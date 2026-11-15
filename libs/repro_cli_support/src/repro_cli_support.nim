@@ -33729,6 +33729,66 @@ proc projectCleanSnapshotStores(buildRoot: string): seq[string] =
         result.add(variantDir)
   result.sort()
 
+proc cleanContainerOutputs(action: BuildActionDef): seq[string] =
+  ## The declared outputs of the DSL action ``action`` that are CONTAINER
+  ## directories: a directory the action declares only to say it exists,
+  ## while other writers fill it (Incremental-Invalidation.md §"Non-regular
+  ## outputs", "Container directory outputs"). ``fs.ensureDir``'s one output,
+  ## and the output root of ``fs.preserveTree``.
+  ##
+  ## This is the twin, over the provider payload a snapshot stores, of
+  ## ``repro_build_engine.containerDirectoryOutputs``, which classifies the
+  ## LOWERED action for the revalidation and restore paths. Both read the
+  ## action's built-in kind; keep them in step. The paths are returned as the
+  ## action spells them, which is how the provider spells the action's
+  ## owned-effect claims (``runtime_provider``).
+  if action.call.packageName != "reprobuild.builtin" or
+      action.call.executableName != "fs":
+    return
+  case action.call.subcommand
+  of "ensureDir":
+    if action.outputs.len == 1:
+      result.add(action.outputs[0])
+  of "preserveTree":
+    for arg in action.call.arguments:
+      if arg.name == "outputRoot" and arg.encodedValue.len > 0:
+        result.add(arg.encodedValue)
+  else:
+    discard
+
+proc classifyContainerClaims(snapshot: var ProviderGraphSnapshot) =
+  ## Mark the owned-effect claims of ``snapshot`` that name a CONTAINER
+  ## directory output as ``oekDirectory``, so that ``repro clean`` removes the
+  ## container only once its members are gone and nothing else is left in it,
+  ## instead of deleting its tree with every other writer's output and every
+  ## user file in it (clean.md §"Ownership Records").
+  ##
+  ## The provider claims every declared output as ``oekFile``. The
+  ## classification comes from the ACTION, not from the record
+  ## (Incremental-Invalidation.md §"Non-regular outputs"): each fragment's
+  ## action nodes carry the provider payload, and a claim names its producing
+  ## action in ``payload``. Deciding it here, when the snapshot is read,
+  ## covers snapshots that older builds wrote as well. A node whose payload
+  ## does not decode leaves its claims as they are.
+  for fragment in snapshot.fragments.mitems:
+    var containers: seq[(string, string)]   # (action id, normalized path)
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      var action: BuildActionDef
+      try:
+        action = decodeBuildActionPayload(toBytes(node.payload))
+      except CatchableError:
+        continue
+      for path in cleanContainerOutputs(action):
+        containers.add((action.id, os.normalizedPath(path)))
+    if containers.len == 0:
+      continue
+    for claim in fragment.effectClaims.mitems:
+      if claim.kind == oekFile and
+          (claim.payload, os.normalizedPath(claim.identity)) in containers:
+        claim.kind = oekDirectory
+
 proc runCleanCommand(args: openArray[string]): int =
   ## ``repro clean``: remove the materialised outputs the project's build
   ## state records as its own.
@@ -33739,7 +33799,8 @@ proc runCleanCommand(args: openArray[string]): int =
   ## executor that prunes the outputs of a vanished edge
   ## (``applyProjectClean``). The snapshots, the action cache, the content
   ## store, ``.repro/stats/`` and every unclaimed file stay, so the next build
-  ## still reuses the cache.
+  ## still reuses the cache. A container directory output is removed only once
+  ## it is empty (``classifyContainerClaims``).
   ##
   ## Exit 0 when every deletable output is gone (or, with ``--dry-run``, was
   ## listed), 1 when a deletion failed, 2 on a usage error.
@@ -33772,7 +33833,9 @@ proc runCleanCommand(args: openArray[string]): int =
   var snapshots: seq[ProviderGraphSnapshot]
   for buildRoot in projectCleanBuildRoots(projectRoot, workRoot):
     for store in projectCleanSnapshotStores(buildRoot):
-      snapshots.add(loadProviderGraphSnapshot(store))
+      var snapshot = loadProviderGraphSnapshot(store)
+      classifyContainerClaims(snapshot)
+      snapshots.add(snapshot)
 
   let res = applyProjectClean(snapshots, projectRoot, dryRun = dryRun)
   for act in res.actions:

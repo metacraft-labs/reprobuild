@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2829,
+    "nimTestBinaries": 2830,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 768,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2876
+    "testEntries": 2877
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1636,7 +1636,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1560,
+      "integration": 1561,
       "platform/destructive": 181,
       "pure unit": 768,
       "unclassified": 344
@@ -1853,9 +1853,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2829,
+    "nimTestBinaryCount": 2830,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2876
+    "testEntryCount": 2877
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10052,7 +10052,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_round8.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 30,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10275,7 +10275,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
       "sourceSuiteCount": 8,
-      "staticCaseCount": 26,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -47254,8 +47254,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_output_cleanup_executor.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 16,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -49431,6 +49431,24 @@
       "source": "tests/integration/t_repro_certify_runs_the_required_set_in_workspace_mode.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_repro_clean_keeps_what_a_container_output_holds",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_clean_keeps_what_a_container_output_holds.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1044,6 +1044,17 @@
 ##                                            /var/lib/repro and no ledger
 ##                                            stops on the missing ledger
 ##                                            (decision 161)
+## ``state-removal-rerun-unwired``           uninstall never calls the
+##                                            re-run that finishes the
+##                                            state removal (decision 163)
+## ``state-removal-token-not-required``       a re-run removes any tree of
+##                                            empty directories under the
+##                                            state, token or not
+##                                            (decision 163 (a))
+## ``pre-bootstrap-root-rmdir``               the state removal and its
+##                                            re-run rmdir a directory that
+##                                            was a pre-bootstrap root
+##                                            (decision 163 (b))
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1886,6 +1897,9 @@ const
                           "ledger-copy-removed-with-the-rest",
                           "empty-state-root-reported-vaguely",
                           "empty-state-root-left-unfinished",
+                          "state-removal-rerun-unwired",
+                          "state-removal-token-not-required",
+                          "pre-bootstrap-root-rmdir",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
