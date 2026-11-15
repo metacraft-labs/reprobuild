@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2818,
+    "nimTestBinaries": 2819,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2865
+    "testEntries": 2866
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1621,7 +1621,7 @@
     "classificationCounts": {
       "graph-fixture": 23,
       "integration": 1554,
-      "platform/destructive": 180,
+      "platform/destructive": 181,
       "pure unit": 766,
       "unclassified": 342
     },
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2818,
+    "nimTestBinaryCount": 2819,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2865
+    "testEntryCount": 2866
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18314,7 +18314,8 @@
         "repro_home_apply",
         "repro_home_generations",
         "repro_local_store",
-        "repro_test_support"
+        "repro_test_support",
+        "repro_tool_profiles"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -18849,6 +18850,29 @@
       "source": "libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_apply",
+        "repro_home_generations",
+        "repro_home_rollback",
+        "repro_local_store",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_home_rollback",
+      "requiresReproBinary": true,
+      "source": "libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34293,7 +34317,8 @@
       "localDependencyShape": [
         "repro_home_generations",
         "repro_local_store",
-        "repro_test_support"
+        "repro_test_support",
+        "repro_tool_profiles"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,

@@ -6108,6 +6108,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_home_rollback_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim",
+    binary: "build/test-bin/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let FixtureRoot = absolutePath(\"build/test-tmp/t-scoop-clean..."),
+  TestSpec(
     source: "libs/repro_home_rollback/tests/t_smoke_home_rollback.nim",
     binary: "build/test-bin/t_smoke_home_rollback",
     defines: @[],

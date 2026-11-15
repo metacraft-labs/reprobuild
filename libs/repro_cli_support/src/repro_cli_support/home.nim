@@ -385,7 +385,8 @@ proc runApplyInline*(commandName: string;
                      mode: ApplyMode = amFull;
                      setOverrideKey: string = "";
                      adoptAddresses: seq[string] = @[];
-                     relock = false): int =
+                     relock = false;
+                     uninstallFromScoop = false): int =
   ## Shared apply-pipeline runner used by `repro home apply` and by
   ## the inline path of `add`/`remove`/`enable`/`disable`/`set`.
   ## Reports the new generation id on stdout and any diagnostics on
@@ -402,6 +403,7 @@ proc runApplyInline*(commandName: string;
     opts.setOverrideKey = setOverrideKey
     opts.adoptAddresses = adoptAddresses
     opts.relock = relock
+    opts.uninstallFromScoop = uninstallFromScoop
     # M83 Phase F3: the compile-then-adapt path is the ONLY apply path.
     # A profile compilation failure is a HARD ERROR — the legacy text
     # parser no longer auto-fills the gap.
@@ -1474,7 +1476,7 @@ proc runHomeHistory(args: openArray[string]): int =
 
 proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
                       relock = false; targetPlatform = "";
-                      targetArch = ""): int =
+                      targetArch = ""; uninstallFromScoop = false): int =
   ## M72 Deliverable 2: `repro home apply --plan` — a non-mutating
   ## preview of the FULL apply (packages, stow, generated files,
   ## managed blocks, launchers, resources). Runs the planning half of
@@ -1488,6 +1490,7 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
     var opts: ApplyOptions
     opts.reconcileStowDrift = reconcileDrift
     opts.relock = relock
+    opts.uninstallFromScoop = uninstallFromScoop
     if targetPlatform.len > 0 or targetArch.len > 0:
       # GM4b: plan for another platform. Package references resolve for
       # the named target (Provisioning-Contributions.md §"Profile Package
@@ -1550,6 +1553,7 @@ proc runHomeApply(args: openArray[string]): int =
   var planMode = false
   var allowDrift = false
   var reconcileDrift = false
+  var uninstallFromScoop = false
   var relock = false
   var targetPlatform = ""
   var targetArch = ""
@@ -1561,6 +1565,7 @@ proc runHomeApply(args: openArray[string]): int =
     if a == "--help" or a == "-h":
       echo "usage: repro home apply [--plan] [--host NAME] [--allow-drift] " &
         "[--reconcile-drift | --accept-overwrite] [--relock] " &
+        "[--uninstall-from-scoop] " &
         "[--target-platform linux|macos|windows] [--target-arch x86_64|arm64]"
       echo ""
       echo "Run the home-profile apply pipeline against the current"
@@ -1593,6 +1598,12 @@ proc runHomeApply(args: openArray[string]): int =
       echo "                     and re-select every package under the"
       echo "                     current selection policy (with --plan:"
       echo "                     show what that would select)."
+      echo "  --uninstall-from-scoop  Remove from Scoop the Scoop packages"
+      echo "                     this apply drops: only the versions"
+      echo "                     Reprobuild installed, and only when no"
+      echo "                     workspace, session or pin root holds any"
+      echo "                     prefix of the app. Without it every Scoop"
+      echo "                     install is left in place."
       echo "  --target-platform  With --plan: resolve packages for another"
       echo "  --target-arch      platform / architecture (the host's PATH"
       echo "                     and Scoop are not consulted for it)."
@@ -1610,6 +1621,8 @@ proc runHomeApply(args: openArray[string]): int =
       reconcileDrift = true
     elif a == "--relock":
       relock = true
+    elif a == "--uninstall-from-scoop":
+      uninstallFromScoop = true
     elif a == "--host" or a.startsWith("--host="):
       try:
         hostFlag = parseFlagValue(args, i, "--host")
@@ -1639,12 +1652,13 @@ proc runHomeApply(args: openArray[string]): int =
     return 2
   if planMode:
     return runHomeApplyPlan(allowDrift, reconcileDrift, relock,
-      targetPlatform, targetArch)
+      targetPlatform, targetArch, uninstallFromScoop)
   # A real apply with --reconcile-drift threads the policy through the
   # apply pipeline so a drifted stow target can be replaced.
   if reconcileDrift:
     putEnv("REPRO_HOME_APPLY_RECONCILE_DRIFT", "1")
-  return runApplyInline("apply", relock = relock)
+  return runApplyInline("apply", relock = relock,
+    uninstallFromScoop = uninstallFromScoop)
 
 # ---------------------------------------------------------------------------
 # `repro home __build-bundle` (M71 Phase A, internal).
@@ -3586,18 +3600,25 @@ proc runHomeRollback(args: openArray[string]): int =
   ## `--accept-overwrite` is passed.
   var generationId = ""
   var acceptOverwrite = false
+  var uninstallFromScoop = false
   var i = 0
   while i < args.len:
     let a = args[i]
     if a == "--accept-overwrite":
       acceptOverwrite = true
+    elif a == "--uninstall-from-scoop":
+      uninstallFromScoop = true
     elif a == "--help" or a == "-h":
-      echo "usage: repro home rollback [<generation-id>] [--accept-overwrite]"
+      echo "usage: repro home rollback [<generation-id>] [--accept-overwrite] " &
+        "[--uninstall-from-scoop]"
       echo ""
       echo "Revert filesystem state to a past generation. Without an"
       echo "explicit id, rolls back to the immediately previous"
       echo "generation by activation timestamp. Refuses to clobber"
       echo "user-edited managed files unless --accept-overwrite."
+      echo "Scoop installs are left in place unless --uninstall-from-scoop,"
+      echo "which removes the versions Reprobuild installed of the Scoop"
+      echo "apps the target generation drops, when nothing else holds them."
       return 0
     elif a.startsWith("--"):
       stderr.writeLine("repro home rollback: unknown flag: " & a)
@@ -3612,6 +3633,7 @@ proc runHomeRollback(args: openArray[string]): int =
   var opts: RollbackOptions
   opts.targetGenerationId = generationId
   opts.acceptOverwrite = acceptOverwrite
+  opts.uninstallFromScoop = uninstallFromScoop
   try:
     let outcome = runRollback(opts)
     if outcome.driftedPaths.len > 0:
