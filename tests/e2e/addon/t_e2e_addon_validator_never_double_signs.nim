@@ -1,5 +1,6 @@
 ## Gate ``e2e_addon_validator_never_double_signs`` (milestone A12; ReproOS
-## Add-On Mode §7.3, decision 24; threat model G26).
+## Add-On Mode §7.3, decision 24 on renaming an exclusive service; threat
+## model G26).
 ##
 ## The ``ethereum_validator`` reference activity runs on an add-on guest,
 ## driven by the deploy agent: a local test network (one execution client,

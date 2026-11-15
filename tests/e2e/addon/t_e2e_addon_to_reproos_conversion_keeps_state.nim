@@ -1245,7 +1245,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("round 5, " & label & ": refused while the directory is pending, " &
            "naming " & address, judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") & o)
-    # --- Review round 6 and owner decisions 58 and 59, while the directory
+    # --- Review round 6 and owner decisions 58 and 59 (a privileged
+    # daemon's grant; the units as systemd loaded them), while the directory
     # is pending: each refused for its own reason and judged.
     for (label, resources, needle, setup, cleanup) in R6Probes:
       discard nw.run("rm -f " & ProbeMarkerDir & "/*.ran " & ProbeMarkerDir & "/*.priv")
@@ -1352,6 +1353,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let ran = nw.exec("test -s " & ProbeMarkerDir &
         "/eth-r10-req.service.ran").exitCode == 0
       let started = journalStarted(journal, "eth-r10-req.service") or ran
+      # Decision 153: a unit that requires a refused unit stays held.
       record["decision153"] = %*{"exit": r.exitCode, "reported": reported,
         "heldInEtc": heldReq, "started": started, "judged": judged(o)}
       discard nw.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
@@ -1528,8 +1530,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # under the engine builds ``reissue-skips-targets`` and
     # ``reissue-skips-sockets``, each on its own step.
     record["decision79"] = newJObject()
-    # Kept in every run (A13 round 7): how systemd saw the decision-79 units
-    # and the validator's starts right after the full apply.
+    # Kept in every run (A13 round 7): how systemd saw the units whose start
+    # decision 79 re-issues, and the validator's starts right after the full
+    # apply.
     record["decision79Diagnosis"] = %*{
       "socket": nw.unitDiagnosis("eth-r7-sock.socket"),
       "socketService": nw.unitDiagnosis(R7SocketSvc),

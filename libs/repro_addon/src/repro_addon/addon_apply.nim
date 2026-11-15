@@ -1462,7 +1462,7 @@ proc writeHeldTriggers*(stateDir: string; triggers: openArray[string]) =
   writeHoldFile(p, triggers.join("\n") & "\n")
 
 const TriggersToRestartFile = "triggers-to-restart"
-  ## §13 decision 155: the triggers a revert could not start again. While
+  ## §13 decision 160: the triggers a revert could not start again. While
   ## the file names any, the host is pending: the next switch first retries
   ## them (the pending-switch guard) and refuses while one still does not
   ## start, and `repro system addon recover` retries them and says so.
@@ -1503,7 +1503,7 @@ proc addonLiveHost*(): LiveHost =
 
 proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
     tuple[ok: bool; lines: seq[string]] =
-  ## §13 decision 155: start again each trigger a revert could not, after a
+  ## §13 decision 160: start again each trigger a revert could not, after a
   ## ``reset-failed``; those that start leave the record, and each outcome
   ## is a line of the report. ``ok`` when none is left. ``host0`` is
   ## systemctl unless a caller (a test) gives another.
@@ -2386,7 +2386,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
             break
         noteRecreated(tentative, name, h.path, h.unit, key, h.v)
       # The first components the unit's start may create, or make again on
-      # a restart (§13 decisions 57 and 68; ``startMayCreate``).
+      # a restart (§13 decisions 57 and 68: named for it, recorded per unit
+      # start; ``startMayCreate``).
       if pending != nil:
         for fp in firstComponentPaths(e.show):
           # A directory decision 71 accepted just now is the unit's too:
@@ -2664,7 +2665,9 @@ proc readRevertHoldDirRecords*(stateDir: string;
   ## ``revertHoldDirsPath``, one entry per (directory, staging) pair, its
   ## last phase. Only a ``<unit>.d`` directly under ``root`` and a staging
   ## name ``validStaging`` accepts, so a damaged record names nothing else.
-  ## None when absent or unreadable.
+  ## None when absent or unreadable: a reader only claims less, and every
+  ## writer reads through ``revertHoldDirsForAppend``, which refuses an
+  ## unreadable record rather than rewrite it from nothing.
   var text = ""
   try: text = readFile(revertHoldDirsPath(stateDir))
   except IOError, OSError: return
@@ -2682,11 +2685,36 @@ proc readRevertHoldDirRecords*(stateDir: string;
         found = true
     if not found: result.add((d, st, ph))
 
+proc revertHoldDirsForAppend(stateDir: string): string =
+  ## The text of ``revertHoldDirsPath`` that the next step is appended to.
+  ## Only a record that does not exist (``lstat`` says ``ENOENT``) is
+  ## empty. One that exists and cannot be read (``EACCES``, ``EIO``, ...)
+  ## raises: the append rewrites the whole file, so taking it as empty
+  ## would drop every earlier ``intended`` and ``staged`` step, and the
+  ## directories they claim would be forgotten (spec §4.2; issue
+  ## 2026-11-15-floor-a-revert-hold-directory-record-is-rewritten-empty-
+  ## when-it-cannot-be-read). ``placeRevertHold`` then raises before it
+  ## takes a step, and the unit keeps its start hold.
+  let p = revertHoldDirsPath(stateDir)
+  try:
+    result = readFile(p)
+  except IOError, OSError:
+    when mutated("revert-hold-record-unreadable-as-empty"):
+      # Falsifying build: the engine before the fix, any read error taken
+      # as no record.
+      return ""
+    else:
+      var st: Stat
+      if lstat(p.cstring, st) != 0 and osLastError().int32 == ENOENT:
+        return ""
+      raise newException(IOError, p & ": the revert-hold directory " &
+        "record exists but cannot be read: " & getCurrentExceptionMsg())
+
 proc recordRevertHoldDir(stateDir: string; r: RevertHoldDirRecord) =
-  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises.
-  var text = ""
-  try: text = readFile(revertHoldDirsPath(stateDir))
-  except IOError, OSError: discard
+  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises,
+  ## also when the record exists and cannot be read
+  ## (``revertHoldDirsForAppend``).
+  let text = revertHoldDirsForAppend(stateDir)
   createDir(addonDir(stateDir))
   writeFileAtomic(revertHoldDirsPath(stateDir),
                   text & r.dir & "\t" & r.staging & "\t" & r.phase & "\n", 0o600)
@@ -4681,7 +4709,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # it checks) and before the collision pass observes any target and before
   # anything is written. A replay or a revert finishes or undoes a switch
   # already under way and is never refused for the base; uninstall does not
-  # come through here (spec §6.4, §13 decision 25).
+  # come through here (spec §6.4, §13 decision 26).
   block:
     var planned = own.resources
     planned.add(user.resources)
@@ -6344,7 +6372,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     ## ``reset-failed`` (§13 decision 151), but those ``keepHeld`` names:
     ## the triggers of a unit a revert keeps held stay down with it, on
     ## record for the switch that clears its hold. A trigger that does not
-    ## start fails the switch (§13 decision 155): the problem is returned,
+    ## start fails the switch (§13 decision 160): the problem is returned,
     ## and the trigger stays on record for the revert's switch. A revert
     ## that cannot start it either moves it to the record of triggers to
     ## restart and commits: the host is then pending until `repro system
@@ -6368,7 +6396,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           for f in failed:
             stderr.writeLine("repro-addon: " & f & "; the revert commits, " &
               "and the host is pending until `repro system addon recover` " &
-              "starts it (§13 decision 155)")
+              "starts it (§13 decision 160)")
         else:
           keep.add(t)
           for f in failed: result.add(f)
@@ -6949,7 +6977,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if clean and problems.len == 0:
         try:
           # What a floored unit's own start created is that unit's (§13
-          # decisions 57 and 68), recorded right after its start and before
+          # decisions 57 and 68: its directories, one record per unit start),
+          # recorded right after its start and before
           # the next unit's. A queued start (--no-block, the boot-time
           # recovery of a generation an earlier switch already started)
           # records nothing. A record that cannot be written leaves the
@@ -7223,8 +7252,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # A refusal decided before the flip (an exclusive unit that would
       # overlap): nothing was switched, but step 2 may already have
       # stopped or disabled units. They are put back -- the marker named
-      # each before it was touched -- and the old generation stands, its
-      # units no longer held (§13 decision 136).
+      # each before it was touched -- and the old generation stands, the
+      # holds on its units released (§13 decision 136).
       releaseUnflippedHolds()
       let undoProblems = undoPreStop(marker)
       clearPendingMarker(stateDir)

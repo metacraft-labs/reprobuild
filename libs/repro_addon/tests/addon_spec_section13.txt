@@ -1,14 +1,176 @@
-# The decisions the ReproOS Add-On Mode spec records in section 13, by number.
-# The floor code, its unit tests and its VM gates may cite only these
-# (t_addon_floor_round12). Wherever the spec is found, it must record every
-# number here; add a number here when the spec records it.
-1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16
-17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32
-33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48
-49 50 51 52 53 54 55 57 58 59 60 61 56 62 63 64
-65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80
-81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96
-97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112
-113 114 115 116 117 118 119 120 121 122 123 124 125 126 127 128
-129 130 131 132 133 134 135 136 137 138 139 140 141 142 143 144
-145 146 147
+# The entries the ReproOS Add-On Mode spec records in section 13 (reprobuild-pm
+# spec/ReproOS-Add-On-Mode.md): the number, the bold title as the spec states
+# it (whitespace collapsed, no final full stop) and, after " | ", the key
+# words of a decision the floor code, its unit tests or its VM gates cite
+# (t_addon_floor_round12).
+#
+# A citation of decision N must have one of N's key words within
+# CitationReach characters of it (spec_citations.nim), so a citation of the
+# wrong number fails although the number is recorded. A key word is a word,
+# the first letters of one, or a phrase of N's own entry in the spec: its
+# title or its text.
+#
+# Wherever the spec is found, each number here must carry the spec's title
+# and each key word must be in that entry. When the spec records a new
+# decision, add its line with the title copied from the spec; when the code
+# cites it, give it key words.
+1 Registry spelling
+2 Store root
+3 System-scope host selection
+4 Refusing apt | apt
+5 Registering the ledger with dpkg
+6 The management-path guard | management-path, guard, sshd, firewall
+7 Recipient key at rest
+8 Base matrix
+9 ReproOS's own state paths
+10 Non-Debian bases
+11 Configuration layers above the distribution
+12 The `network` class on systemd-networkd hosts
+13 First production host (A14 candidate) and rollout staging
+14 `RDMF` v3 | rdmf
+15 TM-6 for the add-on threat model
+16 Terminology rename: Add-On Mode → ReproOS Symbiosis (`symbiotic` / `symbiote`)
+17 Repro state a pre-A14 host already carries | repro state, pre-a14, already, carri
+18 `addOnToolPath()` and generation 0's `/etc/profile.d` file | addontoolpath, generation 0, profile.d
+19 System activities on a fully managed host | fully managed, system activities, mode: full, block form
+20 ucf-managed files
+21 No diversion of a ucf-managed file
+22 What `repro system adopt` adds to the managed prefixes | adopt, prefixes
+23 A failed switch reverts itself | failed switch, revert
+24 Renaming or adopting an exclusive service whose old unit the add-on does not own | renam, adopt, exclusive, old unit
+25 Plaintext secrets on a host without a cgroup memory controller | plaintext, secret, cgroup, memory controller
+26 Rollback on a base outside the supported matrix | rollback, supported matrix, unsupported base, base
+27 Recoveries that cannot revert keep the marker | recover, cannot revert, marker
+28 A compiled profile is applied only at the producer's signed digest | compiled profile, producer, signed, digest
+29 The full engine's agent is held to every A8 rule | full engine, agent, a8
+30 A profile may supersede generation 0's deploy-signer anchors and `caches.conf`
+31 A host that compiles profiles takes its C compiler from its base | compiles profiles, c compiler, base, preflight, compile-profile
+32 What the parity gate's full realisation is | parity, realisation, reproos, stock
+33 G26's residual for validators
+34 Activities in compiled pins and store packages | activit, compiled pins, store packages
+35 The toolchain changes A12 made on the way
+36 Go through Nix from go.dev's release
+37 Refuse drop-ins that reach login sessions or the root slice | drop-in, login, session, root slice
+38 What logind needs to start a session is part of the management path | logind, session, management path
+39 Effects by reference are a documented residual | effects, by reference, documented, residual
+40 The adoption fixture when the production candidate has nothing to adopt | adoption fixture, production candidate, nothing to adopt, alertmanager, hand-configured, fixture
+41 The conversion rehearsal without ReproOS Anywhere | conversion, rehearsal, anywhere
+42 A11's evidence design is approved as landed
+43 DET-AO-3 is an nftables table of the add-on's own
+44 A host bootstrapped without an Evidence sink is enrolled by an operator verb
+45 A11's second-round amendments are approved
+46 DET-AO-5 at re-assert: a digest at realisation | det-ao-5, re-assert, digest, realisation, realised, verif, quarantin
+47 An altered store object is recovered automatically | altered, store object, recover, automatic, det-ao-5, custody, evidence directory
+48 Custody covers every store object a generation references | custody, store object, generation, referenc
+49 A floored unit may not reach a system-state target by any route | system-state, target, route
+50 `EnvironmentFile=` of a floored unit is default-deny | environmentfile, default-deny, adopt, declares, bytes, secrets
+51 Containment is an operator verb pair, recorded | containment, operator, verb, contained, runtime, off-host
+52 The evidence keys can be re-keyed | evidence key, re-key, keys, hand-over, rekey, evidence-enrol, credential, retired
+53 Carried-state reach reads the host's drop-ins as systemd loads them | carried-state, drop-in, loads
+54 A confined unit holds no privilege beyond its account | confined, privilege, account
+55 A floored unit may not conflict with a unit the profile does not define | conflict, does not define, reached, effective
+57 A floored unit's directories are named for it, never an existing tree | directories, named for, existing tree, component, owns
+58 A privileged daemon's grant reaches everything | privileged, daemon, grant, polkit, policy, naming, d-bus
+59 A full apply checks the units as systemd loaded them | full apply, loaded, carried, cross-check, runinfraapply
+60 The restore requirement follows the distribution's dependency closure | restore, requirement, distribution, dependency closure, drop-ins
+61 Adopt requires the profile | adopt, requires the profile
+56 Uninstall records and ships the store evidence it would discard | uninstall, ships, store evidence, discard, custody, sink, acknowledge
+62 An explicit, recorded override of decision 56's refusal | explicit, override, refusal, unshipped, discard, sink, acknowledged
+63 A missing attestation key stops the override | missing, attestation, stops the override
+64 The override record is signed over exactly its bytes, and verified by a command | override, signed, exactly, bytes, verified, command, required, completion, discard
+65 The stale-helper guard reads Nim's own dependency list, and A11 uses it only for its own helpers | stale-helper, guard, dependency list, helpers, fresh, module, headers, include
+66 The upstream Nim report stays a draft until the owner has read it
+67 "Created for the unit" is provenance, never ownership | created for, provenance, ownership, stem, link
+68 The created-directories record is per unit start, and keyed on identity | created-directories, record, per unit start, keyed, identity
+69 One advisory list of base trees | advisory, base trees, union, measured
+70 A unit named after a base tree is refused outright | named after, base tree, outright
+71 A recorded directory systemd made again is the unit's, narrowly | recorded, systemd made, again, narrowly, invocation, identity, dynamic, acceptance
+72 A one-time migration of the directories an older engine left | one-time, migration, older engine, left, migrated, committed, engine
+73 `verify-discard-record` requires the enrolled key | verify-discard-record, enrolled
+74 The stale-helper guard's list is tied to its binary, written by every build path, and covers C, headers and compile-time reads
+75 The simulator's smoke-pass test observes that the peers stop
+76 A directory's identity includes its birth time | identity, birth, inode, ext4
+77 systemd created a directory only if it was born after the invocation began | systemd created, born, invocation
+78 An activator's listener is the activated service's | activator, listener, socket
+79 A full apply re-issues the drivers' start and restart jobs after its check | re-issue, driver, restart job, enabled, pulls, fired, started
+80 Directory listings are dependencies; existence checks are a residual | listing, dependenc, existence, residual
+81 The discard has an intent record and a completion record | discard, intent, completion, linked, exclusively, renamed, attestation key
+82 A remade directory: recorded in a switch, judged by the run outside one
+83 A stopped unit's directory was made in its last run
+84 A listener below a directory its service can write is refused
+85 Decision 72's migration records existing activator listeners
+86 Testing the network guard without a fault hook in the product
+87 The network guard across a reboot
+88 Addresses another LAN device holds
+89 Removing a `takeOver` after pacman wrote a `.pacnew`
+90 The root snapshot is the apply's, set per profile
+91 The rolling-base replay window
+92 Services on Arch come from store packages
+93 The Omarchy VM is pinned by content
+94 The Omarchy hook's account is named by the profile
+95 The Omarchy hook's verification
+96 The network guard has its own timeout
+97 A network profile names what the guard checks
+98 §12.5 condition 2 stays in force on `arch`
+99 An edited backup file is refused for `takeOver`
+100 The add-on's snapshots are its own to delete, and a refusal takes none
+101 The AR0 defaults and refusals
+102 The network guard's lifecycle mechanisms
+103 The switch checks the guard before every network write
+104 Every failure path goes through `reverting`, and a stale timer does nothing
+105 A reverted attempt's snapshot is deleted
+106 The timer outlives the revert
+107 The guard lock sits beside the host apply lock
+108 A missing backup file is refused for `takeOver`
+109 The successor timer's interval
+110 What lifts §12.5 condition 2 on `arch`
+111 A listing counts only the entries that can change what the compiler resolves
+112 The removal is made durable before the completion | removal, durable, completion
+113 The completion follows the evidence, not the whole uninstall | completion, follows, evidence, whole uninstall, removal, second
+114 Configuration files and subdirectories count in a listing | configuration files, subdirectories, listing
+115 Every directory the compiler resolves in, and a checkout's tool directories
+116 Orphan snapshots are swept
+117 A `disarmed` marker is only committed
+118 The timer gone while the owner is alive
+119 A snapshot deletion that fails during a revert
+120 Network configuration goes through the `network` class on every base
+121 A revert that starts because the timer is gone arms a fresh timer first
+122 Uninstall waits for every switch and clears the guard's leftovers
+123 Boot recovery arms a fresh guard timer before a revert
+124 Who creates the guard lock
+125 Every recovery revert has a timer, and a failed arm is reported
+126 Any actor that reverts arms a timer if none is loaded
+127 The guard runs an out-of-store copy of `repro`
+128 The guard's binary copy is repaired, never drift
+129 Adding the copy on an existing host
+130 Arch's generation 0 carries no apt hook
+131 AR1's behavioural choices on Arch and Omarchy
+132 The Omarchy VM is installed from its pinned ISO
+133 A revert holds the units its own floor check refuses, across a reboot | revert, holds, reboot
+134 AR1's review: baselines, unlanded controls, and the agent's realisation
+135 The live check judges a template through its instances | live check, judge, template, instance, confined
+136 The add-on switch holds before its privileged set | add-on switch, holds, privileged set, drivers, reloads
+137 A trigger is ordered after the unit it triggers | trigger, ordered
+138 Decision 79 covers every driver and every spent trigger
+139 Decision 84 reaches every unit that shares the stem | reaches, shares the stem, stem, listener, spelled
+140 A unit only a timer or a path unit starts: the consequence is documented
+141 Decision 82 gets an upper bound | upper bound, main process, execmainstarttimestamp, born
+142 The guarded helpers are built without Nim's user configuration | guarded helpers, built, user configuration
+143 The owner's round-12 decisions on uninstall
+144 Floored units wait for the boot re-assertion | wait, boot, re-assert
+145 Decision 141's bound counts from the run's start | bound, run's start, inactiveexittimestamp
+146 A place with a specifier counts by its literal prefix | specifier, literal prefix
+147 Two smaller points of round 14 | smaller, round 14, inactiveexittimestamp
+148 A re-run completes only an intent its run marked as removed | marker, re-run, marked as removed, earlier intent, authoris
+149 The configuration-gone path keeps its VM case | configuration-gone, vm case, by hand, queued, re-run
+150 The ledger copy is removed last | ledger copy, removed last
+151 Triggers are stopped for a hold | trigger, stopped, hold, socket, active
+152 The triggers to fire again come from each held unit | trigger, fire again, held unit, template, instance
+153 A unit that requires a refused unit stays held | requires, refused unit, stays held
+154 Decision 137's missing spellings are defects
+155 Activators are held like the services they start
+156 A `Restart=` restart's run begins after its delay
+157 The boot replay confirms from a unit ordered after the re-assertion
+158 An ordering that cycles with the re-assertion is refused
+159 A boot-hold unit, and generation 0's upgrade path
+160 A trigger that does not restart fails the switch; its revert leaves the host pending | trigger, restart, pending, recover

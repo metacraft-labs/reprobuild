@@ -1,5 +1,6 @@
 ## Gate ``e2e_addon_base_tree_names_are_measured`` (milestone A9, review
-## round 10, finding 5; spec §10.1, §13 decisions 57 and 69).
+## round 10, finding 5; spec §10.1, §13 decisions 57 and 69: never an
+## existing tree, one advisory list of base trees).
 ##
 ## ``service_floor.BaseSystemTreeNames`` is the union of the names each
 ## supported test-bed base has directly under ``/etc``, ``/run``,

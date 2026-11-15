@@ -1687,7 +1687,8 @@ proc socketOptionRefusal*(unitName, key, value: string; service = "";
 proc baseTreeActivatorRefusal*(unitName: string): string =
   ## Why a unit that activates a floored service may not have this name,
   ## or "": its stem is a tree the base system owns (§13 decision 78), as
-  ## for the floored unit itself (decision 70). ``udev.socket`` would be
+  ## for the floored unit itself, never named after a base tree (decision
+  ## 70). ``udev.socket`` would be
   ## the base's own socket name.
   when FloorMutation == "base-tree-activators-allowed":
     return ""

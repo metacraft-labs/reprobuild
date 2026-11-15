@@ -175,7 +175,7 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
 proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
                            driver: CollisionDriver = nil): RecoveryOutcome =
   ## Finish or revert an interrupted switch (see the module header), and
-  ## start again the triggers a revert could not (§13 decision 155).
+  ## start again the triggers a revert could not (§13 decision 160).
   if not hasPendingMarker(stateDir):
     if hasTriggersToRestart(stateDir):
       let r = retryTriggerRestarts(stateDir)
@@ -424,7 +424,7 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
   ## apply refuses when recovery does not resolve it.
   for dir in guardStateDirs(applyStateDir, pointer, pointerOwner):
     if not hasPendingMarker(dir):
-      # §13 decision 155: a revert left triggers it could not start again;
+      # §13 decision 160: a revert left triggers it could not start again;
       # the apply retries them first and refuses while one still fails.
       if hasTriggersToRestart(dir):
         let rec = recover(dir)

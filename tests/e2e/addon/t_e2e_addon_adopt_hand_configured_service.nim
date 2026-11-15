@@ -1077,7 +1077,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "ActiveState=active" in t3State[0] and "ActiveState=active" in t3State[1] and
       t3State[2].strip().len > 0 and t3State[2].strip() != "0" and
       t3State[3].strip().len > 0 and t3State[3].strip() != "0"
-    # §13 decision 155: a trigger that cannot start again fails the switch;
+    # §13 decision 160: a trigger that cannot start again fails the switch;
     # the revert cannot start it either, records it and commits, so the
     # host is pending; `recover` starts it once the cause is cleared. A
     # transient socket of the gate's own takes the port as soon as the
@@ -1109,10 +1109,10 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "a13r10.socket" in pendingFile and rc.exitCode == 0 and
       "trigger a13r10.socket started again" in rcOut and
       "ActiveState=active" in t4After and "still-pending" notin t4After
-    record["decision155"] = %*{"exit": t4.exitCode, "blocked": blocked,
+    record["decision160"] = %*{"exit": t4.exitCode, "blocked": blocked,
       "pending": pendingFile, "recoverExit": rc.exitCode, "recover": rcOut,
       "after": t4After, "ok": t4Ok}
-    step("decision 155: a trigger that cannot start again fails the switch, " &
+    step("decision 160: a trigger that cannot start again fails the switch, " &
          "the revert commits with the host pending, and recover starts it " &
          "once the cause is cleared", t4Ok, t4Out & "\npending: " &
          pendingFile & "\nblocker: " & blocked & "\nrecover: " & rcOut &
@@ -1126,6 +1126,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
       "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
     let after5 = g.applyProfile(repro, "skeleton2e", skeleton2)
+    # The decision 151 trigger probes are removed with the manifest.
     step("after the manifest is gone, the switch back to the skeleton " &
          "succeeds (decision 151 probes removed)",
          after5.exitCode == 0, after5.stdout & after5.stderr)

@@ -131,7 +131,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   if not bs.ok: return
   # The unit names no hardening: the add-on's default puts it under the
   # floor (no User=, so a dynamic user too). Its directories are named for
-  # it exactly, with what it needs below (§13 decision 67).
+  # it exactly, by its stem, with what it needs below (§13 decision 67).
   let profile = unitProfile(ProbeUnit, ProbeBin, health = "active",
     extra = "RuntimeDirectory=a9-exec-probe/rt\nStateDirectory=a9-exec-probe/st\n" &
             "CacheDirectory=a9-exec-probe/ca\nLogsDirectory=a9-exec-probe/lg\n", floorWaiver = false)
