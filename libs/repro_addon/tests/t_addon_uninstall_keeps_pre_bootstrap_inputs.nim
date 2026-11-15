@@ -8,16 +8,17 @@
 ## The reviewed defect (R review, item 1): the records were ledgered with
 ## a content digest, so after the first tick the capture judged them
 ## drifted and skipped them, the state directory was removed, and nothing
-## wrote them back. The falsifier is that classification: ledger the
-## bumped record as a content-pinned ``lcEtcFile`` and "a bumped sequence
-## floor survives" goes red (run and reverted before this file landed).
+## wrote them back. Since §13 decision 166 nothing is written back at all:
+## the inputs are never removed, and only their mode and owner change,
+## back to what they were (the suite "the pre-bootstrap inputs stay where
+## they are" below).
 ##
 ## No mocks: real files under a temporary root, the uninstall's own
 ## capture and restore procedures (the host-level verb around them needs
 ## root and a ledger of a real bootstrap; the VM gates cover that), the
 ## ledger's own drift check, and the apply planner's own refusal.
 
-import std/[json, os, posix, strutils, unittest]
+import std/[json, os, posix, sequtils, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
@@ -51,23 +52,16 @@ suite "the agent's records survive uninstall byte for byte":
     writeFile(seqPath, "12\n")        # the agent ticked after bootstrap
     check observeDrift(ledger.entries[3]) == ""
 
-  test "a bumped sequence floor survives: captured live, put back byte for byte":
+  test "a bumped sequence floor is an input left where it is, with its recorded mode and owner":
     writeFile(seqPath, "12\n")
-    let captured = capturePreBootstrapInputs(ledger)
-    check captured.drift.len == 0
-    check captured.files.len == 1 and captured.files[0].bytes == "12\n"
-    removeDir(root / "agent")         # what `removeDir("/var/lib/repro")` does
-    check not fileExists(seqPath)
-    var r: UninstallResult
-    restorePreBootstrapInputs(captured, keepStore = false, r)
-    check r.errors == newSeq[string]()
-    check readFile(seqPath) == "12\n"
-    var st: Stat
-    check stat(seqPath.cstring, st) == 0 and (int(st.st_mode) and 0o7777) == 0o600
-    check stat((root / "agent").cstring, st) == 0 and
-          (int(st.st_mode) and 0o7777) == 0o700
+    let pb = preBootstrapInputs(ledger)
+    check pb.drift.len == 0 and pb.errors.len == 0
+    check pb.inputs.len == 4
+    check pb.inputs[3].path == seqPath and not pb.inputs[3].isDir and
+          pb.inputs[3].mode == 0o600
+    check pb.inputs[0].isDir and pb.inputs[0].mode == 0o700
 
-  test "a content-pinned input that changed is drift, not silently put back":
+  test "a content-pinned input that changed is drift":
     let signers = root / "signers"
     writeFile(signers, "key\n")
     let pinned = LedgerEntry(class: lcEtcFile, path: signers,
@@ -75,9 +69,8 @@ suite "the agent's records survive uninstall byte for byte":
       replaced: "f 0644 " & me & " sha256:" & sha256Hex("key\n"),
       collision: "adopt")
     writeFile(signers, "other key\n")
-    let captured = capturePreBootstrapInputs(Ledger(entries: @[pinned]))
-    check captured.files.len == 0
-    check captured.drift.len == 1 and "content changed" in captured.drift[0]
+    let pb = preBootstrapInputs(Ledger(entries: @[pinned]))
+    check pb.drift.len == 1 and "content changed" in pb.drift[0]
 
   test "the ledger text carries the kept class":
     check parseLedger(ledger.render()).entries[3].class == lcKept
@@ -513,3 +506,167 @@ suite "only the add-on's own empty directories follow the ledger copy":
     let again = rerun(s)
     check again.errors.len == 0
     check dirExists(s.st) and not dirExists(s.st / "system")
+
+# ---------------------------------------------------------------------------
+# A11 code review round 15, F2 (§13 decision 166): uninstall never deletes
+# or recreates a pre-bootstrap input. The removal of the state keeps every
+# input; before the token and the ledger copy, each gets back the mode and
+# owner it had before the add-on, in place (fchown, fchmod, fsync); a crash
+# at any point leaves the ledger copy (a re-run finishes) or the inputs
+# already right. The crash is a test seam (``InputStepHook``) raising a
+# ``Defect``-free exception the removal does not catch, as a killed process
+# would stop there. Ownership is the test user's own (chown to another id
+# needs root); an owner that is no account is uid 4000000.
+# Falsifiers ``inputs-removed-and-restored``, ``input-mode-owner-not-
+# restored`` and ``input-metadata-after-ledger-copy``.
+# ---------------------------------------------------------------------------
+
+type Crash = object of CatchableError
+
+proc inodeOf(p: string): uint64 =
+  var st: Stat
+  doAssert lstat(p.cstring, st) == 0, p
+  uint64(st.st_ino)
+
+proc modeOf(p: string): int =
+  var st: Stat
+  doAssert lstat(p.cstring, st) == 0, p
+  int(st.st_mode) and 0o7777
+
+type InputScene = object
+  parent, st, lc, token, agent, key, floor, attest: string
+  inputs: seq[PreBootstrapInput]
+
+proc inputScene(name: string): InputScene =
+  let s = v2Scene("inputs-" & name)
+  result.parent = s.parent
+  result.st = s.st
+  result.lc = s.lc
+  result.token = s.token
+  result.agent = s.st / "agent"
+  result.attest = s.st / "agent" / "attestation.key"    # the add-on's
+  result.key = s.st / "agent" / "recipient.key"         # inputs
+  result.floor = s.st / "agent" / "state" / "deploy-agent" / "rpi2.seq"
+  createDir(parentDir(result.floor))
+  writeFile(result.key, "KEY\n")
+  writeFile(result.floor, "12\n")
+  setFilePermissions(result.key, {fpUserRead})
+  # bootstrap's takeover gave agent/ the add-on's 0700; it was 0750.
+  setFilePermissions(result.agent, {fpUserRead, fpUserWrite, fpUserExec})
+  let (u, g) = (int(getuid()), int(getgid()))
+  result.inputs = @[
+    PreBootstrapInput(path: s.st, isDir: true, mode: modeOf(s.st), uid: u, gid: g),
+    PreBootstrapInput(path: result.agent, isDir: true, mode: 0o750, uid: u, gid: g),
+    PreBootstrapInput(path: result.agent / "state", isDir: true,
+                      mode: modeOf(result.agent / "state"), uid: u, gid: g),
+    PreBootstrapInput(path: parentDir(result.floor), isDir: true,
+                      mode: modeOf(parentDir(result.floor)), uid: u, gid: g),
+    PreBootstrapInput(path: result.key, isDir: false, mode: 0o400, uid: u, gid: g),
+    PreBootstrapInput(path: result.floor, isDir: false, mode: modeOf(result.floor),
+                      uid: u, gid: g)]
+
+proc removeWith(sc: InputScene; r: var UninstallResult;
+                hook: InputStepHook = nil) =
+  removeStateRoot(r, sc.st, sc.lc, tokenPath = sc.token,
+                  preBootstrap = inputPaths(sc.inputs), inputs = sc.inputs,
+                  hook = hook)
+
+suite "the pre-bootstrap inputs stay where they are":
+  test "inputs are never deleted or recreated, and get their prior mode and owner back":
+    let sc = inputScene("stay")
+    let before = @[inodeOf(sc.key), inodeOf(sc.floor), inodeOf(sc.agent)]
+    var r: UninstallResult
+    removeWith(sc, r)
+    checkpoint $r.errors
+    check r.errors.len == 0
+    check fileExists(sc.key) and fileExists(sc.floor)
+    check @[inodeOf(sc.key), inodeOf(sc.floor), inodeOf(sc.agent)] == before
+    check readFile(sc.key) == "KEY\n" and readFile(sc.floor) == "12\n"
+    check modeOf(sc.agent) == 0o750 and modeOf(sc.key) == 0o400
+    check not fileExists(sc.attest)                 # the add-on's: gone
+    check not dirExists(sc.st / "system")           # the add-on's: gone
+    check dirExists(sc.st) and not fileExists(sc.token)
+
+  test "a crash after the ledger copy goes leaves the key and the floor intact":
+    let sc = inputScene("crash-after-ledger")
+    let before = @[inodeOf(sc.key), inodeOf(sc.floor)]
+    var r: UninstallResult
+    expect Crash:
+      removeWith(sc, r, proc (step, path: string) =
+        if step == "ledger-copy-removed": raise newException(Crash, step))
+    check not fileExists(sc.lc) and fileExists(sc.token)
+    check fileExists(sc.key) and fileExists(sc.floor)
+    check @[inodeOf(sc.key), inodeOf(sc.floor)] == before
+    check readFile(sc.key) == "KEY\n" and readFile(sc.floor) == "12\n"
+    check modeOf(sc.agent) == 0o750                 # already right
+    let again = rerun((sc.parent, sc.st, sc.lc, sc.token))
+    checkpoint $again.errors
+    check again.errors.len == 0
+    check readFile(sc.floor) == "12\n" and inodeOf(sc.floor) == before[1]
+    check not dirExists(sc.st / "system") and not fileExists(sc.token)
+
+  test "a crash between an input's chown and its chmod is finished by the re-run":
+    let sc = inputScene("crash-chown")
+    var r: UninstallResult
+    expect Crash:
+      removeWith(sc, r, proc (step, path: string) =
+        if step == "chowned" and path == sc.agent:
+          raise newException(Crash, step))
+    check fileExists(sc.lc)                         # the re-run resumes
+    check modeOf(sc.agent) == 0o700                 # the chmod never ran
+    var again: UninstallResult
+    removeWith(sc, again)
+    checkpoint $again.errors
+    check again.errors.len == 0
+    check modeOf(sc.agent) == 0o750
+    check not fileExists(sc.lc) and readFile(sc.floor) == "12\n"
+
+  test "an input whose prior owner is no account keeps its owner, gets its mode, and is reported":
+    let sc = inputScene("owner-gone")
+    var inputs = sc.inputs
+    inputs[1].uid = 4000000
+    var r: UninstallResult
+    removeStateRoot(r, sc.st, sc.lc, tokenPath = sc.token,
+                    preBootstrap = inputPaths(inputs), inputs = inputs)
+    checkpoint $r.notes
+    check r.errors.len == 0
+    check modeOf(sc.agent) == 0o750
+    var st: Stat
+    check lstat(sc.agent.cstring, st) == 0 and int(st.st_uid) == int(getuid())
+    check r.notes.anyIt(it.startsWith(sc.agent & ": its owner before the " &
+      "add-on, uid 4000000 (no such user now)"))
+
+  test "an input that is gone is a note, never recreated":
+    let sc = inputScene("gone")
+    removeFile(sc.floor)
+    var r: UninstallResult
+    removeWith(sc, r)
+    check r.errors.len == 0
+    check not fileExists(sc.floor)
+    check r.notes.anyIt(it.startsWith(sc.floor & ": a pre-bootstrap input " &
+      "that is not on the host now"))
+
+  test "the other roots keep their inputs: /etc/repro's signers file, the store directories":
+    let base = getTempDir() / ("repro-uninstall-roots-" & $getCurrentProcessId())
+    removeDir(base)
+    let etc = base / "etc-repro"
+    createDir(etc / "anchors")
+    writeFile(etc / "deploy-manifest-allowed-signers", "signer\n")
+    writeFile(etc / "anchors" / "cache.pub", "x")       # the add-on's
+    let signersIno = inodeOf(etc / "deploy-manifest-allowed-signers")
+    var r: UninstallResult
+    removeRootKeepingInputs(r, etc, @[etc, etc / "deploy-manifest-allowed-signers"])
+    check r.errors.len == 0
+    check dirExists(etc) and not dirExists(etc / "anchors")
+    check inodeOf(etc / "deploy-manifest-allowed-signers") == signersIno
+    let repro = base / "repro"
+    createDir(repro / "store" / "prefixes" / "x")
+    writeFile(repro / "store" / "prefixes" / "x" / "f", "y")
+    writeFile(repro / "gc-roots", "z")
+    removeAllBelowKeeping(repro, @[repro, repro / "store"])
+    check dirExists(repro / "store") and not dirExists(repro / "store" / "prefixes")
+    check not fileExists(repro / "gc-roots")
+    var gone: UninstallResult
+    removeRootKeepingInputs(gone, base / "run-repro-absent", @[])
+    check gone.errors.len == 0
+    removeDir(base)

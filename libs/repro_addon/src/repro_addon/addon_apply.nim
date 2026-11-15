@@ -1662,25 +1662,11 @@ proc unitSearchPaths*(): seq[string] =
 proc dropInDirApplies*(dir, unit: string): bool =
   ## Whether systemd reads the drop-in directory ``dir`` (``<name>.d``'s
   ## name, without ``.d``) for ``unit`` or -- for a template
-  ## ``foo@.service`` -- for any of its instances: the unit's own name, an
-  ## instance's name, the template's, a dashed prefix (``foo-.service``)
-  ## and the type-wide ``service`` (systemd.unit(5), "Description").
-  ## Independent of the profile's parse-time ``dropInApplies``.
-  let dot = unit.rfind('.')
-  if dot <= 0: return false
-  let typ = unit[dot .. ^1]
-  if dir == unit or dir == typ[1 .. ^1]: return true
-  if not dir.endsWith(typ): return false
-  let dstem = dir[0 ..< dir.len - typ.len]
-  let stem = unit[0 ..< dot]
-  let at = stem.find('@')
-  if at >= 0 and at == stem.len - 1:
-    # A template: every instance name, and the template's own.
-    if dstem.startsWith(stem): return true
-  if dstem.endsWith("-") and stem.startsWith(dstem): return true
-  if at >= 0 and dstem.endsWith("-") and stem[0 .. at].startsWith(dstem):
-    return true
-  false
+  ## ``foo@.service`` -- for any of its instances
+  ## (``profile.systemdReadsDropInDir``: systemd v257's list, the type-wide
+  ## ``service`` included). Not the profile's parse-time ``dropInApplies``,
+  ## whose falsifying builds must not turn this check off too.
+  systemdReadsDropInDir(dir, unit)
 
 proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
                         roots: openArray[string]): seq[string] =
