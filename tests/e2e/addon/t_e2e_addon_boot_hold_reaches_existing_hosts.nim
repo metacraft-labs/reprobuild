@@ -26,7 +26,8 @@
 ## 4a. the same apply points the re-assert unit at this engine, realised in
 ##    the store, the unit and the prefix named in the ledger (§13 decision
 ##    164); a floored service only its socket starts is refused, its
-##    revert pending over a hold it cannot write; after a reboot the
+##    revert pending over holds it cannot write (the service's and the
+##    socket's drop-in directories full); after a reboot the
 ##    re-assertion commits the revert, and across a second reboot the
 ##    socket stays down and does not listen;
 ## 5. ``repro system addon uninstall`` removes it and its link through the
@@ -237,10 +238,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     r = g.applyProfile(repro, "s1", srp)
     step("a floored service only its socket starts applies", r.exitCode == 0,
          r.stdout & r.stderr)
+    # Both drop-in directories full, so before the reboot neither the
+    # service nor its socket has a persistent hold: what holds them after
+    # it is the re-assertion's replay alone, on the engine it runs.
     discard g.run("rm -rf /var/lib/a9b-sr; mkdir /var/lib/a9b-sr; touch /var/lib/a9b-sr/theirs; " &
-      "mkdir -p /etc/systemd/system/a9b-sr.service.d; " &
-      "mount -t tmpfs -o size=4k a9full /etc/systemd/system/a9b-sr.service.d; " &
-      "dd if=/dev/zero of=/etc/systemd/system/a9b-sr.service.d/.fill bs=4096 count=4 2>/dev/null; true")
+      "for u in service socket; do d=/etc/systemd/system/a9b-sr.$u.d; mkdir -p $d; " &
+      "mount -t tmpfs -o size=4k a9full $d; " &
+      "dd if=/dev/zero of=$d/.fill bs=4096 count=4 2>/dev/null; done; true")
     r = g.applyProfile(repro, "s2", srp.replace("A9 round 16", "A9 round 16 s2"))
     step("its next apply is refused and the revert, unable to write the hold, is pending",
          r.exitCode != 0 and g.exec("test -e /var/lib/repro/system/addon/pending").exitCode == 0,
@@ -265,7 +269,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     r = g.applyProfile(repro, "s3", profile)
     step("and the next apply without it passes", r.exitCode == 0, r.stdout & r.stderr)
     # The drop-in directory the gate made for the tmpfs is the gate's.
-    discard g.run("rmdir /etc/systemd/system/a9b-sr.service.d 2>/dev/null; true")
+    discard g.run("rmdir /etc/systemd/system/a9b-sr.service.d " &
+                  "/etc/systemd/system/a9b-sr.socket.d 2>/dev/null; true")
     let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
     step("uninstall removes the unit and its link through the ledger",
          un.exitCode == 0 and g.exec("test -e " & UnitFile).exitCode != 0 and

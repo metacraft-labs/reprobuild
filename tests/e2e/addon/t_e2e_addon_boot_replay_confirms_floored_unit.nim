@@ -22,8 +22,11 @@
 ##   left; ``current`` is B's generation and both floored units are active;
 ## - the health-checked unit started after the re-assertion exited and
 ##   before the boot-confirm unit's confirm ended;
-## - the boot took no longer than the plain one (within 25 % plus 2 s): the
-##   boot-confirm unit is not on ``multi-user.target``'s path.
+## - ``multi-user.target`` was reached no later than in the plain boot
+##   (within 25 % plus 2 s): the boot-confirm unit is not on its path. The
+##   boot transaction as a whole ends only after the replay (the units the
+##   replay queues join it), so "Startup finished" is later by about the
+##   confirm; both are recorded.
 ##
 ## Falsifying build: ``REPRO_ADDON_MUTATION=boot-confirm-in-reassert`` (the
 ## re-assertion replays and confirms the switch itself): it is reverted
@@ -81,21 +84,29 @@ proc monotonicUsec(g: Guest; unit, prop: string): int64 =
     stdout.strip()
   try: parseBiggestInt(v) except ValueError: 0'i64
 
-proc userspaceSeconds(g: Guest): float =
-  ## This boot's userspace time, once the boot is finished.
+proc bootTimes(g: Guest): tuple[multiUser, finished: float] =
+  ## This boot's userspace time to ``multi-user.target`` (what an operator
+  ## waits for, and what decision 144's ordering delayed) and to the end of
+  ## the boot transaction (which includes every job queued during it, the
+  ## boot-confirm unit's replay among them), once the boot is finished.
   discard g.exec("systemctl is-system-running --wait; true", timeoutSec = 600)
   let sh = g.exec("systemctl show -p UserspaceTimestampMonotonic " &
-                  "-p FinishTimestampMonotonic").stdout
-  var u, f = 0'i64
+                  "-p FinishTimestampMonotonic; systemctl show -p " &
+                  "ActiveEnterTimestampMonotonic multi-user.target").stdout
+  var u, f, m = 0'i64
   for l in sh.splitLines():
     let kv = l.split('=', 1)
     if kv.len != 2: continue
     try:
-      if kv[0] == "UserspaceTimestampMonotonic": u = parseBiggestInt(kv[1])
-      elif kv[0] == "FinishTimestampMonotonic": f = parseBiggestInt(kv[1])
+      case kv[0]
+      of "UserspaceTimestampMonotonic": u = parseBiggestInt(kv[1])
+      of "FinishTimestampMonotonic": f = parseBiggestInt(kv[1])
+      of "ActiveEnterTimestampMonotonic": m = parseBiggestInt(kv[1])
+      else: discard
     except ValueError: discard
-  if u == 0 or f <= u: return -1.0
-  float(f - u) / 1e6
+  result = (-1.0, -1.0)
+  if u > 0 and m > u: result.multiUser = float(m - u) / 1e6
+  if u > 0 and f > u: result.finished = float(f - u) / 1e6
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest
@@ -120,8 +131,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # The boot to compare with: A, nothing pending.
     g.rebootGuest()
     discard g.waitReasserted()
-    let plainBoot = g.userspaceSeconds()
-    record["plainBootSeconds"] = %plainBoot
+    let plainBoot = g.bootTimes()
+    record["plainBoot"] = %*{"multiUserSeconds": plainBoot.multiUser,
+                             "finishedSeconds": plainBoot.finished}
     # The switch to B, stopped after the drivers' writes, then a reset: the
     # boot's re-assertion replays it.
     g.holdWriteback()
@@ -141,8 +153,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let reassertJournal = g.waitReasserted()
     discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true",
                    timeoutSec = 600)
-    let resetBoot = g.userspaceSeconds()
-    record["resetBootSeconds"] = %resetBoot
+    let resetBoot = g.bootTimes()
+    record["resetBoot"] = %*{"multiUserSeconds": resetBoot.multiUser,
+                             "finishedSeconds": resetBoot.finished}
     discard g.exec("for i in $(seq 1 300); do s=$(systemctl show -p ActiveState --value " &
       BootConfirm & "); [ $s = active ] || [ $s = failed ] && break; sleep 2; done",
       timeoutSec = 900)
@@ -186,10 +199,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          reassertExited > 0 and started >= reassertExited and confirmExited > started,
          "re-assertion exited " & $reassertExited & ", floored started " &
          $started & ", boot-confirm exited " & $confirmExited)
-    step("the boot took no longer than the plain one (the boot-confirm unit is " &
-         "not on multi-user.target's path)",
-         plainBoot > 0 and resetBoot > 0 and resetBoot <= plainBoot * 1.25 + 2.0,
-         "plain " & $plainBoot & " s, after the reset " & $resetBoot & " s")
+    step("multi-user.target was reached no later than in the plain boot (the " &
+         "boot-confirm unit is not on its path); the boot transaction itself " &
+         "ends after the replay, and is recorded",
+         plainBoot.multiUser > 0 and resetBoot.multiUser > 0 and
+         resetBoot.multiUser <= plainBoot.multiUser * 1.25 + 2.0,
+         "multi-user.target: plain " & $plainBoot.multiUser & " s, after the reset " &
+         $resetBoot.multiUser & " s; boot finished: plain " & $plainBoot.finished &
+         " s, after the reset " & $resetBoot.finished & " s")
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

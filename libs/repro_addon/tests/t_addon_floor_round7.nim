@@ -234,7 +234,7 @@ suite "round 7, finding 2: the start hold and the paths the manager creates":
     check "[rule:existing-tree" notin p
     check managerPathProblem("/nonexistent/a9r7", 1000, false) == ""
   test "the effective activator check refuses a listener in the add-on's tree":
-    let show = parseShow("FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n")
+    let show = parseShow("FragmentPath=/etc/systemd/system/a.socket\nAfter=sysinit.target\nDropInPaths=\n")
     let lines = parseShowLines("Listen=/run/repro/floor-hold/never (Stream)\n")
     check activatorProblems("a.socket", show, lines,
       "/etc/systemd/system/a.socket", []).len > 0
@@ -257,7 +257,7 @@ suite "round 7, finding 3: each socket option by its rule":
       "[Socket]\nListenStream=/run/a/a.sock\nDirectoryMode=0750\n" &
       "RemoveOnStop=yes\nSocketUser=a\nSocketMode=0660\nPriority=6\n")) == ""
   test "the effective check judges the reported options":
-    let base = "FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n"
+    let base = "FragmentPath=/etc/systemd/system/a.socket\nAfter=sysinit.target\nDropInPaths=\n"
     for (k, v) in [("Mark", "1"), ("Transparent", "yes"), ("Priority", "7"),
                    ("ReceiveBuffer", "8388608"), ("Symlinks", "/etc/a.sock"),
                    ("BindToDevice", "eth0"), ("SocketUser", "root")]:
@@ -268,7 +268,7 @@ suite "round 7, finding 3: each socket option by its rule":
     check activatorProblems("a.socket", parseShow(base & "Mark=-1\nPriority=-1\n"),
       parseShowLines("Listen=/run/a/a.sock (Stream)\n"),
       "/etc/systemd/system/a.socket", []).len == 0
-    check activatorProblems("a.path", parseShow("FragmentPath=/etc/systemd/system/a.path\n" &
+    check activatorProblems("a.path", parseShow("FragmentPath=/etc/systemd/system/a.path\nAfter=sysinit.target\n" &
       "DropInPaths=\nMakeDirectory=yes\n"), parseShowLines("Paths=PathExists /etc/x\n"),
       "/etc/systemd/system/a.path", []).len > 0
     check activatorProblems("a.socket", parseShow(base),
@@ -295,7 +295,7 @@ suite "round 7, finding 3: each socket option by its rule":
     check n == 12     # socket, timer, path on systemd 252, 255, 257, 259
 
   test "the effective check applies the parse-time rules to its files":
-    let base = "FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n"
+    let base = "FragmentPath=/etc/systemd/system/a.socket\nAfter=sysinit.target\nDropInPaths=\n"
     check activatorProblems("a.socket", parseShow(base),
       parseShowLines("Listen=/run/a/a.sock (Stream)\n"),
       "/etc/systemd/system/a.socket", [],
@@ -347,7 +347,7 @@ suite "round 7, finding 4: system-state units by any route":
     check refused(plain & rawUnit("a.socket",
       "[Unit]\nWants=x.target\n\n[Socket]\nListenStream=/run/a/a.sock\n") &
       rawUnit("x.target", "[Unit]\nWants=halt.target\n")).len > 0
-    check activatorProblems("a.socket", parseShow("FragmentPath=/etc/systemd/system/a.socket\n" &
+    check activatorProblems("a.socket", parseShow("FragmentPath=/etc/systemd/system/a.socket\nAfter=sysinit.target\n" &
       "DropInPaths=\nOnFailure=reboot.target\n"), parseShowLines("Listen=/run/a/a.sock (Stream)\n"),
       "/etc/systemd/system/a.socket", []).len > 0
 
@@ -499,7 +499,7 @@ suite "§13 decision 55: Conflicts= names only the profile's own units":
     e.loaded = @[(path: fragment, content: withLines(ru, "Conflicts=shutdown.target\n", ""))]
     check "names a unit the profile does not define" in problemsOf(e)
   test "the effective check of an activator":
-    let base = "FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n"
+    let base = "FragmentPath=/etc/systemd/system/a.socket\nAfter=sysinit.target\nDropInPaths=\n"
     check activatorProblems("a.socket", parseShow(base & "Conflicts=shutdown.target ssh.socket\n"),
       parseShowLines("Listen=/run/a/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len > 0
     check activatorProblems("a.socket", parseShow(base & "Conflicts=shutdown.target\n"),
