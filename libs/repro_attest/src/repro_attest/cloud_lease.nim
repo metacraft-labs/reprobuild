@@ -78,6 +78,7 @@
 ## which is a substitute for a cloud in the same sense that a real
 ## subprocess is a substitute for a real subprocess.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, exitprocs, options, os, osproc, strtabs, streams,
             strutils, times]
 
@@ -1612,7 +1613,7 @@ proc subprocessCloudLeaseEffector*(env: CloudEnvLookup = nil):
         searchPath: searchPath,
         output: "the provider tool " & effect.argv[0].escape() &
           " could not be started")
-    let output = child.outputStream.readAll()
+    let output = drainStream(child.outputStream)
     let status = child.waitForExit()
     child.close()
     CloudEffectResult(status: status, output: output, program: program,
