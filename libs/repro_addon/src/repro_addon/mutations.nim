@@ -1103,6 +1103,25 @@
 ##                                            after the ledger copy goes, so
 ##                                            a crash between them is never
 ##                                            finished (decision 166)
+## ``etc-input-rewritten-in-step-4``         step 4 writes an input /etc
+##                                            file's preserved bytes back
+##                                            (decision 166)
+## ``etc-sweep-rewrites-inputs``              the /etc/repro sweep removes
+##                                            the inputs and writes them back
+## ``run-repro-rewrites-inputs``              /run/repro's removal does
+## ``store-remover-rewrites-inputs``          /repro's removal does
+## ``new-floors-removed``                     a sequence floor the add-on's
+##                                            agent wrote goes while its key
+##                                            stays (decision 168)
+## ``prior-mode-captured-after-takeover``     bootstrap records a takeover
+##                                            root's prior mode after the
+##                                            takeover (decision 167)
+## ``unmarked-prior-trusted``                 uninstall takes an unmarked
+##                                            ledger's prior mode as captured
+##                                            and says nothing (decision 167)
+## ``token-dir-unchecked``                    the state-removal token is
+##                                            written to and read from any
+##                                            directory (decision 165)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1970,6 +1989,14 @@ const
                           "inputs-removed-and-restored",
                           "input-mode-owner-not-restored",
                           "input-metadata-after-ledger-copy",
+                          "etc-input-rewritten-in-step-4",
+                          "etc-sweep-rewrites-inputs",
+                          "run-repro-rewrites-inputs",
+                          "store-remover-rewrites-inputs",
+                          "new-floors-removed",
+                          "prior-mode-captured-after-takeover",
+                          "unmarked-prior-trusted",
+                          "token-dir-unchecked",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",

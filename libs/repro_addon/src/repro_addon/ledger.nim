@@ -149,8 +149,10 @@ type
                            ## generation 0's objects, spec §9). ``adopt`` with an
                            ## empty ``resource`` marks a pre-bootstrap input
                            ## bootstrap took over (spec §6.1): carried
-                           ## forward by every apply, put back as found by
-                           ## uninstall (``isPreBootstrapInput``)
+                           ## forward by every apply, and left in place by
+                           ## uninstall, which puts back only the mode and
+                           ## owner it had before the add-on (§13 decision
+                           ## 166; ``isPreBootstrapInput``)
     preserved*: string     ## where the pre-write bytes of an adopted,
                            ## replaced or reconciled file are kept
                            ## (``<state>/addon/preserved/<sha256>``), or ""
@@ -200,6 +202,15 @@ const
 proc isLink*(e: LedgerEntry): bool =
   ## The object is a symlink into the static tree (``form = link``).
   e.class in FileClasses and e.form == "link"
+
+const PriorCapturedBeforeTakeover* = "prior-captured-before-takeover"
+  ## The ``observation`` of a root entry bootstrap took over, written since
+  ## the fix of the A11 round-16 review: its ``replaced`` value was read
+  ## before ``takeOverRootDir`` changed the directory, so it is the mode and
+  ## owner the directory had before the add-on. A takeover entry without it
+  ## was written by an earlier bootstrap, which read four of them (the
+  ## ``/run/repro`` directories and the deploy agent's state directories)
+  ## after the takeover (§13 decision 167).
 
 proc isPreBootstrapInput*(e: LedgerEntry): bool =
   ## A pre-bootstrap input bootstrap took over (spec §6.1): adopted, and
