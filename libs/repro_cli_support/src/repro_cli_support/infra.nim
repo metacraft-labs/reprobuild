@@ -743,10 +743,12 @@ proc cacheKeysPlatform*(flags: InfraCliFlags; stateDir: string):
 proc renderCacheKeys*(actions: seq[ProfileBuildAction];
                       platform: PlatformTriple): string =
   ## The `repro infra cache-keys` report: one block per build-action edge
-  ## with the entry key an apply on `platform` looks up and the identity
-  ## flags that publish under it. Edges whose outputs are not all under
-  ## their `cwd` are listed as not substitutable, which is what the apply
-  ## concludes about them too (`outputRelPaths`).
+  ## with the entry key an apply on `platform` looks up, the identity
+  ## flags that publish under it, and the `expectedOutputDigest` that binds
+  ## what the apply accepts (or a note that the edge pins none, so an apply
+  ## never substitutes it: the key binds no input content). Edges whose
+  ## outputs are not all under their `cwd` are listed as not substitutable,
+  ## which is what the apply concludes about them too (`outputRelPaths`).
   for action in actions:
     let idy = bc_actions.buildActionCacheIdentity(action, platform)
     result.add(action.id & "\n")
@@ -757,11 +759,23 @@ proc renderCacheKeys*(actions: seq[ProfileBuildAction];
     result.add("  publish:   repro cache publish " &
       deriveCacheEntryKeyHex(idy) & " <prefix> " &
       bc_actions.publishIdentityFlags(idy).join(" ") & "\n")
-    if action.substituteOnly or action.expectedOutputDigest.len > 0:
-      result.add("  expectedOutputDigest: " &
-        (if action.expectedOutputDigest.len > 0: action.expectedOutputDigest
-         else: "(none; `repro cache publish` prints `output-digest blake3:…`" &
-               " to pin)") & "\n")
+    # Every substitutable edge says what binds the bytes an apply takes:
+    # the key binds the edge's declaration, not what it reads, so an apply
+    # substitutes only an edge that pins its digest (Binary-Caches.md
+    # §"Publishing for a host that cannot build", "The entry key is an
+    # address").
+    if action.expectedOutputDigest.len > 0:
+      result.add("  expectedOutputDigest: " & action.expectedOutputDigest &
+        "\n")
+    elif action.substituteOnly:
+      result.add("  expectedOutputDigest: (none; an apply never " &
+        "substitutes this edge and it fails as substitute-only until the " &
+        "profile pins the `output-digest blake3:…` that " &
+        "`repro cache publish` prints)\n")
+    else:
+      result.add("  expectedOutputDigest: (none; an apply never " &
+        "substitutes this edge, it builds locally, until the profile pins " &
+        "the `output-digest blake3:…` that `repro cache publish` prints)\n")
 
 proc runInfraCacheKeys(args: openArray[string]): int =
   ## `repro infra cache-keys [--profile P] [--state-dir D] [--platform-cpu C]
@@ -773,8 +787,11 @@ proc runInfraCacheKeys(args: openArray[string]): int =
   ## `repro cache publish` flags that publish an output prefix under it.
   ## This is how a build host publishes an edge's outputs AHEAD of a host
   ## that cannot build them (Binary-Caches.md §"Publishing for a host that
-  ## cannot build"): the key is a function of the edge and the consuming
-  ## platform only, so it can be derived anywhere the profile compiles.
+  ## cannot build"): the key is a function of the edge's declaration and
+  ## the consuming platform only, so it can be derived anywhere the profile
+  ## compiles. Because it binds nothing the edge reads, an apply takes an
+  ## entry only for an edge that pins `expectedOutputDigest`; the report
+  ## says so for each edge.
   ## Nothing is applied, planned or written outside the profile-compile
   ## cache under the state directory.
   let (flags, _) = parseInfraFlags(args)
@@ -905,23 +922,22 @@ proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
   # The profile pins the bytes (`expectedOutputDigest`), and the apply
   # refuses an entry that digests otherwise, so a mismatch is refused here,
   # before the upload, rather than published as an entry nothing can use.
-  const digestPrefix = "blake3:"
-  # Prefix and hex compared case-insensitively alike (publishInProcess
-  # lowers the hex). A compiled profile holds only lowercase today
-  # (`repro_profile/build_actions` refuses anything else), so this only
-  # keeps the two halves from disagreeing if that rule is ever relaxed.
-  let pinned = action.expectedOutputDigest.toLowerAscii()
-  if pinned.len > 0 and not pinned.startsWith(digestPrefix):
-    stderr.writeLine(who & ": edge '" & edgeId & "' pins " & pinned &
-      ", which is not a blake3:<hex> digest")
+  # Only a well-formed pin is published under: an empty one reads as "no
+  # pin" to publishInProcess, and an uppercase one is an entry the apply's
+  # exact comparison never matches. Same rule as publishBuildActionOutputs.
+  let pinned = action.expectedOutputDigest
+  if not bc_actions.isWellFormedDigestPin(pinned):
+    stderr.writeLine(who & ": edge '" & edgeId & "' pins '" & pinned &
+      "', which is not a blake3:<64 lowercase hex> digest; an edge that " &
+      "pins no bytes is never substituted, so nothing is published")
     return 2
   let res = publishInProcess(PublishInProcessRequest(entryKeyHex: key,
     prefixDir: prefix, identity: idy, endpoint: defaultCacheUrl(),
     keypair: keypair,
-    expectedRawDigestHex: pinned.substr(digestPrefix.len)))
+    expectedRawDigestHex: pinned.substr(bc_actions.DigestPinTagPrefix.len)))
   if not res.ok:
-    if pinned.len > 0 and res.rawArchiveDigestHex.len > 0 and
-        pinned != digestPrefix & res.rawArchiveDigestHex:
+    if res.rawArchiveDigestHex.len > 0 and
+        pinned != bc_actions.DigestPinTagPrefix & res.rawArchiveDigestHex:
       stderr.writeLine(who & ": the profile pins edge '" & edgeId & "' to " &
         pinned & ", but " & prefix & " digests to blake3:" &
         res.rawArchiveDigestHex & "; nothing is published. If this build " &

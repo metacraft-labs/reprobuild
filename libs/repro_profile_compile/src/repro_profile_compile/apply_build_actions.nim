@@ -333,15 +333,21 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
 
       # ---- M4: binary-cache substitute-first / publish-on-miss. ----
       # When a binary cache is configured (``caches.conf`` or
-      # ``REPRO_BINARY_CACHE_URL``) we PREFER fetching each edge's outputs
-      # from the cache instead of building locally; only entries signed by
-      # a key the cache's ``trusted-public-keys`` anchor are accepted.
+      # ``REPRO_BINARY_CACHE_URL``) we PREFER fetching the outputs of each
+      # edge that pins ``expectedOutputDigest`` from the cache instead of
+      # building locally; only entries signed by a key the cache's
+      # ``trusted-public-keys`` anchor, AND whose archive hashes to the
+      # pin, are accepted. An edge that pins no digest always builds
+      # locally: its entry key binds the declaration, not the inputs, so an
+      # entry under it may be stale (``trySubstituteBuildAction`` refuses
+      # it; Binary-Caches.md "The entry key is an address").
       # Edges substituted from the cache are removed from the engine's
       # build-graph; only the misses (and edges with no substitutable
       # outputs) go through ``runBuild``. On a successful local build a
       # host configured as a PUBLISHER (operator-supplied keypair) publishes
-      # the freshly-built outputs back so a later fresh apply hits; any
-      # other host publishes nothing. Off-by-default: no configured cache
+      # the freshly-built outputs back -- of a digested edge whose bytes
+      # match the pin only (``publishBuildActionOutputs``) -- so a later
+      # fresh apply hits; any other host publishes nothing. Off-by-default: no configured cache
       # yields ``configured = false`` and the whole block is a no-op — the
       # local-build path below is byte-identical to pre-M4 behaviour.
       let cacheCfg = resolveBuildActionCacheConfig()
