@@ -6473,8 +6473,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if toRestart.len > 0:
         writeTriggersToRestart(stateDir,
           readTriggersToRestart(stateDir) & toRestart)
-        # The record owns them now (§13 decision 160): step 7 leaves them
-        # out (``step7Inputs``), or the revert would fail the same way.
+        # The restart record owns these triggers now (§13 decision 160):
+        # step 7 leaves them out (``step7Inputs``), or the revert would fail
+        # the same way.
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the
