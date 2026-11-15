@@ -2797,6 +2797,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "no other source shares its compile options"),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_a_failing_producer_fetch_reports_why.nim",
+    binary: "build/test-bin/t_a_failing_producer_fetch_reports_why",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_a_lock_rewrite_that_does_not_parse_is_refused.nim",
     binary: "build/test-bin/t_a_lock_rewrite_that_does_not_parse_is_refused",
     defines: @[],
@@ -3289,7 +3300,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g01",
+    group: "t_group_libs_repro_cli_support_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",
