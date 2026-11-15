@@ -32,6 +32,9 @@ import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
+# The content identity of a producer's channel directories, folded into the
+# keys of consumer actions whose reads nothing observes (§4.3 rule 2).
+import repro_cli_support/producer_channel_content
 # repro's own command line: the generated parser, help and completion.
 import repro_cli_support/cli_program
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
@@ -5098,26 +5101,25 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ##
   ## In develop mode the entry is the ``rpbkOverride``
   ## ``ResolvedPackageBinding`` the SC-1 hook returned — carrying the develop
-  ## override's ``contentIdentity`` (``computeOverrideContentIdentity``,
-  ## ``override_resolution.nim:235-263``, which folds the sibling checkout's
-  ## local-path root mtime). ``foldProducerSourceIdentities`` (below) drives
-  ## the NEVER-CALLED-OUTSIDE-A-TEST ``foldOverridesIntoFingerprint``
-  ## (``override_resolution.nim:349-380``) with these bindings — activating that
-  ## fold at the splice seam IS the SC-4 invalidation hook: a change to the
-  ## sibling producer's source (a new mtime -> a new ``contentIdentity``) shifts
-  ## the consumer action's weak fingerprint so the consumer rebuilds.
+  ## override's ``contentIdentity`` (``computeOverrideContentIdentity``), which
+  ## NAMES the override (package, state, absolute path) and says nothing about
+  ## the bytes under it. In lock-pinned mode it is a synthesized binding whose
+  ## ``contentIdentity`` digests the producer ``LockedDep``'s pinned
+  ## ``revision`` + ``integrity`` (``lockPinnedSourceBinding``), so a refreshed
+  ## pin moves the key; a placed sibling checkout can still carry uncommitted
+  ## edits the pin does not describe.
   ##
-  ## In lock-pinned mode the source identity is the producer ``LockedDep``'s
-  ## pinned ``revision`` + ``integrity`` (``repro_lock.nim:143-149``); it is
-  ## projected onto the SAME fold framing by synthesizing a ``rpbkOverride``
-  ## binding whose ``contentIdentity`` is a digest of ``revision`` + ``integrity``
-  ## (a refreshed pin shifts the consumer cache key; an unchanged pin does not).
-  ##
-  ## Since 2026-10-12 (§4.3, scoped rule) these identities are folded only into
-  ## actions whose reads nothing observes (``readsAreKeyed`` false); a
-  ## monitored action is keyed on what it read under the producer root plus
-  ## the producer's realized directories (``producerChannelIdentity``). See
-  ## ``foldProducerSourceIdentities``.
+  ## Neither identity is the producer's source CONTENT. That reaches a key in
+  ## one of two ways (§4.3, scoped rule since 2026-10-12; see
+  ## ``foldProducerSourceIdentities``): a monitored or built-in action is keyed
+  ## on what it read under the producer root (rule 1), and an action whose
+  ## reads nothing observes (``readsAreKeyed`` false) additionally folds the
+  ## content of the producer's channel directories (``producerChannelContent``,
+  ## rule 2). An earlier scheme put the producer root's mtime in the develop
+  ## identity and relied on it for rule 2; an edit below the root does not
+  ## change that mtime, so report-keyed consumers got stale hits
+  ## (reprobuild-pm issue 2026-11-12, "develop-mode rule 2 invalidation uses a
+  ## directory mtime").
   ##
   ## Empty for a build that consumes no cross-repo producer, so a no-producer
   ## action's cache key is byte-identical to today
@@ -5236,38 +5238,6 @@ proc lockPinnedSourceBinding*(selector: string; dep: LockedDep):
       packageName: selector, fetchUrl: coordUrl, revision: coordRevision),
     override: DevelopOverrideEntry(package: selector, state: "pinned"),
     localPathAbsolute: "",
-    contentIdentity: identity)
-
-proc onDiskSiblingSourceBinding*(selector, siblingRoot: string):
-    ResolvedPackageBinding =
-  ## Cross-Repo-Source-Consumption SC-4 (§4.3, develop-mode on-disk-sibling arm)
-  ## — project a producer consumed as a plain on-disk workspace sibling (no
-  ## develop-override entry, no committed lock pin: ``pbkOnDiskSibling``) onto
-  ## the SAME ``foldOverridesIntoFingerprint`` framing develop mode uses, by
-  ## synthesizing an ``rpbkOverride`` binding whose ``contentIdentity`` folds the
-  ## sibling's absolute root path + its root mtime — the develop-editable analogue
-  ## of ``computeOverrideContentIdentity`` (a develop override with ``state ==
-  ## "editable"`` points at exactly this same sibling checkout, so the folded
-  ## identity matches). A touched sibling root shifts the digest and therefore the
-  ## consumer cache key; an unchanged sibling leaves it stable.
-  let absRoot = absolutePath(siblingRoot)
-  let mtimeIso =
-    try:
-      if dirExists(extendedPath(absRoot)) or fileExists(extendedPath(absRoot)):
-        $getLastModificationTime(extendedPath(absRoot))
-      else:
-        ""
-    except CatchableError:
-      ""
-  var payload = "cross-repo-producer-sibling-source.v1\x00" & selector &
-    "\x00" & absRoot & "\x00" & mtimeIso & "\x00"
-  let identity = toHex(blake3DomainDigest(payload.bytesOf(),
-    hdActionFingerprint).bytes)
-  ResolvedPackageBinding(
-    kind: rpbkOverride,
-    shadowed: UpstreamPackageBinding(packageName: selector),
-    override: DevelopOverrideEntry(package: selector, state: "editable"),
-    localPathAbsolute: absRoot,
     contentIdentity: identity)
 
 # ---------------------------------------------------------------------------
@@ -5488,9 +5458,35 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
 
 const NimProducerPathProjectionVersion = "nim-path-projection:restore-after-config.v2"
 
+const ProducerChannelContentFoldVersion =
+  "cross-repo-producer-channel-content-fold.v1"
+  ## Leads rule 2's channel-content fold. New with that fold, so no record
+  ## keyed before it (on the root-mtime develop identity) can match a key
+  ## carrying it.
+
 proc hasNimProducerPaths(selector: string): bool =
   producerMaterializedAuxPaths.hasKey(selector) and
     producerMaterializedAuxPaths[selector].nimPathDirs.anyIt(it.len > 0)
+
+proc producerChannelDirs*(selector: string): seq[ProducerChannelDir] =
+  ## The realized directories the splice hands a consumer of ``selector``, in
+  ## the fixed channel order both producer folds frame them in: ``bin`` dirs
+  ## (``PATH``), then ``include`` / ``lib`` / ``pkgconfig`` / ``cmake`` (the
+  ## C/C++ search variables), then ``nimpath`` (``nim c --path:``).
+  ## ``producerChannelIdentity`` names them; ``producerChannelContent``
+  ## digests what is under them.
+  template addDirs(tag: string; dirs: seq[string]) =
+    for dir in dirs:
+      result.add(ProducerChannelDir(channel: tag, path: dir))
+  if producerMaterializedBinDirs.hasKey(selector):
+    addDirs("bin", producerMaterializedBinDirs[selector])
+  if producerMaterializedAuxPaths.hasKey(selector):
+    let aux = producerMaterializedAuxPaths[selector]
+    addDirs("include", aux.includeDirs)
+    addDirs("lib", aux.libDirs)
+    addDirs("pkgconfig", aux.pkgConfigDirs)
+    addDirs("cmake", aux.cmakePrefixDirs)
+    addDirs("nimpath", aux.nimPathDirs)
 
 proc producerChannelIdentity*(selector: string): string =
   ## Cross-Repo-Source-Consumption §4.3 (2026-10-12) — what a consuming action
@@ -5498,8 +5494,10 @@ proc producerChannelIdentity*(selector: string): string =
   ## directories the splice puts on its command line and environment (``bin``
   ## dirs on ``PATH``, C/C++ dirs on the search variables, Nim source roots on
   ## ``nim c --path:``). Their CONTENT is not here — it reaches the key through
-  ## the files the action reads — but the directories themselves are part of
-  ## what the action runs, so they are part of its weak fingerprint.
+  ## the files the action reads, or, for an action whose reads nothing
+  ## observes, through ``producerChannelContent`` — but the directories
+  ## themselves are part of what the action runs, so they are part of its
+  ## weak fingerprint.
   ##
   ## Stable across a source change and across a lock refresh for a producer
   ## consumed from a workspace checkout (the directories do not move). A
@@ -5509,26 +5507,20 @@ proc producerChannelIdentity*(selector: string): string =
   ## thing that distinguishes the new content from the old, which is still on
   ## disk unchanged.
   var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
-  template addDirs(tag: string; dirs: seq[string]) =
-    for dir in dirs:
-      payload.add(tag)
-      payload.add(dir)
-      payload.add('\x00')
-  if producerMaterializedBinDirs.hasKey(selector):
-    addDirs("bin:", producerMaterializedBinDirs[selector])
-  if producerMaterializedAuxPaths.hasKey(selector):
-    let aux = producerMaterializedAuxPaths[selector]
-    addDirs("include:", aux.includeDirs)
-    addDirs("lib:", aux.libDirs)
-    addDirs("pkgconfig:", aux.pkgConfigDirs)
-    addDirs("cmake:", aux.cmakePrefixDirs)
-    if hasNimProducerPaths(selector):
+  var nimProjectionTagged = false
+  for dir in producerChannelDirs(selector):
+    if dir.channel == "nimpath" and not nimProjectionTagged and
+        hasNimProducerPaths(selector):
       # The previous launch-only projection could successfully import a stale
       # configured library. Its observed reads remain fresh, so changing argv
       # projection alone cannot invalidate that result. Scope this transition
       # to actions actually handed Nim source roots; other channels stay stable.
       payload.add(NimProducerPathProjectionVersion & "\x00")
-    addDirs("nimpath:", aux.nimPathDirs)
+      nimProjectionTagged = true
+    payload.add(dir.channel)
+    payload.add(':')
+    payload.add(dir.path)
+    payload.add('\x00')
   digestHex(blake3DomainDigest(payload.bytesOf(), hdActionFingerprint))
 
 proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
@@ -5540,7 +5532,7 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ##
   ## WHICH ACTIONS CARRY THE PRODUCER'S IDENTITY (owner decision 2026-10-12,
   ## §4.3). The producer's source identity — a develop override's
-  ## ``contentIdentity`` (sibling root path + mtime), a lock pin's
+  ## ``contentIdentity`` (package, state, absolute path), a lock pin's
   ## ``revision`` + ``integrity`` — is folded ONLY into an action whose reads
   ## are not otherwise keyed (``readsAreKeyed`` false: a process whose
   ## dependencies come from a recognised format or a converter alone). For
@@ -5559,11 +5551,40 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ## change which module a compile resolves, and a cached record from a build
   ## without it says nothing about that.
   ##
+  ## RULE 2: THE CHANNEL CONTENT. Neither source identity above describes the
+  ## bytes an unobserved action can read: the develop identity names the
+  ## override, and a pin does not describe a placed sibling's uncommitted
+  ## edits. A report omits reads (``-MMD`` drops every ``-isystem`` header),
+  ## so for such an action the CONTENT of every channel directory the
+  ## producer hands it (``producerChannelDirs``) is folded as well, under
+  ## ``ProducerChannelContentFoldVersion``: any edit under those directories
+  ## — deep in a tree, through a symlink, mtime-preserving — moves its key.
+  ## The digest is computed lazily, once per producer per call, and only for
+  ## a producer some such action names, so a graph of monitored actions pays
+  ## nothing for it. When a channel entry cannot be read the digest would
+  ## describe a tree that is not on disk, and the action is made uncacheable
+  ## instead (``Failure-Semantics.md`` §"General Rules": ambiguous correctness
+  ## failures fail closed). A monitored action does NOT carry this fold: its
+  ## observed reads key it already (rule 1), and folding the whole tree would
+  ## miss every one of them on any edit, the defect the scoped rule removed.
+  ##
   ## An action that names NO materialized producer keeps its
   ## ``weakFingerprint`` byte-for-byte, and with ``producerSourceBindings``
   ## empty (no cross-repo producer) this is a whole-graph no-op.
   if producerSourceBindings.len == 0:
     return
+  var channelContents = initTable[string, ProducerChannelContent]()
+  proc channelContentOf(selector: string): ProducerChannelContent =
+    if selector notin channelContents:
+      let content = producerChannelContent(selector,
+        producerChannelDirs(selector))
+      if not content.complete:
+        stderr.writeLine("repro: warning: cross-repo producer '" &
+          selector & "': the content of its directories could not be read (" &
+          content.failure & "); actions that consume it without observed " &
+          "reads will not be cached")
+      channelContents[selector] = content
+    channelContents[selector]
   for action in actions.mitems:
     if action.toolIdentityRefs.len == 0:
       continue
@@ -5599,6 +5620,32 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
           digestHex(action.weakFingerprint)
         action.weakFingerprint =
           blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+      # Rule 2's content fold (see the doc comment): what the action can read
+      # through the producer's directories, since nothing observed it.
+      # A producer that hands the action no directory gives it nothing to
+      # read through a channel, so it contributes nothing here, and an action
+      # handed no producer directory at all keeps the binding-fold key.
+      var contentPayload = ProducerChannelContentFoldVersion & "\x00" &
+        digestHex(action.weakFingerprint) & "\x00"
+      var contentComplete = true
+      var contentFolded = false
+      for selector in selectors:
+        if producerChannelDirs(selector).len == 0:
+          continue
+        let content = channelContentOf(selector)
+        if not content.complete:
+          contentComplete = false
+          break
+        contentPayload.add(selector)
+        contentPayload.add('=')
+        contentPayload.add(content.digest)
+        contentPayload.add('\x00')
+        contentFolded = true
+      if not contentComplete:
+        action.cacheable = false
+      elif contentFolded:
+        action.weakFingerprint =
+          blake3DomainDigest(contentPayload.bytesOf(), hdActionFingerprint)
 
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
@@ -12527,8 +12574,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
     # directories folded; the rest get its source identity (develop
-    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
-    # when nothing was materialized (byte-identical to today).
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``) and the
+    # content digest of the directories they are handed (or become
+    # uncacheable when that content cannot be read). No-op when nothing was
+    # materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     # HL-10: a certifying run adds its lock-update node here, after every
     # fold, so the node changes no other action's cache key.
@@ -14316,8 +14365,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
     # directories folded; the rest get its source identity (develop
-    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
-    # when nothing was materialized (byte-identical to today).
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``) and the
+    # content digest of the directories they are handed (or become
+    # uncacheable when that content cannot be read). No-op when nothing was
+    # materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     # HL-10: a certifying run adds its lock-update node here, after every
     # fold, so the node changes no other action's cache key.

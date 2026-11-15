@@ -8447,11 +8447,14 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     #
     # This holds for a recipe-relative extraction too, whose EDGE runs in the
     # recipe directory: Nim writes `<runner>_linkerArgs.txt` into its cwd for
-    # a long link line and deletes it again, and that transient entry in the
-    # recipe's root changes the root's mtime — which an editable develop
-    # override folds into its consumers' action keys
-    # (`computeOverrideContentIdentity`). Measured: every consumer action
-    # missed on the second build. The compiler's private cwd is under the
+    # a long link line and deletes it again. That transient entry in the
+    # recipe's root changed the root's mtime, which an editable develop
+    # override's identity used to fold into its consumers' action keys
+    # (measured: every consumer action missed on the second build). The
+    # identity no longer carries the mtime, but a transient entry under a
+    # producer channel directory would still move the content digest folded
+    # into unobserved consumers' keys (`producerChannelContent`), and the
+    # recipe tree is the user's either way. The compiler's private cwd is under the
     # edge's scratch, so its reads stay absolute and the edge's record names
     # them relative to the recipe.
     try:
