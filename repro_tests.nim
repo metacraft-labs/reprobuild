@@ -14765,6 +14765,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_hcr_linux_threads_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.nim",
+    binary: "build/test-bin/t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_hcr_linux_txn_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim",
     binary: "build/test-bin/t_integration_hcr_linux_commit_failure_rolls_back_published_sites",
     defines: @[],

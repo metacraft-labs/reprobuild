@@ -1331,6 +1331,18 @@ integration_hcr_linux_commit_failure_rolls_back_published_sites:
         tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim \
         2>&1 | tee test-logs/integration_hcr_linux_commit_failure_rolls_back_published_sites.log
 
+# A failed re-patch commit rolls back to the previous generation, never to the
+# original (reprobuild-pm issues/2026-11-12-transaction-rollback-restores-
+# generation-0-silently-reverting-earlier-committed-patches.md).
+integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation \
+        --out:build/test-bin/integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation \
+        tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.log
+
 # HLX-M8 — the rb_hcr_* application ABI.
 integration_hcr_linux_managed_type_layout_change_lifecycle:
     mkdir -p test-logs build/test-bin build/nimcache

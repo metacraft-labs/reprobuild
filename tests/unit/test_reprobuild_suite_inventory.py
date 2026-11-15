@@ -7944,6 +7944,23 @@ compileProfileBinary()
                 },
             },
             "tests/e2e/hcr-linux-txn/"
+            "t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.nim": {
+                "linux": {
+                    "integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation::a "
+                    "generation-2 re-patch of a committed three-function set commits",
+                    "integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation::a "
+                    "generation-2 commit failing after N of 3 leaves every function "
+                    "on generation 1, for N = 0, 1 and 2",
+                    "integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation::the "
+                    "same arm goes RED against a provider whose rollback restores the "
+                    "ORIGINAL word",
+                },
+                "darwin": {
+                    "integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation::linux/amd64 "
+                    "only",
+                },
+            },
+            "tests/e2e/hcr-linux-txn/"
             "t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim": {
                 "linux": {
                     "integration_hcr_linux_commit_failure_rolls_back_published_sites::a "
@@ -7980,9 +7997,9 @@ compileProfileBinary()
                     "integration_hcr_linux_repeated_patch_of_same_function::a "
                     "window modified behind the provider's back is REFUSED",
                     "integration_hcr_linux_repeated_patch_of_same_function::rollback "
-                    "goes RED against a provider that restores generation N-1",
+                    "goes RED against a provider that restores the ORIGINAL word",
                     "integration_hcr_linux_repeated_patch_of_same_function::three "
-                    "generations, retained bodies, rollback to the ORIGINAL",
+                    "generations, retained bodies, rollback to generation 2",
                 },
                 "darwin": {
                     "integration_hcr_linux_repeated_patch_of_same_function::linux/amd64 "
