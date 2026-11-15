@@ -634,6 +634,7 @@ libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	5
 libs/repro_local_store/tests/t_store_concurrent_first_open_waits.nim	nim	2
 libs/repro_local_store/tests/t_store_copy.nim	nim	22
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
+libs/repro_local_store/tests/t_store_publish_is_durable_and_recover_verifies_prefix_contents.nim	nim	9
 libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.nim	nim	12
 libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim	nim	1
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9

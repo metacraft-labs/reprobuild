@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2812,
+    "nimTestBinaries": 2813,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 765,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2858
+    "testEntries": 2859
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1622,7 +1622,7 @@
       "integration": 1552,
       "platform/destructive": 179,
       "pure unit": 765,
-      "unclassified": 339
+      "unclassified": 340
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1836,9 +1836,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2812,
+    "nimTestBinaryCount": 2813,
     "pythonTestFileCount": 46,
-    "testEntryCount": 2858
+    "testEntryCount": 2859
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20088,6 +20088,24 @@
       "source": "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_publish_is_durable_and_recover_verifies_prefix_contents",
+      "class": "unclassified",
+      "classificationReason": "re-enters its own executable",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_publish_is_durable_and_recover_verifies_prefix_contents.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

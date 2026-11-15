@@ -572,6 +572,9 @@ proc materializeImportedPrefix(filePath: string; store: var Store;
   if dirExists(extendedPath(finalPath)):
     if validateExistingPrefixTree(filePath, store, closure, finalPath,
         receiptDigest):
+      # Durable before the row names it (Local-Content-Addressed-Store
+      # §"Write Protocol" steps 4a and 5a).
+      syncPlacedPrefixDurably(finalPath)
       discard store.insertPrefixOrIgnore(PrefixRow(
         prefixId: closure.prefixId,
         packageName: receipt.packageName,
@@ -611,6 +614,9 @@ proc materializeImportedPrefix(filePath: string; store: var Store;
         raiseActivationBundleCorrupt(filePath, "prefix.publish",
           "prefix publish lost race to a non-matching directory")
 
+    # Durable before the row names it (Local-Content-Addressed-Store
+    # §"Write Protocol" steps 4a and 5a).
+    syncPlacedPrefixDurably(finalPath)
     discard store.insertPrefixOrIgnore(PrefixRow(
       prefixId: closure.prefixId,
       packageName: receipt.packageName,
@@ -715,6 +721,9 @@ proc importActivationBundleBytes*(store: var Store; bytes: openArray[byte];
     elif dirExists(extendedPath(finalPath)):
       discard validateExistingPrefixTree(filePath, store, closure, finalPath,
         rd)
+      # Durable before the row names it (Local-Content-Addressed-Store
+      # §"Write Protocol" steps 4a and 5a).
+      syncPlacedPrefixDurably(finalPath)
       discard store.insertPrefixOrIgnore(PrefixRow(
         prefixId: closure.prefixId,
         packageName: receipt.packageName,
