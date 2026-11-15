@@ -642,6 +642,23 @@ suite "reach reads every drop-in systemd applies (round 4)":
       check pendingRefused(confinedR("c0-x.service", ""),
         proc (root: string) = hostFile(root, path, content))
 
+  for path in ["/etc/systemd/system/c0-@1.service.d/10-x.conf",
+               "/run/systemd/system/c0-@.service.d/10-x.conf"]:
+    test "a host source is read: an instance's dashed prefix keeps the " &
+        "instance, " & path:
+      # systemd v257 unit_file_find_dirs(): c0-x@1.service reads
+      # c0-@1.service.d/ and c0-@.service.d/ (the prefix keeps the
+      # instance). Red under dropins-skip-instance-prefix.
+      check not pendingRefused(confinedR("c0-x@1.service", ""))
+      check pendingRefused(confinedR("c0-x@1.service", ""),
+        proc (root: string) = hostFile(root, path, "[Service]\nUser=root\n"))
+
+  test "control: another instance's dashed prefix is not read":
+    check not pendingRefused(confinedR("c0-x@2.service", ""),
+      proc (root: string) = hostFile(root,
+        "/etc/systemd/system/c0-@1.service.d/10-x.conf",
+        "[Service]\nUser=root\n"))
+
   test "a host drop-in that keeps the unit confined is read and let in":
     check not pendingRefused(confinedR("c0-x.service", ""),
       proc (root: string) = hostFile(root,

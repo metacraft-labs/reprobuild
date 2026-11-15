@@ -253,6 +253,14 @@ suite "round 4: drop-ins the generation did not write":
     check not dropInDirApplies("b.service", "a.service")
     check not dropInDirApplies("t@2.socket", "t@.service")
     check not dropInDirApplies("u@2.service", "t@.service")
+    # The dashed prefix of an instance keeps the instance (systemd v257
+    # unit_file_find_dirs()); red under dropins-skip-instance-prefix.
+    check dropInDirApplies("t-@2.service", "t-x@2.service")
+    check dropInDirApplies("t-@2.service", "t-x@.service")      # an instance's
+    check dropInDirApplies("t-@.service", "t-x@2.service")
+    check not dropInDirApplies("t-@3.service", "t-x@2.service")
+    check dropInDirApplies("t-@.service", "t-x@.service")       # every instance's
+    check not dropInDirApplies("t-@.service", "t-x.service")
 
   test "the scan finds a host's drop-in on an instance no one named":
     let root = createTempDir("a9r4-", "-paths")

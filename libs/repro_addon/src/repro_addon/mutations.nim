@@ -1286,6 +1286,11 @@ const
                           "floor-paths-unnormalised",
                           "floor-allows-images",
                           "floor-ignores-prefix-dropins",
+                          # the dashed prefix of an instance built
+                          # without its instance (foo-.service, never
+                          # foo-@x.service, for foo-bar@x.service), at
+                          # parse time and in the scan of foreign drop-ins.
+                          "dropins-skip-instance-prefix",
                           "stored-floor-unversioned",
                           "floor-change-by-ledger-bytes",
                           "replay-forgets-stored-target",
