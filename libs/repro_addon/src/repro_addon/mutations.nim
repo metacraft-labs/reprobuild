@@ -1493,6 +1493,10 @@ const
                           # staged, so a later <unit>.d at that path is
                           # claimed.
                           "revert-hold-gone-dir-reclaimed",
+                          # a revert-hold directory record that exists
+                          # but cannot be read is taken as empty, and the
+                          # next step rewrites it with only that step.
+                          "revert-hold-record-unreadable-as-empty",
                           # uninstall removes only the holds a ledger
                           # names, not those of a revert that died before
                           # its ledger.

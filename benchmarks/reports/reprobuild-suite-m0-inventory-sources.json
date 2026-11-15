@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 35,
     "nimTestBinaries": 2810,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 766,
+    "pureUnitTests": 765,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
     "testEntries": 2856
   },
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -34,7 +34,6 @@
         "libs/repro_addon/tests/t_addon_floor_round13.nim",
         "libs/repro_addon/tests/t_addon_floor_round8.nim",
         "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
-        "libs/repro_addon/tests/t_addon_revert_hold_ledger.nim",
         "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim"
       ],
       "targetOs": "soAny"
@@ -1622,8 +1621,8 @@
       "graph-fixture": 23,
       "integration": 1550,
       "platform/destructive": 179,
-      "pure unit": 766,
-      "unclassified": 338
+      "pure unit": 765,
+      "unclassified": 339
     },
     "graphOwnedTestArtifacts": [
       {
@@ -9765,8 +9764,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_revert_hold_ledger",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -9777,7 +9776,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_revert_hold_ledger.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -47,13 +47,20 @@
 ## ``revert-hold-gone-dir-reclaimed`` is red on "a directory the revert
 ## made, once removed, is never claimed again";
 ## ``revert-hold-clear-removes-any-dir`` is red on "it removes a hold's
-## directory only when the add-on owns it".
+## directory only when the add-on owns it";
+## ``revert-hold-record-unreadable-as-empty`` (the engine before the fix
+## for reprobuild-pm issue
+## ``2026-11-15-floor-a-revert-hold-directory-record-is-rewritten-empty-
+## when-it-cannot-be-read``) is red on "a record that exists and cannot be
+## read is refused, never rewritten empty".
 ##
-## Mocks: none. The holds are real files under a temporary directory that
+## Mocks: none. The unreadable record is a real file of mode 0, read under
+## an unprivileged uid. The holds are real files under a temporary directory that
 ## stands in for ``/etc/systemd/system`` (``revertHoldEntries`` takes the
 ## root as a parameter); nothing here needs a service manager.
 
 import std/[os, sets, strutils, tempfiles, unittest]
+import std/posix
 
 import repro_infra/start_holds
 import repro_addon/addon_apply
@@ -284,6 +291,63 @@ suite "the directory a revert's hold is written in":
     check readRevertHoldDirRecords(state, root) ==
       @[(dir: root / "a.service.d", staging: good, phase: "staged")]
     check claimedRevertHoldDirs(state, root) == @[root / "a.service.d"]
+
+  test "a record that exists and cannot be read is refused, never rewritten empty":
+    # reprobuild-pm issue 2026-11-15-floor-a-revert-hold-directory-record-
+    # is-rewritten-empty-when-it-cannot-be-read: each step is appended by
+    # rewriting the whole record, so a read error taken as "no record"
+    # replaced every earlier step with the new one, and the directory an
+    # earlier revert made was no longer claimed. A mode-0 file stands in for
+    # any read error (EACCES here; EIO the same way). Root reads it anyway,
+    # so as root the engine's calls run under an unprivileged effective uid
+    # that owns the state directory, as the record's real owner would.
+    # That uid must reach the directories, so as root they are made under
+    # /tmp (world-searchable) rather than $TMPDIR, which a root shell may
+    # keep private (nix develop makes it 0700).
+    let asRoot = geteuid() == 0
+    let base = if asRoot: "/tmp" else: ""
+    let root = createTempDir("revert-hold-", "", base)
+    let state = createTempDir("revert-hold-state-", "", base)
+    defer:
+      removeDir(root)
+      removeDir(state)
+    let a = placeRevertHold(state, "a.service", root)
+    let rec = revertHoldDirsPath(state)
+    let before = readFile(rec)
+    check claimedRevertHoldDirs(state, root) == @[a.createdDir]
+    if asRoot:
+      for d in [root, state, state / "addon"]:
+        doAssert posix.chown(d.cstring, Uid(65534), Gid(65534)) == 0
+      doAssert posix.chown(rec.cstring, Uid(65534), Gid(65534)) == 0
+      doAssert seteuid(Uid(65534)) == 0
+    var raised = false
+    try:
+      doAssert posix.chmod(rec.cstring, Mode(0o000)) == 0
+      # The precondition: the record is there to this uid (its directory
+      # can be searched, so only the read is refused) and really cannot be
+      # read. Without the first, a refusal could come from the path, and a
+      # build that takes any error as "no record" would fail its rewrite
+      # the same way and pass.
+      doAssert fileExists(rec)
+      expect IOError:
+        discard readFile(rec)
+      try:
+        discard placeRevertHold(state, "b.service", root)
+      except CatchableError as e:
+        checkpoint e.msg
+        raised = true
+      doAssert posix.chmod(rec.cstring, Mode(0o600)) == 0
+    finally:
+      if asRoot: doAssert seteuid(Uid(0)) == 0
+    # The hold is not placed: nothing made, and the caller keeps the unit's
+    # start hold.
+    check raised
+    check not dirExists(root / "b.service.d")
+    check stagingLeft(root).len == 0
+    # The record is as it was, and still claims the earlier revert's
+    # directory.
+    check readFile(rec) == before
+    check claimedRevertHoldDirs(state, root) == @[a.createdDir]
 
 suite "a passing switch clears the holds":
   test "it removes a hold's directory only when the add-on owns it":
