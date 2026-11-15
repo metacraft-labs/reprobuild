@@ -24816,7 +24816,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_exec_runquotad_does_not_hold_callers_pipe.nim",
@@ -25586,7 +25586,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sc_lock_pinned_fetches_and_builds_sibling_from_source.nim",
@@ -26400,7 +26400,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim",
@@ -27065,6 +27065,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_unknown_project_error_names_the_verb_invoked.nim",
     binary: "build/test-bin/t_unknown_project_error_names_the_verb_invoked",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g14",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_unobserved_consumer_key_follows_producer_channel_content.nim",
+    binary: "build/test-bin/t_unobserved_consumer_key_follows_producer_channel_content",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2823,
+    "nimTestBinaries": 2824,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2870
+    "testEntries": 2871
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,7 +1620,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1557,
+      "integration": 1558,
       "platform/destructive": 181,
       "pure unit": 766,
       "unclassified": 343
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2823,
+    "nimTestBinaryCount": 2824,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2870
+    "testEntryCount": 2871
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -53048,6 +53048,28 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_unknown_project_error_names_the_verb_invoked.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_unobserved_consumer_key_follows_producer_channel_content",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_core",
+        "repro_hash",
+        "repro_lock",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_unobserved_consumer_key_follows_producer_channel_content.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
