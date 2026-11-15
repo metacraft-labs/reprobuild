@@ -68,7 +68,7 @@ import repro_infra/systemd_syntax
 import repro_infra/start_holds
 from repro_test_support import testCaseScratchSlug
 import repro_elevation
-import repro_addon/[addon_apply, adoption_cli, state_sets, transitions]
+import repro_addon/[addon_apply, adoption_cli, reassert, state_sets, transitions]
 
 const
   Validator = """systemd.systemUnit {
@@ -1618,6 +1618,43 @@ OnActiveSec=1
       host9(@[], shows, log)).len == 0
     check log[] == @["reset-failed a.socket", "start a.socket"]
 
+  test "decision 151: a trigger whose unit runs is not stopped, unless the apply restarts that unit":
+    let shows = {
+      "run.socket": {"Triggers": "run.service"}.toTable,
+      "idle.socket": {"Triggers": "idle.service"}.toTable,
+      "re.path": {"Triggers": "re.service"}.toTable,
+      "off.timer": {"Triggers": "off.service"}.toTable}.toTable
+    var log = new seq[string]
+    let host = host9(@["run.socket", "run.service", "idle.socket", "re.path",
+                       "re.service"], shows, log)
+    # run.service serves its own socket (with Accept=no it holds the
+    # listening descriptor: a stop and start of the socket could not bind
+    # again); idle.service does not run; re.service runs but is restarted
+    # under the hold; off.timer is not active.
+    check triggersToStop(["run.socket", "idle.socket", "re.path", "off.timer"],
+      ["re.service"], host) == @["idle.socket", "re.path"]
+
+  test "decision 151: a socket whose RemainAfterExit=yes oneshot service has run is left alone":
+    # reprobuild-pm issue 2026-11-15-addon-switch-a-socket-stopped-for-a-hold-
+    # while-its-service-runs-cannot-start-again (A9's reapply gate): the
+    # oneshot ran and exited, and systemd reports it ActiveState=active, so
+    # its socket cannot fire at the hold; stopped, it could not start again
+    # ("Socket service a9r-sk.service already active, refusing").
+    let shows = {
+      "a9r-sk.socket": {"Triggers": "a9r-sk.service"}.toTable,
+      "a9r-sk.service": {"ActiveState": "active", "SubState": "exited",
+                         "Type": "oneshot", "RemainAfterExit": "yes"}.toTable}.toTable
+    var log = new seq[string]
+    let host = LiveHost(
+      isActive: proc (u: string): bool =
+        u == "a9r-sk.socket" or shows[u].getOrDefault("ActiveState") == "active",
+      show: proc (u: string): Table[string, string] = shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    check triggersToStop(["a9r-sk.socket"], [], host).len == 0
+    # Restarted under the hold, it can fire: the socket is stopped then.
+    check triggersToStop(["a9r-sk.socket"], ["a9r-sk.service"], host) ==
+      @["a9r-sk.socket"]
+
   test "decision 152: the triggers looked at are every held unit's, not only the drivers' starts":
     check fireSources(["d.timer"], ["u.timer", "d.timer"]) == @["d.timer", "u.timer"]
 
@@ -1645,3 +1682,50 @@ OnActiveSec=1
     check "dep.service <- bad.service" in units
     check "dep2.service <- dep.service" in units
     check "inst.service <- tpl@a.service" in units
+
+suite "a trigger that cannot start again leaves the host pending (decision 155)":
+  # A state directory of the test's own (the real filesystem); systemd is a
+  # closure, so a start that fails can be staged without a host.
+  test "recover starts each recorded trigger again; one that still fails stays recorded":
+    let dir = getTempDir() / ("t155-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeTriggersToRestart(dir, ["a.socket", "b.socket"])
+    check hasTriggersToRestart(dir)
+    var log = new seq[string]
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("start " & u)
+        (u == "a.socket", "Job failed"),
+      resetFailed: proc (u: string) = log[].add("reset-failed " & u))
+    let r = retryTriggerRestarts(dir, host)
+    check not r.ok
+    check log[] == @["reset-failed a.socket", "start a.socket",
+                     "reset-failed b.socket", "start b.socket"]
+    check readTriggersToRestart(dir) == @["b.socket"]
+    check "trigger a.socket started again" in r.lines
+    let again = retryTriggerRestarts(dir, LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, "")))
+    check again.ok
+    check not hasTriggersToRestart(dir)
+
+  test "the pending-switch guard refuses while a recorded trigger does not start":
+    let dir = getTempDir() / ("t155g-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeTriggersToRestart(dir, ["b.socket"])
+    let refused = checkPendingSwitches(dir,
+      proc (d: string): RecoveryOutcome {.closure, gcsafe.} =
+        RecoveryOutcome(resolved: false, lines: @["b.socket did not start"]),
+      pointer = dir / "no-pointer")
+    check not refused.ok
+    check "b.socket did not start" in refused.why
+    let passes = checkPendingSwitches(dir,
+      proc (d: string): RecoveryOutcome {.closure, gcsafe.} =
+        RecoveryOutcome(resolved: true),
+      pointer = dir / "no-pointer")
+    check passes.ok
