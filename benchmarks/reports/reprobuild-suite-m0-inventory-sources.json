@@ -12242,7 +12242,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18846,7 +18846,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
       "sourceSuiteCount": 30,
-      "staticCaseCount": 211,
+      "staticCaseCount": 222,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -86,8 +86,8 @@ suite "path mutations in monitor evidence":
       mutation(madeAndRemoved, "rmdir"),
       mutation(removedOnly, "unlink")], tempRoot)
     let transient = transientOwnWrites(evidence)
-    check madeAndRemoved in transient
-    check removedOnly notin transient
+    check transientWriteKey(madeAndRemoved) in transient
+    check transientWriteKey(removedOnly) notin transient
 
   test "a surviving symbolic link the action made is a product":
     ## Whatever it points at: a directory (which `dirExists` follows) or
