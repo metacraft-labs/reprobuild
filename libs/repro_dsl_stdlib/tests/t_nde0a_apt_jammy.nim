@@ -22,8 +22,9 @@
 ##   5. ``determinism`` — extract the same .deb twice into separate
 ##      store roots; byte-compare the resulting trees.
 ##
-## The fixture archives are constructed byte-for-byte in this test instead
-## of fetched from a mutable Ubuntu pool URL. Their complete payload and
+## The fixture archives are constructed byte-for-byte (by the shared
+## ``apt_deb_fixture_builder.nim`` next to this file) instead of fetched
+## from a mutable Ubuntu pool URL. Their complete payload and
 ## metadata are authored here under the repository's Apache-2.0 license;
 ## they contain no Ubuntu package bytes. Exact sha256 pins below make archive
 ## construction drift fail closed before the adapter sees the fixture.
@@ -31,6 +32,7 @@
 import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
 
 import repro_dsl_stdlib/packages/apt_jammy
+import ./apt_deb_fixture_builder
 
 # Importing the recipe's ``repro.nim`` evaluates its ``package aptJammy:``
 # block at module init, exercising the M2 ``versions:`` lowerer + the
@@ -57,7 +59,7 @@ import "../../../recipes/packages/adapters/apt-jammy/repro" as aptJammyRecipe
 # ---------------------------------------------------------------------------
 when defined(linux):
   # ---------------------------------------------------------------------------
-  # Hermetic .deb fixture builder
+  # Hermetic .deb fixtures (archive assembly lives in apt_deb_fixture_builder)
   # ---------------------------------------------------------------------------
 
   type
@@ -108,80 +110,6 @@ Type=oneshot
 ExecStart=/usr/bin/true
 """
 
-  proc putField(buf: var string; offset, width: int; value: string) =
-    doAssert value.len <= width
-    for i in 0 ..< value.len:
-      buf[offset + i] = value[i]
-
-  proc octalField(value, width: int): string =
-    doAssert width >= 2
-    value.toOct(width - 1) & '\0'
-
-  proc tarMember(path, payload: string): string =
-    ## Emit one deterministic POSIX ustar regular-file member.
-    doAssert path.len <= 100
-    var header = newString(512)
-    header.putField(0, 100, path)
-    header.putField(100, 8, octalField(0o644, 8))
-    header.putField(108, 8, octalField(0, 8))
-    header.putField(116, 8, octalField(0, 8))
-    header.putField(124, 12, octalField(payload.len, 12))
-    header.putField(136, 12, octalField(0, 12))
-    for i in 148 ..< 156:
-      header[i] = ' '
-    header[156] = '0'
-    header.putField(257, 6, "ustar\0")
-    header.putField(263, 2, "00")
-    var checksum = 0
-    for ch in header:
-      checksum += ord(ch)
-    header.putField(148, 8, checksum.toOct(6) & "\0 ")
-
-    result = header & payload
-    let padding = (512 - (payload.len mod 512)) mod 512
-    result.add(newString(padding))
-
-  proc tarArchive(path, payload: string): string =
-    tarMember(path, payload) & newString(1024)
-
-  proc zstdRawFrame(payload: string): string =
-    ## Encode one deterministic Zstandard frame containing a single raw
-    ## (uncompressed) block. This keeps the fixture builder pure Nim while
-    ## exercising the adapter's real ``data.tar.zst`` decompression path.
-    ##
-    ## Descriptor 0x60 means: two-byte Frame_Content_Size, single segment,
-    ## no dictionary, no checksum. In that encoding the stored content size
-    ## is the real size minus 256. A Zstandard block header is a 24-bit
-    ## little-endian value: size in bits 3..23, raw type 0 in bits 1..2,
-    ## and Last_Block=1 in bit 0.
-    doAssert payload.len >= 256
-    doAssert payload.len <= 65791
-    result = "\x28\xb5\x2f\xfd\x60"
-    let encodedSize = payload.len - 256
-    result.add(char(encodedSize and 0xff))
-    result.add(char((encodedSize shr 8) and 0xff))
-    let blockHeader = (payload.len shl 3) or 1
-    result.add(char(blockHeader and 0xff))
-    result.add(char((blockHeader shr 8) and 0xff))
-    result.add(char((blockHeader shr 16) and 0xff))
-    result.add(payload)
-
-  proc arMember(name, payload: string): string =
-    ## Emit one deterministic System V ar member. Debian packages require
-    ## even-byte alignment; newline is the conventional pad byte.
-    doAssert name.len + 1 <= 16
-    result =
-      (name & "/").alignLeft(16) &
-      "0".alignLeft(12) &
-      "0".alignLeft(6) &
-      "0".alignLeft(6) &
-      "100644".alignLeft(8) &
-      ($payload.len).alignLeft(10) &
-      "`\n" &
-      payload
-    if (payload.len and 1) == 1:
-      result.add('\n')
-
   proc fixturePayload(fx: DebFixture): tuple[path, bytes: string] =
     case fx.kind
     of dfCommonData:
@@ -192,18 +120,8 @@ ExecStart=/usr/bin/true
       ("lib/systemd/system/accounts-daemon.service", SystemdUnitBytes)
 
   proc fixtureBytes(fx: DebFixture): string =
-    let control = """Package: reprobuild-apt-fixture
-Version: 1.0
-Architecture: all
-Maintainer: Reprobuild test suite
-Description: deterministic apt adapter fixture
-"""
     let payload = fixturePayload(fx)
-    result = "!<arch>\n"
-    result.add(arMember("debian-binary", "2.0\n"))
-    result.add(arMember("control.tar", tarArchive("control", control)))
-    result.add(arMember("data.tar.zst",
-      zstdRawFrame(tarArchive(payload.path, payload.bytes))))
+    debArchiveBytes(payload.path, payload.bytes, ddcZstdRaw)
 
   proc materializeFixture(fx: DebFixture; root: string): string =
     let fixtureDir = root / "apt-fixtures"
@@ -414,18 +332,25 @@ Description: deterministic apt adapter fixture
 
     test "fingerprint composition: install hash is order-independent":
       # Spec §3: permuting ``debs`` order is a cache hit.
-      let h1 = installFingerprint(TestSnapshot,
-        @["libdrm-common", "foot-terminfo"], @[])
-      let h2 = installFingerprint(TestSnapshot,
-        @["foot-terminfo", "libdrm-common"], @[])
+      let common = ExtractedDeb(name: "libdrm-common", version: "1.0",
+                                sha256: FxCommonData.sha256)
+      let terminfo = ExtractedDeb(name: "foot-terminfo", version: "1.0",
+                                  sha256: FxTerminfo.sha256)
+      let h1 = installFingerprint([common, terminfo])
+      let h2 = installFingerprint([terminfo, common])
       check h1 == h2
+      check h1.len == 64
 
-    test "fingerprint composition: install hash changes when snapshot changes":
-      # Spec §3: a different snapshot string produces a fresh store path.
-      let h1 = installFingerprint("ubuntu/jammy/20260101T000000Z",
-        @["libdrm-common"], @[])
-      let h2 = installFingerprint("ubuntu/jammy/20260615T000000Z",
-        @["libdrm-common"], @[])
+    test "fingerprint composition: install hash changes when a .deb's sha256 changes":
+      # Spec §3: the identity is the bytes. The same package name and
+      # version with different bytes (e.g. a different archive served for
+      # the same snapshot) is a different store path. The snapshot string
+      # is not an input at all — see
+      # ``t_apt_install_store_identity_is_byte_keyed.nim``.
+      let h1 = installFingerprint([ExtractedDeb(
+        name: "libdrm-common", version: "1.0", sha256: FxCommonData.sha256)])
+      let h2 = installFingerprint([ExtractedDeb(
+        name: "libdrm-common", version: "1.0", sha256: FxTerminfo.sha256)])
       check h1 != h2
 
     test "extractFingerprint: changes with sha256, stable with same sha256":
@@ -434,7 +359,38 @@ Description: deterministic apt adapter fixture
       let hC = extractFingerprint(FxTerminfo.sha256)
       check hA == hB
       check hA != hC
-      check hA.len == 16
+      # Full SHA-256, not a truncated prefix.
+      check hA.len == 64
+
+    test "malformed input is refused before any store path is named":
+      # Fail-closed input validation: a digest with two spellings, or a
+      # package named twice, has no single well-defined identity.
+      expect AptInputError:
+        discard extractFingerprint(FxCommonData.sha256.toUpperAscii)
+      expect AptInputError:
+        discard extractFingerprint(FxCommonData.sha256[0 ..< 16])
+      expect AptInputError:
+        discard installFingerprint([ExtractedDeb(
+          name: "", version: "1.0", sha256: FxCommonData.sha256)])
+      expect AptInputError:
+        discard installFingerprint([ExtractedDeb(
+          name: "libdrm common", version: "1.0", sha256: FxCommonData.sha256)])
+      expect AptInputError:
+        discard installFingerprint([
+          ExtractedDeb(name: "libdrm-common", version: "1.0",
+                       sha256: FxCommonData.sha256),
+          ExtractedDeb(name: "libdrm-common", version: "1.1",
+                       sha256: FxTerminfo.sha256)])
+      # A unit name is joined onto store paths: anything but a single path
+      # component could read or write outside them.
+      let storeRoot = createTempDir("nde0a_badInput_", "")
+      defer: removeDir(storeRoot)
+      for bad in ["../escape.service", "a/b.service", "..", ""]:
+        expect AptInputError:
+          discard installSystemdUnit(
+            unit = AptFiles(storePath: storeRoot),
+            unitName = bad,
+            storeRoot = storeRoot)
 
 # ---------------------------------------------------------------------------
 # NDE-A DSL-surface coverage. Pins that the rewritten
@@ -468,8 +424,9 @@ suite "NDE0-A apt-jammy DSL surface":
 
   test "recorded version carries the snapshot pin as sourceRevision":
     # The recipe pins the snapshot string into ``sourceRevision`` so the
-    # spec §3 fingerprint ingredients (adapter version + snapshot) are
-    # both reachable from the registry without parsing the config: block.
+    # adapter version (a spec §3 fingerprint input) and the snapshot (its
+    # provenance, not an identity input) are both reachable from the
+    # registry without parsing the config: block.
     let vs = registeredVersions("aptJammy")
     check vs[0].sourceRevision == "ubuntu/jammy/20260615T000000Z"
     check vs[0].sourceUrl.startsWith("https://snapshot.ubuntu.com/")
