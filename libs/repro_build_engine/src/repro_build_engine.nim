@@ -12069,6 +12069,21 @@ proc transientWriteKey*(path: string): string =
     result = path
   while result.len > 1 and result.endsWith("/"):
     result.setLen(result.len - 1)
+  # The same temporary is also recorded under a symlinked spelling: macOS's
+  # `/tmp` and `/var` (and so `$TMPDIR`) are links into `/private`, and GCC
+  # writes `$TMPDIR/cc<random>.s` which the monitor sees opened as spelled
+  # but written as the kernel reached it. Paths are compared as the file
+  # reached, not as spelled (spec/Monitor-Hook-Shim.md, "Metadata, Probe,
+  # And Symlink APIs"), so key by the physical path. The temporary is gone,
+  # so `canonicalPolicyPath` resolves its existing prefix and re-attaches the
+  # absent tail. Windows keeps its own folding above.
+  when not defined(windows):
+    # `canonicalPolicyPath` folds a backslash into `/`; on POSIX a
+    # backslash is a filename character (see above), so such a name keeps its spelling.
+    if result.isAbsolute and '\\' notin result:
+      result = canonicalPolicyPath(result)
+      while result.len > 1 and result.endsWith("/"):
+        result.setLen(result.len - 1)
 
 proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## Paths the action itself WROTE that no longer exist once it finished:
@@ -19853,7 +19868,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # so a cold first run and every later one keyed it differently.
     let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
-      if isLaunchMachinery(path) or transientWriteKey(path) in transient or
+      if isLaunchMachinery(path) or
+          (transient.len > 0 and transientWriteKey(path) in transient) or
           isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
@@ -20211,7 +20227,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
-          transientWriteKey(path) in transient or isOwnOutput(action, path):
+          (transient.len > 0 and transientWriteKey(path) in transient) or
+          isOwnOutput(action, path):
         continue
       elif path in probed:
         result.probes.add(path)
