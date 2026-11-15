@@ -178,3 +178,5 @@
 162 The store-custody gate forges the markers it cites, and two smaller points of round 14 | marker, forge, discard-markers, verify
 165 A re-run finishes only the add-on's own directories, and only with a token | token, re-run, pre-bootstrap, rmdir, chain, ledger copy
 166 The pre-bootstrap inputs are left in place | pre-bootstrap input, left in place, mode and owner
+167 Bootstrap reads a takeover's prior mode before the takeover | prior mode, takeover, marker
+168 Every sequence floor stays while the key is kept | floor, kept

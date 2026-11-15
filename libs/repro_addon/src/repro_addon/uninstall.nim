@@ -66,6 +66,8 @@ import ./mutations
 import ./static_tree
 import ./store_custody
 import ./store_root
+from ./preflight import AgentStateDir, AgentStateRecordsDir, RecipientKeyPath
+import ./preflight as preflightPaths
 import ./switch
 
 
@@ -231,33 +233,68 @@ type
     ## removed"), so a test can stop the run there as a crash would. Nil in
     ## production.
 
-proc preBootstrapInputs*(l: Ledger):
-    tuple[inputs: seq[PreBootstrapInput]; drift, errors: seq[string]] =
+const PriorUncapturedBeforeFix* = ["/run/repro", preflightPaths.SecretsRunDir,
+                                    AgentStateDir, AgentStateRecordsDir]
+  ## The takeover roots a bootstrap before §13 decision 167 recorded after
+  ## the takeover (``rootEntry(p, takeOverRootDir(p, mode),
+  ## baseRootValue(p))``, arguments evaluated left to right): on a ledger
+  ## without the ``PriorCapturedBeforeTakeover`` marker their recorded
+  ## prior value is the add-on's own mode and owner. The other takeover
+  ## roots went through ``establishRoot``, which always read it first.
+
+proc preBootstrapInputs*(l: Ledger; expectedOwner = (0, 0)):
+    tuple[inputs: seq[PreBootstrapInput]; drift, errors, notes: seq[string]] =
   ## Every pre-bootstrap input the ledger names, with the mode and owner it
-  ## had before the add-on: a directory's from the value the preflight
-  ## recorded (bootstrap's takeover made it root's, with the add-on's
-  ## mode), a file's as the ledger recorded it (bootstrap never changes a
-  ## kept file's). A content-pinned input whose bytes changed is ``drift``
-  ## (an agent record's content is unpinned: it cannot drift). Nothing is
-  ## read into memory to be written back: uninstall never rewrites an
-  ## input.
+  ## had before the add-on: a directory's from the value bootstrap read
+  ## before its takeover (``replaced``; the takeover made it root's, with
+  ## the add-on's mode), a file's as the ledger recorded it (bootstrap never
+  ## changes a kept file's). A content-pinned input whose bytes changed is
+  ## ``drift`` (an agent record's content is unpinned: it cannot drift).
+  ## Nothing is read into memory to be written back: uninstall never
+  ## rewrites an input.
+  ##
+  ## §13 decision 167: on a ledger an earlier bootstrap wrote (no
+  ## ``PriorCapturedBeforeTakeover`` marker on the entry), the roots in
+  ## ``PriorUncapturedBeforeFix`` carry the add-on's mode as their prior
+  ## one; that recorded mode is what is put back, and a note says the prior
+  ## mode was not captured. The pre-bootstrap inputs left in place (§13
+  ## decision 166, amended in round 16): the preflight accepts only inputs
+  ## owned by ``expectedOwner`` (root, 0:0),
+  ## so a recorded prior owner that is anything else is a corrupt ledger:
+  ## an error, which keeps the ledger, and nothing is put back from it.
   for e in l.entries:
     if not e.isPreBootstrapInput: continue
     try:
+      var inp: PreBootstrapInput
       case e.class
       of lcRoot, lcDir:
         let (mode, uid, gid) = priorModeOwner(e.replaced)
-        result.inputs.add(PreBootstrapInput(path: e.path, isDir: true,
-          mode: mode, uid: uid, gid: gid))
+        inp = PreBootstrapInput(path: e.path, isDir: true, mode: mode,
+                                uid: uid, gid: gid)
+        when not mutated("unmarked-prior-trusted"):
+          if e.observation != PriorCapturedBeforeTakeover and
+              e.path in PriorUncapturedBeforeFix:
+            result.notes.add(e.path & ": its mode before the add-on was " &
+              "not captured (this host was bootstrapped before that was " &
+              "fixed); it keeps the add-on's mode " & toOct(mode, 4) &
+              " as recorded")
       of lcKept, lcEtcFile, lcKey:
         if e.class != lcKept:
           let d = observeDrift(e)
           if d.len > 0 and not d.startsWith("missing"):
             result.drift.add(e.path & ": " & d)
         let (uid, gid) = parseOwner(e.owner)
-        result.inputs.add(PreBootstrapInput(path: e.path, isDir: false,
-          mode: parseOctInt(e.mode), uid: uid, gid: gid))
-      else: discard
+        inp = PreBootstrapInput(path: e.path, isDir: false,
+          mode: parseOctInt(e.mode), uid: uid, gid: gid)
+      else: continue
+      if (inp.uid, inp.gid) != expectedOwner:
+        result.errors.add(e.path & ": the ledger records its owner before " &
+          "the add-on as " & $inp.uid & ":" & $inp.gid & ", but the " &
+          "preflight accepts only inputs owned by " & $expectedOwner[0] &
+          ":" & $expectedOwner[1] & "; the ledger is corrupt, so nothing " &
+          "is put back from it and it is kept")
+        continue
+      result.inputs.add(inp)
     except CatchableError as ex:
       result.errors.add(e.path & ": the ledger's record of this " &
         "pre-bootstrap input cannot be read (" & ex.msg & ")")
@@ -283,8 +320,55 @@ proc removeAllBelowKeeping*(dir: string; keep: seq[string]) =
     else:
       removeFile(p)
 
-proc accountExists(uid, gid: int): tuple[user, group: bool] =
-  (getpwuid(Uid(uid)) != nil, getgrgid(Gid(gid)) != nil)
+proc removeAndRewrite(dir: string; keep: seq[string]) =
+  ## Only the falsifiers below use it: round 15's removal, everything below
+  ## ``dir`` removed and the kept paths written back from memory, so the
+  ## bytes survive and the inodes do not.
+  var saved: seq[tuple[p: string; isDir: bool; mode: int; bytes: string]]
+  for k in keep:
+    if k == dir or not k.startsWith(dir & "/"): continue
+    var st: Stat
+    if lstat(k.cstring, st) != 0: continue
+    let isDir = S_ISDIR(st.st_mode)
+    saved.add((k, isDir, int(st.st_mode) and 0o7777,
+               if isDir: "" else: readFile(k)))
+  for kind, p in walkDir(dir):
+    if kind == pcDir: removeDir(p) else: removeFile(p)
+  saved.sort(proc (a, b: auto): int = cmp(a.p.len, b.p.len))
+  for x in saved:
+    if x.isDir: createDir(x.p) else: writeFile(x.p, x.bytes)
+    discard posix.chmod(x.p.cstring, Mode(x.mode))
+
+proc keepingRemoval*(dir: string; keep: seq[string]; site: string) =
+  ## ``removeAllBelowKeeping`` at one of uninstall's removal sites
+  ## (``site``: "etc" for the ``/etc/repro`` sweep, "run" for
+  ## ``/run/repro``, "store" for ``/repro``). Each site has a falsifier that
+  ## reverts it to removing the pre-bootstrap inputs and writing them back,
+  ## where they must be left in place (§13 decision 166).
+  when mutated("etc-sweep-rewrites-inputs"):
+    if site == "etc": removeAndRewrite(dir, keep); return
+  when mutated("run-repro-rewrites-inputs"):
+    if site == "run": removeAndRewrite(dir, keep); return
+  when mutated("store-remover-rewrites-inputs"):
+    if site == "store": removeAndRewrite(dir, keep); return
+  removeAllBelowKeeping(dir, keep)
+
+proc keptFloors*(inputs: seq[PreBootstrapInput];
+                 keyPath = RecipientKeyPath;
+                 recordsDir = AgentStateRecordsDir): seq[string] =
+  ## §13 decision 168: when the deploy agent's recipient key is a kept
+  ## input, every sequence floor (``*.seq``) in its records directory is
+  ## kept too, the ones the add-on's agent wrote after bootstrap (a new
+  ## target name) included: a floor that went while its key stays would let
+  ## a manifest this host already accepted replay on that key. Only regular
+  ## files; a link is not a floor.
+  when mutated("new-floors-removed"):
+    return @[]        # FALSIFIER: only the floors the preflight saw stay
+  if not inputs.anyIt(it.path == keyPath and not it.isDir): return
+  if not dirExists(recordsDir): return
+  for kind, p in walkDir(recordsDir):
+    if kind == pcFile and p.endsWith(".seq"):
+      result.add(p)
 
 proc putBackInputMetadata*(r: var UninstallResult;
                            inputs: seq[PreBootstrapInput];
@@ -296,10 +380,9 @@ proc putBackInputMetadata*(r: var UninstallResult;
   ## path is refused, not followed. Idempotent: an input already right is
   ## only fsynced, so a run stopped between the two (a crash) is finished
   ## by the next. An input absent from the host is a note (uninstall never
-  ## recreates one; ``/run`` is emptied by a reboot). One whose prior owner
-  ## is no account now keeps the owner it has, gets its mode back, and is a
-  ## note naming the ids: it is never given to an id nobody holds. True
-  ## when no input failed.
+  ## recreates one; ``/run`` is emptied by a reboot). The prior owner is
+  ## always root's: ``preBootstrapInputs`` refuses a ledger that records
+  ## another (§13 decision 166, amended). True when no input failed.
   result = true
   for inp in inputs:
     var st: Stat
@@ -332,9 +415,7 @@ proc putBackInputMetadata*(r: var UninstallResult;
       r.errors.add(inp.path & ": " & $strerror(errno))
       result = false
       continue
-    let acct = accountExists(inp.uid, inp.gid)
-    let ownerGone = not acct.user or not acct.group
-    if not ownerGone and (int(st.st_uid) != inp.uid or int(st.st_gid) != inp.gid):
+    if int(st.st_uid) != inp.uid or int(st.st_gid) != inp.gid:
       if fchown(fd, Uid(inp.uid), Gid(inp.gid)) != 0:
         r.errors.add(inp.path & ": chown " & $inp.uid & ":" & $inp.gid &
           " failed: " & $strerror(errno))
@@ -352,14 +433,6 @@ proc putBackInputMetadata*(r: var UninstallResult;
         "owner failed: " & $strerror(errno))
       result = false
       continue
-    if ownerGone:
-      r.notes.add(inp.path & ": its owner before the add-on, uid " &
-        $inp.uid & (if acct.user: "" else: " (no such user now)") &
-        " gid " & $inp.gid & (if acct.group: "" else: " (no such group now)") &
-        ", is not an account on this host any more; its mode " &
-        toOct(inp.mode, 4) & " is put back and it stays owned by " &
-        $st.st_uid & ":" & $st.st_gid & " rather than by an id nobody " &
-        "holds; chown it yourself if that id should own it")
 
 const CannotBeShipped* = "cannot be shipped"
   ## The words ``shipAndConfirm`` ends its reason with when no later run can
@@ -1156,7 +1229,7 @@ proc removeHostRoot*(r: var UninstallResult; root: string;
     r.errors.add(root & ": " & ex.msg)
 
 proc removeRootKeepingInputs*(r: var UninstallResult; root: string;
-                              keep: seq[string]) =
+                              keep: seq[string]; site = "") =
   ## Removes one of the host roots (``/etc/repro``, ``/run/repro``) unless
   ## it holds a pre-bootstrap input: then only what is not an input goes,
   ## and the root, itself an input, stays (§13 decision 166).
@@ -1165,7 +1238,7 @@ proc removeRootKeepingInputs*(r: var UninstallResult; root: string;
     removeHostRoot(r, root)
     return
   try:
-    removeAllBelowKeeping(root, keep)
+    keepingRemoval(root, keep, site)
     r.removed.add(root & " (emptied of the add-on's files; the " &
       "pre-bootstrap inputs in it stay)")
   except OSError as ex:
@@ -1232,21 +1305,72 @@ proc stateDirChain*(root, ledgerCopy: string; preBootstrap: seq[string]):
     if d == root: break
     d = parentDir(d)
 
+proc tokenDirRefusal*(dir: string): string =
+  ## "" when ``dir``, the token's directory, may hold the token: a real
+  ## directory (not a link), owned by the user running uninstall (root),
+  ## and writable by no group or other (§13 decision 165, A11 round 16
+  ## R16-5). Anything else could let another user plant or swap the token
+  ## that tells a re-run what to remove.
+  when mutated("token-dir-unchecked"):
+    return ""          # FALSIFIER: any directory may hold the token
+  var st: Stat
+  if lstat(dir.cstring, st) != 0:
+    return dir & ": " & $strerror(errno)
+  if S_ISLNK(st.st_mode): return dir & " is a symbolic link"
+  if not S_ISDIR(st.st_mode): return dir & " is not a directory"
+  if st.st_uid != geteuid():
+    return dir & " is owned by uid " & $st.st_uid & ", not " & $geteuid()
+  if (int(st.st_mode) and 0o022) != 0:
+    return dir & " is writable by its group or by others (mode " &
+      toOct(int(st.st_mode) and 0o7777, 4) & ")"
+  ""
+
+proc ensureTokenDir(dir: string) =
+  ## The token's directory, created 0700 (and synced into its parent) when
+  ## absent, then checked; raises ``OSError`` when it may not hold a token.
+  if not dirExists(dir) and not symlinkExists(dir):
+    createDir(dir)
+    discard posix.chmod(dir.cstring, Mode(0o700))
+    syncDirFd(parentDir(dir))
+  let why = tokenDirRefusal(dir)
+  if why.len > 0:
+    raise newException(OSError, "refusing to write the state-removal " &
+      "token: " & why)
+
+proc removeTokenDurably(path: string) =
+  ## Unlink the token, then fsync its directory, so a crash cannot bring it
+  ## back for a re-run to act on.
+  if fileExists(path) or symlinkExists(path):
+    removeFile(path)
+    syncDirFd(parentDir(path))
+
+proc clearStateRemovalToken*(logDir = UninstallOverrideDir) =
+  ## Bootstrap's step (§13 decision 165, R16-5): a token an earlier
+  ## uninstall left is removed, durably, before a new install writes
+  ## anything, so no later re-run acts on a removal of another install.
+  let path = stateRemovalTokenPath(logDir)
+  if fileExists(path) or symlinkExists(path):
+    let why = tokenDirRefusal(logDir)
+    if why.len > 0:
+      raise newException(OSError, "a state-removal token is at " & path &
+        ", and its directory may not be trusted: " & why)
+    removeTokenDurably(path)
+
 proc writeStateRemovalToken(path, root, ledgerCopy: string;
                             chain, preBootstrap: seq[string]) =
-  ## Durably (a temporary file fsynced, renamed, its directory fsynced, and
-  ## a directory this creates synced into its parent): the token must be on
-  ## disk before the ledger copy goes, or a crash between the two leaves a
-  ## state no re-run may finish.
+  ## Durably (a temporary file created exclusively without following a
+  ## link, fsynced, renamed, its directory fsynced, and a directory this
+  ## creates synced into its parent): the token must be on disk before the
+  ## ledger copy goes, or a crash between the two leaves a state no re-run
+  ## may finish. Its directory is checked first (``tokenDirRefusal``).
   let dir = parentDir(path)
-  if not dirExists(dir):
-    createDir(dir)
-    syncDirFd(parentDir(dir))
+  ensureTokenDir(dir)
   let text = pretty(%*{"schema": StateRemovalTokenSchema, "root": root,
     "ledgerCopy": ledgerCopy, "chain": chain,
     "preBootstrapRoots": preBootstrap}) & "\n"
   let tmp = path & ".tmp"
-  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_TRUNC or
+  if fileExists(tmp) or symlinkExists(tmp): removeFile(tmp)   # a stale one
+  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
                       O_CLOEXEC or ONoFollow, 0o600)
   if fd < 0: raiseOSError(osLastError(), "create " & tmp)
   try:
@@ -1267,6 +1391,9 @@ proc readStateRemovalToken(path, root: string):
   ## directory in it ``root`` or below it and none of them a pre-bootstrap
   ## root it names. A token is root-only (``/var/log/repro-addon``); the
   ## checks keep a damaged one from naming anything else.
+  let why = tokenDirRefusal(parentDir(path))
+  if why.len > 0: return (false, "its directory may not be trusted: " & why, @[])
+  if symlinkExists(path): return (false, "it is a symbolic link", @[])
   var j: JsonNode
   try: j = parseJson(readFile(path))
   except CatchableError as e: return (false, e.msg, @[])
@@ -1395,7 +1522,7 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       if failed.len > 0:
         reportEmptyDirsLeft(r, root, failed, err, chain)
         return
-    if fileExists(tokenPath): removeFile(tokenPath)
+    removeTokenDurably(tokenPath)
     r.removed.add(if root in chain or chain.len == 0 and root notin preBootstrap:
                     root
                   else: root & " (emptied of the add-on's state; the " &
@@ -1444,8 +1571,7 @@ proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
     reportEmptyDirsLeft(r, root, failed, err, t.chain)
     return
   try:
-    removeFile(tokenPath)
-    syncDirFd(parentDir(tokenPath))
+    removeTokenDurably(tokenPath)
   except OSError as ex:
     r.errors.add(tokenPath & ": " & ex.msg)
     return
@@ -1585,7 +1711,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let pb = preBootstrapInputs(l)
   for d in pb.drift: result.drift.add(d)
   for e in pb.errors: result.errors.add(e)
-  let kept = inputPaths(pb.inputs)
+  for n in pb.notes: result.notes.add(n)
+  # With the key, every sequence floor stays, later ones too (§13 decision
+  # 168): read now, before anything is removed.
+  let kept = inputPaths(pb.inputs) & keptFloors(pb.inputs)
 
   # The collision observer, to tell a path a package came to own since
   # (handed back, never removed). Unreadable: no hand-back is possible, so
@@ -1707,8 +1836,9 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       if f.path in [EvidenceConfPath, EvidenceSinkCaPath]:
         sinkFiles.add(f)
         continue
-    if f.isPreBootstrapInput:
-      continue           # left in place, never rewritten (decision 166)
+    when not mutated("etc-input-rewritten-in-step-4"):
+      if f.isPreBootstrapInput:
+        continue         # left in place, never rewritten (decision 166)
     removeOwned(f, result, driver)
   for sl in byClass[lcStaticLink]:
     if symlinkExists(sl.path):
@@ -1783,7 +1913,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     if ReproRoot in kept or StoreRoot in kept:
       # /repro or its store was there before the add-on: emptied, kept.
       removeStore(result, opts.keepStore,
-                  remover = proc () = removeAllBelowKeeping(ReproRoot, kept),
+                  remover = proc () = keepingRemoval(ReproRoot, kept, "store"),
                   keptInputs = kept)
     else: removeStore(result, opts.keepStore)
   # Only what this run found on disk can be removed by it; the objects of
@@ -1827,13 +1957,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     releaseRunDir(defaultSecretsLayout())
   except CatchableError as ex:
     result.errors.add(defaultSecretsLayout().runDir & ": " & ex.msg)
-  removeRootKeepingInputs(result, "/run/repro", kept)
+  removeRootKeepingInputs(result, "/run/repro", kept, "run")
   keepIfFailed()
   if dirExists("/etc/repro"):
     var sinkPaths: seq[string]
     for f in sinkFiles: sinkPaths.add(f.path)
     try:
-      removeAllBelowKeeping("/etc/repro", kept & sinkPaths)
+      keepingRemoval("/etc/repro", kept & sinkPaths, "etc")
     except OSError as ex:
       result.errors.add("/etc/repro: " & ex.msg)
   keepIfFailed()
@@ -1852,7 +1982,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   keepIfFailed()
   for f in sinkFiles:
     removeOwned(f, result, driver)
-  removeRootKeepingInputs(result, "/etc/repro", kept)
+  removeRootKeepingInputs(result, "/etc/repro", kept, "etc")
   keepIfFailed()
   # The store evidence directory (§13 decision 47) goes with the state
   # (`/var/lib/repro`), whatever --keep-store says (that keeps `/repro`).
