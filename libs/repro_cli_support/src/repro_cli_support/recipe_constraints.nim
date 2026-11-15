@@ -841,11 +841,14 @@ proc exactSourceRevision*(c: ReproUsesConstraint;
 # reported here as not readable rather than guessed:
 #
 # * an entry under a `when`, `if`, `elif`, `else`, `case` or `of` — at ANY
-#   depth, including a dependency block that is itself conditional. A `when`
-#   is a compile-time question (a platform, a define) and an `if` / `case` is
-#   a solver variant gate; whether either arm applies to the committed lock
-#   cannot be answered from the text, so such an entry is `conditional` and
-#   the callers do not check it;
+#   depth, including a dependency block that is itself conditional — is
+#   `conditional`, and carries the arms it sits under (``guards``): each
+#   arm's statement, every condition of that statement as written, and which
+#   arm the entry is in. A `when` is a compile-time question (a platform, a
+#   define) and an `if` / `case` is a solver variant gate. Neither is
+#   answered HERE: the answer depends on the lock (the platform it was
+#   resolved for, the variant values the solve chose), so the callers decide
+#   it against the lock with ``recipe_conditions.armApplicability``;
 # * an entry that is not a plain string literal (a `const`, an expression):
 #   the compiler produces that string, and this reader does not.
 
@@ -857,14 +860,56 @@ const
     ## constraints.
 
 type
+  ReproGuardKind* = enum
+    ## Which conditional statement an arm belongs to.
+    rgkWhen = "when"
+      ## `when` / `elif` / `else`: a compile-time question.
+    rgkIf = "if"
+      ## `if` / `elif` / `else`: inside a dependency block, a variant gate
+      ## when the DSL lowers it as one (``lowerUsesBody`` in
+      ## `repro_project_dsl/macros_a.nim`).
+    rgkCase = "case"
+      ## `case <subject>` with `of` / `elif` / `else` arms: likewise.
+    rgkUnpaired = "unpaired"
+      ## An `elif` / `else` / `of` the scan could not pair with the statement
+      ## that opened it. Never decided.
+
+  ReproGuard* = object
+    ## One conditional arm an entry sits under, with the whole statement the
+    ## arm belongs to, because an `elif` / `else` arm applies only when every
+    ## earlier arm of its statement does not.
+    kind*: ReproGuardKind
+    arm*: int
+      ## The index, in ``keywords`` / ``conditions``, of the arm the entry is
+      ## under.
+    keywords*: seq[string]
+      ## Every arm's keyword, in source order: `when` / `if` / `elif` /
+      ## `else` / `of`.
+    conditions*: seq[string]
+      ## Every arm's condition as written (an `of` arm's label list), "" for
+      ## an `else`. Only the arms the scan has seen when the statement ends;
+      ## an arm written on a continuation line is not recovered, and its
+      ## condition then does not parse (``recipe_conditions`` treats that as
+      ## undecidable, never as false).
+    subject*: string
+      ## The `case` subject as written, "" for `when` / `if`.
+    line*: int             ## 1-based line of the arm the entry is under
+    insideBlock*: bool
+      ## The statement is written inside the dependency block, where the DSL
+      ## lowers an `if` / `case` as a variant gate. An `if` / `case` around
+      ## the block is ordinary Nim the provider runs.
+
   ReproUsesDeclaration* = object
     ## One string-literal entry of a dependency block, as written.
     constraint*: ReproUsesConstraint
     rawConstraint*: string ## the literal's text
     blockHead*: string     ## `uses`, `buildDeps`, …
     conditional*: bool
-      ## Under a `when` / `if` / `case` arm. Whether it applies to a given lock
-      ## is not decidable from the text; callers skip it.
+      ## Under a `when` / `if` / `case` arm (``guards`` is not empty). Whether
+      ## it applies to a given lock is decided against that lock by
+      ## ``recipe_conditions.armApplicability``, never assumed.
+    guards*: seq[ReproGuard]
+      ## The arms the entry sits under, outermost first.
 
 proc scanReproUsesDeclarations*(source: string; file = ""):
     seq[ReproUsesDeclaration] =
@@ -877,19 +922,38 @@ proc scanReproUsesDeclarations*(source: string; file = ""):
   ##     "nim >=2.2 <3.0"
   ##     policyName:               # a nested policy call: still unconditional
   ##       "gcc >=12"
-  ##     when defined(macosx):     # conditional: reported, not checked
+  ##     when defined(macosx):     # conditional: carries its arm (guards)
   ##       "clang"
+  ##     else: "gcc >=12"          # an arm with its entry on the same line
   ##   uses: "reprobuild"          # inline form
   ##
   ## Structure is decided by indentation, as Nim's parser decides it: a line
-  ## ending in `:` opens a region that every deeper line belongs to. The scan
-  ## skips comments and the bodies of triple-quoted strings, so a shell script
-  ## inside a `"""` literal cannot open or close a region.
-  type Region = object
-    indent: int
-    conditional: bool
-    head: string           ## the dependency-block head, or ""
+  ## ending in `:` opens a region that every deeper line belongs to, and an
+  ## `elif` / `else` / `of` at the indentation of an open `when` / `if` /
+  ## `case` continues that statement. The scan skips comments and the bodies
+  ## of triple-quoted strings, so a shell script inside a `"""` literal cannot
+  ## open or close a region.
+  type
+    Region = object
+      indent: int
+      conditional: bool
+      head: string         ## the dependency-block head, or ""
+      stmt: int            ## the statement an arm region belongs to, or -1
+      arm: int             ## its arm index, or -1 (a `case x:` header)
+    Statement = object
+      kind: ReproGuardKind
+      keywords, conditions: seq[string]
+      lines: seq[int]
+      subject: string
+      insideBlock: bool
   var stack: seq[Region]
+  var statements: seq[Statement]
+  var openAt = initTable[int, int]()
+    ## indent -> the statement whose arms are written at that indent and
+    ## which a further `elif` / `else` / `of` there continues.
+  var guardRefs: seq[seq[tuple[stmt, arm: int]]]
+    ## Per result entry, the arms it is under; resolved into ``guards`` once
+    ## every statement has all its arms.
   var inTriple = false
   let lines = source.splitLines()
   proc indentOf(l: string): int =
@@ -923,12 +987,49 @@ proc scanReproUsesDeclarations*(source: string; file = ""):
       inc i
     if i >= s.len: return
     (true, value, s[i + 1 .. ^1].strip())
+  proc topLevelColon(s: string): int =
+    ## The first `:` outside a string, a character literal and brackets, or
+    ## -1: the colon that ends an arm's condition (`of "a:b":`,
+    ## `when f(x: 1):`, `when c == ':':`).
+    var inStr = false
+    var depth = 0
+    var i = 0
+    result = -1
+    while i < s.len:
+      let c = s[i]
+      if inStr:
+        if c == '\\': inc i
+        elif c == '"': inStr = false
+      elif c == '"': inStr = true
+      elif c == '\'' and (i == 0 or s[i - 1] notin IdentChars):
+        # A character literal (`':'`, `'\''`). A `'` right after an
+        # identifier character is a numeric type suffix (`1'u8`) instead,
+        # https://nim-lang.org/docs/manual.html#lexical-analysis-numeric-literals
+        inc i
+        if i < s.len and s[i] == '\\': inc i
+        inc i
+        while i < s.len and s[i] != '\'': inc i
+      elif c in {'(', '[', '{'}: inc depth
+      elif c in {')', ']', '}'}: dec depth
+      elif c == ':' and depth == 0: return i
+      inc i
   proc enclosingHead(): string =
     for r in stack:
       if r.head.len > 0: result = r.head
+  proc enclosingArms(): seq[tuple[stmt, arm: int]] =
+    for r in stack:
+      if r.stmt >= 0 and r.arm >= 0: result.add((r.stmt, r.arm))
   proc enclosingConditional(): bool =
     for r in stack:
       if r.conditional: return true
+  var found: seq[ReproUsesDeclaration]
+  proc addEntry(lit: string; head: string; lineNo: int;
+      arms: seq[tuple[stmt, arm: int]]) =
+    found.add(ReproUsesDeclaration(
+      constraint: parseReproUsesConstraint(lit, file, lineNo),
+      rawConstraint: lit, blockHead: head,
+      conditional: enclosingConditional() or arms.len > 0))
+    guardRefs.add(arms)
   for idx, raw in lines:
     let lineNo = idx + 1
     if inTriple:
@@ -943,45 +1044,115 @@ proc scanReproUsesDeclarations*(source: string; file = ""):
       # A triple-quoted string opens here and closes on a later line. Its body
       # is not code.
       inTriple = true
-    let head = enclosingHead()
-    if head.len > 0:
-      let lit = literalAt(code)
-      if lit.ok and (lit.rest.len == 0 or lit.rest == ","):
-        result.add(ReproUsesDeclaration(
-          constraint: parseReproUsesConstraint(lit.value, file, lineNo),
-          rawConstraint: lit.value, blockHead: head,
-          conditional: enclosingConditional()))
-        continue
-    # Does this line open a region, and of which kind?
-    let colon = code.find(':')
-    if colon <= 0: continue
     let word = block:
       var w = ""
       for ch in code:
         if ch in {'a'..'z', 'A'..'Z', '0'..'9', '_'}: w.add(ch)
         else: break
       w
+    # Statements whose arms sit at this indent or deeper end here, unless this
+    # line continues the one at this indent.
+    let continues = word in ["elif", "else", "of"] and ind in openAt
+    var ended: seq[int]
+    for k in openAt.keys:
+      if k > ind or (k == ind and not continues): ended.add(k)
+    for k in ended: openAt.del(k)
+    let head = enclosingHead()
+    if head.len > 0:
+      let lit = literalAt(code)
+      if lit.ok and (lit.rest.len == 0 or lit.rest == ","):
+        addEntry(lit.value, head, lineNo, enclosingArms())
+        continue
+    # A conditional arm: `when` / `if` / `case` open a statement, `elif` /
+    # `else` / `of` continue the open one at this indent (or, for `of`, the
+    # `case x:` header this line is nested under).
+    if word in ["when", "if", "elif", "else", "case", "of"]:
+      let colon = topLevelColon(code)
+      let condText =
+        if colon > 0: code[word.len ..< colon].strip()
+        else: code[word.len .. ^1].strip()
+      let after = if colon > 0: code[colon + 1 .. ^1].strip() else: ""
+      var stmtIdx = -1
+      var armIdx = -1
+      case word
+      of "when", "if":
+        statements.add(Statement(
+          kind: (if word == "when": rgkWhen else: rgkIf),
+          keywords: @[word], conditions: @[condText], lines: @[lineNo],
+          insideBlock: head.len > 0))
+        stmtIdx = statements.high
+        armIdx = 0
+        openAt[ind] = stmtIdx
+      of "case":
+        statements.add(Statement(kind: rgkCase, subject: condText,
+          insideBlock: head.len > 0))
+        stmtIdx = statements.high
+        openAt[ind] = stmtIdx
+        if colon > 0 and after.len == 0:
+          # `case x:` with its arms on deeper lines: the header region is
+          # where they look for their statement.
+          stack.add(Region(indent: ind, conditional: true, stmt: stmtIdx,
+            arm: -1))
+        else:
+          # `case x` with its `of` arms at this same indent: they continue it
+          # through ``openAt``. The whole statement is conditional.
+          stack.add(Region(indent: ind, conditional: true, stmt: -1,
+            arm: -1))
+        continue
+      else:
+        if ind in openAt:
+          stmtIdx = openAt[ind]
+        elif word == "of" and stack.len > 0 and stack[^1].stmt >= 0 and
+            stack[^1].arm < 0:
+          stmtIdx = stack[^1].stmt
+          openAt[ind] = stmtIdx
+        if stmtIdx >= 0 and (word != "of" or
+            statements[stmtIdx].kind == rgkCase):
+          statements[stmtIdx].keywords.add(word)
+          statements[stmtIdx].conditions.add(
+            if word == "else": "" else: condText)
+          statements[stmtIdx].lines.add(lineNo)
+          armIdx = statements[stmtIdx].keywords.high
+        else:
+          statements.add(Statement(kind: rgkUnpaired, keywords: @[word],
+            conditions: @[condText], lines: @[lineNo],
+            insideBlock: head.len > 0))
+          stmtIdx = statements.high
+          armIdx = 0
+      if colon > 0 and after.len > 0:
+        # The arm's body is on its own line: `else: "gcc >=12"`.
+        if head.len > 0:
+          let lit = literalAt(after)
+          if lit.ok and (lit.rest.len == 0 or lit.rest == ","):
+            addEntry(lit.value, head, lineNo,
+              enclosingArms() & @[(stmtIdx, armIdx)])
+        continue
+      stack.add(Region(indent: ind, conditional: true, stmt: stmtIdx,
+        arm: armIdx))
+      continue
+    # Does this line open a region, and of which kind?
+    let colon = code.find(':')
+    if colon <= 0: continue
     if word in ReproDependencyBlockHeads and
         code[word.len .. ^1].strip().startsWith(":"):
       let after = code[code.find(':') + 1 .. ^1].strip()
       if after.len == 0:
-        stack.add(Region(indent: ind, head: word))
+        stack.add(Region(indent: ind, head: word, stmt: -1, arm: -1))
       else:
         # The inline form, `uses: "x"`: one entry on the head's own line.
         let lit = literalAt(after)
         if lit.ok and lit.rest.len == 0:
-          result.add(ReproUsesDeclaration(
-            constraint: parseReproUsesConstraint(lit.value, file, lineNo),
-            rawConstraint: lit.value, blockHead: word,
-            conditional: enclosingConditional()))
+          addEntry(lit.value, word, lineNo, enclosingArms())
       continue
     if code.endsWith(":"):
-      let conditional = word in ["when", "if", "elif", "else", "case", "of"]
-      stack.add(Region(indent: ind, conditional: conditional))
-    elif word == "case" or word == "if" or word == "when":
-      # `case x.value` with its `of` arms on the following lines at the same
-      # indent: the arms open the regions, but mark the whole statement too.
-      stack.add(Region(indent: ind, conditional: true))
+      stack.add(Region(indent: ind, stmt: -1, arm: -1))
+  result = found
+  for i in 0 ..< result.len:
+    for (st, arm) in guardRefs[i]:
+      let s = statements[st]
+      result[i].guards.add(ReproGuard(kind: s.kind, arm: arm,
+        keywords: s.keywords, conditions: s.conditions, subject: s.subject,
+        line: s.lines[arm], insideBlock: s.insideBlock))
 
 # ---------------------------------------------------------------------------
 # The comment beside a pin (Unified-Locking-And-Hooks.md §16.6)
