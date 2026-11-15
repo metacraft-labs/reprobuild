@@ -623,7 +623,14 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
       # A stop error stays an error, including the force-file timeout.
       check stopped.exitCode == 1
       if index == 1:
-        check stopped.output.toLowerAscii().contains("refused")
+        # The listener has exited. It removed its session token on the way
+        # out (Development-Environments-And-Control-API.md §"Control API
+        # Access Control"), so `down` reports the token it cannot read; a
+        # listener killed before that cleanup leaves the token and the
+        # connection is refused instead. Either is the unreachable session.
+        let lowered = stopped.output.toLowerAscii()
+        check lowered.contains("refused") or
+          lowered.contains("cannot read the dev-session control token")
       else:
         check stopped.output.contains("HTTP stop failed; wrote stop request file")
         check stopped.output.contains("did not stop:")

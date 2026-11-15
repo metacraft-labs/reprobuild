@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2830,
+    "nimTestBinaries": 2831,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 768,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2877
+    "testEntries": 2878
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1636,7 +1636,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1561,
+      "integration": 1562,
       "platform/destructive": 181,
       "pure unit": 768,
       "unclassified": 344
@@ -1853,9 +1853,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2830,
+    "nimTestBinaryCount": 2831,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2877
+    "testEntryCount": 2878
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32663,6 +32663,23 @@
       "source": "tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
