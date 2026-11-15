@@ -17,7 +17,7 @@
 ## 2. A host the registry declares WITHOUT `system:` on a Debian base is
 ##    refused the same way by all four commands, the diagnostic asking for `addOn` or
 ##    `managedElsewhere`; so is a spelled `system: {mode: full, ...}` entry
-##    (decision 17). The retired `REPRO_OS_RELEASE_PATH` pointed at the
+##    (decision 19). The retired `REPRO_OS_RELEASE_PATH` pointed at the
 ##    ReproOS fixture changes nothing: the Debian refusal stands (A12
 ##    review finding 5). Negative controls: the same host on a ReproOS base
 ##    plans, and the `full` block form plans its activities there; a host the registry does not declare plans on Debian as before,

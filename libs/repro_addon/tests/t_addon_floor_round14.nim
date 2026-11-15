@@ -1,6 +1,6 @@
 ## The hardening floor after the A9 review's round 14 (ReproOS Add-On Mode
-## spec §10.1 and §13 decisions 144 to 146; reprobuild-pm issues
-## 2026-11-14-floor-*):
+## spec §10.1 and §13 decisions 144 to 146 -- the boot re-assertion, the
+## run's start, a literal prefix; reprobuild-pm issues 2026-11-14-floor-*):
 ##
 ## - a hold is written with every step checked (``writeHoldFile``): a write
 ##   the file system refuses raises, where Nim's ``writeFile`` left an empty
