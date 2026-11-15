@@ -31,10 +31,14 @@
 ## `~/Library/Application Support/repro/home`, space included (GM1 deliverable
 ## "with the default state directory under ~/Library/Application Support").
 ##
-## Which sources the compile used is read from nim's own record, the
-## `<nimcache>/profile-build.json` it writes for every compile: `currentDir`
-## is the working directory the compile ran in (the resolved source root), and
-## `configFiles[0]` is the `nim.cfg` of the compiler that ran.
+## Which sources the compile used is read from nim's own records in the
+## compile's nimcache: the absolute module paths the generated C embeds name
+## the source root every module of reprobuild's own libraries
+## (`libs/repro_*`, `repro_profile` among them) came from
+## (`nix_package_support.ProfileCompileSources`, which says why the working
+## directory no longer can), `profile-build.json`'s `currentDir` must be that
+## nimcache itself, and its `configFiles[0]` is the `nim.cfg` of the compiler
+## that ran.
 ##
 ## Negative control: the source checkout's `build/bin/repro`, under the same
 ## `REPROBUILD_*`-free environment, still compiles against THIS checkout — the
@@ -99,7 +103,7 @@ proc defaultStateDir(homeDir, spacedBase: string): string =
 
 type CompileRecord = object
   rbpiCount: int
-  currentDir: string
+  sources: ProfileCompileSources
   compilerConfig: string
 
 proc compileRecord(stateDir: string): CompileRecord =
@@ -110,7 +114,7 @@ proc compileRecord(stateDir: string): CompileRecord =
   for path in walkDirRec(cacheDir / "nimcache"):
     if path.extractFilename == "profile-build.json":
       let doc = parseFile(path)
-      result.currentDir = doc["currentDir"].getStr()
+      result.sources = profileCompileSources(path.parentDir)
       if doc["configFiles"].len > 0:
         result.compilerConfig = doc["configFiles"][0].getStr()
 
@@ -156,8 +160,14 @@ else:
       check not res.output.contains("profile compilation failed")
       check res.output.contains("create  fs.userFile:~/" & MarkerName)
       check rec.rbpiCount == 1
-      # The compile ran against the package's own sources ...
-      check rec.currentDir == sourceRoot
+      # The compile ran in its own nimcache, against the package's own
+      # sources and nothing in this checkout ...
+      # Printed, not only checkpointed, so a passing run records the evidence.
+      echo "    repro_profile modules: ", rec.sources.profileModules,
+        "; repro_* library modules: ", rec.sources.reproLibModules.len
+      check rec.sources.ranInItsNimcache
+      check rec.sources.compiledAgainst(sourceRoot)
+      check not rec.sources.compiledAgainst(ProjectRoot)
       # ... with the compiler the package names, found through
       # $REPRO_NIM_COMPILER (no nim was on PATH).
       check rec.compilerConfig.startsWith(nimCompiler.parentDir.parentDir)
@@ -173,4 +183,8 @@ else:
       check res.exitCode == 0
       check res.output.contains("create  fs.userFile:~/" & MarkerName)
       check rec.rbpiCount == 1
-      check rec.currentDir == ProjectRoot
+      # Printed, not only checkpointed, so a passing run records the evidence.
+      echo "    repro_profile modules: ", rec.sources.profileModules,
+        "; repro_* library modules: ", rec.sources.reproLibModules.len
+      check rec.sources.ranInItsNimcache
+      check rec.sources.compiledAgainst(ProjectRoot)

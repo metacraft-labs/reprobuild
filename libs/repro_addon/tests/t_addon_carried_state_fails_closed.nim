@@ -512,10 +512,23 @@ suite "reach is default-deny":
       delEnv("REPRO_HOST_APPLY_LOCK")
       delEnv("REPRO_HOST_APPLY_LOCK_WAIT_SECONDS")
     let holdDir = r / "etc/systemd/system/eth-validator.service.d"
+    # The holder marks `ready` only once flock(1) has granted it the lock,
+    # and the apply starts only after that marker exists. A fixed sleep
+    # here raced the holder on a loaded host: when `flock` started late the
+    # apply took the lock first, saw no hold, and the case failed for a
+    # product defect that did not exist (reprobuild-pm issue
+    # 2026-11-15-carried-state-host-lock-recheck-test-races-its-flock-holder).
+    let ready = scratch / "host-apply-2.ready"
+    removeFile(ready)
     let holder = startProcess("flock", args = [lock, "sh", "-c",
-      "sleep 2; mkdir -p " & quoteShell(holdDir) & " && echo x > " &
+      "touch " & quoteShell(ready) & "; sleep 2; mkdir -p " &
+      quoteShell(holdDir) & " && echo x > " &
       quoteShell(holdDir / HoldDropInName)], options = {poUsePath})
-    sleep(500)
+    var waited = 0
+    while not fileExists(ready) and waited < 60_000:
+      sleep(50)
+      waited += 50
+    require fileExists(ready)   # the holder never got the lock: say so
     var why = ""
     try:
       var l = hostLockWithCarriedRecheck(AddonApplyOptions(stateDir:

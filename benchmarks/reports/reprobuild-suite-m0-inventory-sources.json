@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2818,
+    "nimTestBinaries": 2821,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2865
+    "testEntries": 2868
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,10 +1620,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1555,
-      "platform/destructive": 180,
+      "integration": 1556,
+      "platform/destructive": 181,
       "pure unit": 766,
-      "unclassified": 341
+      "unclassified": 342
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2818,
+    "nimTestBinaryCount": 2821,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2865
+    "testEntryCount": 2868
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10223,8 +10223,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18314,7 +18314,8 @@
         "repro_home_apply",
         "repro_home_generations",
         "repro_local_store",
-        "repro_test_support"
+        "repro_test_support",
+        "repro_tool_profiles"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -18849,6 +18850,29 @@
       "source": "libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_apply",
+        "repro_home_generations",
+        "repro_home_rollback",
+        "repro_local_store",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_home_rollback",
+      "requiresReproBinary": true,
+      "source": "libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20202,6 +20226,24 @@
       "source": "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_publish_is_durable_and_recover_verifies_prefix_contents",
+      "class": "unclassified",
+      "classificationReason": "re-enters its own executable",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_publish_is_durable_and_recover_verifies_prefix_contents.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34292,7 +34334,8 @@
       "localDependencyShape": [
         "repro_home_generations",
         "repro_local_store",
-        "repro_test_support"
+        "repro_test_support",
+        "repro_tool_profiles"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
@@ -42171,6 +42214,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_every_selector_spelling_plans_the_certificates_its_build_materializes",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_every_selector_spelling_plans_the_certificates_its_build_materializes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_evidence_publish_verb_and_lock_flag_on_test_sharding",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47108,7 +47166,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_package_build_openssl_selection.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
