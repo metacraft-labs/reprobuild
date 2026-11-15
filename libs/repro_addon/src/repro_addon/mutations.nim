@@ -1552,6 +1552,10 @@ const
                           # through its observation instance, its
                           # specifiers resolved for that instance.
                           "writable-specifier-resolved",
+                          # a writable place whose first component is a
+                          # specifier (%t/a9q/%i) is dropped, not counted
+                          # as /.
+                          "writable-leading-specifier-dropped",
                           # a listener the switch's restart of its
                           # activator makes again keeps its stale record.
                           "restarted-listener-not-rerecorded",

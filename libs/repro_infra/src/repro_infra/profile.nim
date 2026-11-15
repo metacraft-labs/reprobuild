@@ -1506,7 +1506,7 @@ proc checkFloorActivators*(p: SystemProfile) =
               o.suHardening != ServiceFloorHardening or o.suName == r.suName:
             continue
           for w in floorWritablePlaces(serviceDirectives(o.suContent)):
-            if np == w or np.startsWith(w & "/"):
+            if placeCovers(w, np):
               raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
                 "': EnvironmentFile=" & np & " lies in " & o.suName &
                 "'s writable place " & w & "; the manager reads it as root")
