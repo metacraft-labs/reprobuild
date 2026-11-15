@@ -60,7 +60,7 @@
 ## The plan's three add-on sections (spec §7.1) are in the result: the
 ## ledger diff, the collision report, and the service transition list.
 
-import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
+import std/[algorithm, json, math, monotimes, options, os, sets, strutils, tables,
             times]
 from std/posix import Statvfs, statvfs, Stat, lstat, stat, rmdir, S_ISLNK, ENOENT, O_WRONLY, O_CREAT,
   O_TRUNC, O_RDONLY, O_CLOEXEC, fsync
@@ -1434,6 +1434,14 @@ proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
         effectiveFloor(r).len > 0:
       result.add(r.suName)
 
+proc installedUnitName*(r: SystemResource): string =
+  ## The unit file ``r`` installs: a ``systemd.systemUnit`` (not a drop-in)
+  ## or a ``systemd.systemTimer``; "" for any other resource.
+  case r.kind
+  of srkSystemdSystemUnit: (if r.suCollision != "dropIn": r.suName else: "")
+  of srkSystemdSystemTimer: r.stName
+  else: ""
+
 proc activatorOf(r: SystemResource): tuple[name, content: string] =
   ## The socket, timer or path unit ``r`` installs -- a
   ## ``systemd.systemUnit`` of such a type, or a ``systemd.systemTimer`` --
@@ -1457,6 +1465,20 @@ proc activatorTargets(resources: openArray[SystemResource];
   var p = SystemProfile()
   for x in resources: p.resources.add(x)
   triggeredUnits(name, @[content] & profileDropInsOf(p, name))
+
+proc needsBootConfirm*(userText: string): bool =
+  ## Whether a switch to the user profile ``userText`` must be confirmed
+  ## outside the boot re-assertion (§13 decision 157): it has a floored unit
+  ## with a health check, which cannot start while the re-assertion runs
+  ## (decision 144), so a confirm inside it can only time out. A profile
+  ## that does not parse is left to the re-assertion, which reports it.
+  try:
+    for r in parseAddOnUserProfile(userText).resources:
+      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+          r.suHealthCheck.len > 0 and effectiveFloor(r).len > 0:
+        return true
+  except CatchableError: discard
+  false
 
 proc flooredActivatorNames*(resources: openArray[SystemResource]): seq[string] =
   ## The socket, timer and path units of the generation that activate one of
@@ -1513,6 +1535,45 @@ const HeldTriggersFile = "held-triggers"
   ## start again, and a crash leaves them for the next switch.
 
 proc heldTriggersPath(stateDir: string): string = stateDir / HeldTriggersFile
+
+const RevertStoppedFile = "revert-stopped"
+  ## The units a revert stopped because it holds them (§13 decision 155),
+  ## one per line, in the state directory: written before any is stopped,
+  ## so the switch whose check passes starts exactly those again, whatever
+  ## their kind -- a ``systemd.systemTimer`` resource, an activator the
+  ## profile does not enable (A9 review round 16, finding 5).
+
+proc revertStoppedPath(stateDir: string): string = stateDir / RevertStoppedFile
+
+proc readRevertStopped*(stateDir: string): seq[string] =
+  ## The units on record as stopped by a revert; empty when none is.
+  let p = revertStoppedPath(stateDir)
+  if symlinkExists(p) or not fileExists(p): return
+  for l in readFile(p).splitLines():
+    let t = l.strip()
+    if t.len > 0 and t notin result: result.add(t)
+
+proc writeRevertStopped*(stateDir: string; units: openArray[string]) =
+  ## Record ``units`` as stopped by a revert (durably), or remove the record.
+  let p = revertStoppedPath(stateDir)
+  if units.len == 0:
+    if fileExists(p): removeFile(p)
+    return
+  writeHoldFile(p, units.join("\n") & "\n")
+
+proc revertStoppedToStart*(recorded: openArray[string];
+                           generationUnits: HashSet[string];
+                           planned: openArray[string];
+                           isActive: proc (u: string): bool): seq[string] =
+  ## Of the units a revert stopped (``recorded``), those the passing switch
+  ## starts again: still installed by the generation, not already planned,
+  ## and not running.
+  when mutated("revert-stopped-not-restarted"):
+    return
+  for u in recorded:
+    if u in generationUnits and u notin planned and not isActive(u) and
+        u notin result:
+      result.add(u)
 
 proc readHeldTriggers*(stateDir: string): seq[string] =
   ## The triggers on record as stopped for a hold; empty when none is.
@@ -2139,9 +2200,10 @@ type UnitRun* = object
     ## ``NRestarts``: automatic restarts since the unit was last started
     ## explicitly (§13 decision 156's bound)
   restartDelay*: int64
-    ## the ``Restart=`` delay, nanoseconds: ``RestartUSecNext`` where systemd
-    ## reports it (systemd 254 and later, with ``RestartSteps=``), else
-    ## ``RestartUSec``
+    ## the delay before the current run's automatic restart, nanoseconds
+    ## (``restartDelayBefore``): ``RestartUSec``, grown by ``RestartSteps=``
+    ## towards ``RestartMaxDelaySec=`` as systemd grows it. Not
+    ## ``RestartUSecNext``, which is the delay of the NEXT restart.
   running*: bool
 
 proc parseUtcStamp(v: string): int64 =
@@ -2181,11 +2243,42 @@ proc parseTimespanNs*(v: string): int64 =
     if unitNs < 0: return -1
     result += int64(n * unitNs)
 
+proc restartDelayBefore*(nRestarts: int; restartUsec, maxDelayUsec: int64;
+                         steps: int): int64 =
+  ## The delay systemd waited before the restart that began the run whose
+  ## ``NRestarts`` is ``nRestarts``, in the same unit as its inputs (§13
+  ## decision 156, as amended in A9 review round 16). systemd computes the
+  ## delay of restart number n (``n_restarts_next``) in
+  ## ``service_restart_usec_next()``, src/core/service.c
+  ## (https://github.com/systemd/systemd/blob/v257/src/core/service.c):
+  ## ``RestartUSec`` for n <= 1, without steps, with no or an infinite
+  ## maximum, or with a maximum not above it; ``RestartMaxDelayUSec`` once n
+  ## exceeds ``RestartSteps``; else ``r0 * (rmax / r0) ^ ((n - 1) /
+  ## steps)``. When systemd schedules restart n, ``NRestarts`` is n - 1 and
+  ## becomes n as the restart is queued, so the run with ``NRestarts`` = n
+  ## followed the delay for n. -1 for an unknown (infinite) ``RestartUSec``.
+  when mutated("restart-delay-from-next"):
+    # Falsifying build: the delay of the NEXT restart (RestartUSecNext's
+    # meaning), n + 1.
+    let n = nRestarts + 1
+  else:
+    let n = nRestarts
+  if restartUsec < 0: return -1
+  if n <= 1 or steps <= 0 or restartUsec == 0 or maxDelayUsec <= 0 or
+      restartUsec >= maxDelayUsec:
+    return restartUsec
+  if n > steps: return maxDelayUsec
+  let ratio = maxDelayUsec.float64 / restartUsec.float64
+  int64(restartUsec.float64 * pow(ratio, (n - 1).float64 / steps.float64))
+
 proc parseUnitRun*(output: string): UnitRun =
   ## ``UnitRun`` from the output of ``systemctl show --timestamp=us+utc -p
   ## InvocationID -p InactiveExitTimestamp -p InactiveEnterTimestamp -p
-  ## ActiveState`` (and ``NRestarts``, ``RestartUSec``, ``RestartUSecNext``).
-  var nextSeen = false
+  ## ActiveState`` (and ``NRestarts``, ``RestartUSec``, ``RestartSteps``,
+  ## ``RestartMaxDelayUSec``).
+  var restartUsec = 0'i64
+  var maxDelay = 0'i64
+  var steps = 0
   for l in output.splitLines():
     let eq = l.find('=')
     if eq <= 0: continue
@@ -2198,15 +2291,16 @@ proc parseUnitRun*(output: string): UnitRun =
     of "ExecMainStartTimestamp": result.mainStart = parseUtcStamp(v)
     of "NRestarts":
       try: result.nRestarts = parseInt(v) except ValueError: discard
-    of "RestartUSec":
-      if not nextSeen: result.restartDelay = parseTimespanNs(v)
-    of "RestartUSecNext":
-      let d = parseTimespanNs(v)
-      if d >= 0:
-        result.restartDelay = d
-        nextSeen = true
+    of "RestartUSec": restartUsec = parseTimespanNs(v)
+    of "RestartMaxDelayUSec": maxDelay = parseTimespanNs(v)
+    of "RestartSteps":
+      try: steps = parseInt(v) except ValueError: discard
     of "ActiveState": result.running = v in ["active", "activating", "reloading"]
     else: discard
+  # systemd 252 (debian-12) reports neither RestartSteps nor the maximum:
+  # the delay is RestartUSec.
+  result.restartDelay = restartDelayBefore(result.nRestarts, restartUsec,
+                                           maxDelay, steps)
 
 proc unitRun*(unit: string;
               show: proc (args: seq[string]): tuple[exitCode: int; output: string] = nil):
@@ -2216,7 +2310,8 @@ proc unitRun*(unit: string;
   let args = @["show", "--no-pager", "--timestamp=us+utc", "-p", "InvocationID",
                "-p", "InactiveExitTimestamp", "-p", "InactiveEnterTimestamp",
                "-p", "ExecMainStartTimestamp", "-p", "NRestarts",
-               "-p", "RestartUSec", "-p", "RestartUSecNext",
+               "-p", "RestartUSec", "-p", "RestartSteps",
+               "-p", "RestartMaxDelayUSec",
                "-p", "ActiveState", "--", unit]
   try:
     let r = (if show != nil: show(args)
@@ -4803,7 +4898,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # by an earlier engine gets the boot-hold unit at its next apply). Here,
   # under the host apply lock and before anything is written, so a path in
   # the way stops the apply before any generation change.
-  let ownText =
+  let ownTextUpgraded =
     if replaying: migratedOwn
     else:
       try:
@@ -4816,6 +4911,41 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       except ValueError as e:
         raise newException(AddonApplyError, "generation 0 cannot be " &
           "upgraded: " & e.msg)
+  # §13 decision 164: the re-assert unit runs the engine that applies, so
+  # a host an earlier engine bootstrapped recovers with this one's holds.
+  # The engine goes into the store as a binary prefix, which the
+  # generation's ledger names (a generation-0 entry, carried by every later
+  # switch) and its root holds. Under the host apply lock, before anything
+  # else is written; a plan writes nothing, and a replay applies exactly
+  # what the interrupted switch planned.
+  var bootstrapEntries = opts.bootstrapEntries
+  var ownText = ownTextUpgraded
+  if not replaying and not opts.planOnly:
+    let engine = getAppFilename()
+    var engineSha = ""
+    try: engineSha = sha256OfFile(engine) except CatchableError: discard
+    if engineSha.len > 0:
+      let engineExe = reproExeFor(engineSha)
+      try:
+        let rp = repointReassert(ownText, engineExe, ownPathProbe,
+          proc (path: string): string =
+            for e in previous.entries:
+              if e.path == path: return e.sha256
+            "")
+        if rp.changed:
+          let pre = realiseEnginePrefix(engine, engineSha)
+          if pre.exe != engineExe:
+            raise newException(ValueError, "the engine was realised at " &
+              pre.exe & ", not " & engineExe)
+          bootstrapEntries.add(LedgerEntry(class: lcStorePrefix, path: pre.path,
+            sha256: prefixIdHex(pre.id), value: pre.digest, resource: ""))
+          # Under store custody (§13 decision 48) the digest is recorded
+          # outside the store, as bootstrap records its binary's.
+          recordRealised(custodySite(stateDir), pre.path, pre.digest)
+          ownText = rp.own
+      except ValueError as e:
+        raise newException(AddonApplyError, "generation 0's re-assert unit " &
+          "cannot be re-pointed: " & e.msg)
   result.previousLedger = previous
   # The generation `current` names, not the ledger copy's: a switch that
   # failed after its writes leaves the copy describing the host under the
@@ -7174,6 +7304,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # round 15). A template's instances are stopped by
             # pattern. A stop that fails keeps the revert from committing.
             when not mutated("revert-held-left-running"):
+              # Recorded first, so the switch that clears the holds starts
+              # exactly these again (A9 review round 16, finding 5).
+              var stopping: seq[string]
+              for u in held:
+                if '@' notin u and unitIsActive(u): stopping.add(u)
+              if stopping.len > 0:
+                try: writeRevertStopped(stateDir, readRevertStopped(stateDir) & stopping)
+                except CatchableError as ex:
+                  problems.add("the revert could not record what it stops: " & ex.msg)
               for u in held:
                 let at = u.find('@')
                 let target =
@@ -7246,6 +7385,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                       not unitIsActive(u):
                     stepTransitions.add(Transition(unit: u, verb: tvStart,
                       reason: "a revert held it; its hold is cleared"))
+            # What a revert stopped because it held it comes back now, read
+            # from its record, whatever kind of unit it is.
+            block:
+              var genUnits = initHashSet[string]()
+              for rr in composed.resources:
+                let n = installedUnitName(rr)
+                if n.len > 0: genUnits.incl(n)
+              var plannedUnits: seq[string]
+              for t in stepTransitions: plannedUnits.add(t.unit)
+              for u in revertStoppedToStart(readRevertStopped(stateDir), genUnits,
+                                            plannedUnits, unitIsActive):
+                stepTransitions.add(Transition(unit: u, verb: tvStart,
+                  reason: "a revert stopped it while it held it; its hold is cleared"))
+              try: writeRevertStopped(stateDir, [])
+              except CatchableError as ex: problems.add(ex.msg)
             if startHolds.len > 0 or stale.len > 0 or revertStale.len > 0:
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
@@ -7348,7 +7502,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # ``evidence-enrol --rekey`` replaced, decision 52) takes the new
       # entry; the previous one is not carried.
       var restated = initHashSet[string]()
-      for e in opts.bootstrapEntries: restated.incl($e.class & " " & e.path)
+      for e in bootstrapEntries: restated.incl($e.class & " " & e.path)
       for e in previous.entries:
         if e.resource.len > 0 or e.class == lcStaticLink: continue
         if ($e.class & " " & e.path) in restated: continue
@@ -7358,7 +7512,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             readUnitProvision(e.unit).activeState != "active":
           continue      # the instance left running has ended: forgotten
         put(e)
-      for e in opts.bootstrapEntries: put(e)
+      for e in bootstrapEntries: put(e)
       for e in forgottenEntries: put(e)
       # The static tree: its link and its prefix, rebuilt every generation.
       put(LedgerEntry(class: lcStaticLink, path: StaticLinkPath,

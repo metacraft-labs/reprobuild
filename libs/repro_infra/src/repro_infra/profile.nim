@@ -1532,6 +1532,13 @@ proc checkFloorActivators*(p: SystemProfile) =
       if why.len > 0:
         raiseSystemProfileInvalid($r.kind & " '" & name &
           "' activates a floored service: " & why)
+      # §13 decision 163: ordered after sysinit.target, its file and the
+      # profile's drop-ins onto it read together.
+      when InfraAddonMutation != "activator-boot-order-parse-unchecked":
+        let early = activatorBootOrderOfFiles(name, activatorFilesOf(p, name))
+        if early.len > 0:
+          raiseSystemProfileInvalid($r.kind & " '" & name &
+            "' activates a floored service: " & early)
   for d in p.resources:
     var target, content = ""
     if d.kind == srkSystemdSystemDropIn:

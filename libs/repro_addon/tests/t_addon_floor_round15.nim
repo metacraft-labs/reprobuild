@@ -13,7 +13,8 @@
 ## - §13 decision 155: the activators of floored services are held like the
 ##   services (``flooredActivatorNames``).
 ##
-## Falsifying builds, red here: ``recreated-bound-from-inactive-exit-only``
+## Falsifying builds, red here: ``recreated-bound-from-inactive-exit-only``,
+## ``restart-lower-bound-from-inactive-exit``, ``restart-delay-from-next``
 ## and ``record-without-waiting`` (the record is taken before the
 ## directory exists). ``activators-unheld`` and
 ## ``revert-held-left-running`` act at their call sites in the switch and
@@ -46,8 +47,23 @@ suite "§13 decision 156: a restart's run begins its delay after InactiveExitTim
       "InactiveExitTimestamp=Sun 2026-11-15 01:26:34.663524 UTC\nActiveState=active\n")
     check r.nRestarts == 2
     check r.restartDelay == 3 * S
-    let n = parseUnitRun("RestartUSec=3s\nRestartUSecNext=5s\n")
-    check n.restartDelay == 5 * S
+    # RestartUSecNext is the NEXT restart's delay, never read (A9 review
+    # round 16, finding 2): the reviewer's systemd 260 unit, NRestarts=2,
+    # RestartUSec=1s, RestartSteps=2, RestartMaxDelaySec=4s, waited 2 s
+    # before its run while RestartUSecNext said 4 s.
+    let n = parseUnitRun("NRestarts=2\nRestartUSec=1s\nRestartSteps=2\n" &
+                         "RestartMaxDelayUSec=4s\nRestartUSecNext=4s\n")
+    check n.restartDelay == 2 * S
+    # systemd 252 reports neither: RestartUSec.
+    check parseUnitRun("NRestarts=2\nRestartUSec=3s\n").restartDelay == 3 * S
+  test "the delay before restart n follows service_restart_usec_next()":
+    check restartDelayBefore(1, 1 * S, 16 * S, 4) == 1 * S        # n <= 1
+    check restartDelayBefore(2, 1 * S, 16 * S, 4) == 2 * S        # 16^(1/4)
+    check restartDelayBefore(3, 1 * S, 16 * S, 4) == 4 * S
+    check restartDelayBefore(5, 1 * S, 16 * S, 4) == 16 * S       # n > steps
+    check restartDelayBefore(3, 1 * S, 16 * S, 0) == 1 * S        # no steps
+    check restartDelayBefore(3, 4 * S, 2 * S, 4) == 4 * S         # max not above
+    check restartDelayBefore(3, 0, 16 * S, 4) == 0
   let created = {"/run/u": CreatedDir(unit: "u.service", invocation: "I0")}.toTable
   proc verdict(btime, mainStart: int64; restarts: int; delay: int64): string =
     systemdRecreated("/run/u", "u.service", ["/run/u"], created, false,
@@ -65,6 +81,11 @@ suite "§13 decision 156: a restart's run begins its delay after InactiveExitTim
     check runStartOf(SystemdView(invocationStart: Start, mainStart: Start,
                                  nRestarts: 1, restartDelay: 3 * S)) == Start
     check verdict(Start + RunStartToleranceNs + 2 * S, Start, 1, 3 * S).len > 0
+  test "a tree born during the RestartSec= wait, before the run, is refused":
+    # A9 review round 16, finding 1: RestartSec=30; the run begins at +30 s.
+    check verdict(Start + 10 * S, Start + 30 * S, 1, 30 * S).len > 0
+    # The run's own directory, born at its start, still passes.
+    check verdict(Start + 30 * S + 50_000_000, Start + 30 * S, 1, 30 * S) == ""
   test "a tree made well into a restarted run is refused":
     check verdict(Start + 3 * S + RunStartToleranceNs + 1 * S,
                   Start + 3 * S, 1, 3 * S).len > 0

@@ -173,7 +173,8 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
     $m.step & "); finished its step 9"]
 
 proc recoverMarker(stateDir: string; atBoot: bool;
-                   driver: CollisionDriver = nil): RecoveryOutcome =
+                   driver: CollisionDriver = nil;
+                   bootConfirm = false): RecoveryOutcome =
   ## An interrupted switch's own recovery: finish it or revert it; with no
   ## marker, start again the triggers a revert could not (§13 decision 160).
   if not hasPendingMarker(stateDir):
@@ -199,6 +200,29 @@ proc recoverMarker(stateDir: string; atBoot: bool;
   # own the marker: it is waited for like any apply, and if it still holds
   # the lock at the deadline the run is degraded, never deferred, so an
   # interrupted switch is not silently left to the next boot.
+  # §13 decision 157: at boot, a switch to a generation with a
+  # health-checked floored unit is left to the boot-confirm unit, ordered
+  # after this one, which replays it once the floored units can start. Only
+  # where that unit is installed: a host without it keeps the replay here.
+  when not mutated("boot-confirm-in-reassert"):
+    if atBoot and not bootConfirm and fileExists(unitPath(BootConfirmUnit)):
+      var plan: PendingPlan
+      var planRead = false
+      try:
+        plan = readPendingPlan(stateDir)
+        planRead = true
+      except CatchableError: discard
+      if planRead and needsBootConfirm(plan.targetUserText):
+        try:
+          createDir(stateDir / "addon")
+          writeFileAtomic(bootConfirmFlagPath(stateDir), m.purpose & "\n", 0o600)
+          return RecoveryOutcome(resolved: true, deferred: true,
+            lines: @["the pending switch has a health-checked floored unit, " &
+                     "which cannot start while the re-assertion runs: it is " &
+                     "left to " & BootConfirmUnit & ", which replays it after " &
+                     "this unit (§13 decision 157)"])
+        except CatchableError as e:
+          discard e   # the replay below runs here, as before
   var (hostLock, holder, holderPids) =
     tryAcquireHostApplyLock("add-on switch recovery")
   if holder.len > 0:
@@ -294,12 +318,19 @@ proc afterRecovery*(rec: RecoveryOutcome; stateDir: string;
       result.resolved = r.ok
 
 proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
-                           driver: CollisionDriver = nil): RecoveryOutcome =
+                           driver: CollisionDriver = nil;
+                           bootConfirm = false): RecoveryOutcome =
   ## Finish or revert an interrupted switch (see the module header), and
   ## start again the triggers a revert could not (§13 decision 160) --
   ## also those the switch it finishes or reverts leaves on record, so a
   ## resolved marker never leaves the host pending on a trigger.
-  afterRecovery(recoverMarker(stateDir, atBoot, driver), stateDir)
+  ## ``bootConfirm``: the boot-confirm unit's run (§13 decision 157), a
+  ## boot run -- queued starts, the boot's confirm cap -- that replays the
+  ## switch the re-assertion left to it instead of leaving it again. Its
+  ## starts are queued (``--no-block``), never waited for: a unit ordered
+  ## after this one would wait for it, and the confirm polls the units'
+  ## health whatever their start jobs do.
+  afterRecovery(recoverMarker(stateDir, atBoot, driver, bootConfirm), stateDir)
 
 proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## After a recovery: every unit the current generation started is
@@ -624,11 +655,12 @@ proc createLateRecipientKey*(stateDir: string): seq[string] =
     defaultSite(stateDir))
 
 proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
-                       driver: CollisionDriver = nil): ReassertReport =
+                       driver: CollisionDriver = nil;
+                       bootConfirm = false): ReassertReport =
   ## Recover, check, report. Never raises: every failure is a finding.
   result.status = "ok"
   try:
-    let rec = recoverPendingSwitch(stateDir, atBoot, driver)
+    let rec = recoverPendingSwitch(stateDir, atBoot, driver, bootConfirm)
     result.recovery = rec.lines
     if rec.deferred:
       # Mid-switch: the live state is the switch's, not drift. Report and
