@@ -25,7 +25,11 @@
 ## ``start-hold-removes-directory``, ``stale-start-holds-kept``,
 ## ``activator-own-file-only`` (a profile drop-in's ``Service=`` or
 ## ``Unit=`` not read: reprobuild-pm issue
-## 2026-11-15-floor-activator-check-ignores-a-profile-drop-in-that-sets-service).
+## 2026-11-15-floor-activator-check-ignores-a-profile-drop-in-that-sets-service),
+## ``activator-timer-resources-skipped`` and ``reach-timer-resources-skipped``
+## (a ``systemd.systemTimer`` resource not judged as an activator, or not a
+## root of the reach check: issue
+## 2026-11-15-floor-activator-checks-skip-a-systemd-system-timer-resource).
 ##
 ## Mocks: as in ``t_addon_floor_round4``, ``systemctl show`` text written
 ## out here and stubs for the accounts and the manager's limits, because the
@@ -259,6 +263,68 @@ suite "round 5, finding 2: sockets and other activators":
     check "'a.socket' activates a floored service" in refused(plain &
       rawUnit("a.socket", "[Socket]\nAccept=yes\n" &
         "ListenStream=/run/a/a.sock\nListenFIFO=/etc/a.fifo\n"))
+
+  test "a systemd.systemTimer resource is a timer unit of the profile":
+    # A timer may be declared as a systemd.systemUnit or as a
+    # systemd.systemTimer resource; both install a timer of the profile
+    # that starts its Unit=, so both are activators (reprobuild-pm issue
+    # 2026-11-15-floor-activator-checks-skip-a-systemd-system-timer-
+    # resource).
+    proc timerRes(name, content: string): string =
+      "systemd.systemTimer {\n  name = \"" & name & "\"\n  content = \"" &
+        content & "\"\n}\n"
+    let reach = "[Unit]\nWants=reboot.target\n\n[Timer]\nOnCalendar=daily\n"
+    # Its [Unit] is judged as an activator's (a route to a system-state
+    # unit), as it is for a timer declared as a systemd.systemUnit.
+    let asUnit = refused(plain & rawUnit("t.timer", reach & "Unit=a.service\n"))
+    check "activates a floored service" in asUnit
+    check "starts reboot.target" in asUnit
+    check "systemd.systemTimer 't.timer' activates a floored service: " &
+      "[Unit] Wants=reboot.target starts reboot.target" in refused(plain &
+      timerRes("t.timer", reach & "Unit=a.service\n"))
+    # By its namesake, and through a profile drop-in's Unit=.
+    check "systemd.systemTimer 'a.timer' activates a floored service" in
+      refused(plain & timerRes("a.timer", reach))
+    check "systemd.systemTimer 't.timer' activates a floored service" in refused(plain &
+      timerRes("t.timer", reach) &
+      dropInStanza("t.timer", "[Timer]\nUnit=a.service\n"))
+    # Its own settings are judged as an activator's.
+    check "'t.timer' activates a floored service" in refused(plain &
+      timerRes("t.timer", "[Timer]\nOnCalendar=daily\nUnit=a.service\n" &
+        "RandomizedDelaySec=1h\nOnClockChange=yes\nUnknownTimerKey=1\n"))
+    # The reach check takes it as a root too: Conflicts= may name only the
+    # profile's own units (§13 decision 55), which the activator rules do
+    # not judge.
+    check "systemd.systemTimer 't.timer': " in refused(plain &
+      timerRes("t.timer", "[Unit]\nConflicts=nope.service\n\n[Timer]\n" &
+        "OnCalendar=daily\nUnit=a.service\n"))
+    check refused(plain & timerRes("t.timer", "[Unit]\nConflicts=nope.service\n\n" &
+      "[Timer]\nOnCalendar=daily\nUnit=other.service\n")) == ""
+    # The boot-ordering walk reads it as a unit of the profile (not as a
+    # systemd.systemUnit, whose fields it does not have: a FieldDefect).
+    # With default dependencies a timer is ordered before timers.target,
+    # which the boot re-assertion waits for, so a timer ordered after the
+    # floored service -- by its own After= or the service's Before= -- is
+    # an ordering cycle, refused for either kind of declaration alike.
+    let after = "[Unit]\nAfter=a.service\n\n[Timer]\nOnCalendar=daily\n" &
+      "Unit=other.service\n"
+    let cycle = "(a.service -> t.timer -> timers.target)"
+    check cycle in refused(plain & timerRes("t.timer", after))
+    check cycle in refused(plain & rawUnit("t.timer", after))
+    let before = "systemd.systemUnit {\n  name = \"a.service\"\n  content = \"[Unit]\n" &
+      "Description=x\nBefore=t.timer\n\n[Service]\n" & svc & "\n[Install]\n" &
+      "WantedBy=multi-user.target\n\"\n}\n"
+    let plainTimer = "[Timer]\nOnCalendar=daily\nUnit=other.service\n"
+    check cycle in refused(before & timerRes("t.timer", plainTimer))
+    check cycle in refused(before & rawUnit("t.timer", plainTimer))
+    # Without default dependencies there is no cycle, and it is accepted.
+    check refused(before & timerRes("t.timer",
+      "[Unit]\nDefaultDependencies=no\n\n" & plainTimer)) == ""
+    # Controls: the same timers starting nothing floored, and a plain timer
+    # of the floored service, are accepted.
+    check refused(plain & timerRes("t.timer", reach & "Unit=other.service\n")) == ""
+    check refused(plain & timerRes("t.timer",
+      "[Timer]\nOnCalendar=daily\nUnit=a.service\n")) == ""
 
   test "no command line in a drop-in onto any socket, timer or path unit":
     check "carries a command line" in refused(rawUnit("b.socket",

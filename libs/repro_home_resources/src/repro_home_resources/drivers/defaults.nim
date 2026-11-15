@@ -37,6 +37,7 @@ import std/[osproc, strutils]
 
 import ./../errors
 import ./../manifest_record
+import ./../test_home_fence
 import ./../types
 
 # ---------------------------------------------------------------------------
@@ -209,6 +210,7 @@ proc applyUserDefault*(domain, key, valueLiteral: string;
   ## `valueChanged = true`. The recorded payload bytes are the
   ## structurally-canonicalized value so drift comparison is stable.
   when defined(macosx):
+    enforceTestUserDefaultFence(domain, "macos.userDefault apply")
     # The recorded payload, observed bytes, and lifecycle digest are
     # all over the STRUCTURALLY-CANONICALIZED value (see
     # `canonicalizeDefaultsValue`, `observeUserDefault`, and the
@@ -243,6 +245,7 @@ proc destroyUserDefault*(domain, key, restartTarget: string) =
   ## `defaults delete <domain> <key>`, then `killall <restartTarget>`
   ## so the affected daemon drops the now-removed value.
   when defined(macosx):
+    enforceTestUserDefaultFence(domain, "macos.userDefault destroy")
     # Operator-controlled arguments are `quoteShell`'d (layer 2).
     discard execCmd(
       "defaults delete " & quoteShell(domain) & " " & quoteShell(key))

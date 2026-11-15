@@ -57,12 +57,12 @@ libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim	nim	19
 libs/repro_addon/tests/t_addon_floor_round10.nim	nim	33
 libs/repro_addon/tests/t_addon_floor_round11.nim	nim	16
-libs/repro_addon/tests/t_addon_floor_round12.nim	nim	47
+libs/repro_addon/tests/t_addon_floor_round12.nim	nim	48
 libs/repro_addon/tests/t_addon_floor_round13.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round14.nim	nim	13
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
-libs/repro_addon/tests/t_addon_floor_round5.nim	nim	16
+libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
 libs/repro_addon/tests/t_addon_floor_round6.nim	nim	23
 libs/repro_addon/tests/t_addon_floor_round7.nim	nim	38
 libs/repro_addon/tests/t_addon_floor_round8.nim	nim	9
@@ -557,11 +557,12 @@ libs/repro_home_resources/tests/t_concern_classification.nim	nim	5
 libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
 libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
-libs/repro_home_resources/tests/t_registry_root_override.nim	nim	18
+libs/repro_home_resources/tests/t_registry_root_override.nim	nim	21
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	176
 libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
+libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim	nim	9
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
@@ -636,6 +637,7 @@ libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	5
 libs/repro_local_store/tests/t_store_concurrent_first_open_waits.nim	nim	2
 libs/repro_local_store/tests/t_store_copy.nim	nim	22
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
+libs/repro_local_store/tests/t_store_publish_is_durable_and_recover_verifies_prefix_contents.nim	nim	9
 libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.nim	nim	12
 libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim	nim	1
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
@@ -743,7 +745,7 @@ libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim
 libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
 libs/repro_profile_compile/tests/t_addon_profile_collision_and_managed_prefixes.nim	nim	6
-libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	9
+libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	10
 libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim	nim	13
 libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
@@ -2132,7 +2134,7 @@ tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1
 tests/integration/t_orphaned_lock_draft_is_swept_never_published.nim	nim	4
 tests/integration/t_output_cleanup_executor.nim	nim	16
 tests/integration/t_own_flake_ref_survives_an_uninitialised_submodule.nim	nim	2
-tests/integration/t_package_build_openssl_selection.nim	nim	6
+tests/integration/t_package_build_openssl_selection.nim	nim	9
 tests/integration/t_path_tool_rewrite_detected.nim	nim	11
 tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1
@@ -2214,6 +2216,7 @@ tests/integration/t_provider_library_c_abi_memory_ownership.nim	nim	3
 tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
+tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
 tests/integration/t_provision_roundtrip.nim	nim	8

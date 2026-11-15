@@ -494,13 +494,23 @@ proc publish(d: var Store; plan: PlannedPrefix; rootId: string;
     if readFile(stage / ReceiptFileName) != plan.receiptBytes:
       fail("copied receipt differs from the source receipt: " & where)
     let target = d.absolutePrefixPath(where)
+    # Durability, as realisation does it (Local-Content-Addressed-Store
+    # §"Write Protocol" steps 4a and 5a): the copied tree is flushed before
+    # the rename that publishes it, and the receiving directory after, both
+    # before the index transaction commits.
+    syncTreeDurably(stage)
+    let packageDirExisted = dirExists(target.parentDir)
     createDir(target.parentDir)
+    if not packageDirExisted:
+      syncDirectoryDurably(target.parentDir.parentDir)
     var won = not (dirExists(target) or symlinkExists(target))
     if won:
       try: moveDir(stage, target)
       except OSError:
         if not dirExists(target): raise
         won = false
+      if won:
+        syncDirectoryDurably(target.parentDir)
     if not won:
       # Lost the race. Accept the winner only if it is this prefix; it is
       # indexed (or about to be) by its own writer, and held here.

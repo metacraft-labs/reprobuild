@@ -43,6 +43,7 @@ import repro_home_apply/realize
 import repro_home_apply/package_catalog
 import repro_home_generations
 import repro_local_store
+import repro_tool_profiles
 
 let
   FixtureRoot = "build/test-tmp/t-preview-chain" / testCaseScratchSlug()
@@ -290,19 +291,17 @@ suite "M0/GM4b — previewPackageResolutions resolves like the apply":
     writeFile(extendedPath(appDir / "14.1.1" / "rg.exe"), "stub")
     check dirExists(extendedPath(appDir))
 
-    uninstallScoopRecord("ripgrep")
+    uninstallScoopApp("ripgrep", getEnv("REPRO_TEST_SCOOP_OVERRIDE"))
     check not dirExists(extendedPath(appDir))
 
-    # Verify heldByNonProfileRoot distinguishes profile roots from session/workspace roots
+    # Verify scoopAppHolders distinguishes profile roots from session/workspace roots
     let storeDir = FixtureRoot / "fake-store"
     resetDir(storeDir)
     var store = openStore(storeDir)
     defer: store.close()
     var pid: PrefixIdBytes
-    var dig: Digest256
     for i in 0 ..< 32:
       pid[i] = byte(i + 1)
-      dig[i] = byte(i + 1)
     discard store.insertPrefixOrIgnore(PrefixRow(
       prefixId: pid,
       packageName: "scoop.main.ripgrep",
@@ -313,9 +312,9 @@ suite "M0/GM4b — previewPackageResolutions resolves like the apply":
       createdAtUnix: 1000))
     store.registerRoot("gen-1", rkProfile)
     store.attachPrefixToRoot("gen-1", pid)
-    check heldByNonProfileRoot(store, dig).len == 0
+    check scoopAppHolders(store, "ripgrep").len == 0
     store.registerRoot("dev-shell-1", rkSession)
     store.attachPrefixToRoot("dev-shell-1", pid)
-    let holders = heldByNonProfileRoot(store, dig)
+    let holders = scoopAppHolders(store, "ripgrep")
     check holders.len == 1
     check holders[0] == "dev-shell-1 (session)"
