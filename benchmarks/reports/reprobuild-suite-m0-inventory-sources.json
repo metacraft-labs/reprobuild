@@ -45851,7 +45851,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_macho_runtime_audit.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 18,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
