@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2810,
+    "nimTestBinaries": 2812,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 765,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2856
+    "testEntries": 2858
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1619,7 +1619,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1550,
+      "integration": 1552,
       "platform/destructive": 179,
       "pure unit": 765,
       "unclassified": 339
@@ -1836,9 +1836,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2810,
+    "nimTestBinaryCount": 2812,
     "pythonTestFileCount": 46,
-    "testEntryCount": 2856
+    "testEntryCount": 2858
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2020,7 +2020,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 276,
+          "line": 301,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-c"
@@ -2036,7 +2036,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 392,
+          "line": 417,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -2052,7 +2052,23 @@
             "source",
             "tempRoot"
           ],
-          "line": 455,
+          "line": 480,
+          "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
+          "patterns": [
+            "nim-check"
+          ],
+          "snippet": "execCmdEx(\"nim check --hints:off --warnings:off --path:\" &"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "probe",
+            "source",
+            "tempRoot"
+          ],
+          "line": 613,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -17413,8 +17429,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -18988,8 +19004,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 8,
-      "staticCaseCount": 16,
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26889,6 +26905,26 @@
       "source": "libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_elf_relocation_points_programs_at_the_archive_loader",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_elf_relocation_points_programs_at_the_archive_loader.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37588,6 +37624,23 @@
       "source": "tests/integration/t_a_pushed_sibling_is_still_recorded.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_read_outside_the_logical_roots_stays_local",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_read_outside_the_logical_roots_stays_local.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

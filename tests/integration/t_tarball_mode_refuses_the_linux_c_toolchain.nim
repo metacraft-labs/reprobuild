@@ -77,6 +77,9 @@ suite "tarball mode refuses the Linux C toolchain":
       env["REPROBUILD_WORK_ROOT"] = root / "work"
       env["REPROBUILD_ACTION_CACHE_ROOT"] = root / "action-cache"
       env["REPRO_LOCAL_STORE"] = root / "store"
+      # `repro build --tool-provisioning=tarball` realizes tools into the
+      # user's tool store under the store root; this test gets its own.
+      env["REPRO_STORE_ROOT"] = root / "store-root"
       env["REPRO_CACHE_DISABLE"] = "1"
       env["REPROBUILD_NO_RUNQUOTA"] = "1"
       env["REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS"] = "7200"

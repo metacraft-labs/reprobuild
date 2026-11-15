@@ -487,9 +487,54 @@ suite "envelope lanes -- a nixPackage record's version begins at v32":
     check toolUseRealizationDigest(versioned.toolUses[0]) !=
       toolUseRealizationDigest(unversioned.toolUses[0])
 
-  test "v32 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v32, so this matrix is extended
-    check interfaceEnvelopeVersion() == 32'u16
+suite "envelope lanes -- a tarball record's ELF relocation begins at v33":
+
+  proc withElfRelocation(pi: ProjectInterface): ProjectInterface =
+    ## `pi` with the five ELF relocation fields declared on its tarball row,
+    ## which is inside the fingerprint projection (a contribution record).
+    result = pi
+    var row = addr result.provisioningContributions[0].tarballProvisioning[0]
+    row.detail.elfInterpreter = "sysroot/lib64/ld-linux-x86-64.so.2"
+    row.detail.elfRunpath = @["sysroot/lib64"]
+    row.detail.elfPatchDirs = @["bin", "libexec"]
+    row.detail.gccLinkSpecs = "lib/gcc/x86_64-linux-gnu/15.3.0/specs"
+    row.detail.gccSpecDefaults = @["cc1:-fstack-protector-strong"]
+
+  test "v33 carries the relocation; v21..v32 decode it empty with every " &
+      "other detail field intact":
+    let pi = withElfRelocation(bothLanesInterface())
+    for v in 21'u16 .. 32'u16:
+      checkpoint "v" & $v
+      let detail = tarballOf(atVersion(pi, v)).detail
+      check detail.elfInterpreter == ""
+      check detail.elfRunpath.len == 0
+      check detail.elfPatchDirs.len == 0
+      check detail.gccLinkSpecs == ""
+      check detail.gccSpecDefaults.len == 0
+      check detail.version == DetailVersion
+    for v in [33'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let detail = tarballOf(atVersion(pi, v)).detail
+      check detail.elfInterpreter == "sysroot/lib64/ld-linux-x86-64.so.2"
+      check detail.elfRunpath == @["sysroot/lib64"]
+      check detail.elfPatchDirs == @["bin", "libexec"]
+      check detail.gccLinkSpecs == "lib/gcc/x86_64-linux-gnu/15.3.0/specs"
+      check detail.gccSpecDefaults == @["cc1:-fstack-protector-strong"]
+      check detail.version == DetailVersion
+      check tarballOf(atVersion(pi, v)).closureManifest == ClosureManifest
+
+  test "a record that declares no relocation keeps its v32 fingerprint":
+    let plain = bothLanesInterface()
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 32'u16)
+    # The control: a declared relocation changes the realized bytes, so it
+    # moves the fingerprint.
+    let relocated = withElfRelocation(plain)
+    check interfaceFingerprint(relocated) != interfaceFingerprint(plain)
+
+  test "v33 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v33, so this matrix is extended
+    check interfaceEnvelopeVersion() == 33'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

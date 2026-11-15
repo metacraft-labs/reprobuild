@@ -169,6 +169,20 @@ suite "m54_verified_tarball_profile":
         if savedCacheDisable[0]: putEnv("REPRO_CACHE_DISABLE", savedCacheDisable[1])
         else: delEnv("REPRO_CACHE_DISABLE")
 
+      # `repro build --tool-provisioning=tarball` realizes tools into the
+      # user's tool store under the store root, shared by every project, so
+      # this test gets a store of its own rather than writing into the
+      # developer's. The corrupt-mirror project below gets ANOTHER one, for
+      # the reason given for the binary cache above: the shared store already
+      # holds the verified prefix for the sha256 it declares, and would serve
+      # it with no download.
+      let savedStoreRoot = (existsEnv("REPRO_STORE_ROOT"),
+        getEnv("REPRO_STORE_ROOT"))
+      putEnv("REPRO_STORE_ROOT", tempRoot / "store")
+      defer:
+        if savedStoreRoot[0]: putEnv("REPRO_STORE_ROOT", savedStoreRoot[1])
+        else: delEnv("REPRO_STORE_ROOT")
+
       let reproBin = reproBinary()
 
       var daemon = ensureRunQuotaDaemon(repoRoot)
@@ -250,8 +264,10 @@ suite "m54_verified_tarball_profile":
       let corruptRoot = tempRoot / "corrupt-project"
       writeProject(corruptRoot, "file://" & (tempRoot / "missing-corrupt.tar.gz"),
         "file://" & corruptArchive, archive.sha256)
+      putEnv("REPRO_STORE_ROOT", tempRoot / "corrupt-store")
       let corrupt = requireFailure(shellCommand([reproBin, "build", corruptRoot,
         "--daemon=off", "--tool-provisioning=tarball"]), repoRoot)
+      putEnv("REPRO_STORE_ROOT", tempRoot / "store")
       check corrupt.contains("sha256 mismatch")
       check not fileExists(corruptRoot / "build" / "tarball-output.txt")
 

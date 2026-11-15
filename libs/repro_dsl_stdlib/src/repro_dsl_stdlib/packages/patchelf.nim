@@ -46,11 +46,36 @@ type
     output*: string
     file*: string
 
+const
+  PatchelfLinuxX64Sha256 =
+    "ce84f2447fb7a8679e58bc54a20dc2b01b37b5802e12c57eece772a6f14bf3f0"
+    ## SHA-256 of the upstream release asset, measured 2026-11-14 over the
+    ## bytes GitHub Releases served for this URL.
+  PatchelfLinuxX64LockIdentity =
+    "tarball:patchelf@0.18.0:sha256:" & PatchelfLinuxX64Sha256
+
 package patchelf:
   provisioning:
     nixPackage "nixpkgs#patchelf", executablePath = "bin/patchelf",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Linux x86_64: upstream's release build, a statically linked program
+    # (no ``PT_INTERP``, no dynamic section; measured on the bytes this
+    # digest names), so it runs on every Linux host, NixOS included, with
+    # nothing else realized. Tarball mode realizes it for the ELF relocation
+    # of a dynamically linked toolchain archive (the ``gcc`` package's Linux
+    # arm), where it is a provisioning dependency edge of that archive's
+    # realization (Dependency-Provisioning-In-Build-Graph.md §4.2).
+    tarball url = "https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0-x86_64.tar.gz",
+      sha256 = PatchelfLinuxX64Sha256,
+      archiveType = "tar.gz",
+      stripComponents = 0,
+      executablePath = "bin/patchelf",
+      packageId = "patchelf@0.18.0",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = PatchelfLinuxX64LockIdentity,
+      version = "0.18.0"
 
   executable patchelfBin:
     cli:

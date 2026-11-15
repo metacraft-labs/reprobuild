@@ -26,9 +26,10 @@ proc checkProfileNestedCounts*(): bool =
     doAssert valid.probes.len == 1
     doAssert valid.probes[0].spec.args.len == 1
     doAssert valid.libraryPathList.len == 1
+    doAssert valid.exportedExecutables.len == 1
     checkCountMutations(encoded, proc(data: seq[byte]) =
       var pos = 0
-      discard readProfile(data, pos, ArtifactVersion), 9)
+      discard readProfile(data, pos, ArtifactVersion), 10)
   block:
     var identity: ToolActionIdentity
     populateCountFixture(identity)
@@ -41,7 +42,8 @@ proc checkProfileNestedCounts*(): bool =
     doAssert valid.probes.len == 1
     doAssert valid.probes[0].spec.args.len == 1
     doAssert valid.libraryPathList.len == 1
+    doAssert valid.exportedExecutables.len == 1
     checkCountMutations(encoded, proc(data: seq[byte]) =
       var pos = 0
-      discard readActionIdentity(data, pos, ArtifactVersion), 9)
+      discard readActionIdentity(data, pos, ArtifactVersion), 10)
   true

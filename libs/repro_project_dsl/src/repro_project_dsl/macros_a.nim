@@ -969,6 +969,25 @@ proc parseTarballArchiveDetail(node: NimNode;
   of "bundleid": detail.bundleId = exprCode(value)
   of "teamid": detail.teamId = exprCode(value)
   of "installerapp": detail.installerApp = exprCode(value)
+  of "elfinterpreter", "elfrunpath", "elfpatchdir", "gcclinkspecs":
+    # Prefix-relative paths, like ``extraExecutable``: realization resolves
+    # each inside the realized prefix and must not be pointed outside it.
+    let text = litText(value)
+    if text.len > 0 and text.unsafeRelativePath:
+      error("tarball " & identText(node[0]) & " must be relative to the " &
+        "realized prefix", node)
+    case name
+    of "elfinterpreter": detail.elfInterpreter = exprCode(value)
+    of "elfrunpath": detail.elfRunpath.add(exprCode(value))
+    of "elfpatchdir": detail.elfPatchDirs.add(exprCode(value))
+    else: detail.gccLinkSpecs = exprCode(value)
+  of "gccspecdefault":
+    # ``<spec>:<text>``, not a path: GCC spec text appended to one spec of
+    # the written specs file. A literal must name its spec.
+    let text = litText(value)
+    if text.len > 0 and (':' notin text or text.split(':', 1)[0].strip().len == 0):
+      error("tarball gccSpecDefault must be `<spec>:<text>`", node)
+    detail.gccSpecDefaults.add(exprCode(value))
   else:
     return false
   true
@@ -2477,7 +2496,12 @@ proc tarballArchiveDetailLiteral*(detail: TarballArchiveDetail): string =
     ", appBundle: " & codeOrEmpty(detail.appBundle) &
     ", bundleId: " & codeOrEmpty(detail.bundleId) &
     ", teamId: " & codeOrEmpty(detail.teamId) &
-    ", installerApp: " & codeOrEmpty(detail.installerApp) & ")"
+    ", installerApp: " & codeOrEmpty(detail.installerApp) &
+    ", elfInterpreter: " & codeOrEmpty(detail.elfInterpreter) &
+    ", elfRunpath: " & codeListLiteral(detail.elfRunpath) &
+    ", elfPatchDirs: " & codeListLiteral(detail.elfPatchDirs) &
+    ", gccLinkSpecs: " & codeOrEmpty(detail.gccLinkSpecs) &
+    ", gccSpecDefaults: " & codeListLiteral(detail.gccSpecDefaults) & ")"
 
 proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
   ## The ``TarballProvisioningDef(...)`` literal for a macro-time record.

@@ -4,13 +4,15 @@
 ## paths on one host.
 ##
 ## Not a test (no `t_` prefix), so the suite generator never compiles it on
-## its own. The three tests that import it are
+## its own. The tests that import it are
 ## `t_two_checkouts_share_a_static_library_edge`,
-## `t_two_projects_share_a_library_built_with_the_same_flags` and
-## `t_library_outputs_are_path_free_with_debug_info`.
+## `t_two_projects_share_a_library_built_with_the_same_flags`,
+## `t_library_outputs_are_path_free_with_debug_info` and
+## `t_a_read_outside_the_logical_roots_stays_local`.
 ##
-## Everything here is real: the built `repro`, the C compiler and archiver on
-## `PATH` (the dev shell's), real Git checkouts in fresh temporary
+## Everything here is real: the built `repro`, the C compiler and archiver
+## (the dev shell's on `PATH`, or the toolchain the engine realizes into the
+## store root under `--tool-provisioning=tarball`), real Git checkouts in fresh temporary
 ## directories, the engine's monitor and action cache, and the build report
 ## the engine writes with `--write-report`. Nothing is mocked. The evidence a
 ## test asserts on is the engine's own: each action's `launched` flag and
@@ -40,6 +42,11 @@ type
     cacheDecision*: string
     cacheMissReason*: string
     cachePublishSkipReason*: string
+    dependencyPolicyKind*: string
+    monitorReads*: seq[string]
+      ## The paths the monitor observed the action read (the report's
+      ## `evidence.monitorReads`): empty for an edge whose evidence is a
+      ## depfile, or one the monitor never entered.
     trace*: seq[TraceEvent]
 
   BuildRun* = object
@@ -57,9 +64,22 @@ type
     reportCount: int
 
 proc newSharedHost*(prefix: string): SharedHost =
+  ## A fresh action cache and store in a new temporary directory.
+  ##
+  ## The store is where `--tool-provisioning=tarball` realizes the C
+  ## toolchain (`<store root>/tool-store`), which costs a 102 MB download and
+  ## 240 MB of extraction per realized view. Like the catalog conformance sweep
+  ## (`t_stdlib_catalog_tarball_arms_realize`), a test run pays that once per
+  ## pin rather than once per case when `REPRO_CONFORMANCE_STORE` names a
+  ## directory that survives between runs; the store is content-addressed and
+  ## each case still gets its own action cache, so nothing a case asserts on
+  ## carries over. Without the variable every case uses a store of its own.
   result.scratch = createTempDir(prefix, "")
   result.actionCacheRoot = result.scratch / "action-cache"
-  result.storeRoot = result.scratch / "store"
+  let persistentStore = getEnv("REPRO_CONFORMANCE_STORE")
+  result.storeRoot =
+    if persistentStore.len > 0: absolutePath(persistentStore)
+    else: result.scratch / "store"
   createDir(result.actionCacheRoot)
   createDir(result.storeRoot)
 
@@ -101,20 +121,25 @@ proc parseReport(path: string): OrderedTable[string, EdgeOutcome] =
       launched: action{"launched"}.getBool(),
       cacheDecision: action{"cacheDecision"}.getStr(),
       cacheMissReason: action{"cacheMissReason"}.getStr(),
-      cachePublishSkipReason: action{"cachePublishSkipReason"}.getStr())
+      cachePublishSkipReason: action{"cachePublishSkipReason"}.getStr(),
+      dependencyPolicyKind: action{"dependencyPolicyKind"}.getStr())
+    for path in action{"evidence"}{"monitorReads"}.getElems():
+      result[id].monitorReads.add(path.getStr())
   for entry in report{"trace"}.getElems():
     let id = entry{"actionId"}.getStr()
     if id in result:
       result[id].trace.add(TraceEvent(event: entry{"event"}.getStr(),
         detail: entry{"detail"}.getStr()))
 
-proc build*(host: var SharedHost; project: string; portable: bool):
-    BuildRun =
+proc build*(host: var SharedHost; project: string; portable: bool;
+            provisioning = "path"): BuildRun =
   ## `repro build` of `project` against the host's shared action cache and
   ## store, with the engine's cache evidence and trace collected and written
   ## to a report. `portable` turns the portable (path-independent) identity
   ## on, which is what lets a record made in one checkout be found from
-  ## another.
+  ## another. `provisioning` is the `--tool-provisioning` mode: `path` takes
+  ## the C toolchain from `PATH`, `tarball` has the engine realize its Linux
+  ## C toolchain into the store root.
   inc host.reportCount
   result.reportPath = host.scratch / ("report-" & $host.reportCount & ".json")
   let env = newStringTable(modeCaseSensitive)
@@ -137,7 +162,7 @@ proc build*(host: var SharedHost; project: string; portable: bool):
   elif env.hasKey("REPRO_PORTABLE_CACHE"):
     env.del("REPRO_PORTABLE_CACHE")
   let args = @["build", "--daemon=off", "--no-runquota",
-    "--tool-provisioning=path",
+    "--tool-provisioning=" & provisioning,
     "--action-cache-root=" & host.actionCacheRoot,
     "--measure=trace,cache-evidence", "--log=actions",
     "--write-report=" & result.reportPath]
