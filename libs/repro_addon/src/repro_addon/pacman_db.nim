@@ -63,6 +63,45 @@ proc pacmanFilesPaths*(filesEntry: string): seq[string] =
     while q.len > 1 and q[^1] == '/': q.setLen(q.len - 1)
     if q.len > 0 and q[0] != '/': result.add("/" & q)
 
+type
+  PacmanBackupFile* = object
+    ## One line of a ``files`` entry's ``%BACKUP%`` section: a backup file
+    ## (pacman's counterpart of a dpkg conffile) and the MD5 the local
+    ## database holds for it, which is the packaged version's: libalpm
+    ## records the new package's hash whether it extracted the file or kept
+    ## a locally changed one (and wrote ``<path>.pacnew``). Spec
+    ## ReproOS-Add-On-Mode §4.3.1; https://man.archlinux.org/man/alpm-db.7
+    ## and https://wiki.archlinux.org/title/Pacman/Pacnew_and_Pacsave.
+    path*: string   ## ``/``-rooted, as ``pacmanFilesPaths`` gives it
+    md5*: string    ## lower-case hex, 32 digits
+
+proc isMd5Hex(s: string): bool =
+  s.len == 32 and s.allCharsInSet({'0'..'9', 'a'..'f'})
+
+proc pacmanBackupFiles*(filesEntry: string): seq[PacmanBackupFile] =
+  ## The ``%BACKUP%`` section of a ``files`` entry: ``<path><TAB><md5>``
+  ## per line, the path relative to pacman's root. A line without a tab, a
+  ## path that is already absolute, or a digest that is not 32 lower-case
+  ## hex digits is not pacman's and raises ``ValueError``: a reader that
+  ## decides whether a file may be taken over must not read a damaged
+  ## entry as "not a backup file".
+  for raw in pacmanSections(filesEntry).getOrDefault("BACKUP"):
+    let tab = raw.rfind('\t')
+    if tab <= 0:
+      raise newException(ValueError, "a %BACKUP% line without a digest: " &
+        raw)
+    let path = raw[0 ..< tab]
+    let md5 = raw[tab + 1 .. ^1].strip().toLowerAscii()
+    if path[0] == '/' or not isMd5Hex(md5):
+      raise newException(ValueError, "a %BACKUP% line pacman did not " &
+        "write: " & raw)
+    result.add(PacmanBackupFile(path: "/" & path, md5: md5))
+
+proc pacmanFilesSection*(filesEntry: string): seq[string] =
+  ## The ``%FILES%`` section's lines exactly as the entry holds them (the
+  ## base identity digests them, spec §4.3.1).
+  pacmanSections(filesEntry).getOrDefault("FILES")
+
 proc pacmanDbPresent*(root = "/"): bool =
   ## ``root`` carries a pacman local database (its version file exists).
   fileExists(root / PacmanLocalDir / PacmanDbVersionFile)

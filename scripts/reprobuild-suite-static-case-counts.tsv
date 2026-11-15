@@ -36,6 +36,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_arch_base.nim	nim	30
+libs/repro_addon/tests/t_addon_arch_takeover.nim	nim	25
 libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	98
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
@@ -735,7 +736,7 @@ libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	138
 libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2
 libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim	7
 libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
-libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim	nim	10
+libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim	nim	11
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
 libs/repro_profile_compile/tests/t_addon_profile_collision_and_managed_prefixes.nim	nim	6
 libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	9
@@ -1303,8 +1304,11 @@ tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
 tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_apt_closure_refused.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_bootstrap_uninstall_byte_identity.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_collision_matrix.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_preflight_is_zero_write.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_removal_respects_ledger.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_store_placement_by_root_fs.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_takeover_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_uninstall_refuses_pending_switch.nim	nim	1
 tests/e2e/addon/t_e2e_arch_testbed_is_pinned.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	0

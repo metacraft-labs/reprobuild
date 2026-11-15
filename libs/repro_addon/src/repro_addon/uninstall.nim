@@ -61,6 +61,7 @@ import ./static_tree
 import ./store_custody
 import ./store_root
 import ./switch
+import ./takeover
 
 
 type
@@ -156,6 +157,41 @@ proc removeOwned(e: LedgerEntry; r: var UninstallResult;
       # planted on the path since it was observed (threat model G29).
       discard removeLeafNoFollow(e.path)
       r.removed.add(e.path)
+    r.undone.incl(entryKey(e))
+  except CatchableError as ex:
+    r.errors.add(e.path & ": " & ex.msg)
+
+proc undoTakeOver(e: LedgerEntry; r: var UninstallResult;
+                  driver: CollisionDriver) =
+  ## Step 3 on Arch (spec §6.4): a backup file the add-on took over goes
+  ## back by ``takeover.nim``'s rule -- the recorded bytes if their MD5 is
+  ## the one pacman's ``%BACKUP%`` now holds, else the ``.pacnew`` (then
+  ## deleted), else the path is refused and keeps its state (reported as
+  ## ``EAddOnPackageOwned`` with the three digests, so the uninstall stays
+  ## incomplete and a second one can finish once the operator resolves
+  ## it). When the package itself was removed, the add-on's ``.pacsave``
+  ## is deleted if it holds the ledger's bytes, and the path is never
+  ## re-created. An add-on copy that changed since it was written is
+  ## drift, left in place, as for any file.
+  if driver == nil:
+    r.drift.add(e.path & ": left in place: the package database could not " &
+      "be read, so which bytes a taken-over file goes back to is unknown")
+    return
+  let d = observeDrift(e)
+  if d.len > 0 and not d.startsWith("missing"):
+    r.drift.add(e.path & ": " & d)
+    return
+  var u: TakeOverUndo
+  try: u = decideTakeOverUndo(e, driver)
+  except CatchableError as ex:
+    r.drift.add(e.path & ": left in place: " & ex.msg)
+    return
+  if u.kind == tuRefused:
+    r.drift.add(e.path & ": " & refusal(e, u).msg)
+    return
+  try:
+    let line = applyTakeOverUndo(e, u)
+    r.removed.add(e.path & " (" & line & ")")
     r.undone.incl(entryKey(e))
   except CatchableError as ex:
     r.errors.add(e.path & ": " & ex.msg)
@@ -935,8 +971,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   for di in byClass[lcDropIn]:
     removeOwned(di, result, driver)
 
-  # 3. Diversions: the profile's file at the path, then the diversion.
+  # 3. Diversions: the profile's file at the path, then the diversion. On
+  #    Arch, where there are none, the backup files the add-on took over
+  #    go back to the packaged bytes pacman's database names (spec §6.4).
   var handled = initHashSet[string]()
+  for f in byClass[lcEtcFile]:
+    if isTakeOver(f):
+      undoTakeOver(f, result, driver)
+      handled.incl(f.path)
   when not mutated("uninstall-skips-diversion-removal"):
     for dv in byClass[lcDiversion]:
       for f in byClass[lcEtcFile]:

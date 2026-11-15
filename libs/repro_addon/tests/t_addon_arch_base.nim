@@ -112,8 +112,8 @@ suite "the pacman driver (ownership half)":
         collision: "divert", desiredContent: "y\n",
         desiredSha256: sha256Hex("y\n")), at("/etc/ssh/sshd_config"))
       check false
-    except AddonCollisionError as e:
-      check "has no diversions" in e.msg
+    except EAddOnOutOfScope as e:
+      check DivertUnavailableOnArch in e.msg
 
   test "an unowned file is created; a package unit is EAddOnUnitShadows":
     let (dec, _) = d.decide(DecisionInputs(address: "f", kind: tkFile,

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2785,
+    "nimTestBinaries": 2789,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 762,
+    "pureUnitTests": 761,
     "staticallyDetectedRuntimeCompilerFlowTests": 140,
-    "testEntries": 2829
+    "testEntries": 2833
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1616,9 +1616,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1534,
-      "platform/destructive": 177,
-      "pure unit": 762,
+      "integration": 1538,
+      "platform/destructive": 178,
+      "pure unit": 761,
       "unclassified": 334
     },
     "graphOwnedTestArtifacts": [
@@ -1833,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2785,
+    "nimTestBinaryCount": 2789,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2829
+    "testEntryCount": 2833
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2403,7 +2403,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 189,
+          "line": 211,
           "path": "libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -8777,6 +8777,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_arch_takeover",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_arch_takeover.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 25,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_carried_state_fails_closed",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -13278,8 +13296,8 @@
     },
     {
       "binary": "build/test-bin/t_deploy_agent_realises_add_on_for_its_host_base",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -13291,7 +13309,7 @@
         "repro_profile_compile"
       ],
       "owner": "libs/repro_cli_support",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_deploy_agent_realises_add_on_for_its_host_base.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 24,
@@ -21780,7 +21798,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -31551,7 +31569,6 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_addon",
         "repro_test_support"
       ],
       "owner": "tests/e2e",
@@ -32029,6 +32046,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_arch_addon_collision_matrix",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_arch_addon_collision_matrix.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_arch_addon_preflight_is_zero_write",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32046,6 +32081,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_arch_addon_removal_respects_ledger",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_arch_addon_removal_respects_ledger.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_arch_addon_store_placement_by_root_fs",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32057,6 +32109,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_arch_addon_store_placement_by_root_fs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_arch_addon_takeover_survives_package_upgrade",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_arch_addon_takeover_survives_package_upgrade.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

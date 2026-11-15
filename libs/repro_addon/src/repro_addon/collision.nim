@@ -18,8 +18,10 @@
 ## ``/var/lib/pacman/local/*/files`` ``%FILES%`` and unit provision the
 ## same way, and has no diversions; it plugs in behind the same
 ## ``CollisionDriver`` record, and ``detectCollisionDriver`` picks it from
-## the base's os-release. (Its ``%BACKUP%`` half -- backup files and
-## ``collision = takeOver`` -- is not in this module yet.)
+## the base's os-release. It also reads each package's ``%BACKUP%``
+## section: a backup file, with the MD5 pacman holds for its packaged
+## version, is what ``collision = "takeOver"`` may replace (the
+## ``backupTakeover`` class; ``takeover.nim`` restores it).
 ##
 ## **It runs twice.** Once at plan time, to decide and to fill the plan's
 ## collision report; and once more immediately before each write, as the
@@ -36,7 +38,9 @@
 ## Falsifying mutations (``mutations.nim``): ``observer-never-package-owned``
 ## answers "no package owns it" for every path, so the conffile and
 ## package-unit rows must go red; ``observer-checks-path-text-only``
-## skips the link check, so the symlink gate must go red.
+## skips the link check, so the symlink gate must go red;
+## ``observer-ignores-backup`` reads no ``%BACKUP%`` section, so a
+## ``takeOver`` of a backup file is refused as an ordinary package file.
 
 import std/[os, posix, sets, strutils, tables]
 
@@ -47,6 +51,7 @@ import repro_infra/profile
 
 import ./etc_write
 import ./fingerprint
+import ./md5_hex
 import ./host_exec
 import ./mutations
 import ./pacman_db
@@ -59,6 +64,10 @@ type
     viaUcf*: bool         ## the package manages it through ``ucf`` (Debian:
                           ## registered in ``/var/lib/ucf/registry``, in no
                           ## dpkg record), the fourth ownership record
+    backup*: bool         ## pacman: a backup file of the package (its
+                          ## ``%BACKUP%`` section lists the path)
+    backupMd5*: string    ## pacman: the MD5 ``%BACKUP%`` holds for it, the
+                          ## installed package's version; "" otherwise
 
   DiversionRecord* = object
     present*: bool
@@ -93,6 +102,11 @@ type
     supportsDiversions*: bool
       ## dpkg has ``dpkg-divert``; pacman does not, and the plan says so
       ## by name when the ``divert`` opt-in is asked for.
+    supportsTakeOver*: bool
+      ## pacman keeps a locally replaced backup file across upgrades (spec
+      ## §4.3.1), so ``collision = "takeOver"`` exists there; dpkg's
+      ## counterpart is the diversion, and a ``takeOver`` on a dpkg base is
+      ## refused by name.
 
   AddonCollisionError* = object of CatchableError
     ## A refusal of the decision table that has no typed add-on
@@ -113,13 +127,16 @@ type
     cvDropIn = "drop-in"      ## package unit, changed by a drop-in (opt-in)
     cvReplace = "replace"     ## package unit, shadowed by an /etc unit (opt-in)
     cvReconcile = "reconcile" ## differing unowned bytes replaced, preserved
+    cvTakeOver = "take-over"  ## a pacman backup file replaced by a copy, its
+                              ## packaged bytes preserved (opt-in, Arch)
 
   CollisionDecision* = object
     verdict*: CollisionVerdict
     observation*: string
       ## The package-ownership observation, as the ledger records it:
       ## ``absent``, ``unowned``, ``package:<pkg>``, ``conffile:<pkg>``,
-      ## ``unit:<fragmentPath>``, ``diversion:<pkg>``.
+      ## ``backup:<pkg>`` (a pacman backup file), ``unit:<fragmentPath>``,
+      ## ``diversion:<pkg>``.
     observedSha256*: string
       ## The target's content digest when it exists, else "".
     preWriteBytes*: string
@@ -429,6 +446,7 @@ proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
 type
   PacmanIndex = ref object
     owner: Table[string, string]     ## absolute path -> package
+    backup: Table[string, string]    ## absolute path -> packaged MD5
     loaded: bool
     stamp: string
 
@@ -461,6 +479,7 @@ proc loadPacmanIndex(root: string; idx: PacmanIndex) =
       dir & " lists no installed package; package ownership cannot be " &
       "observed")
   var owner = initTable[string, string]()
+  var backup = initTable[string, string]()
   for p in pkgs:
     if p.name.len == 0:
       raise newException(AddonCollisionError, "the pacman package " &
@@ -470,10 +489,20 @@ proc loadPacmanIndex(root: string; idx: PacmanIndex) =
     if not fileExists(p.dir / "files"):
       raise newException(AddonCollisionError, "the pacman package " &
         "database entry " & p.dir & " has no files list")
-    for path in pacmanFilesPaths(readFile(p.dir / "files")):
+    let entry = readFile(p.dir / "files")
+    for path in pacmanFilesPaths(entry):
       # Relative to pacman's root, which is ``root``.
       owner[if root == "/" or root.len == 0: path else: root & path] = p.name
+    var backups: seq[PacmanBackupFile]
+    try: backups = pacmanBackupFiles(entry)
+    except ValueError as e:
+      raise newException(AddonCollisionError, "the pacman package " &
+        "database entry " & p.dir & " has a damaged %BACKUP% section (" &
+        e.msg & "); whether a file is a backup file cannot be observed")
+    for b in backups:
+      backup[if root == "/" or root.len == 0: b.path else: root & b.path] = b.md5
   idx.owner = owner
+  idx.backup = backup
   idx.loaded = true
   idx.stamp = stamp
 
@@ -487,13 +516,21 @@ proc newPacmanDriver*(root = "/"; unitProvision: proc(unit: string):
   ## ``newDpkgDriver``.
   let idx = PacmanIndex()
   let rootDir = root
-  result = CollisionDriver(name: "pacman", supportsDiversions: false)
+  result = CollisionDriver(name: "pacman", supportsDiversions: false,
+                           supportsTakeOver: true)
   result.packageOwner = proc(path: string): PackageOwnership =
     when mutated("observer-never-package-owned"):
       return PackageOwnership()
     else:
       loadPacmanIndex(rootDir, idx)
-      PackageOwnership(package: idx.owner.getOrDefault(path))
+      result = PackageOwnership(package: idx.owner.getOrDefault(path))
+      # A backup file is one a package both lists and backs up: a
+      # ``%BACKUP%`` line for a path no ``%FILES%`` names is not pacman's
+      # and is ignored.
+      if result.package.len > 0 and path in idx.backup:
+        when not mutated("observer-ignores-backup"):
+          result.backup = true
+          result.backupMd5 = idx.backup[path]
   result.diversion = proc(path: string): DiversionRecord =
     DiversionRecord()
   result.diversionTarget = proc(path: string): string = ""
@@ -593,8 +630,8 @@ proc observeTarget*(d: CollisionDriver; path: string;
 
 proc packageOfObservation*(observation: string): string =
   ## The package an ownership observation names (``package:``,
-  ## ``conffile:``, ``ucf:``, ``diversion:``), or "".
-  for pfx in ["package:", "conffile:", "ucf:", "diversion:"]:
+  ## ``conffile:``, ``backup:``, ``ucf:``, ``diversion:``), or "".
+  for pfx in ["package:", "conffile:", "backup:", "ucf:", "diversion:"]:
     if observation.startsWith(pfx): return observation[pfx.len .. ^1]
   ""
 
@@ -605,6 +642,7 @@ proc observationText*(o: TargetObservation; kind: TargetKind): string =
   if o.ownership.package.len > 0:
     return (if o.ownership.viaUcf: "ucf:"
             elif o.ownership.conffile: "conffile:"
+            elif o.ownership.backup: "backup:"
             else: "package:") & o.ownership.package
   if kind == tkUnit and o.unit.fragmentPath.len > 0 and
       not o.unit.fragmentPath.startsWith(SystemdSystemUnitDir & "/"):
@@ -677,6 +715,81 @@ proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
     (if hint.len > 0: "Put the change in a drop-in under " & hint & " instead."
      else: "Change it through a drop-in or configuration directory the " &
            "program reads, or leave it to the package."))
+
+const DivertUnavailableOnArch* = "`divert` is unavailable on Arch"
+  ## The phrase spec §4.3.1 item 2 and §8.4 have the refusal name.
+
+proc refuseOptInForBase*(d: CollisionDriver; address, collision: string) =
+  ## A file opt-in the base cannot honour, refused by name before anything
+  ## is observed (spec §4.3.1, §8.4): ``divert`` on a base without
+  ## diversions (pacman: "`divert` is unavailable on Arch"), and
+  ## ``takeOver`` on a base whose package manager would not keep a locally
+  ## replaced file (dpkg, whose counterpart is the diversion).
+  if collision == "divert" and not d.supportsDiversions:
+    raise newAddOnOutOfScope("fs.systemFile.collision", "", address,
+      DivertUnavailableOnArch & ": pacman has no diversions (no " &
+      "`dpkg-divert`); a backup file is taken over with " &
+      "`collision = \"takeOver\"`, and any other package file has no opt-in " &
+      "(spec §4.3.1)")
+  if collision == "takeOver" and not d.supportsTakeOver:
+    raise newAddOnOutOfScope("fs.systemFile.collision", "", address,
+      "`takeOver` is for pacman backup files (Arch); on the " & d.name &
+      " base a package-owned file is replaced through `collision = " &
+      "\"divert\"` (spec §4.3, §4.3.1)")
+
+proc md5OfFile*(path: string): string =
+  ## Lower-case hex MD5 of ``path``'s bytes: the digest pacman's
+  ## ``%BACKUP%`` holds, and the one ``pacman -Qkk`` compares against.
+  md5Hex(readFile(path))
+
+proc decidePacmanPackageFile(d: CollisionDriver; o: TargetObservation;
+                             inp: DecisionInputs): CollisionDecision =
+  ## The package-owned rows on a pacman base (spec §4.3.1). A backup file
+  ## may be taken over with ``collision = "takeOver"``: pacman then keeps
+  ## the add-on's copy on upgrade (writing ``<path>.pacnew`` when its own
+  ## version changes) and moves it to ``<path>.pacsave`` on removal. Any
+  ## other package file is overwritten by its package's next upgrade, so it
+  ## has no opt-in. A backup file pacman reports ``[modified]`` (its bytes
+  ## differ from the ``%BACKUP%`` MD5) or ``[missing]`` is refused for
+  ## ``takeOver`` too (§13 decisions 99 and 108): the bytes the ledger
+  ## would preserve would not be the packaged version, so no removal could
+  ## put back a file pacman recognises.
+  result.observation = observationText(o, tkFile)
+  result.observedSha256 = o.sha256
+  let pkg = o.ownership.package
+  if not o.ownership.backup:
+    raise newAddOnPackageOwnedOnArch(o.path, pkg, d.dropInHint(o.path),
+      "it is not a backup file of the package (no %BACKUP% entry), so " &
+      "pacman overwrites it on every upgrade of " & pkg & " and it has no " &
+      "opt-in" & (if inp.collision == "takeOver":
+                    "; `collision = \"takeOver\"` applies only to a backup file"
+                  else: ""))
+  if inp.collision != "takeOver":
+    raise newAddOnPackageOwnedOnArch(o.path, pkg, d.dropInHint(o.path),
+      "it is a backup file of the package; declare `collision = " &
+      "\"takeOver\"` on the resource to replace it with the add-on's copy " &
+      "(pacman then keeps that copy and writes its own versions beside it " &
+      "as " & o.path & ".pacnew)")
+  if not o.exists:
+    raise newAddOnPackageOwnedOnArch(o.path, pkg, "",
+      "it is a backup file pacman reports [missing] (absent from disk), so " &
+      "the packaged bytes a removal would restore are not there to " &
+      "preserve; reinstall " & pkg & " (or restore the file) first " &
+      "(spec §4.3.1, §13 decision 108)")
+  let md5 = md5OfFile(o.path)
+  if md5 != o.ownership.backupMd5:
+    raise newAddOnPackageOwnedOnArch(o.path, pkg, "",
+      "it is a backup file pacman reports [modified]: its MD5 " & md5 &
+      " differs from the packaged " & o.ownership.backupMd5 &
+      " %BACKUP% holds, so the bytes the ledger would preserve are a " &
+      "local edit, not the packaged version; restore the packaged file " &
+      "(or take the edit into the profile) first (spec §4.3.1, §13 " &
+      "decision 99)")
+  result.verdict = cvTakeOver
+  result.preWriteBytes = readFile(o.path)
+  result.reason = "backup file of package " & pkg & " (packaged MD5 " &
+    md5 & "); taken over by opt-in: the add-on writes a copy and the " &
+    "ledger keeps the packaged bytes"
 
 proc decideFile(d: CollisionDriver; o: TargetObservation;
                 inp: DecisionInputs): CollisionDecision =
@@ -782,6 +895,8 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       "profile's (the current bytes are kept in the ledger)")
   # Package-owned rows.
   if o.ownership.package.len > 0:
+    if d.supportsTakeOver:
+      return decidePacmanPackageFile(d, o, inp)
     let optIn = inp.collision == "divert" or inp.divertedByProfile
     if not optIn:
       raise newAddOnPackageOwned(o.path, o.ownership.package,
@@ -834,6 +949,7 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
   ## a typed refusal; nothing is written by this proc or on its account.
   case inp.kind
   of tkFile:
+    refuseOptInForBase(d, inp.address, inp.collision)
     let o = observeTarget(d, path)
     (decideFile(d, o, inp), o)
   of tkDiversion:

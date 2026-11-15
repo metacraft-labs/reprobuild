@@ -106,6 +106,18 @@ e2e_arch_addon_preflight_is_zero_write:
 e2e_arch_addon_store_placement_by_root_fs:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_store_placement_by_root_fs
 
+# The pacman collision gates: one fixture per row of the decision table, a
+# taken-over backup file across package upgrades and removal, and the Debian
+# removal gate's sequence unchanged on the Arch guests.
+e2e_arch_addon_collision_matrix:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_collision_matrix
+
+e2e_arch_addon_takeover_survives_package_upgrade:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_takeover_survives_package_upgrade
+
+e2e_arch_addon_removal_respects_ledger:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_removal_respects_ledger
+
 e2e_addon_bootstrap_changes_nothing_preexisting:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
 

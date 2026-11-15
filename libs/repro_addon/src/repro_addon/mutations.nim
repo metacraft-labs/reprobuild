@@ -995,6 +995,17 @@
 ##                                            ``aptClosureLock`` (an engine
 ##                                            mutation: the Nix package
 ##                                            built with it)
+## ``observer-ignores-backup``                the pacman collision driver
+##                                            reads no ``%BACKUP%``
+##                                            section, so every backup file
+##                                            looks like an ordinary package
+##                                            file and a ``takeOver`` is
+##                                            refused
+## ``takeover-restores-recorded-bytes``       removal and uninstall of a
+##                                            ``takeOver`` always restore the
+##                                            bytes recorded at take-over,
+##                                            whatever ``%BACKUP%`` now holds
+##                                            (spec §4.3.1's rule ignored)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1662,7 +1673,12 @@ const
                           # `.deb` closure (repro_profile_compile/
                           # addon_realisation); the static binary only
                           # carries the name.
-                          "arch-realisation-accepts-deb-closure"]
+                          "arch-realisation-accepts-deb-closure",
+                          # The pacman backup-file takeover: the observer
+                          # blind to %BACKUP%, and a restore that ignores
+                          # the MD5 rule (takeover.nim).
+                          "observer-ignores-backup",
+                          "takeover-restores-recorded-bytes"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

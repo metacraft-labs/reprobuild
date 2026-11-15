@@ -77,6 +77,28 @@ suite "the add-on-arch realisation profile":
     discard adaptSystemProfile(p, systemPlanTarget("deb",
       toHashSet(["default"]), srAddOnDebian))
 
+  test "a file's collision opt-in is the base's own: takeOver on Arch, divert on Debian":
+    # spec §4.3, §4.3.1, §8.4: `divert` is unavailable on Arch (pacman has
+    # no diversions) and `takeOver` is the pacman backup-file opt-in, which
+    # a Debian base has no counterpart of but the diversion.
+    proc withCollision(c: string): ProfileIntent =
+      result = ProfileIntent(name: "box")
+      fsSystemFile(result.resources, path = "/etc/avahi/avahi-daemon.conf",
+        content = "allow-interfaces=eth0\n", collision = c, address = "av")
+    let debTarget = systemPlanTarget("deb", toHashSet(["default"]), srAddOnDebian)
+    let onArch = refusal(proc () =
+      discard adaptSystemProfile(withCollision("divert"), archTarget()))
+    require not onArch.isNil
+    check onArch.field == "fs.systemFile.collision"
+    check "`divert` is unavailable on Arch" in onArch.msg
+    let onDebian = refusal(proc () =
+      discard adaptSystemProfile(withCollision("takeOver"), debTarget))
+    require not onDebian.isNil
+    check onDebian.field == "fs.systemFile.collision"
+    check "`takeOver` is for pacman backup files" in onDebian.msg
+    discard adaptSystemProfile(withCollision("takeOver"), archTarget())
+    discard adaptSystemProfile(withCollision("divert"), debTarget)
+
   test "the same unit as a store package plans on Arch":
     var p = ProfileIntent(name: "archbox")
     systemdSystemUnit(p.resources, name = "fixture.service",

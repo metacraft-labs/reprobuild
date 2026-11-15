@@ -1589,8 +1589,12 @@ const
     ## `addOn` stanza it is not a resource stanza.
   UnitCollisionOptIns* = ["dropIn", "replace"]
     ## `collision` values a `systemd.systemUnit` may declare.
-  FileCollisionOptIns* = ["divert"]
-    ## `collision` values an `fs.systemFile` may declare.
+  FileCollisionOptIns* = ["divert", "takeOver"]
+    ## `collision` values an `fs.systemFile` may declare: `divert` (a
+    ## dpkg diversion, Debian) and `takeOver` (a pacman backup file,
+    ## Arch). Which one a base honours is the add-on's to decide
+    ## (ReproOS-Add-On-Mode §4.3, §4.3.1): each is refused by name on the
+    ## other base.
   AddOnClassDirectories* = ["/etc/systemd/system/", "/etc/sysusers.d/",
                             "/etc/tmpfiles.d/", "/etc/sysctl.d/"]
     ## Directories reached through their own add-on classes (units,

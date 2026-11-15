@@ -50,6 +50,12 @@ import ./preflight
 type
   BasePackage* = object
     name*, version*, architecture*, status*: string
+    filesSha256*: string
+      ## pacman bases only: SHA-256 of the package's ``%FILES%`` section
+      ## (spec §4.3.1, §7.4: "the ``%VERSION%`` and ``%FILES%`` digest of
+      ## every package the add-on depends on or collides with"), so a
+      ## package rebuilt at the same version with other files changes the
+      ## record. "" on a dpkg base, whose record is unchanged.
 
   VendorUnit* = object
     unit*: string        ## the distribution unit's name
@@ -138,7 +144,8 @@ proc packagesDigest*(pkgs: seq[BasePackage]): string =
   var lines: seq[string]
   for p in pkgs:
     lines.add(p.name & "\t" & p.version & "\t" & p.architecture & "\t" &
-              p.status)
+              p.status & (if p.filesSha256.len > 0: "\t" & p.filesSha256
+                          else: ""))
   sha256Hex(lines.join("\n") & "\n")
 
 # ---------------------------------------------------------------------------
@@ -280,6 +287,9 @@ proc renderBaseIdentity*(b: BaseIdentity): string =
   for p in b.packages:
     result.add("package\t" & p.name & "\t" & p.version & "\t" &
                p.architecture & "\t" & p.status & "\n")
+  for p in b.packages:
+    if p.filesSha256.len > 0:
+      result.add("package-files\t" & p.name & "\t" & p.filesSha256 & "\n")
   for v in b.vendorUnits:
     result.add("vendor-unit\t" & v.unit & "\t" & v.fragment & "\t" &
                v.sha256 & "\n")
@@ -309,6 +319,17 @@ proc parseBaseIdentity*(text: string): BaseIdentity =
       if f.len != 5: raise newException(ValueError, "bad package line: " & l)
       result.packages.add(BasePackage(name: f[1], version: f[2],
         architecture: f[3], status: f[4]))
+    of "package-files":
+      if f.len != 3:
+        raise newException(ValueError, "bad package-files line: " & l)
+      var found = false
+      for p in result.packages.mitems:
+        if p.name == f[1]:
+          p.filesSha256 = f[2]
+          found = true
+      if not found:
+        raise newException(ValueError, "package-files line for a package " &
+          "the record does not list: " & l)
     of "vendor-unit":
       if f.len != 4: raise newException(ValueError, "bad vendor-unit line: " & l)
       result.vendorUnits.add(VendorUnit(unit: f[1], fragment: f[2],
@@ -339,10 +360,16 @@ proc baseIdentityChanges*(before, after: BaseIdentity): seq[string] =
   if before.systemd != after.systemd:
     result.add("systemd: " & before.systemd & " -> " & after.systemd)
   var was = initTable[string, string]()
-  for p in before.packages: was[p.name] = p.version
+  var wasFiles = initTable[string, string]()
+  for p in before.packages:
+    was[p.name] = p.version
+    wasFiles[p.name] = p.filesSha256
   for p in after.packages:
     if p.name in was and was[p.name] != p.version:
       result.add("package " & p.name & ": " & was[p.name] & " -> " & p.version)
+    elif p.name in was and wasFiles[p.name] != p.filesSha256:
+      result.add("package " & p.name & ": its %FILES% changed at version " &
+                 p.version)
     elif p.name notin was:
       result.add("package " & p.name & ": now considered (" & p.version & ")")
   var vb = initTable[string, string]()
@@ -510,6 +537,11 @@ proc observeBaseIdentity*(ledger: Ledger;
   let pacmanBase = driver.name == "pacman"
   for tool in (if pacmanBase: @AddonArchBaseTools else: @AddonBaseTools):
     for p in toolOwners(tool, driver): names.incl(p)
+  if pacmanBase:
+    # The matrix's Arch row reads pacman's own version (``matrixRefusal``):
+    # it is named by its package, not only through the owner of
+    # ``/usr/bin/pacman``, so the row never depends on a path lookup.
+    names.incl("pacman")
   for e in ledger.entries:
     let p = packageOfObservation(e.observation)
     if p.len > 0: names.incl(p)
@@ -541,16 +573,20 @@ proc observeBaseIdentity*(ledger: Ledger;
           break
   var status = initTable[string, BasePackage]()
   if pacmanBase:
-    # The local database's ``%VERSION%`` / ``%ARCH%`` (spec §4.3.1). The
-    # ``%FILES%`` digest the Arch base identity also names is a later
-    # extension of this record.
+    # The local database's ``%VERSION%`` / ``%ARCH%`` and the digest of
+    # its ``%FILES%`` (spec §4.3.1), the latter read only for the packages
+    # the record names.
     try:
       for p in pacmanInstalledPackages():
         # A nameless entry fails the collision driver's index, which every
         # apply loads before this record is used.
         if p.name.len > 0:
-          status[p.name] = BasePackage(name: p.name, version: p.version,
+          var bp = BasePackage(name: p.name, version: p.version,
             architecture: p.architecture, status: "installed")
+          if p.name in names:
+            bp.filesSha256 = sha256Hex(
+              pacmanFilesSection(readFile(p.dir / "files")).join("\n") & "\n")
+          status[p.name] = bp
     except IOError, OSError:
       discard
   else:

@@ -109,6 +109,7 @@ import ./switch
 import ./evidence
 import ./effective_floor
 import ./sysctl_precedence
+import ./takeover
 import ./transitions
 
 export AddonDriftError, AddonCollisionError, EAddOnExclusiveOverlap
@@ -1102,7 +1103,7 @@ proc savedDecision(s: SavedPlan; fileBacked = true): CollisionDecision =
   result.observedSha256 = s.observedSha256
   result.reason = s.reason & " (replayed)"
   result.acceptedOutOfBand = s.reason == AcceptedOutOfBandReason
-  if fileBacked and result.verdict in {cvAdopt, cvReconcile}:
+  if fileBacked and result.verdict in {cvAdopt, cvReconcile, cvTakeOver}:
     if s.preserved.len == 0 or not fileExists(s.preserved):
       raise newException(AddonApplyError, "the pending plan's preserved " &
         "bytes for " & s.address & " are missing (" & s.preserved & ")")
@@ -4171,6 +4172,19 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           "loader path resolves through Arch's /lib64 -> usr/lib to a file " &
           "Debian does not ship; use a Reprobuild store package (spec §8.3, " &
           "§13 decision 92). Nothing was realised or written")
+  # A file opt-in the base cannot honour, refused by name before anything
+  # is observed (spec §4.3.1, §8.4): `divert` and the diversion kind on a
+  # pacman base ("`divert` is unavailable on Arch"), `takeOver` on a dpkg
+  # base. The engine's realisation refuses both when a profile is compiled;
+  # this refuses a canonical text that reached the apply some other way.
+  for r in user.resources:
+    if r.kind == srkFsSystemFile and r.sfCollision.len > 0:
+      refuseOptInForBase(driver, r.address, r.sfCollision)
+    elif r.kind == srkLinuxDpkgDiversion and not driver.supportsDiversions:
+      raise newAddOnOutOfScope("linux.dpkgDiversion", "", r.address,
+        DivertUnavailableOnArch & ": pacman has no diversions (no " &
+        "`dpkg-divert`); a backup file is taken over with " &
+        "`collision = \"takeOver\"` (spec §4.3.1)")
   # --- The base (A10; spec §7.4, §7.9): observed at plan time, recorded
   # with the generation, and gated by the supported matrix. The gate runs
   # after the base itself and the previous ledger were read (they are what
@@ -4251,9 +4265,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           ": " & nwd)
 
   var prevForm = initTable[string, string]()  # target path -> link / copy
+  var prevTakeOver = initHashSet[string]()     # paths taken over (pacman)
   for e in previous.entries:
     if e.class in FileClasses and e.resource.len > 0:
       prevForm[e.path] = (if e.isLink: "link" else: "copy")
+    if isTakeOver(e) and e.resource.len > 0:
+      prevTakeOver.incl(e.path)
   var prevSha = initTable[string, string]()   # target path -> ledger digest
   var prevObs = initTable[string, string]()   # target path -> its observation
   var prevOwned = initHashSet[string]()
@@ -4671,6 +4688,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         p.preserved = deferPreserve(dec.preWriteBytes)
       of cvDivert:
         p.collision = "divert"
+      of cvTakeOver:
+        # A pacman backup file (spec §4.3.1): the packaged bytes the copy
+        # replaces are the ledger's, for removal and uninstall to restore
+        # by ``takeover.nim``'s rule.
+        p.collision = TakeOverCollision
+        p.preserved = deferPreserve(dec.preWriteBytes)
       of cvReplace:
         p.collision = "replace"
       of cvDropIn, cvCreate, cvUpdate, cvNoOp:
@@ -4690,6 +4713,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                elif r.address in supersedingUser: "copy"
                elif p.keepLedgerSha.len > 0: prevForm.getOrDefault(path, "copy")
                elif carrier.len > 0: "copy"
+               elif prevTakeOver.contains(path) or dec.verdict == cvTakeOver:
+                 # A taken-over backup file is always a copy (spec
+                 # §4.3.1): pacman compares its contents with the packaged
+                 # MD5 on every upgrade and must never find a link into
+                 # the store there -- nor rename one to `.pacsave`.
+                 "copy"
                elif r.kind in LinkFormKinds and
                   dec.verdict notin {cvAdopt, cvDivert}: "link"
                else: "copy"
@@ -4882,6 +4911,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     # `<class> <path>` of every entry whose path a package came to own: its
     # removal hands the path back (``handback.nim``), so the commit drops
     # the entry whatever is at the path.
+  var takeOverPlan = initTable[string, TakeOverUndo]()
+    # `<class> <path>` of a taken-over backup file being removed -> how it
+    # is undone (``takeover.nim``), compared again before the restore.
   var planDrift = initTable[string, string]()
     # `<class> <path>` -> what `observeDrift` said when the removal was
     # decided. Before each destroy and each restore the object is observed
@@ -4989,6 +5021,40 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       for e in entries:
         if e.class in {lcEtcFile, lcUnit, lcDropIn} and fileExists(e.path):
           discard deferPreserve(readFile(e.path))
+    # A backup file the add-on took over (spec §4.3.1, §13 decision 89):
+    # which bytes go back is decided now, from pacman's database and the
+    # `.pacnew` / `.pacsave` beside the path, and decided again just before
+    # the restore. A removal that neither the recorded bytes nor the
+    # `.pacnew` can satisfy is refused before anything is written --
+    # except by a revert or a replay, which go back whatever is in the way:
+    # there the path is kept, owned, and reported.
+    var takeOverKept = false
+    for e in entries:
+      if not isTakeOver(e): continue
+      var u: TakeOverUndo
+      try: u = decideTakeOverUndo(e, driver)
+      except AddonTakeOverError as ex:
+        if purpose in ["revert", "replay"] or replaying:
+          result.drift.add(e.path & ": " & ex.msg & " (left in place)")
+          takeOverKept = true
+          continue
+        raise newException(AddonCollisionError, "refusing the removal of " &
+          r.address & ": " & ex.msg)
+      takeOverPlan[entryKeyOf(e)] = u
+      if u.kind == tuRefused:
+        if purpose in ["revert", "replay"] or replaying:
+          result.drift.add(refusal(e, u).msg & " (left in place)")
+          takeOverKept = true
+          continue
+        raise refusal(e, u)
+      result.ledgerDiff.add("take-over-restore\t" & e.path & "\t" &
+        r.address & " (" & describe(e, u) & ")")
+    if takeOverKept:
+      keptEntries.add(entries)
+      keptAddresses.incl(r.address)
+      for e in entries:
+        if e.class in {lcEtcFile, lcUnit, lcDropIn}: keptPaths.incl(e.path)
+      continue
     # Objects that go back to what they were rather than away: anything
     # the ledger preserved bytes for (adopted, reconciled), and a
     # `replace`d package unit, whose removal must not `disable --now` the
@@ -6011,7 +6077,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # new generation no longer carries, so the add-on's own link now
           # dangles; that is the removal in progress, and the restore (or
           # the deletion) replaces the link.
-          if replaying and alreadyRestored(e):
+          if replaying and (if isTakeOver(e): takeOverAlreadyUndone(e, driver)
+                            else: alreadyRestored(e)):
             hookRestored.add(e.path)
             continue
           let d = changedSincePlan(e, planDrift.getOrDefault(entryKeyOf(e)))
@@ -6019,6 +6086,27 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             hookKept.incl(e.resource)
             hookKeptDrift.add(e.path & ": " & d & " (changed after the " &
               "plan; left in place, --reconcile-drift removes it)")
+            continue
+          if isTakeOver(e):
+            # Decided again from the database and the files beside the
+            # path: an undo whose inputs changed since the plan (a package
+            # upgraded or removed in between, a `.pacnew` edited) is left,
+            # as drift, never carried out on the plan's stale reading.
+            try:
+              let now = decideTakeOverUndo(e, driver)
+              let planned = takeOverPlan.getOrDefault(entryKeyOf(e))
+              if entryKeyOf(e) notin takeOverPlan or
+                  not sameDecision(planned, now):
+                hookKept.incl(e.resource)
+                hookKeptDrift.add(e.path & ": changed after the plan (" &
+                  (if entryKeyOf(e) in takeOverPlan: describe(e, planned)
+                   else: "no plan") & " -> " & describe(e, now) &
+                  "); left in place")
+                continue
+              discard applyTakeOverUndo(e, now)
+              hookRestored.add(e.path)
+            except CatchableError as ex:
+              problems.add("restoring " & e.path & ": " & ex.msg)
             continue
           try:
             if restorePreserved(e):

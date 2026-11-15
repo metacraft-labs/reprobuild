@@ -191,6 +191,46 @@ proc newAddOnPackageOwned*(path, package: string; conffile: bool;
   result.conffile = conffile
   result.dropInHint = dropInHint
 
+proc newAddOnPackageOwnedOnArch*(path, package, dropInHint,
+                                 why: string): ref EAddOnPackageOwned =
+  ## `EAddOnPackageOwned` on a pacman base (ReproOS-Add-On-Mode §4.3.1):
+  ## `path` belongs to `package` and `why` says which row refused it -- a
+  ## file that is not a backup file (no opt-in), a backup file without
+  ## `collision = "takeOver"`, or a backup file pacman reports
+  ## `[modified]` or `[missing]`. Unlike the Debian message it never offers
+  ## `collision = "divert"`: pacman has no diversions.
+  var detail = path & " is a file of package " & package & ": " & why
+  if dropInHint.len > 0:
+    detail.add(". Prefer a drop-in under " & dropInHint)
+  result = newException(EAddOnPackageOwned,
+    diagnosticMessage(adPackageOwned, detail))
+  result.diagnostic = adPackageOwned
+  result.path = path
+  result.package = package
+  result.conffile = false
+  result.dropInHint = dropInHint
+
+proc newAddOnTakeOverRestoreRefused*(path, package, recordedMd5, pacnewMd5,
+                                     backupMd5: string): ref EAddOnPackageOwned =
+  ## `EAddOnPackageOwned` for the removal or uninstall of a `takeOver`
+  ## whose recorded bytes and `<path>.pacnew` both differ from the MD5
+  ## pacman's `%BACKUP%` now holds (ReproOS-Add-On-Mode §4.3.1, §13
+  ## decision 89): naming the package, the path and the three digests.
+  ## Restoring either would leave a file pacman treats as a local edit, so
+  ## nothing is restored and the operator resolves it.
+  result = newException(EAddOnPackageOwned, diagnosticMessage(adPackageOwned,
+    "cannot hand " & path & " back to package " & package & ": the bytes " &
+    "the add-on recorded when it took the file over (MD5 " & recordedMd5 &
+    ") and " & path & ".pacnew (" &
+    (if pacnewMd5.len > 0: "MD5 " & pacnewMd5 else: "absent") &
+    ") both differ from the MD5 pacman's %BACKUP% now holds for it (" &
+    backupMd5 & "); nothing was restored. Put the packaged version at " &
+    path & ".pacnew (or reinstall " & package & "), then remove the " &
+    "resource again"))
+  result.diagnostic = adPackageOwned
+  result.path = path
+  result.package = package
+
 proc newAddOnUnitShadows*(unit, fragmentPath: string): ref EAddOnUnitShadows =
   ## `EAddOnUnitShadows` for `unit`, provided by a package at
   ## `fragmentPath`.

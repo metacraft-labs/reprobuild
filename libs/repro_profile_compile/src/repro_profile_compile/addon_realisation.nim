@@ -126,6 +126,27 @@ proc firewallChainCheck(value: FieldValue): string =
       AddOnFirewallTable & "`; add-on firewall rules go only there"
   ""
 
+proc debianCollisionCheck(value: FieldValue): string =
+  ## `fs.systemFile.collision` in `add-on-debian`: `takeOver` is the pacman
+  ## backup-file opt-in, which dpkg has no counterpart of but the
+  ## diversion (spec §4.3, §4.3.1).
+  let v = if value.kind == fvkString: value.s else: ""
+  if v == "takeOver":
+    return "`takeOver` is for pacman backup files (Arch); on a Debian " &
+      "base a package-owned file is replaced through `collision = " &
+      "\"divert\"` (spec §4.3)"
+  ""
+
+proc archCollisionCheck(value: FieldValue): string =
+  ## `fs.systemFile.collision` in `add-on-arch`: pacman has no diversions,
+  ## so `divert` is refused by the name spec §4.3.1 item 2 gives it.
+  let v = if value.kind == fvkString: value.s else: ""
+  if v == "divert":
+    return "`divert` is unavailable on Arch: pacman has no diversions; a " &
+      "backup file is taken over with `collision = \"takeOver\"`, and any " &
+      "other package file has no opt-in (spec §4.3.1)"
+  ""
+
 proc shared(fields: varargs[string]): seq[FieldRule] =
   for f in fields:
     result.add FieldRule(field: f, class: fcShared)
@@ -197,8 +218,10 @@ proc addOnDebianProfile*(): RealisationProfile =
       fields: shared("path", "content", "sourceUrl", "sha256", "sourceLocal",
         "mode") &
         @[FieldRule(field: "collision", class: fcAddOnSpecific,
-            reason: "the opt-in when a package owns the path (spec §4.3): " &
-              "`divert`")]),
+            reason: "the opt-in when a package owns the path (spec §4.3, " &
+              "§4.3.1): `divert` on Debian, `takeOver` of a backup file " &
+              "on Arch",
+            check: debianCollisionCheck)]),
     KindRule(kind: "passwd.user", class: fcShared,
       fields: shared("name", "shell", "extraGroups")),
     KindRule(kind: "passwd.group", class: fcShared,
@@ -329,7 +352,10 @@ proc addOnArchProfile*(): RealisationProfile =
   ##   at plan time, before anything is realised. It covers an operator
   ##   tool's closure (`linux.addOnTool`) for the same reason;
   ## * the diversion class does not exist: pacman has no `dpkg-divert`
-  ##   (§4.3.1 item 2), so `linux.dpkgDiversion` is invalid.
+  ##   (§4.3.1 item 2), so `linux.dpkgDiversion` is invalid, and so is an
+  ##   `fs.systemFile`'s `collision = "divert"` ("`divert` is unavailable
+  ##   on Arch"); its opt-in for a backup file is `collision = "takeOver"`
+  ##   (§4.3.1), which `add-on-debian` refuses in turn.
   ##
   ## Derived from `addOnDebianProfile` rather than written out again, so a
   ## kind or field classified for one base is classified for both.
@@ -341,6 +367,10 @@ proc addOnArchProfile*(): RealisationProfile =
       k = KindRule(kind: k.kind, class: fcInvalid, reason: "pacman has no " &
         "diversions (`dpkg-divert`); a package-owned file on Arch cannot be " &
         "diverted (spec §4.3.1)")
+    of "fs.systemFile":
+      for f in k.fields.mitems:
+        if f.field == "collision":
+          f.check = archCollisionCheck
     of "systemd.systemUnit", "linux.addOnTool":
       when RealisationMutation == "arch-realisation-accepts-deb-closure":
         # Falsifying mutation for `e2e_arch_addon_apt_closure_refused`: a
