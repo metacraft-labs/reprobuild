@@ -188,6 +188,11 @@ def green(kind, base="debian-13"):
             rec["decision137"] = {
                 l: {"ran": True, "triggerActive": "active",
                     "refusedNotLoaded": False} for l in ("socket", "timer")}
+            rec["decision137Unheld"] = {
+                l: {"ran": True, "triggerActive": "active",
+                    "refusedNotLoaded": False, "serviceJudged": False}
+                for l in ("socket", "timer")}
+            rec["decision137Unheld"]["exit"] = 0
             up = {l: {"triggerActive": True, "ran": True,
                       "trigger": "ActiveState=active Result=success"}
                   for l in ("socket", "path")}
@@ -369,18 +374,24 @@ def red_record(kind, base="debian-13"):
     elif kind == "mutnoedges":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="trigger-edges-omitted")
-        rec["decision137"] = {
+        rec["decision137Unheld"] = {
             l: {"ran": False, "triggerActive": "inactive",
                 "applyRefused": True, "journalNotLoaded": True,
-                "refusedNotLoaded": True} for l in ("socket", "timer")}
+                "refusedNotLoaded": True, "serviceJudged": False}
+            for l in ("socket", "timer")}
+        rec["decision137Unheld"]["exit"] = 1
         rec["steps"] = [ok("bootstrap"),
-                        red("the reinstalled host realises the activities in full"),
-                        red("decision 137, socket first: a socket declared before "
-                            "the service it triggers is applied, active, and its "
-                            "service ran"),
-                        red("decision 137, timer first: a timer declared before "
-                            "the service it triggers is applied, active, and its "
-                            "service ran")]
+                        ok("decision 137, socket first: a socket declared "
+                           "before the service it triggers is applied, "
+                           "active, and its service ran"),
+                        red("decision 137, unheld socket first: a socket "
+                            "declared before the unconfined service it "
+                            "triggers, which no hold orders, is applied, "
+                            "active, and its service ran"),
+                        red("decision 137, unheld timer first: a timer "
+                            "declared before the unconfined service it "
+                            "triggers, which no hold orders, is applied, "
+                            "active, and its service ran")]
     elif kind == "mutholdwin":
         rec = base_record(HELD, base, mutation="start-holds-after-driver-writes",
                           with_gate_mutation=False)
@@ -806,6 +817,32 @@ class TheTriggerOrderEvidence(unittest.TestCase):
         ok_, _, why = cls.classify(cell, rec)
         self.assertFalse(ok_, "%s accepted: %s" % (cell, why))
 
+    def test_the_falsifier_reads_the_unheld_triggers(self):
+        # A13 review round 9: the decision-151 holds order the R7 triggers,
+        # so the falsifier's red must be the unheld (R11) triggers' -- red
+        # on R7 alone, or on an R11 service the live check judged (held,
+        # so not ordered by the edges alone), is not its red.
+        rec = red_record("mutnoedges")
+        rec["decision137"] = rec.pop("decision137Unheld")
+        self.assertRejected("mutnoedges-debian-13", rec)
+        for l in ("socket", "timer"):
+            with self.subTest(trigger=l):
+                rec = red_record("mutnoedges")
+                rec["decision137Unheld"][l]["serviceJudged"] = True
+                self.assertRejected("mutnoedges-debian-13", rec)
+                rec = red_record("mutnoedges")
+                del rec["decision137Unheld"][l]["serviceJudged"]
+                self.assertRejected("mutnoedges-debian-13", rec)
+                rec = green("conv")
+                rec["decision137Unheld"][l]["serviceJudged"] = True
+                self.assertRejected("conv-debian-13", rec)
+                rec = green("conv")
+                rec["decision137Unheld"][l]["ran"] = False
+                self.assertRejected("conv-debian-13", rec)
+        rec = green("conv")
+        del rec["decision137Unheld"]
+        self.assertRejected("conv-debian-13", rec)
+
     def test_a_green_record_whose_trigger_did_not_run(self):
         for l in ("socket", "timer"):
             with self.subTest(trigger=l):
@@ -827,21 +864,21 @@ class TheTriggerOrderEvidence(unittest.TestCase):
             for half in ("applyRefused", "journalNotLoaded"):
                 with self.subTest(trigger=l, missing=half):
                     rec = red_record("mutnoedges")
-                    rec["decision137"][l][half] = False
+                    rec["decision137Unheld"][l][half] = False
                     self.assertRejected("mutnoedges-debian-13", rec)
                     rec = red_record("mutnoedges")
-                    del rec["decision137"][l][half]
+                    del rec["decision137Unheld"][l][half]
                     self.assertRejected("mutnoedges-debian-13", rec)
 
     def test_a_falsifier_red_on_one_trigger_only(self):
         for l in ("socket", "timer"):
             with self.subTest(trigger=l):
                 rec = red_record("mutnoedges")
-                rec["decision137"][l]["refusedNotLoaded"] = False
+                rec["decision137Unheld"][l]["refusedNotLoaded"] = False
                 self.assertRejected("mutnoedges-debian-13", rec)
                 rec = red_record("mutnoedges")
-                rec["steps"] = [s for s in rec["steps"]
-                                if not s["step"].startswith("decision 137, %s" % l)]
+                rec["steps"] = [s for s in rec["steps"] if not
+                                s["step"].startswith("decision 137, unheld %s" % l)]
                 self.assertRejected("mutnoedges-debian-13", rec)
         rec = red_record("mutnoedges")
         rec["engineBuild"]["mutation"] = ""

@@ -257,7 +257,8 @@ EXPECT.update({
                     "add-on build live-check-call-site-reverted"),
     # §13 decision 137: the planner without the trigger edges. Not run
     # with REPRO_A13_STOP_AT_RED: both the socket-first and the timer-first
-    # case must be seen red, and the apply's refusal comes earlier.
+    # case must be seen red, and the apply's refusal comes earlier. Read on
+    # the unheld triggers (R11): decision 151's holds order the R7 ones.
     # §13 decision 151: neither the full apply nor the add-on switch stops
     # or holds the triggers of held units. Neither stops at its first red
     # step in the conversion gate (both apply steps carry evidence).
@@ -284,7 +285,7 @@ EXPECT.update({
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
     "mutcallsite": "a switch that changes only a service's credential judges it",
-    "mutnoedges": "decision 137, timer first:",
+    "mutnoedges": "decision 137, unheld socket first:",
     "muttrigconv": "decision 151, full apply (first realisation):",
     "muttrigheld": "decision 151, add-on switch: an Accept=yes socket hit by a burst",
     "mutrestartignored": "decision 160: a trigger that cannot start again fails the switch",
@@ -349,11 +350,16 @@ def on_target_rec(kind, rec):
         return on_target(kind, steps) and lc.get("ranAsRoot") is True
     if kind == "mutnoedges":
         # Red because systemd refused each trigger whose unit was not yet
-        # loaded, for the socket and for the timer alike.
-        d = rec.get("decision137", {})
+        # loaded, for the socket and for the timer alike, on the triggers
+        # no hold orders (R11): the decision-151 holds order the R7 ones,
+        # so only these discriminate (A13 review round 9, measured at
+        # reprobuild 9e78a755bd). And their services were not judged: the
+        # premise that nothing but the planner's edges orders them.
+        d = rec.get("decision137Unheld", {})
         st = {x["step"]: x for x in steps}
-        red_both = all(any(n.startswith("decision 137, %s first:" % l) and not x["ok"]
-                           for n, x in st.items()) for l in ("socket", "timer"))
+        red_both = all(any(n.startswith("decision 137, unheld %s first:" % l)
+                           and not x["ok"] for n, x in st.items())
+                       for l in ("socket", "timer"))
         # Both halves of the refusal, for each trigger: the apply reported
         # its enable --now failed, and systemd's journal says why ("not
         # loaded"). Either alone could be another failure.
@@ -361,7 +367,8 @@ def on_target_rec(kind, rec):
             e = d.get(l, {})
             return (e.get("applyRefused") is True and
                     e.get("journalNotLoaded") is True and
-                    e.get("refusedNotLoaded") is True)
+                    e.get("refusedNotLoaded") is True and
+                    e.get("serviceJudged") is False)
         return red_both and refused("socket") and refused("timer")
     if kind == "muttrigconv":
         # Red because each trigger fired at its held service until its rate
@@ -479,6 +486,12 @@ def on_target_rec(kind, rec):
                 rec.get("decision135Converted", {}).get("judgedTemplate") is True and
                 all(rec.get("decision137", {}).get(l, {}).get("ran") is True and
                     rec.get("decision137", {}).get(l, {}).get("refusedNotLoaded") is False
+                    for l in ("socket", "timer")) and
+                # Decision 137 on the triggers no hold orders (R11): active,
+                # their services run, and not judged by the live check.
+                all(rec.get("decision137Unheld", {}).get(l, {}).get("ran") is True and
+                    rec.get("decision137Unheld", {}).get(l, {}).get("triggerActive") == "active" and
+                    rec.get("decision137Unheld", {}).get(l, {}).get("serviceJudged") is False
                     for l in ("socket", "timer")) and
                 triggers_up(rec.get("decision151", {})) and
                 held_requirer(rec.get("decision153", {})))
