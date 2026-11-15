@@ -2664,7 +2664,9 @@ proc readRevertHoldDirRecords*(stateDir: string;
   ## ``revertHoldDirsPath``, one entry per (directory, staging) pair, its
   ## last phase. Only a ``<unit>.d`` directly under ``root`` and a staging
   ## name ``validStaging`` accepts, so a damaged record names nothing else.
-  ## None when absent or unreadable.
+  ## None when absent or unreadable: a reader only claims less, and every
+  ## writer reads through ``revertHoldDirsForAppend``, which refuses an
+  ## unreadable record rather than rewrite it from nothing.
   var text = ""
   try: text = readFile(revertHoldDirsPath(stateDir))
   except IOError, OSError: return
@@ -2682,11 +2684,36 @@ proc readRevertHoldDirRecords*(stateDir: string;
         found = true
     if not found: result.add((d, st, ph))
 
+proc revertHoldDirsForAppend(stateDir: string): string =
+  ## The text of ``revertHoldDirsPath`` that the next step is appended to.
+  ## Only a record that does not exist (``lstat`` says ``ENOENT``) is
+  ## empty. One that exists and cannot be read (``EACCES``, ``EIO``, ...)
+  ## raises: the append rewrites the whole file, so taking it as empty
+  ## would drop every earlier ``intended`` and ``staged`` step, and the
+  ## directories they claim would be forgotten (spec §4.2; issue
+  ## 2026-11-15-floor-a-revert-hold-directory-record-is-rewritten-empty-
+  ## when-it-cannot-be-read). ``placeRevertHold`` then raises before it
+  ## takes a step, and the unit keeps its start hold.
+  let p = revertHoldDirsPath(stateDir)
+  try:
+    result = readFile(p)
+  except IOError, OSError:
+    when mutated("revert-hold-record-unreadable-as-empty"):
+      # Falsifying build: the engine before the fix, any read error taken
+      # as no record.
+      return ""
+    else:
+      var st: Stat
+      if lstat(p.cstring, st) != 0 and osLastError().int32 == ENOENT:
+        return ""
+      raise newException(IOError, p & ": the revert-hold directory " &
+        "record exists but cannot be read: " & getCurrentExceptionMsg())
+
 proc recordRevertHoldDir(stateDir: string; r: RevertHoldDirRecord) =
-  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises.
-  var text = ""
-  try: text = readFile(revertHoldDirsPath(stateDir))
-  except IOError, OSError: discard
+  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises,
+  ## also when the record exists and cannot be read
+  ## (``revertHoldDirsForAppend``).
+  let text = revertHoldDirsForAppend(stateDir)
   createDir(addonDir(stateDir))
   writeFileAtomic(revertHoldDirsPath(stateDir),
                   text & r.dir & "\t" & r.staging & "\t" & r.phase & "\n", 0o600)

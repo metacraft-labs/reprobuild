@@ -247,7 +247,11 @@ reprobuild-packages
 # so a renamed copy no longer traps on its own syscalls (4212d13), and an
 # inline clone with a child stack runs outside the trap handler (77bf297).
 # a7b272f6 is an ancestor.
-io-mon=4212d138707f2e30c844344870db46b81e73a96c
+# Moved to 30d85793 (2026-11-15), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: a macOS monitored root that is itself a
+# SIP-protected binary (`/bin/sh -c ...`) is spawned through its drop-in
+# (30d8579). 4212d138 is an ancestor.
+io-mon=30d85793e891c1a80859d52a9eb197b42d56752c
 # `release.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at
