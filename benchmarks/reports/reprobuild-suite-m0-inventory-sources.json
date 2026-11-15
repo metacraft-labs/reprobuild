@@ -18775,8 +18775,8 @@
       "owner": "libs/repro_home_resources",
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_registry_root_override.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 18,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

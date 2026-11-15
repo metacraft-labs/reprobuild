@@ -557,7 +557,7 @@ libs/repro_home_resources/tests/t_concern_classification.nim	nim	5
 libs/repro_home_resources/tests/t_macos_app_bundle_placement.nim	nim	19
 libs/repro_home_resources/tests/t_macos_app_folder_placement.nim	nim	11
 libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
-libs/repro_home_resources/tests/t_registry_root_override.nim	nim	18
+libs/repro_home_resources/tests/t_registry_root_override.nim	nim	21
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	176
 libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
