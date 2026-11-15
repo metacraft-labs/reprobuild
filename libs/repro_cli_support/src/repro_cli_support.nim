@@ -5474,9 +5474,15 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     for a in args:
       cmd.add(" ")
       cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd,
-      env = scrubbedGitRepositoryEnv())
-    (code: r.exitCode, output: r.output)
+    # ``poStdErrToStdOut`` is what puts git's reason in ``output``: every
+    # failure below quotes it, and git reports a failure only on stderr
+    # (``--quiet`` silences the rest). ``execCmdEx``'s default carries it;
+    # an explicit option set without it discards stderr, and a CI fetch
+    # failure then read "fetch failed from <url> at pinned revision <rev>: "
+    # with no cause at all.
+    let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      workingDir = cwd, env = scrubbedGitRepositoryEnv())
+    (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
 
   proc verifyRevisionIntegrity() =
     verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
@@ -5534,12 +5540,16 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # back to fetching every branch and tag, then checking out the pinned
     # revision. A bare ``fetch <url>`` takes only the remote's HEAD, which
     # misses a pin that only a non-default branch reaches.
+    let byRevision = step.output.strip()
     step = git(["-C", checkoutRoot, "fetch", "--quiet", url,
       "+refs/heads/*:refs/remotes/pinned-source/*",
       "+refs/tags/*:refs/tags/*"])
     if step.code != 0:
+      # Both attempts' reasons: the by-revision fetch is the one expected
+      # to work, and its failure is usually the one that explains this.
       fail("fetch failed from " & url & " at pinned revision " & revision &
-        ": " & step.output.strip())
+        ": by revision: " & byRevision & "; all branches and tags: " &
+        step.output.strip())
   step = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
     "--end-of-options", revision & "^{commit}"])
   if step.code != 0:
