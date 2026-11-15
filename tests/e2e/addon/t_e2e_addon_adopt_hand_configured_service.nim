@@ -934,6 +934,128 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          after4.exitCode == 0, after4.stdout & after4.stderr)
     if fails.len > 0: return fails
 
+    # --- 2g. Triggers of held units on an add-on host (§13 decision 151).
+    # A socket (Accept=no) and a path unit whose confined services the
+    # switch's live check judges (carried state on the host) and therefore
+    # holds. While a switch runs, connections keep arriving and the path
+    # keeps existing (a loop in the guest). The switch stops and holds the
+    # triggers with their services and starts them again once its check
+    # passes: afterwards both are active and their services run. A refused
+    # switch (a generator makes a third unit root at the switch's reload)
+    # leaves neither trigger failed, and once the generator is gone the
+    # next switch brings both up. Falsifier: the add-on build
+    # triggers-left-running, under which each trigger fires at its held
+    # service until systemd's trigger rate limit fails it for good.
+    let trigWaiver = "  floorExceptions = [\"serviceFloor: the A13 decision-151 probe\"]\n"
+    let trigProfile = skeleton2 &
+      "\nsystemd.systemUnit {\n  name = \"a13r10.socket\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: a socket\n\n" &
+      "[Socket]\nListenStream=127.0.0.1:18720\n\n[Install]\nWantedBy=sockets.target\n\"\n}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10.service\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: socket-activated\n\n" &
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nStateDirectory=a13r10\n" &
+      "ExecStart=/bin/sh -c 'id -u > /var/lib/a13r10/sock.ran; exec /bin/sleep infinity'\n\"\n" &
+      "  enabled = false\n" & trigWaiver & "}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10.path\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: a path unit\n\n" &
+      "[Path]\nPathExists=/run/a13r10-job\nUnit=a13r10-p.service\n\n" &
+      "[Install]\nWantedBy=paths.target\n\"\n}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10-p.service\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: path-activated\n\n" &
+      "[Service]\nType=oneshot\nRemainAfterExit=yes\nDynamicUser=yes\n" &
+      "NoNewPrivileges=yes\nStateDirectory=a13r10p\n" &
+      "ExecStart=/bin/sh -c 'id -u > /var/lib/a13r10p/path.ran'\n\"\n" &
+      "  enabled = false\n" & trigWaiver & "}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10-bad.service\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: generation @GEN@\n\n" &
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nStateDirectory=a13r10b\n" &
+      "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
+      trigWaiver & "}\n"
+    let trigAgitate = "rm -f /run/a13r10-stop; touch /run/a13r10-job; " &
+      "nohup bash -c 'while [ ! -e /run/a13r10-stop ]; do timeout 1 bash -c " &
+      "\"exec 3<>/dev/tcp/127.0.0.1/18720\" 2>/dev/null; touch /run/a13r10-job; " &
+      "sleep 0.3; done' >/dev/null 2>&1 &"
+    let trigCalm = "touch /run/a13r10-stop; sleep 1; true"
+    # Each trigger's state, and whether its service ran (its uid marker,
+    # waited for a little, after a connection made now).
+    let trigCheck = "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18720' " &
+      "2>/dev/null; for i in $(seq 15); do [ -s /var/lib/a13r10/sock.ran ] && " &
+      "[ -s /var/lib/a13r10p/path.ran ] && break; sleep 1; done; " &
+      "systemctl show -p ActiveState -p Result a13r10.socket | tr '\\n' ' '; echo; " &
+      "systemctl show -p ActiveState -p Result a13r10.path | tr '\\n' ' '; echo; " &
+      "cat /var/lib/a13r10/sock.ran 2>/dev/null; echo; " &
+      "cat /var/lib/a13r10p/path.ran 2>/dev/null; echo"
+    discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
+      "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
+      "\"repro-state-set/1\", \"host\": \"a13r10\", \"createdAt\": " &
+      "\"2026-11-15T00:00:00Z\", \"entries\": []}' > " &
+      "/var/lib/repro/system/carried/state-set.json")
+    let t0 = g.applyProfile(repro, "trig0", trigProfile.replace("@GEN@", "0"))
+    step("decision 151, add-on host: the trigger probes apply with carried " &
+         "state on the host", t0.exitCode == 0, t0.stdout & t0.stderr)
+    # A passing switch (a unit file changes) while the triggers are agitated.
+    discard g.exec(trigAgitate)
+    let t1 = g.applyProfile(repro, "trig1", trigProfile.replace("@GEN@", "1"))
+    discard g.exec(trigCalm)
+    let t1State = g.exec(trigCheck).stdout.splitLines()
+    let t1Ok = t1.exitCode == 0 and t1State.len >= 4 and
+      "ActiveState=active" in t1State[0] and "ActiveState=active" in t1State[1] and
+      t1State[2].strip().len > 0 and t1State[2].strip() != "0" and
+      t1State[3].strip().len > 0 and t1State[3].strip() != "0"
+    step("decision 151, add-on switch: a socket with connections arriving " &
+         "and a path unit whose path exists, held through a passing switch, " &
+         "are active after it and their services run",
+         t1Ok, t1.stdout & t1.stderr & "\n" & t1State.join("\n"))
+    # A refused switch, from the triggers' services stopped and the socket's
+    # backlog flushed, so each trigger fires as soon as anything lets it.
+    discard g.exec("systemctl stop a13r10.socket a13r10.service a13r10.path " &
+      "a13r10-p.service; rm -f /run/a13r10-job /var/lib/a13r10/sock.ran " &
+      "/var/lib/a13r10p/path.ran; systemctl start a13r10.socket a13r10.path; true")
+    discard g.run("mkdir -p /etc/systemd/system-generators && printf " &
+      "'#!/bin/sh\\nmkdir -p \"$1/a13r10-bad.service.d\"\\nprintf " &
+      "\"[Service]\\\\nUser=root\\\\n\" > \"$1/a13r10-bad.service.d/10-root.conf\"" &
+      "\\n' > /etc/systemd/system-generators/a13r10-gen " &
+      "&& chmod 755 /etc/systemd/system-generators/a13r10-gen")
+    discard g.exec(trigAgitate)
+    let t2 = g.applyProfile(repro, "trig2", trigProfile.replace("@GEN@", "2"))
+    discard g.exec(trigCalm)
+    let t2Out = t2.stdout & t2.stderr
+    let t2State = g.exec(trigCheck).stdout.splitLines()
+    let t2NotFailed = t2State.len >= 2 and "failed" notin t2State[0] and
+      "trigger-limit-hit" notin t2State[0] and "failed" notin t2State[1] and
+      "trigger-limit-hit" notin t2State[1]
+    step("decision 151, add-on switch refused: neither trigger is failed " &
+         "after a refused switch during which they were agitated",
+         t2.exitCode != 0 and
+           "a13r10-bad.service as systemd loaded it is not confined" in t2Out and
+           t2NotFailed,
+         t2Out & "\n" & t2State.join("\n"))
+    discard g.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
+      "/run/systemd/generator/a13r10-bad.service.d; systemctl daemon-reload")
+    let t3 = g.applyProfile(repro, "trig3", trigProfile.replace("@GEN@", "3"))
+    let t3State = g.exec(trigCheck).stdout.splitLines()
+    let t3Ok = t3.exitCode == 0 and t3State.len >= 4 and
+      "ActiveState=active" in t3State[0] and "ActiveState=active" in t3State[1] and
+      t3State[2].strip().len > 0 and t3State[2].strip() != "0" and
+      t3State[3].strip().len > 0 and t3State[3].strip() != "0"
+    record["decision151AddOn"] = %*{
+      "pass": {"exit": t1.exitCode, "state": t1State, "ok": t1Ok},
+      "refused": {"exit": t2.exitCode,
+        "refusedForReason": "a13r10-bad.service as systemd loaded it is not confined" in t2Out,
+        "state": t2State, "notFailed": t2NotFailed},
+      "recovered": {"exit": t3.exitCode, "state": t3State, "ok": t3Ok}}
+    step("decision 151, add-on switch after the refusal: once the generator " &
+         "is gone the next switch brings both triggers back, active, and " &
+         "their services run", t3Ok, t3.stdout & t3.stderr & "\n" &
+         t3State.join("\n"))
+    discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
+      "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
+    let after5 = g.applyProfile(repro, "skeleton2e", skeleton2)
+    step("after the manifest is gone, the switch back to the skeleton " &
+         "succeeds (decision 151 probes removed)",
+         after5.exitCode == 0, after5.stdout & after5.stderr)
+    if fails.len > 0: return fails
+
     # --- 3. Converge: hardened, from the store, state untouched.
     let work = g.runDir / "a13"
     createDir(work)
