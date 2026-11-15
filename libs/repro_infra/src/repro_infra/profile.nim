@@ -1325,25 +1325,73 @@ proc profileUnitOf(p: SystemProfile; name: string): int =
           r.suName == tmpl: return i
   -1
 
+proc dropInDirNames(name: string; acc: var seq[string]) =
+  ## ``unit_file_find_dirs()`` (``src/shared/dropin.c``,
+  ## https://github.com/systemd/systemd/blob/v257/src/shared/dropin.c) for
+  ## one unit-path directory: the unit names whose ``<name>.d/`` systemd
+  ## reads for ``name``, highest priority first -- the name itself, then
+  ## (an instance) its template's chain, then the chain of its dashed
+  ## prefix (``foo-bar-baz.service`` -> ``foo-bar-.service`` ->
+  ## ``foo-.service``, the instance kept: ``foo-@x.service``).
+  acc.add(name)
+  let dot = name.rfind('.')
+  if dot <= 0: return
+  let typ = name[dot .. ^1]
+  let n = name[0 ..< dot]
+  let at = n.find('@')
+  let isInstance = at > 0 and at + 1 < n.len
+  if isInstance:
+    dropInDirNames(n[0 .. at] & typ, acc)
+  var prefix = if at >= 0: n[0 ..< at] else: n
+  var chopped = false
+  while true:
+    let dash = prefix.rfind('-')
+    if dash <= 0: return
+    if dash + 1 < prefix.len or chopped:
+      prefix = prefix[0 .. dash]
+      break
+    prefix = prefix[0 ..< dash]       # a trailing dash, chopped once
+    chopped = true
+  let instance = if isInstance: n[at + 1 .. ^1] else: ""
+  dropInDirNames((if isInstance: prefix & "@" & instance else: prefix) & typ, acc)
+
 proc profileDropInsOf*(p: SystemProfile; name: string): seq[string] =
   ## The contents of the profile's drop-ins that apply to unit ``name``
   ## (``dropInApplies``): each ``systemd.systemDropIn``, and each
-  ## ``systemUnit`` with ``collision = "dropIn"``, in the order systemd
-  ## parses them -- by file name (``50-repro-<name>.conf``), across all the
-  ## directories that apply (systemd.unit(5), "Description"). Ties keep the
-  ## profile's order.
-  var named: seq[(string, int, string)]
+  ## ``systemUnit`` with ``collision = "dropIn"``, as systemd reads them.
+  ## Every one is ``/etc/systemd/system/<unit>.d/50-repro-<name>.conf``;
+  ## ``conf_files_list_strv()`` (``src/basic/conf-files.c``) keeps, of the
+  ## files that share a file name, only the one in the highest-priority
+  ## directory (``dropInDirNames``; the type-wide ``<type>.d/`` last), and
+  ## parses the survivors in file-name order (systemd.unit(5),
+  ## "Description").
+  var dirs: seq[string]
+  dropInDirNames(name, dirs)
+  let dot = name.rfind('.')
+  if dot > 0: dirs.add(name[dot + 1 .. ^1])
+  var best = initTable[string, (int, int, string)]()  # file -> (rank, idx, text)
   for i, d in p.resources:
-    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
-      named.add((AddOnDropInPrefix & d.diName & ".conf", i, d.diContent))
-    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
-        dropInApplies(d.suName, name):
-      let n = if d.suDropInName.len > 0: d.suDropInName else: "addon"
-      named.add((AddOnDropInPrefix & n & ".conf", i, d.suContent))
-  named.sort(proc (a, b: (string, int, string)): int =
-    result = cmp(a[0], b[0])
-    if result == 0: result = cmp(a[1], b[1]))
-  for (_, _, c) in named: result.add(c)
+    var unit, file, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      (unit, file, content) = (d.diUnit, d.diName, d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      (unit, file, content) = (d.suName,
+        (if d.suDropInName.len > 0: d.suDropInName else: "addon"), d.suContent)
+    else:
+      continue
+    # ``dropInApplies`` is the floor's (deliberately wider) reading; it does
+    # not name the dashed prefix that keeps an instance (``foo-@x.service``
+    # for ``foo-bar@x.service``), which ``unit_file_find_dirs`` does.
+    if not (dropInApplies(unit, name) or unit in dirs): continue
+    let f = AddOnDropInPrefix & file & ".conf"
+    var rank = dirs.find(unit)
+    if rank < 0: rank = dirs.len
+    if f notin best or rank < best[f][0]:
+      best[f] = (rank, i, content)
+  var files: seq[string]
+  for f in best.keys: files.add(f)
+  files.sort()
+  for f in files: result.add(best[f][2])
 
 proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
   ## The profile's bytes systemd reads for ``name``: its unit and every

@@ -80,6 +80,26 @@ expand_token_path() {
   esac
 }
 
+# Whether an LC_RPATH entry is one the package may carry: a loader token, a
+# directory of the package itself, or exactly one of the required runtime
+# directories.
+rpath_in_closure() {
+  local rpath=$1
+  local required
+  case "$rpath" in
+    @loader_path|@loader_path/*|@executable_path|@executable_path/*)
+      return 0
+      ;;
+    "$package_root"|"$package_root"/*)
+      return 0
+      ;;
+  esac
+  for required in "${required_rpaths[@]}"; do
+    [[ $rpath == "$required" ]] && return 0
+  done
+  return 1
+}
+
 audit_dependency() {
   local dependency=$1
   local image=$2
@@ -142,6 +162,7 @@ audit_slice() {
   local require_package_rpaths=${4:-1}
   local rpaths
   local required
+  local rpath
   local install_id
   local dependency
   local dependencies
@@ -162,6 +183,25 @@ audit_slice() {
       return
     fi
   done
+
+  # The converse of the check above: every LC_RPATH must belong to the
+  # package. The required runtime directories are the package's closure, so an
+  # entry that is neither one of them, nor inside the package, nor a loader
+  # token came from the BUILD HOST -- a Homebrew prefix, or whichever
+  # `/nix/store/*-clingo-*` a glob found first. dyld searches LC_RPATH in
+  # order, so such an entry can shadow the closure's library with a different
+  # build of it (two OpenSSLs in one process), and it makes the output differ
+  # between builders. Interpreted helpers own a foreign closure and are exempt
+  # (`require_package_rpaths` is 0 for them).
+  if ((require_package_rpaths)); then
+    while IFS= read -r rpath; do
+      [[ -n $rpath ]] || continue
+      rpath_in_closure "$rpath" || {
+        fail "$image [$arch] LC_RPATH outside the package closure: $rpath"
+        return
+      }
+    done <<<"$rpaths"
+  fi
 
   if [[ $image == "$package_root"/lib/* ]]; then
     install_id=$(slice_install_id "$image" "$arch")

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2815,
+    "nimTestBinaries": 2816,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
-    "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2862
+    "staticallyDetectedRuntimeCompilerFlowTests": 142,
+    "testEntries": 2863
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,7 +1620,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1551,
+      "integration": 1552,
       "platform/destructive": 180,
       "pure unit": 766,
       "unclassified": 342
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2815,
+    "nimTestBinaryCount": 2816,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2862
+    "testEntryCount": 2863
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5263,6 +5263,44 @@
         }
       ],
       "source": "tests/integration/t_dev_env_artifact.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "compileRecipe",
+          "executedVariables": [],
+          "line": 56,
+          "path": "tests/integration/t_dsl_body_hash_does_not_justify_fragment_reuse.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let artifact = extractInterfaceFromModule(modulePath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "compileRecipe",
+          "executedVariables": [],
+          "line": 58,
+          "path": "tests/integration/t_dsl_body_hash_does_not_justify_fragment_reuse.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "compileProviderBinary(modulePath, outDir / \"provider\","
+        }
+      ],
+      "source": "tests/integration/t_dsl_body_hash_does_not_justify_fragment_reuse.nim"
     },
     {
       "class": "integration",
@@ -8912,7 +8950,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 29,
-      "staticCaseCount": 125,
+      "staticCaseCount": 126,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9827,13 +9865,14 @@
         "repro_deploy_agent",
         "repro_dsl_stdlib",
         "repro_local_store",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_findings.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18898,7 +18937,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
       "sourceSuiteCount": 30,
-      "staticCaseCount": 222,
+      "staticCaseCount": 225,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -41491,6 +41530,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dsl_body_hash_does_not_justify_fragment_reuse",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_dsl_body_hash_does_not_justify_fragment_reuse.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dss11_cross_process_contribution_reaches_the_instance",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -43985,7 +44042,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_integration_provider_fragment_refresh_and_pruning.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -45869,7 +45926,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_macho_runtime_audit.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 18,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58303,7 +58360,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_provider_snapshot_binary_binding.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
