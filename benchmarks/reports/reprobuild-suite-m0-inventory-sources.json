@@ -1619,8 +1619,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1552,
-      "platform/destructive": 179,
+      "integration": 1551,
+      "platform/destructive": 180,
       "pure unit": 765,
       "unclassified": 339
     },
@@ -5537,7 +5537,7 @@
       "source": "tests/integration/t_executed_binary_is_a_recorded_input.nim"
     },
     {
-      "class": "integration",
+      "class": "platform/destructive",
       "matches": [
         {
           "assignedCommandVariable": "cc",
@@ -18080,6 +18080,7 @@
         "repro_home_apply",
         "repro_home_intent",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "libs/repro_home_apply",
@@ -42081,8 +42082,8 @@
     },
     {
       "binary": "build/test-bin/t_execution_lease_confinement",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -42093,7 +42094,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
