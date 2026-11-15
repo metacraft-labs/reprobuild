@@ -7804,6 +7804,10 @@ proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
   writeKeyedToolIdentity(outDir, keyInfo.key, identity)
 
 proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
+  ## Whether every evaluation input a snapshot's fragments recorded still
+  ## holds. Callers check ``providerSnapshotBinaryFresh`` FIRST; this covers
+  ## the inputs that predicate does not, and refuses any kind it cannot
+  ## check.
   if snapshot.fragments.len == 0:
     return false
   for fragment in snapshot.fragments:
@@ -7815,6 +7819,13 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
       of gevDirectoryEnumeration:
         if directoryMemberNames(input.identity) != input.directoryMembers:
           return false
+      of gevProviderSource:
+        # Governed by ``providerSnapshotBinaryFresh``, which every caller
+        # applies before this and which requires every fragment's record to
+        # name the current provider artifact and binary. Refusing the kind
+        # here instead would make every snapshot written since the record
+        # was introduced a miss, silently disabling the cached-snapshot path.
+        discard
       else:
         return false
   true
@@ -8035,8 +8046,9 @@ proc providerGraphStoreRoot(base: string): string =
   ##
   ## The provider-graph snapshot (``provider-fragments.rbsz``) caches the
   ## fragments a provider emitted. ``refreshProviderGraph`` reuses a stored
-  ## snapshot whenever the ``providerArtifactId`` matches and nothing it tracks
-  ## (file mtimes, body hashes, directory membership) changed — but it does
+  ## snapshot whenever every fragment was produced by the current provider
+  ## (artifact id and binary) and nothing else it tracks (files read,
+  ## directory membership) changed — but it does
   ## NOT track solver-participating variant values, which are resolved at
   ## provider-run time and change the emitted graph (e.g. ``buildType=release``
   ## moves every output to ``build-release-repro/``). Two builds differing only

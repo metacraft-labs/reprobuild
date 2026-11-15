@@ -205,6 +205,33 @@ proc memberBodyHashes(snapshot: ProviderGraphSnapshot): seq[string] =
     if fragment.entryPointId == MemberEntryPoint:
       result.add(fragment.entryPointBodyHash)
 
+proc providerSources(fragment: StoredGraphFragment): seq[GraphEvaluationInput] =
+  for input in fragment.evaluationInputs:
+    if input.kind == gevProviderSource:
+      result.add(input)
+
+proc memberIndex(snapshot: ProviderGraphSnapshot; member: string): int =
+  for i, fragment in snapshot.fragments:
+    if fragment.entryPointId == MemberEntryPoint and
+        splitPath(fragment.arguments).tail == member:
+      return i
+  -1
+
+proc everyFragmentRecordsSource(snapshot: ProviderGraphSnapshot;
+                                artifactId, binaryDigest: string): bool =
+  ## Every stored fragment -- the root AND each member -- records exactly
+  ## one provider-source input, naming this artifact and this binary.
+  if snapshot.fragments.len == 0:
+    return false
+  for fragment in snapshot.fragments:
+    let sources = providerSources(fragment)
+    checkpoint(fragment.entryPointId & " " & fragment.arguments &
+      " provider sources: " & $sources.len)
+    if sources.len != 1 or sources[0].identity != artifactId or
+        sources[0].digest != binaryDigest:
+      return false
+  true
+
 suite "integration_provider_fragment_refresh_and_pruning":
   when isNixSupported:
     test "provider runtime refreshes minimal fragments and prunes stale ownership":
@@ -456,6 +483,158 @@ suite "integration_provider_fragment_refresh_and_pruning":
         discard refresh(providerV2, ArtifactV2, store = badStore)
       check readFile(providerSnapshotPath(badStore)) == "corrupt-store"
       check nonEmptyLines(countsPath).len == 0
+
+    test "a stored fragment is reused only when the current provider source produced it":
+      ## Reproduces reprobuild-pm
+      ## issues/2026-11-12-reusing-fragments-by-body-hash-is-unsound-and-production-doesnt-use-symbodyhash.md.
+      ##
+      ## The spec used to let the engine KEEP a stored fragment across a
+      ## provider change when its entry point id and body hash were
+      ## unchanged. That is unsound, because the body hashes the DSL ships
+      ## are not closure-complete: the root's is the constant
+      ## `<package>.build.v1`, and a foreach body's is a digest of its
+      ## untyped syntax, which a change to a helper proc it calls, a
+      ## package-scope flag or a global leaves untouched. The rule the
+      ## engine now enforces is that a fragment is reused only when it
+      ## was produced by the CURRENT provider source, which it records as
+      ## a `gevProviderSource` evaluation input on every fragment.
+      ##
+      ## The fragment the old permission would have kept is exactly a
+      ## stored member whose entry point id, body hash, arguments and
+      ## every other input are unchanged while the provider that produced
+      ## it is a different one. This case builds that fragment by editing
+      ## ONLY the member's provider-source record in the persisted
+      ## snapshot, then shows the refresh re-produces it rather than
+      ## serving it. A legacy snapshot, written before the record existed,
+      ## is the same situation with the record absent.
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-provider-source-reuse", "")
+      defer: removeDir(tempRoot)
+      let fixtureSourceDir = repoRoot / "build" / "provider-fixtures" /
+        splitPath(tempRoot).tail
+      createDir(fixtureSourceDir)
+      defer:
+        if dirExists(fixtureSourceDir):
+          removeDir(fixtureSourceDir)
+
+      let srcDir = tempRoot / "src"
+      let binDir = tempRoot / "bin"
+      let storeRoot = tempRoot / "store"
+      let countsPath = tempRoot / "counts.log"
+      createDir(srcDir)
+      createDir(binDir)
+      createDir(storeRoot)
+      resetCounts(countsPath)
+      writeFile(srcDir / "a.txt", "alpha\n")
+      writeFile(srcDir / "b.txt", "bravo\n")
+
+      let providerSource = fixtureSourceDir / "fixture_provider.nim"
+      writeFixtureProvider(providerSource)
+      let provider = compileProvider(providerSource, binDir / "provider",
+        tempRoot / "nimcache-provider")
+      let binaryDigest = fileContentDigest(provider)
+      # Another provider's source identity: what a fragment the old
+      # permission kept across a provider change would still be carrying.
+      let otherBinary = tempRoot / "other-provider-binary"
+      writeFile(otherBinary, "a different provider build")
+      let foreignSource = GraphEvaluationInput(kind: gevProviderSource,
+        identity: ArtifactV2, digest: fileContentDigest(otherBinary))
+      check foreignSource.digest != binaryDigest
+
+      proc refresh(): ProviderRefreshReport =
+        refreshProviderGraph(RefreshConfig(
+          storeRoot: storeRoot,
+          providerBinaryPath: provider,
+          providerArtifactId: ArtifactV1,
+          rootEntryPointId: RootEntryPoint,
+          rootArguments: srcDir,
+          namespace: "workspace",
+          lockSliceId: "lock-v1",
+          activity: "build",
+          providerExtraArgs: @["--fixture-counts", countsPath],
+          providerWorkingDir: repoRoot))
+
+      # (a) A cold refresh records the provider source on EVERY fragment,
+      # in the report and in what it persisted.
+      let cold = refresh()
+      check nonEmptyLines(countsPath) == @["root", "member:a.txt", "member:b.txt"]
+      check cold.snapshot.fragments.len == 3
+      check everyFragmentRecordsSource(cold.snapshot, ArtifactV1, binaryDigest)
+      check everyFragmentRecordsSource(loadProviderGraphSnapshot(storeRoot),
+        ArtifactV1, binaryDigest)
+      check providerSnapshotBinaryFresh(loadProviderGraphSnapshot(storeRoot),
+        provider)
+
+      # THE CONTROL: an untampered warm refresh invokes nothing. Without it
+      # the cases below would be satisfied by a refresh that always re-runs.
+      resetCounts(countsPath)
+      let warm = refresh()
+      check warm.invoked.len == 0
+      check nonEmptyLines(countsPath).len == 0
+
+      # (b) The fragment the old permission would have kept: member a.txt
+      # with its id, body hash, arguments, invocation key and every other
+      # input unchanged, but produced by a different provider.
+      block foreignProvider:
+        var stored = loadProviderGraphSnapshot(storeRoot)
+        let index = memberIndex(stored, "a.txt")
+        require index >= 0
+        let before = stored.fragments[index]
+        var inputs: seq[GraphEvaluationInput] = @[]
+        for input in before.evaluationInputs:
+          if input.kind != gevProviderSource:
+            inputs.add(input)
+        inputs.add(foreignSource)
+        stored.fragments[index].evaluationInputs = inputs
+        check stored.fragments[index].invocationKey == before.invocationKey
+        check stored.fragments[index].entryPointBodyHash == before.entryPointBodyHash
+        check stored.fragments[index].fragmentDigest == before.fragmentDigest
+        saveProviderGraphSnapshot(storeRoot, stored)
+        check not providerSnapshotBinaryFresh(loadProviderGraphSnapshot(storeRoot),
+          provider)
+
+        resetCounts(countsPath)
+        let refreshed = refresh()
+        checkpoint("invoked after foreign-source tamper: " &
+          $refreshed.invoked.mapIt(it.entryPointId & " " & it.arguments))
+        check "member:a.txt" in nonEmptyLines(countsPath)
+        check refreshed.invoked.anyIt(it.entryPointId == MemberEntryPoint and
+          splitPath(it.arguments).tail == "a.txt")
+        check refreshed.snapshot.fragments.len == 3
+        check everyFragmentRecordsSource(refreshed.snapshot, ArtifactV1,
+          binaryDigest)
+        check everyFragmentRecordsSource(loadProviderGraphSnapshot(storeRoot),
+          ArtifactV1, binaryDigest)
+
+      # (c) A legacy snapshot: member b.txt carries no provider-source
+      # record at all. It is evaluated once, and then warm again.
+      block legacySnapshot:
+        var stored = loadProviderGraphSnapshot(storeRoot)
+        let index = memberIndex(stored, "b.txt")
+        require index >= 0
+        var inputs: seq[GraphEvaluationInput] = @[]
+        for input in stored.fragments[index].evaluationInputs:
+          if input.kind != gevProviderSource:
+            inputs.add(input)
+        stored.fragments[index].evaluationInputs = inputs
+        saveProviderGraphSnapshot(storeRoot, stored)
+        check not providerSnapshotBinaryFresh(loadProviderGraphSnapshot(storeRoot),
+          provider)
+
+        resetCounts(countsPath)
+        let refreshed = refresh()
+        checkpoint("invoked after legacy tamper: " &
+          $refreshed.invoked.mapIt(it.entryPointId & " " & it.arguments))
+        check "member:b.txt" in nonEmptyLines(countsPath)
+        check refreshed.invoked.anyIt(it.entryPointId == MemberEntryPoint and
+          splitPath(it.arguments).tail == "b.txt")
+        check everyFragmentRecordsSource(loadProviderGraphSnapshot(storeRoot),
+          ArtifactV1, binaryDigest)
+
+        resetCounts(countsPath)
+        let warmAgain = refresh()
+        check warmAgain.invoked.len == 0
+        check nonEmptyLines(countsPath).len == 0
 
     test "a CHILD plan with no project root is refused, naming the child":
       ## The per-plan refusal in `executePlan`, given the input it lacked.

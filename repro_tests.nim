@@ -870,7 +870,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-review-\" & $getCurrentProc..."),
+    singleReason: "module-level statement runs at every start-up: let root = expandFilename(getTempDir()) / (\"addon-review-\" &..."),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_review_round2.nim",
     binary: "build/test-bin/t_addon_review_round2",
@@ -881,7 +881,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"a11-round2-\" & $getCurrentProces..."),
+    singleReason: "module-level statement runs at every start-up: let root = expandFilename(getTempDir()) / (\"a11-round2-\" & $..."),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_review_round3.nim",
     binary: "build/test-bin/t_addon_review_round3",
@@ -19979,6 +19979,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let reproBin = getEnv(\"REPROBUILD_REPRO\","),
   TestSpec(
+    source: "tests/integration/t_dsl_body_hash_does_not_justify_fragment_reuse.nim",
+    binary: "build/test-bin/t_dsl_body_hash_does_not_justify_fragment_reuse",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g04",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_dss11_cross_process_contribution_reaches_the_instance.nim",
     binary: "build/test-bin/t_dss11_cross_process_contribution_reaches_the_instance",
     defines: @[],
@@ -20218,7 +20229,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_enumerated_directory_evidence_producers.nim",
@@ -20867,7 +20878,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_health_reports_forge_repository_renames.nim",
@@ -21604,7 +21615,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_cli_flag.nim",
@@ -22231,7 +22242,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_from_a_v3_host_resolves_on_a_v2_host.nim",
