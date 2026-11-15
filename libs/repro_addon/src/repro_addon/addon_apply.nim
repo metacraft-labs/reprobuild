@@ -1521,6 +1521,28 @@ proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
   writeTriggersToRestart(stateDir, left)
   result.ok = left.len == 0
 
+proc step7Inputs*(transitions: seq[Transition]; paused: seq[string];
+                  assumeActive: HashSet[string]; excluded: openArray[string]):
+    tuple[transitions: seq[Transition]; paused: seq[string];
+          assumeActive: HashSet[string]] =
+  ## Everything step 7 starts, with the ``excluded`` units left out: the
+  ## plan's transitions, the triggers step 2 paused, and the units a revert
+  ## or replay plans as running that are down. The one place a revert's
+  ## step 7 is kept from starting a trigger its record of triggers to
+  ## restart owns (§13 decision 160), whatever list would start it.
+  result = (transitions: transitions, paused: paused, assumeActive: assumeActive)
+  when mutated("revert-starts-unstartable-trigger"):
+    # FALSIFYING MUTATION: step 7 starts it again.
+    return
+  if excluded.len == 0: return
+  result.transitions = @[]
+  for tr in transitions:
+    if tr.unit notin excluded: result.transitions.add(tr)
+  result.paused = @[]
+  for t in paused:
+    if t notin excluded: result.paused.add(t)
+  for t in excluded: result.assumeActive.excl(t)
+
 proc hostRunningInstances*(tmpl: string): seq[string]
 
 proc heldTriggersOf*(resources: openArray[SystemResource];
@@ -2270,6 +2292,17 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
       if r.exitCode == 0: result = r.output.splitWhitespace()
     except CatchableError: discard
     conflictsCache[u] = result
+  # What each unit is ordered before, as systemd reports it, for the
+  # boot-ordering cycle (spec §10.1, "A floored unit's own ordering").
+  # A unit systemd cannot show is ordered before nothing it could report.
+  var beforeCache = initTable[string, seq[string]]()
+  let orderedBeforeOf = proc (u: string): seq[string] =
+    if u in beforeCache: return beforeCache[u]
+    try:
+      let r = runSystemctl(@["show", "--no-pager", "-p", "Before", "--value", "--", u])
+      if r.exitCode == 0: result = r.output.splitWhitespace()
+    except CatchableError: discard
+    beforeCache[u] = result
   var limits = initTable[string, string]()
   if flooredUnitNames(resources).len > 0:
     try: limits = managerLimits()
@@ -2330,7 +2363,7 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
         limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
         adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf,
-        createdDirs: created, ledgerDirs: ledgerDirs,
+        orderedBeforeOf: orderedBeforeOf, createdDirs: created, ledgerDirs: ledgerDirs,
         systemdView: proc (p, u: string; s: ShowProps): SystemdView =
           hostSystemdView(p, u, s),
         runningInstances: hostRunningInstances,
@@ -6423,6 +6456,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if toRestart.len > 0:
         writeTriggersToRestart(stateDir,
           readTriggersToRestart(stateDir) & toRestart)
+        # The record owns them now (§13 decision 160): step 7 leaves them
+        # out (``step7Inputs``), or the revert would fail the same way.
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the
@@ -7010,6 +7045,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 try: recordCreatedDirs(stateDir, u, createdPending,
                                        invocation = unitInvocation(u).id)
                 except IOError, OSError: discard
+          # A revert leaves out what its record of triggers to restart owns
+          # (§13 decision 160): one filter for every start of step 7.
+          block:
+            let reverting = purpose == "revert" or
+              (replaying and opts.replayOf == "revert")
+            let excluded =
+              if reverting: readTriggersToRestart(stateDir) else: @[]
+            let inputs = step7Inputs(stepTransitions, paused, assumeActive,
+                                     excluded)
+            stepTransitions = inputs.transitions
+            paused = inputs.paused
+            assumeActive = inputs.assumeActive
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
                    afterStart = recordAfter)

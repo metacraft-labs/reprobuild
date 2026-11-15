@@ -172,10 +172,10 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   @["the switch to " & current & " had committed (marker at step " &
     $m.step & "); finished its step 9"]
 
-proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
-                           driver: CollisionDriver = nil): RecoveryOutcome =
-  ## Finish or revert an interrupted switch (see the module header), and
-  ## start again the triggers a revert could not (§13 decision 160).
+proc recoverMarker(stateDir: string; atBoot: bool;
+                   driver: CollisionDriver = nil): RecoveryOutcome =
+  ## An interrupted switch's own recovery: finish it or revert it; with no
+  ## marker, start again the triggers a revert could not (§13 decision 160).
   if not hasPendingMarker(stateDir):
     if hasTriggersToRestart(stateDir):
       let r = retryTriggerRestarts(stateDir)
@@ -279,6 +279,27 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
       result.lines.add("the switch could be neither finished nor " &
         "reverted; the marker stays for an operator (`repro system addon " &
         "recover`): " & failed & "; the revert failed too: " & e2.msg)
+
+proc afterRecovery*(rec: RecoveryOutcome; stateDir: string;
+                    host: LiveHost = LiveHost()): RecoveryOutcome =
+  ## Once a marker is resolved, the triggers its switch left on record are
+  ## started again too (§13 decision 160): the outcome is resolved only
+  ## when none is left. ``host`` is systemctl unless a test gives another.
+  result = rec
+  when not mutated("recover-skips-triggers-after-marker"):
+    if result.resolved and not result.deferred and
+        hasTriggersToRestart(stateDir):
+      let r = retryTriggerRestarts(stateDir, host)
+      result.lines.add(r.lines)
+      result.resolved = r.ok
+
+proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
+                           driver: CollisionDriver = nil): RecoveryOutcome =
+  ## Finish or revert an interrupted switch (see the module header), and
+  ## start again the triggers a revert could not (§13 decision 160) --
+  ## also those the switch it finishes or reverts leaves on record, so a
+  ## resolved marker never leaves the host pending on a trigger.
+  afterRecovery(recoverMarker(stateDir, atBoot, driver), stateDir)
 
 proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## After a recovery: every unit the current generation started is

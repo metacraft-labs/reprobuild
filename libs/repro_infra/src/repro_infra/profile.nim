@@ -1325,25 +1325,73 @@ proc profileUnitOf(p: SystemProfile; name: string): int =
           r.suName == tmpl: return i
   -1
 
+proc dropInDirNames(name: string; acc: var seq[string]) =
+  ## ``unit_file_find_dirs()`` (``src/shared/dropin.c``,
+  ## https://github.com/systemd/systemd/blob/v257/src/shared/dropin.c) for
+  ## one unit-path directory: the unit names whose ``<name>.d/`` systemd
+  ## reads for ``name``, highest priority first -- the name itself, then
+  ## (an instance) its template's chain, then the chain of its dashed
+  ## prefix (``foo-bar-baz.service`` -> ``foo-bar-.service`` ->
+  ## ``foo-.service``, the instance kept: ``foo-@x.service``).
+  acc.add(name)
+  let dot = name.rfind('.')
+  if dot <= 0: return
+  let typ = name[dot .. ^1]
+  let n = name[0 ..< dot]
+  let at = n.find('@')
+  let isInstance = at > 0 and at + 1 < n.len
+  if isInstance:
+    dropInDirNames(n[0 .. at] & typ, acc)
+  var prefix = if at >= 0: n[0 ..< at] else: n
+  var chopped = false
+  while true:
+    let dash = prefix.rfind('-')
+    if dash <= 0: return
+    if dash + 1 < prefix.len or chopped:
+      prefix = prefix[0 .. dash]
+      break
+    prefix = prefix[0 ..< dash]       # a trailing dash, chopped once
+    chopped = true
+  let instance = if isInstance: n[at + 1 .. ^1] else: ""
+  dropInDirNames((if isInstance: prefix & "@" & instance else: prefix) & typ, acc)
+
 proc profileDropInsOf*(p: SystemProfile; name: string): seq[string] =
   ## The contents of the profile's drop-ins that apply to unit ``name``
   ## (``dropInApplies``): each ``systemd.systemDropIn``, and each
-  ## ``systemUnit`` with ``collision = "dropIn"``, in the order systemd
-  ## parses them -- by file name (``50-repro-<name>.conf``), across all the
-  ## directories that apply (systemd.unit(5), "Description"). Ties keep the
-  ## profile's order.
-  var named: seq[(string, int, string)]
+  ## ``systemUnit`` with ``collision = "dropIn"``, as systemd reads them.
+  ## Every one is ``/etc/systemd/system/<unit>.d/50-repro-<name>.conf``;
+  ## ``conf_files_list_strv()`` (``src/basic/conf-files.c``) keeps, of the
+  ## files that share a file name, only the one in the highest-priority
+  ## directory (``dropInDirNames``; the type-wide ``<type>.d/`` last), and
+  ## parses the survivors in file-name order (systemd.unit(5),
+  ## "Description").
+  var dirs: seq[string]
+  dropInDirNames(name, dirs)
+  let dot = name.rfind('.')
+  if dot > 0: dirs.add(name[dot + 1 .. ^1])
+  var best = initTable[string, (int, int, string)]()  # file -> (rank, idx, text)
   for i, d in p.resources:
-    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
-      named.add((AddOnDropInPrefix & d.diName & ".conf", i, d.diContent))
-    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
-        dropInApplies(d.suName, name):
-      let n = if d.suDropInName.len > 0: d.suDropInName else: "addon"
-      named.add((AddOnDropInPrefix & n & ".conf", i, d.suContent))
-  named.sort(proc (a, b: (string, int, string)): int =
-    result = cmp(a[0], b[0])
-    if result == 0: result = cmp(a[1], b[1]))
-  for (_, _, c) in named: result.add(c)
+    var unit, file, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      (unit, file, content) = (d.diUnit, d.diName, d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      (unit, file, content) = (d.suName,
+        (if d.suDropInName.len > 0: d.suDropInName else: "addon"), d.suContent)
+    else:
+      continue
+    # ``dropInApplies`` is the floor's (deliberately wider) reading; it does
+    # not name the dashed prefix that keeps an instance (``foo-@x.service``
+    # for ``foo-bar@x.service``), which ``unit_file_find_dirs`` does.
+    if not (dropInApplies(unit, name) or unit in dirs): continue
+    let f = AddOnDropInPrefix & file & ".conf"
+    var rank = dirs.find(unit)
+    if rank < 0: rank = dirs.len
+    if f notin best or rank < best[f][0]:
+      best[f] = (rank, i, content)
+  var files: seq[string]
+  for f in best.keys: files.add(f)
+  files.sort()
+  for f in files: result.add(best[f][2])
 
 proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
   ## The profile's bytes systemd reads for ``name``: its unit and every
@@ -1610,6 +1658,111 @@ proc checkFloorReach*(p: SystemProfile) =
               "reached from " & root & "): AllowIsolate=yes lets a job " &
               "stop every unit the target does not want")
 
+proc namesUnit(value, name: string): bool =
+  ## ``value`` (a list of unit names) names ``name``, or an instance of the
+  ## template ``name`` (``a@.service`` for ``a@1.service``).
+  let at = name.find('@')
+  let dot = name.rfind('.')
+  let tmpl = at > 0 and dot == at + 1
+  for t in value.splitWhitespace():
+    if t == name: return true
+    if tmpl and t.startsWith(name[0 .. at]) and t.endsWith(name[dot .. ^1]):
+      return true
+
+proc unitDefaultDependencies(files: openArray[string]): bool =
+  ## Whether a unit read from ``files`` has default dependencies (the last
+  ## ``DefaultDependencies=`` wins; systemd.unit(5)).
+  result = true
+  for c in files:
+    for d in sectionDirectives(c, ["Unit"]):
+      if d.key == "DefaultDependencies":
+        result = d.value.strip().toLowerAscii() notin ["no", "false", "0", "off"]
+
+proc profileOrderedBeforeOf*(p: SystemProfile; name: string): seq[string] =
+  ## The units ``name`` is ordered before, as far as the profile says
+  ## (systemd.unit(5): ``Before=`` and ``After=`` are each other's
+  ## inverse): the ``Before=`` of its files; every profile unit whose files
+  ## order it ``After=`` ``name``; and a target of the profile that pulls
+  ## ``name`` in (its ``Wants=``/``Requires=``, or ``name``'s
+  ## ``WantedBy=``/``RequiredBy=``), which systemd orders after it when
+  ## both have default dependencies and nothing orders them the other way
+  ## (systemd.target(5), "Implicit Dependencies"); and, for a socket, timer
+  ## or path unit of the profile with default dependencies, its boot target
+  ## (``sockets.target``, ``timers.target``, ``paths.target``). A unit the
+  ## profile does not define is ordered before nothing the profile can see; the
+  ## effective-unit check reads it from systemd.
+  let files = unitFilesOf(p, name)
+  var after: seq[string]
+  for c in files:
+    for d in sectionDirectives(c, ["Unit"]):
+      if d.key == "Before":
+        for t in d.value.splitWhitespace(): result.add(t)
+      elif d.key == "After":
+        for t in d.value.splitWhitespace(): after.add(t)
+  let own = files.len > 0
+  # Its [Install] pulls it in only when it is enabled.
+  let at = profileUnitOf(p, name)
+  let enabled = at >= 0 and p.resources[at].suEnabled
+  # A socket, timer or path unit of the profile with default dependencies
+  # is ordered before its boot target, which ``basic.target`` -- and so the
+  # re-assertion -- is ordered after (systemd.socket(5), systemd.timer(5),
+  # systemd.path(5), "Default Dependencies"). Only for a unit the profile
+  # defines: a base unit's ``DefaultDependencies=`` is not the profile's to
+  # read, and the effective half reads its ordering from systemd.
+  if at >= 0 and unitDefaultDependencies(files):
+    for (suffix, target) in [(".socket", "sockets.target"),
+                             (".timer", "timers.target"),
+                             (".path", "paths.target")]:
+      if name.endsWith(suffix) and target notin result: result.add(target)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        r.suName == name: continue
+    let other = unitFilesOf(p, r.suName)
+    var pulls, orderedAfter, orderedBefore = false
+    for c in other:
+      for d in sectionDirectives(c, ["Unit"]):
+        if d.key == "After" and namesUnit(d.value, name): orderedAfter = true
+        if d.key == "Before" and namesUnit(d.value, name): orderedBefore = true
+        if d.key in ["Wants", "Requires"] and namesUnit(d.value, name):
+          pulls = true
+    if enabled:
+      for c in files:
+        for d in sectionDirectives(c, ["Install"]):
+          if d.key in ["WantedBy", "RequiredBy"] and
+              r.suName in d.value.splitWhitespace():
+            pulls = true
+    if orderedAfter:
+      result.add(r.suName)
+    elif pulls and own and r.suName.endsWith(".target") and
+        not orderedBefore and r.suName notin after and
+        unitDefaultDependencies(other) and unitDefaultDependencies(files):
+      result.add(r.suName)
+
+proc checkFloorBootOrdering*(p: SystemProfile) =
+  ## Spec §10.1, "A floored unit's own ordering": no unit the floor orders
+  ## after the boot re-assertion (``FloorBootOrdering``, §13 decision 144)
+  ## is ordered, by any chain the profile defines, before the
+  ## re-assertion or before a unit it waits for (``ReassertWaitsFor``):
+  ## that is an ordering cycle, which systemd breaks at every boot by
+  ## deleting a job of its own choosing (issue 2026-11-15, a floored
+  ## unit's own ordering can form a cycle with the boot re-assertion).
+  ## The effective-unit check walks the whole order systemd reports.
+  when InfraAddonMutation in ["floor-static-r3-disabled", "floor-unchecked",
+                              "floor-round5-static-off"]:
+    return
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        r.suHardening != ServiceFloorHardening or floorWaivedWhole(r):
+      continue
+    if ("\n" & FloorBootOrdering & "\n") notin renderedSystemUnitContent(r):
+      continue
+    let route = bootOrderingCycleRoute(r.suName,
+      proc (u: string): seq[string] = profileOrderedBeforeOf(p, u),
+      ReassertWaitsFor)
+    if route.len > 0:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "' " &
+        bootOrderingCycleReason(route))
+
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
   ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
@@ -1621,6 +1774,7 @@ proc applyAddOnServiceFloor*(p: var SystemProfile) =
   checkFloorDropIns(p)
   checkFloorActivators(p)
   checkFloorReach(p)
+  checkFloorBootOrdering(p)
 
 proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
   ## Every floor exception of the profile's units under the floor, one
@@ -3105,6 +3259,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
     checkFloorDropIns(result)
     checkFloorActivators(result)
     checkFloorReach(result)
+    checkFloorBootOrdering(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------

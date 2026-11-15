@@ -53,6 +53,7 @@ import repro_core/relocation
 import repro_core/ambient_execution
 import repro_core/process_exec
 import repro_core/cli_images
+import repro_core/nix_configuration_env
 import repro_core/source_root
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -7850,6 +7851,10 @@ proc writeToolIdentityCache(outDir: string; mode: ToolProvisioningMode;
   writeKeyedToolIdentity(outDir, keyInfo.key, identity)
 
 proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
+  ## Whether every evaluation input a snapshot's fragments recorded still
+  ## holds. Callers check ``providerSnapshotBinaryFresh`` FIRST; this covers
+  ## the inputs that predicate does not, and refuses any kind it cannot
+  ## check.
   if snapshot.fragments.len == 0:
     return false
   for fragment in snapshot.fragments:
@@ -7861,6 +7866,13 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
       of gevDirectoryEnumeration:
         if directoryMemberNames(input.identity) != input.directoryMembers:
           return false
+      of gevProviderSource:
+        # Governed by ``providerSnapshotBinaryFresh``, which every caller
+        # applies before this and which requires every fragment's record to
+        # name the current provider artifact and binary. Refusing the kind
+        # here instead would make every snapshot written since the record
+        # was introduced a miss, silently disabling the cached-snapshot path.
+        discard
       else:
         return false
   true
@@ -8081,8 +8093,9 @@ proc providerGraphStoreRoot(base: string): string =
   ##
   ## The provider-graph snapshot (``provider-fragments.rbsz``) caches the
   ## fragments a provider emitted. ``refreshProviderGraph`` reuses a stored
-  ## snapshot whenever the ``providerArtifactId`` matches and nothing it tracks
-  ## (file mtimes, body hashes, directory membership) changed — but it does
+  ## snapshot whenever every fragment was produced by the current provider
+  ## (artifact id and binary) and nothing else it tracks (files read,
+  ## directory membership) changed — but it does
   ## NOT track solver-participating variant values, which are resolved at
   ## provider-run time and change the emitted graph (e.g. ``buildType=release``
   ## moves every output to ``build-release-repro/``). Two builds differing only
@@ -25875,7 +25888,8 @@ const DaemonRequestAuthoritativeEnvPrefixes* = ["REPROBUILD_", "REPRO_"]
   ## Reprobuild's own control namespace, over which a build REQUEST is
   ## authoritative and the daemon's start environment is not.
 
-const DaemonRequestAuthoritativeEnvNames* = ["IN_AGENT_SHELL"]
+const DaemonRequestAuthoritativeEnvNames* =
+  @["IN_AGENT_SHELL"] & @NixConfigurationEnvNames
   ## Variables OUTSIDE that namespace that reprobuild nevertheless reads to
   ## pick a user-facing default, so the caller's value must govern a hosted
   ## build exactly as a ``REPROBUILD_`` knob does. ``IN_AGENT_SHELL`` selects
@@ -25883,9 +25897,19 @@ const DaemonRequestAuthoritativeEnvNames* = ["IN_AGENT_SHELL"]
   ## makes the ``--log`` default quiet; spec/CLI/build.md §"Daemon Mode"
   ## requires the client's own selection to apply on both routes. Without the
   ## entry, a daemon auto-started from an agent shell silenced the status
-  ## lines of every later caller that was not in one. Exact names only: list
-  ## a variable here only when reprobuild itself consults it, never one a
-  ## project merely passes through to its actions.
+  ## lines of every later caller that was not in one.
+  ##
+  ## ``NixConfigurationEnvNames`` (``NIX_CONFIG`` and the variables that
+  ## locate Nix's configuration files) are read by reprobuild to compose
+  ## every request to the shared Nix helper, which runs that request's Nix
+  ## commands with them. They carry the caller's Nix credentials, so a
+  ## daemon started by an earlier caller -- a previous CI job on a
+  ## persistent runner -- must not lend its own to a later caller that set
+  ## none (reprobuild-pm issue
+  ## 2026-11-10-repro-daemon-nix-fetch-gets-http-401-on-a-persistent-macos-runner).
+  ##
+  ## Exact names only: list a variable here only when reprobuild itself
+  ## consults it, never one a project merely passes through to its actions.
 
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
                             currentEnv: openArray[string]): seq[string] =
