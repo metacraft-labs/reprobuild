@@ -870,7 +870,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let root = expandFilename(getTempDir()) / (\"addon-review-\" & $getCur..."),
+    singleReason: "module-level statement runs at every start-up: let root = expandFilename(getTempDir()) / (\"addon-review-\" &..."),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_review_round2.nim",
     binary: "build/test-bin/t_addon_review_round2",
@@ -881,7 +881,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let root = expandFilename(getTempDir()) / (\"a11-round2-\" & $getCurr..."),
+    singleReason: "module-level statement runs at every start-up: let root = expandFilename(getTempDir()) / (\"a11-round2-\" & $..."),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_review_round3.nim",
     binary: "build/test-bin/t_addon_review_round3",
