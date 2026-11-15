@@ -580,8 +580,15 @@ for tok in ${NIX_LDFLAGS:-}; do
       ;;
   esac
 done
+if [ ${#openssl_passl[@]} -eq 0 ] && [ "${package_build}" = 1 ] &&
+    [ -n "${OPENSSL_LIBDIR:-}" ] && [ -d "${OPENSSL_LIBDIR}" ]; then
+  # The derivation names its OpenSSL explicitly; that is as much a closure
+  # path as NIX_LDFLAGS' -L, and does not depend on how a platform's
+  # cc-wrapper spells it.
+  openssl_passl=("--passL:-L${OPENSSL_LIBDIR}" "--passL:-lssl" "--passL:-lcrypto")
+fi
 if [ ${#openssl_passl[@]} -eq 0 ] && [ "${package_build}" = 1 ]; then
-  echo "error: no OpenSSL -L in NIX_LDFLAGS in a Nix package build; refusing the" >&2
+  echo "error: no OpenSSL -L in NIX_LDFLAGS or OPENSSL_LIBDIR in a Nix package build; refusing the" >&2
   echo "       Homebrew fallback (it would plant a host rpath in the package)." >&2
   exit 2
 fi
