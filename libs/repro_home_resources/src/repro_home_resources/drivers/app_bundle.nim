@@ -46,6 +46,7 @@
 ## * spctl(8); "Notarizing macOS software before distribution" —
 ##   https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, os, osproc, strutils, streams]
 from repro_core/ambient_execution import uncontrolledStartProcess
 
@@ -153,8 +154,8 @@ proc runSystemTool*(exe: string; args: openArray[string]; stdinText = ""):
     p.inputStream.close()
     # Both streams are read before waiting. The tools driven here write
     # little to stderr, so draining stdout first cannot fill stderr's pipe.
-    let output = p.outputStream.readAll()
-    let errors = p.errorStream.readAll()
+    let output = drainStream(p.outputStream)
+    let errors = drainStream(p.errorStream)
     let code = p.waitForExit()
     result = (code, output, errors)
   finally:

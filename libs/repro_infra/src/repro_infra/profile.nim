@@ -1310,148 +1310,6 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
     return
   @[stem & ".service"]
 
-proc activatedService(name, content: string): string =
-  ## The service a socket, timer or path unit starts, as far as its own
-  ## file says (``triggeredUnits``): the first unit it triggers, the
-  ## template for an ``Accept=yes`` socket.
-  let units = triggeredUnits(name, [content])
-  if units.len > 0: units[0] else: ""
-
-proc checkFloorActivators*(p: SystemProfile) =
-  ## The units that activate a floored service, and the drop-ins onto them,
-  ## under the floor's rules for activators (A9 review round 5, finding 2;
-  ## `service_floor.activatorRefusal`); a service's `Sockets=` names only the
-  ## profile's own sockets; no drop-in onto any socket, timer or path unit
-  ## carries a command line; and no floored unit's `EnvironmentFile=` lies
-  ## in another floored unit's writable place (finding 1).
-  when InfraAddonMutation in ["floor-round5-static-off",
-      "floor-static-r3-disabled", "floor-unchecked"]:
-    return
-  var floored = initHashSet[string]()
-  var sockets = initHashSet[string]()
-  for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
-    if r.suHardening == ServiceFloorHardening: floored.incl(r.suName)
-    if r.suName.endsWith(".socket"): sockets.incl(r.suName)
-  proc isFloored(target: string): bool =
-    if target in floored: return true
-    let at = target.find('@')
-    let dot = target.rfind('.')
-    at > 0 and dot > at and (target[0 .. at] & target[dot .. ^1]) in floored
-  var activators = initHashSet[string]()
-  for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
-    if r.suHardening == ServiceFloorHardening:
-      for d in sectionDirectives(r.suContent, ["Service"]):
-        if d.key == "Sockets":
-          for t in d.value.splitWhitespace():
-            if t notin sockets:
-              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
-                "': Sockets=" & t & " is not a socket unit of this profile; " &
-                "a socket the base defines hands the service what it opens " &
-                "as root")
-            activators.incl(t)
-    if r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
-        r.suName.endsWith(".path"):
-      if isFloored(activatedService(r.suName, r.suContent)):
-        activators.incl(r.suName)
-  # Spec §10.1 round 12, "A listener below a place its service can write",
-  # as §13 decision 139 extends it: the places any unit sharing the
-  # activated service's stem can write -- the service, a template of that
-  # stem and its instances, and every drop-in the profile writes onto one
-  # of them -- since the listener rule lets each of them name /run/<stem>.
-  proc writableOf(service: string): seq[string] =
-    let at = service.find('@')
-    let dot = service.rfind('.')
-    let tpl = if at > 0 and dot > at: service[0 .. at] & service[dot .. ^1] else: service
-    let stem = unitStem(service)
-    for r in p.resources:
-      if r.kind == srkSystemdSystemUnit:
-        let mine =
-          when InfraAddonMutation == "listener-writable-own-unit-only":
-            r.suCollision != "dropIn" and r.suName in [service, tpl]
-          else: unitStem(r.suName) == stem
-        if mine:
-          result.add(floorWritablePlaces(serviceDirectives(r.suContent)))
-      elif r.kind == srkSystemdSystemDropIn:
-        when InfraAddonMutation != "listener-writable-own-unit-only":
-          if unitStem(r.diUnit) == stem:
-            result.add(floorWritablePlaces(serviceDirectives(r.diContent)))
-  for r in p.resources:
-    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
-        r.suName in activators:
-      let svc = activatedService(r.suName, r.suContent)
-      let why = activatorRefusal(r.suName, r.suContent, dropIn = false,
-                                 service = svc, serviceWritable = writableOf(svc))
-      if why.len > 0:
-        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
-          "' activates a floored service: " & why)
-  for d in p.resources:
-    var target, content = ""
-    if d.kind == srkSystemdSystemDropIn:
-      target = d.diUnit
-      content = d.diContent
-    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
-      target = d.suName
-      content = d.suContent
-    else:
-      continue
-    if not (target.endsWith(".socket") or target.endsWith(".timer") or
-            target.endsWith(".path")):
-      continue
-    if hasExecLines(content):
-      raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
-        target & " carries a command line, which the manager runs as root " &
-        "outside every floor")
-    var applies = false
-    var service = ""
-    for a in activators:
-      if dropInApplies(target, a):
-        applies = true
-        for r in p.resources:
-          if r.kind == srkSystemdSystemUnit and r.suName == a:
-            service = activatedService(a, r.suContent)
-    if applies:
-      let why = activatorRefusal(target, content, dropIn = true, service = service,
-                                 serviceWritable = writableOf(service))
-      if why.len > 0:
-        raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
-          target & ", which activates a floored service: " & why)
-  # EnvironmentFile= is default-deny (§13 decision 50): a store path, a file
-  # the profile installs, or the service's own secrets.
-  var ownFiles: seq[string]
-  for f in p.resources:
-    if f.kind == srkFsSystemFile: ownFiles.add(f.sfPath)
-  for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening or
-        floorWaivedWhole(r):
-      continue
-    for d in sectionDirectives(r.suContent, ["Service"]):
-      if d.key != "EnvironmentFile": continue
-      for t in d.value.splitWhitespace():
-        let why = environmentFileRefusal(r.suName, t, ownFiles)
-        if why.len > 0:
-          raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
-            "': EnvironmentFile=" & t & ": " & why)
-  # EnvironmentFile= against every other floored unit's writable places.
-  for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening:
-      continue
-    for d in sectionDirectives(r.suContent, ["Service"]):
-      if d.key != "EnvironmentFile": continue
-      for t in d.value.splitWhitespace():
-        let np = normalisedPath(t.strip(leading = true, trailing = false,
-                                        chars = {'-'}))
-        for o in p.resources:
-          if o.kind != srkSystemdSystemUnit or
-              o.suHardening != ServiceFloorHardening or o.suName == r.suName:
-            continue
-          for w in floorWritablePlaces(serviceDirectives(o.suContent)):
-            if np == w or np.startsWith(w & "/"):
-              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
-                "': EnvironmentFile=" & np & " lies in " & o.suName &
-                "'s writable place " & w & "; the manager reads it as root")
-
 proc profileUnitOf(p: SystemProfile; name: string): int =
   ## The index of the profile's own unit ``name`` (or of the template an
   ## instance ``name`` is of), -1 when the profile does not define it.
@@ -1494,6 +1352,165 @@ proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
   if i >= 0: result.add(p.resources[i].suContent)
   result.add(profileDropInsOf(p, name))
 
+proc activatorFilesOf(p: SystemProfile; name: string): seq[string] =
+  ## The bytes the floor's activator checks read for the trigger ``name``:
+  ## its unit file and the profile's drop-ins onto it (``unitFilesOf``),
+  ## because systemd reads ``Service=`` / ``Unit=`` from both
+  ## (systemd.unit(5), "Description").
+  when InfraAddonMutation == "activator-own-file-only":
+    # The falsifier: the unit's own file alone.
+    let i = profileUnitOf(p, name)
+    if i >= 0: result.add(p.resources[i].suContent)
+  else:
+    result = unitFilesOf(p, name)
+
+proc activatedService(p: SystemProfile; name: string;
+                      isFloored: proc (unit: string): bool): string =
+  ## The service the socket, timer or path unit ``name`` of the profile
+  ## starts (``triggeredUnits`` over ``activatorFilesOf``): the first
+  ## floored unit it triggers when it triggers one, otherwise the first
+  ## unit it triggers (the template for an ``Accept=yes`` socket); "" when
+  ## it triggers none.
+  let units = triggeredUnits(name, activatorFilesOf(p, name))
+  for u in units:
+    if isFloored(u): return u
+  if units.len > 0: units[0] else: ""
+
+proc checkFloorActivators*(p: SystemProfile) =
+  ## The units that activate a floored service, and the drop-ins onto them,
+  ## under the floor's rules for activators (A9 review round 5, finding 2;
+  ## `service_floor.activatorRefusal`); a service's `Sockets=` names only the
+  ## profile's own sockets; no drop-in onto any socket, timer or path unit
+  ## carries a command line; and no floored unit's `EnvironmentFile=` lies
+  ## in another floored unit's writable place (finding 1).
+  when InfraAddonMutation in ["floor-round5-static-off",
+      "floor-static-r3-disabled", "floor-unchecked"]:
+    return
+  var floored = initHashSet[string]()
+  var sockets = initHashSet[string]()
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+    if r.suHardening == ServiceFloorHardening: floored.incl(r.suName)
+    if r.suName.endsWith(".socket"): sockets.incl(r.suName)
+  proc isFloored(target: string): bool =
+    if target in floored: return true
+    let at = target.find('@')
+    let dot = target.rfind('.')
+    at > 0 and dot > at and (target[0 .. at] & target[dot .. ^1]) in floored
+  var activators = initHashSet[string]()
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+    if r.suHardening == ServiceFloorHardening:
+      for d in sectionDirectives(r.suContent, ["Service"]):
+        if d.key == "Sockets":
+          for t in d.value.splitWhitespace():
+            if t notin sockets:
+              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+                "': Sockets=" & t & " is not a socket unit of this profile; " &
+                "a socket the base defines hands the service what it opens " &
+                "as root")
+            activators.incl(t)
+    if r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
+        r.suName.endsWith(".path"):
+      # Its unit file and the profile's drop-ins onto it decide what it
+      # starts, as they decide it for the planner and `checkFloorReach`.
+      if isFloored(activatedService(p, r.suName, isFloored)):
+        activators.incl(r.suName)
+  # Spec §10.1 round 12, "A listener below a place its service can write",
+  # as §13 decision 139 extends it: the places any unit sharing the
+  # activated service's stem can write -- the service, a template of that
+  # stem and its instances, and every drop-in the profile writes onto one
+  # of them -- since the listener rule lets each of them name /run/<stem>.
+  proc writableOf(service: string): seq[string] =
+    let at = service.find('@')
+    let dot = service.rfind('.')
+    let tpl = if at > 0 and dot > at: service[0 .. at] & service[dot .. ^1] else: service
+    let stem = unitStem(service)
+    for r in p.resources:
+      if r.kind == srkSystemdSystemUnit:
+        let mine =
+          when InfraAddonMutation == "listener-writable-own-unit-only":
+            r.suCollision != "dropIn" and r.suName in [service, tpl]
+          else: unitStem(r.suName) == stem
+        if mine:
+          result.add(floorWritablePlaces(serviceDirectives(r.suContent)))
+      elif r.kind == srkSystemdSystemDropIn:
+        when InfraAddonMutation != "listener-writable-own-unit-only":
+          if unitStem(r.diUnit) == stem:
+            result.add(floorWritablePlaces(serviceDirectives(r.diContent)))
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        r.suName in activators:
+      let svc = activatedService(p, r.suName, isFloored)
+      let why = activatorRefusal(r.suName, r.suContent, dropIn = false,
+                                 service = svc, serviceWritable = writableOf(svc))
+      if why.len > 0:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' activates a floored service: " & why)
+  for d in p.resources:
+    var target, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      target = d.diUnit
+      content = d.diContent
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      target = d.suName
+      content = d.suContent
+    else:
+      continue
+    if not (target.endsWith(".socket") or target.endsWith(".timer") or
+            target.endsWith(".path")):
+      continue
+    if hasExecLines(content):
+      raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
+        target & " carries a command line, which the manager runs as root " &
+        "outside every floor")
+    var applies = false
+    var service = ""
+    for a in activators:
+      if dropInApplies(target, a):
+        applies = true
+        service = activatedService(p, a, isFloored)
+    if applies:
+      let why = activatorRefusal(target, content, dropIn = true, service = service,
+                                 serviceWritable = writableOf(service))
+      if why.len > 0:
+        raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
+          target & ", which activates a floored service: " & why)
+  # EnvironmentFile= is default-deny (§13 decision 50): a store path, a file
+  # the profile installs, or the service's own secrets.
+  var ownFiles: seq[string]
+  for f in p.resources:
+    if f.kind == srkFsSystemFile: ownFiles.add(f.sfPath)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening or
+        floorWaivedWhole(r):
+      continue
+    for d in sectionDirectives(r.suContent, ["Service"]):
+      if d.key != "EnvironmentFile": continue
+      for t in d.value.splitWhitespace():
+        let why = environmentFileRefusal(r.suName, t, ownFiles)
+        if why.len > 0:
+          raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+            "': EnvironmentFile=" & t & ": " & why)
+  # EnvironmentFile= against every other floored unit's writable places.
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening:
+      continue
+    for d in sectionDirectives(r.suContent, ["Service"]):
+      if d.key != "EnvironmentFile": continue
+      for t in d.value.splitWhitespace():
+        let np = normalisedPath(t.strip(leading = true, trailing = false,
+                                        chars = {'-'}))
+        for o in p.resources:
+          if o.kind != srkSystemdSystemUnit or
+              o.suHardening != ServiceFloorHardening or o.suName == r.suName:
+            continue
+          for w in floorWritablePlaces(serviceDirectives(o.suContent)):
+            if np == w or np.startsWith(w & "/"):
+              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+                "': EnvironmentFile=" & np & " lies in " & o.suName &
+                "'s writable place " & w & "; the manager reads it as root")
+
 proc profileStartsOf*(p: SystemProfile; name: string): seq[string] =
   ## The units starting ``name`` starts, as far as the profile says: its
   ## ``[Unit]`` starting dependencies (``StartingDependencyKeys``) in its
@@ -1535,14 +1552,18 @@ proc checkFloorReach*(p: SystemProfile) =
       roots.add(r.suName)
   if roots.len == 0: return
   let floored = roots
+  proc isFloored(unit: string): bool =
+    for f in floored:
+      if unit == f or dropInApplies(unit, f): return true
   for r in p.resources:
     if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
         (r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
          r.suName.endsWith(".path")):
-      let svc = activatedService(r.suName, r.suContent)
-      for f in floored:
-        if (svc == f or dropInApplies(svc, f)) and r.suName notin roots:
-          roots.add(r.suName)
+      # What it starts, from its unit file and the profile's drop-ins onto
+      # it (``activatedService``).
+      if isFloored(activatedService(p, r.suName, isFloored)) and
+          r.suName notin roots:
+        roots.add(r.suName)
   for root in roots:
     # Conflicts= may name only the profile's own units (§13 decision 55).
     for c in unitFilesOf(p, root):

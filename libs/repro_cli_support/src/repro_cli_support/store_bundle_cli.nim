@@ -12,6 +12,7 @@
 ## resolving the action-cache root (the same precedence `repro build` uses)
 ## and writing a dev-env allow file (the same file `repro allow` writes).
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils]
 import blake3
 import repro_core/ambient_execution
@@ -95,8 +96,8 @@ else:
     let p = uncontrolledStartProcess(self, workingDir = root,
       args = ["dev-env", "export", "bash", "--project-root", root],
       env = env, options = {})
-    let script = p.outputStream.readAll()
-    let errText = p.errorStream.readAll()
+    let script = drainStream(p.outputStream)
+    let errText = drainStream(p.errorStream)
     let code = p.waitForExit()
     p.close()
     if code != 0:

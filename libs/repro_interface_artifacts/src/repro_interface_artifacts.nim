@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
             strutils, tables, tempfiles, times]
 
@@ -4551,17 +4552,14 @@ proc runCommand*(command: openArray[string];
         if savedDir.len > 0:
           setCurrentDir(savedDir)
         raise
-    # N51 triage: LEFT AS `readAll` DELIBERATELY, on BOTH counts. This is the
-    # `else` of the `when defined(windows)` above, so it is the POSIX arm —
-    # and on POSIX `osproc`'s stream is a stdio `File` whose `fread` already
-    # loops to EOF, so there is no short read to fix. Draining to EOF would
-    # also be the WRONG remedy for the hazard this proc is shaped around: the
-    # Windows arm exists precisely because `nim` exits while `gcc` still holds
-    # the pipe's write handle and the pipe never EOFs. A drain loop is a
-    # stronger version of the read that deadlocks there.
+    # The POSIX arm of the `when defined(windows)` above. The read is to end
+    # of input (`drainStream`), which on POSIX is what `readAll` already did
+    # (`fread` blocks for EOF), so this does not add a wait; the Windows arm
+    # is a temp-file sink precisely because `nim` exits while `gcc` still
+    # holds a pipe's write handle open.
     var output = ""
     if process.outputStream != nil:
-      output = process.outputStream.readAll()
+      output = drainStream(process.outputStream)
     let exitCode = process.waitForExit()
     process.close()
     result = ProviderCompileExecutionResult(
