@@ -2,9 +2,11 @@
 ## that need no Nix build, against real git repositories, GNU tar and zstd on
 ## a temporary filesystem. No mocks.
 ##
-## The Nix half, publishing and the full restore are exercised end to end by
-## the procedure recorded in docs/workspace-bundles.md (they need a Nix
-## daemon, flakes and an S3 endpoint).
+## Building a Nix half from dev shells, publishing and the full restore are
+## exercised end to end by the procedure recorded in docs/workspace-bundles.md
+## (they need flakes and an S3 endpoint). Restoring a Nix half is tested here
+## against the real `nix-store`, `nix-hash`, tar and zstd, into a store under
+## another root, with store paths this test adds to the host's store.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_bundle
@@ -267,6 +269,22 @@ suite "sources into an existing root, activation, GitHub round trip":
       check viaGh.restored == @["sources"]
       check readFile(fresh / "lib" / "src" / "lib.nim") == "echo 1\n"
 
+const RestoreScriptTools = ["bash", "sh", "nix-store", "nix-hash", "tar",
+  "zstd", "sha256sum", "df", "awk", "xargs", "mktemp", "sort", "join", "cmp",
+  "diff", "cut", "sed", "tr", "cat", "chmod", "rm", "mkdir", "touch", "tee",
+  "date", "dirname", "tail", "head"]
+
+proc restoreScriptPath(top: string): string =
+  ## A PATH holding the tools restore.sh may use and no `repro`, as on a
+  ## machine whose setup script runs it. Built from links into this host's
+  ## own PATH, because neither /usr/bin nor /bin holds them on NixOS.
+  result = top / "tools"
+  createDir(result)
+  for tool in RestoreScriptTools:
+    let exe = findExe(tool, followSymlinks = false)
+    if exe.len > 0 and not symlinkExists(result / tool):
+      createSymlink(exe, result / tool)
+
 suite "restore.sh as a setup script":
   test "a failure is logged and does not fail the session unless strict":
     let top = createTempDir("repro-bundle-sh-", "")
@@ -275,8 +293,198 @@ suite "restore.sh as a setup script":
     writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
       "name": "demo"}, false, NixHalf()))
     let log = top / "log" / "restore.log"
-    let env = "env -i PATH=/usr/bin:/bin REPRO_BUNDLE_LOG=" & quoteShell(log)
+    let env = "env -i PATH=" & quoteShell(restoreScriptPath(top)) &
+      " REPRO_BUNDLE_LOG=" & quoteShell(log)
     check execCmdEx(env & " bash " & quoteShell(script) & " /nowhere").exitCode == 0
     check "install repro first" in readFile(log)
     check execCmdEx(env & " REPRO_BUNDLE_STRICT=1 bash " & quoteShell(script) &
       " /nowhere").exitCode == 1
+
+proc makeWritable(path: string) =
+  setFilePermissions(path, getFilePermissions(path) + {fpUserWrite})
+
+proc storeLocationIn(root, storePath: string): string =
+  root & storePath
+
+proc outsideOf(root: string): string =
+  root & ".outside"
+
+proc interruptedUnpack(partsDir: string; h: NixHalf; root: string) =
+  ## The state a restore killed mid-unpack leaves: the stream unpacked as
+  ## far as one file of the first path, cut short there, and nothing
+  ## registered. Truncating after a full unpack is the same on-disk state
+  ## (GNU tar writes each file in place), and is exact, where killing tar
+  ## at the right byte is a race.
+  createDir(root)
+  var cat = "cat"
+  for p in h.parts: cat.add(" " & quoteShell(partsDir / p.file))
+  discard sh(cat & " | zstd -q -dc --long=27 | tar -C " & quoteShell(root) &
+    " -xf -")
+  let big = storeLocationIn(root, h.shells[0].input) / "lib" / "big.so"
+  makeWritable(big)
+  discard sh("truncate -s 4096 " & quoteShell(big))
+  setFilePermissions(big, {fpUserRead, fpGroupRead, fpOthersRead})
+  # The second path never started.
+  let second = storeLocationIn(root, h.shells[0].env)
+  removeFile(second)
+  # The third, a symlink store path, holds a symlink to a read-only
+  # directory outside the store: removing the leftover must not follow it.
+  let outside = outsideOf(root)
+  createDir(outside)
+  writeFile(outside / "keep", "keep\n")
+  setFilePermissions(outside, {fpUserRead, fpUserExec})
+  let third = storeLocationIn(root, h.paths[2])
+  removeFile(third)
+  createSymlink(outside, third)
+
+proc outsideUntouched(root: string): bool =
+  ## Whether the directory the third path's leftover pointed to is still
+  ## there, still read-only and still holds its file.
+  let outside = outsideOf(root)
+  result = dirExists(outside) and
+    getFilePermissions(outside) == {fpUserRead, fpUserExec} and
+    fileExists(outside / "keep")
+
+proc intactFile(path, expected: string): bool =
+  ## Whether `path` holds exactly `expected`; reports the size, not the
+  ## bytes, when it does not.
+  let got = readFile(path)
+  result = got == expected
+  if not result:
+    echo "    ", path, " is ", got.len, " bytes, not the ", expected.len,
+      " bytes the bundle carries"
+
+proc storeVerifies(root: string): tuple[ok: bool; output: string] =
+  let (output, code) = execCmdEx("nix-store --store " & quoteShell(root) &
+    " --verify --check-contents 2>&1")
+  (code == 0 and "modified" notin output, output)
+
+proc pathValid(root, storePath: string): bool =
+  execCmdEx("nix-store --store " & quoteShell(root) & " --check-validity " &
+    quoteShell(storePath) & " 2>&1").exitCode == 0
+
+proc corruptRegistration(partsDir: string; h: var NixHalf; storePath: string) =
+  ## The publisher's registration names a NAR hash the content does not
+  ## have, as when its own copy of the path was damaged.
+  let db = sh("zstd -q -dc " & quoteShell(partsDir / "registration"))
+  let at = db.find(storePath & "\n")
+  doAssert at >= 0
+  let hashAt = at + storePath.len + 1
+  var bad = db
+  for i in hashAt ..< hashAt + 64: bad[i] = '0'
+  writeFile(partsDir / "registration.raw", bad)
+  discard sh("zstd -q -f -19 " & quoteShell(partsDir / "registration.raw") &
+    " -o " & quoteShell(partsDir / "registration"))
+  removeFile(partsDir / "registration.raw")
+  let bytes = readFile(partsDir / "registration")
+  h.registration = BundlePart(file: "registration", bytes: bytes.len,
+    sha256: sha256Hex(bytes))
+
+suite "nix half restore after an interrupted unpack":
+  test "a truncated leftover is replaced, and content is checked before registration":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-nix-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      # Two store paths of our own: a tree with a 1 MiB file, and a file.
+      let tree = top / "payload"
+      createDir(tree / "lib")
+      var big = newString(1 shl 20)
+      # xorshift: incompressible, so the stream spans several parts, and
+      # the same on every run, so the store path is too.
+      var x = 0x9E3779B97F4A7C15'u64
+      for i in 0 ..< big.len:
+        x = x xor (x shl 13)
+        x = x xor (x shr 7)
+        x = x xor (x shl 17)
+        big[i] = chr(int(x and 0xff))
+      writeFile(tree / "lib" / "big.so", big)
+      writeFile(tree / "env.sh", "export T_REPRO_BUNDLE=1\n")
+      let a = sh("nix-store --add " & quoteShell(tree)).strip()
+      let b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
+      createSymlink("env.sh", top / "link")
+      let c = sh("nix-store --add " & quoteShell(top / "link")).strip()
+      let partsDir = top / "bundle" / "x86_64-linux" / NixHalfDir / "h"
+      let packed = packNixHalf(@[a, b, c], partsDir, 3, 128 * 1024)
+      check packed.parts.len > 1
+      var h = NixHalf(id: "h", system: "x86_64-linux",
+        zstd: storePathOf(expandFilename(findExe("zstd"))), paths: @[a, b, c],
+        unpackedBytes: packed.unpackedBytes,
+        compressedBytes: packed.compressedBytes, parts: packed.parts,
+        registration: packed.registration,
+        shells: @[BundleShell(name: "t:default", input: a, env: b)])
+
+      # The library path: `repro bundle restore`.
+      let root = top / "root"
+      interruptedUnpack(partsDir, h, root)
+      check not pathValid(root, a)
+      restoreNixHalf(h, partsDir, root)
+      check pathValid(root, a)
+      check intactFile(storeLocationIn(root, a) / "lib" / "big.so", big)
+      check pathValid(root, c)
+      check expandSymlink(storeLocationIn(root, c)) == "env.sh"
+      check outsideUntouched(root)
+      let verified = storeVerifies(root)
+      check verified.ok
+      if not verified.ok: echo verified.output
+      # Run again over the complete store: valid paths are left alone.
+      restoreNixHalf(h, partsDir, root)
+      check storeVerifies(root).ok
+      # And into an empty root, with nothing left over to remove.
+      let fresh = top / "fresh-root"
+      restoreNixHalf(h, partsDir, fresh)
+      check intactFile(storeLocationIn(fresh, a) / "lib" / "big.so", big)
+      check storeVerifies(fresh).ok
+
+      # The bootstrap path: restore.sh, from a local bundle directory.
+      let script = top / "restore.sh"
+      writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+        "name": "bundle"}, true, h))
+      let shRoot = top / "sh-root"
+      interruptedUnpack(partsDir, h, shRoot)
+      let log = top / "restore.log"
+      let env = "env -i PATH=" & quoteShell(restoreScriptPath(top)) &
+        " TMPDIR=" & quoteShell(top) &
+        " REPRO_BUNDLE_LOG=" & quoteShell(log) &
+        " REPRO_BUNDLE_NIX_ROOT=" & quoteShell(shRoot)
+      discard execCmdEx(env & " bash " & quoteShell(script) & " " &
+        quoteShell(top / "bundle"))
+      check "nix half restored" in readFile(log)
+      check pathValid(shRoot, a)
+      check intactFile(storeLocationIn(shRoot, a) / "lib" / "big.so", big)
+      check pathValid(shRoot, c)
+      check expandSymlink(storeLocationIn(shRoot, c)) == "env.sh"
+      check outsideUntouched(shRoot)
+      let shVerified = storeVerifies(shRoot)
+      check shVerified.ok
+      if not shVerified.ok: echo readFile(log) & "\n" & shVerified.output
+
+      # A registration whose hash the content does not have is refused,
+      # and nothing is registered, by both paths.
+      corruptRegistration(partsDir, h, a)
+      let badRoot = top / "bad-root"
+      interruptedUnpack(partsDir, h, badRoot)
+      var refused = ""
+      try: restoreNixHalf(h, partsDir, badRoot)
+      except BundleError as e: refused = e.msg
+      check "does not match its registration" in refused
+      check a in refused
+      check not pathValid(badRoot, a)
+      check not pathValid(badRoot, b)
+      check outsideUntouched(badRoot)
+      writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+        "name": "bundle"}, true, h))
+      let badShRoot = top / "bad-sh-root"
+      interruptedUnpack(partsDir, h, badShRoot)
+      removeFile(log)
+      let badEnv = env.replace(quoteShell(shRoot), quoteShell(badShRoot))
+      discard execCmdEx(badEnv & " bash " & quoteShell(script) & " " &
+        quoteShell(top / "bundle"))
+      check "does not match its registration" in readFile(log)
+      check "nix half restored" notin readFile(log)
+      check not pathValid(badShRoot, a)
+      check outsideUntouched(badShRoot)

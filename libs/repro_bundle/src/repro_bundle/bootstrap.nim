@@ -1,7 +1,7 @@
 ## `restore.sh`: the bootstrap a machine without `repro` runs
 ## (Workspace-Bundles.md §7). It restores the Nix half with nothing but
-## bash, curl, tar, sha256sum, df and nix-store, then hands over to the
-## `repro` that half contains, which restores the remaining halves.
+## bash, curl, tar, sha256sum, df, nix-store and nix-hash, then hands over to
+## the `repro` that half contains, which restores the remaining halves.
 ##
 ## Everything it needs is baked in at create time (the half's id, parts,
 ## hashes and, for a GitHub source, each file's branch; the zstd and repro
@@ -122,9 +122,58 @@ else
     nix-store --realise "$ZSTD" >/dev/null 2>&1 || done_with "cannot realise $ZSTD"
     Z="$ZSTD/bin/zstd"
   fi
+  # Only the half's invalid paths are restored; a valid path is Nix's. What
+  # an interrupted unpack or substitution left at an invalid path is deleted
+  # first, so --skip-old-files never keeps a truncated file; each restored
+  # path's NAR hash must match the registration before it is registered.
+  # A run killed anywhere leaves those paths invalid, and the next starts
+  # them over (Workspace-Bundles.md §7 step 3).
+  command -v nix-hash >/dev/null || done_with "nix-hash is not installed; nothing restored"
+  meta=$(mktemp -d "${TMPDIR:-/tmp}/repro-bundle-meta.XXXXXX") || done_with "cannot create a scratch directory"
+  trap 'rm -rf "$meta" "${work:-}"' EXIT
+  "$Z" -q -dc "$dir/registration" > "$meta/db" || done_with "cannot decompress the registration"
+  # nix-store --dump-db: <path> <narHash> <narSize> <deriver> <n> <n refs>.
+  awk -v out="$meta/expected" -v paths="$meta/paths" '
+    s == 0 { p = $0; s = 1; next }  s == 1 { h = $0; s = 2; next }
+    s == 2 { s = 3; next }  s == 3 { s = 4; next }
+    s == 4 { n = $0 + 0; print p "\t" h > out; print p > paths; s = (n > 0) ? 5 : 0; next }
+    s == 5 { if (--n == 0) s = 0 }
+    END { if (s != 0) exit 1 }' "$meta/db" && [ -s "$meta/paths" ] \
+    || done_with "malformed nix half registration"
+  xargs nix-store "${store[@]}" --check-validity --print-invalid < "$meta/paths" > "$meta/invalid" \
+    || done_with "nix-store --check-validity failed"
+  at=""; [ "$ROOT" != / ] && at="${ROOT%/}"
+  while IFS= read -r p; do
+    t="$at$p"
+    if [ -d "$t" ] && [ ! -L "$t" ]; then chmod -R u+w "$t"; fi
+    if [ -e "$t" ] || [ -L "$t" ]; then rm -rf "$t" || done_with "cannot remove the partial store path $t"; fi
+  done < "$meta/invalid"
   ( cd "$dir" && cat "${PARTS[@]}" ) | "$Z" -q -dc --long=27 | tar -C "$ROOT" --skip-old-files -xf - \
     || done_with "nix half unpack failed"
-  "$Z" -q -dc "$dir/registration" | nix-store "${store[@]}" --load-db || done_with "nix-store --load-db failed"
+  # In sh -c: $0 is nix-hash, $1 the root's prefix, $2 one store path.
+  tr '\n' '\0' < "$meta/invalid" \
+    | xargs -0 -r -P "$PARALLEL" -n 1 sh -c 'printf "%s\t%s\n" "$2" "$("$0" --type sha256 "$1$2" 2>/dev/null)"' "$(command -v nix-hash)" "$at" \
+    > "$meta/actual.unsorted" || done_with "hashing the restored store paths failed"
+  # join needs both inputs in the collation it compares with: use C's.
+  LC_ALL=C sort "$meta/actual.unsorted" > "$meta/actual"
+  LC_ALL=C sort "$meta/invalid" | LC_ALL=C join -t "$(printf '\t')" - <(LC_ALL=C sort "$meta/expected") > "$meta/want"
+  if ! cmp -s "$meta/want" "$meta/actual"; then
+    diff "$meta/want" "$meta/actual" | sed -n 's/^< //p' | cut -f1 > "$meta/bad"
+    while IFS= read -r p; do
+      t="$at$p"
+      if [ -d "$t" ] && [ ! -L "$t" ]; then chmod -R u+w "$t" 2>/dev/null; fi
+      rm -rf "$t"
+    done < "$meta/bad"
+    done_with "nix half content does not match its registration, nothing registered:" $(tr '\n' ' ' < "$meta/bad")
+  fi
+  awk -v want="$meta/invalid" '
+    BEGIN { while ((getline l < want) > 0) w[l] = 1 }
+    s == 0 { p = $0; e = $0 "\n"; s = 1; next }
+    s < 4 { e = e $0 "\n"; s++; next }
+    s == 4 { n = $0 + 0; e = e $0 "\n"; if (n == 0) { if (p in w) printf "%s", e; s = 0 } else s = 5; next }
+    s == 5 { e = e $0 "\n"; if (--n == 0) { if (p in w) printf "%s", e; s = 0 } }' "$meta/db" \
+    | nix-store "${store[@]}" --load-db || done_with "nix-store --load-db failed"
+  rm -rf "$meta"
   nix-store "${store[@]}" --check-validity "${ROOTS[@]}" >/dev/null || done_with "registration incomplete"
   [ "$dir" = "${work:-}" ] && rm -f "$work"/*
   log "nix half restored"
