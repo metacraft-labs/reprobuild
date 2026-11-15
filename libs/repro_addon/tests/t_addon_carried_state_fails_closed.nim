@@ -1683,7 +1683,7 @@ OnActiveSec=1
     check "dep2.service <- dep.service" in units
     check "inst.service <- tpl@a.service" in units
 
-suite "a trigger that cannot start again leaves the host pending (decision 155)":
+suite "a trigger that cannot start again leaves the host pending (decision 160)":
   # A state directory of the test's own (the real filesystem); systemd is a
   # closure, so a start that fails can be staged without a host.
   test "recover starts each recorded trigger again; one that still fails stays recorded":

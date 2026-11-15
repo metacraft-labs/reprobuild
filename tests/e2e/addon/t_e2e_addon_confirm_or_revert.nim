@@ -206,7 +206,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.stdout & r.stderr)
     step("positive control: A' serves its page", g.served() == "page-A2", "")
     # An operator restarts the service between two applies (§13 decision
-    # 67; A9 review round 10): systemd removes its RuntimeDirectory and
+    # 71; A9 review round 10): systemd removes its RuntimeDirectory and
     # makes it again, with a new inode, for a new invocation. The next
     # apply must still take it as the unit's, and say so in its log.
     let rs = g.exec("systemctl restart repro-fixture-web.service; sleep 2; " &

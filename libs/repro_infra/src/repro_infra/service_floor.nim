@@ -100,7 +100,8 @@
 ## the engines of those versions stored, byte for byte.
 
 import std/[algorithm, sequtils, strutils, tables]
-from std/posix import realpath
+when defined(posix):
+  from std/posix import realpath
 
 const FloorMutation {.strdefine: "reproAddonMutation".} = ""
   ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
@@ -1552,21 +1553,26 @@ proc canonicalPlace*(path: string; resolveLinks = false): string =
     return
   if result == "/var/run" or result.startsWith("/var/run/"):
     result = "/run" & result["/var/run".len .. ^1]
-  if resolveLinks and result.startsWith("/"):
-    var head = result
-    var tail = ""
-    while head.len > 1:
-      var buf: array[4097, char]
-      let r = realpath(head.cstring, cast[cstring](addr buf[0]))
-      if r != nil:
-        let resolved = $cast[cstring](addr buf[0])
-        result = normalisedPath(resolved & tail)
-        if result == "/var/run" or result.startsWith("/var/run/"):
-          result = "/run" & result["/var/run".len .. ^1]
-        return
-      let slash = head.rfind('/')
-      tail = head[slash .. ^1] & tail
-      head = if slash <= 0: "/" else: head[0 ..< slash]
+  # Links are resolved where the effective half runs, on the Linux host;
+  # the add-on has no Windows host, and std/posix's realpath does not exist
+  # there (reprobuild-pm issue
+  # 2026-11-15-windows-repro-engine-does-not-compile-service-floor-calls-posix-realpath).
+  when defined(posix):
+    if resolveLinks and result.startsWith("/"):
+      var head = result
+      var tail = ""
+      while head.len > 1:
+        var buf: array[4097, char]
+        let r = realpath(head.cstring, cast[cstring](addr buf[0]))
+        if r != nil:
+          let resolved = $cast[cstring](addr buf[0])
+          result = normalisedPath(resolved & tail)
+          if result == "/var/run" or result.startsWith("/var/run/"):
+            result = "/run" & result["/var/run".len .. ^1]
+          return
+        let slash = head.rfind('/')
+        tail = head[slash .. ^1] & tail
+        head = if slash <= 0: "/" else: head[0 ..< slash]
 
 proc listenerRefusal*(unitName, value: string; service = "";
                       serviceWritable: openArray[string] = []): string =
@@ -1687,7 +1693,8 @@ proc socketOptionRefusal*(unitName, key, value: string; service = "";
 proc baseTreeActivatorRefusal*(unitName: string): string =
   ## Why a unit that activates a floored service may not have this name,
   ## or "": its stem is a tree the base system owns (§13 decision 78), as
-  ## for the floored unit itself (decision 70). ``udev.socket`` would be
+  ## for the floored unit itself, never named after a base tree (decision
+  ## 70). ``udev.socket`` would be
   ## the base's own socket name.
   when FloorMutation == "base-tree-activators-allowed":
     return ""

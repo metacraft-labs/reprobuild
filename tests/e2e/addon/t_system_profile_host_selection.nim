@@ -141,7 +141,7 @@ suite "ReproOS add-on mode: system-scope host selection":
     check "system  : activities default; realised add-on-debian" in
       short.stdout
 
-    # The `full` block form (decision 17) selects the same way on a fully
+    # The `full` block form (decision 19) selects the same way on a fully
     # managed host: web + base, realised in full, on a ReproOS base.
     let fullWeb = sb.runRepro(["infra", "plan", "--state-dir", stateDir,
       "--profile", systemPath, "--host", "a6sel-fullweb"], host = "",

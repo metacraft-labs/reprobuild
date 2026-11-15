@@ -31,6 +31,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/winlibs_pin
+import repro_dsl_stdlib/linux_toolchain_pin
 # DSL-port M9.R.2c — typed slot var for each ``executable <tool>Bin:``
 # declared below (ldBin / arBin / ranlibBin / stripBin / nmBin /
 # objdumpBin / objcopyBin / gasBin).
@@ -119,6 +120,27 @@ package ar:
       os = "windows",
       lockIdentity = WinLibsX64LockIdentity,
       version = WinLibsBinutilsVersion
+
+    # Linux x86_64: the archiver of the toolchain the ``gcc`` package
+    # realizes (``linux_toolchain_pin``), from the same pin and relocated
+    # the same way, so it runs on any Linux x86_64 host and under the
+    # monitor.
+    tarball url = LinuxToolchainX64Url,
+      sha256 = LinuxToolchainX64Sha256,
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = LinuxToolchainArchiver,
+      elfInterpreter = LinuxToolchainLoader,
+      elfRunpath = LinuxToolchainRuntimeDir,
+      elfPatchDir = LinuxToolchainPatchDirs[0],
+      elfPatchDir = LinuxToolchainPatchDirs[1],
+      elfPatchDir = LinuxToolchainPatchDirs[2],
+      elfPatchDir = LinuxToolchainPatchDirs[3],
+      packageId = LinuxToolchainX64PackageId,
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = LinuxToolchainX64LockIdentity,
+      version = LinuxToolchainBinutilsVersion
 
   executable arBin:
     cli:

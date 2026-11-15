@@ -11,7 +11,7 @@
 ## `addOn` (`rt-addon`), the indented block form (`rt-block`), the inline
 ## block form (`rt-inline`), the spelled `full` (`rt-fullshort`, the same as
 ## absent) and the `full` block form selecting a system activity
-## (`rt-fullblock`, spec §13 decision 17).
+## (`rt-fullblock`, spec §13 decision 19).
 ##
 ## 1. Macro -> export: `repro home export` writes schema 5, and
 ##    `intent.hostSystems` carries exactly the seven declarations, each with
