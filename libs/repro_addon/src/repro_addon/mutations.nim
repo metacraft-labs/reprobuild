@@ -594,6 +594,12 @@
 ##                                           add-on switch stops or holds
 ##                                           the triggers of held units
 ##                                           (decision 151)
+## ``trigger-restart-failure-ignored``     a trigger that does not start
+##                                           again is dropped, and the
+##                                           switch goes on (decision 155)
+## ``triggers-of-running-units-stopped``   every active trigger of a held
+##                                           unit is stopped, also one whose
+##                                           unit runs (decision 151)
 ## ``fired-from-driver-starts-only``       the triggers to fire again are
 ##                                           taken from the drivers' starts
 ##                                           alone (decision 152)
@@ -1647,6 +1653,9 @@ const
                           "trigger-edges-omitted",
                           # A13 review round 9, §13 decisions 151-153.
                           "triggers-left-running",
+                          "triggers-of-running-units-stopped",
+                          # §13 decision 155.
+                          "trigger-restart-failure-ignored",
                           "fired-from-driver-starts-only",
                           "fired-instance-unmapped",
                           "requirers-of-refused-released",

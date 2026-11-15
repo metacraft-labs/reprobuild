@@ -976,6 +976,14 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "\"exec 3<>/dev/tcp/127.0.0.1/18720\" 2>/dev/null; touch /run/a13r10-job; " &
       "sleep 0.3; done' >/dev/null 2>&1 &"
     let trigCalm = "touch /run/a13r10-stop; sleep 1; true"
+    # Before each switch: the triggers' services stopped and the socket's
+    # backlog flushed, so each trigger fires as soon as anything lets it
+    # while the switch holds its service (a running service is served by
+    # its trigger without firing, and decision 151 leaves it alone).
+    let trigReset = "touch /run/a13r10-stop; sleep 1; systemctl stop " &
+      "a13r10.socket a13r10.service a13r10.path a13r10-p.service; rm -f " &
+      "/run/a13r10-job /var/lib/a13r10/sock.ran /var/lib/a13r10p/path.ran; " &
+      "systemctl start a13r10.socket a13r10.path; true"
     # Each trigger's state, and whether its service ran (its uid marker,
     # waited for a little, after a connection made now).
     let trigCheck = "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18720' " &
@@ -993,7 +1001,35 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let t0 = g.applyProfile(repro, "trig0", trigProfile.replace("@GEN@", "0"))
     step("decision 151, add-on host: the trigger probes apply with carried " &
          "state on the host", t0.exitCode == 0, t0.stdout & t0.stderr)
-    # A passing switch (a unit file changes) while the triggers are agitated.
+    # A passing switch while the socket's service already runs and its
+    # connections keep arriving (the common case): decision 151 leaves a
+    # trigger whose unit runs alone -- with Accept=no the service holds the
+    # listening socket, so the socket could not be started again -- and the
+    # service stays reachable through it after the switch.
+    discard g.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18720' " &
+      "2>/dev/null; for i in $(seq 15); do [ -s /var/lib/a13r10/sock.ran ] " &
+      "&& break; sleep 1; done; true")
+    let runBefore = g.exec("systemctl show -p ActiveState -p InvocationID " &
+      "a13r10.service | tr '\\n' ' '").stdout.strip()
+    discard g.exec(trigAgitate)
+    let t1r = g.applyProfile(repro, "trig1r", trigProfile.replace("@GEN@", "1r"))
+    discard g.exec(trigCalm)
+    let runAfter = g.exec("systemctl show -p ActiveState -p InvocationID " &
+      "a13r10.service | tr '\\n' ' '; systemctl show -p ActiveState -p " &
+      "Result a13r10.socket | tr '\\n' ' '; timeout 2 bash -c 'exec " &
+      "3<>/dev/tcp/127.0.0.1/18720' && echo reachable").stdout.strip()
+    let t1rOk = t1r.exitCode == 0 and "ActiveState=active" in runBefore and
+      runAfter.count("ActiveState=active") == 2 and "reachable" in runAfter
+    record["decision151Running"] = %*{"exit": t1r.exitCode,
+      "before": runBefore, "after": runAfter, "ok": t1rOk}
+    step("decision 151, add-on switch (service running): a socket whose " &
+         "service runs with connections arriving stays active through a " &
+         "passing switch, and the service stays reachable",
+         t1rOk, t1r.stdout & t1r.stderr & "\nbefore: " & runBefore &
+         "\nafter: " & runAfter)
+    # A passing switch (a unit file changes) while the triggers are agitated,
+    # from their services stopped, so each would fire at its held service.
+    discard g.exec(trigReset)
     discard g.exec(trigAgitate)
     let t1 = g.applyProfile(repro, "trig1", trigProfile.replace("@GEN@", "1"))
     discard g.exec(trigCalm)
@@ -1002,15 +1038,15 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "ActiveState=active" in t1State[0] and "ActiveState=active" in t1State[1] and
       t1State[2].strip().len > 0 and t1State[2].strip() != "0" and
       t1State[3].strip().len > 0 and t1State[3].strip() != "0"
+    record["decision151Pass"] = %*{"exit": t1.exitCode, "state": t1State,
+      "ok": t1Ok}
     step("decision 151, add-on switch: a socket with connections arriving " &
          "and a path unit whose path exists, held through a passing switch, " &
          "are active after it and their services run",
          t1Ok, t1.stdout & t1.stderr & "\n" & t1State.join("\n"))
     # A refused switch, from the triggers' services stopped and the socket's
     # backlog flushed, so each trigger fires as soon as anything lets it.
-    discard g.exec("systemctl stop a13r10.socket a13r10.service a13r10.path " &
-      "a13r10-p.service; rm -f /run/a13r10-job /var/lib/a13r10/sock.ran " &
-      "/var/lib/a13r10p/path.ran; systemctl start a13r10.socket a13r10.path; true")
+    discard g.exec(trigReset)
     discard g.run("mkdir -p /etc/systemd/system-generators && printf " &
       "'#!/bin/sh\\nmkdir -p \"$1/a13r10-bad.service.d\"\\nprintf " &
       "\"[Service]\\\\nUser=root\\\\n\" > \"$1/a13r10-bad.service.d/10-root.conf\"" &
@@ -1024,6 +1060,9 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let t2NotFailed = t2State.len >= 2 and "failed" notin t2State[0] and
       "trigger-limit-hit" notin t2State[0] and "failed" notin t2State[1] and
       "trigger-limit-hit" notin t2State[1]
+    record["decision151Refused"] = %*{"exit": t2.exitCode,
+      "refusedForReason": "a13r10-bad.service as systemd loaded it is not confined" in t2Out,
+      "state": t2State, "notFailed": t2NotFailed}
     step("decision 151, add-on switch refused: neither trigger is failed " &
          "after a refused switch during which they were agitated",
          t2.exitCode != 0 and
@@ -1038,12 +1077,48 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "ActiveState=active" in t3State[0] and "ActiveState=active" in t3State[1] and
       t3State[2].strip().len > 0 and t3State[2].strip() != "0" and
       t3State[3].strip().len > 0 and t3State[3].strip() != "0"
-    record["decision151AddOn"] = %*{
-      "pass": {"exit": t1.exitCode, "state": t1State, "ok": t1Ok},
-      "refused": {"exit": t2.exitCode,
-        "refusedForReason": "a13r10-bad.service as systemd loaded it is not confined" in t2Out,
-        "state": t2State, "notFailed": t2NotFailed},
-      "recovered": {"exit": t3.exitCode, "state": t3State, "ok": t3Ok}}
+    # §13 decision 155: a trigger that cannot start again fails the switch;
+    # the revert cannot start it either, records it and commits, so the
+    # host is pending; `recover` starts it once the cause is cleared. A
+    # transient socket of the gate's own takes the port as soon as the
+    # switch has stopped the probe's socket. Falsifier: the add-on build
+    # trigger-restart-failure-ignored (the switch passes, the socket down).
+    discard g.exec(trigReset)
+    discard g.exec("touch /run/a13r10-job; rm -f /run/a13r10-blockstop; " &
+      "nohup bash -c 'until [ -e /run/a13r10-blockstop ]; do " &
+      "systemd-run --quiet --unit=a13r10-blocker " &
+      "--socket-property=ListenStream=127.0.0.1:18720 /bin/sleep infinity " &
+      ">/dev/null 2>&1 && systemctl is-active --quiet a13r10-blocker.socket " &
+      "&& break; systemctl stop a13r10-blocker.socket a13r10-blocker.service " &
+      ">/dev/null 2>&1; systemctl reset-failed a13r10-blocker.socket " &
+      "a13r10-blocker.service >/dev/null 2>&1; sleep 0.1; done' >/dev/null 2>&1 &")
+    let t4 = g.applyProfile(repro, "trig4", trigProfile.replace("@GEN@", "4"))
+    let t4Out = t4.stdout & t4.stderr
+    discard g.exec("touch /run/a13r10-blockstop; sleep 1; true")
+    let pendingFile = g.exec("cat /var/lib/repro/system/" &
+      "triggers-to-restart 2>/dev/null").stdout.strip()
+    let blocked = g.exec("systemctl is-active a13r10-blocker.socket").stdout.strip()
+    discard g.exec("systemctl stop a13r10-blocker.socket " &
+      "a13r10-blocker.service; true")
+    let rc = g.exec(repro & " system addon recover")
+    let rcOut = rc.stdout & rc.stderr
+    let t4After = g.exec("systemctl show -p ActiveState -p Result " &
+      "a13r10.socket | tr '\\n' ' '; test -e /var/lib/repro/system/" &
+      "triggers-to-restart && echo still-pending; true").stdout.strip()
+    let t4Ok = t4.exitCode != 0 and blocked == "active" and
+      "a13r10.socket" in pendingFile and rc.exitCode == 0 and
+      "trigger a13r10.socket started again" in rcOut and
+      "ActiveState=active" in t4After and "still-pending" notin t4After
+    record["decision155"] = %*{"exit": t4.exitCode, "blocked": blocked,
+      "pending": pendingFile, "recoverExit": rc.exitCode, "recover": rcOut,
+      "after": t4After, "ok": t4Ok}
+    step("decision 155: a trigger that cannot start again fails the switch, " &
+         "the revert commits with the host pending, and recover starts it " &
+         "once the cause is cleared", t4Ok, t4Out & "\npending: " &
+         pendingFile & "\nblocker: " & blocked & "\nrecover: " & rcOut &
+         "\nafter: " & t4After)
+    record["decision151Recovered"] = %*{"exit": t3.exitCode, "state": t3State,
+      "ok": t3Ok}
     step("decision 151, add-on switch after the refusal: once the generator " &
          "is gone the next switch brings both triggers back, active, and " &
          "their services run", t3Ok, t3.stdout & t3.stderr & "\n" &
