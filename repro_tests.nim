@@ -5710,7 +5710,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let fixtureRoot = createTempDir(\"repro-gm4b-lock-fixture-\", ..."),
+    singleReason: "module-level statement runs at every start-up: let registry = beginRegistryIsolation(\"repro-gm4b-lock-regis..."),
   TestSpec(
     source: "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim",
     binary: "build/test-bin/t_homebrew_bridge_records",
