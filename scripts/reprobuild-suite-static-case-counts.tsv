@@ -271,7 +271,7 @@ libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim	nim	7
 libs/repro_cli_support/tests/t_catalog_publication.nim	nim	9
 libs/repro_cli_support/tests/t_connection_ends_with_its_leaf.nim	nim	3
 libs/repro_cli_support/tests/t_cross_target_flag.nim	nim	8
-libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	15
+libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	16
 libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	8
 libs/repro_cli_support/tests/t_data_file_row_selection_fixtures.nim	nim	3
 libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim	nim	4

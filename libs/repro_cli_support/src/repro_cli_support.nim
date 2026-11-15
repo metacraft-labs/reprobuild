@@ -25878,14 +25878,25 @@ const
     "REPROBUILD_SOURCE_ROOT"
   ]
 
-  ## Well-known toolchain env vars that must also be forwarded to the daemon
-  ## when present in the user's shell. On Nix systems (especially macOS where
-  ## ``-liconv`` must resolve to ``libiconv`` from the Nix store) the cc-wrapper
-  ## consumes these to inject the correct ``-L``/``-isystem`` paths into clang/
-  ## ld invocations driven by cargo/rustc. Without forwarding, a daemon spawned
-  ## by launchd has none of them and cargo actions like
-  ## ``db-replay-server-cargo`` fail at the rustc link step. Values are NEVER
-  ## hardcoded; they are read live from the launching shell's environment.
+  ## The compiler-toolchain environment: variables that change what the
+  ## tools an action runs produce, and that a build REQUEST is therefore
+  ## authoritative over (``daemonWorkerEnvUnsets``). On Nix systems the
+  ## cc-wrapper consumes them to add ``-L``/``-isystem`` paths, rpaths and its
+  ## hardening flags to every clang/gcc/ld invocation (``NIX_HARDENING_ENABLE``
+  ## alone decides whether it adds ``-O2`` and ``_FORTIFY_SOURCE``).
+  ##
+  ## The request carries the caller's whole environment
+  ## (``daemonCarriedEnvironment``), so a value the caller has always reaches
+  ## the hosted build. What this list adds is the other direction: a value the
+  ## DAEMON was started with and the caller does not have is unset for the
+  ## build, so a daemon started from a ``nix develop`` shell does not compile
+  ## a later plain-shell caller's code with that shell's hardening, which
+  ## ``--daemon=off`` from the same shell would not.
+  ##
+  ## Every client before v0.2.0 forwarded exactly this list (plus
+  ## ``DaemonNixToolchainEnvPrefixes``) whenever the caller had a value, so
+  ## "absent from the request" means "absent from the caller" for clients of
+  ## every version, which is what makes the unset safe.
   DaemonNixToolchainEnvVars* = [
     # Nix cc-wrapper inputs — consumed by the wrapper to extend the underlying
     # clang/ld invocation with the correct -L/-isystem paths.
@@ -25927,12 +25938,15 @@ const
     "CARGO_NET_OFFLINE"
   ]
 
-  ## Env-var name prefixes forwarded wholesale. The cc-wrapper synthesizes
-  ## per-tuple variables of the form
-  ## ``NIX_LDFLAGS_<HOST>_<TARGET>``/``NIX_CFLAGS_COMPILE_<HOST>_<TARGET>`` /
-  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>`` whose suffixes vary by host
-  ## triple (e.g. ``aarch64_apple_darwin``). Forwarding them by prefix avoids
-  ## host-specific allowlist drift.
+  ## Name prefixes of the same toolchain environment. The cc-wrapper reads
+  ## per-target variables of the form ``NIX_CFLAGS_COMPILE_<triple>`` and
+  ## activates its roles through ``NIX_CC_WRAPPER_TARGET_HOST_<triple>`` /
+  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>``, whose suffixes vary by
+  ## host triple (e.g. ``aarch64_apple_darwin``). Matching them by prefix
+  ## avoids host-specific list drift. ``NIX_HARDENING_ENABLE_<triple>`` is
+  ## not matched: the wrapper derives it from ``NIX_HARDENING_ENABLE`` (in
+  ## ``DaemonNixToolchainEnvVars``) inside its own process, and a stdenv
+  ## shell exports only the unsuffixed name.
   DaemonNixToolchainEnvPrefixes* = [
     "NIX_LDFLAGS_",
     "NIX_CFLAGS_",
@@ -25993,10 +26007,12 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
                             currentEnv: openArray[string]): seq[string] =
   ## Variables the daemon process carries that the REQUEST does not, limited
   ## to reprobuild's own control namespace
-  ## (``DaemonRequestAuthoritativeEnvPrefixes``) plus the few variables
-  ## outside it that reprobuild reads to pick a default
-  ## (``DaemonRequestAuthoritativeEnvNames``). The worker must unset these
-  ## before running a hosted build.
+  ## (``DaemonRequestAuthoritativeEnvPrefixes``), the few variables outside
+  ## it that reprobuild reads to pick a default
+  ## (``DaemonRequestAuthoritativeEnvNames``), and the compiler-toolchain
+  ## environment (``DaemonNixToolchainEnvVars`` /
+  ## ``DaemonNixToolchainEnvPrefixes``). The worker must unset these before
+  ## running a hosted build.
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -26009,10 +26025,19 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
   ## a dependency chain; the same hole reaches action fingerprints and cache
   ## inputs, so the consequence is not only latency.
   ##
-  ## Scoped to the prefixes rather than the whole environment because a
-  ## request cannot distinguish "the client had no PATH" from "PATH was not
+  ## The toolchain environment is in scope because it decides what an action
+  ## COMPILES, not just how the build is run: a daemon started from a
+  ## ``nix develop`` shell kept that shell's ``NIX_HARDENING_ENABLE``, so the
+  ## cc-wrapper added ``-O2`` and ``_FORTIFY_SOURCE`` to a later plain-shell
+  ## caller's daemon-hosted compiles while ``--daemon=off`` from the same
+  ## shell compiled at ``-O0``.
+  ##
+  ## Scoped to these names rather than the whole environment because a
+  ## request from a client before v0.2.0 carried only a curated list, so it
+  ## cannot distinguish "the client had no PATH" from "PATH was not
   ## forwarded", and clearing the ambient environment of a build is a much
-  ## larger claim than making reprobuild's own knobs request-scoped.
+  ## larger claim than making reprobuild's own knobs request-scoped. Every
+  ## name added here was on that curated list.
   var carried = initHashSet[string]()
   for item in requestEnv:
     let split = item.find('=')
@@ -26026,13 +26051,11 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
     let key = item[0 ..< split]
     if carried.contains(key):
       continue
-    if key in DaemonRequestAuthoritativeEnvNames:
+    if key in DaemonRequestAuthoritativeEnvNames or
+        key in DaemonNixToolchainEnvVars or
+        DaemonRequestAuthoritativeEnvPrefixes.anyIt(key.startsWith(it)) or
+        DaemonNixToolchainEnvPrefixes.anyIt(key.startsWith(it)):
       result.add(key)
-      continue
-    for prefix in DaemonRequestAuthoritativeEnvPrefixes:
-      if key.startsWith(prefix):
-        result.add(key)
-        break
 
 proc currentEnvironmentPairs*(): seq[string] =
   for key, value in envPairs():
