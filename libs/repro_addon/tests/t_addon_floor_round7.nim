@@ -1,6 +1,8 @@
 ## The hardening floor after A9's review round 7 (ReproOS Add-On Mode spec
 ## §10.1, *Amended 2026-11-06 (A9 adversarial review, round 7)*; §13
-## decisions 49 and 50), from the reviewer's probe (``zz_a9rev7_probe``):
+## decisions 49 and 50: no route to a system-state target, and
+## ``EnvironmentFile=`` default-deny), from the reviewer's probe
+## (``zz_a9rev7_probe``):
 ## each test is a class of finding the probe recorded red.
 ##
 ## - ``EnvironmentFile=`` is default-deny: a store object of the generation

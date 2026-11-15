@@ -625,6 +625,13 @@ proc runAddonCli*(args: seq[string]): int =
           "authorised and carried out (its discard marker " &
           discardMarkerPath(custodySite(DefaultStateDir), r.overrideRecord) &
           " is valid); its signed intent record is " & r.overrideRecord & "\n")
+        if r.completionRecord.len > 0:
+          stdout.write("the discard completed; the signed completion " &
+            "record is " & r.completionRecord & " (signature " &
+            r.completionRecord & DiscardRecordSigExt & ")\n")
+        else:
+          stdout.write("the discard did NOT complete: there is no " &
+            "completion record\n")
       elif r.overrideRecord.len > 0:
         # §13 decisions 62 and 64: the record of what was discarded
         # unshipped, its signature beside it.

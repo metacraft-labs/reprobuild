@@ -109,6 +109,10 @@
 ## process pass), ``writable-specifier-resolved`` (the instance's link is
 ## followed).
 ##
+## Also red here: ``restarted-listener-not-rerecorded`` (the record keeps
+## the listener the socket's restart unlinked). ``start-hold-any-content``
+## is red in ``t_addon_floor_round12``.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
 ## *Mocking.* None: the real add-on, the base's own systemd and kernel.
@@ -218,6 +222,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("and applies again" & tag, r.exitCode == 0,
            r.stdout & r.stderr & g.exec("ls -la /run/a9r-sk; cat " & Record).stdout)
       notPending("the socket's second apply" & tag)
+      # §13 decisions 78 and 151: the switch stopped the socket for its holds
+      # and started it again, and the manager bound a new listener; the
+      # record follows it, naming the listener there now.
+      let lrec = g.exec("awk -F'\\t' '$1 == \"/run/a9r-sk/sock\" {print $4}' " & Record &
+                        "; stat -c %i /run/a9r-sk/sock").stdout.splitLines()
+      step("the record names the listener the socket's restart bound" & tag,
+           lrec.len >= 2 and lrec[0].strip().len > 0 and lrec[0].strip() == lrec[1].strip(),
+           lrec.join("\n") & g.exec("cat " & Record).stdout)
       # The service started once outside a switch, as its socket would start
       # it: systemd hands it the directory its socket's start made (the same
       # directory, now owned by the service's account), and the next apply,
@@ -478,6 +490,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       record["beforeMain-" & label] = %evp
       r = g.applyProfile(repro, label & "2", pu(label & "2"))
       let outp = r.stdout & r.stderr
+      # Decision 145: the bound counts from the run's start.
       step("a root tree made 3 s into the run, before its main process (" & label &
            "), is refused (§13 decision 145)", r.exitCode != 0 and
            "[rule:existing-tree" in outp and "/var/lib/a9r-p" in outp, evp & outp)
@@ -494,6 +507,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["laterInTheRun"] = %evm
     r = g.applyProfile(repro, "m1", st("m1"))
     let outm = r.stdout & r.stderr
+    # Decision 141's upper bound: born no later than the run's start.
     step("a root tree made 3 s into a run that began outside a switch is refused " &
          "(§13 decision 141)", r.exitCode != 0 and "[rule:existing-tree" in outm and
          "/var/lib/a9r-st" in outm, outm & evm)

@@ -8234,11 +8234,36 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   resolveAndWriteIdentityKeyed(artifact, outDir, mode, storeRootOverride,
     pins, toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
 
+proc buildToolStoreRoot*(mode: ToolProvisioningMode): string =
+  ## The tool store ``repro build`` (and ``repro graph``, which must show the
+  ## same actions) realizes tools into, or "" for the historical store under
+  ## the invocation's ``outDir``.
+  ##
+  ## Under ``tarball`` it is the user's tool store inside the reprobuild
+  ## store root, ``<store root>/tool-store``, the one dev-env activation
+  ## already uses. Two reasons. A realized prefix is keyed on the archive
+  ## digest, not on the project, so a per-project store re-downloads and
+  ## re-extracts the same bytes for every checkout (the C toolchain archive
+  ## is 240 MB extracted). And the store root is a logical root of the
+  ## portable identity while a project's ``.repro`` directory is not a
+  ## content identity: a toolchain realized there is read from the store
+  ## root, so a compile with the provisioned toolchain can be shared between
+  ## checkouts and projects. The other modes keep the per-``outDir`` store:
+  ## Nix mode roots its realizations under the tool store, and a tool request
+  ## is keyed by package and executable rather than by pin, so a shared store
+  ## would let two projects that pin different versions take each other's
+  ## roots away.
+  if mode != tpmTarball:
+    return ""
+  let storeRoot = resolvedStoreRootOrEmpty()
+  if storeRoot.len == 0: "" else: storeRoot / "tool-store"
+
 proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
                                   outDir: string;
                                   mode: ToolProvisioningMode;
                                   pins: seq[ProvisioningPin];
-                                  keyInfo: tuple[key: string; cacheable: bool]):
+                                  keyInfo: tuple[key: string; cacheable: bool];
+                                  storeRootOverride = ""):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
   ## The warm resolver under a key computed ONCE by the caller (see the
@@ -8272,8 +8297,8 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
         return (identity: warm.identity, identityPath: warm.identityPath,
           inspectionPath: warm.inspectionPath)
   inc warmBuildCacheCounters.toolIdentityResolves
-  result = resolveAndWriteIdentityKeyed(artifact, outDir, mode, "", pins,
-    keyInfo)
+  result = resolveAndWriteIdentityKeyed(artifact, outDir, mode,
+    storeRootOverride, pins, keyInfo)
   warmToolIdentities.dropWarmEntriesWithPrefix(
     outDir & "\0" & mode.modeName & "\0")
   # An uncacheable key (a nonce) is never looked up again: nothing is kept
@@ -8289,7 +8314,8 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
 proc warmResolveAndWriteIdentity*(artifact: ProjectInterfaceArtifact;
                                   outDir: string;
                                   mode: ToolProvisioningMode;
-                                  pins: seq[ProvisioningPin] = @[]):
+                                  pins: seq[ProvisioningPin] = @[];
+                                  storeRootOverride = ""):
     tuple[identity: PathOnlyBuildIdentity; identityPath: string;
       inspectionPath: string] =
   ## The build path's tool-identity resolution: the in-process warm table,
@@ -8298,12 +8324,13 @@ proc warmResolveAndWriteIdentity*(artifact: ProjectInterfaceArtifact;
   ## for ``resolveAndWriteIdentity``; the warm table is keyed on the same
   ## key, so it cannot serve an identity resolved under other pins either.
   warmResolveAndWriteIdentity(artifact, outDir, mode, pins,
-    toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
+    toolIdentityCacheKeyInfo(artifact, mode, pins = pins), storeRootOverride)
 
 proc warmResolveAndWriteIdentityKeyed*(artifact: ProjectInterfaceArtifact;
                                        outDir: string;
                                        mode: ToolProvisioningMode;
-                                       pins: seq[ProvisioningPin] = @[]):
+                                       pins: seq[ProvisioningPin] = @[];
+                                       storeRootOverride = ""):
     tuple[resolved: tuple[identity: PathOnlyBuildIdentity;
       identityPath: string; inspectionPath: string];
       keyInfo: tuple[key: string; cacheable: bool]] =
@@ -8314,7 +8341,7 @@ proc warmResolveAndWriteIdentityKeyed*(artifact: ProjectInterfaceArtifact;
   ## meanwhile, or the nonce of an uncacheable key).
   result.keyInfo = toolIdentityCacheKeyInfo(artifact, mode, pins = pins)
   result.resolved = warmResolveAndWriteIdentity(artifact, outDir, mode, pins,
-    result.keyInfo)
+    result.keyInfo, storeRootOverride)
 
 # ---------------------------------------------------------------------------
 # Dependency-Attribution MAC-2 — the daemon-parent prewarm.
@@ -8870,6 +8897,36 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         if mergedPrefixVars.allIt(it[0] != varName):
           mergedPrefixVars.add((varName,
             depLibraryPrefix(actionIdy.cmakePrefixList)))
+    if not matched:
+      # A reference that names no declared tool may name an executable a
+      # declared tool's realization EXPORTS beside its own (a ``tarball``
+      # arm's ``extraExecutable``). The case: a C project declares only
+      # ``gcc``, and its archive edge names ``ar``. The Linux toolchain
+      # archive exports its own ``ar``; without this the reference resolved
+      # to nothing, PATH was left alone, and the edge ran whatever ``ar`` the
+      # ambient PATH held, from outside every logical root. Only that
+      # executable's directory is added: the reference is to one program,
+      # not to the whole toolchain's search lists. A tool the project does
+      # declare under that name always wins, because this runs only when
+      # the loop above matched nothing.
+      for actionIdy in snapshot.actionIdentities:
+        var exportedPath = ""
+        for exported in actionIdy.exportedExecutables:
+          let file = extractFilename(exported)
+          if file == name or file == addFileExt(name, ExeExt):
+            exportedPath = exported
+            break
+        if exportedPath.len == 0:
+          continue
+        matched = true
+        if actionIdy.provisioningReceipt.len > 0 and
+            actionIdy.provisioningReceipt notin mergedReceipts:
+          mergedReceipts.add(actionIdy.provisioningReceipt)
+        if mergedExecutablePath.len == 0:
+          mergedExecutablePath = exportedPath
+        let exportedDir = parentDir(exportedPath)
+        if exportedDir.len > 0 and exportedDir notin mergedBinDirs:
+          mergedBinDirs.add(exportedDir)
     if matched:
       var nimPathDirs: seq[string] = @[]
       {.cast(gcsafe).}:
@@ -13578,8 +13635,14 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # way.
   # Per Provider-Compile-Tiering.md §"2b — repro-standard-provider" and
   # reprobuild-specs/Standard-Provider-Implementation.milestones.org §M2.
-  if mode == tpmPathOnly and not prepareOnly and
-      artifact.projectInterface.standardBuildEligible:
+  template dispatchStandardProvider(standardIdentity: PathOnlyBuildIdentity) =
+    ## The Tier 2b dispatch below, shared by the two modes that take it:
+    ## ``path`` (before tool identities are resolved, with an identity that
+    ## carries no tools: the actions use the caller's PATH) and ``tarball``
+    ## (after they are resolved, so the tool-identity resolver threads the
+    ## realized tools' directories onto every action's PATH). Returns from
+    ## ``executeBuildTarget`` when the standard provider ran; falls through
+    ## when its binary is missing.
     let standardProviderBinary = siblingStandardProviderPath(publicCliPath)
     if standardProviderBinary.len > 0:
       let standardProviderArtifactId =
@@ -13591,9 +13654,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("providerBinary: " & standardProviderBinary)
       logSummary("providerArtifact: " & standardProviderArtifactId)
       logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
-      let synthIdentity = PathOnlyBuildIdentity(
-        projectName: artifact.projectInterface.projectName,
-        interfaceFingerprint: artifact.interfaceFingerprint)
+      let synthIdentity = standardIdentity
       let providerGraphStart = statStart(statsEnabled)
       progressRenderer.renderPhase("refreshing standard provider graph")
       let refresh = refreshReadableProviderGraph(RefreshConfig(
@@ -13654,6 +13715,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("standardDirect: provider binary missing; falling back to " &
         "per-project provider compile")
 
+  if mode == tpmPathOnly and not prepareOnly and
+      artifact.projectInterface.standardBuildEligible:
+    dispatchStandardProvider(PathOnlyBuildIdentity(
+      projectName: artifact.projectInterface.projectName,
+      interfaceFingerprint: artifact.interfaceFingerprint))
+
   if shouldEnterBuildPipeline(effectiveMode):
     # ReproOS M7 deliverable 3: the committed lock's ``provisioning`` records
     # select each package's contribution. Resolved HERE, in this process,
@@ -13679,7 +13746,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       else:
         progressRenderer.renderPhase("resolving tool identities")
         warmResolveAndWriteIdentity(buildArtifact, outDir, effectiveMode,
-          pins = provisioningPins)
+          pins = provisioningPins,
+          storeRootOverride = buildToolStoreRoot(effectiveMode))
     finishStat(buildStats, statsEnabled, "repro tool identity resolve",
       identityStart)
     let identity = resolved.identity
@@ -13743,6 +13811,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         "local-only"
     logSummary("cachePortability: " & portability)
     logSummary("runQuotaSocket: " & runQuotaSocketDiagnostic())
+    # A convention project (no ``build:`` block) under ``tarball``: the same
+    # standard-provider dispatch path mode takes above, now that the tools
+    # are realized and ``pendingToolIdentityResolver`` names them. Without
+    # it the project fell to the check below and built nothing, so a C
+    # project could not be built with the toolchain the engine provisions
+    # into the store root. The other provisioning modes are not dispatched
+    # here yet (reprobuild-pm issue 2026-10-04, standard examples exit
+    # without deriving their build actions).
+    if effectiveMode == tpmTarball and not prepareOnly and
+        artifact.projectInterface.standardBuildEligible:
+      dispatchStandardProvider(identity)
     if not moduleHasBuildBlock(modulePath):
       result.exitCode = 0
       return
@@ -31466,7 +31545,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     recordMaterializedProducersForInspection(toolArtifact, projectRoot,
       outDir, publicCliPath, effectiveMode)
     let keyedResolution = warmResolveAndWriteIdentityKeyed(toolArtifact,
-      outDir, effectiveMode, pins = provisioningPins)
+      outDir, effectiveMode, pins = provisioningPins,
+      storeRootOverride = buildToolStoreRoot(effectiveMode))
     let resolved = keyedResolution.resolved
     identity = resolved.identity
     resolvedArtifact = toolArtifact

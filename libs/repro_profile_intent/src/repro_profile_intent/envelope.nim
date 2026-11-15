@@ -117,7 +117,7 @@ const
     ##     a build that did not know the key would plan the profile without
     ##     its managed prefixes and let every ``/etc`` path through the
     ##     add-on's scope check.
-    ##  13 (ReproOS add-on mode, spec §13 decision 17): ``"hostSystems"``
+    ##  13 (ReproOS add-on mode, spec §13 decision 19): ``"hostSystems"``
     ##     ``"mode"`` gains the value ``full`` -- a fully managed host that
     ##     selects system activities through the block form. Bumped because
     ##     a schema-11 reader refuses the value as corrupt rather than

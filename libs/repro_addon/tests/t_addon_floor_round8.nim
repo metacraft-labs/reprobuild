@@ -1,6 +1,7 @@
 ## The hardening floor after A9's review round 8 (ReproOS Add-On Mode spec
 ## §10.1, *Amended 2026-11-06 (A9 adversarial review, round 8)*; §13
-## decision 55 with its exception withdrawn), from the reviewer's probe
+## decision 55, no conflict with a unit the profile does not define, with its
+## exception withdrawn), from the reviewer's probe
 ## (``zz_a9rev8_probe``):
 ##
 ## - every component of every ``*Directory=`` value, in both halves (1);

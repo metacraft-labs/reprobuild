@@ -960,6 +960,41 @@ type
       ## ``teamId`` and runs it confined, with ``installerArgs``, into the
       ## staging prefix. Store-And-Installation-Layout.md § Installer
       ## applications.
+    elfInterpreter*: string
+      ## Prefix-relative path of the dynamic loader the archive carries
+      ## (``x86_64-buildroot-linux-gnu/sysroot/lib64/ld-linux-x86-64.so.2``).
+      ## When set, realization rewrites the ``PT_INTERP`` of every ELF
+      ## program under ``elfPatchDirs`` to that loader's absolute path in the
+      ## realized prefix, so a dynamically linked toolchain starts on a host
+      ## whose own loader cannot run it (NixOS) and runs against the C
+      ## library realized with it. Dependency-Provisioning-In-Build-Graph.md
+      ## §4.2, "Relocating a dynamically linked archive".
+    elfRunpath*: seq[string]
+      ## Prefix-relative directories appended, as absolute paths in the
+      ## realized prefix, to the ``DT_RPATH`` of every dynamically linked ELF
+      ## file (programs and shared objects) under ``elfPatchDirs``. The
+      ## file's own entries (``$ORIGIN/../lib``) are kept first.
+    elfPatchDirs*: seq[string]
+      ## Prefix-relative directories whose ELF files the two fields above
+      ## rewrite, recursively. Only these: a target sysroot beside them
+      ## holds the C library a link reads, and is left as shipped.
+    gccLinkSpecs*: string
+      ## Prefix-relative path of the GCC ``specs`` file realization writes
+      ## (``lib/gcc/<triple>/<version>/specs``): the driver's own specs
+      ## (``-dumpspecs`` of the realized ``executablePath``) with the
+      ## default dynamic linker and run path of a linked executable set to
+      ## ``elfInterpreter`` and ``elfRunpath`` in the realized prefix, so an
+      ## executable the toolchain links runs on this host. Requires
+      ## ``elfInterpreter``.
+    gccSpecDefaults*: seq[string]
+      ## Defaults the specs file ``gccLinkSpecs`` writes adds to the
+      ## driver's own, each ``<spec>:<text>``: ``text`` is appended to the
+      ## named spec of the ``-dumpspecs`` output (``cc1``, ``link``,
+      ## ``self_spec``, ...). For an archive whose vendor runs its driver
+      ## through a wrapper that adds options (Buildroot's
+      ## ``toolchain-wrapper``), so that declaring the real driver keeps the
+      ## options the vendor ships. Requires ``gccLinkSpecs``.
+      ## https://gcc.gnu.org/onlinedocs/gcc/Spec-Files.html
 
   TarballProvisioningDef* = object
     url*: string

@@ -278,6 +278,16 @@ suite "§13 decision 133: a revert's persistent hold":
     check not isAddonHold(HoldPath, other)
     check "[rule:" in problemsOf(e)
 
+suite "§13 decision 151: a start hold the switch writes on a trigger":
+  const StartPath = "/run/systemd/system/a.socket.d/" & StartHoldName
+  test "the add-on's start hold, exactly its text under /run, is its own":
+    check isAddonHold(StartPath, StartHoldText)
+  test "a file under its name that is not exactly that is judged":
+    check not isAddonHold(StartPath, StartHoldText & "Wants=reboot.target\n")
+    check not isAddonHold(StartPath, "")
+    check not isAddonHold("/etc/systemd/system/a.socket.d/" & StartHoldName,
+                          StartHoldText)
+
 suite "round 12, finding 5: the run in one snapshot":
   test "the start, the stop and the state come from the same read":
     let d = createTempDir("a9r12-", "-view")
@@ -665,8 +675,13 @@ suite "round 12: no citation of a §13 entry the spec does not record":
   test "§13 is read from the spec: numbered titles inside it, nothing outside":
     let spec = "## 12. Other\n\n7. **not §13**\n\n## 13. Decisions\n\n" &
       "1. **One** (x).\n\n82. **A remade directory**\n    text 83. **no**\n" &
-      "133. **A revert holds**\n\n## 14. Cross-references\n\n140. **after**\n"
+      "133. **A revert holds the units its own floor check refuses, across a\n" &
+      "     reboot** (x).\n\n## 14. Cross-references\n\n140. **after**\n"
     check recordedDecisions(spec) == @[1, 82, 133]
+    let titles = recordedTitles(spec)
+    check titles[0].title == "One"
+    check titles[1].title == "A remade directory"
+    check titles[2].title == "A revert holds the units its own floor check refuses, across a reboot"
   test "only tracked files are scanned":
     let tracked = trackedFiles(repoRoot, roots)
     check tracked.len > 10
@@ -676,18 +691,22 @@ suite "round 12: no citation of a §13 entry the spec does not record":
     defer: removeFile(probe)
     check probe notin trackedFiles(repoRoot, roots)
   test "the committed list of §13 decisions is one the spec records":
-    let snapshot = readDecisionList(readFile(snapshotPath))
-    check snapshot.len > 100
+    let list = readDecisionList(readFile(snapshotPath))
+    check list.len > 100
     checkpoint "the spec read: " & (if specPath.len > 0: specPath else: "none found")
     if specPath.len > 0:
-      let recorded = recordedDecisions(readFile(specPath))
-      for n in snapshot:
-        if n notin recorded:
-          checkpoint "the list names decision " & $n & ", which " & specPath &
-            " does not record: that spec is stale, or the list is wrong"
-          check n in recorded
+      # Each number with the title the spec gives it, and each key word one
+      # of that entry's (reprobuild-pm issue ``2026-11-15-floor-the-
+      # citation-test-passes-a-citation-of-the-wrong-section-13-
+      # decision``): a list entry that is not the spec's would vouch for
+      # citations of the wrong decision.
+      let recorded = recordedTitles(readFile(specPath))
+      check recorded.len >= list.len
+      for why in listRefusals(list, recorded):
+        checkpoint why & " (" & specPath & "): that spec is stale, or the list is wrong"
+        check why.len == 0
   test "no floor source, unit test or VM gate cites a decision §13 does not record":
-    let recorded = readDecisionList(readFile(snapshotPath))
+    let recorded = listedNumbers(readDecisionList(readFile(snapshotPath)))
     var scanned = 0
     for f in trackedFiles(repoRoot, roots):
       if not f.endsWith(".nim"): continue
@@ -698,8 +717,66 @@ suite "round 12: no citation of a §13 entry the spec does not record":
             ", which " & snapshotPath.extractFilename & " does not list"
           check n in recorded
     check scanned > 10
+  test "each citation stands near what §13 records under its number":
+    # The number alone passed any citation from 1 to the last decision,
+    # whatever it was cited for: the ledger copy removed last as 146 (a
+    # place with a specifier), the configuration-gone VM case as 145 (the
+    # run-start bound), and 141's amendment as 144 (the boot re-assertion).
+    # A key word of the decision's entry (``addon_spec_section13.txt``)
+    # must stand near each citation. This scan found eight more wrong ones
+    # (19 cited as 17, 26 as 25, 71 as 67 in a VM gate).
+    let list = readDecisionList(readFile(snapshotPath))
+    var scanned = 0
+    for f in trackedFiles(repoRoot, roots):
+      if not f.endsWith(".nim"): continue
+      inc scanned
+      for why in citationRefusals(readFile(f), list):
+        checkpoint f.relativePath(repoRoot) & " cites " & why
+        check why.len == 0
+    check scanned > 10
+  test "a citation of the wrong decision is refused, the right one passes":
+    # The three wrong citations the issue found, as they read, against
+    # their entries as the committed list gives them. Literals are split
+    # after "decision" so this file's own citations are only its real ones.
+    let list = readDecisionList(readFile(snapshotPath))
+    let ledger = "The state goes last, and within it the ledger copy (§13 decision"
+    check citationRefusals(ledger & " 146).", list).len == 1
+    check citationRefusals(ledger & " 150).", list).len == 0
+    let gone = "the configuration-gone path keeps its VM case (decision"
+    check citationRefusals(gone & " 145)", list).len == 1
+    check citationRefusals(gone & " 149)", list).len == 0
+    let amended = "suite \"§13 decision" & " 141, as N amends it: the upper " &
+      "bound counts from the run's start\":"
+    check citedDecisions(amended.replace("as N", "as 144")) == @[141, 144]
+    check citationRefusals(amended.replace("as N", "as 144"), list).len == 1
+    check citationRefusals(amended.replace("as N", "as 145"), list).len == 0
+    # A key word counts only where it starts a word: "prefix" in
+    # "unprefixed" does not vouch for decision 146.
+    check citationRefusals("an unprefixed name (decision" & " 146)", list).len == 1
+    check citationRefusals("a literal prefix (decision" & " 146)", list).len == 0
+    # A key word too far away is about other code.
+    check citationRefusals("the ledger copy" & repeat(' ', CitationReach + 10) &
+                           "(decision" & " 150)", list).len == 1
+    # A number the list does not record, or records without key words.
+    check citationRefusals("(decision" & " 99999)", list).len == 1
+    check citationRefusals("Registry spelling (decision" & " 1)", list).len == 1
   test "the list reader and the spec finder":
-    check readDecisionList("# comment\n1 2\n\n133 139\n") == @[1, 2, 133, 139]
+    let l = readDecisionList("# comment\n1 One. \n\n133 A revert  holds | Revert holds, reboot\n")
+    check listedNumbers(l) == @[1, 133]
+    check l[0].title == "One"
+    check l[1].title == "A revert holds"
+    check l[1].keys == @["revert holds", "reboot"]
+    let spec = recordedTitles("## 13. Decisions\n\n1. **One.** A body.\n\n" &
+      "133. **A revert holds** across a\n     reboot.\n\n## 14. Next\n")
+    check spec[1].entry == "133. **a revert holds** across a reboot."
+    check listRefusals(l, spec).len == 0
+    # A key word the entry does not have, a title that is not the spec's,
+    # and a number the spec does not record are each refused.
+    check listRefusals([SectionDecision(number: 133, title: "A revert holds",
+                                        keys: @["ledger"])], spec).len == 1
+    check listRefusals([SectionDecision(number: 1, title: "Two")], spec).len == 1
+    check listRefusals([SectionDecision(number: 150, title: "x")], spec).len == 1
+    expect ValueError: discard readDecisionList("150\n")
     let d = createTempDir("a9r14-", "")
     defer: removeDir(d)
     createDir(d / "reprobuild-pm" / "spec")

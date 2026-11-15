@@ -19,8 +19,8 @@
 ## ``created-dirs-by-path``, ``created-dirs-per-step``,
 ## ``activator-reach-unchecked``, ``refusal-lines-untagged``,
 ## ``untagged-lines-skipped``, ``base-tree-units-by-directory``,
-## ``created-dirs-not-rerecorded``, and for §13 decision 71, one per
-## condition: ``recreated-unrecorded-accepted``, ``recreated-any-path``,
+## ``created-dirs-not-rerecorded``, and for §13 decision 71 (a
+## directory made again), one per condition: ``recreated-unrecorded-accepted``, ``recreated-any-path``,
 ## ``recreated-systemd-unchecked``; and ``accepted-not-rerecorded``; and for
 ## §13 decision 72: ``migration-reruns``, ``migration-any-path``,
 ## ``corrupt-record-as-absent``, ``migration-any-unit``.

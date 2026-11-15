@@ -11,5 +11,6 @@ Reprobuild repository.
 - [Build Stats](stats.md)
 - [Cleaning a cargo target directory](cargo-gc.md)
 - [Cargo in a Reprobuild build: the thin cargo edge](cargo-edge.md)
+- [Sharing a host's CPU and memory from a Justfile](user-guide/runquota-in-justfiles.md)
 - [Nix Provisioning Catalog](nix-provisioning.md)
 - [Package Cache Identity Safety](package-cache-identity.md)

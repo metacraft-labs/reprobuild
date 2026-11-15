@@ -22,7 +22,12 @@
 ## the authoring-time application rules from `validateMacosAppRecord`
 ## (case 8); dropping `installerApp` from any route, or writing it before v28
 ## (the installer-application cases); removing the installer-silent rules
-## from `validateMacosAppRecord` (its authoring-error case).
+## from `validateMacosAppRecord` (its authoring-error case); dropping an ELF
+## relocation field (`elfInterpreter`, `elfRunpath`, `elfPatchDir`,
+## `gccLinkSpecs`, `gccSpecDefault`) from the macro, the literal emitters or
+## the codec, or writing it before v33 (the ELF relocation cases); accepting
+## an absolute relocation path, or a `gccSpecDefault` that names no spec
+## (its authoring-error case).
 ##
 ## No mocks: the macros, the codec and a real `nim c` of the generated stub.
 
@@ -143,11 +148,31 @@ provisioningFor "installerDetailFixture":
     cpu = "x86_64",
     os = "macos"
 
+# A dynamically linked toolchain archive relocated onto its own loader
+# (Dependency-Provisioning-In-Build-Graph.md §4.2). Never realized here.
+package elfDetailFixture:
+  provisioning:
+    tarball url = "https://example.invalid/toolchain.tar.xz",
+      sha256 = repeat('7', 64),
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/cc.real",
+      elfInterpreter = "sysroot/lib/ld-linux-x86-64.so.2",
+      elfRunpath = "sysroot/lib",
+      elfPatchDir = "bin",
+      elfPatchDir = "libexec",
+      gccLinkSpecs = "lib/gcc/x86_64-linux-gnu/15.3.0/specs",
+      gccSpecDefault = "cc1:-fstack-protector-strong",
+      gccSpecDefault = "self_spec:%{!shared:-pie}",
+      cpu = "x86_64",
+      os = "linux"
+
 package detailConsumer:
   uses:
     "detailFixture"
     "appDetailFixture"
     "installerDetailFixture"
+    "elfDetailFixture"
 
 proc findPackage(name: string): PackageDef =
   for pkg in registeredPackages():
@@ -530,3 +555,76 @@ suite "GM4b: tarball archive detail fields":
       discard decodePreInstallAction("move-item")
     expect ValueError:
       discard preInstallAction("move-item", "a\x1fb")
+
+suite "ELF relocation detail fields":
+
+  proc checkElfDetail(detail: TarballArchiveDetail) =
+    check detail.elfInterpreter == "sysroot/lib/ld-linux-x86-64.so.2"
+    check detail.elfRunpath == @["sysroot/lib"]
+    check detail.elfPatchDirs == @["bin", "libexec"]
+    check detail.gccLinkSpecs == "lib/gcc/x86_64-linux-gnu/15.3.0/specs"
+    check detail.gccSpecDefaults == @["cc1:-fstack-protector-strong",
+      "self_spec:%{!shared:-pie}"]
+
+  test "the in-package block carries the ELF relocation":
+    let pkg = findPackage("elfDetailFixture")
+    check pkg.tarballProvisioning.len == 1
+    checkElfDetail(pkg.tarballProvisioning[0].detail)
+
+  test "the v33 codec keeps the ELF relocation, and a v32 payload decodes " &
+      "without it":
+    let artifact = artifactFromRegisteredDsl(currentSourcePath())
+    let roundTrip = decodeProjectInterfaceArtifact(
+      encodeProjectInterfaceArtifact(artifact))
+    var seen = 0
+    for u in roundTrip.projectInterface.toolUses:
+      if u.packageSelector == "elfDetailFixture":
+        checkElfDetail(u.tarballProvisioning[0].detail)
+        inc seen
+    check seen == 1
+    check InterfaceFormatVersion >= 33'u16
+    let older = decodeInterfacePayload(encodeInterfacePayload(
+      artifact.projectInterface, version = 32'u16), version = 32'u16)
+    var olderSeen = 0
+    for u in older.toolUses:
+      if u.packageSelector == "elfDetailFixture":
+        check u.tarballProvisioning[0].detail.elfInterpreter == ""
+        check u.tarballProvisioning[0].detail.elfPatchDirs.len == 0
+        check u.tarballProvisioning[0].detail.gccSpecDefaults.len == 0
+        check u.tarballProvisioning[0].executablePath == "bin/cc.real"
+        inc olderSeen
+    check olderSeen == 1
+
+  test "an ELF relocation path outside the prefix is an authoring error":
+    let tempRoot = createTempDir("repro-elf-detail-error", "",
+      getCurrentDir())
+    defer: removeDir(tempRoot)
+    proc compileRecord(field, value: string): tuple[output: string;
+        exitCode: int] =
+      let source = tempRoot / "bad_elf_record.nim"
+      writeFile(source, "import repro_project_dsl\n" &
+        "package badElf:\n  provisioning:\n" &
+        "    tarball url = \"https://example.invalid/t.tar.xz\",\n" &
+        "      sha256 = \"" & repeat('f', 64) & "\",\n" &
+        "      archiveType = \"tar.xz\",\n" &
+        "      executablePath = \"bin/cc\",\n" &
+        "      " & field & " = " & value & ",\n" &
+        "      cpu = \"x86_64\",\n      os = \"linux\"\n")
+      execCmdEx("nim check --hints:off --warnings:off --path:" &
+        quoteShell(getCurrentDir() / "libs" / "repro_project_dsl" / "src") &
+        " " & quoteShell(source))
+    let ok = compileRecord("elfInterpreter", "\"lib/ld.so\"")
+    checkpoint ok.output
+    check ok.exitCode == 0
+    for field in ["elfInterpreter", "elfRunpath", "elfPatchDir",
+        "gccLinkSpecs"]:
+      for bad in ["\"/lib64/ld.so\"", "\"../outside\""]:
+        let res = compileRecord(field, bad)
+        checkpoint field & " = " & bad & ":\n" & res.output
+        check res.exitCode != 0
+        check "must be relative to the realized prefix" in res.output
+    for bad in ["\"-fstack-protector-strong\"", "\":-pie\""]:
+      let res = compileRecord("gccSpecDefault", bad)
+      checkpoint "gccSpecDefault = " & bad & ":\n" & res.output
+      check res.exitCode != 0
+      check "gccSpecDefault must be `<spec>:<text>`" in res.output

@@ -61,6 +61,8 @@ type
 
 const
   StartHoldName* = "zz-repro-addon-floor-hold.conf"
+  RuntimeHoldDir* = "/run/systemd/system"
+    ## Where start holds live (``start_holds.RuntimeUnitDir``).
     ## The runtime drop-in the switch writes for every floored unit before
     ## step 6's reload and removes once the unit passes this check (spec
     ## §10.1, A9 review round 4, finding 7): an assertion that always
@@ -1391,8 +1393,18 @@ proc isAddonHold*(path, content: string): bool =
   ## ``path`` is one of the add-on's own holds, which the rules about
   ## loaded files do not judge: the switch's start hold, or a revert's
   ## persistent hold (§13 decision 133) holding exactly ``RevertHoldText``.
-  ## A file of that name with other content is judged like any drop-in.
-  if path.endsWith("/" & StartHoldName): return true
+  ## A file of that name with other content is judged like any drop-in,
+  ## and so is a start hold that is not exactly ``StartHoldText`` in a
+  ## regular file under the runtime unit directory: the hold the switch
+  ## writes on an activator (§13 decision 151) is exempt, a file planted
+  ## under its name is not.
+  if path.endsWith("/" & StartHoldName):
+    when mutated("start-hold-any-content"):
+      # Falsifying build: a start hold exempted by its name alone.
+      return true
+    else:
+      return path.startsWith(RuntimeHoldDir & "/") and not symlinkExists(path) and
+        content == StartHoldText
   when mutated("revert-hold-any-content"):
     # Falsifying build: a revert hold exempted by its name alone.
     path.endsWith("/" & RevertHoldName)
