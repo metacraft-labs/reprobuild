@@ -1868,31 +1868,48 @@ proc installedListeners*(unitFile: string; dropIns: openArray[string]):
     tuple[service: string; paths: seq[string]] =
   ## The unix listeners an activator the add-on installed declares, and the
   ## service it starts, read from the files the add-on wrote for it (its
-  ## unit file, then its own drop-ins; an empty assignment resets), for the
-  ## one-time migration (spec §10.1 round 12, "The migration records
-  ## listeners").
+  ## unit file, then its own drop-ins), for the one-time migration (spec
+  ## §10.1 round 12, "The migration records listeners"). An empty
+  ## ``Listen*=`` clears the listeners. The service is read as systemd
+  ## reads it, by the reader the planner and the floor checks share
+  ## (``profile.triggeredUnits``): the last ``Service=`` naming a loadable
+  ## ``.service`` wins and an empty one is ignored, specifiers are
+  ## expanded, ``Accept=`` is a systemd boolean (its template then).
   let name = extractFilename(unitFile)
   let dot = name.rfind('.')
   if dot <= 0 or name[dot + 1 .. ^1] != "socket": return
-  var explicit, accept = ""
   var vals: seq[string]
-  for f in @[unitFile] & @dropIns:
+  var texts: seq[string]
+  # systemd parses a unit's drop-ins in the order of their file names,
+  # across every directory that applies (systemd.unit(5), "Description"),
+  # whatever order the ledger lists them in.
+  var ordered = @dropIns
+  when not mutated("migration-service-as-written"):
+    ordered.sort(proc (a, b: string): int =
+      result = cmp(extractFilename(a), extractFilename(b))
+      if result == 0: result = cmp(a, b))
+  for f in @[unitFile] & ordered:
     var text = ""
     try: text = readFile(f)
     except IOError, OSError: continue
+    texts.add(text)
     for d in serviceFloor.sectionDirectives(text, ["Socket"]):
       case d.key
-      of "Service": explicit = d.value.strip()
-      of "Accept": accept = d.value.strip()
       of "ListenStream", "ListenDatagram", "ListenSequentialPacket":
         if d.value.strip().len == 0: vals = @[]
         elif d.value.strip().startsWith("/"): vals.add(normalisedPath(d.value.strip()))
       else: discard
   result.paths = vals
-  result.service =
-    if explicit.len > 0: explicit
-    elif accept.toLowerAscii() in ["yes", "true", "1", "on"]: name[0 ..< dot] & "@.service"
-    else: name[0 ..< dot] & ".service"
+  when mutated("migration-service-as-written"):
+    # The falsifier: the last Service= as written, an empty one a reset.
+    var explicit = ""
+    for t in texts:
+      for d in serviceFloor.sectionDirectives(t, ["Socket"]):
+        if d.key == "Service": explicit = d.value.strip()
+    result.service = if explicit.len > 0: explicit else: name[0 ..< dot] & ".service"
+  else:
+    let units = triggeredUnits(name, texts)
+    result.service = if units.len > 0: units[0] else: ""
 
 proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
                          invocationOf: proc (unit: string): string;
