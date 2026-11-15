@@ -275,3 +275,93 @@ proc acquireExclusiveLockWithin*(lockPath: string; deadlineMs: int;
         e.holderPids = holders
         raise e
       sleep(100)
+
+# ---------------------------------------------------------------------------
+# Shared (reader) acquisition.
+#
+# A SHARED lock coexists with any number of other shared holders and excludes
+# every exclusive one, in both directions: while any shared holder exists,
+# `tryAcquireExclusiveFileLock` answers false and `acquireExclusiveFileLock`
+# waits; while an exclusive holder exists, `acquireSharedFileLock` waits.
+#
+#   * POSIX: `flock(LOCK_SH)` (https://man7.org/linux/man-pages/man2/flock.2.html).
+#     The lock belongs to the open file description, so it is released when
+#     the holder closes it OR DIES — a killed process never leaves it held.
+#   * Windows: the share-mode exclusion the exclusive half already uses. A
+#     shared holder opens the file for GENERIC_READ with FILE_SHARE_READ, so
+#     further shared opens succeed while the exclusive open (GENERIC_READ |
+#     GENERIC_WRITE, share mode 0) fails with a sharing violation, and vice
+#     versa (https://learn.microsoft.com/en-us/windows/win32/fileio/creating-and-opening-files).
+#     The handle is closed by the OS when the process dies, so the same
+#     crash-release property holds.
+#
+# Release either kind with `releaseExclusiveFileLock`: releasing is closing
+# the handle, whatever kind of lock it carried.
+# ---------------------------------------------------------------------------
+
+when defined(windows):
+  const ProviderLockFileShareRead = 0x00000001'u32
+else:
+  const ProviderLockShared = 1.cint
+
+proc acquireSharedFileLock*(lockPath: string;
+                            onBusy: LockBusyHook = nil): ReproFileLock =
+  ## Take a SHARED lock on `lockPath` (created on demand), waiting for as long
+  ## as an exclusive holder has it. `onBusy` runs once, the first time the
+  ## lock is found held exclusively — so a caller can say what it is waiting
+  ## for instead of hanging silently. Raises on any failure other than
+  ## "held"; a failure never grants the lock.
+  createDir(extendedPath(parentDir(lockPath)))
+  when defined(windows):
+    let wide = newWideCString(lockPath)
+    var told = false
+    while true:
+      let handle = providerLockCreateFileW(
+        wide,
+        ProviderLockGenericRead,
+        ProviderLockFileShareRead,
+        nil,
+        ProviderLockOpenAlways,
+        ProviderLockFileAttributeNormal,
+        nil)
+      if cast[int](handle) != cast[int](ProviderLockInvalidHandle):
+        return ReproFileLock(held: true, handle: handle)
+      let error = providerLockGetLastError()
+      if error != ProviderLockSharingViolation:
+        raise newException(IOError,
+          "CreateFileW(" & lockPath & ") failed, GetLastError=" & $error)
+      if not told:
+        told = true
+        if onBusy != nil: onBusy()
+      sleep(50)
+  else:
+    # Close-on-exec for the reason `acquireExclusiveFileLock` gives: a child
+    # that inherited the fd would hold the lock for its own lifetime.
+    let fd = posix.open(lockPath.cstring, O_RDWR or O_CREAT or O_CLOEXEC,
+      Mode(0o600))
+    if fd < 0:
+      raise newException(IOError,
+        "open(" & lockPath & ") failed, errno=" & $errno)
+    # Non-blocking first, only so `onBusy` can be told; then block.
+    while providerLockFlock(fd, ProviderLockShared or
+        ProviderLockNonBlocking) != 0:
+      let err = errno
+      if err == EINTR: continue
+      if err != EWOULDBLOCK and err != EAGAIN:
+        discard posix.close(fd)
+        raise newException(IOError,
+          "flock(" & lockPath & ", LOCK_SH) failed, errno=" & $err)
+      if onBusy != nil: onBusy()
+      while providerLockFlock(fd, ProviderLockShared) != 0:
+        let waitErr = errno
+        if waitErr == EINTR: continue
+        discard posix.close(fd)
+        raise newException(IOError,
+          "flock(" & lockPath & ", LOCK_SH) failed, errno=" & $waitErr)
+      break
+    return ReproFileLock(held: true, fd: fd)
+
+proc isHeld*(lock: ReproFileLock): bool =
+  ## Whether `lock` currently holds its file (it was acquired and not yet
+  ## released).
+  lock.held

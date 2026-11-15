@@ -105,15 +105,46 @@ when defined(macosx):
     try: p.close()
     except CatchableError: discard
 
+  proc domainPlist(domain: string): string =
+    ## Where cfprefsd keeps `domain`. `defaults` goes through cfprefsd to
+    ## the ACCOUNT's real preferences, whatever `$HOME` the test hands the
+    ## `repro` it spawns, so this is the invoking user's real home.
+    getHomeDir() / "Library" / "Preferences" / (domain & ".plist")
+
+  proc removeTestDomain(domain: string): bool =
+    ## `defaults delete <domain>` empties the domain but leaves a 42-byte
+    ## `{}` plist behind (reprobuild-pm issue
+    ## 2026-10-23-macos-user-default-gate-leaves-a-plist-in-the-real-users-
+    ## preferences-every-run). Remove the file too. cfprefsd writes it
+    ## asynchronously, so keep removing until it has stayed gone for a
+    ## settle interval. Idempotent. Returns whether nothing is left.
+    discard execCmd("defaults delete " & quoteShell(domain) & " 2>/dev/null")
+    let plist = domainPlist(domain)
+    let deadline = epochTime() + 5.0
+    var goneSince = -1.0
+    while epochTime() < deadline:
+      if fileExists(plist):
+        try: removeFile(plist) except OSError: discard
+        goneSince = -1.0
+      elif goneSince < 0:
+        goneSince = epochTime()
+      elif epochTime() - goneSince >= 0.5:
+        return true
+      sleep(50)
+    not fileExists(plist)
+
   proc runGate3() =
     # The test domain lives under ~/Library/Preferences/ — NOT
     # com.apple.dock — so the gate never disturbs a real system
     # preference. `defaults` resolves a bare reverse-DNS domain to
-    # ~/Library/Preferences/<domain>.plist.
-    let testDomain = "com.reprobuild.m68-gate3-" &
+    # ~/Library/Preferences/<domain>.plist. The `com.reprobuild.test.`
+    # prefix is the scratch namespace the test home fence lets a fenced
+    # process write (`isTestUserDefaultsDomain`).
+    let testDomain = "com.reprobuild.test.m68-gate3-" &
       $getCurrentProcessId() & "-" & $int(epochTime())
-    defer:
-      discard execCmd("defaults delete " & testDomain & " 2>/dev/null")
+    # Safety net for a failed `check`/exception; the asserted cleanup is
+    # the explicit call at the end of the proc.
+    defer: discard removeTestDomain(testDomain)
 
     let tempRoot = createTempDir("repro-m68-gate3-", "")
     defer:
@@ -153,6 +184,11 @@ when defined(macosx):
     let placeholder = fixtureDir / placeholderName
     copyFile("/bin/sleep", placeholder)
     setFilePermissions(placeholder, {fpUserRead, fpUserWrite, fpUserExec})
+    # A copied platform binary loses its signature's path binding and the
+    # kernel kills it at exec (SIGKILL, exit 137) on current macOS; an
+    # ad-hoc signature makes the copy runnable.
+    check execCmd("codesign -s - --force " & quoteShell(placeholder) &
+      " 2>/dev/null") == 0
     let ph1 = startProcess(placeholder, args = @["600"], options = {})
     defer: terminateIfRunning(ph1)
     let resources1 = "userdefault:macos.theme:" & testDomain &
@@ -178,6 +214,10 @@ when defined(macosx):
     # never reached. The placeholder must STILL be alive.
     sleep(500)
     check ph2.peekExitCode() == -1
+
+    # --- Cleanup leaves nothing in the real user's preferences ---
+    check removeTestDomain(testDomain)
+    check not fileExists(domainPlist(testDomain))
 
 suite "M68 gate 3: e2e_macos_user_default_restart_target":
   # pattern-kill-ok: the case's title names the product behaviour under test

@@ -257,14 +257,20 @@ EXPECT.update({
                     "add-on build live-check-call-site-reverted"),
     # §13 decision 137: the planner without the trigger edges. Not run
     # with REPRO_A13_STOP_AT_RED: both the socket-first and the timer-first
-    # case must be seen red, and the apply's refusal comes earlier.
+    # case must be seen red, and the apply's refusal comes earlier. Read on
+    # the unheld triggers (R11): decision 151's holds order the R7 ones.
     # §13 decision 151: neither the full apply nor the add-on switch stops
     # or holds the triggers of held units. Neither stops at its first red
     # step in the conversion gate (both apply steps carry evidence).
     "muttrigconv": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                     "engine build triggers-left-running"),
-    "muttrigadopt": ("e2e_addon_adopt_hand_configured_service", "red",
-                     "add-on build triggers-left-running"),
+    # The add-on half is the floor-hold gate's generation D (seam build): a
+    # burst of connections at the socket while the switch holds its service.
+    # The adopt gate's case 2g cannot falsify it: its services are already
+    # running when the switch holds them, so nothing fires in the window
+    # (round 9's measured finding, reprobuild 9e78a755bd).
+    "muttrigheld": ("e2e_addon_floor_held_until_checked", "red",
+                    "add-on seam build triggers-left-running"),
     # §13 decision 160: a trigger that does not start again is dropped and
     # the switch passes.
     "mutrestartignored": ("e2e_addon_adopt_hand_configured_service", "red",
@@ -279,9 +285,9 @@ EXPECT.update({
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
     "mutcallsite": "a switch that changes only a service's credential judges it",
-    "mutnoedges": "decision 137, timer first:",
+    "mutnoedges": "decision 137, unheld socket first:",
     "muttrigconv": "decision 151, full apply (first realisation):",
-    "muttrigadopt": "decision 151, add-on switch: a socket with connections",
+    "muttrigheld": "decision 151, add-on switch: an Accept=yes socket hit by a burst",
     "mutrestartignored": "decision 160: a trigger that cannot start again fails the switch",
     "mutrevertstarts": "decision 160: a trigger that cannot start again fails the switch",
 })
@@ -344,11 +350,16 @@ def on_target_rec(kind, rec):
         return on_target(kind, steps) and lc.get("ranAsRoot") is True
     if kind == "mutnoedges":
         # Red because systemd refused each trigger whose unit was not yet
-        # loaded, for the socket and for the timer alike.
-        d = rec.get("decision137", {})
+        # loaded, for the socket and for the timer alike, on the triggers
+        # no hold orders (R11): the decision-151 holds order the R7 ones,
+        # so only these discriminate (A13 review round 9, measured at
+        # reprobuild 9e78a755bd). And their services were not judged: the
+        # premise that nothing but the planner's edges orders them.
+        d = rec.get("decision137Unheld", {})
         st = {x["step"]: x for x in steps}
-        red_both = all(any(n.startswith("decision 137, %s first:" % l) and not x["ok"]
-                           for n, x in st.items()) for l in ("socket", "timer"))
+        red_both = all(any(n.startswith("decision 137, unheld %s first:" % l)
+                           and not x["ok"] for n, x in st.items())
+                       for l in ("socket", "timer"))
         # Both halves of the refusal, for each trigger: the apply reported
         # its enable --now failed, and systemd's journal says why ("not
         # loaded"). Either alone could be another failure.
@@ -356,7 +367,8 @@ def on_target_rec(kind, rec):
             e = d.get(l, {})
             return (e.get("applyRefused") is True and
                     e.get("journalNotLoaded") is True and
-                    e.get("refusedNotLoaded") is True)
+                    e.get("refusedNotLoaded") is True and
+                    e.get("serviceJudged") is False)
         return red_both and refused("socket") and refused("timer")
     if kind == "muttrigconv":
         # Red because each trigger fired at its held service until its rate
@@ -377,10 +389,17 @@ def on_target_rec(kind, rec):
         u = rec.get("decision160", {})
         return (on_target(kind, steps) and u.get("exit") == 0 and
                 u.get("blocked") == "active")
-    if kind == "muttrigadopt":
-        st = rec.get("decision151Pass", {}).get("state", [])
-        return (on_target(kind, steps) and len(st) >= 2 and
-                limit_hit(st[0]) and limit_hit(st[1]))
+    if kind == "muttrigheld":
+        # Red because the burst failed the socket by its trigger rate limit
+        # while the switch held its service, not for another reason: the
+        # switch applied, and the socket was left running into the window.
+        d = rec.get("decision151Seam", {})
+        st = {x["step"]: x for x in steps}
+        applied = any(n.startswith("generation D applies once checked") and x["ok"]
+                      for n, x in st.items())
+        return (on_target(kind, steps) and applied and
+                limit_hit(d.get("after", "")) and
+                "ActiveState=inactive" not in d.get("during", ""))
     if kind in ("mutliveset", "mutcallsite"):
         # The credentials-only switch changed the probe's materialised
         # credential and wrote none of its unit files (``credentialsOnly``),
@@ -467,6 +486,12 @@ def on_target_rec(kind, rec):
                 rec.get("decision135Converted", {}).get("judgedTemplate") is True and
                 all(rec.get("decision137", {}).get(l, {}).get("ran") is True and
                     rec.get("decision137", {}).get(l, {}).get("refusedNotLoaded") is False
+                    for l in ("socket", "timer")) and
+                # Decision 137 on the triggers no hold orders (R11): active,
+                # their services run, and not judged by the live check.
+                all(rec.get("decision137Unheld", {}).get(l, {}).get("ran") is True and
+                    rec.get("decision137Unheld", {}).get(l, {}).get("triggerActive") == "active" and
+                    rec.get("decision137Unheld", {}).get(l, {}).get("serviceJudged") is False
                     for l in ("socket", "timer")) and
                 triggers_up(rec.get("decision151", {})) and
                 held_requirer(rec.get("decision153", {})))
@@ -613,8 +638,12 @@ GREEN = {
                      "the restore (held at its seam) and does not start when "
                      "it fails"),
     "floorupgrade": (24, "and its service serves page-prefloor"),
-    # Generation C (§13 decision 136) adds eight steps to the A9 gate.
-    "heldwin": (17, "and the service runs after C"),
+    # Generation C (§13 decision 136) adds eight steps to the A9 gate, and
+    # generation D (§13 decision 151) three more.
+    "heldwin": (20, "decision 151, add-on switch: an Accept=yes socket hit by "
+                    "a burst of connections while the switch holds its service "
+                    "is active after the switch, and an instance runs on a "
+                    "connection"),
     "hardreset": (181, "uninstall"),
     "parity": (59, "the add-on guest's re-assert materialises the token and "
                    "starts the failed vaultwarden again"),
@@ -701,6 +730,14 @@ def green_incomplete(kind, rec):
     """Why a green record of ``kind`` is not a complete run, or None."""
     steps = rec.get("steps", [])
     least, last = GREEN[kind]
+    if kind == "heldwin":
+        # §13 decision 151: the socket was stopped for the hold (inactive in
+        # the window), and is up after the switch with an instance run.
+        d = rec.get("decision151Seam")
+        if (not isinstance(d, dict) or d.get("ok") is not True or
+                "ActiveState=inactive" not in d.get("during", "")):
+            return ("decision151Seam %r, expected the socket inactive in the "
+                    "window and up after" % d)
     red = [st["step"] for st in steps if not st.get("ok")]
     if red:
         return "green record with red steps: %r" % red

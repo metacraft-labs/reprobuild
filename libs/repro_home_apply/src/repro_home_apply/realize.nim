@@ -749,28 +749,29 @@ proc recordedScoopApp*(rp: RealizedPackage): tuple[
     provStr[i] = char(b)
   result = parseScoopProvenance(provStr)
 
-proc uninstallScoopRecord*(app: string) =
-  ## Uninstall a Scoop-managed app removed by a generation transition.
-  uninstallScoopApp(app, getEnv(ScoopOverrideEnvVar))
+proc planDroppedScoopRecord*(store: Store; rp: RealizedPackage;
+                             uninstallFromScoop: bool): ScoopRemovalPlan =
+  ## The removal plan for a Scoop package a generation transition drops
+  ## (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed by Store GC Roots).
+  ## `rp` must be a Scoop record (`recordedScoopApp(rp).ok`). Shared by the
+  ## apply's `--plan` preview, the apply itself and rollback, so all three
+  ## decide alike.
+  let sc = recordedScoopApp(rp)
+  planScoopAppRemoval(store,
+    resolveScoopRootFor(getEnv(ScoopOverrideEnvVar)), sc.bucket, sc.app,
+    sc.version, uninstallFromScoop)
 
-proc heldByNonProfileRoot*(store: Store; prefixDigest: Digest256): seq[string] =
-  ## Return any non-`profile` root IDs (`workspace`, `session`, `pin`) in
-  ## `store` that currently hold `prefixDigest`. When empty, no dev shell,
-  ## workspace lock, or explicit pin references this prefix, so an active
-  ## generation transition (`repro home apply` / `rollback`) can eagerly
-  ## uninstall a backing Scoop app.
-  var pid: PrefixIdBytes
-  for i in 0 ..< 32:
-    pid[i] = prefixDigest[i]
-  let holders = store.rootsHolding(pid)
-  if holders.len == 0:
-    return @[]
-  var rootKinds = initTable[string, string]()
-  for r in store.listRoots():
-    rootKinds[r.rootId] = r.kind
-  for h in holders:
-    let k = rootKinds.getOrDefault(h, "")
-    if k.len > 0 and k != $rkProfile:
-      result.add(h & " (" & k & ")")
+proc executeScoopRemoval*(store: Store; plan: ScoopRemovalPlan) =
+  ## Carry out `plan`: a whole-app `scoop uninstall` when every installed
+  ## version is Reprobuild's, a per-version removal when only some are, and
+  ## nothing otherwise.
+  case plan.action
+  of sraUninstallApp:
+    uninstallScoopApp(plan.app, getEnv(ScoopOverrideEnvVar))
+    forgetScoopAppInstalls(store, plan)
+  of sraRemoveVersions:
+    executeScoopVersionRemoval(store, plan)
+  else:
+    discard
 
 export parseScoopProvenance

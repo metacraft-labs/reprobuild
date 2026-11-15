@@ -19,6 +19,12 @@ if [ -n "${NIX_BUILD_TOP:-}" ] && [ -z "${IN_NIX_SHELL:-}" ]; then
 fi
 require_package_prefix() {
   local name="$1"
+  if [ "${package_build}" = 1 ] && [ -n "${!name:-}" ] && [ ! -d "${!name}" ]; then
+    # A prefix that is not a directory yields no rpath at all (the library
+    # scan skips it), so the package would link without the library's dir.
+    echo "error: ${name}=${!name} is not a directory in a Nix package build." >&2
+    exit 2
+  fi
   if [ "${package_build}" = 1 ] && [ -z "${!name:-}" ]; then
     echo "error: ${name} is unset in a Nix package build." >&2
     echo "       Falling back to a host library (Homebrew, or the first matching" >&2
