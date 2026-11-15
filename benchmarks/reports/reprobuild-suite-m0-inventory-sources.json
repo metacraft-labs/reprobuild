@@ -9023,7 +9023,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 29,
-      "staticCaseCount": 126,
+      "staticCaseCount": 128,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10129,7 +10129,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_service_floor.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 32,
+      "staticCaseCount": 33,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10275,8 +10275,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 8,
-      "staticCaseCount": 28,
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 34,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -49040,7 +49040,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_recipe_lock_consistency_refuses.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51588,7 +51588,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_leaf_refetches_through_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 24,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58855,8 +58855,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_recipe_lock_consistency_check.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
