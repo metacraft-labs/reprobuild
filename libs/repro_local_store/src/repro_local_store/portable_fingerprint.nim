@@ -815,7 +815,21 @@ proc computePortableFingerprint*(roots: openArray[LogicalRoot];
   for path in reads:
     consider(path, pikRead, readIdentity(path))
   for path in probes:
-    consider(path, pikProbe, probeIdentity(path))
+    # A DECLARED input is bound by its content (Edge-Derived-Identities.md
+    # §3.3, the `rbpm-v2` rider: "the declared/observed split, with declared
+    # inputs bound by content"), whatever access the monitor reported for it.
+    # Measured: the relocated GNU `ar` of the store-root toolchain is
+    # reported as only PROBING the object it archives, so the archive edge's
+    # record bound `lib.o` by its kind ("file") and two different objects
+    # gave the archive one portable key --
+    # a wrong hit as soon as a record's bytes can be restored. A file the
+    # action declared is read as a declared input, so it is identified as a
+    # read; a probe of anything else stays a probe.
+    if normalizeForCompare(path) in declaredKeys and
+        entryKindAt(path) == iekFile:
+      consider(path, pikRead, readIdentity(path))
+    else:
+      consider(path, pikProbe, probeIdentity(path))
   for path in enumerations:
     consider(path, pikEnumeration, membershipHex(path))
   for variable in observedEnv:
