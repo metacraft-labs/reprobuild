@@ -26145,15 +26145,30 @@ const DaemonRequestAuthoritativeEnvNames* =
   ## consults it, never one a project merely passes through to its actions.
 
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
-                            currentEnv: openArray[string]): seq[string] =
-  ## Variables the daemon process carries that the REQUEST does not, limited
-  ## to reprobuild's own control namespace
+                            currentEnv: openArray[string];
+                            requestEnvIsComplete = false): seq[string] =
+  ## Variables the daemon process carries that the REQUEST does not, which
+  ## the worker must unset before running a hosted build.
+  ##
+  ## A COMPLETE request (``environmentIsComplete``: the client sent its whole
+  ## environment, as every client since v0.2.0 does) is the caller's
+  ## environment, so every name it lacks is unset and the hosted build sees
+  ## exactly what a direct build from the same shell sees, which is what a
+  ## hosted build must be equivalent to. The curated rule below could not
+  ## deliver it: a daemon started from a ``nix develop`` shell also holds
+  ## ``CC``, ``CXX``, ``AR``, ``LD``, ``PKG_CONFIG``, the pkg-config
+  ## wrapper's role variable, ``CONFIG_SHELL``, ``SOURCE_DATE_EPOCH`` and
+  ## more, and no list of them stays complete. Names the daemon publishes for
+  ## its own builds (``RUNQUOTA_SOCKET``, the ``*_SRC`` roots) are
+  ## re-established by the build itself, as on the direct route.
+  ##
+  ## An INCOMPLETE request is overlaid, and only these names are unset:
+  ## reprobuild's own control namespace
   ## (``DaemonRequestAuthoritativeEnvPrefixes``), the few variables outside
   ## it that reprobuild reads to pick a default
   ## (``DaemonRequestAuthoritativeEnvNames``), and the compiler-toolchain
   ## environment (``DaemonNixToolchainEnvVars`` /
-  ## ``DaemonNixToolchainEnvPrefixes``). The worker must unset these before
-  ## running a hosted build.
+  ## ``DaemonNixToolchainEnvPrefixes``).
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -26173,12 +26188,11 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
   ## caller's daemon-hosted compiles while ``--daemon=off`` from the same
   ## shell compiled at ``-O0``.
   ##
-  ## Scoped to these names rather than the whole environment because a
-  ## request from a client before v0.2.0 carried only a curated list, so it
-  ## cannot distinguish "the client had no PATH" from "PATH was not
-  ## forwarded", and clearing the ambient environment of a build is a much
-  ## larger claim than making reprobuild's own knobs request-scoped. Every
-  ## name added here was on that curated list.
+  ## The incomplete rule is scoped to these names rather than the whole
+  ## environment because a request from a client before v0.2.0 carried only
+  ## a curated list, so it cannot distinguish "the client had no PATH" from
+  ## "PATH was not forwarded". Every name added here was on that curated
+  ## list.
   var carried = initHashSet[string]()
   for item in requestEnv:
     let split = item.find('=')
@@ -26192,7 +26206,8 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
     let key = item[0 ..< split]
     if carried.contains(key):
       continue
-    if key in DaemonRequestAuthoritativeEnvNames or
+    if requestEnvIsComplete or
+        key in DaemonRequestAuthoritativeEnvNames or
         key in DaemonNixToolchainEnvVars or
         DaemonRequestAuthoritativeEnvPrefixes.anyIt(key.startsWith(it)) or
         DaemonNixToolchainEnvPrefixes.anyIt(key.startsWith(it)):
@@ -26202,7 +26217,8 @@ proc currentEnvironmentPairs*(): seq[string] =
   for key, value in envPairs():
     result.add(key & "=" & value)
 
-proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
+proc applyDaemonRequestEnvironment*(requestEnv: openArray[string];
+                                    requestEnvIsComplete = false):
     seq[tuple[key: string; value: string; present: bool]] =
   ## Install a request's environment for the duration of one hosted session
   ## and return the restore list, newest first is not required because every
@@ -26211,7 +26227,8 @@ proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
   ## The one funnel both the build and watch executors use, so the two cannot
   ## drift: a hole fixed for builds but not for watch cycles would reappear on
   ## the next `repro watch` that spawns the same actions.
-  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs()):
+  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs(),
+                                    requestEnvIsComplete):
     result.add((key: name, value: getEnv(name), present: existsEnv(name)))
     delEnv(name)
   for item in requestEnv:
@@ -31276,6 +31293,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonBuildEnvironment(),
+      environmentIsComplete: true,
       attached: true,
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
@@ -36241,6 +36259,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonWatchEnvironment(),
+      environmentIsComplete: true,
       attached: not detach,
       detached: detach,
       cancelOnDisconnect: not detach,
@@ -40926,7 +40945,8 @@ proc installUserDaemonBuildExecutor() =
       # merely overlaid on it -- see `daemonWorkerEnvUnsets` for what an
       # overlay let through and what it cost.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # RE-SEED THE EMBEDDED SOURCE ROOTS AFTER THE REQUEST IS INSTALLED, so
       # a hosted build does not depend on WHICH CLIENT sent it.
       #
@@ -41075,7 +41095,8 @@ proc installUserDaemonWatchExecutor() =
       # must enforce the same private-environment boundary, including the
       # request's authority over reprobuild's own namespace.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # Same re-seed as the build executor, for the reason its comment gives:
       # a hole closed for builds and left open for watch cycles reappears on
       # the next `repro watch` that spawns the same actions.
