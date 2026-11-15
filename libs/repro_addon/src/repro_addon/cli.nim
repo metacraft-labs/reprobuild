@@ -632,6 +632,10 @@ proc runAddonCli*(args: seq[string]): int =
         else:
           stdout.write("the discard did NOT complete: there is no " &
             "completion record\n")
+        # §13 decision 162: the same verify hint a plain run prints.
+        stdout.write("check it with `repro system addon " &
+          "verify-discard-record " & r.overrideRecord &
+          " --key <enrolled key>`\n")
       elif r.overrideRecord.len > 0:
         # §13 decisions 62 and 64: the record of what was discarded
         # unshipped, its signature beside it.
