@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, tempfiles, times, net, jsonutils]
 from std/sysrand import urandom
 
@@ -2970,7 +2971,7 @@ proc downloadUrlToFile(url, destination: string) =
       options = {poUsePath, poStdErrToStdOut})
     var diagnostic = ""
     try:
-      diagnostic = process.outputStream().readAll().strip()
+      diagnostic = drainStream(process.outputStream()).strip()
     except CatchableError:
       discard
     let exitCode = waitForExit(process)

@@ -1,5 +1,6 @@
 ## Report-only forge identity discovery. Git redirects intentionally remain
 ## usable; the manifest owner decides whether and how to record a rename.
+from repro_core/process_streams import drainStream
 import std/[json, monotimes, os, osproc, strutils, streams, tables, times]
 import repro_core/ambient_execution
 import repro_workspace_manifests
@@ -80,7 +81,7 @@ proc queryGithub(gh, identity: string): tuple[canonical, reason: string, stop: b
       return ("", "API query timed out", true)
     let code = child.waitForExit()
     if code != 0: return ("", "API unavailable (network, authentication or repository access)", false)
-    let response = child.outputStream.readAll().strip()
+    let response = drainStream(child.outputStream).strip()
     if not validGithubIdentity(response):
       return ("", "API returned an invalid canonical identity", false)
     return (response, "", false)

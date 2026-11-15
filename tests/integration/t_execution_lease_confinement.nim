@@ -1185,12 +1185,11 @@ int main(void) {
     for shell in shells:
       let outPath = base / "out"
       let errPath = base / "err"
-      let child = startSeatbeltWrapper(shell, fake, base / "unused.sb",
+      var child = startSeatbeltWrapper(shell, fake, base / "unused.sb",
         outPath, errPath,
         @["/bin/sh", "-c", "n=3; while [ $n -le 64 ]; do [ -e /dev/fd/$n ] && echo FD-$n; n=$((n+1)); done; echo scanned"],
         base, newStringTable(modeCaseSensitive))
       let code = child.waitForExit()
-      child.close()
       checkpoint shell & ": stderr: " & readFile(errPath)
       check code == 0
       # No descriptor 3..64: not the worker's descriptor 12, and not the
@@ -1199,3 +1198,45 @@ int main(void) {
       # directory handle cannot be mistaken for a leak.)
       check readFile(outPath).splitWhitespace == @["scanned"]
       check (fcntl(12, F_GETFD) and FD_CLOEXEC) == 0
+
+  test "a lease timeout kills the action's whole process tree, including a descendant that left the group":
+    ## reprobuild-pm issues/2026-10-29-macos-lease-timeout-kills-only-the-top-
+    ## process. The macOS backends used to `kill()` only the process they
+    ## started; the action's children were reparented to launchd and outlived
+    ## the lease. The wrapper is driven with a stand-in `sandbox-exec` (as in
+    ## the test above: Seatbelt exists only on macOS, the property under test
+    ## is the process lifecycle) and an action that starts an ordinary
+    ## background child and one that calls `setsid` (so a process group alone
+    ## would miss it).
+    let base = getTempDir() / ("repro-seatbelt-tree-" & $getCurrentProcessId())
+    createDir(base)
+    defer: removeDir(base)
+    let fake = base / "sandbox-exec"
+    writeFile(fake, "#!/bin/sh\nshift 2\nexec \"$@\"\n")
+    setFilePermissions(fake, {fpUserRead, fpUserWrite, fpUserExec})
+    let action = "sleep 300 & echo $! > " & (base / "plain") & "; " &
+      "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"301\"' & " &
+      "echo $! > " & (base / "escaped") & "; wait"
+    var child = startSeatbeltWrapper("/bin/sh", fake, base / "unused.sb",
+      base / "out", base / "err", @["/bin/sh", "-c", action], base,
+      newStringTable(modeCaseSensitive))
+    var pids: seq[Pid]
+    for name in ["plain", "escaped"]:
+      for _ in 0 ..< 200:
+        if fileExists(base / name) and readFile(base / name).strip.len > 0:
+          break
+        sleep(25)
+      pids.add(Pid(parseInt(readFile(base / name).strip)))
+    sleep(200)   # let perl finish its setsid + exec
+    for pid in pids: check posix.kill(pid, 0) == 0
+    killProcessTree(child)
+    discard child.waitForExit()
+    for pid in pids:
+      var gone = false
+      for _ in 0 ..< 200:
+        if posix.kill(pid, 0) != 0:
+          gone = true
+          break
+        sleep(25)
+      check gone
+      if not gone: discard posix.kill(pid, SIGKILL)

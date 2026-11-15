@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2813,
+    "nimTestBinaries": 2814,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 765,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2859
+    "testEntries": 2861
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1619,10 +1619,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1552,
-      "platform/destructive": 179,
+      "integration": 1551,
+      "platform/destructive": 180,
       "pure unit": 765,
-      "unclassified": 340
+      "unclassified": 342
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1836,9 +1836,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2813,
-    "pythonTestFileCount": 46,
-    "testEntryCount": 2859
+    "nimTestBinaryCount": 2814,
+    "pythonTestFileCount": 47,
+    "testEntryCount": 2861
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5537,7 +5537,7 @@
       "source": "tests/integration/t_executed_binary_is_a_recorded_input.nim"
     },
     {
-      "class": "integration",
+      "class": "platform/destructive",
       "matches": [
         {
           "assignedCommandVariable": "cc",
@@ -9325,7 +9325,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round14.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 10,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9379,7 +9379,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round5.nim",
       "sourceSuiteCount": 6,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13365,7 +13365,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14882,8 +14882,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_n51_drain_process_stream.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14919,6 +14919,23 @@
       "source": "libs/repro_core/tests/t_nim_dep_scanner.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nix_configuration_env",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_nix_configuration_env.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18080,6 +18097,7 @@
         "repro_home_apply",
         "repro_home_intent",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "libs/repro_home_apply",
@@ -42099,8 +42117,8 @@
     },
     {
       "binary": "build/test-bin/t_execution_lease_confinement",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -42111,7 +42129,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -59666,6 +59684,21 @@
       "source": "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `importlib.machinery`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_nix_daemon_runs_nix_with_the_requesting_clients_configuration.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

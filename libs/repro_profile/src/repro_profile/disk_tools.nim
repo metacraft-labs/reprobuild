@@ -20,6 +20,7 @@
 ## stdout/stderr. The apply driver (``./disk_apply.nim``) catches these
 ## and surfaces them as a structured ``DiskApplyResult`` failure.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, os, osproc, streams, strformat, strutils, tables]
 
 import ./types
@@ -208,17 +209,10 @@ proc cryptsetupFormat*(device: string; encryption: EncryptionSpec;
   let cmdLine = quoteShell(argv[0]) & " " & renderArgv(argv[1..^1])
   let p = startProcess(argv[0], args = argv[1..^1],
     options = {poUsePath, poStdErrToStdOut})
-  # N51 triage: LEFT AS `readAll` DELIBERATELY. The short-read defect is
-  # Windows-only — there `osproc`'s stream is a raw handle and one `ReadFile`
-  # on a pipe returns whatever is available, so `readAll`'s "stop at the first
-  # sub-1 KiB read" ends the capture early. On POSIX the stream is a stdio
-  # `File` and `fread` loops internally until the full count or real EOF, so
-  # `readAll` here already reads to EOF. This arm is POSIX-only: LUKS
-  # and `cryptsetup`.
   let s = p.inputStream
   s.write(passphrase)
   s.close()
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let exit = p.waitForExit()
   p.close()
   result.tool = "cryptsetup"
@@ -255,12 +249,10 @@ proc cryptsetupOpen*(device: string; name: string;
   let cmdLine = quoteShell(argv[0]) & " " & renderArgv(argv[1..^1])
   let p = startProcess(argv[0], args = argv[1..^1],
     options = {poUsePath, poStdErrToStdOut})
-  # N51 triage: LEFT AS `readAll` DELIBERATELY — same reasoning as
-  # `cryptsetupFormat` above (POSIX-only; `fread` already reads to EOF).
   let s = p.inputStream
   s.write(passphrase)
   s.close()
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let exit = p.waitForExit()
   p.close()
   if exit != 0:

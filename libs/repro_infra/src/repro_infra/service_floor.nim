@@ -1415,31 +1415,59 @@ proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
   ## normalised paths: ``ReadWritePaths=``, each writable bind's
   ## destination, each tmpfs, each ``*Directory=`` under its root. A place
   ## spelled with a specifier counts by its literal prefix
-  ## (``literalPrefix``; §13 decision 146).
+  ## (``literalPrefix``; §13 decision 146), and one whose literal prefix is
+  ## empty or not absolute -- ``%t/a9q/%i``, whose first component is a
+  ## specifier -- counts as ``/``: it may resolve anywhere, so it covers
+  ## everything. A consumer therefore compares with ``placeCovers``, which
+  ## lets ``/`` cover every path.
   const roots = [("StateDirectory", "/var/lib"), ("RuntimeDirectory", "/run"),
                  ("CacheDirectory", "/var/cache"), ("LogsDirectory", "/var/log"),
                  ("ConfigurationDirectory", "/etc")]
+  proc place(spelled: string): string =
+    # The literal prefix is taken before the absolute-path test: a value
+    # starting with a specifier is not absolute as spelled, yet systemd
+    # resolves it to an absolute place (A9 round 15; reprobuild-pm issue
+    # 2026-11-15-floor-a-place-whose-first-component-is-a-specifier-is-
+    # dropped-not-counted).
+    when FloorMutation == "writable-leading-specifier-dropped":
+      # Falsifying build: the round-14 order, which dropped such a place.
+      if not spelled.startsWith("/"): return ""
+    let p = literalPrefix(spelled)
+    if p.startsWith("/"): normalisedPath(p) else: "/"
   for (k, v) in directives:
     case k
     of "ReadWritePaths":
       for t in v.splitWhitespace():
         let q = t.strip(leading = true, trailing = false, chars = {'-', '+'})
-        if q.startsWith("/"): result.add(literalPrefix(normalisedPath(q)))
+        if q.len > 0:
+          let p = place(q)
+          if p.len > 0: result.add(p)
     of "BindPaths":
       for t in v.splitWhitespace():
         let parts = t.strip(leading = true, trailing = false,
                             chars = {'-', '+'}).split(':')
         let d = if parts.len >= 2: parts[1] else: parts[0]
-        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
+        if d.len > 0:
+          let p = place(d)
+          if p.len > 0: result.add(p)
     of "TemporaryFileSystem":
       for t in v.splitWhitespace():
         let d = t.split(':')[0]
-        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
+        if d.len > 0:
+          let p = place(d)
+          if p.len > 0: result.add(p)
     else:
       for (dk, root) in roots:
         if k == dk:
           for t in v.splitWhitespace():
             result.add(literalPrefix(normalisedPath(root & "/" & t.split(':')[0])))
+
+proc placeCovers*(place, path: string): bool =
+  ## Whether the writable ``place`` (an entry of ``floorWritablePlaces``)
+  ## covers the normalised absolute ``path``: the place itself or anything
+  ## below it. ``/`` covers every path, which ``path.startsWith(place &
+  ## "/")`` alone would miss.
+  place == "/" or path == place or path.startsWith(place & "/")
 
 type SocketOptionRule* = enum
   ## How the floor judges one ``[Socket]`` option of a unit that activates

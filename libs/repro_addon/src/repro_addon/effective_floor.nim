@@ -2107,7 +2107,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         continue
       var inWritable = false
       for w in places:
-        if np == w or np.startsWith(w & "/"):
+        if placeCovers(w, np):
           problem2("environment-file-writable", "EnvironmentFile", "EnvironmentFile " & np & " lies in the writable place " & w)
           inWritable = true
       # One rule per refusal: a file in a writable place is refused whatever
