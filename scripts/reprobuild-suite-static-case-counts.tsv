@@ -620,6 +620,7 @@ libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim	n
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	12
 libs/repro_local_store/tests/t_input_access_sidecar.nim	nim	3
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
+libs/repro_local_store/tests/t_multi_output_realization_id_covers_modes_and_links.nim	nim	2
 libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	22
 libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim	nim	1
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4
@@ -2658,6 +2659,7 @@ tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	7
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_install_mirror_optional_version.nim	nim	3
+tests/unit/t_install_mirror_realization_id_covers_modes_and_links.nim	nim	4
 tests/unit/t_install_mirror_rebuild_after_hashed_publish.nim	nim	3
 tests/unit/t_install_mirror_relocation.nim	nim	30
 tests/unit/t_install_mirror_shell_tools.nim	nim	2
