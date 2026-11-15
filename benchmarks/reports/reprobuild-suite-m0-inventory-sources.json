@@ -47109,7 +47109,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_package_build_openssl_selection.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
