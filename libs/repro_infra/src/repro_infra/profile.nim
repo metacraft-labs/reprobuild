@@ -1329,7 +1329,11 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
       if current != section: continue
       let eq = t.find('=')
       if eq <= 0: continue
-      let k = t[0 ..< eq].strip()
+      when InfraAddonMutation == "trigger-key-blanks-unread":
+        # FALSIFYING MUTATION (§13 decision 154): `Key = value` unread.
+        let k = t[0 ..< eq]
+      else:
+        let k = t[0 ..< eq].strip()
       let v = t[eq + 1 .. ^1].strip()
       if k == key:
         if explicitSet and not isSocket: continue
@@ -1344,7 +1348,10 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
           explicitSet = true
       elif isSocket and k == "Accept":
         let b = systemdBoolean(v)
-        if b >= 0: accept = b == 1
+        when InfraAddonMutation != "trigger-accept-unread":
+          # FALSIFYING MUTATION (when absent, §13 decision 154): Accept=
+          # is not read, so the socket triggers its namesake.
+          if b >= 0: accept = b == 1
       elif isSocket and k.startsWith("Listen"):
         if v.len == 0: listeners.setLen(0)
         elif k in NonAcceptListenKeys or k in AcceptListenKeys:
