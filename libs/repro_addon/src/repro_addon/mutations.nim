@@ -1578,6 +1578,27 @@ const
                           # specifier (%t/a9q/%i) is dropped, not counted
                           # as /.
                           "writable-leading-specifier-dropped",
+                          # decision 156's bound ignores an automatic
+                          # restart's delay: InactiveExitTimestamp alone.
+                          "recreated-bound-from-inactive-exit-only",
+                          # a revert leaves a held unit that runs running.
+                          "revert-held-left-running",
+                          # an activator gets no start hold and no boot
+                          # hold.
+                          "activators-unheld",
+                          # the switch records a unit's directories as
+                          # soon as its start returns, not once they
+                          # exist.
+                          "record-without-waiting",
+                          # the boot-hold unit is ordered after
+                          # sysinit.target, so activators start beside it.
+                          "boot-hold-after-sysinit",
+                          # a host bootstrapped by an earlier engine never
+                          # gets generation 0's new objects.
+                          "gen0-not-upgraded",
+                          # a switch does not record its start holds for
+                          # the boot-hold unit.
+                          "boot-holds-unrecorded",
                           # a listener the switch's restart of its
                           # activator makes again keeps its stale record.
                           "restarted-listener-not-rerecorded",

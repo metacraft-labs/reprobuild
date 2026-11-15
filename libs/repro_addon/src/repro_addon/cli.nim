@@ -83,6 +83,7 @@ import ./reassert
 import ./seams
 import ./secrets_ops
 import ./agent_split
+import ./boot_holds
 import ./static_tree
 import ./store_root
 import ./switch
@@ -695,6 +696,15 @@ proc runAddonCli*(args: seq[string]): int =
             atBoot = true)))
         except CatchableError as e:
           stdout.write("repro-addon reassert: degraded\n  " & e.msg & "\n")
+        # The holds the boot-hold unit wrote are lifted once the pending
+        # switch is resolved (§13 decision 159); a switch still pending
+        # keeps them.
+        try:
+          for l in releaseBootHolds(DefaultStateDir,
+                                    reload = proc () = daemonReload()):
+            stdout.write("repro-addon boot-holds: " & l & "\n")
+        except CatchableError as e:
+          stdout.write("repro-addon boot-holds: " & e.msg & "\n")
         # A host bootstrapped before the shipping path unit's fix (the drill's
         # D1) is migrated here, by one switch, rather than waiting for its
         # next generation (A11 review finding 8).

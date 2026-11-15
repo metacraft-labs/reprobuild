@@ -67,8 +67,8 @@ The add-on handles this in four ways:
   were installed.
 - **Before anything starts, systemd's own view is checked.** From just
   before the switch reloads systemd until this check passes, the switch
-  holds every floored unit, so no socket, timer or other start request can
-  run it. The hold is an assertion that `/` does not exist, so nothing a
+  holds every floored unit, and the socket, timer and path units that start
+  one, so no socket, timer or other start request can run it. The hold is an assertion that `/` does not exist, so nothing a
   unit creates or removes can lift it. The add-on then reads everything `systemctl show` reports for
   each floored unit and compares it with the floor the unit was written
   under, minus its named exceptions. A property the floor neither checks
@@ -132,9 +132,11 @@ The add-on handles this in four ways:
     reported start (8 s on arm64 and armhf) (systemd makes a unit's directories as it starts the
     run's first command, which may be an `ExecStartPre=` that runs long
     before the main process; a tree made later in the run, by the unit or
-    by anything else, is not the one systemd made for it); for
-    a unit that is not running, it must also have been born before that
-    run ended. A template's directory is
+    by anything else, is not the one systemd made for it). After an
+    automatic restart (`Restart=`), the run starts when the restart delay
+    (`RestartSec=`) has passed, not when systemd scheduled the restart. For
+    a unit that is not running, the directory must also have been born
+    before that run ended. A template's directory is
     judged by the instances that can have run: the one recorded, any that
     systemd reports running, and any the profile names. Every instance of
     the template reaches the same verdict. The apply records such a
@@ -181,6 +183,17 @@ The add-on handles this in four ways:
     re-assertion would not start. The refusal names the chain of units.
     A unit that must run that early has to waive the whole hardening
     (`serviceFloor: <why>`).
+    The socket, path and timer units that start a held service are
+    held with it, and the step back stops whatever it holds, so a held
+    socket stops listening. These start too early in boot to wait for the
+    re-assertion, so a small boot unit, `repro-addon-boot-hold.service`,
+    puts the holds of a step back that is still pending in place before
+    any of them can start. It runs only while a switch is pending, so a
+    normal boot skips it. A host installed by an add-on version without
+    that unit gets it at its next apply, which changes nothing else the
+    add-on installed; if a file is already at the unit's path and the
+    add-on did not put it there, the apply refuses and changes nothing
+    until you move it away.
   - **a unit that only a timer or a path unit starts** never has its
     directories recorded by an apply, because no apply starts it. After
     the first run its timer starts, the next apply refuses the unit's

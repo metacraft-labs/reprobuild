@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2818,
+    "nimTestBinaries": 2821,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 766,
+    "pureUnitTests": 767,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2865
+    "testEntries": 2868
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -56,7 +56,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 7,
       "defines": [],
       "dependencyShape": [
         "repro_addon"
@@ -66,6 +66,7 @@
         "libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim",
         "libs/repro_addon/tests/t_addon_evidence_docs_commands_parse.nim",
         "libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim",
+        "libs/repro_addon/tests/t_addon_floor_round15.nim",
         "libs/repro_addon/tests/t_addon_image_assembly_cleanup.nim",
         "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim",
         "libs/repro_addon/tests/t_addon_review_round5.nim"
@@ -1620,10 +1621,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1554,
+      "integration": 1555,
       "platform/destructive": 180,
-      "pure unit": 766,
-      "unclassified": 342
+      "pure unit": 767,
+      "unclassified": 343
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1837,9 +1838,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2818,
+    "nimTestBinaryCount": 2821,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2865
+    "testEntryCount": 2868
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8972,6 +8973,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_boot_hold_and_gen0_upgrade",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_carried_state_fails_closed",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -9421,6 +9440,23 @@
       "source": "libs/repro_addon/tests/t_addon_floor_round14.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round15",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round15.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31213,6 +31249,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_base_tree_names_are_measured.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_boot_hold_reaches_existing_hosts",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_boot_hold_reaches_existing_hosts.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

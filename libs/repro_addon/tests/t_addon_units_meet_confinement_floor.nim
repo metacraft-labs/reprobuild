@@ -4,7 +4,7 @@
 ##
 ## ``systemd-analyze security --offline=yes`` over every unit text the
 ## add-on renders -- its own service units (the deploy agent's fetch and
-## apply units, the re-assert and secrets units) and a service under the
+## apply units, the re-assert, boot-hold and secrets units) and a service under the
 ## ``serviceFloor`` default, from a store prefix and from an apt closure --
 ## must stay at or below the exposure each one is committed to here
 ## (``Thresholds``). The score is systemd's own, on the unit text exactly as
@@ -56,6 +56,7 @@ const
     (AgentFetchUnit, 12),
     (AgentApplyUnit, 25),
     (ReassertUnit, 25),
+    (BootHoldUnit, 10),
     (SecretsUnit, 25),
     ("a9-store.service", 14),
     ("a9-closure.service", 14)]
