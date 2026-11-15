@@ -75,11 +75,11 @@ const
     "audit", "info", "init", "list", "lsp", "mcp", "outdated", "package",
     "search", "upgrade"]
     ## Commands the specification describes that repro does not have yet.
-  DeclaredNotSpecified = [
-    "allow", "anywhere", "cargo", "certificates", "deny", "deploy-agent",
-    "flake", "locking", "pull"]
+  DeclaredNotSpecified: array[0, string] = []
     ## Commands repro has whose specification is not a command page (some
-    ## are specified only in design documents); each needs a page.
+    ## are specified only in design documents). Empty: every command repro
+    ## has is specified by a page. An entry may be added only with the
+    ## command, and the test then requires it to be removed once a page exists.
   BuiltInFlags = ["--help", "-h"]
 
 proc paramName(stmt: NimNode): string =
