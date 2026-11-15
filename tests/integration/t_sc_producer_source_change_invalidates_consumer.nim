@@ -39,7 +39,7 @@
 ## tempdir consumer workspace + a real sibling checkout resolved through
 ## ``resolveProducerBinding`` — so the ``contentIdentity`` folded is the SAME one
 ## the shipped develop-override resolver produces (``computeOverrideContentIdentity``,
-## which folds the sibling checkout's local-path root mtime), not a fabricated
+## which names the override: package, state, absolute path), not a fabricated
 ## value. The SC-2/SC-3 end-to-end executable/library splices already prove the
 ## producer is built + consumed from source; SC-4 is specifically the
 ## SOURCE-content invalidation arm, and the fold on the action fingerprint is the
@@ -59,11 +59,15 @@
 ##   2. Reuse (not reinvention): the shifted consumer fingerprint EQUALS
 ##      ``foldOverridesIntoFingerprint(orig, @[binding])`` — proving SC-4 drives
 ##      the shipped never-called fold, not a bespoke digest.
-##   3. Producer SOURCE change invalidates the consumer: bumping the sibling
-##      checkout's root mtime (a source edit) yields a NEW ``contentIdentity``
-##      and re-resolves to a DIFFERENT binding; folding it from the SAME original
-##      fingerprint gives a DIFFERENT digest than assertion (1) — i.e. editing
-##      the producer's source rebuilds the consumer.
+##   3. Producer SOURCE change invalidates the consumer: with the producer's
+##      ``include/`` handed to the consumer as a channel directory, editing a
+##      header in it (the producer root's mtime held fixed) leaves the develop
+##      ``contentIdentity`` where it was — it names the override, not its
+##      bytes — and still moves the consumer's key through the channel
+##      content fold (reprobuild-pm issue 2026-11-12, "develop-mode rule 2
+##      invalidation uses a directory mtime"). Until that issue the identity
+##      folded the root mtime and this assertion bumped it, which no real edit
+##      below the root does.
 ##   4. Lock-pinned arm: with no override and a ``LockedDep`` pin, the fold
 ##      SHIFTS the consumer fingerprint (a pinned ``revision`` + ``integrity`` is
 ##      the source identity); a REFRESHED pin (new revision/integrity) shifts it
@@ -207,25 +211,44 @@ suite "SC-4: producer source change invalidates consumer":
     check devActions[0].weakFingerprint == expectedDev
     let consumerDevFingerprint = devActions[0].weakFingerprint
 
-    # ---- (3) producer SOURCE change -> new contentIdentity -> different fold.
-    # Bump the sibling checkout's root mtime (a source edit) and re-resolve;
-    # ``computeOverrideContentIdentity`` folds the root mtime, so the binding's
-    # ``contentIdentity`` changes and the fold from the SAME baseline differs.
-    let future = getTime() + initDuration(seconds = 120)
-    setLastModificationTime(siblingCheckout, future)
-    let devBinding2 = resolveProducerBinding(producerName, workspace)
-    check devBinding2.kind == pbkDevelopOverride
-    check devBinding2.contentIdentity != devBinding.contentIdentity  # source moved
+    # ---- (3) producer SOURCE change -> different fold. A real edit: a
+    # header under a channel directory the consumer is handed, with the
+    # producer root's mtime restored so nothing but the bytes moved.
+    let siblingInclude = siblingCheckout / "include"
+    createDir(siblingInclude)
+    writeFile(siblingInclude / "prod.h", "#define PROD_VALUE 1\n")
+    let rootMtime = getLastModificationTime(siblingCheckout)
+    producerMaterializedAuxPaths.clear()
+    producerMaterializedAuxPaths[producerName] =
+      ProducerAuxPaths(includeDirs: @[siblingInclude])
 
-    producerSourceBindings.clear()
-    producerSourceBindings[producerName] = devBinding2.overrideBinding
-    var devActions2 = @[consumerOrig, controlOrig]
-    foldProducerSourceIdentities(devActions2)
+    proc foldDevelop(): seq[BuildAction] =
+      ## Re-resolve as the next invocation would, and fold from the baseline.
+      setLastModificationTime(siblingCheckout, rootMtime)
+      let binding = resolveProducerBinding(producerName, workspace)
+      check binding.kind == pbkDevelopOverride
+      # The develop identity names the override; an edit does not move it.
+      check binding.contentIdentity == devBinding.contentIdentity
+      producerSourceBindings.clear()
+      producerSourceBindings[producerName] = binding.overrideBinding
+      result = @[consumerOrig, controlOrig]
+      foldProducerSourceIdentities(result)
+
+    let beforeEdit = foldDevelop()
+    # Handing the consumer a directory folds its content on top of (2).
+    check beforeEdit[0].weakFingerprint != consumerDevFingerprint
+    check foldDevelop()[0].weakFingerprint == beforeEdit[0].weakFingerprint
+    writeFile(siblingInclude / "prod.h", "#define PROD_VALUE 2\n")
+    let devActions2 = foldDevelop()
     # The consumer rebuilds: its cache key differs from the pre-edit key.
-    check devActions2[0].weakFingerprint != consumerDevFingerprint
+    check devActions2[0].weakFingerprint != beforeEdit[0].weakFingerprint
     check devActions2[0].weakFingerprint != consumerOrig.weakFingerprint
+    check devActions2[0].cacheable
     # The control still never moves.
     check devActions2[1].weakFingerprint == controlOrig.weakFingerprint
+    setLastModificationTime(siblingCheckout, rootMtime)
+    let devBinding2 = resolveProducerBinding(producerName, workspace)
+    producerMaterializedAuxPaths.clear()
 
     # ---- (4) lock-pinned arm: no override, a ``LockedDep`` pin is the source
     # identity. A pin shifts the consumer key; a refreshed pin shifts it
@@ -352,7 +375,17 @@ suite "SC-4: producer source change invalidates consumer":
     check producerChannelIdentity(producerName) == oldNativeIdentity
     var unchangedNative = @[consumerOrig, monitoredOrig, controlOrig]
     foldProducerSourceIdentities(unchangedNative)
-    check unchangedNative[0].weakFingerprint == legacySourceKey
+    # The rule-2 (unobserved) consumer is the one key that deliberately moves
+    # here: it now also carries the CONTENT of the native channel directories
+    # it is handed (absent ones here), because its report does not name what
+    # it read through them. Its legacy key was the binding fold alone, the
+    # stale-hit defect of reprobuild-pm issue 2026-11-12. The monitored key
+    # below is unchanged, and the new key is deterministic.
+    check unchangedNative[0].weakFingerprint != legacySourceKey
+    check unchangedNative[0].cacheable
+    var refoldedNative = @[consumerOrig]
+    foldProducerSourceIdentities(refoldedNative)
+    check refoldedNative[0].weakFingerprint == unchangedNative[0].weakFingerprint
     check toHex(unchangedNative[1].weakFingerprint.bytes) ==
       legacyMonitoredKey(oldNativeIdentity)
     check unchangedNative[2].weakFingerprint == controlOrig.weakFingerprint

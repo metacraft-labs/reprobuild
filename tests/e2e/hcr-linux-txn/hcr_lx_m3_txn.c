@@ -116,6 +116,9 @@ extern unsigned long long repro_hcr_lx_probe_site_generation(
     unsigned long long entry_address);
 extern unsigned int repro_hcr_lx_probe_site_retained_body_count(
     unsigned long long entry_address);
+extern int repro_hcr_lx_probe_site_claimed(unsigned long long entry_address);
+extern unsigned long long repro_hcr_lx_probe_site_published_word(
+    unsigned long long entry_address);
 
 /* ---- the real claim map -------------------------------------------------- */
 
@@ -521,7 +524,10 @@ static int run_prepare_arm(const char *mode) {
 /*
  * Re-patching (design §4.5). Three generations of the same function, the
  * superseded bodies executed directly to prove they were retained, then a
- * rollback that must land on the ORIGINAL word rather than on generation 2.
+ * rollback of the generation-3 transaction that must land on generation 2 —
+ * the word published before that transaction — and leave the site live at
+ * generation 2 with its claim held (§11.2: a rolled-back patch leaves the
+ * process on the previous version, never on a mixture with generation 0).
  */
 static int run_repeat(void) {
   unsigned long long entry = (unsigned long long)(uintptr_t)hcr_lx_m3_victim_a;
@@ -571,8 +577,9 @@ static int run_repeat(void) {
     retained_value[g] = body();
   }
 
-  /* Rollback of the generation-3 transaction. §4.5 says this restores the
-   * ORIGINAL saved word, not generation 2's. */
+  /* Rollback of the generation-3 transaction. It restores the word that was
+   * published before the transaction — generation 2's jump — not the
+   * original. */
   rc = repro_hcr_lx_probe_txn_rollback();
 
   printf("{\"mode\":\"repeat\",\"rollbackRc\":%d,\"window\":\"0x%llx\","
@@ -594,13 +601,33 @@ static int run_repeat(void) {
     print_hex(rolled, SNAP_BYTES);
   }
   printf("\",\"valueAfterRollback\":%d,\"siteLiveAfterRollback\":%d,"
+         "\"siteGenerationAfterRollback\":%llu,"
+         "\"siteClaimedAfterRollback\":%d,"
+         "\"sitePublishedWordAfterRollback\":\"0x%llx\","
+         "\"siteRetainedBodyCountAfterRollback\":%u,"
+         "\"releasedClaimCount\":%d,"
          "\"claimsAfterRollback\":%d,\"oldCodeRetained\":%d,"
-         "\"retainedRegionCount\":%d}\n",
+         "\"retainedRegionCount\":%d",
          hcr_lx_m3_victim_a(),
          repro_hcr_lx_probe_site_is_live(entry),
+         repro_hcr_lx_probe_site_generation(entry),
+         repro_hcr_lx_probe_site_claimed(entry),
+         repro_hcr_lx_probe_site_published_word(entry),
+         repro_hcr_lx_probe_site_retained_body_count(entry),
+         repro_hcr_lx_probe_txn_released_claim_count(),
          claim_count(),
          repro_hcr_lx_probe_last_old_code_retained(),
          repro_hcr_lx_probe_last_retained_region_count());
+
+  /* Rolling the same transaction back AGAIN must change nothing: the site is
+   * already back at generation 2, and a second decrement would leave the
+   * table claiming generation 1 while the window holds generation 2's jump. */
+  rc = repro_hcr_lx_probe_txn_rollback();
+  printf(",\"secondRollbackRc\":%d,\"valueAfterSecondRollback\":%d,"
+         "\"siteGenerationAfterSecondRollback\":%llu,"
+         "\"sitePublishedWordAfterSecondRollback\":\"0x%llx\"}\n",
+         rc, hcr_lx_m3_victim_a(), repro_hcr_lx_probe_site_generation(entry),
+         repro_hcr_lx_probe_site_published_word(entry));
   return 0;
 }
 
@@ -746,6 +773,186 @@ static int run_commit(int fault) {
   return 0;
 }
 
+/*
+ * A commit failure in a RE-PATCH transaction (design §11.2, issue
+ * `reprobuild-pm/issues/2026-11-12-transaction-rollback-restores-generation-
+ * 0-silently-reverting-earlier-committed-patches.md`).
+ *
+ * Generation 1 patches all three victims and COMMITS. Generation 2 targets
+ * the same three sites with DIFFERENT bodies, and its commit is made to fail
+ * at site `fault` through the same production-branch lever `run_commit` uses,
+ * so `fault` of the three are published before the failure. What the rollback
+ * restores is the whole question: generation 1 at every site (the process is
+ * on "the previous version"), or the original at the published ones (a mix of
+ * generation 0 and generation 1 that nobody shipped).
+ *
+ * Then, with the lever disarmed, generation 3 re-patches all three. Each
+ * site's pre-state must still be the admissible "word this provider
+ * published", which a rollback that left the window and the site table
+ * disagreeing would turn into `entry-modified-externally`.
+ *
+ * `fault` = -1 is the positive control: generation 2 commits, so the
+ * comparison against the generation-1 snapshot can say "different".
+ */
+static int run_repatch_commit_fault(int fault) {
+  unsigned long long entries[3];
+  unsigned long long sleds[3];
+  unsigned long long windows[3];
+  patch_body *gen1_bodies[3];
+  patch_body *gen2_bodies[3];
+  patch_body *gen3_bodies[3];
+  uint8_t pristine[3][SNAP_BYTES];
+  uint8_t after_gen1[3][SNAP_BYTES];
+  uint8_t after_gen2[3][SNAP_BYTES];
+  int gen1_value[3];
+  int gen2_value[3];
+  int gen3_value[3];
+  unsigned long long gen1_generation[3];
+  unsigned long long gen2_generation[3];
+  unsigned long long gen3_generation[3];
+  int gen2_site_live[3];
+  int gen2_claimed[3];
+  int gen3_claimed[3];
+  unsigned int gen2_site_retained[3];
+  unsigned long long gen2_site_published_word[3];
+  unsigned long long gen2_live_word[3];
+  unsigned long long gen1_published_word[3];
+  unsigned long long gen1_original_word[3];
+  int gen2_published[3];
+  int gen2_restored[3];
+  long long maps_before_gen2, maps_after_gen2;
+  int gen1_rc, gen2_prepare_rc, gen2_commit_rc, gen3_prepare_rc, gen3_commit_rc;
+  int i;
+
+  entries[0] = (unsigned long long)(uintptr_t)hcr_lx_m3_victim_a;
+  entries[1] = (unsigned long long)(uintptr_t)hcr_lx_m3_victim_b;
+  entries[2] = (unsigned long long)(uintptr_t)hcr_lx_m3_victim_c;
+  sleds[0] = sled_of(hcr_lx_m3_victim_a);
+  sleds[1] = sled_of(hcr_lx_m3_victim_b);
+  sleds[2] = sled_of(hcr_lx_m3_victim_c);
+  /* Each generation gives every victim a DIFFERENT body, so the three
+   * candidate states of a site — original, generation 1, generation 2 — are
+   * three different return values and three different words. */
+  gen1_bodies[0] = &body_a; gen1_bodies[1] = &body_b; gen1_bodies[2] = &body_c;
+  gen2_bodies[0] = &body_b; gen2_bodies[1] = &body_c; gen2_bodies[2] = &body_a;
+  gen3_bodies[0] = &body_c; gen3_bodies[1] = &body_a; gen3_bodies[2] = &body_b;
+
+  for (i = 0; i < 3; ++i) {
+    snapshot(&victims[i], pristine[i]);
+  }
+
+  /* ---- generation 1: commits ---------------------------------------------- */
+  repro_hcr_lx_probe_set_commit_fault_site(-1);
+  repro_hcr_lx_probe_txn_reset();
+  for (i = 0; i < 3; ++i) {
+    repro_hcr_lx_probe_txn_add(entries[i], sleds[i], gen1_bodies[i]->bytes,
+                               gen1_bodies[i]->len);
+  }
+  gen1_rc = repro_hcr_lx_probe_txn_prepare();
+  if (gen1_rc == 0) {
+    gen1_rc = repro_hcr_lx_probe_txn_commit();
+  }
+  if (gen1_rc != 0) {
+    printf("{\"mode\":\"repatch-commit\",\"gen1Refusal\":\"%s\"}\n",
+           repro_hcr_lx_probe_refusal_name(gen1_rc));
+    return 1;
+  }
+  for (i = 0; i < 3; ++i) {
+    windows[i] = repro_hcr_lx_probe_txn_window_address(i);
+    gen1_published_word[i] = repro_hcr_lx_probe_txn_published_word(i);
+    gen1_original_word[i] = repro_hcr_lx_probe_txn_original_word(i);
+    gen1_value[i] = victims[i].fn();
+    gen1_generation[i] = repro_hcr_lx_probe_site_generation(entries[i]);
+    snapshot(&victims[i], after_gen1[i]);
+  }
+
+  /* ---- generation 2: fails during commit at site `fault` ------------------ */
+  repro_hcr_lx_probe_txn_reset();
+  for (i = 0; i < 3; ++i) {
+    repro_hcr_lx_probe_txn_add(entries[i], sleds[i], gen2_bodies[i]->bytes,
+                               gen2_bodies[i]->len);
+  }
+  repro_hcr_lx_probe_set_commit_fault_site(fault);
+  maps_before_gen2 = anon_exec_bytes();
+  gen2_prepare_rc = repro_hcr_lx_probe_txn_prepare();
+  gen2_commit_rc =
+      gen2_prepare_rc == 0 ? repro_hcr_lx_probe_txn_commit() : -1;
+  maps_after_gen2 = anon_exec_bytes();
+  repro_hcr_lx_probe_set_commit_fault_site(-1);
+  for (i = 0; i < 3; ++i) {
+    snapshot(&victims[i], after_gen2[i]);
+    gen2_value[i] = victims[i].fn();
+    gen2_site_live[i] = repro_hcr_lx_probe_site_is_live(entries[i]);
+    gen2_generation[i] = repro_hcr_lx_probe_site_generation(entries[i]);
+    gen2_claimed[i] = repro_hcr_lx_probe_site_claimed(entries[i]);
+    gen2_site_retained[i] =
+        repro_hcr_lx_probe_site_retained_body_count(entries[i]);
+    gen2_site_published_word[i] =
+        repro_hcr_lx_probe_site_published_word(entries[i]);
+    memcpy(&gen2_live_word[i], (const void *)(uintptr_t)windows[i],
+           sizeof(gen2_live_word[i]));
+    gen2_published[i] = repro_hcr_lx_probe_txn_site_published(i);
+    gen2_restored[i] = repro_hcr_lx_probe_txn_site_restored(i);
+  }
+
+  printf("{\"mode\":\"repatch-commit\",\"fault\":%d,\"gen1Rc\":%d,"
+         "\"gen2PrepareRc\":%d,\"gen2CommitRc\":%d,\"gen2CommitRefusal\":\"%s\","
+         "\"anonExecBeforeGen2\":%lld,\"anonExecAfterGen2\":%lld",
+         fault, gen1_rc, gen2_prepare_rc, gen2_commit_rc,
+         repro_hcr_lx_probe_refusal_name(gen2_commit_rc), maps_before_gen2,
+         maps_after_gen2);
+  /* The generation-2 transaction's own accounting, printed before generation
+   * 3 resets it. */
+  print_txn();
+
+  /* ---- generation 3: the lever is disarmed; must commit ------------------- */
+  repro_hcr_lx_probe_txn_reset();
+  for (i = 0; i < 3; ++i) {
+    repro_hcr_lx_probe_txn_add(entries[i], sleds[i], gen3_bodies[i]->bytes,
+                               gen3_bodies[i]->len);
+  }
+  gen3_prepare_rc = repro_hcr_lx_probe_txn_prepare();
+  gen3_commit_rc =
+      gen3_prepare_rc == 0 ? repro_hcr_lx_probe_txn_commit() : -1;
+  for (i = 0; i < 3; ++i) {
+    gen3_value[i] = victims[i].fn();
+    gen3_generation[i] = repro_hcr_lx_probe_site_generation(entries[i]);
+    gen3_claimed[i] = repro_hcr_lx_probe_site_claimed(entries[i]);
+  }
+
+  printf(",\"gen3PrepareRc\":%d,\"gen3PrepareRefusal\":\"%s\","
+         "\"gen3CommitRc\":%d,\"functions\":[",
+         gen3_prepare_rc, repro_hcr_lx_probe_refusal_name(gen3_prepare_rc),
+         gen3_commit_rc);
+  for (i = 0; i < 3; ++i) {
+    printf("%s{\"name\":\"%s\",\"entry\":\"0x%llx\",\"window\":\"0x%llx\","
+           "\"originalValue\":%d,\"gen1Value\":%d,\"value\":%d,"
+           "\"gen1Generation\":%llu,\"siteLive\":%d,\"generation\":%llu,"
+           "\"claimed\":%d,\"siteRetainedBodyCount\":%u,"
+           "\"originalWord\":\"0x%llx\","
+           "\"gen1PublishedWord\":\"0x%llx\",\"sitePublishedWord\":\"0x%llx\","
+           "\"liveWord\":\"0x%llx\",\"published\":%d,\"restored\":%d,"
+           "\"gen3Value\":%d,\"gen3Generation\":%llu,\"gen3Claimed\":%d,"
+           "\"pristine\":\"",
+           i == 0 ? "" : ",", victims[i].name, entries[i], windows[i],
+           victims[i].original_value, gen1_value[i], gen2_value[i],
+           gen1_generation[i], gen2_site_live[i], gen2_generation[i],
+           gen2_claimed[i], gen2_site_retained[i], gen1_original_word[i],
+           gen1_published_word[i],
+           gen2_site_published_word[i], gen2_live_word[i], gen2_published[i],
+           gen2_restored[i], gen3_value[i], gen3_generation[i],
+           gen3_claimed[i]);
+    print_hex(pristine[i], SNAP_BYTES);
+    printf("\",\"gen1Text\":\"");
+    print_hex(after_gen1[i], SNAP_BYTES);
+    printf("\",\"after\":\"");
+    print_hex(after_gen2[i], SNAP_BYTES);
+    printf("\"}");
+  }
+  printf("]}\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *mode;
   if (argc < 5) {
@@ -781,6 +988,10 @@ int main(int argc, char **argv) {
   if (strcmp(mode, "commit") == 0) {
     int fault = argc >= 6 ? atoi(argv[5]) : -1;
     return run_commit(fault);
+  }
+  if (strcmp(mode, "repatch-commit") == 0) {
+    int fault = argc >= 6 ? atoi(argv[5]) : -1;
+    return run_repatch_commit_fault(fault);
   }
   fprintf(stderr, "unknown mode: %s\n", mode);
   return 2;
