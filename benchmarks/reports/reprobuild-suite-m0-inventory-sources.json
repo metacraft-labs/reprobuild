@@ -8790,7 +8790,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_arch_takeover.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

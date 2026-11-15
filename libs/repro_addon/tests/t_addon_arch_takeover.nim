@@ -79,7 +79,12 @@ pkg("avahi", "1:0.8-1", ["etc/", "etc/avahi/", "etc/avahi/avahi-daemon.conf",
     [("etc/avahi/avahi-daemon.conf", md5Hex(Packaged1)),
      ("etc/avahi/hosts", md5Hex("packaged hosts\n")),
      ("etc/avahi/missing.conf", md5Hex("x\n"))])
-pkg("fx", "1-1", ["etc/fx/", "etc/fx/plain.conf"], [])
+pkg("fx", "1-1", ["etc/fx/", "etc/fx/plain.conf", "etc/fx/nodigest.conf"], [])
+put("etc/fx/nodigest.conf", "no digest\n")
+block:
+  # A %BACKUP% line with libalpm's "(null)" digest, written as pacman does.
+  let f = root / "var/lib/pacman/local/fx-1-1/files"
+  writeFile(f, readFile(f).replace("%BACKUP%\n", "%BACKUP%\netc/fx/nodigest.conf\t(null)\n"))
 
 proc noUnit(unit: string): UnitProvision {.gcsafe.} =
   UnitProvision(loadState: "not-found")
@@ -103,7 +108,12 @@ suite "%BACKUP% in the local database":
     check b[0].path == "/etc/a" and b[0].md5 == md5Hex("a")
     check b[1].path == "/etc/b c"
     check pacmanBackupFiles("%FILES%\netc/a\n\n%BACKUP%\n\n").len == 0
-    for bad in ["etc/a", "etc/a\tnot-a-digest", "/etc/a\t" & md5Hex("a")]:
+    # libalpm's spelling of a digest it does not have (Omarchy 4.5.0-3,
+    # bash-completion 2.18.0-1): a backup file with no packaged MD5.
+    let n = pacmanBackupFiles("%BACKUP%\netc/c\t(null)\n\n")
+    check n.len == 1 and n[0].path == "/etc/c" and n[0].md5 == ""
+    for bad in ["etc/a", "etc/a\tnot-a-digest", "/etc/a\t" & md5Hex("a"),
+                "etc/a\tnull", "etc/a\t(NULL)"]:
       expect ValueError:
         discard pacmanBackupFiles("%BACKUP%\n" & bad & "\n\n")
 
@@ -164,6 +174,15 @@ suite "the decision table on a pacman base":
       check "not a backup file" in e.msg and "no opt-in" in e.msg
       check "plain.conf.d/" in e.msg
       check "divert" notin e.msg
+
+  test "a backup file pacman records no digest for ((null)) is observed and refused for takeOver":
+    let o = d.packageOwner(at("/etc/fx/nodigest.conf"))
+    check o.package == "fx" and o.backup and o.backupMd5 == ""
+    let e = refusedWith[EAddOnPackageOwned](proc () =
+      discard d.decide(file(at("/etc/fx/nodigest.conf"), "y\n", "takeOver"),
+                       at("/etc/fx/nodigest.conf")))
+    require not e.isNil
+    check "(null)" in e.msg and "no opt-in" in e.msg
 
   test "a [missing] backup file is refused for takeOver, naming the file":
     let e = refusedWith[EAddOnPackageOwned](proc () =

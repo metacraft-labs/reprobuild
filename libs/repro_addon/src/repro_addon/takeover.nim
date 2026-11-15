@@ -150,9 +150,10 @@ proc decideTakeOverUndo*(e: LedgerEntry; driver: CollisionDriver): TakeOverUndo 
     # database now says the packaged version is.
     result.kind = tuRecorded
     return
-  if o.backup and result.recordedMd5 == o.backupMd5:
+  if o.backup and o.backupMd5.len > 0 and result.recordedMd5 == o.backupMd5:
     result.kind = tuRecorded
-  elif o.backup and result.pacnewMd5.len > 0 and result.pacnewMd5 == o.backupMd5:
+  elif o.backup and o.backupMd5.len > 0 and result.pacnewMd5.len > 0 and
+      result.pacnewMd5 == o.backupMd5:
     result.kind = tuPacnew
   else:
     # Includes a package that no longer backs the path up (``o.backup``
@@ -253,4 +254,5 @@ proc takeOverAlreadyUndone*(e: LedgerEntry; driver: CollisionDriver): bool =
     let pacsave = e.path & PacsaveSuffix
     return not (fileExists(e.path) or symlinkExists(e.path)) and
       not (regularFileBeside(pacsave) and sha256OfFile(pacsave) == e.sha256)
-  o.backup and regularFileBeside(e.path) and md5OfFile(e.path) == o.backupMd5
+  o.backup and o.backupMd5.len > 0 and regularFileBeside(e.path) and
+    md5OfFile(e.path) == o.backupMd5

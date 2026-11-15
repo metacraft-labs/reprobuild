@@ -73,26 +73,38 @@ type
     ## ReproOS-Add-On-Mode §4.3.1; https://man.archlinux.org/man/alpm-db.7
     ## and https://wiki.archlinux.org/title/Pacman/Pacnew_and_Pacsave.
     path*: string   ## ``/``-rooted, as ``pacmanFilesPaths`` gives it
-    md5*: string    ## lower-case hex, 32 digits
+    md5*: string    ## lower-case hex, 32 digits; "" when pacman recorded
+                    ## no digest (``PacmanNoDigest``)
+
+const PacmanNoDigest* = "(null)"
+  ## What libalpm writes as a ``%BACKUP%`` digest it does not have (its
+  ## ``%s`` of a NULL hash): a file the package lists as backup but whose
+  ## packaged MD5 pacman never computed -- measured on Omarchy 4.5.0-3,
+  ## ``bash-completion`` 2.18.0-1's
+  ## ``etc/bash_completion.d/000_bash_completion_compat.bash``. Read as a
+  ## backup file with no packaged digest, never as a damaged entry.
 
 proc isMd5Hex(s: string): bool =
   s.len == 32 and s.allCharsInSet({'0'..'9', 'a'..'f'})
 
 proc pacmanBackupFiles*(filesEntry: string): seq[PacmanBackupFile] =
   ## The ``%BACKUP%`` section of a ``files`` entry: ``<path><TAB><md5>``
-  ## per line, the path relative to pacman's root. A line without a tab, a
-  ## path that is already absolute, or a digest that is not 32 lower-case
-  ## hex digits is not pacman's and raises ``ValueError``: a reader that
-  ## decides whether a file may be taken over must not read a damaged
-  ## entry as "not a backup file".
+  ## per line, the path relative to pacman's root. ``PacmanNoDigest`` is
+  ## read as a backup file with no packaged digest (``md5`` ""). A line
+  ## without a tab, a path that is already absolute, or any other digest
+  ## that is not 32 lower-case hex digits is not pacman's and raises
+  ## ``ValueError``: a reader that decides whether a file may be taken over
+  ## must not read a damaged entry as "not a backup file".
   for raw in pacmanSections(filesEntry).getOrDefault("BACKUP"):
     let tab = raw.rfind('\t')
     if tab <= 0:
       raise newException(ValueError, "a %BACKUP% line without a digest: " &
         raw)
     let path = raw[0 ..< tab]
-    let md5 = raw[tab + 1 .. ^1].strip().toLowerAscii()
-    if path[0] == '/' or not isMd5Hex(md5):
+    var md5 = raw[tab + 1 .. ^1].strip()
+    if md5 == PacmanNoDigest: md5 = ""
+    else: md5 = md5.toLowerAscii()
+    if path[0] == '/' or (md5.len > 0 and not isMd5Hex(md5)):
       raise newException(ValueError, "a %BACKUP% line pacman did not " &
         "write: " & raw)
     result.add(PacmanBackupFile(path: "/" & path, md5: md5))

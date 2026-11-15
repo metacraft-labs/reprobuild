@@ -770,6 +770,14 @@ proc decidePacmanPackageFile(d: CollisionDriver; o: TargetObservation;
       "\"takeOver\"` on the resource to replace it with the add-on's copy " &
       "(pacman then keeps that copy and writes its own versions beside it " &
       "as " & o.path & ".pacnew)")
+  if o.ownership.backupMd5.len == 0:
+    # pacman lists it as a backup file but recorded no packaged digest
+    # (``pacman_db.PacmanNoDigest``): no packaged version can be named, so
+    # no removal could ever restore one.
+    raise newAddOnPackageOwnedOnArch(o.path, pkg, d.dropInHint(o.path),
+      "it is a backup file for which pacman's database records no packaged " &
+      "MD5 (" & PacmanNoDigest & "), so no removal could restore a version " &
+      "pacman recognises; it has no opt-in")
   if not o.exists:
     raise newAddOnPackageOwnedOnArch(o.path, pkg, "",
       "it is a backup file pacman reports [missing] (absent from disk), so " &
