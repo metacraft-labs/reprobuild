@@ -590,6 +590,18 @@
 ## ``template-live-by-name``                the live check reads a template
 ##                                           by its own name, which systemd
 ##                                           refuses (decision 135)
+## ``triggers-left-running``               neither the full apply nor the
+##                                           add-on switch stops or holds
+##                                           the triggers of held units
+##                                           (decision 151)
+## ``fired-from-driver-starts-only``       the triggers to fire again are
+##                                           taken from the drivers' starts
+##                                           alone (decision 152)
+## ``fired-instance-unmapped``             an instance trigger's unit is
+##                                           not mapped to its judged
+##                                           template (decision 152)
+## ``requirers-of-refused-released``       a unit that requires a refused
+##                                           unit is released (decision 153)
 ## ``trigger-edges-omitted``               the planner orders no socket,
 ##                                           timer or path unit after the
 ##                                           unit it triggers (decision 137)
@@ -1624,6 +1636,11 @@ const
                           "live-check-call-site-reverted",
                           # §13 decision 137: the planner's trigger edges.
                           "trigger-edges-omitted",
+                          # A13 review round 9, §13 decisions 151-153.
+                          "triggers-left-running",
+                          "fired-from-driver-starts-only",
+                          "fired-instance-unmapped",
+                          "requirers-of-refused-released",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",

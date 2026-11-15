@@ -1739,3 +1739,12 @@ block worktreeLocalNimcache:
   if rel.len > 0:
     cacheDir.add("/" & rel)
   switch("nimcache", cacheDir & "/" & project & suffix)
+
+# The adopt gate's structural check (tests/e2e/addon/adopt_gate_source.nim)
+# parses the gate's whole source with macros.parseStmt at compile time, once
+# for the gate and once for each of its negative controls. With the A13
+# round-9 trigger case the source outgrew the Nim VM's default loop budget
+# (10 000 000 iterations). The check refuses any configuration file of the
+# gate's own, so the budget is raised here, for that compile only.
+if projectName() == "t_e2e_addon_adopt_hand_configured_service":
+  switch("maxLoopIterationsVM", "100000000")

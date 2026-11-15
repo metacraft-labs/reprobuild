@@ -8895,8 +8895,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 27,
-      "staticCaseCount": 114,
+      "sourceSuiteCount": 28,
+      "staticCaseCount": 120,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59198,7 +59198,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_addon_a13_classify.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 50,
+      "staticCaseCount": 56,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
