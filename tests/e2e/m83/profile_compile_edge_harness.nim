@@ -174,7 +174,15 @@ proc sandboxEnv*(sb: ProfileSandbox; host = DefaultSandboxHost):
   ## The isolated environment every run gets. `host` is exported as
   ## `$REPRO_HOST`; an empty `host` removes the variable, so a run selects its
   ## host with `--host` (or falls back to the OS hostname).
-  result = newStringTable(modeCaseSensitive)
+  ##
+  ## Windows variable names are case-insensitive, and the inherited one is
+  ## spelled `Path`. A case-sensitive table would keep it beside the `PATH`
+  ## set below, the child's environment block would carry both, and which
+  ## one the child reads depends on the table's iteration order -- so the
+  ## spy could silently drop off the compile's `PATH` (every `nimSpawns`
+  ## check then reads 0).
+  result = newStringTable(
+    when defined(windows): modeCaseInsensitive else: modeCaseSensitive)
   for k, v in envPairs():
     result[k] = v
   result["PATH"] = sb.spyDir & $PathSep & getEnv("PATH")
