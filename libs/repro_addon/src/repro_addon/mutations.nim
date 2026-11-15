@@ -133,6 +133,13 @@
 ##                                            finds it (a negative control
 ##                                            of the hard-reset gate: the
 ##                                            resets must leave mixtures)
+## ``boot-confirm-before-ready``              the boot re-assertion says
+##                                            ``READY=1`` only when it
+##                                            exits, as a oneshot's
+##                                            completion did, so a boot
+##                                            replay's confirm polls a
+##                                            floored unit that waits for
+##                                            it (§13 decision 155)
 ## ``addon-target-in-boot-order``             ``repro-addon.target`` keeps its
 ##                                            default dependencies, so
 ##                                            multi-user.target waits for
@@ -1106,6 +1113,7 @@ const
                           "scope-accepts-unnormalised-paths",
                           "reassert-required-by-boot",
                           "reassert-skips-recovery",
+                          "boot-confirm-before-ready",
                           "pause-before-write",
                           "pause-before-write-no-recheck",
                           "install-targets-ignore-alias-also",

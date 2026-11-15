@@ -89,6 +89,7 @@ import ./switch
 import ./transitions
 import ./uninstall
 import ./verify
+import ./sd_notify
 
 proc migrateStaleOwnObjects*(stateDir: string; atBoot = false): string =
   ## One switch to the migrated own profile when it differs (``own_profile.
@@ -678,6 +679,12 @@ proc runAddonCli*(args: seq[string]): int =
         if a == "--boot" and cmd == "reassert": atBoot = true
         else: raise newException(ValueError, "unknown option " & a)
       if atBoot:
+        # The re-assert unit is ``Type=notify`` (§13 decision 155): its
+        # start job, which every floored unit waits for, ends at
+        # ``READY=1``. A boot replay says it before its confirm; every run
+        # says it here, on every path out, so the job never waits for its
+        # timeout.
+        defer: discard notifyReady()
         # A contained host stays contained across the reboot (decision 51):
         # the runtime masks are gone, so they are put back first.
         try: discard reapplyContainment()

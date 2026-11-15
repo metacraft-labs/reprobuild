@@ -86,6 +86,7 @@ import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./sd_notify
 import ./own_profile
 import ./contain_marker
 import ./tmpfiles_scope
@@ -257,6 +258,14 @@ type
       ## §10.3, "Legacy delivery").
       ## A deploy-agent apply: the manifest's ``deploymentId`` and sequence,
       ## recorded in the generation it commits (spec §7.4).
+    readyBeforeConfirm*: bool
+      ## A recovery at boot, run by the re-assert unit (``Type=notify``):
+      ## say ``READY=1`` to the service manager just before step 8's
+      ## confirm, once every write, hold and queued start of step 7 is in
+      ## place. Every floored unit is ordered after the re-assert unit (§13
+      ## decision 144), so until then its start waits for this very
+      ## process, and a confirm that polled it could only time out (§13
+      ## decision 155). Passed on to the revert of a failed switch.
     confirmCapSec*: int
       ## When > 0, step 8 waits at most this long, whatever the profile's
       ## ``confirmTimeout``: a recovery at boot runs a replay's confirm
@@ -6914,6 +6923,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # counted from the end of step 7. A failure withholds the commit,
       # and the switch reverts below.
       if clean and problems.len == 0 and healthChecks.len > 0:
+        # At boot the floored units step 7 queued wait for the re-assert
+        # unit's start job, which is this process: its readiness releases
+        # them, and only then can the confirm see them (§13 decision 155).
+        if opts.readyBeforeConfirm and not mutated("boot-confirm-before-ready"):
+          discard notifyReady()
         hookConfirm = confirm(healthChecks, confirmTimeout,
                               hostNamespaceProbe(probeExe))
         if not hookConfirm.passed:
@@ -7275,6 +7289,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         assumeActive: assume, retention: opts.retention,
         reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
         nonBlockingStarts: opts.nonBlockingStarts,
+        readyBeforeConfirm: opts.readyBeforeConfirm,
         confirmCapSec: opts.confirmCapSec))
     except CatchableError as e:
       raise newException(AddonApplyError, why & "\nthe switch could not " &
@@ -7377,7 +7392,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
                               replayError: string;
                               driver: CollisionDriver = nil;
                               nonBlockingStarts = false;
-                              confirmCapSec = 0): FailedReplayRevert =
+                              confirmCapSec = 0;
+                              readyBeforeConfirm = false): FailedReplayRevert =
   ## A recovery whose replay of an interrupted switch failed for any reason
   ## other than rolling itself back (a plan that cannot be read or
   ## planned, a refusal, a step that raised) reverts to the generation the
@@ -7494,7 +7510,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     userProfileText: back.user, storedTarget: true, driver: driver,
     purpose: "revert",
     assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
-    nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
+    nonBlockingStarts: nonBlockingStarts,
+    readyBeforeConfirm: readyBeforeConfirm, confirmCapSec: confirmCapSec))
   # Step 2 disabled the units the switch was removing, recording each
   # first. When the switch got no further, their files are still the old
   # generation's and the ledger still lists them unchanged, so the revert

@@ -235,12 +235,17 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
       result.lines.add("finishing the committed switch failed: " & e.msg)
     return
   # At boot the replay's confirm and, if it fails, its revert's run inside
-  # the re-assert unit's start timeout: each is capped (§7.7).
+  # the re-assert unit's bounds (``TimeoutStartSec=`` up to readiness,
+  # ``RuntimeMaxSec=`` after it): each is capped (§7.7). Its readiness is
+  # said just before a confirm, so the floored units it started, which are
+  # ordered after this unit, can start while the confirm checks them (§13
+  # decision 155).
   let cap = if atBoot: BootConfirmCapSec else: 0
   try:
     let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
       hostIdentity: readHostname(), replay: true, purpose: "replay",
       driver: driver, nonBlockingStarts: atBoot,
+      readyBeforeConfirm: atBoot,
       revertOf: m.revertOf, revertReason: m.revertReason,
       replayOf: m.purpose, confirmCapSec: cap))
     if m.purpose == "revert":
@@ -261,7 +266,8 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
     let failed = e.msg
     try:
       let rv = revertAfterFailedReplay(stateDir, m, failed, driver,
-        nonBlockingStarts = atBoot, confirmCapSec = cap)
+        nonBlockingStarts = atBoot, confirmCapSec = cap,
+        readyBeforeConfirm = atBoot)
       if rv.reverted:
         result.lines.add("the replay failed (" & failed & "); reverted to " &
           m.fromGeneration & " (re-applied as generation " &

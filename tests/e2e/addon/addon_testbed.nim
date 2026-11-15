@@ -1131,11 +1131,16 @@ proc resumeSwitch*(g: Guest; timeoutSec = 900): ExecOut =
 proc waitReasserted*(g: Guest; timeoutSec = 900): string =
   ## After a boot: wait until the re-assert unit has run, and return its
   ## journal for this boot.
+  ##
+  ## The unit is ``Type=notify`` (spec §13 decision 155): it is ``active``
+  ## from its ``READY=1``, which a boot replay sends before its confirm, so
+  ## "has run" is ``SubState=exited`` (its process gone, the unit kept
+  ## active by ``RemainAfterExit=yes``), or ``failed``.
   let deadline = epochTime() + timeoutSec.float
   while epochTime() < deadline:
-    let st = g.exec("systemctl show -p ActiveState --value " &
-                    "repro-addon-reassert.service").stdout.strip()
-    if st in ["active", "failed"]: break
+    let st = g.exec("systemctl show -p ActiveState -p SubState --value " &
+                    "repro-addon-reassert.service").stdout.splitWhitespace()
+    if "exited" in st or "failed" in st: break
     sleep(1000)
   result = g.exec("journalctl -b -o cat --no-pager -u " &
                   "repro-addon-reassert.service").stdout

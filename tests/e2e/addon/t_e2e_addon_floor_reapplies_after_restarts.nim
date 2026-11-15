@@ -396,10 +396,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # puts its start holds back first, so the refused unit stays down.
     g.rebootGuest()
     # The boot re-assertion replays the pending revert; wait for it to end
-    # (a oneshot that stays active), so the recovery below does not find it
-    # running and defer.
-    discard g.exec("for i in $(seq 1 300); do [ \"$(systemctl show -p ActiveState " &
-      "--value repro-addon-reassert.service)\" = active ] && break; sleep 2; done", timeoutSec = 900)
+    # (its process gone, the unit kept active: ``SubState=exited``), so the
+    # recovery below does not find it running and defer.
+    discard g.exec("for i in $(seq 1 300); do [ \"$(systemctl show -p SubState " &
+      "--value repro-addon-reassert.service)\" = exited ] && break; sleep 2; done", timeoutSec = 900)
     let bootW = g.exec("test -e " & Pending & " && echo pending=yes; " &
       "systemctl is-active a9r-st.service; stat -c '%n %U' /var/lib/a9r-st; " &
       "systemctl show -p After a9r-st.service | tr ' ' '\\n' | grep -c reassert; " &

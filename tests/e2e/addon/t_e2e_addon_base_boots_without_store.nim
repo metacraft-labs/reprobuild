@@ -21,7 +21,9 @@
 ##
 ## - the guest reaches ``multi-user.target`` and accepts key-authenticated
 ##   SSH (every check below runs over it, as root with the run's key);
-## - the re-assert unit ran and reported ``degraded``;
+## - the re-assert unit ran and reported ``degraded``, and is active
+##   (``exited``, ``success``): its store-missing fallback said ``READY=1``,
+##   as a ``Type=notify`` unit must (spec §13 decision 155);
 ## - no BASE unit failed: every failed unit is one of the add-on's (the
 ##   ledger's units -- the store mount and the fixture service cannot work
 ##   without the store, and are allowed to fail).
@@ -37,7 +39,7 @@
 ##
 ## *Mocking.* None.
 
-import std/[json, os, strutils, times, unittest]
+import std/[algorithm, json, os, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -119,6 +121,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let journal = g.waitReasserted()
       step(pass & ": the re-assert unit reported degraded",
            "repro-addon reassert: degraded" in journal, journal)
+      # The unit is ``Type=notify`` (spec §13 decision 155): the fallback
+      # that wrote the report must also have said ``READY=1``, or the unit
+      # fails (``Result=protocol``) and every unit ordered after it fails
+      # with it.
+      let unitState = g.exec("systemctl show -p ActiveState -p SubState " &
+        "-p Result --value repro-addon-reassert.service").stdout.
+        splitWhitespace()
+      step(pass & ": the re-assert unit's fallback notified readiness " &
+           "(active, exited, success)",
+           unitState.sorted() == @["active", "exited", "success"], $unitState)
       let failed = g.exec("systemctl list-units --failed --plain --no-legend " &
                           "--no-pager --full").stdout
       var baseFailed: seq[string]

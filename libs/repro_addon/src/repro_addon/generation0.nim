@@ -481,6 +481,20 @@ proc reassertUnit(reproExe: string): string =
   # instead of the unit failing silently with ENOENT. `reassert --boot`
   # always exits 0. No network: it needs none, and its health probes run
   # in the host's namespaces through PID 1.
+  #
+  # ``Type=notify`` (§13 decision 155): every floored unit is ordered after
+  # this unit (decision 144), and that ordering waits for its start job.
+  # A oneshot's job ends only when the process exits, so a boot replay's
+  # confirm step, which runs inside it, would poll floored units that
+  # cannot start until it returns, and every such replay would time out
+  # and revert. The add-on says ``READY=1`` (``sd_notify``) just before a
+  # boot replay's confirm, when the generation's writes and holds are in
+  # place, and on every way out; the shell fallback says it with
+  # ``systemd-notify``, exec'd so that it is the main process
+  # (``NotifyAccess=main``, the default). ``TimeoutStartSec=`` bounds the
+  # run up to readiness, and ``RuntimeMaxSec=`` (counted from readiness)
+  # bounds the confirm and revert after it; ``RemainAfterExit=yes`` keeps
+  # the unit active once the process has exited, as before.
   when mutated("reassert-required-by-boot"):
     # The falsifying mutation: in the base's boot path, and requiring the
     # store mount, so a missing store fails the unit before it can report.
@@ -501,16 +515,18 @@ proc reassertUnit(reproExe: string): string =
   unitDeps &
   "\n" &
   "[Service]\n" &
-  "Type=oneshot\n" &
+  "Type=notify\n" &
   "RemainAfterExit=yes\n" &
   "TimeoutStartSec=" & $ReassertTimeoutMin & "min\n" &
+  "RuntimeMaxSec=" & $ReassertTimeoutMin & "min\n" &
   # The fallback also rewrites the report, so a stale `ok` from an earlier
   # boot is never what an operator reads.
   "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " & reproExe &
     " system addon reassert --boot; else echo repro-addon reassert: " &
     "degraded: the add-on binary " & reproExe & " is unavailable, the " &
     "store is missing or unreadable; echo repro-addon reassert: degraded, " &
-    "the store is missing or unreadable > " & ReassertReportPath & "; fi'\n" &
+    "the store is missing or unreadable > " & ReassertReportPath &
+    "; exec systemd-notify --ready; fi'\n" &
   # The apply unit's confinement, and no network (§7.7; threat model G16).
   privilegedConfinement(network = mutated("reassert-has-network")) &
   NoSwapLine &

@@ -168,7 +168,10 @@ The add-on handles this in four ways:
     the unit: every hardened unit starts only after the add-on's boot-time
     re-assertion, which redoes the step back, and its hold, first. One
     consequence: a hardened unit wanted by `multi-user.target` makes that
-    target wait for the re-assertion. A unit installed by an add-on version
+    target wait for the re-assertion. When the re-assertion finishes a
+    switch a crash interrupted, the wait ends before that switch checks
+    its units' health, so a hardened unit with a health check can pass it
+    at boot. A unit installed by an add-on version
     that predates this ordering does not wait, until an apply installs it
     again.
   - **a unit that only a timer or a path unit starts** never has its
