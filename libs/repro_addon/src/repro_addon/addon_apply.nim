@@ -1521,6 +1521,28 @@ proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
   writeTriggersToRestart(stateDir, left)
   result.ok = left.len == 0
 
+proc step7Inputs*(transitions: seq[Transition]; paused: seq[string];
+                  assumeActive: HashSet[string]; excluded: openArray[string]):
+    tuple[transitions: seq[Transition]; paused: seq[string];
+          assumeActive: HashSet[string]] =
+  ## Everything step 7 starts, with the ``excluded`` units left out: the
+  ## plan's transitions, the triggers step 2 paused, and the units a revert
+  ## or replay plans as running that are down. The one place a revert's
+  ## step 7 is kept from starting a trigger its record of triggers to
+  ## restart owns (§13 decision 160), whatever list would start it.
+  result = (transitions: transitions, paused: paused, assumeActive: assumeActive)
+  when mutated("revert-starts-unstartable-trigger"):
+    # FALSIFYING MUTATION: step 7 starts it again.
+    return
+  if excluded.len == 0: return
+  result.transitions = @[]
+  for tr in transitions:
+    if tr.unit notin excluded: result.transitions.add(tr)
+  result.paused = @[]
+  for t in paused:
+    if t notin excluded: result.paused.add(t)
+  for t in excluded: result.assumeActive.excl(t)
+
 proc hostRunningInstances*(tmpl: string): seq[string]
 
 proc heldTriggersOf*(resources: openArray[SystemResource];
@@ -6434,14 +6456,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if toRestart.len > 0:
         writeTriggersToRestart(stateDir,
           readTriggersToRestart(stateDir) & toRestart)
-        # The record owns them now (§13 decision 160): the revert's step 7
-        # does not start them again, or it would fail the same way and the
-        # revert with it.
-        when not mutated("revert-starts-unstartable-trigger"):
-          var kept: seq[Transition]
-          for tr in stepTransitions:
-            if tr.unit notin toRestart: kept.add(tr)
-          stepTransitions = kept
+        # The record owns them now (§13 decision 160): step 7 leaves them
+        # out (``step7Inputs``), or the revert would fail the same way.
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the
@@ -7029,6 +7045,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 try: recordCreatedDirs(stateDir, u, createdPending,
                                        invocation = unitInvocation(u).id)
                 except IOError, OSError: discard
+          # A revert leaves out what its record of triggers to restart owns
+          # (§13 decision 160): one filter for every start of step 7.
+          block:
+            let reverting = purpose == "revert" or
+              (replaying and opts.replayOf == "revert")
+            let excluded =
+              if reverting: readTriggersToRestart(stateDir) else: @[]
+            let inputs = step7Inputs(stepTransitions, paused, assumeActive,
+                                     excluded)
+            stepTransitions = inputs.transitions
+            paused = inputs.paused
+            assumeActive = inputs.assumeActive
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
                    afterStart = recordAfter)

@@ -8950,7 +8950,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 29,
-      "staticCaseCount": 125,
+      "staticCaseCount": 126,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9865,7 +9865,8 @@
         "repro_deploy_agent",
         "repro_dsl_stdlib",
         "repro_local_store",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
@@ -9884,8 +9885,7 @@
       "localDependencyShape": [
         "repro_addon",
         "repro_deploy_agent",
-        "repro_peer_cache",
-        "repro_test_support"
+        "repro_peer_cache"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
