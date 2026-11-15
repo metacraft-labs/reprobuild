@@ -1729,3 +1729,18 @@ suite "a trigger that cannot start again leaves the host pending (decision 160)"
         RecoveryOutcome(resolved: true),
       pointer = dir / "no-pointer")
     check passes.ok
+
+  test "decision 160: once a marker is resolved, recover starts the recorded triggers too":
+    let dir = getTempDir() / ("t160r-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeTriggersToRestart(dir, ["a.socket"])
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    let r = afterRecovery(RecoveryOutcome(resolved: true,
+      lines: @["replayed the switch to completion"]), dir, host)
+    check r.resolved
+    check "trigger a.socket started again" in r.lines
+    check not hasTriggersToRestart(dir)

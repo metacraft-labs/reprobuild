@@ -269,6 +269,10 @@ EXPECT.update({
     # the switch passes.
     "mutrestartignored": ("e2e_addon_adopt_hand_configured_service", "red",
                           "add-on build trigger-restart-failure-ignored"),
+    # §13 decision 160: the revert's step 7 starts again a trigger it
+    # recorded as unstartable, and fails on it.
+    "mutrevertstarts": ("e2e_addon_adopt_hand_configured_service", "red",
+                        "add-on build revert-starts-unstartable-trigger"),
     "mutnoedges": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                    "engine build trigger-edges-omitted"),
 })
@@ -279,6 +283,7 @@ TARGET.update({
     "muttrigconv": "decision 151, full apply (first realisation):",
     "muttrigadopt": "decision 151, add-on switch: a socket with connections",
     "mutrestartignored": "decision 160: a trigger that cannot start again fails the switch",
+    "mutrevertstarts": "decision 160: a trigger that cannot start again fails the switch",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -360,6 +365,12 @@ def on_target_rec(kind, rec):
         return (on_target(kind, steps) and
                 all(limit_hit(first.get(l, {}).get("trigger", ""))
                     for l in ("socket", "path")))
+    if kind == "mutrevertstarts":
+        # Red because the revert failed on the trigger at its step 7, not
+        # for another reason: the port was taken and the switch failed.
+        u = rec.get("decision160", {})
+        return (on_target(kind, steps) and u.get("exit", 0) != 0 and
+                u.get("blocked") == "active" and u.get("revertFailed") is True)
     if kind == "mutrestartignored":
         # Red because the switch passed with the trigger down, not for
         # another reason: the port was taken.
@@ -742,7 +753,8 @@ def green_incomplete(kind, rec):
         for key, field in (("decision151Running", "ok"), ("decision151Pass", "ok"),
                            ("decision151Refused", "notFailed"),
                            ("decision151Refused", "refusedForReason"),
-                           ("decision151Recovered", "ok"), ("decision160", "ok")):
+                           ("decision151Recovered", "ok"), ("decision160", "ok"),
+                           ("decision160Done", "ok")):
             d = rec.get(key)
             if not isinstance(d, dict) or d.get(field) is not True:
                 return "%s %r, expected %s" % (key, d, field)

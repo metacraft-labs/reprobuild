@@ -594,6 +594,12 @@
 ##                                           add-on switch stops or holds
 ##                                           the triggers of held units
 ##                                           (decision 151)
+## ``revert-starts-unstartable-trigger``   the revert's step 7 starts a
+##                                           trigger it recorded as
+##                                           unstartable (decision 160)
+## ``recover-skips-triggers-after-marker`` recover retries the triggers to
+##                                           restart only when no marker
+##                                           was pending (decision 160)
 ## ``trigger-restart-failure-ignored``     a trigger that does not start
 ##                                           again is dropped, and the
 ##                                           switch goes on (decision 160)
@@ -1680,6 +1686,8 @@ const
                           "triggers-of-running-units-stopped",
                           # §13 decision 160.
                           "trigger-restart-failure-ignored",
+                          "revert-starts-unstartable-trigger",
+                          "recover-skips-triggers-after-marker",
                           "fired-from-driver-starts-only",
                           "fired-instance-unmapped",
                           "requirers-of-refused-released",

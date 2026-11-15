@@ -6434,6 +6434,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if toRestart.len > 0:
         writeTriggersToRestart(stateDir,
           readTriggersToRestart(stateDir) & toRestart)
+        # The record owns them now (§13 decision 160): the revert's step 7
+        # does not start them again, or it would fail the same way and the
+        # revert with it.
+        when not mutated("revert-starts-unstartable-trigger"):
+          var kept: seq[Transition]
+          for tr in stepTransitions:
+            if tr.unit notin toRestart: kept.add(tr)
+          stepTransitions = kept
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the
