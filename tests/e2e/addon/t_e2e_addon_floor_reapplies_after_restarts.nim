@@ -109,6 +109,10 @@
 ## process pass), ``writable-specifier-resolved`` (the instance's link is
 ## followed).
 ##
+## Also red here: ``restarted-listener-not-rerecorded`` (the record keeps
+## the listener the socket's restart unlinked). ``start-hold-any-content``
+## is red in ``t_addon_floor_round12``.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
 ## *Mocking.* None: the real add-on, the base's own systemd and kernel.
@@ -218,6 +222,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("and applies again" & tag, r.exitCode == 0,
            r.stdout & r.stderr & g.exec("ls -la /run/a9r-sk; cat " & Record).stdout)
       notPending("the socket's second apply" & tag)
+      # §13 decisions 78 and 151: the switch stopped the socket for its holds
+      # and started it again, and the manager bound a new listener; the
+      # record follows it, naming the listener there now.
+      let lrec = g.exec("awk -F'\\t' '$1 == \"/run/a9r-sk/sock\" {print $4}' " & Record &
+                        "; stat -c %i /run/a9r-sk/sock").stdout.splitLines()
+      step("the record names the listener the socket's restart bound" & tag,
+           lrec.len >= 2 and lrec[0].strip().len > 0 and lrec[0].strip() == lrec[1].strip(),
+           lrec.join("\n") & g.exec("cat " & Record).stdout)
       # The service started once outside a switch, as its socket would start
       # it: systemd hands it the directory its socket's start made (the same
       # directory, now owned by the service's account), and the next apply,

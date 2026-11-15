@@ -32,6 +32,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/winlibs_pin
+import repro_dsl_stdlib/linux_toolchain_pin
 import repro_dsl_stdlib/packages/binutils as binutilsModule
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/types/library
@@ -88,6 +89,40 @@ package gcc:
       preInstallUnrecognized = "Get-ChildItem \"$dir\\*.7z\" | Remove-Item -Recurse -Force",
       cpu = "x86_64",
       os = "windows"
+    # Linux x86_64: Bootlin's glibc toolchain, realized into the store root
+    # by tarball mode and relocated onto the loader and C library in its own
+    # sysroot. What the archive is, why it is relocated and what that means
+    # for executables it links is in ``linux_toolchain_pin``.
+    # ``executableAlias`` puts the real driver on PATH as ``gcc``, the name
+    # consumers invoke; ``extraExecutable`` exports the toolchain's own
+    # unprefixed ``ar``, so an archive edge that names ``ar`` in a project
+    # that declares only ``gcc`` runs this archiver and not one from the
+    # ambient PATH. ``gccLinkSpecs`` sets the default dynamic linker and run
+    # path of a linked executable to the realized ones; ``gccSpecDefault``
+    # keeps the hardening defaults Buildroot's wrapper adds, which declaring
+    # the real driver would otherwise lose.
+    tarball url = LinuxToolchainX64Url,
+      sha256 = LinuxToolchainX64Sha256,
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = LinuxToolchainGccDriver,
+      executableAlias = "gcc",
+      extraExecutable = LinuxToolchainArchiver,
+      elfInterpreter = LinuxToolchainLoader,
+      elfRunpath = LinuxToolchainRuntimeDir,
+      elfPatchDir = LinuxToolchainPatchDirs[0],
+      elfPatchDir = LinuxToolchainPatchDirs[1],
+      elfPatchDir = LinuxToolchainPatchDirs[2],
+      elfPatchDir = LinuxToolchainPatchDirs[3],
+      gccLinkSpecs = LinuxToolchainGccSpecs,
+      gccSpecDefault = LinuxToolchainGccSpecDefaults[0],
+      gccSpecDefault = LinuxToolchainGccSpecDefaults[1],
+      gccSpecDefault = LinuxToolchainGccSpecDefaults[2],
+      packageId = LinuxToolchainX64PackageId,
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = LinuxToolchainX64LockIdentity,
+      version = LinuxToolchainGccVersion
 
   executable gcc:
     cli:

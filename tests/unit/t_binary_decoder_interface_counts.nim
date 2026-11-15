@@ -8,7 +8,7 @@ suite "interface bounded count decoding":
     var value: ProjectInterface
     populateCountFixture(value)
     checkCountMutations(encodeInterfacePayload(value), proc(data: seq[byte]) =
-      discard decodeInterfacePayload(data), expectedCounts = 64)
+      discard decodeInterfacePayload(data), expectedCounts = 73)
   test "file stamp sequence":
     var values: seq[FileStamp]
     populateCountFixture(values)

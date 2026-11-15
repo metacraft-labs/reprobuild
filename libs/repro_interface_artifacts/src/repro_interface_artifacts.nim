@@ -1215,8 +1215,18 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 32'u16
-    ## v32 (current): ``InterfaceNixProvisioning`` retains ``version``, the
+  EnvelopeVersion = 33'u16
+    ## v33 (current): ``TarballArchiveDetail`` retains the ELF relocation of
+    ##                a dynamically linked archive (``elfInterpreter``,
+    ##                ``elfRunpath``, ``elfPatchDirs``, ``gccLinkSpecs``,
+    ##                ``gccSpecDefaults``),
+    ##                after ``installerApp``. v32 and older payloads decode
+    ##                them empty: an archive realized as shipped, which is
+    ##                what every archive was before. The fingerprint
+    ##                projection writes the block only when a field is
+    ##                non-empty, so no fingerprint or key hashed from one
+    ##                moves for a record that declares none.
+    ## v32: ``InterfaceNixProvisioning`` retains ``version``, the
     ##                release a ``nixPackage`` record declares, a string
     ##                after ``lockIdentity``. v31 and older payloads decode
     ##                with it empty, a record that names no release, which is
@@ -2014,7 +2024,7 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
 
 proc writeTarballArchiveDetail(outp: var seq[byte];
                                detail: TarballArchiveDetail;
-                               version: uint16) =
+                               version: uint16; forFingerprint = false) =
   ## GM4b (v21), GM4c (v22), installer applications (v28). Field order is
   ## the declaration order of ``TarballArchiveDetail``;
   ## ``readTarballArchiveDetail`` mirrors it.
@@ -2041,6 +2051,19 @@ proc writeTarballArchiveDetail(outp: var seq[byte];
     outp.writeString(detail.teamId)
   if version >= 28'u16:
     outp.writeString(detail.installerApp)
+  if version >= 33'u16:
+    let declaresElfRelocation = detail.elfInterpreter.len > 0 or
+      detail.elfRunpath.len > 0 or detail.elfPatchDirs.len > 0 or
+      detail.gccLinkSpecs.len > 0 or detail.gccSpecDefaults.len > 0
+    # The fingerprint projection omits an all-empty block (see the v33 note
+    # on ``EnvelopeVersion``); the wire payload always carries it, since the
+    # reader decodes a fixed layout.
+    if not forFingerprint or declaresElfRelocation:
+      outp.writeString(detail.elfInterpreter)
+      outp.writeStringSeq(detail.elfRunpath)
+      outp.writeStringSeq(detail.elfPatchDirs)
+      outp.writeString(detail.gccLinkSpecs)
+      outp.writeStringSeq(detail.gccSpecDefaults)
 
 proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
                               version: uint16): TarballArchiveDetail =
@@ -2067,6 +2090,12 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
     result.teamId = readString(bytes, pos)
   if version >= 28'u16:
     result.installerApp = readString(bytes, pos)
+  if version >= 33'u16:
+    result.elfInterpreter = readString(bytes, pos)
+    result.elfRunpath = readStringSeq(bytes, pos)
+    result.elfPatchDirs = readStringSeq(bytes, pos)
+    result.gccLinkSpecs = readString(bytes, pos)
+    result.gccSpecDefaults = readStringSeq(bytes, pos)
 
 const FirstEnvelopeVersionWithTarballDetail = 21'u16
   ## The envelope version that introduced ``TarballArchiveDetail`` (GM4b).
@@ -2127,7 +2156,8 @@ proc writeTarballProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.cpu)
   outp.writeString(provisioning.os)
   if version >= 21'u16:
-    outp.writeTarballArchiveDetail(provisioning.detail, version)
+    outp.writeTarballArchiveDetail(provisioning.detail, version,
+      forFingerprint)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -3878,7 +3908,12 @@ proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
     ", appBundle: " & escForCode(detail.appBundle) &
     ", bundleId: " & escForCode(detail.bundleId) &
     ", teamId: " & escForCode(detail.teamId) &
-    ", installerApp: " & escForCode(detail.installerApp) & ")"
+    ", installerApp: " & escForCode(detail.installerApp) &
+    ", elfInterpreter: " & escForCode(detail.elfInterpreter) &
+    ", elfRunpath: " & listLit(detail.elfRunpath) &
+    ", elfPatchDirs: " & listLit(detail.elfPatchDirs) &
+    ", gccLinkSpecs: " & escForCode(detail.gccLinkSpecs) &
+    ", gccSpecDefaults: " & listLit(detail.gccSpecDefaults) & ")"
 
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =
