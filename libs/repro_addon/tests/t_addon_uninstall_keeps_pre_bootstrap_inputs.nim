@@ -17,7 +17,7 @@
 ## root and a ledger of a real bootstrap; the VM gates cover that), the
 ## ledger's own drift check, and the apply planner's own refusal.
 
-import std/[os, posix, strutils, unittest]
+import std/[json, os, posix, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
@@ -345,7 +345,8 @@ suite "the ledger copy goes last":
     checkpoint "order: " & $order & " blocker: " & blocker
     setFilePermissions(blocker, {fpUserRead, fpUserExec})
     var r: UninstallResult
-    removeStateRoot(r, st, ledger, @[st / "ev"])
+    let token = st & "-log" / StateRemovalTokenName
+    removeStateRoot(r, st, ledger, @[st / "ev"], tokenPath = token)
     checkpoint $r.errors
     check r.errors.len == 1 and "is kept" in r.errors[0]
     check st notin r.removed
@@ -353,7 +354,162 @@ suite "the ledger copy goes last":
     check readLedger(ledger).generation == "g0"
     setFilePermissions(blocker, {fpUserRead, fpUserWrite, fpUserExec})
     var again: UninstallResult
-    removeStateRoot(again, st, ledger, @[st / "ev"])
+    removeStateRoot(again, st, ledger, @[st / "ev"], tokenPath = token)
+    check not fileExists(token)       # the run finished: no token is left
     check again.errors.len == 0
     check not dirExists(st)
     check st in again.removed and (st / "ev" & " (store evidence)") in again.removed
+
+# ---------------------------------------------------------------------------
+# A11 code review rounds 14 and 15 (§13 decisions 161 and 163, amending
+# 150): after the ledger copy only rmdir(2) of the add-on's own empty
+# directories runs. Before the ledger copy goes, a durable token outside the
+# state (beside the discard records) names them; a re-run with that token
+# and no ledger removes exactly them and succeeds, a host with neither is
+# refused as before with nothing touched, and a directory that was a
+# pre-bootstrap root is never removed. The failing rmdir is reported
+# precisely: its errno and cause, what remains, and never "everything is
+# gone" when the directory still holds something.
+#
+# A parent directory without write permission stands for an immutable
+# /var/lib or a mount point (the tests run without root). The real
+# removal, the real token and the real re-run (through
+# ``runAddonUninstall``, whose host lock a process without root does not
+# take) otherwise. Falsifiers ``empty-state-root-reported-vaguely``,
+# ``empty-state-root-left-unfinished``, ``state-removal-rerun-unwired``,
+# ``state-removal-token-not-required`` and ``pre-bootstrap-root-rmdir``.
+# ---------------------------------------------------------------------------
+
+proc v2Scene(name: string): tuple[parent, st, lc, token: string] =
+  let parent = getTempDir() / ("repro-uninstall-v2-" & name & "-" &
+                               $getCurrentProcessId())
+  if dirExists(parent):
+    for d in [parent, parent / "var-lib-repro", parent / "var-lib-repro" / "system"]:
+      if dirExists(d):
+        setFilePermissions(d, {fpUserRead, fpUserWrite, fpUserExec})
+  removeDir(parent)
+  let st = parent / "var-lib-repro"
+  createDir(st / "agent")
+  createDir(st / "system" / "addon" / "discard-markers")
+  writeFile(st / "agent" / "attestation.key", "x")
+  let lc = ledgerCopyPath(st / "system")
+  writeLedger(lc, Ledger(generation: "g0"))
+  createDir(parent / "log")
+  (parent, st, lc, parent / "log" / StateRemovalTokenName)
+
+proc leftUnder(d: string): seq[string] =
+  for p in walkDirRec(d, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+                                        pcLinkToDir}):
+    result.add(p)
+
+proc rerun(s: tuple[parent, st, lc, token: string]): UninstallResult =
+  ## The re-run through the uninstall verb itself, so its wiring is held.
+  runAddonUninstall(UninstallOptions(stateDir: s.st / "system",
+    stateRoot: s.st, logDir: parentDir(s.token)))
+
+suite "only the add-on's own empty directories follow the ledger copy":
+  test "V2: a failed rmdir of the root says what remains, keeps the token, and a re-run finishes":
+    let s = v2Scene("finish")
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, @[s.st / "ev"], tokenPath = s.token)
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint $r.errors
+    check r.errors.len == 1
+    check r.errors.len == 1 and r.errors[0].startsWith(s.st & ": rmdir failed")
+    check r.errors.len == 1 and
+      ("the directory " & s.st & " remains, empty of") in r.errors[0]
+    check r.errors.len == 1 and " remains, " in r.errors[0] and
+      " remain, " notin r.errors[0]
+    check s.st notin r.removed
+    check dirExists(s.st) and leftUnder(s.st).len == 0
+    check not fileExists(s.lc)
+    check fileExists(s.token)
+    let again = rerun(s)
+    checkpoint $again.errors
+    check again.errors.len == 0
+    check not dirExists(s.st)
+    check not fileExists(s.token)
+    check again.removed == @[s.st & " (left by an earlier uninstall)"]
+
+  test "a failed rmdir of an intermediate directory names it and both that remain":
+    let s = v2Scene("intermediate")
+    # system/ itself cannot be removed: its parent (the root) is read-only
+    # once everything else is gone. A read-only root also refuses agent/'s
+    # removal, so agent/ is moved out first: only system/ is left in it.
+    moveDir(s.st / "agent", s.parent / "agent-elsewhere")
+    setFilePermissions(s.st, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token)
+    setFilePermissions(s.st, {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint $r.errors
+    let sys = s.st / "system"
+    check r.errors.len == 1 and r.errors[0].startsWith(sys & ": rmdir failed")
+    check r.errors.len == 1 and
+      ("the directories " & sys & ", " & s.st & " remain") in r.errors[0]
+    check dirExists(sys) and not fileExists(s.lc) and fileExists(s.token)
+    let again = rerun(s)
+    check again.errors.len == 0
+    check not dirExists(s.st) and not fileExists(s.token)
+
+  test "a directory that is not empty is named, never called empty":
+    let s = v2Scene("notempty")
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token)
+    check r.errors.len == 0 and not dirExists(s.st)
+    # A token from a run that stopped, and an entry that appeared since.
+    createDir(s.st / "system")
+    writeFile(s.st / "system" / "late", "x")
+    writeFile(s.token, $(%*{"schema": StateRemovalTokenSchema, "root": s.st,
+      "ledgerCopy": s.lc, "chain": [s.st / "system", s.st],
+      "preBootstrapRoots": newSeq[string]()}))
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and
+      (s.st / "system" & ": rmdir failed") in again.errors[0]
+    check again.errors.len == 1 and "is not empty" in again.errors[0]
+    check again.errors.len == 1 and "empty of" notin again.errors[0]
+    check fileExists(s.st / "system" / "late") and fileExists(s.token)
+
+  test "a re-run without the token touches nothing and refuses as before":
+    let s = v2Scene("notoken")
+    # The shape an earlier uninstall leaves when it put the pre-bootstrap
+    # directories back, or a host that never had the add-on: empty
+    # directories, no ledger, no token.
+    removeFile(s.lc)
+    removeFile(s.st / "agent" / "attestation.key")
+    removeDir(s.st / "system" / "addon")
+    var r: UninstallResult
+    check not finishEmptyStateRoot(r, s.st, s.lc, s.token)
+    check r.errors.len == 0 and r.removed.len == 0
+    expect LedgerError:
+      discard rerun(s)
+    check dirExists(s.st / "system") and dirExists(s.st / "agent")
+
+  test "a pre-bootstrap root is never removed, by the run or by a re-run":
+    let s = v2Scene("prebootstrap")
+    # /var/lib/repro and agent/ were the host's before the add-on;
+    # system/ is the add-on's.
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token,
+                    preBootstrap = @[s.st, s.st / "agent"])
+    checkpoint $r.errors
+    check r.errors.len == 0
+    check dirExists(s.st)                       # kept
+    check not dirExists(s.st / "system")        # the add-on's: removed
+    check not fileExists(s.token)
+    # A re-run after a failure at system/: the token's chain is system/ only.
+    createDir(s.st / "system")
+    let chain = stateDirChain(s.st, s.lc, @[s.st, s.st / "agent"])
+    check chain == @[s.st / "system"]
+    setFilePermissions(s.st, {fpUserRead, fpUserExec})
+    var mid: UninstallResult
+    writeLedger(s.lc, Ledger(generation: "g0"))
+    removeStateRoot(mid, s.st, s.lc, tokenPath = s.token,
+                    preBootstrap = @[s.st, s.st / "agent"])
+    setFilePermissions(s.st, {fpUserRead, fpUserWrite, fpUserExec})
+    check mid.errors.len == 1 and fileExists(s.token)
+    let again = rerun(s)
+    check again.errors.len == 0
+    check dirExists(s.st) and not dirExists(s.st / "system")

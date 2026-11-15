@@ -747,6 +747,16 @@ proc ensureUsageColumns(db: Database) =
           raise
   db.exec("CREATE TABLE IF NOT EXISTS cas_use (" &
     "digest BLOB PRIMARY KEY, last_used_at INTEGER NOT NULL)")
+  # The install-provenance ledger (`adapter_installs`, see
+  # `recordAdapterInstall`) is the same kind of addition: an older build
+  # never reads it, and a store without it answers "nothing recorded",
+  # which every reader treats as "not installed by Reprobuild".
+  db.exec("CREATE TABLE IF NOT EXISTS adapter_installs (" &
+    "adapter TEXT NOT NULL, install_root TEXT NOT NULL, " &
+    "name TEXT NOT NULL, version TEXT NOT NULL, " &
+    "identity TEXT NOT NULL, detail TEXT NOT NULL, " &
+    "recorded_at INTEGER NOT NULL, " &
+    "PRIMARY KEY (adapter, install_root, name, version))")
 
 # ---------------------------------------------------------------------------
 # Store lifecycle
@@ -951,6 +961,84 @@ proc forgetCasUse*(s: Store; digest: PrefixIdBytes) =
   d.bindBlob(1, digest)
   discard d.step()
 
+# ---------------------------------------------------------------------------
+# Install-provenance ledger
+# ---------------------------------------------------------------------------
+#
+# Some adapters bind to a package manager's install tree outside the store
+# (Scoop's `<scoopRoot>/apps/<app>/<version>`). Whether Reprobuild may later
+# delete such an install depends on whether Reprobuild created it or only
+# found it there, and nothing in that tree records the difference. The
+# adapter records each install it performs here, keyed by
+# `(adapter, install_root, name, version)`, together with an `identity` of
+# the directory it created (device + file index) so that a later
+# uninstall-and-reinstall by someone else does not inherit the record.
+# A missing row means "not installed by Reprobuild": an index rebuilt after
+# corruption therefore forgets these records, which only ever makes removal
+# more conservative.
+
+proc recordAdapterInstall*(s: Store; adapter, installRoot, name, version,
+                           identity, detail: string; now: int64 = 0) =
+  ## Record (or replace) the install of `name@version` under `installRoot`
+  ## that `adapter` just performed. `detail` is free-form context for an
+  ## operator reading the index (e.g. the Scoop bucket).
+  var u = s.db.prepare(
+    "INSERT OR REPLACE INTO adapter_installs(adapter, install_root, name, " &
+    "version, identity, detail, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+  defer: u.finalize()
+  u.bindText(1, adapter)
+  u.bindText(2, installRoot)
+  u.bindText(3, name)
+  u.bindText(4, version)
+  u.bindText(5, identity)
+  u.bindText(6, detail)
+  u.bindInt(7, nowOr(now))
+  if u.step() != SqliteDone:
+    raise newException(IOError, "cannot record the " & adapter &
+      " install of " & name & "@" & version & " in " & s.indexPath)
+
+proc adapterInstallIdentity*(s: Store; adapter, installRoot, name,
+                             version: string): string =
+  ## The recorded directory identity of `name@version`, or "" when no
+  ## install of it is recorded.
+  var q = s.db.prepare(
+    "SELECT identity FROM adapter_installs WHERE adapter = ? AND " &
+    "install_root = ? AND name = ? AND version = ?")
+  defer: q.finalize()
+  q.bindText(1, adapter)
+  q.bindText(2, installRoot)
+  q.bindText(3, name)
+  q.bindText(4, version)
+  if q.step() == SqliteRow:
+    return q.columnText(0)
+  ""
+
+proc adapterInstallVersions*(s: Store; adapter, installRoot,
+                             name: string): seq[string] =
+  ## Every recorded version of `name` under `installRoot`, sorted.
+  var q = s.db.prepare(
+    "SELECT version FROM adapter_installs WHERE adapter = ? AND " &
+    "install_root = ? AND name = ? ORDER BY version")
+  defer: q.finalize()
+  q.bindText(1, adapter)
+  q.bindText(2, installRoot)
+  q.bindText(3, name)
+  while q.step() == SqliteRow:
+    result.add(q.columnText(0))
+
+proc forgetAdapterInstall*(s: Store; adapter, installRoot, name,
+                           version: string) =
+  ## Drop the record of `name@version` once the install is gone.
+  var d = s.db.prepare(
+    "DELETE FROM adapter_installs WHERE adapter = ? AND install_root = ? " &
+    "AND name = ? AND version = ?")
+  defer: d.finalize()
+  d.bindText(1, adapter)
+  d.bindText(2, installRoot)
+  d.bindText(3, name)
+  d.bindText(4, version)
+  discard d.step()
+
 proc uniqueStoreToken(s: var Store): string =
   inc s.nonce
   let now = getTime()
@@ -1139,6 +1227,129 @@ proc fsyncDir(path: string) =
     discard posix.close(fd)
   else:
     discard path
+
+# ---------------------------------------------------------------------------
+# Durability of a published tree (Local-Content-Addressed-Store §"Write
+# Protocol", steps 4a and 5a)
+# ---------------------------------------------------------------------------
+#
+# A rename is atomic against a crashed PROCESS, not against a power cut. The
+# kernel may write the rename's directory entry to disk before the data of the
+# files it exposes: ext4's ``auto_da_alloc`` heuristic only covers a rename
+# that REPLACES an existing file, and XFS and APFS give no rename-versus-data
+# ordering at all. The index commit after the rename is durable on its own
+# (SQLite), so without an explicit flush a power cut can leave an index row
+# naming a prefix whose files are empty. The store therefore flushes the
+# whole staged tree before the rename and the directory that received it
+# after, and commits the index only then.
+
+when defined(macosx):
+  const FFullFsync = cint(51)
+    ## ``F_FULLFSYNC`` from <sys/fcntl.h>. On macOS ``fsync(2)`` hands the
+    ## data to the drive but does not make the drive flush its write cache;
+    ## ``fcntl(F_FULLFSYNC)`` does. See the fsync(2) man page on macOS.
+
+when defined(posix):
+  proc flushFdDurably(fd: cint): cint =
+    when defined(macosx):
+      if posix.fcntl(fd, FFullFsync) == 0:
+        return 0
+      # A filesystem without F_FULLFSYNC (some network and FUSE ones):
+      # plain fsync is the best that exists there.
+    posix.fsync(fd)
+
+proc syncDirectoryDurably*(path: string) =
+  ## Flush ``path``'s directory entries (the names created, removed or
+  ## renamed in it) to stable storage. Raises ``OSError`` when the flush
+  ## fails. A filesystem that cannot flush a directory at all (``EINVAL``:
+  ## some FUSE and network filesystems) is accepted, because nothing the
+  ## store does can make that directory more durable.
+  ##
+  ## Windows: a no-op. NTFS journals directory metadata itself and offers no
+  ## per-directory flush to an unprivileged caller; the content check that
+  ## recovery makes (``recover``) is what catches a tree that did not
+  ## survive there.
+  when defined(posix):
+    let fd = posix.open(path.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+    if fd < 0:
+      raiseOSError(osLastError(), "open directory for fsync: " & path)
+    defer: discard posix.close(fd)
+    if flushFdDurably(fd) != 0:
+      let err = osLastError()
+      if int32(err) != posix.EINVAL:
+        raiseOSError(err, "fsync directory: " & path)
+  else:
+    discard path
+
+proc syncTreeDurably*(dir: string) =
+  ## Flush every regular file and every directory under ``dir`` (``dir``
+  ## included) to stable storage, children before their directory. Symbolic
+  ## links are not opened: a link has no data of its own, and its name is
+  ## made durable by the flush of the directory holding it. Raises
+  ## ``OSError`` on the first flush that fails, so a publish that cannot be
+  ## made durable is refused rather than indexed.
+  ##
+  ## Windows: a no-op, for the reason ``syncDirectoryDurably`` gives.
+  when defined(posix):
+    for kind, entry in walkDir(dir, relative = false, checkDir = true):
+      case kind
+      of pcDir:
+        syncTreeDurably(entry)
+      of pcFile:
+        # ``walkDir`` reports FIFOs, sockets and devices as ``pcFile`` too.
+        # ``O_NONBLOCK`` keeps the open of a FIFO from waiting forever for
+        # a writer (the same guard ``hashRegularNoFollow`` uses), and
+        # ``fstat`` then skips everything that is not a regular file: a
+        # special file has no data of its own, and its name is made durable
+        # by its directory's flush.
+        let fd = posix.open(entry.cstring, posix.O_RDONLY or oNoFollow or
+          posix.O_NONBLOCK or posix.O_CLOEXEC)
+        if fd < 0:
+          let openErr = posix.errno
+          if openErr == posix.ENXIO or openErr == posix.ELOOP or
+              openErr == posix.EACCES:
+            # ENXIO: a socket. ELOOP: a symbolic link (``O_NOFOLLOW``).
+            # EACCES: a file its owner cannot read; the store cannot hash it
+            # either (``hashRegularNoFollow`` records it as special), so no
+            # digest vouches for its bytes, and refusing the publish would
+            # make the package unrealisable without making anything the
+            # store checks more durable.
+            continue
+          raiseOSError(OSErrorCode(openErr), "open for fsync: " & entry)
+        var st: posix.Stat
+        if posix.fstat(fd, st) != 0:
+          let err = osLastError()
+          discard posix.close(fd)
+          raiseOSError(err, "fstat for fsync: " & entry)
+        if not posix.S_ISREG(st.st_mode):
+          discard posix.close(fd)
+          continue
+        let rc = flushFdDurably(fd)
+        let err = osLastError()
+        discard posix.close(fd)
+        if rc != 0:
+          raiseOSError(err, "fsync: " & entry)
+      of pcLinkToFile, pcLinkToDir:
+        discard
+    syncDirectoryDurably(dir)
+  else:
+    discard dir
+
+proc syncPlacedPrefixDurably*(absolutePath: string) =
+  ## For a writer that puts a prefix directory at
+  ## ``prefixes/<pkg>/<dir>/`` itself instead of through ``realizePrefix``
+  ## (an adapter that unpacks and renames on its own, a bundle import, an
+  ## adoption, recovery's re-insert): flush the tree, the directory holding
+  ## it, and ``prefixes/``, so the index row the caller commits next never
+  ## names a tree whose data or name a power cut can still take. Call it
+  ## after the last write to the tree and before the row's transaction
+  ## commits (§"Write Protocol" steps 4a and 5a: the flushes may follow the
+  ## rename, as long as both precede the commit). Raises ``OSError`` as
+  ## ``syncTreeDurably`` does. Windows: a no-op.
+  syncTreeDurably(absolutePath)
+  let packageDir = parentDir(absolutePath)
+  syncDirectoryDurably(packageDir)
+  syncDirectoryDurably(parentDir(packageDir))
 
 proc casDiagnostic(digest: PrefixIdBytes; finalPath: string): string =
   "repro store: CAS entry " & hexOf(digest) & " at " & finalPath &
@@ -2449,7 +2660,20 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
   ## rename against a VERIFIED existing prefix. Fills ``res``'s
   ## ``outcome``, ``row``, ``verification`` and integrity fields. The
   ## caller removes ``stage`` if this raises.
-  createDir(extendedPath(parentDir(res.absolutePath)))
+  ##
+  ## Durability (§"Write Protocol" steps 4a and 5a): the staged tree is
+  ## flushed before the rename, and the directory that receives the rename
+  ## is flushed after it, both before the index transaction commits. So a
+  ## power cut leaves either no row, or a row naming a tree whose data and
+  ## name are on disk.
+  syncTreeDurably(stage)
+  let packageDir = parentDir(res.absolutePath)
+  let packageDirExisted = dirExists(extendedPath(packageDir))
+  createDir(extendedPath(packageDir))
+  if not packageDirExisted:
+    # A first version of a package creates ``prefixes/<pkg>/``; its name in
+    # ``prefixes/`` must survive as well as the prefix inside it.
+    syncDirectoryDurably(parentDir(packageDir))
   # Publish (atomic rename) and index in ONE write transaction, so a
   # writer whose rename loses reads the winner's row, not the gap
   # between the winner's rename and its insert (which would otherwise
@@ -2483,6 +2707,10 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
         except OSError as err:
           renameError = err.msg
       if renameError.len == 0:
+        # Make the rename durable before the index names its result. A
+        # failure here rolls the transaction back and leaves an unindexed
+        # directory, which recovery verifies against its receipt.
+        syncDirectoryDurably(packageDir)
         let wrote = s.publishRowLocked(row, contentDigest, replacing)
         s.db.exec("COMMIT")
         committed = true
@@ -3095,9 +3323,59 @@ proc relativeFromRoot(s: Store; absolutePath: string): string =
     result = result[prefix.len .. ^1]
   result = toForwardSlash(result)
 
+type
+  RecoveredContent = enum
+    rcIntact        ## the tree matches a recorded digest
+    rcUnrecorded    ## nothing records what the tree should hash to
+    rcDamaged       ## the tree does not match its record, or cannot be read
+
+proc checkRecoveredContent(s: Store; dir: string; receipt: RealizationReceipt;
+                           indexed: bool; why: var string;
+                           treeDigest: var PrefixIdBytes): RecoveredContent =
+  ## Recovery's content check of one prefix directory (§"Corruption
+  ## Detection", "prefix contents"). The index's ``content_digest`` is the
+  ## record when it has one; otherwise the receipt's ``contentDigest`` (the
+  ## tree as its writer sealed it). ``treeDigest`` is set to the directory's
+  ## ``prefixTreeDigest`` whenever the result is ``rcIntact`` from the
+  ## receipt, so the caller can record it on the row.
+  var rec: tuple[found, recorded: bool; digest: PrefixIdBytes]
+  if indexed:
+    rec = s.prefixContentRecord(receipt.realizationHash)
+  try:
+    if rec.recorded:
+      let actual = prefixTreeDigest(dir)
+      if actual == rec.digest:
+        return rcIntact
+      why = "prefix " & dir & " does not match the store index's record " &
+        "of it (recorded tree " & hexOf(rec.digest) & ", found " &
+        hexOf(actual) & ")"
+      return rcDamaged
+    if receipt.contentDigest.len == 0:
+      return rcUnrecorded
+    let actual = storeTreeDigest(dir)
+    if actual != receipt.contentDigest:
+      why = "prefix " & dir & " does not match the content digest its " &
+        "receipt sealed (" & receipt.contentDigest & ", found " & actual & ")"
+      return rcDamaged
+    treeDigest = prefixTreeDigest(dir)
+    return rcIntact
+  except OSError, IOError:
+    # ``IOError``: a read that failed part-way (``EIO`` from a damaged
+    # medium) in ``storeTreeDigest``'s file reads. Either way the tree
+    # cannot be shown intact, and one unreadable prefix must not abort the
+    # recovery of all the others.
+    why = "prefix " & dir & " could not be read to check its contents: " &
+      getCurrentExceptionMsg()
+    return rcDamaged
+
 proc reconcileUnindexedPrefixes(s: var Store; report: var RecoverReport) =
-  ## For each `prefixes/<pkg>/<dir>/` not present in the index, re-read
-  ## its receipt and either re-insert the row or quarantine the prefix.
+  ## For each `prefixes/<pkg>/<dir>/`, re-read its receipt and check the
+  ## tree against what was recorded of it (``checkRecoveredContent``). A
+  ## damaged tree -- what a power cut leaves of files whose names reached
+  ## the disk before their data -- is quarantined whether or not the index
+  ## names it; an indexed one keeps its row, so the next realisation
+  ## publishes a fresh tree in its place. An intact unindexed prefix is
+  ## re-inserted with its tree digest recorded.
   if not dirExists(extendedPath(s.prefixesRoot)):
     return
   # TODO(win-longpath): walk results escape; needs review
@@ -3149,9 +3427,30 @@ proc reconcileUnindexedPrefixes(s: var Store; report: var RecoverReport) =
         except OSError: discard
         continue
       let row = s.lookupPrefix(receipt.realizationHash)
+      var why = ""
+      var treeDigest: PrefixIdBytes
+      let content =
+        if kind == pcDir:
+          s.checkRecoveredContent(dir, receipt, row.found, why, treeDigest)
+        else:
+          # A symlink at a prefix path is no tree the store published; the
+          # use-time check (``verifyRealizedPrefix``) refuses it.
+          rcUnrecorded
+      if content == rcDamaged:
+        try:
+          let movedTo = s.quarantineUnique(dir)
+          s.appendAudit(gaQuarantine, receipt.realizationHash,
+            "recover: " & why & "; moved it to " & movedTo)
+          report.quarantinedPrefixes.add(dir)
+        except OSError: discard
+        continue
       if row.found:
-        # Already indexed; this is the common case after a successful
-        # publish — nothing to do.
+        # Already indexed; the common case after a successful publish.
+        # Record the digest recovery just verified against the receipt, so
+        # a later use checks the tree instead of trusting it on first use.
+        if content == rcIntact and treeDigest != default(PrefixIdBytes):
+          discard s.recordPrefixContentDigest(receipt.realizationHash,
+            treeDigest, onlyIfUnrecorded = true)
         continue
       # Re-insert.
       let digest = receiptDigest(receipt)
@@ -3163,10 +3462,26 @@ proc reconcileUnindexedPrefixes(s: var Store; report: var RecoverReport) =
         adapter: receipt.adapter,
         receiptDigest: digest,
         createdAtUnix: receipt.createdAtUnix)
+      # The directory may never have been flushed (a writer that died
+      # before step 6, a bundle import's unpack): make it durable before
+      # the row naming it commits. One that cannot be flushed is left
+      # unindexed for the next pass rather than indexed undurably. A
+      # symbolic link at the prefix path is not followed: only its name,
+      # in its package directory, is the store's.
+      try:
+        if kind == pcDir:
+          syncPlacedPrefixDurably(dir)
+        else:
+          syncDirectoryDurably(pkgDir)
+          syncDirectoryDurably(s.prefixesRoot)
+      except OSError:
+        continue
       s.db.exec("BEGIN IMMEDIATE")
       var committed = false
       try:
-        discard s.insertPrefixOrIgnore(prow)
+        if s.insertPrefixOrIgnore(prow) and content == rcIntact:
+          discard s.recordPrefixContentDigest(prow.prefixId, treeDigest,
+                                              onlyIfUnrecorded = false)
         s.appendAudit(gaRestore, receipt.realizationHash,
           "recovered from disk: " & dir)
         s.db.exec("COMMIT")

@@ -723,8 +723,11 @@ lint:
     # ever rejects it. So a green sweep on Linux said nothing about whether
     # the engine still builds on a Mac, and a Mac that could not run
     # home-switch at all was how we found out. Generates C for --os:macosx
-    # and --os:windows and refuses a Linux-only module in either closure;
-    # no macOS runner, about a minute a target. See the script header.
+    # and --os:windows and refuses a Linux-only module in either closure,
+    # then compiles the Windows C (syntax only) with the dev shell's
+    # MinGW-w64 gcc, which is what rejects a POSIX-only binding; no macOS or
+    # Windows runner. A few minutes for both targets, nearly all of it Nim's
+    # codegen; the C stage is seconds. See the script header.
     bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
     # The other closure a green sweep says nothing about: what an INSTALLED
     # reprobuild compiles against. The sweep reads the checkout; a release
@@ -792,6 +795,13 @@ lint:
     # neighbours.
     python3 ./scripts/check_pattern_kills.py --self-test 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_pattern_kills.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse `Stream.readAll` on a child's output or error stream in product
+    # code: it stops at the first short read, which on a Windows pipe is the
+    # writer pausing (`dotnet msbuild -getProperty` was cut after 256 bytes;
+    # reprobuild-pm issue 2026-10-27). Read with `drainStream`. Self-test
+    # first. Source scan, no compiler.
+    python3 ./scripts/check_process_stream_readall.py --self-test 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_process_stream_readall.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT
@@ -1362,6 +1372,18 @@ integration_hcr_linux_commit_failure_rolls_back_published_sites:
         --out:build/test-bin/integration_hcr_linux_commit_failure_rolls_back_published_sites \
         tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim \
         2>&1 | tee test-logs/integration_hcr_linux_commit_failure_rolls_back_published_sites.log
+
+# A failed re-patch commit rolls back to the previous generation, never to the
+# original (reprobuild-pm issues/2026-11-12-transaction-rollback-restores-
+# generation-0-silently-reverting-earlier-committed-patches.md).
+integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation \
+        --out:build/test-bin/integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation \
+        tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.log
 
 # HLX-M8 — the rb_hcr_* application ABI.
 integration_hcr_linux_managed_type_layout_change_lifecycle:

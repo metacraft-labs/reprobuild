@@ -15,6 +15,7 @@
 ## ``HOME`` at a directory of its own and attribute anything left there to
 ## the binary under test rather than to whatever else shares the host.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, strtabs, strutils]
 
 type
@@ -65,7 +66,7 @@ proc runOne(binary: string; args: openArray[string]; env: StringTableRef;
                          options = {poStdErrToStdOut})
     result.pid = p.processID
     try:
-      result.output = p.outputStream.readAll()
+      result.output = drainStream(p.outputStream)
     finally:
       result.exitCode = p.waitForExit()
       p.close()

@@ -90,6 +90,10 @@ type
     providerArtifactId*: string
     protocolVersion*: uint32
     entryPoints*: seq[GraphEntryPointDescriptor]
+    maxFrameLength*: uint32
+      ## Session transport only: the frame bound the provider accepted in
+      ## the handshake (Low-Level-Provider-Protocol.md §2.1). Unused, and 0,
+      ## on the single-shot file path.
 
   GraphNode* = object
     id*: string
@@ -528,7 +532,12 @@ type
     earlyCutoffs*: seq[string]
     persistedSnapshotPath*: string
 
-const ProviderProtocolVersion* = 1'u32
+const ProviderProtocolVersion* = 2'u32
+  ## 2: ``EngineHello`` and ``ProviderManifest`` carry ``maxFrameLength``,
+  ## and a serving provider keeps the protocol off its fd 0 / fd 1
+  ## (Low-Level-Provider-Protocol.md §2.1, §2.2, §5). Mirrored by
+  ## ``repro_interface_artifacts.ProviderProtocolVersionMirror``, which keys
+  ## ProviderArtifactId, so a provider built for 1 is rebuilt, not reused.
 
 const DevEnvDeclaredGraphStableName* = "reprobuild.dev-env-declared.v1"
   ## The metadata node a package's ROOT fragment carries when its recipe

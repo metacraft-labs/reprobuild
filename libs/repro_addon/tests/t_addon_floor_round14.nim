@@ -12,11 +12,12 @@
 ##   (``InactiveExitTimestamp``), so a tree made during ``ExecStartPre=``
 ##   or before a oneshot's last ``ExecStart=`` is refused;
 ## - §13 decision 146: a writable place spelled with a specifier counts by
-##   its literal prefix.
+##   its literal prefix, and one whose first component is a specifier
+##   (``%t/a9q/%i``, an empty prefix) counts as ``/`` (A9 round 15).
 ##
 ## Falsifying builds, each red here: ``hold-written-unchecked``,
 ## ``floored-not-after-reassert``, ``recreated-bound-from-main-start``,
-## ``writable-specifier-resolved``.
+## ``writable-specifier-resolved``, ``writable-leading-specifier-dropped``.
 ##
 ## *Mocking.* The full file system is a file-size limit (setrlimit(2),
 ## ``RLIMIT_FSIZE``) on this process, which makes write(2) fail with
@@ -130,3 +131,30 @@ suite "§13 decision 146: a specifier place counts by its literal prefix":
     check "/run/a9q" in w
     check "/srv" in w
     check listenerRefusal("a9q.socket", "/run/a9q/sub/x/control", "a9q.service", w).len > 0
+  # reprobuild-pm issue 2026-11-15-floor-a-place-whose-first-component-is-
+  # a-specifier-is-dropped-not-counted: a place whose first component is a
+  # specifier (``%t``, ``%S``, ``%C``, ...) has an empty literal prefix, so
+  # it covers everything. Each key that names a place by path is checked;
+  # the ``*Directory=`` keys are under a fixed root and were counted.
+  test "a place whose first component is a specifier counts as / for every key":
+    check literalPrefix("%t/a9q/%i") == "/"
+    for line in ["ReadWritePaths=%t/a9q/%i", "ReadWritePaths=-%t/a9q",
+                 "ReadWritePaths=+%S/a9q", "BindPaths=/srv:%t/a9q/%i",
+                 "BindPaths=-%C/a9q", "BindPaths=/srv:%t/a9q:rbind",
+                 "TemporaryFileSystem=%t/a9q/%i:mode=0755",
+                 "TemporaryFileSystem=%T"]:
+      let w = floorWritablePlaces(serviceDirectives("[Service]\n" & line & "\n"))
+      checkpoint line
+      check w == @["/"]
+      check listenerRefusal("a9q.socket", "/run/a9q/sub/x/control",
+                            "a9q.service", w).len > 0
+  test "a literal place beside it is kept, and a *Directory= one is unchanged":
+    check floorWritablePlaces(serviceDirectives(
+      "[Service]\nReadWritePaths=/srv/a9q -%t/a9q\n")) == @["/srv/a9q", "/"]
+    check floorWritablePlaces(serviceDirectives(
+      "[Service]\nRuntimeDirectory=%i\n")) == @["/run"]
+  test "/ covers every path; another place only itself and below":
+    check placeCovers("/", "/etc/a9q.env")
+    check placeCovers("/srv/a9q", "/srv/a9q")
+    check placeCovers("/srv/a9q", "/srv/a9q/env")
+    check not placeCovers("/srv/a9q", "/srv/a9qx/env")

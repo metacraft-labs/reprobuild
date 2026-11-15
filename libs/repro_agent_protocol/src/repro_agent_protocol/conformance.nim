@@ -18,6 +18,7 @@
 ## move; its build of target `long` runs until it is cancelled (at most
 ## `LongBuildSeconds`), which is how the scenario exercises cancellation.
 
+from repro_core/process_streams import drainStream
 import std/[asyncdispatch, os, osproc, sequtils, sets, streams, strtabs,
             strutils, tables, times]
 
@@ -182,7 +183,7 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
     result.failures.add "the provider did not finish within " &
       $timeoutSeconds & "s"
   result.providerExit = p.waitForExit()
-  result.providerOutput = p.outputStream.readAll()
+  result.providerOutput = drainStream(p.outputStream)
   for _ in 0 ..< 50:
     poll(10) # let the host observe the disconnect
   result.backendCalls = backend.calls

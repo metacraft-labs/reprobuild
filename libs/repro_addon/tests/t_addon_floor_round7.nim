@@ -371,6 +371,7 @@ suite "round 7, finding 5: the effective half is the authority":
     const Counterparts = {"checkFloorDropIns": "foreignDropInsFor",
       "checkFloorActivators": "activatorProblems",
       "checkFloorReach": "systemStateRoute",
+      "checkFloorBootOrdering": "bootOrderingCycleRoute",
       "checkFloorAccounts": "accountProblems"}.toTable
     for line in ProfileSource.splitLines() & ApplySource.splitLines():
       if not line.startsWith("proc checkFloor"): continue

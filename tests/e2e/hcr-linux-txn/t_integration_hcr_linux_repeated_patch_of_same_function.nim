@@ -2,7 +2,10 @@
 ## `integration_hcr_linux_repeated_patch_of_same_function`.
 ##
 ## Design: `reprobuild-specs/HCR/Linux-ELF-Provider.md` §4.5 (re-patching an
-## already-patched function) and §11.2 (the saved original word).
+## already-patched function) and §11.2 (a patch applies to every function in
+## the set or to none; a failed patch never leaves partially-new code).
+## Rollback target: `reprobuild-pm/issues/2026-11-12-transaction-rollback-
+## restores-generation-0-silently-reverting-earlier-committed-patches.md`.
 ## Milestone: `HCR-Linux-ELF-Provider.milestones.org`, HLX-M3.
 ##
 ## WHY THIS EXISTS. Hot reloading is iterative by definition: the second reload
@@ -27,23 +30,28 @@
 ##      modification is a real store of a real executable word performed by
 ##      something that is not the provider.
 ##
-##   3. Rollback after generation 3 restores the ORIGINAL unpatched bytes, not
-##      generation 2's. §4.5 is explicit: a rolled-back site returns to
-##      unpatched code rather than to an older patch whose body may since have
-##      been superseded.
+##   3. Rolling back the generation-3 transaction restores GENERATION 2 — the
+##      word that was published before that transaction — not the original
+##      unpatched bytes. The process is then on the previous version, which is
+##      what `hcr/patchFailed` tells the IDE, and the site stays live at
+##      generation 2 with its claim still held. Restoring the original would
+##      silently drop generation 2, a patch that had committed. Generation 2's
+##      body is retained (never freed), so the restored jump is to live code.
 ##
 ## `allowed_mocks: none`. Real process, real GCC with the real patchable
 ## profile, real bodies from a real relocatable object, the production
 ## transaction through the no-mock probe shim.
 ##
-## The claim-map arm of this gate (the claim is released on rollback) moved
+## The claim-map arm of this gate (the claim on the window) moved
 ## to codetracer-native-recorder
 ## `tests/reprobuild-hcr/t_integration_hcr_linux_txn_claim_map.nim` on
 ## 2026-11-07: the claim map is the recorder's, and the recorder runs it
 ## against this checkout (`.github/workflows/downstream-tests.yml` runs it
 ## against every reprobuild commit). This gate builds without the map
 ## (`m3_fixture.nim`), so the provider's claim calls take the bridge's no-map
-## path and every assertion below is about text, values and pages.
+## path, and the assertions below are about text, values, pages and the
+## provider's own site table (whose `claimed` flag is the provider's half of
+## the claim).
 ##
 ## ------------------------------------------------------------------------
 ## DISCRIMINATION, measured by this file:
@@ -52,12 +60,15 @@
 ##     generations must produce three DIFFERENT published words at the SAME
 ##     window, so an instrument that could only say "identical" fails here;
 ##   * claim 3 is discriminated by a falsifier build
-##     (`REPRO_HCR_HLX_M3_FALSIFY_ROLLBACK_TO_PREVIOUS_GENERATION`) in which
-##     rollback restores the previous generation's word instead of the
-##     original. That arm MUST end with the victim returning generation 2's
-##     value and the text NOT matching the pristine snapshot. Note that the
-##     falsifier is INVISIBLE at generation 1, where the two words coincide —
-##     which is exactly why the re-patch gate is the one that has to carry it.
+##     (`REPRO_HCR_HLX_M3_FALSIFY_ROLLBACK_TO_ORIGINAL_WORD`) in which
+##     rollback restores the site's ORIGINAL word instead of the word published
+##     before the transaction. That arm MUST end with the victim returning its
+##     original value and the text matching the pristine snapshot rather than
+##     generation 2's. Note that the falsifier is INVISIBLE at generation 1,
+##     where the two words coincide — which is exactly why the re-patch gate
+##     is the one that has to carry it (and why
+##     `t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.nim`
+##     carries it for a multi-site commit failure).
 
 import std/[json, os, strutils, unittest]
 
@@ -68,7 +79,7 @@ when defined(linux) and defined(amd64):
     setup:
       let repoRoot = getCurrentDir()
 
-    test "three generations, retained bodies, rollback to the ORIGINAL":
+    test "three generations, retained bodies, rollback to generation 2":
       let bodies = buildPatchBodies(repoRoot)
       let fixture = buildFixture(repoRoot, "hcr_lx_m3_txn")
       let run = runArm(fixture, "repeat", bodies)
@@ -143,18 +154,34 @@ when defined(linux) and defined(amd64):
       check run["oldCodeRetained"].getInt() == 1
       check run["retainedRegionCount"].getInt() == 4
 
-      # Claim 3: rollback lands on the ORIGINAL, byte for byte.
+      # Claim 3: rolling back generation 3 lands on GENERATION 2, byte for
+      # byte.
       check run["rollbackRc"].getInt() == 0
-      check run["rolledBackText"].getStr() == pristine
-      check run["valueAfterRollback"].getInt() == OriginalA
-      # And it is not merely equal to the original by accident: generation 2's
-      # text is a state this rollback could plausibly have landed on, and did
-      # not.
-      check run["rolledBackText"].getStr() != gens[1]["text"].getStr()
-      # §4.5: the site is retired so a later patch re-plans from an all-NOP
-      # window. (That the claim is RELEASED on rollback is the claim map's
-      # half, asserted downstream; see the header.)
-      check run["siteLiveAfterRollback"].getInt() == 0
+      check run["rolledBackText"].getStr() == gens[1]["text"].getStr()
+      check run["valueAfterRollback"].getInt() == ValueB
+      # And it is not equal to generation 2 by accident: the original text is
+      # a state this rollback could plausibly have landed on, and did not.
+      check run["rolledBackText"].getStr() != pristine
+      check run["valueAfterRollback"].getInt() != OriginalA
+      # The site table agrees with the window: still live, back at generation
+      # 2, recording generation 2's word, and still holding the claim that was
+      # taken at generation 1 — no claim is released by this rollback. (The
+      # claim MAP's view of the same claim is asserted downstream; see the
+      # header.)
+      check run["siteLiveAfterRollback"].getInt() == 1
+      check run["siteGenerationAfterRollback"].getInt() == 2
+      check run["sitePublishedWordAfterRollback"].getStr() == w1
+      check run["siteClaimedAfterRollback"].getInt() == 1
+      check run["releasedClaimCount"].getInt() == 0
+      # Generation 3's body is rolled back but RETAINED, like every superseded
+      # body: three bodies, one per generation.
+      check run["siteRetainedBodyCountAfterRollback"].getInt() == 3
+      # Rolling the same transaction back a second time is a no-op: still
+      # generation 2, in the window and in the table.
+      check run["secondRollbackRc"].getInt() == 0
+      check run["valueAfterSecondRollback"].getInt() == ValueB
+      check run["siteGenerationAfterSecondRollback"].getInt() == 2
+      check run["sitePublishedWordAfterSecondRollback"].getStr() == w1
 
     test "a window modified behind the provider's back is REFUSED":
       let bodies = buildPatchBodies(repoRoot)
@@ -172,28 +199,29 @@ when defined(linux) and defined(amd64):
       # put the original all-NOP word back, so the victim returns 11.
       check run["value"].getInt() == OriginalA
 
-    test "rollback goes RED against a provider that restores generation N-1":
+    test "rollback goes RED against a provider that restores the ORIGINAL word":
       # DISCRIMINATION, measured. One property removed and nothing else:
-      # rollback restores `previous_word` instead of `original_word`, which is
-      # precisely what §4.5 forbids.
+      # rollback restores `original_word` instead of `previous_word`, which
+      # drops generation 2 — a patch that had committed.
       let bodies = buildPatchBodies(repoRoot)
       let healthy = buildFixture(repoRoot, "hcr_lx_m3_txn")
-      let falsified = buildFixture(repoRoot, "hcr_lx_m3_txn_prev_gen",
-        ["REPRO_HCR_HLX_M3_FALSIFY_ROLLBACK_TO_PREVIOUS_GENERATION"])
+      let falsified = buildFixture(repoRoot, "hcr_lx_m3_txn_to_original",
+        ["REPRO_HCR_HLX_M3_FALSIFY_ROLLBACK_TO_ORIGINAL_WORD"])
 
       let green = runArm(healthy, "repeat", bodies)
       let red = runArm(falsified, "repeat", bodies)
 
-      check green["rolledBackText"].getStr() == green["pristineText"].getStr()
-      check green["valueAfterRollback"].getInt() == OriginalA
+      check green["rolledBackText"].getStr() ==
+        green["generations"][1]["text"].getStr()
+      check green["valueAfterRollback"].getInt() == ValueB
 
-      # The falsified provider lands on generation 2 — the value and the bytes
+      # The falsified provider lands on the ORIGINAL — the value and the bytes
       # both say so. If this arm were also green the assertion above would be
       # measuring nothing, because a rollback that cannot be made to land
-      # anywhere else is not evidence that it lands on the original.
-      check red["rolledBackText"].getStr() != red["pristineText"].getStr()
-      check red["valueAfterRollback"].getInt() == ValueB
-      check red["rolledBackText"].getStr() ==
+      # anywhere else is not evidence that it lands on generation 2.
+      check red["rolledBackText"].getStr() == red["pristineText"].getStr()
+      check red["valueAfterRollback"].getInt() == OriginalA
+      check red["rolledBackText"].getStr() !=
         red["generations"][1]["text"].getStr()
 
 else:

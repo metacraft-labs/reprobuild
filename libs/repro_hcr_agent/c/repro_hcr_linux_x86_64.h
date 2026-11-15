@@ -759,8 +759,11 @@ typedef struct repro_hcr_lx_site {
                             * a re-patch can still walk sled boundaries for the
                             * tier-2 IP adjustment (HLX-M4) */
   uint64_t window_address;
-  uint64_t original_word;  /* rollback target; always the ORIGINAL, never the
-                            * previous generation (design §4.5) */
+  uint64_t original_word;  /* the window's pre-patch word, saved at the FIRST
+                            * publication. It is the rollback target only for
+                            * a transaction that published this site for the
+                            * first time; a re-patch rolls back to the word
+                            * published before it (`previous_word`, §11.2) */
   uint64_t published_word;
   uint64_t generation;
   /* HLX-M3, design §11.2/§4.5. `original_word_saved` is the flag behind
@@ -1942,9 +1945,12 @@ typedef struct repro_hcr_lx_patch_report {
    * length — 1 for the saved original word plus one per superseded patch body
    * retained across generations (§4.5).
    *
-   * `previous_word` is the window's pre-state at PREPARE time, which for a
-   * re-patch is the previous generation's published word and is NOT the
-   * rollback target; `original_word` above always is (§4.5). */
+   * `previous_word` is the window's pre-state at PREPARE time — the original
+   * word for a first publication, the previous generation's published word
+   * for a re-patch — and it is the ROLLBACK TARGET: a rolled-back transaction
+   * leaves the process on the version it was running before (§11.2), never
+   * on a mixture with generation 0. `original_word` above is the pre-patch
+   * word, which equals `previous_word` only for a first publication. */
   int old_code_retained;
   int retained_region_count;
   uint64_t previous_word;
@@ -1968,7 +1974,9 @@ static const uint8_t repro_hcr_lx_endbr64[4] = {0xf3, 0x0f, 0x1e, 0xfa};
  * claim map, and READS of the target: symbols are resolved and disambiguated
  * upstream, build-ids verified upstream, every sled validated, every page and
  * island allocated, every patch body written and protected, every encoding
- * computed, and every site's ORIGINAL aligned word saved. The only write into
+ * computed, and every site's pre-transaction aligned word saved (the rollback
+ * target, `previous_word`; for a first publication also the original word
+ * the site table keeps). The only write into
  * live text is the single aligned 8-byte store in `repro_hcr_lx_txn_commit`.
  * A prepare failure therefore leaves the target byte-identical BY
  * CONSTRUCTION, not by cleanup — which is what makes IsoNim's "never blank the
@@ -1993,13 +2001,28 @@ static const uint8_t repro_hcr_lx_endbr64[4] = {0xf3, 0x0f, 0x1e, 0xfa};
  *     quiescence, which is HLX-M4's `repro_hcr_lx_quiesce_begin` and is NOT
  *     claimed by this milestone.
  *
+ * ROLLBACK RESTORES THE PREVIOUS VERSION, NOT GENERATION 0. Each published
+ * site gets back the word that was in its window BEFORE this transaction
+ * (`previous_word`): the all-NOP window for a site this transaction published
+ * first, generation N's jump for a site it was re-patching to N+1. §11.2's
+ * "a patch either applies to every function in the set or to none" and "a
+ * failed patch never leaves the target running partially-new code" are what
+ * decide it: restoring the ORIGINAL at the published sites while the
+ * untouched ones keep generation N would leave a mixture no build produced,
+ * reported to the IDE as "the previous version" (`hcr/patchFailed`).
+ * Restoring the original is not part of rollback at all.
+ *
  * ROLLBACK IS NOT "FREE EVERYTHING". Bodies that were never published are
  * provider-private and are unmapped. Bodies that WERE published are retained,
  * because under tier 1 a thread may be executing inside one, and §4.5 and §6.1
  * both forbid freeing code a PC may be standing in. Islands come from a bump
- * allocator and are never reclaimed at all, for the same reason. The claim on
- * a rolled-back window IS released (§4.5: retained across generations,
- * released on rollback or shutdown).
+ * allocator and are never reclaimed at all, for the same reason. That is also
+ * what makes restoring generation N's jump sound: its body and island were
+ * retained when N+1 superseded them. The claim on a window is released only
+ * when the rollback leaves it UNPATCHED — a site this transaction published
+ * first. A re-patched site is still patched at generation N, so it keeps the
+ * claim it has held since its first publication (§4.5: retained across
+ * generations).
  * ------------------------------------------------------------------------- */
 
 #define REPRO_HCR_LX_MAX_TXN_SITES 16
@@ -2015,8 +2038,11 @@ typedef struct repro_hcr_lx_prepared_site {
    * target */
   repro_hcr_lx_sled_plan plan;
   uint64_t window_address;
-  uint64_t original_word;   /* §4.5: the rollback target, ALWAYS the original */
-  uint64_t previous_word;   /* the window's pre-state at prepare time         */
+  uint64_t original_word;   /* the window's pre-patch word (first publication) */
+  uint64_t previous_word;   /* the window's pre-state at prepare time: the
+                             * ROLLBACK TARGET (§11.2) — equal to
+                             * `original_word` for a first publication,
+                             * generation N's word for a re-patch          */
   uint64_t published_word;
   uint64_t dispatch_address;
   uint64_t island_address;
@@ -2034,6 +2060,11 @@ typedef struct repro_hcr_lx_prepared_site {
   /* commit / rollback state */
   int published;
   int restored;
+  /* 1 once rollback has moved a re-patched site's table entry back to
+   * generation N. Rollback may run more than once on the same transaction
+   * (after a failed commit, then again by a caller abandoning it), and the
+   * generation must be decremented exactly once. */
+  int site_reverted;
   int body_retained;
   /* Set by the agent AFTER a successful commit, when it has registered a GDB
    * JIT symfile or a dynamic `.eh_frame` section for this site's body.
@@ -2270,7 +2301,11 @@ static int repro_hcr_lx_txn_prepare_site(repro_hcr_lx_transaction *txn,
     ps->plan.window_offset =
         (uint32_t)(ps->window_address - ps->site->sled_address);
     ps->plan.refusal = REPRO_HCR_LX_OK;
-    /* §4.5: rollback restores the ORIGINAL, not generation N-1. */
+    /* `previous_word` is generation N's word, and it is what a rollback of
+     * this transaction restores (§11.2: the process goes back to the version
+     * it was running, never to generation 0). `original_word` is carried for
+     * the tier-2 boundary decode in publish, which needs the window's
+     * pre-patch instruction bytes. */
     ps->original_word = ps->site->original_word;
     ps->previous_word = current_word;
   } else {
@@ -2291,7 +2326,8 @@ static int repro_hcr_lx_txn_prepare_site(repro_hcr_lx_transaction *txn,
     }
     ps->window_address = ps->plan.window_address;
     /* §11.2: read and save the original aligned word BEFORE anything can
-     * change it. This is the only thing rollback needs. */
+     * change it. For a first publication it is also the pre-transaction word,
+     * so it is the only thing rollback needs. */
     memcpy(&ps->original_word, (const void *)(uintptr_t)ps->window_address,
            sizeof(ps->original_word));
     ps->previous_word = ps->original_word;
@@ -2845,32 +2881,38 @@ static int repro_hcr_lx_txn_publish_site(repro_hcr_lx_transaction *txn,
 }
 
 /*
- * Restore one published site to its ORIGINAL saved word (§4.5: the original,
- * never the previous generation, so a rolled-back site returns to unpatched
- * code rather than to an older patch whose body may since have been superseded).
+ * Restore one published site to the word that was published in its window
+ * BEFORE this transaction (`previous_word`, §11.2): unpatched code for a site
+ * this transaction published first, generation N's jump for a site it was
+ * re-patching. Generation N's body and island are retained (never freed), so
+ * that jump lands on live code.
  *
  * One aligned 8-byte store, same rule as publication. Never widened.
  */
 static int repro_hcr_lx_txn_restore_site(repro_hcr_lx_transaction *txn,
                                          repro_hcr_lx_prepared_site *ps) {
   uint64_t word;
-#if defined(REPRO_HCR_HLX_M3_FALSIFY_ROLLBACK_TO_PREVIOUS_GENERATION)
+#if defined(REPRO_HCR_HLX_M3_FALSIFY_ROLLBACK_TO_ORIGINAL_WORD)
   /*
-   * FALSIFIER ARM (HLX-M3). Restores the PREVIOUS GENERATION's word instead of
-   * the original, which is precisely what design §4.5 forbids: "rollback always
-   * restores the original saved word, not the previous generation's, so a
-   * rolled-back site returns to unpatched code rather than to an older patch".
+   * FALSIFIER ARM (HLX-M3). Restores the site's ORIGINAL word instead of the
+   * word published before the transaction, and changes nothing else — the
+   * site-table bookkeeping below still believes generation N is live. This is
+   * the behaviour recorded in `reprobuild-pm/issues/2026-11-12-transaction-
+   * rollback-restores-generation-0-silently-reverting-earlier-committed-
+   * patches.md`: a failed reload N+1 drops patch N at every site it had
+   * published.
    *
    * For a first-generation site the two words are equal, so this arm is
    * INVISIBLE until a function has been patched at least twice — which is why
-   * the re-patch gate is the one that has to carry it. Under this arm the
-   * "rollback after generation 3 restores the ORIGINAL bytes" assertion MUST go
-   * red and the victim MUST return generation 2's value. The agent never
-   * defines it.
+   * the re-patch gates carry it. Under this arm the "rollback of generation 3
+   * restores generation 2" assertion of
+   * `integration_hcr_linux_repeated_patch_of_same_function` and the N = 2 arm
+   * of `integration_hcr_linux_commit_failure_after_repatch_keeps_previous_
+   * generation` MUST go red. The agent never defines it.
    */
-  word = ps->previous_word;
-#else
   word = ps->original_word;
+#else
+  word = ps->previous_word;
 #endif
   /* The same page replacement as publication, carrying the saved word. */
   if (repro_hcr_lx_replace_text_word(
@@ -2902,10 +2944,12 @@ static int repro_hcr_lx_txn_restore_site(repro_hcr_lx_transaction *txn,
  * a partial commit, or after a complete commit that the caller decided to
  * abandon.
  *
- * Order: published sites are restored in REVERSE publication order, then
- * registrations are undone, then claims are released, then unpublished bodies
- * are unmapped. Published bodies and every island are RETAINED — see the
- * header comment.
+ * Order: published sites are restored in REVERSE publication order, each to
+ * the word published before this transaction, then registrations are undone,
+ * then the claims of sites the rollback leaves UNPATCHED are released, then
+ * unpublished bodies are unmapped. A re-patched site stays live at generation
+ * N with its claim held. Published bodies and every island are RETAINED — see
+ * the header comment.
  */
 static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
   int i;
@@ -2915,7 +2959,10 @@ static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
   }
   for (i = txn->site_count - 1; i >= 0; --i) {
     repro_hcr_lx_prepared_site *ps = &txn->sites[i];
-    if (!ps->published) {
+    /* A site an earlier rollback of this transaction already restored holds
+     * its pre-transaction word; storing it again would only re-count it. A
+     * site whose earlier restore FAILED is retried. */
+    if (!ps->published || ps->restored) {
       continue;
     }
     if (repro_hcr_lx_txn_restore_site(txn, ps) != REPRO_HCR_LX_OK) {
@@ -2939,34 +2986,78 @@ static int repro_hcr_lx_txn_rollback(repro_hcr_lx_transaction *txn) {
       }
       ps->eh_frame_payload_address = 0;
     }
-    if (ps->published) {
-      /* The window is back to its original bytes, so the site is unpatched
-       * again: retire the slot and release the claim (§4.5 releases the claim
-       * on rollback). The patch page is NOT unmapped — a thread may have
-       * entered it before the restore landed, and under tier 1 there is no way
-       * to prove otherwise. */
-      /*
-       * The claim belongs to the SITE, not to this transaction: §4.5 takes it
-       * once at the first publication and RETAINS it across generations, so by
-       * generation N the transaction that is rolling back did not take it and
-       * `claimed_here` is 0. Releasing only what this transaction claimed
-       * would therefore leak the claim on every re-patch rollback — measured,
-       * and it is why the condition is the site's flag and not the
-       * transaction's.
-       */
-      int site_claimed = (ps->site != NULL && ps->site->claimed);
+    if (ps->published && ps->restored && ps->fresh_site) {
+      /* This transaction published the site FIRST, so the window is back to
+       * its original bytes and the site is unpatched again: retire the slot
+       * and release the claim this transaction took. The patch page is NOT
+       * unmapped — a thread may have entered it before the restore landed,
+       * and under tier 1 there is no way to prove otherwise. */
       if (ps->site != NULL) {
         ps->site->used = 0;
         ps->site = NULL;
       }
-      if (ps->claimed_here || site_claimed) {
+      if (ps->claimed_here) {
         repro_hcr_mcr_release((uintptr_t)ps->window_address);
         txn->released_claim_count += 1;
       }
       ps->claimed_here = 0;
       ps->patch_page = NULL;   /* retained, deliberately leaked (§4.5/§6.1) */
+    } else if (ps->published && ps->restored) {
+      /*
+       * A RE-PATCH rolled back: the window holds generation N's word again,
+       * so the site is still patched, at generation N. Undo exactly what
+       * `repro_hcr_lx_txn_publish_site` did to the site table and nothing
+       * more:
+       *
+       *   - `published_word` goes back to generation N's word, so the next
+       *     re-patch finds the admissible pre-state "the word this provider
+       *     published" rather than refusing `entry-modified-externally`;
+       *   - `generation` goes back to N;
+       *   - the slot stays `used` and the claim stays HELD. It was taken at
+       *     the site's first publication and is retained across generations
+       *     (§4.5); this transaction did not take it (`claimed_here` is 0)
+       *     and a site that is still patched must not give it up.
+       *
+       * `retained_body_count` is deliberately NOT decremented. The rolled-back
+       * generation-N+1 body stays mapped for the same reason every superseded
+       * body does — a PC may be standing in it — so it is still a retained
+       * region, and `retained_region_count`/`oldCodeRetained` (which are
+       * computed from this count) must keep counting it. The count is "bodies
+       * this site holds", not "generations live".
+       */
+      if (ps->site != NULL && !ps->site_reverted) {
+        ps->site->published_word = ps->previous_word;
+        if (ps->site->generation > 0) {
+          ps->site->generation -= 1;
+        }
+        ps->site_reverted = 1;
+      }
+      ps->patch_page = NULL;   /* retained, deliberately leaked (§4.5/§6.1) */
+    } else if (ps->published) {
+      /*
+       * The restore itself FAILED (`repro_hcr_lx_txn_restore_site` reported
+       * it, and the rollback returns the failure). The window still holds
+       * this transaction's word, so the site table keeps describing exactly
+       * that — live, at the generation the commit recorded, claim held.
+       * Retiring the slot or releasing the claim here would let another
+       * patcher take bytes this provider's jump still occupies, and would
+       * make the next reload of this function plan over a live jump.
+       */
+      ps->patch_page = NULL;   /* retained, deliberately leaked (§4.5/§6.1) */
     } else if (ps->prepared) {
       repro_hcr_lx_txn_discard_prepared(txn, ps);
+    }
+    /* The report names one window (the last site prepared or published) and
+     * the commit wrote that window's generation and claim into it. Make it
+     * describe the state the rollback LEFT, so a reader of the report and a
+     * reader of the site table agree: generation N and the claim still held
+     * for a re-patch, generation 0 and no claim for a retired site. */
+    if (ps->published &&
+        ps->window_address == repro_hcr_lx_last_report.window_address) {
+      repro_hcr_lx_last_report.generation =
+          ps->site != NULL ? ps->site->generation : 0;
+      repro_hcr_lx_last_report.claim_held =
+          ps->site != NULL ? ps->site->claimed : 0;
     }
   }
   txn->rolled_back = 1;

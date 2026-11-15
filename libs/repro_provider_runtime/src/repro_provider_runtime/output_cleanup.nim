@@ -21,7 +21,15 @@
 ##     retained (shared / re-claimed ownership);
 ##   * a resolved path that escapes the project root is refused — Reprobuild
 ##     never deletes outside the tree it owns;
-##   * cleanup is idempotent: an already-absent output is a no-op success.
+##   * cleanup is idempotent: an already-absent output is a no-op success;
+##   * an ``oekDirectory`` claim is a CONTAINER directory output — a directory
+##     the producing action declares only to say that it exists, while other
+##     writers fill it (Incremental-Invalidation.md §"Non-regular outputs",
+##     "Container directory outputs"). It is never removed with its tree: it
+##     is removed only once nothing is left in it after its members, which
+##     are claims of their own, have been removed. ``repro clean`` classifies
+##     the claims of ``fs.ensureDir`` and of a ``fs.preserveTree`` root this
+##     way (``classifyContainerClaims`` in ``repro_cli_support``).
 ##
 ## Non-file effect kinds (`oekService`, `oekSystemUser`, `oekDatabase`,
 ## `oekResource`) are intentionally out of scope here — they belong to the
@@ -90,6 +98,10 @@ proc dirIsEmpty(path: string): bool =
     return false
   true
 
+proc isStrictlyInside(path, dir: string): bool =
+  ## Whether the normalized absolute ``path`` lies strictly below ``dir``.
+  path.len > dir.len and path.startsWith(dir & $DirSep)
+
 proc planOutputCleanup*(report: ProviderRefreshReport;
                         projectRoot: string): seq[OutputCleanupAction] =
   ## Decide, without touching the filesystem, what the executor would do for each
@@ -157,18 +169,24 @@ proc executeCleanupAction(act: var OutputCleanupAction;
   ## ``removeOwnedTrees`` decides what a FILE-kind claim found as a directory
   ## on disk means. During a graph refresh it is a mismatch worth failing on:
   ## the claim and the filesystem disagree about what the edge produced. For
-  ## ``repro clean`` it is the ordinary case of an action that declares a
-  ## directory as its output (the DSL claims every declared output as
-  ## ``oekFile``), and the whole tree is that action's product, so it is
-  ## removed. Nim's ``removeDir`` unlinks symlinks it meets instead of
-  ## following them, so the removal stays inside the resolved path.
+  ## ``repro clean`` it is the ordinary case of an action that declares an
+  ## OPAQUE directory as its output (the DSL claims every declared output as
+  ## ``oekFile``; a process action's directory output is always opaque), and
+  ## the whole tree is that action's product, so it is removed. Nim's
+  ## ``removeDir`` unlinks symlinks it meets instead of following them, so
+  ## the removal stays inside the resolved path.
+  ##
+  ## ``removeOwnedTrees`` never applies to an ``oekDirectory`` claim. That is
+  ## a container (see the module header): its other entries are other
+  ## actions' outputs or files no action declares, so it is removed only when
+  ## it is empty, under a refresh and under ``repro clean`` alike.
   try:
     if act.claim.kind == oekDirectory:
       if symlinkExists(act.resolvedPath):
         removeFile(act.resolvedPath)          # remove the link, not its target
         act.outcome = ocoDeleted
       elif dirExists(act.resolvedPath):
-        if removeOwnedTrees or dirIsEmpty(act.resolvedPath):
+        if dirIsEmpty(act.resolvedPath):
           removeDir(act.resolvedPath)
           act.outcome = ocoDeleted
         else:
@@ -222,6 +240,46 @@ proc projectCleanReport*(
         result.staleEffects.add(StaleOwnedEffect(
           invocationKey: fragment.invocationKey, claim: claim))
 
+proc pruneEmptiedParents(removed, rootAbs: string;
+                         containers: openArray[string];
+                         kept: HashSet[string]) =
+  ## After ``repro clean`` removed ``removed`` from inside a container,
+  ## remove the directories between it and the innermost container holding
+  ## it that the removal left empty. A ``fs.preserveTree`` creates those
+  ## directories to hold the entries it copies; once its entries are gone an
+  ## empty one is what is left of them, and it would keep the container from
+  ## ever being empty. ``removed`` is a member, or a nested container that
+  ## was itself removed, so a container inside a container does not leave
+  ## the directories that led to it behind.
+  ##
+  ## The walk stops at the first directory that still holds anything or that
+  ## a claim the clean keeps names (``kept``), and never removes the
+  ## container itself (its own claim decides that, later in the plan) nor
+  ## anything outside it. It does nothing at all when any directory between
+  ## the project root ``rootAbs`` and ``removed`` is a symbolic link: the
+  ## directories it would see through the link are not under the project,
+  ## and clean.md §"Ownership Records" unlinks links and never follows them.
+  var container = ""
+  for candidate in containers:
+    if removed.isStrictlyInside(candidate) and candidate.len > container.len:
+      container = candidate
+  if container.len == 0:
+    return
+  var dir = removed.parentDir
+  while dir.isStrictlyInside(rootAbs):
+    if symlinkExists(dir):
+      return
+    dir = dir.parentDir
+  dir = removed.parentDir
+  while dir.isStrictlyInside(container):
+    if dir in kept or not dirExists(dir) or not dirIsEmpty(dir):
+      break
+    try:
+      removeDir(dir)
+    except OSError:
+      break
+    dir = dir.parentDir
+
 proc applyProjectClean*(snapshots: openArray[ProviderGraphSnapshot];
                         projectRoot: string;
                         dryRun = false): OutputCleanupResult =
@@ -233,13 +291,35 @@ proc applyProjectClean*(snapshots: openArray[ProviderGraphSnapshot];
   ## cache, the content store and any other file under the project are left
   ## in place, which is what lets the next build reuse the cache (a build that
   ## stored payload-backed records restores the outputs instead of
-  ## re-executing). A declared output that is a directory on disk is removed
-  ## with its contents (see `executeCleanupAction`). With ``dryRun`` nothing
-  ## is removed and each deletion is reported as ``ocoWouldDelete``.
+  ## re-executing). A declared ``oekFile`` output that is a directory on disk
+  ## is an opaque output and is removed with its contents; an ``oekDirectory``
+  ## claim is a container and is removed only once it is empty (see
+  ## `executeCleanupAction`). A member (or nested container) removed from
+  ## inside a container takes with it the directories below the container it
+  ## leaves empty (`pruneEmptiedParents`), so a container whose entries were all declared
+  ## is empty when its own turn comes: the plan runs files before
+  ## directories, and directories deepest first. With ``dryRun`` nothing is
+  ## removed and each deletion is reported as ``ocoWouldDelete``.
   result.actions = planOutputCleanup(projectCleanReport(snapshots), projectRoot)
+  let rootAbs = absolutePath(projectRoot).normalizedPath
+  var containers: seq[string]
+  var kept = initHashSet[string]()
+  for act in result.actions:
+    if act.outcome == ocoWouldDelete:
+      if act.claim.kind == oekDirectory:
+        containers.add(act.resolvedPath)
+    elif isFileEffectKind(act.claim.kind):
+      # A claim the clean keeps (its policy forbids the delete) carries no
+      # resolved path in the plan; resolve it here so the pruning walk can
+      # stop at it.
+      var resolved: string
+      if resolveWithinRoot(projectRoot, act.claim.identity, resolved):
+        kept.incl(resolved)
   for act in result.actions.mitems:
     if act.outcome == ocoWouldDelete and not dryRun:
       executeCleanupAction(act, removeOwnedTrees = true)
+      if act.outcome == ocoDeleted:
+        pruneEmptiedParents(act.resolvedPath, rootAbs, containers, kept)
     result.tally(act.outcome)
 
 proc summaryLine*(r: OutputCleanupResult): string =

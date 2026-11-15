@@ -46,6 +46,9 @@ import repro_project_dsl
 import repro_tool_profiles
 import repro_home_apply
 import repro_home_intent
+from repro_home_apply/junction_aware_remove import removeJunctionAware
+from repro_test_support import removeDirEventually, beginRegistryIsolation,
+  endRegistryIsolation
 
 const ExeSuffix = when defined(windows): ".exe" else: ""
 
@@ -54,6 +57,27 @@ proc writeExecutable(path, body: string) =
   writeFile(path, body)
   setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc removeTempRoot(root: string) =
+  ## Remove a case's scratch root, and fail the case if that does not work.
+  ## A bare `removeDir` failed teardown on Windows ("The directory is not
+  ## empty") for every case that applies: the engine's action-cache records
+  ## (`store\provisioning\cache\action-cache\hot-records\0-1-<hex>.rbar\
+  ## <hex>.rec`) lie past MAX_PATH under `%TEMP%` (309 characters measured on
+  ## eli-pc), which `removeDir` without the `\\?\` form cannot enumerate.
+  ## `removeJunctionAware` uses the extended-length form and unlinks
+  ## junctions without following them; `removeDirEventually` then raises
+  ## whatever is still in the way (the m76 stow cases' `removeTempRoot`).
+  removeJunctionAware(root)
+  if dirExists(root):
+    removeDirEventually(root)
+
+# The applies below synthesize `env.userPath` (`home.package.gm4block.bin`):
+# on Windows that is a write to `HKCU\Environment\Path`. Every case writes a
+# fake hive instead of the invoking user's registry (registry_isolation.nim).
+# Without it the apply cases target the real user Path: refused under
+# `REPRO_TEST_HOME_FENCE` (measured on eli-pc), written without it.
+let registry = beginRegistryIsolation("repro-gm4b-lock-registry-")
 
 let fixtureRoot = createTempDir("repro-gm4b-lock-fixture-", "")
 let fixturePayload = fixtureRoot / ("gm4block" & ExeSuffix)
@@ -223,7 +247,7 @@ suite "home-profile lock: resolution honours it":
 
   test "a recorded selection pins the kind the policy would not choose":
     let root = createTempDir("repro-gm4b-lock-pin-", "")
-    defer: removeDir(root)
+    defer: removeTempRoot(root)
     setupProfile(root)
     var opts = options(root, host = "gm4b-lock-elsewhere")
     opts.targetContext = HostContext(platform: "linux", arch: "x86_64",
@@ -247,7 +271,7 @@ suite "home-profile lock: resolution honours it":
 
   test "a changed policy re-derives instead of honouring the old pin":
     let root = createTempDir("repro-gm4b-lock-policy-", "")
-    defer: removeDir(root)
+    defer: removeTempRoot(root)
     setupProfile(root, "linux: [tarball, path]")
     var opts = options(root, host = "gm4b-lock-elsewhere")
     opts.targetContext = HostContext(platform: "linux", arch: "x86_64",
@@ -266,7 +290,7 @@ suite "home-profile lock: resolution honours it":
   test "a pin whose realization is gone names the lock and the relock " &
       "command":
     let root = createTempDir("repro-gm4b-lock-gone-", "")
-    defer: removeDir(root)
+    defer: removeTempRoot(root)
     setupProfile(root)
     var opts = options(root, host = "gm4b-lock-elsewhere")
     opts.targetContext = HostContext(platform: "linux", arch: "x86_64",
@@ -299,7 +323,7 @@ suite "home-profile lock: apply writes it":
       else: delEnv("REPRO_CACHE_DISABLE")
       if savedRc.len > 0: putEnv("REPRO_HOME_POSIX_PATH_RC", savedRc)
       else: delEnv("REPRO_HOME_POSIX_PATH_RC")
-      removeDir(root)
+      removeTempRoot(root)
     setupProfile(root)
     let opts = options(root)
     let lockPath = homeProfileLockPath(opts.profileDir)
@@ -339,7 +363,7 @@ suite "home-profile lock: pins the selected realization":
     let original = gm4blockDefinition()
     defer:
       redefineGm4block(original)
-      removeDir(root)
+      removeTempRoot(root)
     withApplyEnv(root):
       setupProfile(root)
       let opts = options(root)
@@ -391,7 +415,8 @@ suite "home-profile lock: pins the selected realization":
       let plan = runApplyPlan(opts)
       check plan.unrealizable == @["gm4block"]
       check plan.driftCount == 0
-      expect CatchableError:
+      # ... and the apply refuses it up front, before anything changes.
+      expect EApplyUnrealizablePackages:
         discard runApply(opts)
       check readFile(lockPath) == first
       # --relock re-selects and rewrites the record.
@@ -406,7 +431,7 @@ suite "home-profile lock: pins the selected realization":
   test "a record without an identity pins kind and contributor; the next " &
       "apply records the identity":
     let root = createTempDir("repro-gm4b-lock-legacy-", "")
-    defer: removeDir(root)
+    defer: removeTempRoot(root)
     withApplyEnv(root):
       setupProfile(root)
       let opts = options(root)
@@ -428,4 +453,5 @@ suite "home-profile lock: pins the selected realization":
       check upgraded.version == "1.0"
       check upgraded.lockIdentity == "sha256:" & fixtureSha
 
-removeDir(fixtureRoot)
+removeTempRoot(fixtureRoot)
+endRegistryIsolation(registry)

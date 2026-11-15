@@ -54,6 +54,7 @@
 ## receiver's lease cleanup), and in memory. The repository cache never
 ## holds a byte of it.
 
+from repro_core/process_streams import drainStream
 import std/[monotimes, algorithm, os, osproc, sets, streams, strutils, tables, times]
 when defined(posix):
   import std/posix
@@ -361,7 +362,7 @@ proc cloneTree(pool: WorktreePool; src, dest: string): string =
       else: @["-pPR", src, dest]
     let p = uncontrolledStartProcess("cp", args = args,
       options = {poUsePath, poStdErrToStdOut})
-    let output = p.outputStream.readAll()
+    let output = drainStream(p.outputStream)
     let code = p.waitForExit()
     p.close()
     if code != 0:

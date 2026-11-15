@@ -2650,6 +2650,14 @@
             # would shadow the host's, which must match the running manager.
             REPRO_SYSTEMD_ANALYZE =
               pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.systemd}/bin/systemd-analyze";
+            # The MinGW-w64 gcc that scripts/check_portable_engine_closure.sh
+            # compiles the engine's generated Windows C with, syntax only, so a
+            # binding to a function Windows lacks (POSIX `realpath`, reprobuild-pm
+            # issue 2026-11-15-windows-repro-engine-does-not-compile-service-floor-calls-posix-realpath)
+            # fails `just lint` instead of the Windows build. A variable and not
+            # `packages`: on PATH its binutils and `cc` would shadow the host
+            # toolchain's.
+            REPRO_WINDOWS_CC = "${pkgs.pkgsCross.mingwW64.stdenv.cc}/bin/${pkgs.pkgsCross.mingwW64.stdenv.cc.targetPrefix}gcc";
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
@@ -2957,6 +2965,13 @@
               # B build (grub-install reached ``modinfo.sh`` search
               # only after the switch to ``grub2_efi``).
               pkgs.qemu
+              # The add-on VM gates' restricted-guest mirror relay
+              # (`tests/e2e/addon/addon_testbed.nim`, `relayPort`): a guest
+              # booted with QEMU `restrict=on` reaches the time-shifted
+              # snapshot mirror only through a `guestfwd` that runs
+              # `socat STDIO TCP:127.0.0.1:<port>`, and
+              # `scripts/run_addon_gate.sh` refuses to start without it.
+              pkgs.socat
               pkgs.grub2_efi
               pkgs.kmod
               # ReproOS add-on mode A16 (`repro infra image`, spec §6.5.2):

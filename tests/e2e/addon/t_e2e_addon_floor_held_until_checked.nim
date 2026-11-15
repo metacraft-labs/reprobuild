@@ -23,6 +23,21 @@
 ## Falsifying build: ``REPRO_ADDON_MUTATION=floor-start-unheld`` (no hold):
 ## the service runs in the window -- red.
 ##
+## Generation D (§13 decision 151): the triggers of held units are stopped
+## for the hold. D changes the template again; the gate pauses D's switch at
+## ``step-4``, with every hold in place, fires a burst of 300 connections at
+## the unchanged ``Accept=yes`` socket and creates the path unit's path, and
+## requires each trigger stopped in the window by its own observable: the
+## socket not active and its ``NAccepted`` unchanged, the path unit not
+## active and no start job of its service. After the switch both are active
+## again, an instance runs on a connection and the path's service ran.
+## Falsifying build: ``REPRO_ADDON_MUTATION=triggers-left-running`` (the
+## triggers left running under the hold): the socket accepts connections
+## and the path starts its held service in the window -- red at the window
+## step (measured at reprobuild c5237a255d: 130 connections accepted in the
+## window, too few in 2 s for the socket's rate limit, so the harm the
+## after-switch step looks for need not show).
+##
 ## Generation C (§13 decision 136): the holds go in before the privileged
 ## set, not at step 6. C changes the template again; the gate pauses C's
 ## switch at ``step-4`` -- after the drivers wrote the template and their
@@ -47,6 +62,8 @@ import ./addon_testbed
 const
   Gate = "e2e_addon_floor_held_until_checked"
   Port = 18493
+  PathJob = "/run/a9hp-job"
+    ## Generation D's path unit's path, created only in D's window.
 
 proc profile(binary, description: string): string =
   "addOn {\n  managedEtcPrefixes = []\n}\n\n" &
@@ -55,7 +72,17 @@ proc profile(binary, description: string): string =
     "\nAccept=yes\n\n[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n" &
     "systemd.systemUnit {\n  name = \"a9h@.service\"\n  content = \"[Unit]\n" &
     "Description=" & description & "\n\n[Service]\nType=oneshot\nUser=a9h\n" &
-    "ExecStart=" & binary & " --version\n\"\n  enabled = false\n}\n"
+    "ExecStart=" & binary & " --version\n\"\n  enabled = false\n}\n" &
+    # Generation D's path unit (§13 decision 151): its path exists only in
+    # D's window, so it never fires before; its floored service stays
+    # active once it has run, so the path does not fire again after.
+    "systemd.systemUnit {\n  name = \"a9hp.path\"\n  content = \"[Unit]\n" &
+    "Description=A9 hold path\n\n[Path]\nPathExists=" & PathJob &
+    "\n\n[Install]\nWantedBy=paths.target\n\"\n  enabled = true\n}\n" &
+    "systemd.systemUnit {\n  name = \"a9hp.service\"\n  content = \"[Unit]\n" &
+    "Description=" & description & " (path)\n\n[Service]\nType=oneshot\n" &
+    "RemainAfterExit=yes\nUser=a9h\nExecStart=" & binary &
+    " --version\n\"\n  enabled = false\n}\n"
 
 proc started(g: Guest): string =
   ## How many lines the instances have logged (each run prints one).
@@ -149,6 +176,75 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                        $Port & "' 2>/dev/null; sleep 3; true")
         step("and the service runs after C", g.started() != inWindowC,
              g.started())
+        # Generation D: a burst at the socket while the switch holds its
+        # service (§13 decision 151).
+        let beforeD = g.started()
+        let pd = g.startSwitchPausedAt(repro, "d", profile(binary, "A9 hold D"),
+                                       "step-4")
+        step("generation D pauses after the drivers' writes, before step 6",
+             pd.exitCode == 0, pd.stdout & pd.stderr)
+        if pd.exitCode == 0:
+          # In the window: a burst of connections at the socket, and the
+          # path unit's path created. Each trigger's own observable: the
+          # socket's accepted count, and the path's service's start jobs in
+          # this boot's journal since the window opened.
+          let acceptedBefore = g.exec("systemctl show -p NAccepted --value " &
+            "a9h.socket").stdout.strip()
+          let since = g.exec("sleep 1; date +%s").stdout.strip()
+          discard g.exec("touch " & PathJob & "; for i in $(seq 300); do " &
+            "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" & $Port &
+            "' 2>/dev/null & done; wait; sleep 3; true")
+          let sockDuring = g.exec("systemctl show -p ActiveState -p Result " &
+            "-p NAccepted -p NRefused a9h.socket | tr '\\n' ' '").stdout.strip()
+          let acceptedDuring = g.exec("systemctl show -p NAccepted --value " &
+            "a9h.socket").stdout.strip()
+          let pathDuring = g.exec("systemctl show -p ActiveState -p Result " &
+            "a9hp.path | tr '\\n' ' '").stdout.strip()
+          let pathStarts = g.exec("journalctl --sync 2>/dev/null; journalctl " &
+            "-q -o cat --no-pager -b _PID=1 UNIT=a9hp.service --since @" & since &
+            " | grep -c . ; true").stdout.strip()
+          let holds = g.exec("ls /run/systemd/system/a9h.socket.d " &
+            "/run/systemd/system/a9hp.path.d 2>&1 | tr '\\n' ' '").stdout.strip()
+          let windowOk = "ActiveState=active" notin sockDuring and
+            acceptedDuring == acceptedBefore and
+            "ActiveState=active" notin pathDuring and pathStarts == "0"
+          record["decision151Window"] = %*{"socket": sockDuring,
+            "acceptedBefore": acceptedBefore, "acceptedDuring": acceptedDuring,
+            "path": pathDuring, "pathServiceStarts": pathStarts,
+            "holds": holds, "ok": windowOk}
+          step("decision 151, add-on switch: while the switch holds their " &
+               "units, the socket and the path unit are stopped (no " &
+               "connection accepted under a burst, no start of the path's " &
+               "service while its path exists)", windowOk,
+               "socket: " & sockDuring & " (accepted " & acceptedBefore &
+               " -> " & acceptedDuring & ")\npath: " & pathDuring &
+               " (service start jobs " & pathStarts & ")\nholds: " & holds)
+          let resD = g.resumeSwitch()
+          step("generation D applies once checked", resD.exitCode == 0,
+               resD.stdout & resD.stderr)
+          discard g.exec("sleep 3; true")
+          let afterD = g.exec("systemctl show -p ActiveState -p Result " &
+            "a9h.socket | tr '\\n' ' '").stdout.strip()
+          let pathAfter = g.exec("systemctl show -p ActiveState -p Result " &
+            "a9hp.path | tr '\\n' ' '; systemctl is-active a9hp.service").
+            stdout.strip()
+          discard g.exec("timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+                         $Port & "' 2>/dev/null; sleep 3; true")
+          let ranD = g.started()
+          let okD = "ActiveState=active" in afterD and
+            "trigger-limit-hit" notin afterD and ranD != beforeD and
+            "ActiveState=active" in pathAfter and
+            "trigger-limit-hit" notin pathAfter and
+            pathAfter.endsWith(" active")
+          discard g.exec("rm -f " & PathJob)
+          record["decision151Seam"] = %*{"during": sockDuring, "after": afterD,
+            "pathAfter": pathAfter, "startedBefore": beforeD,
+            "startedAfter": ranD, "ok": okD}
+          step("decision 151, add-on switch: after the switch the socket and " &
+               "the path unit are active, an instance runs on a connection, " &
+               "and the path's service ran", okD,
+               "socket: " & afterD & "\npath: " & pathAfter & "\nstarted " &
+               beforeD & " -> " & ranD)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

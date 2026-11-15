@@ -17,6 +17,7 @@
 ## terminal, which is what keeps the fingerprint and the preflight plan
 ## deterministic.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, posix, streams, strtabs, strutils, times]
 
 import repro_core/ambient_execution
@@ -162,7 +163,7 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
         return
       result.exitCode = code
     else:
-      result.output = p.outputStream.readAll()
+      result.output = drainStream(p.outputStream)
       result.exitCode = p.waitForExit()
   finally:
     closeProcessOnce(p)

@@ -77,6 +77,11 @@ type
       ## §13 decision 62: discard the store evidence even when the sink has
       ## not acknowledged its records, after a signed local record of each
       ## object discarded unshipped is written and printed.
+    stateRoot*: string
+      ## The state root that holds ``stateDir`` ("" = ``/var/lib/repro``).
+    logDir*: string
+      ## Where the state-removal token goes ("" = ``/var/log/repro-addon``,
+      ## beside the discard records; §13 decision 163).
     discardStoreEvidence*: bool
       ## Remove the store evidence directory's entries with the state; an
       ## uninstall that would remove any refuses without it, naming them
@@ -308,6 +313,9 @@ proc shipEvidenceNow*(stateDir: string): tuple[ok: bool; why: string] =
   ## wait for.
   shipAndConfirm(defaultShipSite(), readHostName())
 
+const StateRoot* = "/var/lib/repro"
+  ## The add-on's state, removed last, the ledger copy last within it but
+  ## for the rmdir of the empty directories (§13 decisions 150 and 161).
 const UninstallOverrideDir* = "/var/log/repro-addon"
   ## Where §13 decision 62's override record is written: outside
   ## ``/var/lib/repro`` and ``/etc/repro``, which uninstall removes.
@@ -707,7 +715,13 @@ proc writeDiscardMarker*(custody: CustodySite; signer: TextSigner;
   ## for the same intent is left as it is.
   let path = discardMarkerPath(custody, intentPath)
   if fileExists(path): return
-  createDir(parentDir(path))
+  let markers = parentDir(path)
+  if not dirExists(markers):
+    # §13 decision 162: a new discard-markers/ is an entry of its parent,
+    # synced so that the marker's own directory fsync below is not undone
+    # by losing the directory it is in.
+    createDir(markers)
+    syncDirFd(parentDir(markers))
   let j = %*{"schema": DiscardMarkerSchema,
              "record": "removed: every object of the intent record was " &
                        "removed (or kept with the store) and the removal " &
@@ -1062,31 +1076,236 @@ proc removeAllBut(dir, keep: string) =
     else:
       removeFile(p)
 
+proc holdsOnlyEmptyDirs(dir: string): bool =
+  ## True when nothing is below ``dir`` but directories, themselves empty
+  ## of anything else (a symbolic link, even to a directory, is not one).
+  ## Only the falsifier ``state-removal-token-not-required`` uses it: the
+  ## re-run judges by the token's chain, never by the shape of the tree.
+  for kind, p in walkDir(dir):
+    if kind != pcDir or not holdsOnlyEmptyDirs(p): return false
+  true
+
+proc rmdirHint(err: cint): string =
+  ## Why an rmdir(2) of a directory the uninstall emptied fails, for the
+  ## operator. rmdir(2): EBUSY for a mount point; EPERM when the parent is
+  ## immutable or append-only, or the directory itself is immutable;
+  ## ENOTEMPTY (or EEXIST) when an entry is in it.
+  if err == EBUSY: "it is a mount point; unmount it"
+  elif err == EPERM: "it, or its parent directory, is immutable or " &
+                     "append-only (lsattr -d on both); clear the attribute"
+  elif err == EACCES: "its parent directory does not allow the removal; " &
+                      "fix the parent's permissions"
+  elif err == EROFS: "its file system is mounted read-only; remount it " &
+                     "read-write"
+  elif err == ENOTEMPTY or err == EEXIST:
+    "something is in it: an entry created after the uninstall emptied it, " &
+      "or one it could not list or remove; look inside and remove it"
+  else: "clear the cause"
+
+const
+  StateRemovalTokenName* = "uninstall-state-removal-pending.json"
+    ## §13 decision 163 (a): the state-removal token, beside the discard
+    ## records, outside the state.
+  StateRemovalTokenSchema* = "repro-addon-uninstall-state-removal/1"
+
+proc stateRemovalTokenPath*(logDir = UninstallOverrideDir): string =
+  logDir / StateRemovalTokenName
+
+proc stateDirChain*(root, ledgerCopy: string; preBootstrap: seq[string]):
+    seq[string] =
+  ## The add-on's own directories that hold the ledger copy, deepest first:
+  ## from the ledger copy's directory up to ``root``. It stops below the
+  ## first pre-bootstrap root (§13 decision 163 (b)): that directory was
+  ## the host's before the add-on, and it and everything above it stay.
+  var d = parentDir(ledgerCopy)
+  while d == root or d.startsWith(root & "/"):
+    when not mutated("pre-bootstrap-root-rmdir"):
+      if d in preBootstrap: break
+    result.add(d)
+    if d == root: break
+    d = parentDir(d)
+
+proc writeStateRemovalToken(path, root, ledgerCopy: string;
+                            chain, preBootstrap: seq[string]) =
+  ## Durably (a temporary file fsynced, renamed, its directory fsynced, and
+  ## a directory this creates synced into its parent): the token must be on
+  ## disk before the ledger copy goes, or a crash between the two leaves a
+  ## state no re-run may finish.
+  let dir = parentDir(path)
+  if not dirExists(dir):
+    createDir(dir)
+    syncDirFd(parentDir(dir))
+  let text = pretty(%*{"schema": StateRemovalTokenSchema, "root": root,
+    "ledgerCopy": ledgerCopy, "chain": chain,
+    "preBootstrapRoots": preBootstrap}) & "\n"
+  let tmp = path & ".tmp"
+  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_TRUNC or
+                      O_CLOEXEC or O_NOFOLLOW, 0o600)
+  if fd < 0: raiseOSError(osLastError(), "create " & tmp)
+  try:
+    var off = 0
+    while off < text.len:
+      let n = posix.write(fd, unsafeAddr text[off], text.len - off)
+      if n < 0: raiseOSError(osLastError(), "write " & tmp)
+      off += n
+    if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & tmp)
+  finally:
+    discard posix.close(fd)
+  moveFile(tmp, path)   # rename(2): same directory, replaces atomically
+  syncDirFd(dir)
+
+proc readStateRemovalToken(path, root: string):
+    tuple[ok: bool; why: string; chain: seq[string]] =
+  ## The chain a token names, checked: its schema, its root, and every
+  ## directory in it ``root`` or below it and none of them a pre-bootstrap
+  ## root it names. A token is root-only (``/var/log/repro-addon``); the
+  ## checks keep a damaged one from naming anything else.
+  var j: JsonNode
+  try: j = parseJson(readFile(path))
+  except CatchableError as e: return (false, e.msg, @[])
+  if j.kind != JObject or j{"schema"}.getStr != StateRemovalTokenSchema:
+    return (false, "not a " & StateRemovalTokenSchema & " record", @[])
+  if j{"root"}.getStr != root:
+    return (false, "it names the state " & j{"root"}.getStr & ", not " & root, @[])
+  var keep: seq[string]
+  for k in j{"preBootstrapRoots"}.getElems: keep.add(k.getStr)
+  for c in j{"chain"}.getElems:
+    let d = c.getStr
+    if not (d == root or d.startsWith(root & "/")) or d.contains("/../") or
+        d.endsWith("/..") or d in keep:
+      return (false, "its chain names " & d & ", which is not one of the " &
+        "add-on's own directories under " & root, @[])
+    result.chain.add(d)
+  result.chain.sort(proc (a, b: string): int = cmp(b.len, a.len))
+  result.ok = true
+
+proc removeChain(chain: seq[string]):
+    tuple[failed: string; err: cint; removed: seq[string]] =
+  ## rmdir(2) each directory of the chain, deepest first; one already gone
+  ## is skipped. The first failure names its directory and errno;
+  ## ``removed`` lists the directories this call removed.
+  for d in chain:
+    if not dirExists(d) and not symlinkExists(d): continue
+    if posix.rmdir(d.cstring) != 0:
+      result.failed = d
+      result.err = errno
+      return
+    result.removed.add(d)
+
+proc reportEmptyDirsLeft(r: var UninstallResult; root, failed: string;
+                         err: cint; chain: seq[string]) =
+  ## The precise report of a failed rmdir after the ledger copy (§13
+  ## decisions 161 and 163). It says what is known: the ledger copy is
+  ## gone and the token stands; it claims the rest is empty only when the
+  ## rmdir did not find something in the directory.
+  let left = chain[chain.find(failed) .. ^1]
+  let what = (if left.len == 1: "the directory " & left[0] & " remains"
+              else: "the directories " & left.join(", ") & " remain")
+  let notEmpty = err == ENOTEMPTY or err == EEXIST
+  r.errors.add(failed & ": rmdir failed: " & $strerror(err) & " -- " &
+    rmdirHint(err) & ". The ledger copy is gone; " & what &
+    (if notEmpty: ", and " & failed & " is not empty"
+     else: ", empty of the add-on's state") &
+    ". Run uninstall again once the cause is cleared: the token " &
+    "recording this step is kept in " & UninstallOverrideDir &
+    ", and a re-run that finds it, with no ledger, removes only these " &
+    "directories, and only once each is empty, and succeeds")
+
 proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
                       evidence: seq[string] = @[];
-                      syncer: DiscardSyncer = syncRemovedObjects) =
+                      syncer: DiscardSyncer = syncRemovedObjects;
+                      preBootstrap: seq[string] = @[];
+                      tokenPath = stateRemovalTokenPath()) =
   ## Removes the add-on's state, ``/var/lib/repro``, with its ledger copy
-  ## last (§13 decision 150): everything else first, checked gone and
-  ## synced, then the ledger copy, then the empty directories. A removal
-  ## that fails part-way leaves the ledger copy, so a re-run can read it
-  ## and finish; the root and its evidence entries are reported removed
-  ## only once the root is gone.
+  ## last but for the rmdir of the add-on's own empty directories (§13
+  ## decisions 150, 161 and 163): everything but the ledger copy and the
+  ## directories on its way first, checked gone and synced; then the token
+  ## (``writeStateRemovalToken``), outside the state, naming the directories
+  ## left to remove; then the ledger copy; then those directories, each by
+  ## rmdir(2), never one that was a pre-bootstrap root (``preBootstrap``);
+  ## then the token. A removal that fails before the ledger copy leaves it,
+  ## so a re-run can read it and finish; one that fails after it leaves
+  ## the token, says so precisely, and a re-run finishes the chain
+  ## (``finishEmptyStateRoot``). The root and its evidence entries are
+  ## reported removed only once the chain is gone.
   if not dirExists(root): return
   when mutated("ledger-copy-removed-with-the-rest"):
     removeHostRoot(r, root, evidence)    # FALSIFIER: round 12's one removeDir
     return
+  var chain: seq[string]
   try:
     if ledgerCopy.startsWith(root & "/") and fileExists(ledgerCopy):
       removeAllBut(root, ledgerCopy)
       syncer(@[root & "/.state-removed"])   # the unlinks above, made durable
+      chain = stateDirChain(root, ledgerCopy, preBootstrap)
+      writeStateRemovalToken(tokenPath, root, ledgerCopy, chain, preBootstrap)
       removeFile(ledgerCopy)
-    removeDir(root)
-    r.removed.add(root)
+    elif root notin preBootstrap:
+      removeDir(root)   # no ledger copy under it to keep (a state elsewhere)
+    when mutated("empty-state-root-reported-vaguely"):
+      if dirExists(root) and root notin preBootstrap:
+        removeDir(root)  # FALSIFIER: the rmdir error as round 13 reported it
+    else:
+      let (failed, err, _) = removeChain(chain)
+      if failed.len > 0:
+        reportEmptyDirsLeft(r, root, failed, err, chain)
+        return
+    if fileExists(tokenPath): removeFile(tokenPath)
+    r.removed.add(if root in chain or chain.len == 0 and root notin preBootstrap:
+                    root
+                  else: root & " (emptied of the add-on's state; the " &
+                    "directory was there before the add-on and stays)")
     for e in evidence: r.removed.add(e & " (store evidence)")
   except OSError as ex:
     r.errors.add(root & ": " & ex.msg & (if fileExists(ledgerCopy):
       "; the ledger copy " & ledgerCopy & " is kept, so uninstall, run " &
       "again once the cause is cleared, finishes the removal" else: ""))
+
+proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
+                           tokenPath = stateRemovalTokenPath()): bool =
+  ## §13 decisions 161 and 163: a re-run after an uninstall that removed
+  ## the ledger copy and then could not rmdir one of the add-on's own
+  ## directories. Only with the token that uninstall wrote (outside the
+  ## state) and no ledger copy: it removes exactly the directories the token
+  ## names, deepest first, each by rmdir(2) (so one that holds anything
+  ## stays, reported), then the token, and succeeds. False, with nothing
+  ## touched, without a token or with a ledger copy: the uninstall then
+  ## proceeds, or refuses on the missing ledger, as before -- a host that
+  ## never had the add-on, or whose pre-bootstrap directories an earlier
+  ## uninstall put back, is never touched.
+  if fileExists(ledgerCopy): return false
+  when mutated("state-removal-token-not-required"):
+    # FALSIFIER: any tree of empty directories is removed, token or not.
+    if not fileExists(tokenPath):
+      if symlinkExists(root) or not dirExists(root) or
+          not holdsOnlyEmptyDirs(root): return false
+      var all: seq[string]
+      for p in walkDirRec(root, yieldFilter = {pcDir}): all.add(p)
+      all.add(root)
+      all.sort(proc (a, b: string): int = cmp(b.len, a.len))
+      discard removeChain(all)
+      r.removed.add(root & " (left empty by an earlier uninstall)")
+      return true
+  if not fileExists(tokenPath): return false
+  when mutated("empty-state-root-left-unfinished"):
+    return false   # FALSIFIER: the re-run stops on the missing ledger
+  result = true
+  let t = readStateRemovalToken(tokenPath, root)
+  if not t.ok:
+    r.errors.add(tokenPath & ": " & t.why & "; nothing was removed")
+    return
+  let (failed, err, gone) = removeChain(t.chain)
+  if failed.len > 0:
+    reportEmptyDirsLeft(r, root, failed, err, t.chain)
+    return
+  try:
+    removeFile(tokenPath)
+    syncDirFd(parentDir(tokenPath))
+  except OSError as ex:
+    r.errors.add(tokenPath & ": " & ex.msg)
+    return
+  for d in gone:
+    r.removed.add(d & " (left by an earlier uninstall)")
 
 proc removeStateEvidence*(r: var UninstallResult; entries: seq[string];
                           remover: proc (d: string) = removeDirTree): bool =
@@ -1150,6 +1369,17 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # writing at the same moment (``repro_core/host_apply_lock``).
   var hostLock = acquireHostApplyLock("repro system addon uninstall")
   defer: hostLock.release()
+  # §13 decisions 161 and 163: an earlier run removed the ledger copy
+  # and could not rmdir one of the add-on's own directories; its token says
+  # which. Finish that. Without the token nothing is touched here.
+  let stateRoot = if opts.stateRoot.len > 0: opts.stateRoot else: StateRoot
+  let tokenPath = stateRemovalTokenPath(
+    if opts.logDir.len > 0: opts.logDir else: UninstallOverrideDir)
+  when not mutated("state-removal-rerun-unwired"):
+    if stateDir.startsWith(stateRoot & "/") and
+        finishEmptyStateRoot(result, stateRoot, ledgerCopyPath(stateDir),
+                             tokenPath):
+      return
   # The altered store objects kept as evidence go with /var/lib/repro. They
   # are named, and nothing is removed, until the operator says to discard
   # them (having copied them out).
@@ -1476,6 +1706,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # they were removed, each checked gone, above. One that appeared since
   # is reported with the root, once the root is gone.
   # The state goes last, and within it the ledger copy (§13 decision 150).
-  removeStateRoot(result, "/var/lib/repro", ledgerCopyPath(stateDir),
-                  evidenceEntries(custodySite(stateDir)))
+  # The pre-bootstrap roots under it stay (§13 decision 163 (b)): the
+  # captured list, which the token carries for a re-run.
+  var preBootstrap: seq[string]
+  for e in captured.roots:
+    if e.path == stateRoot or e.path.startsWith(stateRoot & "/"):
+      preBootstrap.add(e.path)
+  removeStateRoot(result, stateRoot, ledgerCopyPath(stateDir),
+                  evidenceEntries(custodySite(stateDir)),
+                  preBootstrap = preBootstrap, tokenPath = tokenPath)
   restorePreBootstrapInputs(captured, opts.keepStore, result)

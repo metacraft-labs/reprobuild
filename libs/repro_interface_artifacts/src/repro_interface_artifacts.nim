@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
             strutils, tables, tempfiles, times]
 
@@ -4551,17 +4552,14 @@ proc runCommand*(command: openArray[string];
         if savedDir.len > 0:
           setCurrentDir(savedDir)
         raise
-    # N51 triage: LEFT AS `readAll` DELIBERATELY, on BOTH counts. This is the
-    # `else` of the `when defined(windows)` above, so it is the POSIX arm —
-    # and on POSIX `osproc`'s stream is a stdio `File` whose `fread` already
-    # loops to EOF, so there is no short read to fix. Draining to EOF would
-    # also be the WRONG remedy for the hazard this proc is shaped around: the
-    # Windows arm exists precisely because `nim` exits while `gcc` still holds
-    # the pipe's write handle and the pipe never EOFs. A drain loop is a
-    # stronger version of the read that deadlocks there.
+    # The POSIX arm of the `when defined(windows)` above. The read is to end
+    # of input (`drainStream`), which on POSIX is what `readAll` already did
+    # (`fread` blocks for EOF), so this does not add a wait; the Windows arm
+    # is a temp-file sink precisely because `nim` exits while `gcc` still
+    # holds a pipe's write handle open.
     var output = ""
     if process.outputStream != nil:
-      output = process.outputStream.readAll()
+      output = drainStream(process.outputStream)
     let exitCode = process.waitForExit()
     process.close()
     result = ProviderCompileExecutionResult(
@@ -8449,11 +8447,14 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     #
     # This holds for a recipe-relative extraction too, whose EDGE runs in the
     # recipe directory: Nim writes `<runner>_linkerArgs.txt` into its cwd for
-    # a long link line and deletes it again, and that transient entry in the
-    # recipe's root changes the root's mtime — which an editable develop
-    # override folds into its consumers' action keys
-    # (`computeOverrideContentIdentity`). Measured: every consumer action
-    # missed on the second build. The compiler's private cwd is under the
+    # a long link line and deletes it again. That transient entry in the
+    # recipe's root changed the root's mtime, which an editable develop
+    # override's identity used to fold into its consumers' action keys
+    # (measured: every consumer action missed on the second build). The
+    # identity no longer carries the mtime, but a transient entry under a
+    # producer channel directory would still move the content digest folded
+    # into unobserved consumers' keys (`producerChannelContent`), and the
+    # recipe tree is the user's either way. The compiler's private cwd is under the
     # edge's scratch, so its reads stay absolute and the edge's record names
     # them relative to the recipe.
     try:
@@ -8643,14 +8644,16 @@ proc providerFingerprintFor*(inputSources: openArray[string];
 # split private-impl edits out of ``projectSourceSemanticIdentity``.
 
 const
-  ProviderProtocolVersionV1* = 1'u32
+  ProviderProtocolVersionMirror* = 2'u32
     ## Mirrors ``repro_provider_runtime/types.nim``'s
     ## ``ProviderProtocolVersion``. Held as a local const so the identity
     ## layer does not take a build-graph dependency on the runtime library
     ## (which would form a cycle once RP2 wires the session launcher). Kept
-    ## in sync manually; a divergence would only change every
-    ## ProviderArtifactId uniformly (a full cache miss, never a correctness
-    ## bug).
+    ## in sync by hand and checked by
+    ## ``tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim``.
+    ## It MUST move with the wire version: ProviderArtifactId hashes it, and
+    ## a stale value would let an engine reuse a cached provider that speaks
+    ## the previous wire, which then fails every handshake.
 
 var cachedNimCompilerIdentity = ""
 var cachedNimCompilerIdentityPath = ""
@@ -9061,7 +9064,7 @@ proc computeProviderArtifactId*(
   ## compute the same id, hence bind the same cached artifact.
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.providerArtifactId.v1")
-  payload.writeU32Le(ProviderProtocolVersionV1)
+  payload.writeU32Le(ProviderProtocolVersionMirror)
   payload.writeString(
     if frontendIdentity.len > 0: frontendIdentity
     else: frontendRuntimeIdentity(workDir))
