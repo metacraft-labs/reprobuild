@@ -1,5 +1,21 @@
 import std/[algorithm, os, strutils, compilesettings]
 
+# A compile for a Windows TARGET on a non-Windows HOST: generate C for
+# `--os:windows` from Linux, as scripts/check_portable_engine_closure.sh does.
+# In NimScript `std/os` follows the target, so `/` and `parentDir` would build
+# `\`-separated paths that the host compiler then cannot open (every
+# `--path` below became `libs\<lib>\src`, and the compile died at
+# `cannot open file: repro_cli_support`). Joining with the host's separator is
+# what every path in this file needs: each one is probed and searched on the
+# machine running nim, never on the target. A native compile -- Windows on
+# Windows, Linux on Linux -- takes the `std/os` procs unchanged.
+when defined(windows) and buildOS != "windows":
+  proc `/`(head, tail: string): string =
+    os.`/`(head, tail).replace('\\', '/')
+
+  proc parentDir(path: string): string =
+    os.parentDir(path).replace('\\', '/')
+
 # The directory holding THIS file, resolved independently of whatever project
 # nim happens to be compiling.
 #

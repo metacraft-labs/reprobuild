@@ -723,8 +723,11 @@ lint:
     # ever rejects it. So a green sweep on Linux said nothing about whether
     # the engine still builds on a Mac, and a Mac that could not run
     # home-switch at all was how we found out. Generates C for --os:macosx
-    # and --os:windows and refuses a Linux-only module in either closure;
-    # no macOS runner, about a minute a target. See the script header.
+    # and --os:windows and refuses a Linux-only module in either closure,
+    # then compiles the Windows C (syntax only) with the dev shell's
+    # MinGW-w64 gcc, which is what rejects a POSIX-only binding; no macOS or
+    # Windows runner. A few minutes for both targets, nearly all of it Nim's
+    # codegen; the C stage is seconds. See the script header.
     bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
     # The other closure a green sweep says nothing about: what an INSTALLED
     # reprobuild compiles against. The sweep reads the checkout; a release

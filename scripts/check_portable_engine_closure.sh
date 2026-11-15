@@ -45,16 +45,22 @@
 # the image that reaches the most code and the one that broke, and the
 # others are subsets of its library set. About a minute.
 #
-# `--os:macosx` only, although the same defect reaches Windows. `--os:windows`
-# from a Linux host does not get as far as the closure: `config.nims` keys
-# its sibling `--path` entries on the TARGET platform, so it offers
-# `..\gosti\src` to a Linux host and the compile dies at
+# Both non-Linux targets. `--os:windows` from a Linux host needs
+# `config.nims` to join its `--path` entries with the HOST separator -- in
+# NimScript `std/os` follows the target, and until it did the compile died at
 # `apps/repro/repro.nim(58, 8) Error: cannot open file: repro_cli_support`
-# before any module is resolved. Measured on reprobuild `5294fe2fdd`.
-# Pass `--os=windows` by hand once `config.nims` resolves a host path for a
-# foreign target; until then the Windows half of this invariant rests on the
-# macOS half catching the same unguarded import, which it does, because an
-# import is not per-platform.
+# before any module was resolved (measured on reprobuild `5294fe2fdd`), so
+# this gate ran for macOS only. Two Windows-only breaks then reached
+# `agents` with it green: `269fd0da9b` read a process stream without
+# importing std/streams (a Nim error this codegen now reports), and
+# `5dfbf471d3` called POSIX `realpath` (a C error no codegen reports).
+#
+# THE WINDOWS C STAGE. For the second class, the generated Windows C is
+# also compiled, syntax only, by a MinGW-w64 gcc
+# (scripts/check_windows_generated_c.py): MinGW's headers are what reject a
+# POSIX binding, and they are the headers the real Windows build uses. The
+# compiler is the dev shell's REPRO_WINDOWS_CC; outside the shell the gate
+# refuses rather than skipping the stage. About fifteen seconds.
 set -euo pipefail
 
 cd -- "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -76,7 +82,7 @@ readonly LINUX_ONLY_ROOTS=(
   'libs/repro_addon/:ReproOS add-on mode: statfs(2) and the btrfs subvolume ioctls via <sys/vfs.h> (repro_addon/linux_fs.nim), plus the dpkg ownership ledger'
 )
 
-targets=(macosx)
+targets=(macosx windows)
 if [[ $# -gt 0 ]]; then
   case "$1" in
     --os=*) targets=("${1#--os=}") ;;
@@ -156,6 +162,20 @@ for target in "${targets[@]}"; do
       failures+=("--os:${target}: ${#offenders[@]} module(s) from ${root} in the portable engine")
     fi
   done
+
+  # The C stage, after the closure verdict: a Linux-only module would fail
+  # here too, but less legibly than the diagnostic above.
+  if [[ "${target}" == windows ]]; then
+    if [[ -z "${REPRO_WINDOWS_CC:-}" || ! -x "${REPRO_WINDOWS_CC}" ]]; then
+      failures+=("--os:windows: REPRO_WINDOWS_CC ('${REPRO_WINDOWS_CC:-}') is not an executable MinGW-w64 gcc, so the generated C was NOT compiled; run inside the dev shell (\`nix develop\`), which provides it")
+      continue
+    fi
+    printf 'check_portable_engine_closure: compiling the --os:windows C with %s\n' \
+      "${REPRO_WINDOWS_CC}"
+    if ! python3 ./scripts/check_windows_generated_c.py "${cache}" "${REPRO_WINDOWS_CC}"; then
+      failures+=("--os:windows: the generated C does not compile with MinGW-w64; see the diagnostics above")
+    fi
+  fi
 done
 
 if (( ${#failures[@]} )); then
