@@ -3,7 +3,7 @@
 ## normalised `nix print-dev-env` per shell, so a session enters a shell with
 ## no evaluation.
 
-import std/[algorithm, json, os, sets, strutils, tempfiles]
+import std/[algorithm, json, os, sets, strutils, tables, tempfiles]
 import nimcrypto/sha2
 import repro_core/ambient_execution
 import repro_local_store/store_bundle
@@ -194,6 +194,34 @@ proc findZstd(paths: seq[string]): string =
     if "-zstd-" in p and fileExists(p / "bin" / "zstd"):
       return p
 
+proc packNixHalf*(paths: seq[string]; partial: string; level: int;
+                  partSize: int64): tuple[parts: seq[BundlePart];
+                    registration: BundlePart;
+                    unpackedBytes, compressedBytes: int64] =
+  ## Write the store paths' `nix-store --dump-db` registration and their
+  ## compressed tar stream, split into parts, into the fresh directory
+  ## `partial` (§2.1).
+  removeDir(partial)
+  createDir(partial)
+  let listPath = partial / ".paths"
+  var list = ""
+  for p in paths: list.add(p[1 .. ^1] & "\n")
+  writeFile(listPath, list)
+  let zstdExe = requireExe("zstd")
+  discard mustRunShell("nix-store --dump-db $(cat " & quoteShell(listPath) &
+    " | sed 's|^|/|') | " & zstdCompressCommand(zstdExe, 19, 0) & " > " &
+    quoteShell(partial / "registration"), "nix-store --dump-db")
+  let regBytes = readFile(partial / "registration")
+  result.registration = BundlePart(file: "registration", bytes: regBytes.len,
+    sha256: sha256Hex(regBytes))
+  result.unpackedBytes = unpackedSize(paths)
+  let pipeline = quoteShell(requireExe("tar")) &
+    " --format=posix -C / -cf - -T " & quoteShell(listPath) & " | " &
+    zstdCompressCommand(zstdExe, level, 0)
+  (result.parts, result.compressedBytes) = writeCompressedParts(pipeline,
+    partial, partSize)
+  removeFile(listPath)
+
 proc createNixHalf*(members: seq[BundleMember]; systemDir: string;
                     opts: NixHalfOptions): tuple[half: NixHalf; reused: bool] =
   ## Build the half into `<systemDir>/nix/<id>/`, or reuse it when a complete
@@ -243,35 +271,17 @@ proc createNixHalf*(members: seq[BundleMember]; systemDir: string;
     var half = parseNixHalf(parseJson(readFile(dir / NixManifestName)))
     return (half, true)
   let partial = dir & ".partial"
-  removeDir(partial)
-  createDir(partial)
-  let listPath = partial / ".paths"
-  var list = ""
-  for p in paths: list.add(p[1 .. ^1] & "\n")
-  writeFile(listPath, list)
-  let zstdExe = requireExe("zstd")
   let level = (if opts.level > 0: opts.level else: DefaultZstdLevel)
-  discard mustRunShell("nix-store --dump-db $(cat " & quoteShell(listPath) &
-    " | sed 's|^|/|') | " & zstdCompressCommand(zstdExe, 19, 0) & " > " &
-    quoteShell(partial / "registration"), "nix-store --dump-db")
-  let regBytes = readFile(partial / "registration")
-  let unpacked = unpackedSize(paths)
   stderr.writeLine("repro bundle: nix half " & id & ": " & $paths.len &
-    " paths, " & $(unpacked shr 20) & " MiB unpacked; compressing at -" &
-    $level)
-  let pipeline = quoteShell(requireExe("tar")) &
-    " --format=posix -C / -cf - -T " & quoteShell(listPath) & " | " &
-    zstdCompressCommand(zstdExe, level, 0)
-  let (parts, total) = writeCompressedParts(pipeline, partial,
+    " paths; compressing at -" & $level)
+  let packed = packNixHalf(paths, partial, level,
     (if opts.partSize > 0: opts.partSize else: DefaultPartSize))
-  removeFile(listPath)
   var half = NixHalf(id: id, system: system,
     nixVersion: mustRun(requireExe("nix"), ["--version"]).strip(),
-    zstd: zstdPath, repro: reproPath, paths: paths, unpackedBytes: unpacked,
-    compressedBytes: total, parts: parts,
-    registration: BundlePart(file: "registration", bytes: regBytes.len,
-      sha256: sha256Hex(regBytes)),
-    shells: shells, primary: primary)
+    zstd: zstdPath, repro: reproPath, paths: paths,
+    unpackedBytes: packed.unpackedBytes,
+    compressedBytes: packed.compressedBytes, parts: packed.parts,
+    registration: packed.registration, shells: shells, primary: primary)
   writeFile(partial / NixManifestName, pretty(half.toJson) & "\n")
   removeDir(dir)
   moveDir(partial, dir)
@@ -299,12 +309,102 @@ proc zstdForRestore*(h: NixHalf): string =
     discard mustRun(requireExe("nix-store"), ["--realise", h.zstd])
   result = h.zstd / "bin" / "zstd"
 
+type RegisteredPath* = object
+  ## One path's entry in a `nix-store --dump-db` registration.
+  path*: string
+  narHash*: string     ## SHA-256 of the path's NAR serialisation, base16
+  entry*: string       ## the entry's lines, as `--load-db` reads them
+
+proc parseRegistration*(db: string): seq[RegisteredPath] =
+  ## The `nix-store --dump-db` format, which `--load-db` reads back: per path
+  ## the lines `<path>`, `<narHash>` (base16), `<narSize>`, `<deriver>` (may
+  ## be empty), `<n>`, then `n` reference lines. See Nix's
+  ## `makeValidityRegistration` (src/libstore/store-api.cc).
+  let lines = db.splitLines()
+  var i = 0
+  while i < lines.len:
+    if lines[i].len == 0 and i == lines.len - 1: break
+    if i + 4 >= lines.len or not lines[i].startsWith("/nix/store/"):
+      bundleFail("malformed Nix half registration at line " & $(i + 1))
+    var n: int
+    try: n = parseInt(lines[i + 4])
+    except ValueError:
+      bundleFail("malformed Nix half registration at line " & $(i + 5))
+    if n < 0 or i + 5 + n > lines.len:
+      bundleFail("malformed Nix half registration at line " & $(i + 5))
+    result.add(RegisteredPath(path: lines[i], narHash: lines[i + 1],
+      entry: lines[i ..< i + 5 + n].join("\n") & "\n"))
+    i += 5 + n
+
+proc storeLocation(root, path: string): string =
+  ## Where store path `path` lives on disk for the store rooted at `root`.
+  if root.len == 0 or root == "/": path
+  else: root.strip(leading = false, chars = {'/'}) & path
+
+proc invalidPaths(paths: seq[string]; root: string): seq[string] =
+  ## The paths among `paths` that the store at `root` does not hold as
+  ## valid. Asked 1000 at a time, so a large closure stays well within the
+  ## kernel's limit on a command line's length.
+  const Chunk = 1000
+  var i = 0
+  while i < paths.len:
+    let batch = paths[i ..< min(i + Chunk, paths.len)]
+    for line in mustRun(requireExe("nix-store"), storeArgs(root) &
+        @["--check-validity", "--print-invalid"] & batch).splitLines():
+      if line.strip().len > 0: result.add(line.strip())
+    i += Chunk
+
+proc removeStoreLeftover*(location: string) =
+  ## Delete what an interrupted unpack or substitution left at an invalid
+  ## store path, as Nix does before it substitutes one. Store directories
+  ## are read-only, so they are made writable first; a symlink is removed,
+  ## never followed.
+  if symlinkExists(location) or fileExists(location):
+    removeFile(location)
+  elif dirExists(location):
+    setFilePermissions(location, getFilePermissions(location) + {fpUserWrite})
+    for sub in walkDirRec(location, yieldFilter = {pcDir},
+                          followFilter = {pcDir}):
+      setFilePermissions(sub, getFilePermissions(sub) + {fpUserWrite})
+    removeDir(location)
+
+proc narHashes(locations: seq[string]): seq[string] =
+  ## The base16 SHA-256 NAR hash of each location, in order ("" where it
+  ## could not be computed), by `nix-hash`, 16 at a time.
+  if locations.len == 0: return
+  let list = locations.join("\0") & "\0"
+  # `sh -c` gets nix-hash as $0 and one location as $1.
+  let script = "xargs -0 -P 16 -n 1 sh -c " &
+    quoteShell("printf '%s\\t%s\\n' \"$1\" " &
+      "\"$(\"$0\" --type sha256 \"$1\" 2>/dev/null)\"") & " " &
+    quoteShell(requireExe("nix-hash"))
+  var got = initTable[string, string]()
+  for line in mustRunShell(script, "hashing the restored store paths",
+      stdinData = list).splitLines():
+    let tab = line.find('\t')
+    if tab > 0: got[line[0 ..< tab]] = line[tab + 1 .. ^1]
+  for loc in locations: result.add(got.getOrDefault(loc))
+
 proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
-  ## §7 step 3: verified parts → `zstd -d | tar --skip-old-files -x`, then the
-  ## registration, then every shell root must be valid.
+  ## §7 step 3. Only the half's *invalid* paths are restored; a valid path
+  ## is Nix's, and is neither rewritten nor re-registered. Whatever an
+  ## interrupted unpack or substitution left at an invalid path is deleted
+  ## first, so `--skip-old-files` can never keep a truncated file. The
+  ## verified parts are then unpacked, each restored path's NAR hash must
+  ## match its registration, and only then are those paths registered. A
+  ## run killed at any point leaves them invalid, and the next run starts
+  ## them over.
   let zstdExe = zstdForRestore(h)
   let target = (if root.len > 0: root else: "/")
   createDir(target)
+  let reg = readVerifiedPart(partsDir, h.registration)
+  let registered = parseRegistration(mustRunShell(quoteShell(zstdExe) &
+    " -q -dc", "decompressing the registration", stdinData = reg))
+  var paths: seq[string]
+  for r in registered: paths.add(r.path)
+  let invalid = invalidPaths(paths, root).toHashSet()
+  for p in paths:
+    if p in invalid: removeStoreLeftover(storeLocation(root, p))
   let errPath = partsDir / ".unpack.stderr"
   let command = "set -o pipefail; (" & quoteShell(zstdExe) &
     " -q -dc --long=" & $ZstdWindowLog & " - | " &
@@ -313,11 +413,28 @@ proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
   if feedParts(partsDir, h.parts, command, stopEarly = false) != 0:
     bundleFail("unpacking the Nix half failed: " &
       (if fileExists(errPath): readFile(errPath).strip() else: ""))
-  let reg = readVerifiedPart(partsDir, h.registration)
-  let db = mustRunShell(quoteShell(zstdExe) & " -q -dc", "decompressing " &
-    "the registration", stdinData = reg)
-  discard mustRun(requireExe("nix-store"), storeArgs(root) & @["--load-db"],
-    stdinData = db)
+  var restored: seq[RegisteredPath]
+  var locations: seq[string]
+  for r in registered:
+    if r.path in invalid:
+      restored.add(r)
+      locations.add(storeLocation(root, r.path))
+  let actual = narHashes(locations)
+  var mismatched: seq[string]
+  for i, r in restored:
+    if actual[i] != r.narHash:
+      mismatched.add(r.path & ": the registration says sha256 " & r.narHash &
+        ", the unpacked content hashes to " &
+        (if actual[i].len > 0: actual[i] else: "nothing (unreadable)"))
+      removeStoreLeftover(locations[i])
+  if mismatched.len > 0:
+    bundleFail("the Nix half's content does not match its registration, " &
+      "so nothing was registered:\n  " & mismatched.join("\n  "))
+  var db = ""
+  for r in restored: db.add(r.entry)
+  if db.len > 0:
+    discard mustRun(requireExe("nix-store"), storeArgs(root) & @["--load-db"],
+      stdinData = db)
   if not h.nixHalfPresent(root):
     bundleFail("the Nix half's registration did not make every shell root " &
       "valid")
