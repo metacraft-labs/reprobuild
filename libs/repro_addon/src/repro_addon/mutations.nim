@@ -1035,6 +1035,15 @@
 ##                                            one recursive removal, so a
 ##                                            part-way failure can take the
 ##                                            ledger copy (decision 150)
+## ``empty-state-root-reported-vaguely``     the failed rmdir of the empty
+##                                            /var/lib/repro is reported as
+##                                            round 13 did, without saying
+##                                            only an empty directory remains
+##                                            (decision 161)
+## ``empty-state-root-left-unfinished``       a re-run that finds an empty
+##                                            /var/lib/repro and no ledger
+##                                            stops on the missing ledger
+##                                            (decision 161)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1859,6 +1868,8 @@ const
                           "ship-ok-without-sink-configuration",
                           "sink-config-removed-in-step-4",
                           "ledger-copy-removed-with-the-rest",
+                          "empty-state-root-reported-vaguely",
+                          "empty-state-root-left-unfinished",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",

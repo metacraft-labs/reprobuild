@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2819,
+    "nimTestBinaries": 2820,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2866
+    "testEntries": 2867
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,7 +1620,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1554,
+      "integration": 1555,
       "platform/destructive": 181,
       "pure unit": 766,
       "unclassified": 342
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2819,
+    "nimTestBinaryCount": 2820,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2866
+    "testEntryCount": 2867
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10223,8 +10223,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42194,6 +42194,21 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_every_selector_spelling_plans_the_certificates_its_build_materializes",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_every_selector_spelling_plans_the_certificates_its_build_materializes.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

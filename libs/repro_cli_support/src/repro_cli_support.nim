@@ -4347,79 +4347,36 @@ const DefaultBuildCollectionName* = "default"
   ## equivalent, while a literal `repro build build` would have read
   ## like an authoring mistake.
 
-proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
-                            identity: PathOnlyBuildIdentity;
-                            projectRoot: string;
-                            selectedActionIds: openArray[string];
-                            publishableOnly = false):
-    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
-  ## Named-Targets M2: accept multiple selectors and union their
-  ## dependency closures in a single engine pass. Each selector may be
-  ## an action id, an explicit ``target "name", handle`` label, an
-  ## implicit target name carried by the M1 export table, or a
-  ## qualified ``<package>:<name>`` form. When a selector matches more
-  ## than one package, raises ``BuildTargetAmbiguousError``. When it
-  ## matches no edge, raises ``BuildTargetUnknownError`` with up to
-  ## three closest known names.
-  let profiles = profileIndex(identity)
-  var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
-  var targets = initTable[string, BuildTargetDef]()
-  var pools = initTable[string, BuildPoolDef]()
-  for fragment in snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkAction:
-        actionNodes.add((
-          node: node,
-          payload: decodeBuildActionPayload(toBytes(node.payload))))
-      elif node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-target.v1":
-        let target = decodeBuildTargetPayload(toBytes(node.payload))
-        if targets.hasKey(target.name):
-          raise newException(ValueError,
-            "duplicate build target metadata: " & target.name)
-        targets[target.name] = target
-      elif node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-pool.v1":
-        let pool = decodeBuildPoolPayload(toBytes(node.payload))
-        if pools.hasKey(pool.name):
-          raise newException(ValueError,
-            "duplicate build pool metadata: " & pool.name)
-        pools[pool.name] = pool
-  for pool in pools.values:
-    result.pools.add(repro_build_engine.pool(pool.name, pool.capacity))
-  var declaredActions = newSeq[BuildActionDef](actionNodes.len)
-  for i in 0 ..< actionNodes.len:
-    declaredActions[i] = actionNodes[i].payload
-  let inferredActions = inferDeclaredActionDeps(declaredActions, projectRoot)
-  for i in 0 ..< actionNodes.len:
-    actionNodes[i].payload = inferredActions[i]
-  var aliases = DirectTargetAliases(
-    byAction: initTable[string, string](),
-    rankByAction: initTable[string, int]())
-  for target in targets.values:
-    considerDirectAlias(aliases, target)
-  let aliasForAction = aliases.byAction
-
-  proc publicPayload(action: BuildActionDef): BuildActionDef =
-    result = action
-    if aliasForAction.hasKey(action.id):
-      result.id = aliasForAction[action.id]
-    for i in 0 ..< result.deps.len:
-      if aliasForAction.hasKey(result.deps[i]):
-        result.deps[i] = aliasForAction[result.deps[i]]
-
-  proc lowerItem(item: tuple[node: GraphNode; payload: BuildActionDef]):
-      BuildAction =
-    var node = item.node
-    node.payload = actionPayload(publicPayload(item.payload))
-    lowerGraphAction(node, profiles, projectRoot)
-
-  proc shouldLower(item: tuple[node: GraphNode;
-                               payload: BuildActionDef]): bool =
-    not publishableOnly or
-      (item.payload.publishToBinaryCache and
-        item.payload.cacheEntryIdentity.isSome)
-
+proc selectProviderActions*(snapshot: ProviderGraphSnapshot;
+                            declaredActions: openArray[BuildActionDef];
+                            targets: Table[string, BuildTargetDef];
+                            selectors: openArray[string]): HashSet[string] =
+  ## The provider action ids a build of ``selectors`` materializes, by the
+  ## rules of CLI/build.md §"Target Selection" and Build-Graph-Collections.md.
+  ## ``declaredActions`` are the snapshot's declared actions with their dependencies
+  ## already inferred (``inferDeclaredActionDeps``); ``targets`` its build
+  ## targets by name.
+  ##
+  ## Each selector is resolved in order as a qualified ``<package>:<name>``,
+  ## an action id, a build-target name, the ``<collection>#<member>``
+  ## shorthand, then an implicit or explicit export name; a target selects
+  ## the closure of its members, an action the closure of its dependencies,
+  ## and the union is returned. With no non-empty selector the whole graph is
+  ## selected minus the Generic Build Exclude Rules' collections. An unknown
+  ## or ambiguous selector raises ``BuildTargetUnknownError`` /
+  ## ``BuildTargetAmbiguousError``.
+  ##
+  ## This is the ONE selection ``lowerProviderSnapshot`` (what the build
+  ## runs) and ``certificatePlanPart`` (which certificates that build can
+  ## issue) both use, so the certificate plan can never resolve a spelling
+  ## differently from the build it describes (reprobuild-pm issue
+  ## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md: the
+  ## plan kept a resolver of its own that lacked the collection-member form
+  ## and treated a fragment-less path as selecting nothing).
+  # A seq copy: the nested procs below capture it, and an ``openArray``
+  # parameter cannot be captured.
+  let actions = @declaredActions
+  var selected = initHashSet[string]()
   # Generic Build Exclude Rules (Build-Graph-Collections.md): a build that
   # does not name its targets leaves out the members of the ``test``,
   # ``bench`` and ``lint`` collections, which run only when selected by
@@ -4452,9 +4409,9 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     # graph does not declare, and a cycle among retained actions, reach the
     # engine's graph validation unchanged.
     var consumersByDep = initTable[string, seq[string]]()
-    for item in actionNodes:
-      for dep in item.payload.deps:
-        consumersByDep.mgetOrPut(dep, @[]).add(item.payload.id)
+    for action in actions:
+      for dep in action.deps:
+        consumersByDep.mgetOrPut(dep, @[]).add(action.id)
     var pending: seq[string] = @[]
     for actionId in excluded:
       pending.add(actionId)
@@ -4466,21 +4423,20 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     excluded
 
   var hasSelector = false
-  for s in selectedActionIds:
+  for s in selectors:
     if s.len > 0:
       hasSelector = true
       break
   if not hasSelector:
     let excludedActionIds = excludedByBuildRules()
-    for item in actionNodes:
-      if not excludedActionIds.contains(item.payload.id) and
-          shouldLower(item):
-        result.actions.add(lowerItem(item))
+    for action in actions:
+      if not excludedActionIds.contains(action.id):
+        result.incl(action.id)
     return
 
   var byId = initTable[string, BuildActionDef]()
-  for item in actionNodes:
-    byId[item.payload.id] = item.payload
+  for action in actions:
+    byId[action.id] = action
 
   # Named-Targets M2: aggregate every fragment's target-export table
   # into one project-scoped view. Cross-package ambiguity is re-derived
@@ -4650,9 +4606,9 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     # suggestions over the known action ids, explicit target labels,
     # and implicit names.
     var known: seq[string] = @[]
-    for item in actionNodes:
-      if known.find(item.payload.id) < 0:
-        known.add(item.payload.id)
+    for action in actions:
+      if known.find(action.id) < 0:
+        known.add(action.id)
     for name in targets.keys:
       if known.find(name) < 0:
         known.add(name)
@@ -4672,14 +4628,13 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     raise err
 
   var resolvedRoots: seq[string] = @[]
-  for selector in selectedActionIds:
+  for selector in selectors:
     if selector.len == 0:
       continue
     let resolved = resolveSelectorToActionId(selector)
     if resolvedRoots.find(resolved) < 0:
       resolvedRoots.add(resolved)
 
-  var selected = initHashSet[string]()
   # ``repro build`` and ``repro build default`` are the same build, so the
   # ``default`` collection's slice of the selection follows the Generic
   # Build Exclude Rules; roots selected by any other name keep their full
@@ -4735,6 +4690,83 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       skippingExcluded = false
     else:
       includeClosure(root)
+  selected
+
+proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
+                            identity: PathOnlyBuildIdentity;
+                            projectRoot: string;
+                            selectedActionIds: openArray[string];
+                            publishableOnly = false):
+    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
+  ## Named-Targets M2: accept multiple selectors and union their
+  ## dependency closures in a single engine pass. Each selector may be
+  ## an action id, an explicit ``target "name", handle`` label, an
+  ## implicit target name carried by the M1 export table, or a
+  ## qualified ``<package>:<name>`` form. When a selector matches more
+  ## than one package, raises ``BuildTargetAmbiguousError``. When it
+  ## matches no edge, raises ``BuildTargetUnknownError`` with up to
+  ## three closest known names.
+  let profiles = profileIndex(identity)
+  var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
+  var targets = initTable[string, BuildTargetDef]()
+  var pools = initTable[string, BuildPoolDef]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        actionNodes.add((
+          node: node,
+          payload: decodeBuildActionPayload(toBytes(node.payload))))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        if targets.hasKey(target.name):
+          raise newException(ValueError,
+            "duplicate build target metadata: " & target.name)
+        targets[target.name] = target
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-pool.v1":
+        let pool = decodeBuildPoolPayload(toBytes(node.payload))
+        if pools.hasKey(pool.name):
+          raise newException(ValueError,
+            "duplicate build pool metadata: " & pool.name)
+        pools[pool.name] = pool
+  for pool in pools.values:
+    result.pools.add(repro_build_engine.pool(pool.name, pool.capacity))
+  var declaredActions = newSeq[BuildActionDef](actionNodes.len)
+  for i in 0 ..< actionNodes.len:
+    declaredActions[i] = actionNodes[i].payload
+  let inferredActions = inferDeclaredActionDeps(declaredActions, projectRoot)
+  for i in 0 ..< actionNodes.len:
+    actionNodes[i].payload = inferredActions[i]
+  var aliases = DirectTargetAliases(
+    byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  for target in targets.values:
+    considerDirectAlias(aliases, target)
+  let aliasForAction = aliases.byAction
+
+  proc publicPayload(action: BuildActionDef): BuildActionDef =
+    result = action
+    if aliasForAction.hasKey(action.id):
+      result.id = aliasForAction[action.id]
+    for i in 0 ..< result.deps.len:
+      if aliasForAction.hasKey(result.deps[i]):
+        result.deps[i] = aliasForAction[result.deps[i]]
+
+  proc lowerItem(item: tuple[node: GraphNode; payload: BuildActionDef]):
+      BuildAction =
+    var node = item.node
+    node.payload = actionPayload(publicPayload(item.payload))
+    lowerGraphAction(node, profiles, projectRoot)
+
+  proc shouldLower(item: tuple[node: GraphNode;
+                               payload: BuildActionDef]): bool =
+    not publishableOnly or
+      (item.payload.publishToBinaryCache and
+        item.payload.cacheEntryIdentity.isSome)
+
+  let selected = selectProviderActions(snapshot, inferredActions, targets,
+    selectedActionIds)
   for item in actionNodes:
     if selected.contains(item.payload.id) and shouldLower(item):
       result.actions.add(lowerItem(item))
@@ -32315,6 +32347,10 @@ type
     actionDeps*: Table[string, seq[string]]
       ## Every declared action's dependencies (after inference), so a reader
       ## can walk a marked node's closure (TC-8e issuance).
+    bySelector*: seq[tuple[selector: string; materialized: HashSet[string]]]
+      ## Each non-empty selector the part was planned for, with the actions
+      ## that selector alone materializes, in selector order. Empty when the
+      ## part was planned for no name (a fragment-less path selector).
 
   CertificatePlan* = object
     ## A plan as the certificate query sees it. ``noCertify`` is
@@ -32354,12 +32390,17 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
                           projectRoot: string;
                           selectors: openArray[string]):
     CertificatePlanPart =
-  ## Resolve ``selectors`` against ``snapshot`` and record the actions their
-  ## union materializes, by the rules ``lowerProviderSnapshot`` applies: a
-  ## qualified ``<package>:<name>``, an action id, a build-target name, then
-  ## an implicit or explicit export name; a target selects the closure of
-  ## its members, an action the closure of its dependencies. An unknown or
-  ## ambiguous selector raises the same errors ``repro build`` reports.
+  ## Record the actions a build of ``selectors`` materializes from
+  ## ``snapshot``, by the selection the build itself lowers
+  ## (``selectProviderActions``): a qualified ``<package>:<name>``, an action
+  ## id, a build-target name, the ``<collection>#<member>`` shorthand, then an
+  ## implicit or explicit export name; with no non-empty selector (a path
+  ## selector without a ``#<name>`` fragment), the whole graph minus the
+  ## ``test`` / ``bench`` / ``lint`` collections. An unknown or ambiguous
+  ## selector raises the same errors ``repro build`` reports.
+  ##
+  ## Each non-empty selector's own selection is kept too (``bySelector``),
+  ## so a caller can say which selector certifies nothing.
   result.repository = certificateRepositoryRoot(projectRoot)
   result.certificates = aggregateCertificateExportTable(snapshot)
   result.targets = initTable[string, BuildTargetDef]()
@@ -32372,80 +32413,21 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
           node.stableName == "reprobuild.build-target.v1":
         let target = decodeBuildTargetPayload(toBytes(node.payload))
         result.targets[target.name] = target
-  var byId = initTable[string, BuildActionDef]()
-  for action in inferDeclaredActionDeps(declared, projectRoot):
-    byId[action.id] = action
-  let exportTable = aggregateTargetExportTable(snapshot)
-
-  proc resolveRoot(selector: string; targets: Table[string, BuildTargetDef]):
-      string =
-    for entry in exportTable.entries:
-      if entry.owningPackage & ":" & entry.name == selector:
-        return entry.actionId
-    if byId.hasKey(selector) or targets.hasKey(selector):
-      return selector
-    var owners: seq[string] = @[]
-    var chosen = ""
-    for entry in exportTable.entries:
-      if entry.name == selector:
-        if owners.find(entry.owningPackage) < 0:
-          owners.add(entry.owningPackage)
-        chosen = entry.actionId
-    if owners.len > 1:
-      var candidates: seq[string] = @[]
-      for owner in owners:
-        candidates.add(owner & ":" & selector)
-      candidates.sort()
-      var err = newException(BuildTargetAmbiguousError,
-        "target '" & selector & "' is exported by multiple packages: " &
-          candidates.join(", ") &
-          " — re-run with the qualified <package>:<name> form")
-      err.selectorName = selector
-      err.candidates = candidates
-      raise err
-    if owners.len == 1:
-      return chosen
-    var known: seq[string] = @[]
-    for id in byId.keys:
-      known.add(id)
-    for name in targets.keys:
-      known.add(name)
-    for entry in exportTable.entries:
-      if known.find(entry.name) < 0:
-        known.add(entry.name)
-    var err = newException(BuildTargetUnknownError,
-      "unknown build target: " & selector)
-    err.selectorName = selector
-    err.suggestions = topLevenshteinCandidates(selector, known)
-    raise err
-
-  var materialized = initHashSet[string]()
-  var expanded = initHashSet[string]()
-  proc includeAction(actionId: string) =
-    if materialized.contains(actionId) or not byId.hasKey(actionId):
-      return
-    materialized.incl(actionId)
-    for dep in byId[actionId].deps:
-      includeAction(dep)
-  proc includeTarget(name: string; targets: Table[string, BuildTargetDef]) =
-    if expanded.contains(name) or not targets.hasKey(name):
-      return
-    expanded.incl(name)
-    for nested in targets[name].targets:
-      includeTarget(nested, targets)
-    for actionId in targets[name].actions:
-      includeAction(actionId)
+  let inferred = inferDeclaredActionDeps(declared, projectRoot)
+  result.materialized = selectProviderActions(snapshot, inferred,
+    result.targets, selectors)
+  var nonEmpty: seq[string] = @[]
   for selector in selectors:
-    if selector.len == 0:
-      continue
-    let root = resolveRoot(selector, result.targets)
-    if result.targets.hasKey(root):
-      includeTarget(root, result.targets)
-    else:
-      includeAction(root)
-  result.materialized = materialized
-  for id, action in byId:
-    result.actionDeps[id] = action.deps
+    if selector.len > 0 and nonEmpty.find(selector) < 0:
+      nonEmpty.add(selector)
+  for selector in nonEmpty:
+    result.bySelector.add((selector: selector,
+      materialized:
+        if nonEmpty.len == 1: result.materialized
+        else: selectProviderActions(snapshot, inferred, result.targets,
+          [selector])))
+  for action in inferred:
+    result.actionDeps[action.id] = action.deps
 
 proc certificateNodeMembers*(part: CertificatePlanPart;
                              nodeKind: CertificateNodeKind;
@@ -32488,20 +32470,46 @@ proc certificateNodeClosure*(part: CertificatePlanPart;
       pending.add(dep)
 
 proc certificateNodeMaterialized(part: CertificatePlanPart;
-                                 entry: CertificateExportEntry): bool =
+                                 entry: CertificateExportEntry;
+                                 materialized: HashSet[string]): bool =
   ## A marked edge is materialized when the plan builds it. A marked target
   ## is materialized when the plan builds every edge the target groups,
   ## nested targets included: it "passes when it and its whole closure
   ## materialize" (Test-Certificates.md §"Marking a node"), so a plan that
   ## builds only some of its members does not contain it. A target that
-  ## groups no edge is never materialized.
+  ## groups no edge is never materialized. ``materialized`` is the set of
+  ## provider action ids the plan (or one selector of it) builds.
   let members = certificateNodeMembers(part, entry.nodeKind, entry.node)
   if members.len == 0:
     return false
   for actionId in members:
-    if not part.materialized.contains(actionId):
+    if not materialized.contains(actionId):
       return false
   true
+
+proc certificateNodeMaterialized(part: CertificatePlanPart;
+                                 entry: CertificateExportEntry): bool =
+  certificateNodeMaterialized(part, entry, part.materialized)
+
+proc selectorsCertifyingNothing*(part: CertificatePlanPart;
+                                 noCertify = false): seq[string] =
+  ## The selectors of ``part`` that, on their own, materialize no
+  ## certificate-producing node, in selector order (Test-Certificates.md
+  ## §"Marking a node": "selecting only a sub-target that is neither `test`
+  ## nor marked runs the tests and issues nothing"). ``repro test`` names
+  ## each, with the reason, so a run never ends without a certificate for a
+  ## target the user named and without saying why. Empty for a
+  ## ``--no-certify`` plan: that run asked for no certificate.
+  if noCertify:
+    return @[]
+  for entry in part.bySelector:
+    var certifies = false
+    for cert in part.certificates.entries:
+      if certificateNodeMaterialized(part, cert, entry.materialized):
+        certifies = true
+        break
+    if not certifies:
+      result.add(entry.selector)
 
 proc planCertificateNodes*(plan: CertificatePlan): seq[CertificatePlanNode] =
   ## Test-Certificates TC-9a: the certificate-producing nodes ``plan``
@@ -32623,8 +32631,11 @@ proc runCertificatesCommand*(args: openArray[string];
     let resolved = parseAndResolveSelectors(selectors,
       "repro certificates plan")
     # The anchor carries the first name as its fragment: ``.#<name>`` for
-    # this project, ``<sibling project file>#<name>`` for a sibling.
-    let anchorName = splitTarget(resolved.target).fragment
+    # this project, ``<sibling project file>#<name>`` for a sibling. It is
+    # derived as the build derives it (``parseBuildTarget``), so a
+    # fragment-less path plans no name, which the plan reads as the whole
+    # default graph the build of that path lowers.
+    let anchorName = parseBuildTarget(resolved.target).selectedActionId
     var names: seq[string] = @[]
     if anchorName.len > 0:
       names.add(anchorName)
@@ -89567,6 +89578,55 @@ proc plainTestBuild(buildArgs, selectors: seq[string];
     args.add(sel)
   runBuildCommand(args, publicCliPath)
 
+proc selectorSpelling(name: string; spellings: openArray[string]): string =
+  ## ``name`` (a selector as the certificate plan received it) in the
+  ## spelling the user typed: ``.#test#unit`` for ``test#unit``,
+  ## ``sib:suite`` for a sibling's ``suite``. ``name`` itself when no typed
+  ## selector carries it.
+  for typed in spellings:
+    if typed == name:
+      return typed
+  for typed in spellings:
+    if typed.find('#') >= 0 and splitTarget(typed).fragment == name:
+      return typed
+    let classified = classifyBuildSelector(typed)
+    if classified.kind == bskQualified and classified.name == name:
+      return typed
+  name
+
+proc reportSelectorsCertifyingNothing(part: CertificatePlanPart;
+                                      nodes: seq[CertificatePlanNode];
+                                      spellings: openArray[string];
+                                      anchorSelector: string) =
+  ## One line per selector the user named that certifies nothing on its
+  ## own, with the reason (reprobuild-pm issue
+  ## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md: a
+  ## run must not end without a certificate for a named target and without
+  ## saying why). A plan for no name at all (a path selector without a
+  ## ``#<name>`` fragment) is named by its anchor when it certifies nothing.
+  let declared = part.certificates.entries.len > 0
+  let why =
+    if declared:
+      "it selects no certificate-producing node: no node marked with " &
+        "`certificate \"<name>\", <handle>` (nor the implicit `test` node) " &
+        "is wholly in its plan, so the tests it selects ran without one — " &
+        "select a declared name ('repro certificates list') or mark the " &
+        "node in repro.nim"
+    else:
+      "it selects no certificate-producing node: the project declares none " &
+        "(no `certificate \"<name>\", <handle>` and no `test` node), so " &
+        "the tests it selects ran without one"
+  if part.bySelector.len == 0:
+    if nodes.len == 0 and anchorSelector.len > 0:
+      stderr.writeLine("repro test: no certificate for '" & anchorSelector &
+        "' — a path selector without a #<name> fragment builds the " &
+        "project's default graph, which leaves out the test, bench and lint " &
+        "collections; " & why)
+    return
+  for selector in selectorsCertifyingNothing(part):
+    stderr.writeLine("repro test: no certificate for '" &
+      selectorSpelling(selector, spellings) & "' — " & why)
+
 proc reportUnselectedCertificates(unselected: seq[string]) =
   ## The one line naming the project's marked nodes this run did not select.
   if unselected.len > 0:
@@ -89788,6 +89848,10 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   # also names a directory (``test`` beside a ``test/`` directory) would be
   # classified as a path again by the build.
   var buildSelectors: seq[string]
+  # What the user typed, and the resolved anchor, so a selector that
+  # certifies nothing is named in the user's spelling.
+  var spellings: seq[string]
+  var anchorSelector = ""
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     # So does ``REPROBUILD_NO_RUNQUOTA``, the documented full-bypass switch
@@ -89853,16 +89917,34 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
           "certificate-producing node (see 'repro certificates list'); " &
           "nothing to certify")
         return 2
-    let resolved = parseAndResolveSelectors(
-      (if selectors.len == 0: @[TestCollectionSelector] else: selectors),
-      "repro test")
-    let anchorName = splitTarget(resolved.target).fragment
+    let typedSelectors =
+      if selectors.len == 0: @[TestCollectionSelector] else: selectors
+    let resolved = parseAndResolveSelectors(typedSelectors, "repro test")
+    anchorSelector = resolved.target
+    # The name the build selects through the anchor, exactly as the build
+    # derives it (``parseBuildTarget``): a legacy ``<dir>#<module>`` anchor
+    # selects a module, not an action, and a fragment-less path selects no
+    # name at all, which the plan then reads as the whole default graph.
+    let anchorName = parseBuildTarget(resolved.target).selectedActionId
     if anchorName.len > 0:
       names.add(anchorName)
+    for typed in typedSelectors:
+      spellings.add(typed)
     for name in resolved.extraNameSelectors:
       if names.find(name) < 0:
         names.add(name)
-    buildSelectors = @[resolved.target] & resolved.extraNameSelectors
+    # An extra name the build would classify as a path again (one that
+    # carries ``#``, ``.`` or ``/``, such as the member shorthand
+    # ``test#unit`` taken from a second ``.#test#unit`` selector, or one
+    # that names an existing path) is handed over anchored on the same
+    # project, so the build selects exactly what the plan resolved.
+    let anchorBase = splitTarget(resolved.target).base
+    buildSelectors = @[resolved.target]
+    for extra in resolved.extraNameSelectors:
+      buildSelectors.add(
+        if classifyBuildSelector(extra).kind == bskPath:
+          (if anchorBase.len > 0: anchorBase else: ".") & "#" & extra
+        else: extra)
     info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
       selectDefaultAction = false, workRoot = workRoot, lowerGraph = false,
       bypassRunQuotaExplicit = bypassRunQuota)
@@ -89884,6 +89966,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       unselected.add(entry.name)
   if nodes.len == 0:
     let code = plainTestBuild(buildArgs, selectors, publicCliPath)
+    reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
     reportUnselectedCertificates(unselected)
     return code
 
@@ -90106,6 +90189,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       discard issueForCertificateNode(pre, run.node.name, verdict.commands,
         readSetFromMonitorDepFiles(verdict.depfiles, verdict.recordedReads,
           verdict.recordedSources), workspaceRoot, copyOut)
+  reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
   reportUnselectedCertificates(unselected)
   code
 

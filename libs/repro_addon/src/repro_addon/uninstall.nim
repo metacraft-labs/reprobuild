@@ -308,6 +308,9 @@ proc shipEvidenceNow*(stateDir: string): tuple[ok: bool; why: string] =
   ## wait for.
   shipAndConfirm(defaultShipSite(), readHostName())
 
+const StateRoot* = "/var/lib/repro"
+  ## The add-on's state, removed last, the ledger copy last within it but
+  ## for the rmdir of the empty directories (§13 decisions 150 and 161).
 const UninstallOverrideDir* = "/var/log/repro-addon"
   ## Where §13 decision 62's override record is written: outside
   ## ``/var/lib/repro`` and ``/etc/repro``, which uninstall removes.
@@ -707,7 +710,13 @@ proc writeDiscardMarker*(custody: CustodySite; signer: TextSigner;
   ## for the same intent is left as it is.
   let path = discardMarkerPath(custody, intentPath)
   if fileExists(path): return
-  createDir(parentDir(path))
+  let markers = parentDir(path)
+  if not dirExists(markers):
+    # §13 decision 162: a new discard-markers/ is an entry of its parent,
+    # synced so that the marker's own directory fsync below is not undone
+    # by losing the directory it is in.
+    createDir(markers)
+    syncDirFd(parentDir(markers))
   let j = %*{"schema": DiscardMarkerSchema,
              "record": "removed: every object of the intent record was " &
                        "removed (or kept with the store) and the removal " &
@@ -1062,15 +1071,60 @@ proc removeAllBut(dir, keep: string) =
     else:
       removeFile(p)
 
+proc holdsOnlyEmptyDirs(dir: string): bool =
+  ## True when nothing is below ``dir`` but directories, themselves empty
+  ## of anything else (a symbolic link, even to a directory, is not one).
+  for kind, p in walkDir(dir):
+    if kind != pcDir or not holdsOnlyEmptyDirs(p): return false
+  true
+
+proc rmdirHint(err: cint): string =
+  ## Why an rmdir(2) of an empty directory fails, for the operator.
+  if err == EBUSY: "it is a mount point; unmount it"
+  elif err == EPERM: "its parent directory is immutable or append-only " &
+                     "(lsattr); clear the attribute"
+  elif err == EACCES: "its parent directory does not allow the removal; " &
+                      "fix the parent's permissions"
+  elif err == EROFS: "its file system is mounted read-only; remount it " &
+                     "read-write"
+  else: "clear the cause"
+
+proc removeEmptyDirs(dir: string): tuple[failed: string; err: cint] =
+  ## Removes ``dir``, which holds nothing but empty directories, deepest
+  ## first, each by rmdir(2), so a failure names the one directory and its
+  ## errno. ``failed`` is empty when every directory went.
+  for kind, p in walkDir(dir):
+    if kind == pcDir:
+      result = removeEmptyDirs(p)
+      if result.failed.len > 0: return
+  if posix.rmdir(dir.cstring) != 0:
+    return (dir, errno)
+
+proc reportEmptyDirsLeft(r: var UninstallResult; root, failed: string;
+                         err: cint) =
+  ## The precise report of the last step of removing the state (§13
+  ## decision 150 as amended by decision 161): the ledger copy is gone with
+  ## everything else, and only empty directories remain.
+  r.errors.add(failed & ": rmdir failed: " & $strerror(err) & " -- " &
+    rmdirHint(err) & ". Everything under " & root & " is gone, the ledger " &
+    "copy with it; only " &
+    (if failed == root: "the empty directory itself" else: "empty directories") &
+    " remains. Run uninstall again once the cause is cleared: a re-run that " &
+    "finds " & root & " empty, with no ledger, removes it and succeeds")
+
 proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
                       evidence: seq[string] = @[];
                       syncer: DiscardSyncer = syncRemovedObjects) =
   ## Removes the add-on's state, ``/var/lib/repro``, with its ledger copy
-  ## last (§13 decision 150): everything else first, checked gone and
-  ## synced, then the ledger copy, then the empty directories. A removal
-  ## that fails part-way leaves the ledger copy, so a re-run can read it
-  ## and finish; the root and its evidence entries are reported removed
-  ## only once the root is gone.
+  ## last but for the empty directories (§13 decisions 150 and 161):
+  ## everything but the ledger copy and the directories on its way first,
+  ## checked gone and synced, then the ledger copy, then the directories
+  ## that held it and the root, each by rmdir(2). A removal that fails
+  ## before the ledger copy leaves it, so a re-run can read it and finish;
+  ## one that fails after it leaves nothing but empty directories, says so
+  ## precisely, and a re-run finishes them (``finishEmptyStateRoot``). The
+  ## root and its evidence entries are reported removed only once the root
+  ## is gone.
   if not dirExists(root): return
   when mutated("ledger-copy-removed-with-the-rest"):
     removeHostRoot(r, root, evidence)    # FALSIFIER: round 12's one removeDir
@@ -1080,13 +1134,45 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       removeAllBut(root, ledgerCopy)
       syncer(@[root & "/.state-removed"])   # the unlinks above, made durable
       removeFile(ledgerCopy)
-    removeDir(root)
+    elif not holdsOnlyEmptyDirs(root):
+      removeDir(root)   # no ledger copy under it to keep (a state elsewhere)
+    when mutated("empty-state-root-reported-vaguely"):
+      if dirExists(root):
+        removeDir(root)  # FALSIFIER: the rmdir error as round 13 reported it
+    else:
+      if dirExists(root):
+        let (failed, err) = removeEmptyDirs(root)
+        if failed.len > 0:
+          reportEmptyDirsLeft(r, root, failed, err)
+          return
     r.removed.add(root)
     for e in evidence: r.removed.add(e & " (store evidence)")
   except OSError as ex:
     r.errors.add(root & ": " & ex.msg & (if fileExists(ledgerCopy):
       "; the ledger copy " & ledgerCopy & " is kept, so uninstall, run " &
       "again once the cause is cleared, finishes the removal" else: ""))
+
+proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string):
+    bool =
+  ## §13 decision 161: a re-run after an uninstall whose only failure was the
+  ## rmdir of the empty state (``root``, ``/var/lib/repro``) or of the
+  ## directories that held the ledger copy. It finds no ledger copy and
+  ## nothing under ``root`` but empty directories, so there is nothing left
+  ## to undo: it removes them and succeeds, or reports the rmdir precisely
+  ## again. False, with nothing done, for any other state (no ``root``, a
+  ## ledger copy, or anything but empty directories): the uninstall then
+  ## proceeds, or stops on the missing ledger, as before.
+  if fileExists(ledgerCopy) or symlinkExists(root) or not dirExists(root):
+    return false
+  if not holdsOnlyEmptyDirs(root): return false
+  when mutated("empty-state-root-left-unfinished"):
+    return false   # FALSIFIER: the re-run stops on the missing ledger
+  result = true
+  let (failed, err) = removeEmptyDirs(root)
+  if failed.len > 0:
+    reportEmptyDirsLeft(r, root, failed, err)
+  else:
+    r.removed.add(root & " (left empty by an earlier uninstall)")
 
 proc removeStateEvidence*(r: var UninstallResult; entries: seq[string];
                           remover: proc (d: string) = removeDirTree): bool =
@@ -1150,6 +1236,11 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # writing at the same moment (``repro_core/host_apply_lock``).
   var hostLock = acquireHostApplyLock("repro system addon uninstall")
   defer: hostLock.release()
+  # §13 decision 161: an earlier run removed everything, the ledger copy
+  # with it, and could not rmdir the empty /var/lib/repro. Finish that.
+  if stateDir.startsWith(StateRoot & "/") and
+      finishEmptyStateRoot(result, StateRoot, ledgerCopyPath(stateDir)):
+    return
   # The altered store objects kept as evidence go with /var/lib/repro. They
   # are named, and nothing is removed, until the operator says to discard
   # them (having copied them out).
@@ -1476,6 +1567,6 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # they were removed, each checked gone, above. One that appeared since
   # is reported with the root, once the root is gone.
   # The state goes last, and within it the ledger copy (§13 decision 150).
-  removeStateRoot(result, "/var/lib/repro", ledgerCopyPath(stateDir),
+  removeStateRoot(result, StateRoot, ledgerCopyPath(stateDir),
                   evidenceEntries(custodySite(stateDir)))
   restorePreBootstrapInputs(captured, opts.keepStore, result)
