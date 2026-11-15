@@ -2270,6 +2270,17 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
       if r.exitCode == 0: result = r.output.splitWhitespace()
     except CatchableError: discard
     conflictsCache[u] = result
+  # What each unit is ordered before, as systemd reports it, for the
+  # boot-ordering cycle (spec §10.1, "A floored unit's own ordering").
+  # A unit systemd cannot show is ordered before nothing it could report.
+  var beforeCache = initTable[string, seq[string]]()
+  let orderedBeforeOf = proc (u: string): seq[string] =
+    if u in beforeCache: return beforeCache[u]
+    try:
+      let r = runSystemctl(@["show", "--no-pager", "-p", "Before", "--value", "--", u])
+      if r.exitCode == 0: result = r.output.splitWhitespace()
+    except CatchableError: discard
+    beforeCache[u] = result
   var limits = initTable[string, string]()
   if flooredUnitNames(resources).len > 0:
     try: limits = managerLimits()
@@ -2330,7 +2341,7 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
         limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
         adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf,
-        createdDirs: created, ledgerDirs: ledgerDirs,
+        orderedBeforeOf: orderedBeforeOf, createdDirs: created, ledgerDirs: ledgerDirs,
         systemdView: proc (p, u: string; s: ShowProps): SystemdView =
           hostSystemdView(p, u, s),
         runningInstances: hostRunningInstances,
@@ -6423,6 +6434,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if toRestart.len > 0:
         writeTriggersToRestart(stateDir,
           readTriggersToRestart(stateDir) & toRestart)
+        # The record owns them now (§13 decision 160): the revert's step 7
+        # does not start them again, or it would fail the same way and the
+        # revert with it.
+        when not mutated("revert-starts-unstartable-trigger"):
+          var kept: seq[Transition]
+          for tr in stepTransitions:
+            if tr.unit notin toRestart: kept.add(tr)
+          stepTransitions = kept
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the

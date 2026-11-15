@@ -170,7 +170,17 @@ The add-on handles this in four ways:
     consequence: a hardened unit wanted by `multi-user.target` makes that
     target wait for the re-assertion. A unit installed by an add-on version
     that predates this ordering does not wait, until an apply installs it
-    again.
+    again. Because a hardened unit starts after the re-assertion, it
+    cannot also be ordered before it: an apply refuses a hardened unit
+    that is ordered, by its own or its drop-ins' `Before=` lines or by
+    other units' `After=` lines, before `repro-addon-reassert.service` or
+    before a unit the re-assertion waits for (`sysinit.target`,
+    `basic.target`, `sockets.target`, `local-fs.target` and the other
+    early-boot targets). systemd would find an ordering cycle at every
+    boot and drop one of its jobs, so either the unit or the
+    re-assertion would not start. The refusal names the chain of units.
+    A unit that must run that early has to waive the whole hardening
+    (`serviceFloor: <why>`).
   - **a unit that only a timer or a path unit starts** never has its
     directories recorded by an apply, because no apply starts it. After
     the first run its timer starts, the next apply refuses the unit's
