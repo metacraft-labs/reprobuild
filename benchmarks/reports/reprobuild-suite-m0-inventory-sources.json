@@ -18936,7 +18936,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
       "sourceSuiteCount": 30,
-      "staticCaseCount": 222,
+      "staticCaseCount": 225,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
