@@ -401,7 +401,7 @@ suite "gate source":
   SourceStart = "## Gate ``e2e_addon_adopt_hand_configured_service``"
     ## How the file begins.
   GateDigest =
-    "5e1854126cf84965068f193d167d356abd1cafc5a3a02944da877f28eeb251ef"
+    "6e45f935cab6f30c7543468d50535df035fa62b24ab669aca479aa535cef09ae"
     ## ``codeDigest`` of the gate as reviewed. The structural checks above
     ## are each a freeze of one part of the gate, and seven reviews of
     ## 2026-11-12 each found a part left open: a helper of the gate that

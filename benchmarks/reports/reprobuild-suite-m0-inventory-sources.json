@@ -14951,8 +14951,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_nix_store_roots_large_closure.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

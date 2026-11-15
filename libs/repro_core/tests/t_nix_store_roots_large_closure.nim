@@ -56,6 +56,14 @@ proc nixStore(args: openArray[string]): tuple[output: string; code: int] =
 proc addPrivatePaths(dir, tag: string; count: int): seq[string] =
   ## `count` new store paths with `NameLen`-character names, added with
   ## `nix-store --add` in groups small enough for any `ARG_MAX`.
+  ##
+  ## `nixStore` merges stderr into stdout, and a real Nix may print warnings
+  ## or notices there (an unknown `NIX_CONFIG` setting, a substituter notice)
+  ## depending on the host. So only lines that are store paths count, and the
+  ## i-th one must be the store path of the i-th file of the group: a
+  ## diagnostic is neither taken for a path nor allowed to shift the mapping.
+  ## The diagnostics stay in the assertion messages.
+  let storeDir = nixStoreDir()
   var files: seq[string] = @[]
   for i in 0 ..< count:
     let prefix = "rbroot-" & align($i, 4, '0') & "-"
@@ -68,9 +76,19 @@ proc addPrivatePaths(dir, tag: string; count: int): seq[string] =
     let group = files[start ..< min(start + 100, files.len)]
     let res = nixStore(@["--add"] & group)
     doAssert res.code == 0, "nix-store --add failed: " & res.output
+    var added: seq[string] = @[]
     for line in res.output.splitLines():
-      if line.strip().len > 0:
-        result.add(line.strip())
+      let candidate = line.strip()
+      if isRootableStorePath(candidate, storeDir):
+        added.add(candidate)
+    doAssert added.len == group.len,
+      "nix-store --add printed " & $added.len & " store paths for " &
+      $group.len & " files: " & res.output
+    for i, file in group:
+      doAssert added[i].endsWith("-" & extractFilename(file)),
+        "nix-store --add printed " & added[i] & " for " & file & ": " &
+        res.output
+    result.add(added)
     start += group.len
   doAssert result.len == count,
     "nix-store --add printed " & $result.len & " paths for " & $count
@@ -100,6 +118,51 @@ suite "storePathBatches":
     let batches = storePathBatches(["/nix/store/x-a", long, "/nix/store/x-b"],
       budget = 64)
     check batches == @[@["/nix/store/x-a"], @[long], @["/nix/store/x-b"]]
+
+suite "the fixture's own store paths":
+
+  test "nix-store diagnostics on stderr are not taken for added store paths":
+    # Reprobuild-pm issue 2026-11-15: on a host whose `nix-store` prints a
+    # warning or notice on stderr, `addPrivatePaths` counted those lines as
+    # store paths and failed the large-closure case in its fixture. An unknown
+    # `NIX_CONFIG` setting makes the real `nix-store` warn on every call, so
+    # the condition holds on any host, not only on one whose Nix happens to.
+    let tag = $getCurrentProcessId() & "-" & $int64(epochTime() * 1000) &
+      "-diag"
+    let srcDir = createTempDir("repro-large-closure-diag-", "")
+    let hadConfig = existsEnv("NIX_CONFIG")
+    let savedConfig = getEnv("NIX_CONFIG")
+    putEnv("NIX_CONFIG", (if savedConfig.len > 0: savedConfig & "\n" else: "") &
+      "reprobuild-test-unknown-setting = 1")
+    var paths: seq[string] = @[]
+    try:
+      # Positive control: the real nix-store does print a diagnostic here.
+      let probe = srcDir / "probe"
+      writeFile(probe, "reprobuild diagnostic probe " & tag & "\n")
+      let raw = nixStore(["--add", probe])
+      check raw.code == 0
+      check "reprobuild-test-unknown-setting" in raw.output
+      for line in raw.output.splitLines():
+        if line.strip().startsWith(nixStoreDir() & "/"):
+          paths.add(line.strip())
+
+      let added = addPrivatePaths(srcDir, tag, 150)
+      paths.add(added)
+      check added.len == 150
+      check added.toHashSet().len == 150
+      for i, p in added:
+        check p.startsWith(nixStoreDir() & "/")
+        check p.endsWith("-rbroot-" & align($i, 4, '0') & "-" &
+          repeat('x', NameLen - "rbroot-0000-".len))
+        check fileExists(p)
+    finally:
+      if hadConfig:
+        putEnv("NIX_CONFIG", savedConfig)
+      else:
+        delEnv("NIX_CONFIG")
+      removeDir(srcDir)
+      if paths.len > 0:
+        discard nixStore(@["--delete"] & paths)
 
 suite "rootStorePaths over a closure larger than one shell argument":
 
