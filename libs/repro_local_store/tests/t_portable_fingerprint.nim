@@ -376,3 +376,41 @@ suite "portable fingerprints":
     check names.len == 1
     check names[0].endsWith(".snap.svg")
     check fileContentHex(leaf).len == 64
+
+  test "a declared input the monitor only probed is bound by its content":
+    ## Edge-Derived-Identities.md §3.3 (`rbpm-v2`): declared inputs are bound
+    ## by content. Measured: an archive edge whose only observation of the
+    ## object it archives was a probe got one portable key for two different
+    ## objects.
+    ## A probe of an UNDECLARED file keeps its kind-only identity (the
+    ## control below), so this is the declaration's doing, not a blanket
+    ## promotion of probes.
+    let base = createTempDir("repro-declared-probe-", "")
+    defer: removeDir(extendedPath(base))
+    let project = base / "project"
+    createDir(project / "obj")
+    let obj = project / "obj" / "lib.o"
+    let other = project / "obj" / "other.o"
+    let roots = @[LogicalRoot(label: "project", path: project,
+      kind: lrkTracked)]
+    proc fp(): PortableFingerprint =
+      computePortableFingerprint(roots, argv = @["ar", "rcs", "lib.a", obj],
+        cwd = project, env = @[], declaredInputs = @[obj], reads = @[],
+        probes = @[obj, other], enumerations = @[])
+    writeFile(obj, "object-v1")
+    writeFile(other, "undeclared-v1")
+    let first = fp()
+    check first.portable
+    var declaredKind = pikProbe
+    for input in first.inputs:
+      if input.path == "project:obj/lib.o":
+        declaredKind = input.kind
+        check input.role == irDeclared
+        check input.digest.startsWith("file:")
+    check declaredKind == pikRead
+    writeFile(obj, "object-v2")
+    check fp().strongHex != first.strongHex
+    # Control: the undeclared, probed file's content is not in the key.
+    writeFile(obj, "object-v1")
+    writeFile(other, "undeclared-v2")
+    check fp().strongHex == first.strongHex

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2827,
-    "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 767,
+    "nimTestBinaries": 2831,
+    "pureUnitConsolidationGroups": 83,
+    "pureUnitTests": 768,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2874
+    "testEntries": 2878
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -316,6 +316,21 @@
       "sources": [
         "libs/repro_dsl_stdlib/tests/t_doc_comment_position_from_first_line.nim",
         "libs/repro_dsl_stdlib/tests/t_doc_comment_reaches_listing_and_diagnostic.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "sources": [
+        "libs/repro_dsl_stdlib/tests/t_entropy_image_blessings.nim",
+        "libs/repro_dsl_stdlib/tests/t_tool_input_check_policies.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1621,9 +1636,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1559,
+      "integration": 1562,
       "platform/destructive": 181,
-      "pure unit": 767,
+      "pure unit": 768,
       "unclassified": 344
     },
     "graphOwnedTestArtifacts": [
@@ -1838,9 +1853,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2827,
+    "nimTestBinaryCount": 2831,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2874
+    "testEntryCount": 2878
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11106,6 +11121,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_an_output_that_embeds_a_checkout_path_is_found_through_compression",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_an_output_that_embeds_a_checkout_path_is_found_through_compression.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_annotation_perturbs_no_fingerprint",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -17602,6 +17634,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tool_input_check_policies",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_tool_input_check_policies.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_undeclared_lock_file_is_compile_error",
       "class": "unclassified",
       "classificationReason": "spawns a subprocess (through `libs/repro_dsl_stdlib/tests/lock_file_compile_probe.nim`)",
@@ -20060,7 +20111,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_portable_fingerprint.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 18,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32616,6 +32667,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_dev_env_announces_before_working",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -37609,6 +37677,24 @@
       "source": "tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_changed_library_source_or_flag_is_never_a_hit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_changed_library_source_or_flag_is_never_a_hit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48378,7 +48464,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_project_dsl_build_action_payload.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

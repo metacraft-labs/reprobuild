@@ -55,6 +55,7 @@ import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
+import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
@@ -184,6 +185,7 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/cross_target_flag
 import repro_cli_support/dev_session
+import repro_cli_support/dev_session_access
 from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
 when not defined(windows):
@@ -514,11 +516,11 @@ const LegacyVerbSynopses = [
     "repro dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale] [--pre-activation-env=PATH]\n" &
       "repro dev-env deactivate <rollback-manifest> [--shell=bash|zsh|fish|nushell|pwsh]\n"),
   ("up",
-    "repro up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS] [--replace [--force]]\n"),
+    "repro up [selector] [--activity=name] [--foreground] [--http=HOST:PORT [--http-allow-remote]] [--ready-timeout=MS] [--replace [--force]]\n"),
   ("down",
     "repro down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n"),
   ("dev",
-    "repro dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n"),
+    "repro dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT [--http-allow-remote]] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n"),
   ("hooks",
     "repro hooks ensure|reinstall|uninstall [--vcs] [--record-store] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n"),
   ("check",
@@ -2523,6 +2525,57 @@ proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
   lines.sort()
   lines.join("\n")
 
+proc toolDeclaredInputCheckPolicyForRefs*(
+    profiles: Table[string, PathOnlyToolProfile];
+    refs: openArray[string]): Option[FileFingerprintPolicy] =
+  ## Caching-Architecture D2: the input-check policy an edge that states
+  ## none takes from the tools it names. Only a ref that RESOLVES to a tool
+  ## profile here counts -- by executable name, by bare package selector, or
+  ## (when neither matches, as ``mkToolIdentityResolver`` does) as an
+  ## executable a profile's realization exports -- so the declaration
+  ## travels with the resolved tool identity: a ref that resolves to nothing
+  ## (the C convention dispatched under ``--tool-provisioning=path`` sees no
+  ## profiles at all) leaves the edge on ``timestamp``. Each resolved ref is
+  ## looked up by the bare package name of its profile, then by its own
+  ## name (``repro_core/tool_input_check_policies``); with several declaring
+  ## tools the strongest policy wins. `none` when no resolved tool declares
+  ## one.
+  for refName in refs:
+    if refName.len == 0:
+      continue
+    var resolvedPackages: seq[string] = @[]
+    for profile in profiles.values:
+      let bare = bareToolSelector(profile.packageSelector)
+      if profile.executableName == refName or bare == refName:
+        resolvedPackages.add(bare)
+    if resolvedPackages.len == 0:
+      for profile in profiles.values:
+        for exported in profile.exportedExecutables:
+          let file = extractFilename(exported)
+          if file == refName or file == addFileExt(refName, ExeExt):
+            resolvedPackages.add(bareToolSelector(profile.packageSelector))
+            break
+    if resolvedPackages.len == 0:
+      continue
+    for key in resolvedPackages & @[refName]:
+      let declared = toolDeclaredInputCheckPolicy(key)
+      if declared.isSome:
+        result = some(if result.isSome:
+            strongestInputCheckPolicy(result.get(), declared.get())
+          else: declared.get())
+
+proc keyedOnToolDeclaredInputCheckPolicy*(weak: ContentDigest;
+                                          policy: FileFingerprintPolicy):
+    ContentDigest =
+  ## Mix a policy an edge took from its tools' declaration into its weak
+  ## fingerprint. The payload says "unstated" either way, so without this the
+  ## same edge would key identically whether it resolved to ``hybrid`` (a
+  ## tarball-provisioned ``gcc``) or to ``timestamp`` (no resolved profile).
+  var text = "reprobuild.toolDeclaredInputCheckPolicy.v1\n" & $policy & "\n"
+  for b in weak.bytes:
+    text.add(toHex(b, 2))
+  weakFingerprintFromText(text)
+
 proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
     seq[string] =
   ## The sub-tools that reach the engine as
@@ -3241,14 +3294,29 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.removeBeforeRun = payload.removeBeforeRun
     result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
+  # Caching-Architecture D2: an edge that states no policy takes the one its
+  # resolved tools declare, else the owner-decided default, timestamp.
+  var policyFromTools = false
   let actionCachePolicy =
     case payload.actionCachePolicy
+    of acfpUnstated:
+      let declared = toolDeclaredInputCheckPolicyForRefs(profiles,
+        payload.toolIdentityRefs)
+      if declared.isSome and declared.get() != ffpTimestamp:
+        policyFromTools = true
+        declared.get()
+      else:
+        ffpTimestamp
     of acfpTimestamp:
       ffpTimestamp
     of acfpChecksum:
       ffpChecksum
     of acfpHybrid:
       ffpHybrid
+  defer:
+    if policyFromTools:
+      result.weakFingerprint = keyedOnToolDeclaredInputCheckPolicy(
+        result.weakFingerprint, actionCachePolicy)
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
@@ -18381,6 +18449,11 @@ type
       ## Preserve explicit scope before selection resolution supplies default.
     foreground: bool
     httpBind: string
+      ## ``--http``, or empty for the platform default transport (AF_UNIX
+      ## on POSIX, ``127.0.0.1:0`` on Windows); see ``dev_session_access``.
+    httpAllowRemote: bool
+      ## ``--http-allow-remote``: the explicit opt-in a non-loopback
+      ## ``--http`` host needs.
     debounceMs: int
     force: bool
     replace: bool
@@ -18427,7 +18500,10 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
   ## future command gets the refusal until someone writes down that it
   ## waits.
   var selection = DevEnvCliSelection()
-  result.httpBind = "127.0.0.1:0"
+  # Empty: the platform default transport, chosen by the listener. A
+  # loopback TCP port is no longer the default on POSIX, because every
+  # local account can connect to one (§"Control API Access Control").
+  result.httpBind = ""
   result.debounceMs = 250
   var i = 0
   while i < args.len:
@@ -18451,6 +18527,14 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       result.replace = true
     elif arg == "--http" or arg.startsWith("--http="):
       result.httpBind = valueFromFlag(args, i, "--http")
+    elif arg == AllowRemoteFlag:
+      # Only the commands that START a session bind anything; they are the
+      # ones that take `--ready-timeout`. `down` refuses the flag rather
+      # than accepting one that would do nothing.
+      if not acceptReadyTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.httpAllowRemote = true
     elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
       result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
       if result.debounceMs < 0:
@@ -18482,6 +18566,12 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       raise newException(ValueError,
         "unexpected " & commandName & " argument: " & arg)
     inc i
+  # The bind restriction is checked here, before any session state exists:
+  # a non-loopback host needs the explicit opt-in.
+  if result.httpBind.len > 0:
+    let parts = parseHttpBind(result.httpBind)
+    refuseNonLoopbackBind(result.httpBind, parts.host,
+      result.httpAllowRemote)
   selection.resolveDevEnvSelection()
   result.selection = selection
 
@@ -18505,6 +18595,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     lockSliceId: parsed.selection.lockSliceId,
     developOverridesPath: parsed.selection.developOverridesPath,
     httpBind: parsed.httpBind,
+    httpAllowRemote: parsed.httpAllowRemote,
     debounceMs: parsed.debounceMs)
 
 proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
@@ -18525,6 +18616,8 @@ proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
     "--http", config.httpBind,
     "--debounce-ms", $config.debounceMs
   ]
+  if config.httpAllowRemote:
+    result.add(AllowRemoteFlag)
   if config.foreground:
     result.add("--foreground")
 
@@ -20361,8 +20454,11 @@ proc runDownCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "dev session metadata is missing httpBind: " & metadataPath)
   try:
-    let response = httpRequest(httpBindValue, "/session/stop",
-      httpMethod = "POST")
+    # Authenticated with the token the session published the path of; a
+    # caller that cannot read it is refused here, by name, before any
+    # request is sent.
+    let response = controlRequest(controlClientFor(metadata),
+      "/session/stop", httpMethod = "POST")
     if response.status < 200 or response.status >= 300:
       raise newException(IOError,
         "session stop request failed with HTTP " & $response.status &
@@ -20484,6 +20580,7 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     lockSliceId: valueAfterFlag(args, "--lock-slice"),
     developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
     httpBind: valueAfterFlag(args, "--http"),
+    httpAllowRemote: args.find(AllowRemoteFlag) >= 0,
     debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
   # W2 — a ``repro dev`` / ``repro up`` session starts services and runs
   # watch-cycle tasks in the activated environment, so it is an activation
@@ -20502,7 +20599,8 @@ proc runDevSessionHttpHelper(args: openArray[string]): int =
     sessionId: valueAfterFlag(args, "--session-id"),
     sessionDir: valueAfterFlag(args, "--session-dir"),
     host: valueAfterFlag(args, "--host"),
-    port: if portText.len > 0: parseInt(portText) else: 0))
+    port: if portText.len > 0: parseInt(portText) else: 0,
+    allowRemote: args.find(AllowRemoteFlag) >= 0))
 
 const
   DirenvManagedBlockId = "repro-dev-env-direnv"
