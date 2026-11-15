@@ -61,7 +61,7 @@ libs/repro_addon/tests/t_addon_floor_round11.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round12.nim	nim	48
 libs/repro_addon/tests/t_addon_floor_round13.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round14.nim	nim	13
-libs/repro_addon/tests/t_addon_floor_round15.nim	nim	12
+libs/repro_addon/tests/t_addon_floor_round15.nim	nim	13
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17

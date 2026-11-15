@@ -13,8 +13,9 @@
 ## - §13 decision 155: the activators of floored services are held like the
 ##   services (``flooredActivatorNames``).
 ##
-## Falsifying build, red here: ``recreated-bound-from-inactive-exit-only``.
-## ``record-without-waiting``, ``activators-unheld`` and
+## Falsifying builds, red here: ``recreated-bound-from-inactive-exit-only``
+## and ``record-without-waiting`` (the record is taken before the
+## directory exists). ``activators-unheld`` and
 ## ``revert-held-left-running`` act at their call sites in the switch and
 ## are red in the VM gate ``t_e2e_addon_floor_reapplies_after_restarts``.
 ##
@@ -87,6 +88,20 @@ suite "the start step waits for a unit's directories before it records them":
     waitForPendingPaths("a.service", [("/run/a", "a.service")], timeoutMs = 120,
       exists = proc (p: string): bool = false,
       stillStarting = proc (u: string): bool = true)
+  test "the start step records a unit's directories only once they exist":
+    # The directory appears on the fourth look, as a Type=simple unit's
+    # does once systemd-executor has made it; the record must see it.
+    var looks = 0
+    var seenAtRecord = false
+    let exists = proc (p: string): bool =
+      inc looks
+      looks > 3
+    recordAfterStart("a.service", [("/run/a", "a.service")],
+      record = proc (u: string) = seenAtRecord = exists("/run/a"),
+      wait = proc (u: string) =
+        waitForPendingPaths(u, [("/run/a", "a.service")], timeoutMs = 5000,
+          exists = exists, stillStarting = proc (v: string): bool = true))
+    check seenAtRecord
   test "nothing to wait for when no path is pending for the unit":
     var calls = 0
     waitForPendingPaths("a.service", [("/run/b", "b.service")], timeoutMs = 5000,

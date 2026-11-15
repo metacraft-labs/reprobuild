@@ -2251,6 +2251,22 @@ proc waitForPendingPaths*(unit: string; pending: openArray[tuple[path, unit: str
     if not missing or not alive(unit) or getMonoTime() >= deadline: return
     sleep(50)
 
+proc recordAfterStart*(unit: string; pending: openArray[tuple[path, unit: string]];
+                       record: proc (u: string);
+                       wait: proc (u: string) = nil) =
+  ## The start step's record of the directories named for ``unit`` that
+  ## its start made (§13 decisions 57 and 68), taken once its pending paths
+  ## exist (``waitForPendingPaths``,
+  ## or ``wait`` when given). The end-of-step pass (``recordStartedSince``)
+  ## does not make the wait redundant: it runs straight after the last
+  ## unit's start returns, so for that unit it reads the directories at the
+  ## same instant this record would without the wait, and a ``Type=simple``
+  ## unit's directories may not exist yet (A9 review round 15, finding 2).
+  when not mutated("record-without-waiting"):
+    if wait != nil: wait(unit)
+    else: waitForPendingPaths(unit, pending)
+  record(unit)
+
 proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
   ## The unit's current ``InvocationID`` and when that invocation began
   ## (``unitRun``).
@@ -7259,11 +7275,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               (proc (u: string) {.closure.})(nil)
             else:
               proc (u: string) =
-                when not mutated("record-without-waiting"):
-                  waitForPendingPaths(u, createdPending)
-                try: recordCreatedDirs(stateDir, u, createdPending,
-                                       invocation = unitInvocation(u).id)
-                except IOError, OSError: discard
+                recordAfterStart(u, createdPending, proc (v: string) =
+                  try: recordCreatedDirs(stateDir, v, createdPending,
+                                         invocation = unitInvocation(v).id)
+                  except IOError, OSError: discard)
           # A revert leaves out what its record of triggers to restart owns
           # (§13 decision 160): one filter for every start of step 7.
           block:

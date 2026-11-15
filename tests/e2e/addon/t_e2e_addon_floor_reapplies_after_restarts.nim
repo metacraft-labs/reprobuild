@@ -140,8 +140,10 @@
 ## followed), ``triggers-of-running-units-stopped`` (the socket is stopped
 ## while its service runs and cannot start again: the apply after the
 ## service ran, and the refused switch's revert, fail),
-## ``record-without-waiting`` (the ``Type=simple`` unit's second
-## apply is refused), ``recreated-bound-from-inactive-exit-only`` (the
+## ``record-without-waiting`` is red in
+## ``t_addon_floor_round15``, not here: the end-of-step record usually
+## catches the directory under this host's timing, so these cases are its
+## positive control only), ``recreated-bound-from-inactive-exit-only`` (the
 ## restart's directory is refused), ``revert-held-left-running`` (the
 ## control unit the revert holds keeps running),
 ## ``activators-unheld`` (the held service's socket has no
