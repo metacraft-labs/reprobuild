@@ -16,6 +16,7 @@ verifies:
     - tests/integration/t_certificates_travel_with_pushed_commit.nim
     - tests/integration/t_repro_push_certifies_only_content_that_was_not_tested.nim
     - tests/integration/t_gateway_finds_certificates_by_the_pushed_tree.nim
+    - tests/integration/t_every_selector_spelling_plans_the_certificates_its_build_materializes.nim
 unverified:
   - claim: "A repository states its certificate policy in its project file, and repro certificates policy prints it."
     reason: "Exercised by the shared-policy fixture's cases; this page does not cite one of them by name yet."
@@ -51,6 +52,14 @@ against one exact content of the repository. When `repro test` passes and its
 preconditions hold, such as a clean working tree, it issues one into your local
 certificate store; `--no-certify` turns that off. `repro certify` runs the tests
 a certificate requires, for when the certificate is what you want.
+
+A certificate is issued for a test, or a group of tests, that the project marks
+as certificate-producing; the project's `test` collection is one. Whichever way
+you name what to run, as a name, as `.#test#<name>` or as a path such as `.`,
+`repro test` certifies what that build actually runs. When something you named
+is covered by no such mark, the tests still run, and the run ends with
+`repro test: no certificate for '<what you named>'` and the reason, so a run
+never leaves out a certificate without saying why.
 
 A certificate names content, not a commit. A commit whose message you reword
 keeps its certificate, and a change to any file needs a new one. Certifying again
