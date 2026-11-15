@@ -108,6 +108,10 @@
 ##   revert pending, the boot-hold unit exited before any activator
 ##   asserted, each is down with its assertion failed, and the socket is not
 ##   listening; after the recovery they are back;
+## - **a held service's socket across a reboot** (§13 decision 155): a
+##   revert that commits holding a service started only by its socket holds
+##   the socket persistently too; after a reboot it is down and not
+##   listening, and the next passing apply clears both holds;
 ## - **a socket's listener after the switch restarts it** (§13 decisions 78
 ##   and 151): the switch stops the socket for its holds and starts it again,
 ##   the manager binds a new listener, and the record follows it, so the
@@ -138,9 +142,11 @@
 ## service ran, and the refused switch's revert, fail),
 ## ``record-without-waiting`` (the ``Type=simple`` unit's second
 ## apply is refused), ``recreated-bound-from-inactive-exit-only`` (the
-## restart's directory is refused), ``revert-held-left-running`` (the held
-## socket listens), ``activators-unheld`` (the held socket listens; at the
-## reboot the activators start), ``boot-hold-after-sysinit`` and
+## restart's directory is refused), ``revert-held-left-running`` (the
+## control unit the revert holds keeps running),
+## ``activators-unheld`` (the held service's socket has no
+## persistent hold and listens after the reboot; the switch's trigger holds,
+## §13 decision 151, cover the other activator cases), ``boot-hold-after-sysinit`` and
 ## ``boot-holds-unrecorded`` (at the reboot the activators start),
 ## ``restarted-listener-not-rerecorded`` (the socket's next apply is
 ## refused ``existing-listener``).
@@ -396,6 +402,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("test -e " & typeHold).exitCode != 0 and
          g.exec("test -e " & ctlHold).exitCode == 0,
          g.exec("ls -la /etc/systemd/system/service.d /etc/systemd/system/a9r-control.service.d 2>&1").stdout)
+    # §13 decision 155: a hold keeps a unit from starting, not from running.
+    # The control unit ran before this switch and the switch did not change
+    # it; the revert holds it, so it stops it.
+    let ctlState = g.exec("systemctl show -p ActiveState -p InactiveEnterTimestamp " &
+                          "a9r-control.service").stdout
+    step("and stopped the held units that were running (§13 decision 155)",
+         "ActiveState=active" notin ctlState, ctlState)
     discard g.run("rm -f /usr/lib/systemd/system/service.d/zz-a9r.conf; " &
                   "rmdir /usr/lib/systemd/system/service.d 2>/dev/null; systemctl daemon-reload")
     g.rebootGuest()
@@ -568,6 +581,48 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     r = g.applyProfile(repro, "w3", st("w3"))
     step("and back without the activators", r.exitCode == 0, r.stdout & r.stderr)
     discard g.run("rm -f /etc/a9r-st.trigger")
+    # §13 decision 155: a revert that holds a service holds its activator
+    # with it, by the persistent hold too, so the activator stays down
+    # across a reboot. The service is started only by its socket, the
+    # revert commits (its holds can be written), and the guest reboots.
+    let srp = proc (d: string): string =
+      control & unitResource("a9r-sr.service", "User=a9e\nStateDirectory=a9r-sr\n",
+                             binary, enabled = false, description = d) &
+        socketResource("a9r-sr.socket", "ListenStream=/run/a9r-sr\nService=a9r-sr.service\n")
+    const SrHold = "/etc/systemd/system/a9r-sr.socket.d/" & HoldName
+    r = g.applyProfile(repro, "r1", srp("r1"))
+    step("a floored service only its socket starts applies", r.exitCode == 0,
+         r.stdout & r.stderr)
+    discard g.run("rm -rf /var/lib/a9r-sr; mkdir /var/lib/a9r-sr; touch /var/lib/a9r-sr/theirs")
+    r = g.applyProfile(repro, "r2", srp("r2"))
+    let outr = r.stdout & r.stderr
+    step("a tree its service never made is refused, and the revert commits holding " &
+         "the service and its socket, persistently (§13 decision 155)",
+         r.exitCode != 0 and "keeps a9r-sr.service" in outr and "a9r-sr.socket" in outr and
+         g.exec("test -e " & SrHold).exitCode == 0 and
+         g.exec("test -e " & Pending).exitCode != 0 and
+         g.exec("systemctl is-active a9r-sr.socket").stdout.strip() != "active",
+         outr & g.exec("ls -la /etc/systemd/system/a9r-sr.socket.d 2>&1").stdout)
+    g.rebootGuest()
+    discard g.waitReasserted()
+    let srBoot = g.exec("systemctl show -p ActiveState -p AssertResult a9r-sr.socket; " &
+                        "ss -xlH | grep -c ' /run/a9r-sr '; true").stdout
+    record["heldSocketReboot"] = %srBoot
+    step("after a reboot the held service's socket is still down and not " &
+         "listening (§13 decision 155)",
+         "ActiveState=active" notin srBoot and srBoot.strip().endsWith("0") and
+         g.exec("stat -c %U /var/lib/a9r-sr").stdout.strip() == "root", srBoot)
+    discard g.run("rm -rf /var/lib/a9r-sr")
+    r = g.applyProfile(repro, "r3", srp("r3"))
+    step("once the tree is gone the next apply clears both holds and the socket listens",
+         r.exitCode == 0 and g.exec("test -e " & SrHold).exitCode != 0 and
+         g.exec("systemctl is-active a9r-sr.socket").stdout.strip() == "active",
+         r.stdout & r.stderr)
+    # Back to the floored unit the next case refuses, so its revert has a
+    # unit to hold.
+    discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st")
+    r = g.applyProfile(repro, "r4", st("r4"))
+    step("and back to the floored unit", r.exitCode == 0, r.stdout & r.stderr)
     # A9 review round 14, finding 1: a full file system under the drop-in
     # directory. The hold's write fails at the flush; the revert must see it,
     # keep the start holds and stay pending, and no empty hold may block the
