@@ -971,7 +971,18 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nStateDirectory=a13r10b\n" &
       "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
       trigWaiver & "}\n"
-    let trigAgitate = "rm -f /run/a13r10-stop; touch /run/a13r10-job; " &
+    # The agitator also samples, every half second until it stops, which
+    # holds are in place and what each trigger has done (A13 review round 9:
+    # what a switch's hold does to a trigger is recorded, not inferred).
+    let trigAgitate = "rm -f /run/a13r10-stop /run/a13r10-sample.log; " &
+      "date +%s > /run/a13r10-since; touch /run/a13r10-job; " &
+      "nohup bash -c 'while [ ! -e /run/a13r10-stop ]; do date +%s.%N; " &
+      "ls /run/systemd/system/a13r10.service.d /run/systemd/system/a13r10-p.service.d " &
+      "/run/systemd/system/a13r10.socket.d /run/systemd/system/a13r10.path.d " &
+      "2>/dev/null | tr \"\\n\" \" \"; echo; systemctl show -p ActiveState -p " &
+      "Result -p NAccepted -p NRefused a13r10.socket a13r10.path a13r10.service " &
+      "a13r10-p.service | tr \"\\n\" \" \"; echo; sleep 0.5; done' " &
+      ">/run/a13r10-sample.log 2>&1 & " &
       "nohup bash -c 'while [ ! -e /run/a13r10-stop ]; do timeout 1 bash -c " &
       "\"exec 3<>/dev/tcp/127.0.0.1/18720\" 2>/dev/null; touch /run/a13r10-job; " &
       "sleep 0.3; done' >/dev/null 2>&1 &"
@@ -1038,8 +1049,14 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "ActiveState=active" in t1State[0] and "ActiveState=active" in t1State[1] and
       t1State[2].strip().len > 0 and t1State[2].strip() != "0" and
       t1State[3].strip().len > 0 and t1State[3].strip() != "0"
+    let t1Diag = g.exec("echo '--- samples'; cat /run/a13r10-sample.log 2>&1 | " &
+      "tail -120; echo '--- triggers'; systemctl show -p ActiveState -p Result " &
+      "-p NAccepted -p NRefused -p NConnections a13r10.socket a13r10.path; " &
+      "echo '--- journal'; journalctl -b --no-pager -o short-monotonic --since " &
+      "@$(cat /run/a13r10-since) -u a13r10.socket -u a13r10.service -u " &
+      "a13r10.path -u a13r10-p.service 2>&1 | tail -150").stdout
     record["decision151Pass"] = %*{"exit": t1.exitCode, "state": t1State,
-      "ok": t1Ok}
+      "ok": t1Ok, "diagnostics": t1Diag}
     step("decision 151, add-on switch: a socket with connections arriving " &
          "and a path unit whose path exists, held through a passing switch, " &
          "are active after it and their services run",

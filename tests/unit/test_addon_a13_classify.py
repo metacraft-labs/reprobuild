@@ -76,6 +76,10 @@ CONV = "e2e_addon_to_reproos_conversion_keeps_state"
 TICK = "e2e_addon_tick_observes_a_fresh_cycle"
 HARDRESET = "e2e_addon_hard_reset_at_every_step"
 HELD = "e2e_addon_floor_held_until_checked"
+HELD_D151 = ("decision 151, add-on switch: an Accept=yes socket hit by a "
+             "burst of connections while the switch holds its "
+             "service is active after the switch, and an "
+             "instance runs on a connection")
 ENGINE = "/nix/store/00000000000000000000000000000000-reprobuild-test"
 
 ADOPT_EVERY_SWITCH_STEPS = [
@@ -184,6 +188,11 @@ def green(kind, base="debian-13"):
             rec["decision137"] = {
                 l: {"ran": True, "triggerActive": "active",
                     "refusedNotLoaded": False} for l in ("socket", "timer")}
+            rec["decision137Unheld"] = {
+                l: {"ran": True, "triggerActive": "active",
+                    "refusedNotLoaded": False, "serviceJudged": False}
+                for l in ("socket", "timer")}
+            rec["decision137Unheld"]["exit"] = 0
             up = {l: {"triggerActive": True, "ran": True,
                       "trigger": "ActiveState=active Result=success"}
                   for l in ("socket", "path")}
@@ -242,7 +251,12 @@ def green(kind, base="debian-13"):
                               "vaultwarden again")
     elif kind == "heldwin":
         rec = base_record(HELD, base, with_gate_mutation=False)
-        rec["steps"] = padded([], 17, "and the service runs after C")
+        rec["steps"] = padded([], 20, HELD_D151)
+        rec["decision151Seam"] = {
+            "during": "No such file or directory\nActiveState=inactive "
+                      "Result=success NAccepted=3 NRefused=0",
+            "after": "ActiveState=active Result=success",
+            "startedBefore": "6", "startedAfter": "7", "ok": True}
     else:
         raise KeyError(kind)
     rec["verdict"] = "green"
@@ -325,17 +339,19 @@ def red_record(kind, base="debian-13"):
                             "socket with connections arriving and a path unit "
                             "whose path exists, held through the apply, are "
                             "active after it and their services run")]
-    elif kind == "muttrigadopt":
-        rec = base_record(ADOPT, base, mutation="triggers-left-running")
-        rec["decision151Pass"] = {"exit": 0, "ok": False, "state": [
-            "ActiveState=failed Result=trigger-limit-hit ",
-            "ActiveState=failed Result=trigger-limit-hit ", "", ""]}
-        rec["steps"] = [ok("bootstrap"),
-                        red("decision 151, add-on switch: a socket with "
-                            "connections arriving and a path unit whose path "
-                            "exists, held through a passing switch, are "
-                            "active after it and their services run"),
-                        red("stopped at the first red step under the mutation")]
+    elif kind == "muttrigheld":
+        rec = base_record(HELD, base, mutation="triggers-left-running",
+                          with_gate_mutation=False)
+        rec["decision151Seam"] = {
+            "during": "No such file or directory\nActiveState=failed "
+                      "Result=trigger-limit-hit NAccepted=201 NRefused=0",
+            "after": "ActiveState=failed Result=trigger-limit-hit",
+            "startedBefore": "6", "startedAfter": "6", "ok": False}
+        rec["steps"] = [ok("and the service runs after C"),
+                        ok("generation D pauses after the drivers' writes, "
+                           "before step 6"),
+                        ok("generation D applies once checked"),
+                        red(HELD_D151)]
     elif kind == "mutrevertstarts":
         rec = base_record(ADOPT, base, mutation="revert-starts-unstartable-trigger")
         rec["decision160"] = {"exit": 1, "blocked": "active",
@@ -358,18 +374,24 @@ def red_record(kind, base="debian-13"):
     elif kind == "mutnoedges":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="trigger-edges-omitted")
-        rec["decision137"] = {
+        rec["decision137Unheld"] = {
             l: {"ran": False, "triggerActive": "inactive",
                 "applyRefused": True, "journalNotLoaded": True,
-                "refusedNotLoaded": True} for l in ("socket", "timer")}
+                "refusedNotLoaded": True, "serviceJudged": False}
+            for l in ("socket", "timer")}
+        rec["decision137Unheld"]["exit"] = 1
         rec["steps"] = [ok("bootstrap"),
-                        red("the reinstalled host realises the activities in full"),
-                        red("decision 137, socket first: a socket declared before "
-                            "the service it triggers is applied, active, and its "
-                            "service ran"),
-                        red("decision 137, timer first: a timer declared before "
-                            "the service it triggers is applied, active, and its "
-                            "service ran")]
+                        ok("decision 137, socket first: a socket declared "
+                           "before the service it triggers is applied, "
+                           "active, and its service ran"),
+                        red("decision 137, unheld socket first: a socket "
+                            "declared before the unconfined service it "
+                            "triggers, which no hold orders, is applied, "
+                            "active, and its service ran"),
+                        red("decision 137, unheld timer first: a timer "
+                            "declared before the unconfined service it "
+                            "triggers, which no hold orders, is applied, "
+                            "active, and its service ran")]
     elif kind == "mutholdwin":
         rec = base_record(HELD, base, mutation="start-holds-after-driver-writes",
                           with_gate_mutation=False)
@@ -423,7 +445,7 @@ GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutreceipt", "mutliveset", "mutcallsite", "muttplconv", "muttpladopt",
              "mutholdwin", "mutnoedges", "mutreissuetgt", "mutreissuesock",
-             "muttrigconv", "muttrigadopt", "mutrestartignored",
+             "muttrigconv", "muttrigheld", "mutrestartignored",
              "mutrevertstarts"]
 
 
@@ -566,6 +588,21 @@ class TheIssuesDoctoredInputs(unittest.TestCase):
         rec["steps"] = rec["steps"][:15] + rec["steps"][-1:]
         ok_, _, why = cls.classify("heldwin-debian-13", rec)
         self.assertFalse(ok_, why)
+
+    def test_a_held_window_record_without_generation_d(self):
+        # §13 decision 151: generation D's evidence is part of a green
+        # record: the socket down in the window, up after the switch.
+        for change in ("drop", "notOk", "activeDuring"):
+            with self.subTest(change=change):
+                rec = green("heldwin")
+                if change == "drop":
+                    del rec["decision151Seam"]
+                elif change == "notOk":
+                    rec["decision151Seam"]["ok"] = False
+                else:
+                    rec["decision151Seam"]["during"] = "ActiveState=active"
+                ok_, _, why = cls.classify("heldwin-debian-13", rec)
+                self.assertFalse(ok_, why)
 
 
 class TheRecordsBuild(unittest.TestCase):
@@ -780,6 +817,32 @@ class TheTriggerOrderEvidence(unittest.TestCase):
         ok_, _, why = cls.classify(cell, rec)
         self.assertFalse(ok_, "%s accepted: %s" % (cell, why))
 
+    def test_the_falsifier_reads_the_unheld_triggers(self):
+        # A13 review round 9: the decision-151 holds order the R7 triggers,
+        # so the falsifier's red must be the unheld (R11) triggers' -- red
+        # on R7 alone, or on an R11 service the live check judged (held,
+        # so not ordered by the edges alone), is not its red.
+        rec = red_record("mutnoedges")
+        rec["decision137"] = rec.pop("decision137Unheld")
+        self.assertRejected("mutnoedges-debian-13", rec)
+        for l in ("socket", "timer"):
+            with self.subTest(trigger=l):
+                rec = red_record("mutnoedges")
+                rec["decision137Unheld"][l]["serviceJudged"] = True
+                self.assertRejected("mutnoedges-debian-13", rec)
+                rec = red_record("mutnoedges")
+                del rec["decision137Unheld"][l]["serviceJudged"]
+                self.assertRejected("mutnoedges-debian-13", rec)
+                rec = green("conv")
+                rec["decision137Unheld"][l]["serviceJudged"] = True
+                self.assertRejected("conv-debian-13", rec)
+                rec = green("conv")
+                rec["decision137Unheld"][l]["ran"] = False
+                self.assertRejected("conv-debian-13", rec)
+        rec = green("conv")
+        del rec["decision137Unheld"]
+        self.assertRejected("conv-debian-13", rec)
+
     def test_a_green_record_whose_trigger_did_not_run(self):
         for l in ("socket", "timer"):
             with self.subTest(trigger=l):
@@ -801,21 +864,21 @@ class TheTriggerOrderEvidence(unittest.TestCase):
             for half in ("applyRefused", "journalNotLoaded"):
                 with self.subTest(trigger=l, missing=half):
                     rec = red_record("mutnoedges")
-                    rec["decision137"][l][half] = False
+                    rec["decision137Unheld"][l][half] = False
                     self.assertRejected("mutnoedges-debian-13", rec)
                     rec = red_record("mutnoedges")
-                    del rec["decision137"][l][half]
+                    del rec["decision137Unheld"][l][half]
                     self.assertRejected("mutnoedges-debian-13", rec)
 
     def test_a_falsifier_red_on_one_trigger_only(self):
         for l in ("socket", "timer"):
             with self.subTest(trigger=l):
                 rec = red_record("mutnoedges")
-                rec["decision137"][l]["refusedNotLoaded"] = False
+                rec["decision137Unheld"][l]["refusedNotLoaded"] = False
                 self.assertRejected("mutnoedges-debian-13", rec)
                 rec = red_record("mutnoedges")
-                rec["steps"] = [s for s in rec["steps"]
-                                if not s["step"].startswith("decision 137, %s" % l)]
+                rec["steps"] = [s for s in rec["steps"] if not
+                                s["step"].startswith("decision 137, unheld %s" % l)]
                 self.assertRejected("mutnoedges-debian-13", rec)
         rec = red_record("mutnoedges")
         rec["engineBuild"]["mutation"] = ""
@@ -884,12 +947,23 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutrestartignored")
         rec["decision160"]["blocked"] = "inactive"
         self.assertRejected("mutrestartignored-debian-13", rec)
-        rec = red_record("muttrigadopt")
-        rec["decision151Pass"]["state"][1] = "ActiveState=active Result=success "
-        self.assertRejected("muttrigadopt-debian-13", rec)
-        rec = red_record("muttrigadopt")
+        # §13 decision 151, add-on half: red because the burst failed the
+        # socket by its rate limit, after a switch that applied.
+        rec = red_record("muttrigheld")
+        rec["decision151Seam"]["after"] = "ActiveState=active Result=success"
+        self.assertRejected("muttrigheld-debian-13", rec)
+        rec = red_record("muttrigheld")
+        rec["steps"][2]["ok"] = False     # the switch itself failed
+        self.assertRejected("muttrigheld-debian-13", rec)
+        rec = red_record("muttrigheld")
+        rec["decision151Seam"]["during"] = "ActiveState=inactive Result=success"
+        self.assertRejected("muttrigheld-debian-13", rec)
+        rec = red_record("muttrigheld")
         rec["mutation"] = ""
-        self.assertRejected("muttrigadopt-debian-13", rec)
+        self.assertRejected("muttrigheld-debian-13", rec)
+        del rec["decision151Seam"]
+        rec["mutation"] = "triggers-left-running"
+        self.assertRejected("muttrigheld-debian-13", rec)
 
 
 class OwnEvidenceIsRecorded(unittest.TestCase):
