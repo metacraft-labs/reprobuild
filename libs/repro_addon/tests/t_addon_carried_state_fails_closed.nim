@@ -1954,7 +1954,10 @@ systemd.systemUnit {
     # drivers' reload it fires at the held one.
     let p = parseSystemProfile("""systemd.systemUnit {
   name = "s.socket"
-  content = "[Socket]\nListenStream=/run/s\nService=new.service\n"
+  content = "[Socket]
+ListenStream=/run/s
+Service=new.service
+"
 }
 """)
     var active = new seq[string]
@@ -2087,3 +2090,118 @@ systemd.systemUnit {
       host, proc (t: string): seq[string] = @["tpl@a.service"])
     check held.len == 1
     check held[0].unit == "tpl@.service" and held[0].because == "bad.service"
+
+
+suite "every requirer of a refused unit stays held (decision 153, A13 review round 10)":
+  test "decision 153: the generation's units that require a judged unit, judged or not, transitively":
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "grp.target"
+  content = "[Unit]
+Requires=gen.service
+"
+}
+systemd.systemUnit {
+  name = "bound.service"
+  content = "[Unit]
+BindsTo=grp.target
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "reset.service"
+  content = "[Unit]
+Requires=gen.service
+Requires=
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "wants.service"
+  content = "[Unit]
+Wants=gen.service
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "dropped.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemDropIn {
+  unit = "dropped.service"
+  name = "req"
+  content = "[Unit]
+Requires=gen.service
+"
+}
+""")
+    let reqs = profileRequirersOf(p, ["gen.service"])
+    check "grp.target" in reqs
+    check "bound.service" in reqs
+    check "dropped.service" in reqs
+    check "reset.service" notin reqs        # an empty Requires= resets
+    check "wants.service" notin reqs        # Wants= is not a requirement
+    check "gen.service" notin reqs
+    check reqs.find("grp.target") < reqs.find("bound.service")
+    # Read live after the reload, an unjudged requirer of a refused unit
+    # stays held with it (``requiringRefused`` over the passed units and
+    # these requirers).
+    let shows = {"grp.target": {"Requires": "gen.service"}.toTable,
+                 "bound.service": {"BindsTo": "grp.target"}.toTable}.toTable
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    var held: seq[string]
+    for (u, because) in requiringRefused(reqs, ["gen.service"], host):
+      held.add(u)
+    check "grp.target" in held and "bound.service" in held
+
+  test "decision 168: a generation that resolves only some of the recorded triggers is refused":
+    let dir = getTempDir() / ("t-r10-partial-" & $getCurrentProcessId())
+    removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let g = parseSystemProfile("""systemd.systemUnit {
+  name = "a.socket"
+  content = "[Socket]\nListenStream=/run/a\n"
+}
+systemd.systemUnit {
+  name = "b.socket"
+  content = "[Socket]\nListenStream=/run/b\n"
+}
+""")
+    var ea = TriggerRestartEntry(unit: "a.socket")
+    ea.rendered.add((unit: "a.socket", digest: renderedUnitDigest(g, "a.socket")))
+    var eb = TriggerRestartEntry(unit: "b.socket")
+    eb.rendered.add((unit: "b.socket", digest: renderedUnitDigest(g, "b.socket")))
+    writeTriggerRestartEntries(dir, [ea, eb])
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] = (false, "Job failed"))
+    let onlyA = parseSystemProfile("""systemd.systemUnit {
+  name = "a.socket"
+  content = "[Socket]\nListenStream=/run/a2\n"
+}
+systemd.systemUnit {
+  name = "b.socket"
+  content = "[Socket]\nListenStream=/run/b\n"
+}
+""")
+    let why = switchTriggerRecordRefusal(dir, onlyA, host)
+    check "b.socket" in why
+    check "a.socket" notin why.split("could not")[0]
+    check readTriggersToRestart(dir) == @["a.socket", "b.socket"]

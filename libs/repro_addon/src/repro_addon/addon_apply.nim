@@ -1663,10 +1663,17 @@ proc restartEntryResolvedBy*(e: TriggerRestartEntry; p: SystemProfile): bool =
 
 proc unresolvedRestartEntries*(stateDir: string; p: SystemProfile):
     seq[TriggerRestartEntry] =
-  ## The record's trigger entries ``p`` does not resolve.
+  ## The record's trigger entries ``p`` does not resolve. An apply goes
+  ## through only when this is empty: a generation that resolves some of
+  ## the recorded triggers but not all is refused (decision 168).
+  var resolvedAny = false
   for e in readTriggerRestartEntries(stateDir):
-    if e.dependantOf.len == 0 and not restartEntryResolvedBy(e, p):
-      result.add(e)
+    if e.dependantOf.len > 0: continue
+    if restartEntryResolvedBy(e, p): resolvedAny = true
+    else: result.add(e)
+  when mutated("partial-fix-accepted"):
+    # FALSIFYING MUTATION: resolving one recorded trigger is enough.
+    if resolvedAny: result.setLen(0)
 
 proc clearResolvedRestartEntries*(stateDir: string; p: SystemProfile):
     seq[string] =

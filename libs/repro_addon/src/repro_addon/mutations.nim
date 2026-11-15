@@ -631,12 +631,20 @@
 ##                                           refused unit is shown by name,
 ##                                           which systemd refuses (decision
 ##                                           153, round 10)
+## ``unjudged-requirers-released``         a unit the live check does not
+##                                           judge that requires a refused
+##                                           unit is not held (decision 153,
+##                                           round 10)
 ## ``switch-ignores-restart-record``       an add-on switch does not check
 ##                                           the record of triggers to
 ##                                           restart (decision 160, round 10)
 ## ``fixing-apply-refused``                no generation resolves an entry
 ##                                           of the record of triggers to
 ##                                           restart (round-10 owner decision)
+## ``partial-fix-accepted``                a generation that resolves one
+##                                           recorded trigger goes through
+##                                           with others still on record
+##                                           (decision 168)
 ## ``restart-record-after-held``           a revert drops a trigger from the
 ##                                           held record before it is on the
 ##                                           restart record (round 10)
@@ -1820,8 +1828,10 @@ const
                           "template-trigger-instances-unlisted",
                           "live-check-triggers-in-memory",
                           "template-requirer-shown-by-name",
+                          "unjudged-requirers-released",
                           "switch-ignores-restart-record",
                           "fixing-apply-refused",
+                          "partial-fix-accepted",
                           "restart-record-after-held",
                           "dependants-started",
                           # §13 decision 154: one falsifier per spelling.

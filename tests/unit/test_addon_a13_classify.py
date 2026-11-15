@@ -209,6 +209,10 @@ def green(kind, base="debian-13"):
             rec["decision153"] = {"exit": 1, "reported": True,
                                   "heldInEtc": True, "started": False,
                                   "judged": True}
+            rec["decision153Unjudged"] = {"reported": True, "heldInEtc": True,
+                                          "active": "inactive"}
+            rec["decision153Premise"] = {"startExit": 0, "requirerRan": True,
+                                         "heldSkipped": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -383,6 +387,19 @@ def red_record(kind, base="debian-13"):
                             "the trigger, and the unit that requires it, on "
                             "record"),
                         red("stopped at the first red step under the mutation")]
+    elif kind == "mutunjudgedreq":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="unjudged-requirers-released")
+        rec["decision153"] = {"exit": 1, "reported": True, "heldInEtc": True,
+                              "started": False, "judged": True}
+        rec["decision153Unjudged"] = {"reported": False, "heldInEtc": False,
+                                      "active": "active"}
+        rec["decision153Premise"] = {"startExit": 0, "requirerRan": True,
+                                     "heldSkipped": True}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 153: a unit the live check does not judge "
+                            "that requires a refused unit stays held with it, "
+                            "not active, and the apply says why")]
     elif kind == "mutdependants":
         rec = base_record(ADOPT, base, mutation="dependants-started")
         rec["decision160Revert"] = {"exit": 1, "blocked": "active",
@@ -410,7 +427,8 @@ def red_record(kind, base="debian-13"):
                         red("stopped at the first red step under the mutation")]
     elif kind == "mutrestartignored":
         rec = base_record(ADOPT, base, mutation="trigger-restart-failure-ignored")
-        rec["decision160Revert"] = {"exit": 0, "blocked": "active", "ok": False}
+        rec["decision160Revert"] = {"exit": 0, "blocked": "active",
+                                    "pending": "", "ok": False}
         rec["steps"] = [ok("bootstrap"),
                         red("decision 160: a trigger that cannot start again "
                             "fails the switch, and its revert commits with "
@@ -492,7 +510,7 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutreceipt", "mutliveset", "mutcallsite", "muttplconv", "muttpladopt",
              "mutholdwin", "mutnoedges", "mutreissuetgt", "mutreissuesock",
              "muttrigconv", "muttrigheld", "mutrestartignored",
-             "mutdependants", "mutswitchrecord",
+             "mutdependants", "mutswitchrecord", "mutunjudgedreq",
              "mutrevertstarts"]
 
 
@@ -1000,6 +1018,47 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutrestartignored")
         rec["decision160Revert"]["blocked"] = "inactive"
         self.assertRejected("mutrestartignored-debian-13", rec)
+        # A13 review round 10: the second shape of trigger-restart-failure-
+        # ignored -- the switch goes on and fails on the dependant whose
+        # dependency job starts the socket the blocker holds -- and a near
+        # miss, another failure with the record empty.
+        rec = red_record("mutrestartignored")
+        rec["decision160Revert"].update({"exit": 1, "revertFailed": True,
+            "dependantJobFailed": True, "socketBindFailed": True})
+        ok_, _, why = cls.classify("mutrestartignored-debian-13", rec)
+        self.assertTrue(ok_, why)
+        for field in ("dependantJobFailed", "socketBindFailed"):
+            rec = red_record("mutrestartignored")
+            rec["decision160Revert"].update({"exit": 1, "revertFailed": True,
+                "dependantJobFailed": True, "socketBindFailed": True})
+            rec["decision160Revert"][field] = False
+            self.assertRejected("mutrestartignored-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        rec["decision160Revert"].update({"exit": 1, "pending": "",
+            "dependantJobFailed": False, "socketBindFailed": False})
+        self.assertRejected("mutrestartignored-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        rec["decision160Revert"]["pending"] = "a13r10.socket\trendered=x"
+        self.assertRejected("mutrestartignored-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        del rec["decision160Revert"]["pending"]
+        self.assertRejected("mutrestartignored-debian-13", rec)
+        # §13 decision 153 extended: red because the unjudged requirer was
+        # released, with the judged one held and the premise measured.
+        rec = red_record("mutunjudgedreq")
+        rec["decision153Unjudged"] = {"reported": True, "heldInEtc": True,
+                                      "active": "inactive"}
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
+        rec = red_record("mutunjudgedreq")
+        rec["decision153"]["heldInEtc"] = False
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
+        rec = red_record("mutunjudgedreq")
+        rec["decision153Premise"]["requirerRan"] = False
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
+        for key in ("decision153Unjudged", "decision153Premise"):
+            rec = green("conv")
+            del rec[key]
+            self.assertRejected("conv-debian-13", rec)
         # The owner decision "leave dependants out": red because the revert
         # failed on the dependant it started, not on the trigger.
         rec = red_record("mutdependants")
