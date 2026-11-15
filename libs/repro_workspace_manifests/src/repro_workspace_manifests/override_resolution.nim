@@ -24,27 +24,27 @@
 ##
 ## - **Content identity** (``computeOverrideContentIdentity``):
 ##   deterministic hex digest that an action fingerprint can fold in
-##   alongside the upstream identity. The digest covers the override
-##   entry's salient fields (package, absolute local_path, state) plus
-##   the local-path root's last-modification time. This is the
-##   intentionally-cheap scheme:
+##   alongside the upstream identity. Despite the name it NAMES the
+##   override — the entry's package, state and absolute, normalized
+##   ``local_path`` — and says nothing about the bytes under that path.
+##   The absolute path differs from any upstream identity, so the digest
+##   differs from the upstream's fingerprint even before the operator
+##   modifies a file: the "no silent fallback" property
+##   ``Workspace-And-Develop-Mode.md`` §"Remote Execution Interaction"
+##   calls for ("local override state must become part of action
+##   identity where relevant").
 ##
-##     - The absolute path differs from any upstream identity, so the
-##       digest is guaranteed to differ from the upstream's fingerprint
-##       even when the operator has not yet modified any source file.
-##       That is the "no silent fallback" property the spec calls for.
-##     - The mtime catches "the operator edited the override" without
-##       walking the directory tree. Heavier per-file content hashing
-##       can be layered on top later without changing the digest's
-##       framing (the schema string carries a version tag so the cache
-##       key changes when we upgrade the scheme).
-##
-##   The spec (``Workspace-And-Develop-Mode.md`` §"Remote Execution
-##   Interaction") does NOT pin a specific scheme — it requires that
-##   "local override state must become part of action identity where
-##   relevant". This proc satisfies that requirement at the resolver
-##   boundary; a follow-up can swap in a directory-content hash without
-##   changing the resolver's signature.
+##   The override's source CONTENT reaches a cache key elsewhere
+##   (Cross-Repo-Source-Consumption §4.3): an action whose reads are
+##   observed is keyed on the files it read under the override (rule 1),
+##   and an action whose reads nothing observes additionally folds the
+##   content digest of the producer directories it is handed (rule 2,
+##   ``repro_cli_support/producer_channel_content``). Version 1 of this
+##   identity also folded the override root's mtime and was relied on as
+##   rule 2's content signal; an edit below the root leaves that mtime
+##   alone, so report-keyed consumers were served stale results. v2
+##   drops it rather than leave a value that looks like a content check
+##   and is not one.
 ##
 ## - **Fingerprint folder** (``foldOverridesIntoFingerprint``):
 ##   convenience that takes an existing weak action fingerprint plus
@@ -70,7 +70,7 @@
 ## See ``Workspace-Management.milestones.org`` §M21 for the milestone
 ## entry; the deviation note there records the deferral.
 
-import std/[options, os, strutils, times]
+import std/[options, os, strutils]
 
 import repro_hash
 
@@ -167,11 +167,11 @@ type
       diagnostic*: OverrideResolutionDiagnostic
 
 const
-  overrideContentIdentityVersion* = "reprobuild.workspace.override-content-identity.v1"
+  overrideContentIdentityVersion* = "reprobuild.workspace.override-content-identity.v2"
     ## Version tag prepended to the content-identity payload. Bumping
     ## this string invalidates every override-affected action's cache
-    ## key on purpose, so a future swap (e.g. to a directory-content
-    ## hash) is opt-in and visible.
+    ## key on purpose. v2: the override root's mtime is no longer part
+    ## of the payload (see the module note).
 
   fingerprintFoldVersion* = "reprobuild.workspace.action-override-fold.v1"
     ## Version tag prepended to the fingerprint-fold payload. Same
@@ -213,31 +213,15 @@ proc writeStringRecord(buf: var seq[byte]; value: string) =
   for ch in value:
     buf.add(byte(ord(ch)))
 
-proc localPathMtimeIso(localPath: string): string =
-  ## Return the override path's last-modification time in ISO-8601
-  ## UTC form (precision: seconds) when the path exists, or an empty
-  ## string when the path is missing. The mtime captures "the operator
-  ## edited the override" cheaply; the empty-string fallback keeps the
-  ## resolver usable on overrides that have not been cloned yet (the
-  ## absolute path alone is then the entire identity).
-  try:
-    if not fileExists(localPath) and not dirExists(localPath):
-      return ""
-    let info = getFileInfo(localPath)
-    result = info.lastWriteTime.utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
-  except OSError:
-    result = ""
-
 # ---------------------------------------------------------------------------
 # Content identity
 # ---------------------------------------------------------------------------
 
 proc computeOverrideContentIdentity*(entry: DevelopOverrideEntry;
                                      workspaceRoot: string): string =
-  ## Deterministic hex digest of the override's identity-bearing
-  ## fields. Folded into action fingerprints so the cache key for an
-  ## override-affected action differs from the same action's
-  ## upstream-bound cache key.
+  ## Deterministic hex digest naming the override. Folded into action
+  ## fingerprints so the cache key for an override-affected action
+  ## differs from the same action's upstream-bound cache key.
   ##
   ## Payload (length-prefixed, in order):
   ##
@@ -245,20 +229,24 @@ proc computeOverrideContentIdentity*(entry: DevelopOverrideEntry;
   ##   2. ``package`` name
   ##   3. ``state`` (editable / pinned / detached)
   ##   4. absolute, normalized ``local_path``
-  ##   5. ISO-8601 mtime of the local path's root (empty when missing)
+  ##
+  ## It does NOT change when a file under ``local_path`` changes: the
+  ## source content reaches cache keys through observed reads (rule 1 of
+  ## Cross-Repo-Source-Consumption §4.3) or the producer channel content
+  ## fold (rule 2), never through this value. Do not reintroduce a
+  ## filesystem timestamp here as a cheap content signal: a root mtime
+  ## does not move on an edit below the root (see the module note).
   ##
   ## ``created_at`` and ``provenance`` are intentionally NOT folded in:
-  ## they describe how the override was created, not what its current
-  ## source content is. Two operators who develop-mode the same
-  ## package at different times should get the same fingerprint
-  ## contribution.
+  ## they describe how the override was created, not what it points at.
+  ## Two operators who develop-mode the same package at different times
+  ## should get the same fingerprint contribution.
   let absPath = resolveOverrideAbsolutePath(workspaceRoot, entry)
   var payload = newSeqOfCap[byte](128 + absPath.len)
   payload.writeStringRecord(overrideContentIdentityVersion)
   payload.writeStringRecord(entry.package)
   payload.writeStringRecord(entry.state)
   payload.writeStringRecord(absPath)
-  payload.writeStringRecord(localPathMtimeIso(absPath))
   let digest = blake3DomainDigest(payload, hdActionFingerprint)
   result = toHex(digest.bytes)
 
