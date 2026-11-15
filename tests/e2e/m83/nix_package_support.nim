@@ -5,7 +5,8 @@
 ##
 ## Every process is spawned from an argv sequence, never through a shell.
 
-import std/[os, osproc, sets, streams, strtabs, strutils]
+import std/[algorithm, json, os, osproc, sequtils, sets, streams, strtabs,
+  strutils]
 
 const ProjectRoot* = currentSourcePath().parentDir().parentDir().parentDir()
   .parentDir()
@@ -151,3 +152,96 @@ proc wrapperDefault*(wrapper, name: string): string =
     if line.startsWith(prefix) and line.endsWith("'}"):
       return line[prefix.len ..< line.len - 2]
   doAssert false, wrapper & " sets no default for " & name
+
+# ---------------------------------------------------------------------------
+# Which sources a profile compile read
+# ---------------------------------------------------------------------------
+
+const
+  ReproLibMarker = "/libs/repro_"
+    ## Reprobuild's own libraries live at `<source root>/libs/repro_*/src/`.
+  ProfileLibMarker = "/libs/repro_profile/src/"
+    ## Every profile imports `repro_profile`, so every compile reads modules
+    ## from `<source root>/libs/repro_profile/src/`.
+
+type ProfileCompileSources* = object
+  ## Which reprobuild sources a profile compile read, from nim's own records
+  ## in the compile's nimcache.
+  ##
+  ## WHY NOT `currentDir`. `profile-build.json`'s `currentDir` is the
+  ## directory nim ran in. That used to be the resolved source root, and the
+  ## gates compared it with the root they expected. Since 478890f088
+  ## ("fix(profile-compile): run nim in the compile's nimcache") the compile
+  ## runs in its private nimcache, so the working directory names no source
+  ## root at all; the gates now check that it IS the nimcache.
+  ##
+  ## The root is read instead from the module paths the generated C embeds.
+  ## A profile compile is a debug build (stack traces on), so every
+  ## `<nimcache>/*.nim.c` names the absolute path of the Nim module it was
+  ## generated from in its frame records (`nimfr_("name", "/abs/x.nim")`,
+  ## `nimlf_(line, "/abs/x.nim")`), and `--forceBuild:on` regenerates all of
+  ## them for every compile. The vendored `-I` flags that `config.nims`
+  ## anchors on its own directory are not usable here: the Nix package
+  ## compiles with `REPROBUILD_USE_SYSTEM_HASH_LIBS=1`, which emits none.
+  ##
+  ## The paths are read as they appear between the quotes of a C string
+  ## literal. Nim escapes `"`, `\` and non-ASCII bytes there, so a source
+  ## root containing one of them reads as a different path and the
+  ## comparison fails rather than passes.
+  nimcacheDir*: string
+    ## The directory holding `profile-build.json`, symlinks resolved.
+  currentDir*: string
+    ## nim's working directory, symlinks resolved.
+  reproLibModules*: seq[string]
+    ## Every absolute `.../libs/repro_*/....nim` path embedded in the
+    ## generated C: every module of reprobuild's own libraries the compile
+    ## read. Sorted and de-duplicated.
+  profileModules*: seq[string]
+    ## The `.../libs/repro_profile/src/....nim` subset of `reproLibModules`.
+
+proc embeddedReproLibModules(cText: string): seq[string] =
+  ## The C string literals in `cText` that name a module of one of
+  ## reprobuild's own libraries.
+  var at = cText.find(ReproLibMarker)
+  while at >= 0:
+    let open = cText.rfind('"', last = at)
+    let close = cText.find('"', at)
+    if open >= 0 and close > at:
+      let literal = cText[open + 1 ..< close]
+      if literal.endsWith(".nim") and '\n' notin literal:
+        result.add literal
+    at = cText.find(ReproLibMarker, max(at + 1, close))
+
+proc profileCompileSources*(nimcacheDir: string): ProfileCompileSources =
+  ## Read `nimcacheDir`, the directory of a `profile-build.json`.
+  result.nimcacheDir = expandFilename(nimcacheDir)
+  let doc = parseFile(nimcacheDir / "profile-build.json")
+  let cwd = doc["currentDir"].getStr()
+  result.currentDir =
+    if dirExists(cwd): expandFilename(cwd) else: cwd
+  var found = initHashSet[string]()
+  for kind, path in walkDir(nimcacheDir):
+    if kind == pcFile and path.endsWith(".nim.c"):
+      for module in embeddedReproLibModules(readFile(path)):
+        found.incl module
+  for module in found:
+    result.reproLibModules.add module
+  result.reproLibModules.sort()
+  result.profileModules =
+    result.reproLibModules.filterIt(ProfileLibMarker in it)
+
+proc ranInItsNimcache*(src: ProfileCompileSources): bool =
+  ## The compile ran in its own nimcache (478890f088), not a source root.
+  src.nimcacheDir.len > 0 and src.currentDir == src.nimcacheDir
+
+proc compiledAgainst*(src: ProfileCompileSources; root: string): bool =
+  ## The compile read reprobuild's libraries from `root`, and from nowhere
+  ## else: at least one `repro_profile` module lies under
+  ## `<root>/libs/repro_profile/src/` (so the check cannot pass on an empty
+  ## record), and every module of every `repro_*` library lies under
+  ## `<root>/libs/`.
+  let profilePrefix = root & ProfileLibMarker
+  let libsPrefix = root & "/libs/"
+  src.profileModules.len > 0 and
+    src.profileModules.allIt(it.startsWith(profilePrefix)) and
+    src.reproLibModules.allIt(it.startsWith(libsPrefix))
