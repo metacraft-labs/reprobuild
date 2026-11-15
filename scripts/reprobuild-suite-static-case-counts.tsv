@@ -2246,6 +2246,7 @@ tests/integration/t_remove_gcs_only_unreferenced_checkouts_and_guards_dirty.nim	
 tests/integration/t_rename_alternates_keeps_old_bare_reachable.nim	nim	1
 tests/integration/t_rename_force_pushes_record_is_rekeyed.nim	nim	2
 tests/integration/t_rename_fork_at_previous_path_is_refused.nim	nim	1
+tests/integration/t_rename_identity_check_ignores_common_blobs.nim	nim	4
 tests/integration/t_rename_old_reader_parses_fragment.nim	nim	9
 tests/integration/t_rename_orphan_is_reported.nim	nim	2
 tests/integration/t_rename_refusals.nim	nim	6
@@ -2789,7 +2790,7 @@ tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim	nim	3
 tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_fragment_writer_emits_only_repo_v2.nim	nim	5
-tests/unit/t_repo_relocation_move_ordering.nim	nim	10
+tests/unit/t_repo_relocation_move_ordering.nim	nim	12
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
 tests/unit/t_role_falls_back_toward_mainline.nim	nim	3
 tests/unit/t_role_validation_refused_at_manifest_load.nim	nim	7

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2828,
+    "nimTestBinaries": 2829,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 767,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2875
+    "testEntries": 2876
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1621,7 +1621,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1560,
+      "integration": 1561,
       "platform/destructive": 181,
       "pure unit": 767,
       "unclassified": 344
@@ -1838,9 +1838,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2828,
+    "nimTestBinaryCount": 2829,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2875
+    "testEntryCount": 2876
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -49113,6 +49113,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_rename_identity_check_ignores_common_blobs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rename_identity_check_ignores_common_blobs.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rename_old_reader_parses_fragment",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -58818,7 +58835,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_repo_relocation_move_ordering.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
