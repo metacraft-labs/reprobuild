@@ -25,7 +25,9 @@ import std/[os, strutils]
 when defined(posix):
   import std/posix
 else:
-  import std/osproc
+  # `readLine(Stream, var string)` on `Process.outputStream` lives in
+  # std/streams, which std/osproc does not re-export.
+  import std/[osproc, streams]
 import ./products
 
 type
