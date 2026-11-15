@@ -578,31 +578,38 @@ proc applyLeaseRenew*(request: DaemonLeaseRenewRequest;
     result.reason = "no state store at " & root
     return
   let store = openStateStore(root)
-  if not hasStateRecord(store, request.address):
-    result.ok = true
-    result.hadRecord = false
-    result.reason = "no record for address " & request.address
-    return
-  var rec =
-    try:
-      readStateRecord(store, request.address)
-    except ForeignStateRecordError as err:
-      # A NEWER repro owns this record. Renewing would mean rewriting it in
-      # OUR format — downgrading it and dropping whatever the newer version
-      # added — so refuse and say why; the newer repro's own renew path (or
-      # daemon) is the one that may touch it.
-      result.ok = false
-      result.reason = "refusing to renew: the record for " & request.address &
-        " was written by a newer repro (state-record version " &
-        $err.version & "); renew it with that version"
+  # The read, the renewal and the write are ONE step under the record lock
+  # (Ephemeral-State-Leases.md §4.6): two renews of one record — this handler
+  # and a consuming reconcile, or two handlers in two daemons of one user —
+  # that each read and renamed would otherwise drop whichever holder the other
+  # added, a `keep` holder included.
+  var rec: ResourceStateRecord
+  withStateRecordLock(store, request.address):
+    if not hasStateRecord(store, request.address):
+      result.ok = true
+      result.hadRecord = false
+      result.reason = "no record for address " & request.address
       return
-    except CatchableError as err:
-      result.ok = false
-      result.reason = "failed to read record: " & err.msg
-      return
-  renewHolder(rec, request.consumerId,
-              policyFromTtlSeconds(request.ttlSeconds), now)
-  writeStateRecord(store, rec)
+    rec =
+      try:
+        readStateRecord(store, request.address)
+      except ForeignStateRecordError as err:
+        # A NEWER repro owns this record. Renewing would mean rewriting it in
+        # OUR format — downgrading it and dropping whatever the newer version
+        # added — so refuse and say why; the newer repro's own renew path (or
+        # daemon) is the one that may touch it.
+        result.ok = false
+        result.reason = "refusing to renew: the record for " & request.address &
+          " was written by a newer repro (state-record version " &
+          $err.version & "); renew it with that version"
+        return
+      except CatchableError as err:
+        result.ok = false
+        result.reason = "failed to read record: " & err.msg
+        return
+    renewHolder(rec, request.consumerId,
+                policyFromTtlSeconds(request.ttlSeconds), now)
+    writeStateRecord(store, rec)
   result.ok = true
   result.hadRecord = true
   result.reason = "renewed"
@@ -707,6 +714,7 @@ proc leaseReapFindings*(report: ReapReport):
       case f.kind
       of rfkUnreapable: "cannot reap"
       of rfkBlocked: "holding"
+      of rfkInUse: "in use, not reaping"
     result.add((
       signature: "finding\x00" & f.address & "\x00" & f.typeId & "\x00" &
         $f.kind,

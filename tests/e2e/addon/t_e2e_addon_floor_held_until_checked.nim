@@ -23,6 +23,17 @@
 ## Falsifying build: ``REPRO_ADDON_MUTATION=floor-start-unheld`` (no hold):
 ## the service runs in the window -- red.
 ##
+## Generation D (§13 decision 151): the triggers of held units are stopped
+## for the hold. D changes the template again; the gate pauses D's switch at
+## ``step-4``, with every hold in place, and fires a burst of 300
+## connections at the unchanged ``Accept=yes`` socket (systemd's trigger
+## rate limit for such a socket is 200 in 2 s, systemd.socket(5)), then
+## requires the socket active after the switch and an instance to run on a
+## connection. Falsifying build: ``REPRO_ADDON_MUTATION=triggers-left-running``
+## (the socket left running under the hold): each connection starts an
+## instance the hold refuses, the burst trips the rate limit, and the socket
+## stays failed (``trigger-limit-hit``) after the switch -- red.
+##
 ## Generation C (§13 decision 136): the holds go in before the privileged
 ## set, not at step 6. C changes the template again; the gate pauses C's
 ## switch at ``step-4`` -- after the drivers wrote the template and their
@@ -149,6 +160,36 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                        $Port & "' 2>/dev/null; sleep 3; true")
         step("and the service runs after C", g.started() != inWindowC,
              g.started())
+        # Generation D: a burst at the socket while the switch holds its
+        # service (§13 decision 151).
+        let beforeD = g.started()
+        let pd = g.startSwitchPausedAt(repro, "d", profile(binary, "A9 hold D"),
+                                       "step-4")
+        step("generation D pauses after the drivers' writes, before step 6",
+             pd.exitCode == 0, pd.stdout & pd.stderr)
+        if pd.exitCode == 0:
+          let during = g.exec("for i in $(seq 300); do timeout 2 bash -c " &
+            "'exec 3<>/dev/tcp/127.0.0.1/" & $Port & "' 2>/dev/null & done; " &
+            "wait; sleep 2; ls /run/systemd/system/a9h.socket.d 2>&1 | tr '\\n' ' '; " &
+            "echo; systemctl show -p ActiveState -p Result -p NAccepted " &
+            "-p NRefused a9h.socket | tr '\\n' ' '").stdout.strip()
+          let resD = g.resumeSwitch()
+          step("generation D applies once checked", resD.exitCode == 0,
+               resD.stdout & resD.stderr)
+          let afterD = g.exec("systemctl show -p ActiveState -p Result " &
+            "a9h.socket | tr '\\n' ' '").stdout.strip()
+          discard g.exec("timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+                         $Port & "' 2>/dev/null; sleep 3; true")
+          let ranD = g.started()
+          let okD = "ActiveState=active" in afterD and
+            "trigger-limit-hit" notin afterD and ranD != beforeD
+          record["decision151Seam"] = %*{"during": during, "after": afterD,
+            "startedBefore": beforeD, "startedAfter": ranD, "ok": okD}
+          step("decision 151, add-on switch: an Accept=yes socket hit by a " &
+               "burst of connections while the switch holds its service is " &
+               "active after the switch, and an instance runs on a connection",
+               okD, "during: " & during & "\nafter: " & afterD & "\nstarted " &
+               beforeD & " -> " & ranD)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

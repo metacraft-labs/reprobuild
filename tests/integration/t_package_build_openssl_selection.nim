@@ -27,6 +27,19 @@ when defined(posix):
       options = {poStdErrToStdOut})
     (output, code)
 
+  proc requirePrefix(repoRoot, name: string;
+                     vars: seq[(string, string)]): Run =
+    ## Sources the real helper, then calls its `require_package_prefix NAME`.
+    let helper = repoRoot / "scripts" / "lib" / "package_build_openssl.sh"
+    var args = @["-i", "PATH=" & getEnv("PATH")]
+    for (k, v) in vars: args.add(k & "=" & v)
+    args.add(["bash", "-c",
+      "set -euo pipefail; source \"$1\"; require_package_prefix \"$2\"; " &
+      "echo accepted", "select", helper, name])
+    let (output, code) = execCmdEx(quoteShellCommand(@["env"] & args),
+      options = {poStdErrToStdOut})
+    (output, code)
+
   suite "package-build OpenSSL selection":
     let repoRoot = getCurrentDir()
     let nixLib = "/nix/store/00000000000000000000000000000000-openssl-3.0/lib"
@@ -78,3 +91,26 @@ when defined(posix):
         let r = selectOpenssl(repoRoot, @[])
         check r.exitCode == 0
         check r.output.contains("package_build=0")
+
+    test "a package build refuses a runtime prefix that is unset":
+      withTmp:
+        let r = requirePrefix(repoRoot, "CLINGO_PREFIX",
+          @[("NIX_BUILD_TOP", tmp), ("OPENSSL_LIBDIR", libDir)])
+        check r.exitCode == 2
+        check r.output.contains("CLINGO_PREFIX is unset")
+
+    test "a package build refuses a runtime prefix that is not a directory":
+      withTmp:
+        let r = requirePrefix(repoRoot, "ZSTD_PREFIX",
+          @[("NIX_BUILD_TOP", tmp), ("OPENSSL_LIBDIR", libDir),
+            ("ZSTD_PREFIX", tmp / "missing")])
+        check r.exitCode == 2
+        check r.output.contains("is not a directory")
+
+    test "a package build accepts a runtime prefix that is a directory":
+      withTmp:
+        let r = requirePrefix(repoRoot, "ZSTD_PREFIX",
+          @[("NIX_BUILD_TOP", tmp), ("OPENSSL_LIBDIR", libDir),
+            ("ZSTD_PREFIX", tmp)])
+        check r.exitCode == 0
+        check r.output.contains("accepted")

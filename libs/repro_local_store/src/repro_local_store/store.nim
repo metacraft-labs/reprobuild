@@ -747,6 +747,16 @@ proc ensureUsageColumns(db: Database) =
           raise
   db.exec("CREATE TABLE IF NOT EXISTS cas_use (" &
     "digest BLOB PRIMARY KEY, last_used_at INTEGER NOT NULL)")
+  # The install-provenance ledger (`adapter_installs`, see
+  # `recordAdapterInstall`) is the same kind of addition: an older build
+  # never reads it, and a store without it answers "nothing recorded",
+  # which every reader treats as "not installed by Reprobuild".
+  db.exec("CREATE TABLE IF NOT EXISTS adapter_installs (" &
+    "adapter TEXT NOT NULL, install_root TEXT NOT NULL, " &
+    "name TEXT NOT NULL, version TEXT NOT NULL, " &
+    "identity TEXT NOT NULL, detail TEXT NOT NULL, " &
+    "recorded_at INTEGER NOT NULL, " &
+    "PRIMARY KEY (adapter, install_root, name, version))")
 
 # ---------------------------------------------------------------------------
 # Store lifecycle
@@ -949,6 +959,84 @@ proc forgetCasUse*(s: Store; digest: PrefixIdBytes) =
   var d = s.db.prepare("DELETE FROM cas_use WHERE digest = ?")
   defer: d.finalize()
   d.bindBlob(1, digest)
+  discard d.step()
+
+# ---------------------------------------------------------------------------
+# Install-provenance ledger
+# ---------------------------------------------------------------------------
+#
+# Some adapters bind to a package manager's install tree outside the store
+# (Scoop's `<scoopRoot>/apps/<app>/<version>`). Whether Reprobuild may later
+# delete such an install depends on whether Reprobuild created it or only
+# found it there, and nothing in that tree records the difference. The
+# adapter records each install it performs here, keyed by
+# `(adapter, install_root, name, version)`, together with an `identity` of
+# the directory it created (device + file index) so that a later
+# uninstall-and-reinstall by someone else does not inherit the record.
+# A missing row means "not installed by Reprobuild": an index rebuilt after
+# corruption therefore forgets these records, which only ever makes removal
+# more conservative.
+
+proc recordAdapterInstall*(s: Store; adapter, installRoot, name, version,
+                           identity, detail: string; now: int64 = 0) =
+  ## Record (or replace) the install of `name@version` under `installRoot`
+  ## that `adapter` just performed. `detail` is free-form context for an
+  ## operator reading the index (e.g. the Scoop bucket).
+  var u = s.db.prepare(
+    "INSERT OR REPLACE INTO adapter_installs(adapter, install_root, name, " &
+    "version, identity, detail, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+  defer: u.finalize()
+  u.bindText(1, adapter)
+  u.bindText(2, installRoot)
+  u.bindText(3, name)
+  u.bindText(4, version)
+  u.bindText(5, identity)
+  u.bindText(6, detail)
+  u.bindInt(7, nowOr(now))
+  if u.step() != SqliteDone:
+    raise newException(IOError, "cannot record the " & adapter &
+      " install of " & name & "@" & version & " in " & s.indexPath)
+
+proc adapterInstallIdentity*(s: Store; adapter, installRoot, name,
+                             version: string): string =
+  ## The recorded directory identity of `name@version`, or "" when no
+  ## install of it is recorded.
+  var q = s.db.prepare(
+    "SELECT identity FROM adapter_installs WHERE adapter = ? AND " &
+    "install_root = ? AND name = ? AND version = ?")
+  defer: q.finalize()
+  q.bindText(1, adapter)
+  q.bindText(2, installRoot)
+  q.bindText(3, name)
+  q.bindText(4, version)
+  if q.step() == SqliteRow:
+    return q.columnText(0)
+  ""
+
+proc adapterInstallVersions*(s: Store; adapter, installRoot,
+                             name: string): seq[string] =
+  ## Every recorded version of `name` under `installRoot`, sorted.
+  var q = s.db.prepare(
+    "SELECT version FROM adapter_installs WHERE adapter = ? AND " &
+    "install_root = ? AND name = ? ORDER BY version")
+  defer: q.finalize()
+  q.bindText(1, adapter)
+  q.bindText(2, installRoot)
+  q.bindText(3, name)
+  while q.step() == SqliteRow:
+    result.add(q.columnText(0))
+
+proc forgetAdapterInstall*(s: Store; adapter, installRoot, name,
+                           version: string) =
+  ## Drop the record of `name@version` once the install is gone.
+  var d = s.db.prepare(
+    "DELETE FROM adapter_installs WHERE adapter = ? AND install_root = ? " &
+    "AND name = ? AND version = ?")
+  defer: d.finalize()
+  d.bindText(1, adapter)
+  d.bindText(2, installRoot)
+  d.bindText(3, name)
+  d.bindText(4, version)
   discard d.step()
 
 proc uniqueStoreToken(s: var Store): string =

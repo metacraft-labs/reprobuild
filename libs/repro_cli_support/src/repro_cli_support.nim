@@ -32,6 +32,9 @@ import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
+# The content identity of a producer's channel directories, folded into the
+# keys of consumer actions whose reads nothing observes (§4.3 rule 2).
+import repro_cli_support/producer_channel_content
 # repro's own command line: the generated parser, help and completion.
 import repro_cli_support/cli_program
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
@@ -4347,79 +4350,36 @@ const DefaultBuildCollectionName* = "default"
   ## equivalent, while a literal `repro build build` would have read
   ## like an authoring mistake.
 
-proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
-                            identity: PathOnlyBuildIdentity;
-                            projectRoot: string;
-                            selectedActionIds: openArray[string];
-                            publishableOnly = false):
-    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
-  ## Named-Targets M2: accept multiple selectors and union their
-  ## dependency closures in a single engine pass. Each selector may be
-  ## an action id, an explicit ``target "name", handle`` label, an
-  ## implicit target name carried by the M1 export table, or a
-  ## qualified ``<package>:<name>`` form. When a selector matches more
-  ## than one package, raises ``BuildTargetAmbiguousError``. When it
-  ## matches no edge, raises ``BuildTargetUnknownError`` with up to
-  ## three closest known names.
-  let profiles = profileIndex(identity)
-  var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
-  var targets = initTable[string, BuildTargetDef]()
-  var pools = initTable[string, BuildPoolDef]()
-  for fragment in snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkAction:
-        actionNodes.add((
-          node: node,
-          payload: decodeBuildActionPayload(toBytes(node.payload))))
-      elif node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-target.v1":
-        let target = decodeBuildTargetPayload(toBytes(node.payload))
-        if targets.hasKey(target.name):
-          raise newException(ValueError,
-            "duplicate build target metadata: " & target.name)
-        targets[target.name] = target
-      elif node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-pool.v1":
-        let pool = decodeBuildPoolPayload(toBytes(node.payload))
-        if pools.hasKey(pool.name):
-          raise newException(ValueError,
-            "duplicate build pool metadata: " & pool.name)
-        pools[pool.name] = pool
-  for pool in pools.values:
-    result.pools.add(repro_build_engine.pool(pool.name, pool.capacity))
-  var declaredActions = newSeq[BuildActionDef](actionNodes.len)
-  for i in 0 ..< actionNodes.len:
-    declaredActions[i] = actionNodes[i].payload
-  let inferredActions = inferDeclaredActionDeps(declaredActions, projectRoot)
-  for i in 0 ..< actionNodes.len:
-    actionNodes[i].payload = inferredActions[i]
-  var aliases = DirectTargetAliases(
-    byAction: initTable[string, string](),
-    rankByAction: initTable[string, int]())
-  for target in targets.values:
-    considerDirectAlias(aliases, target)
-  let aliasForAction = aliases.byAction
-
-  proc publicPayload(action: BuildActionDef): BuildActionDef =
-    result = action
-    if aliasForAction.hasKey(action.id):
-      result.id = aliasForAction[action.id]
-    for i in 0 ..< result.deps.len:
-      if aliasForAction.hasKey(result.deps[i]):
-        result.deps[i] = aliasForAction[result.deps[i]]
-
-  proc lowerItem(item: tuple[node: GraphNode; payload: BuildActionDef]):
-      BuildAction =
-    var node = item.node
-    node.payload = actionPayload(publicPayload(item.payload))
-    lowerGraphAction(node, profiles, projectRoot)
-
-  proc shouldLower(item: tuple[node: GraphNode;
-                               payload: BuildActionDef]): bool =
-    not publishableOnly or
-      (item.payload.publishToBinaryCache and
-        item.payload.cacheEntryIdentity.isSome)
-
+proc selectProviderActions*(snapshot: ProviderGraphSnapshot;
+                            declaredActions: openArray[BuildActionDef];
+                            targets: Table[string, BuildTargetDef];
+                            selectors: openArray[string]): HashSet[string] =
+  ## The provider action ids a build of ``selectors`` materializes, by the
+  ## rules of CLI/build.md §"Target Selection" and Build-Graph-Collections.md.
+  ## ``declaredActions`` are the snapshot's declared actions with their dependencies
+  ## already inferred (``inferDeclaredActionDeps``); ``targets`` its build
+  ## targets by name.
+  ##
+  ## Each selector is resolved in order as a qualified ``<package>:<name>``,
+  ## an action id, a build-target name, the ``<collection>#<member>``
+  ## shorthand, then an implicit or explicit export name; a target selects
+  ## the closure of its members, an action the closure of its dependencies,
+  ## and the union is returned. With no non-empty selector the whole graph is
+  ## selected minus the Generic Build Exclude Rules' collections. An unknown
+  ## or ambiguous selector raises ``BuildTargetUnknownError`` /
+  ## ``BuildTargetAmbiguousError``.
+  ##
+  ## This is the ONE selection ``lowerProviderSnapshot`` (what the build
+  ## runs) and ``certificatePlanPart`` (which certificates that build can
+  ## issue) both use, so the certificate plan can never resolve a spelling
+  ## differently from the build it describes (reprobuild-pm issue
+  ## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md: the
+  ## plan kept a resolver of its own that lacked the collection-member form
+  ## and treated a fragment-less path as selecting nothing).
+  # A seq copy: the nested procs below capture it, and an ``openArray``
+  # parameter cannot be captured.
+  let actions = @declaredActions
+  var selected = initHashSet[string]()
   # Generic Build Exclude Rules (Build-Graph-Collections.md): a build that
   # does not name its targets leaves out the members of the ``test``,
   # ``bench`` and ``lint`` collections, which run only when selected by
@@ -4452,9 +4412,9 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     # graph does not declare, and a cycle among retained actions, reach the
     # engine's graph validation unchanged.
     var consumersByDep = initTable[string, seq[string]]()
-    for item in actionNodes:
-      for dep in item.payload.deps:
-        consumersByDep.mgetOrPut(dep, @[]).add(item.payload.id)
+    for action in actions:
+      for dep in action.deps:
+        consumersByDep.mgetOrPut(dep, @[]).add(action.id)
     var pending: seq[string] = @[]
     for actionId in excluded:
       pending.add(actionId)
@@ -4466,21 +4426,20 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     excluded
 
   var hasSelector = false
-  for s in selectedActionIds:
+  for s in selectors:
     if s.len > 0:
       hasSelector = true
       break
   if not hasSelector:
     let excludedActionIds = excludedByBuildRules()
-    for item in actionNodes:
-      if not excludedActionIds.contains(item.payload.id) and
-          shouldLower(item):
-        result.actions.add(lowerItem(item))
+    for action in actions:
+      if not excludedActionIds.contains(action.id):
+        result.incl(action.id)
     return
 
   var byId = initTable[string, BuildActionDef]()
-  for item in actionNodes:
-    byId[item.payload.id] = item.payload
+  for action in actions:
+    byId[action.id] = action
 
   # Named-Targets M2: aggregate every fragment's target-export table
   # into one project-scoped view. Cross-package ambiguity is re-derived
@@ -4650,9 +4609,9 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     # suggestions over the known action ids, explicit target labels,
     # and implicit names.
     var known: seq[string] = @[]
-    for item in actionNodes:
-      if known.find(item.payload.id) < 0:
-        known.add(item.payload.id)
+    for action in actions:
+      if known.find(action.id) < 0:
+        known.add(action.id)
     for name in targets.keys:
       if known.find(name) < 0:
         known.add(name)
@@ -4672,14 +4631,13 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
     raise err
 
   var resolvedRoots: seq[string] = @[]
-  for selector in selectedActionIds:
+  for selector in selectors:
     if selector.len == 0:
       continue
     let resolved = resolveSelectorToActionId(selector)
     if resolvedRoots.find(resolved) < 0:
       resolvedRoots.add(resolved)
 
-  var selected = initHashSet[string]()
   # ``repro build`` and ``repro build default`` are the same build, so the
   # ``default`` collection's slice of the selection follows the Generic
   # Build Exclude Rules; roots selected by any other name keep their full
@@ -4735,6 +4693,83 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       skippingExcluded = false
     else:
       includeClosure(root)
+  selected
+
+proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
+                            identity: PathOnlyBuildIdentity;
+                            projectRoot: string;
+                            selectedActionIds: openArray[string];
+                            publishableOnly = false):
+    tuple[actions: seq[BuildAction]; pools: seq[BuildPool]] =
+  ## Named-Targets M2: accept multiple selectors and union their
+  ## dependency closures in a single engine pass. Each selector may be
+  ## an action id, an explicit ``target "name", handle`` label, an
+  ## implicit target name carried by the M1 export table, or a
+  ## qualified ``<package>:<name>`` form. When a selector matches more
+  ## than one package, raises ``BuildTargetAmbiguousError``. When it
+  ## matches no edge, raises ``BuildTargetUnknownError`` with up to
+  ## three closest known names.
+  let profiles = profileIndex(identity)
+  var actionNodes: seq[tuple[node: GraphNode; payload: BuildActionDef]] = @[]
+  var targets = initTable[string, BuildTargetDef]()
+  var pools = initTable[string, BuildPoolDef]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        actionNodes.add((
+          node: node,
+          payload: decodeBuildActionPayload(toBytes(node.payload))))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        if targets.hasKey(target.name):
+          raise newException(ValueError,
+            "duplicate build target metadata: " & target.name)
+        targets[target.name] = target
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-pool.v1":
+        let pool = decodeBuildPoolPayload(toBytes(node.payload))
+        if pools.hasKey(pool.name):
+          raise newException(ValueError,
+            "duplicate build pool metadata: " & pool.name)
+        pools[pool.name] = pool
+  for pool in pools.values:
+    result.pools.add(repro_build_engine.pool(pool.name, pool.capacity))
+  var declaredActions = newSeq[BuildActionDef](actionNodes.len)
+  for i in 0 ..< actionNodes.len:
+    declaredActions[i] = actionNodes[i].payload
+  let inferredActions = inferDeclaredActionDeps(declaredActions, projectRoot)
+  for i in 0 ..< actionNodes.len:
+    actionNodes[i].payload = inferredActions[i]
+  var aliases = DirectTargetAliases(
+    byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  for target in targets.values:
+    considerDirectAlias(aliases, target)
+  let aliasForAction = aliases.byAction
+
+  proc publicPayload(action: BuildActionDef): BuildActionDef =
+    result = action
+    if aliasForAction.hasKey(action.id):
+      result.id = aliasForAction[action.id]
+    for i in 0 ..< result.deps.len:
+      if aliasForAction.hasKey(result.deps[i]):
+        result.deps[i] = aliasForAction[result.deps[i]]
+
+  proc lowerItem(item: tuple[node: GraphNode; payload: BuildActionDef]):
+      BuildAction =
+    var node = item.node
+    node.payload = actionPayload(publicPayload(item.payload))
+    lowerGraphAction(node, profiles, projectRoot)
+
+  proc shouldLower(item: tuple[node: GraphNode;
+                               payload: BuildActionDef]): bool =
+    not publishableOnly or
+      (item.payload.publishToBinaryCache and
+        item.payload.cacheEntryIdentity.isSome)
+
+  let selected = selectProviderActions(snapshot, inferredActions, targets,
+    selectedActionIds)
   for item in actionNodes:
     if selected.contains(item.payload.id) and shouldLower(item):
       result.actions.add(lowerItem(item))
@@ -5099,26 +5134,25 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ##
   ## In develop mode the entry is the ``rpbkOverride``
   ## ``ResolvedPackageBinding`` the SC-1 hook returned — carrying the develop
-  ## override's ``contentIdentity`` (``computeOverrideContentIdentity``,
-  ## ``override_resolution.nim:235-263``, which folds the sibling checkout's
-  ## local-path root mtime). ``foldProducerSourceIdentities`` (below) drives
-  ## the NEVER-CALLED-OUTSIDE-A-TEST ``foldOverridesIntoFingerprint``
-  ## (``override_resolution.nim:349-380``) with these bindings — activating that
-  ## fold at the splice seam IS the SC-4 invalidation hook: a change to the
-  ## sibling producer's source (a new mtime -> a new ``contentIdentity``) shifts
-  ## the consumer action's weak fingerprint so the consumer rebuilds.
+  ## override's ``contentIdentity`` (``computeOverrideContentIdentity``), which
+  ## NAMES the override (package, state, absolute path) and says nothing about
+  ## the bytes under it. In lock-pinned mode it is a synthesized binding whose
+  ## ``contentIdentity`` digests the producer ``LockedDep``'s pinned
+  ## ``revision`` + ``integrity`` (``lockPinnedSourceBinding``), so a refreshed
+  ## pin moves the key; a placed sibling checkout can still carry uncommitted
+  ## edits the pin does not describe.
   ##
-  ## In lock-pinned mode the source identity is the producer ``LockedDep``'s
-  ## pinned ``revision`` + ``integrity`` (``repro_lock.nim:143-149``); it is
-  ## projected onto the SAME fold framing by synthesizing a ``rpbkOverride``
-  ## binding whose ``contentIdentity`` is a digest of ``revision`` + ``integrity``
-  ## (a refreshed pin shifts the consumer cache key; an unchanged pin does not).
-  ##
-  ## Since 2026-10-12 (§4.3, scoped rule) these identities are folded only into
-  ## actions whose reads nothing observes (``readsAreKeyed`` false); a
-  ## monitored action is keyed on what it read under the producer root plus
-  ## the producer's realized directories (``producerChannelIdentity``). See
-  ## ``foldProducerSourceIdentities``.
+  ## Neither identity is the producer's source CONTENT. That reaches a key in
+  ## one of two ways (§4.3, scoped rule since 2026-10-12; see
+  ## ``foldProducerSourceIdentities``): a monitored or built-in action is keyed
+  ## on what it read under the producer root (rule 1), and an action whose
+  ## reads nothing observes (``readsAreKeyed`` false) additionally folds the
+  ## content of the producer's channel directories (``producerChannelContent``,
+  ## rule 2). An earlier scheme put the producer root's mtime in the develop
+  ## identity and relied on it for rule 2; an edit below the root does not
+  ## change that mtime, so report-keyed consumers got stale hits
+  ## (reprobuild-pm issue 2026-11-12, "develop-mode rule 2 invalidation uses a
+  ## directory mtime").
   ##
   ## Empty for a build that consumes no cross-repo producer, so a no-producer
   ## action's cache key is byte-identical to today
@@ -5237,38 +5271,6 @@ proc lockPinnedSourceBinding*(selector: string; dep: LockedDep):
       packageName: selector, fetchUrl: coordUrl, revision: coordRevision),
     override: DevelopOverrideEntry(package: selector, state: "pinned"),
     localPathAbsolute: "",
-    contentIdentity: identity)
-
-proc onDiskSiblingSourceBinding*(selector, siblingRoot: string):
-    ResolvedPackageBinding =
-  ## Cross-Repo-Source-Consumption SC-4 (§4.3, develop-mode on-disk-sibling arm)
-  ## — project a producer consumed as a plain on-disk workspace sibling (no
-  ## develop-override entry, no committed lock pin: ``pbkOnDiskSibling``) onto
-  ## the SAME ``foldOverridesIntoFingerprint`` framing develop mode uses, by
-  ## synthesizing an ``rpbkOverride`` binding whose ``contentIdentity`` folds the
-  ## sibling's absolute root path + its root mtime — the develop-editable analogue
-  ## of ``computeOverrideContentIdentity`` (a develop override with ``state ==
-  ## "editable"`` points at exactly this same sibling checkout, so the folded
-  ## identity matches). A touched sibling root shifts the digest and therefore the
-  ## consumer cache key; an unchanged sibling leaves it stable.
-  let absRoot = absolutePath(siblingRoot)
-  let mtimeIso =
-    try:
-      if dirExists(extendedPath(absRoot)) or fileExists(extendedPath(absRoot)):
-        $getLastModificationTime(extendedPath(absRoot))
-      else:
-        ""
-    except CatchableError:
-      ""
-  var payload = "cross-repo-producer-sibling-source.v1\x00" & selector &
-    "\x00" & absRoot & "\x00" & mtimeIso & "\x00"
-  let identity = toHex(blake3DomainDigest(payload.bytesOf(),
-    hdActionFingerprint).bytes)
-  ResolvedPackageBinding(
-    kind: rpbkOverride,
-    shadowed: UpstreamPackageBinding(packageName: selector),
-    override: DevelopOverrideEntry(package: selector, state: "editable"),
-    localPathAbsolute: absRoot,
     contentIdentity: identity)
 
 # ---------------------------------------------------------------------------
@@ -5489,9 +5491,35 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
 
 const NimProducerPathProjectionVersion = "nim-path-projection:restore-after-config.v2"
 
+const ProducerChannelContentFoldVersion =
+  "cross-repo-producer-channel-content-fold.v1"
+  ## Leads rule 2's channel-content fold. New with that fold, so no record
+  ## keyed before it (on the root-mtime develop identity) can match a key
+  ## carrying it.
+
 proc hasNimProducerPaths(selector: string): bool =
   producerMaterializedAuxPaths.hasKey(selector) and
     producerMaterializedAuxPaths[selector].nimPathDirs.anyIt(it.len > 0)
+
+proc producerChannelDirs*(selector: string): seq[ProducerChannelDir] =
+  ## The realized directories the splice hands a consumer of ``selector``, in
+  ## the fixed channel order both producer folds frame them in: ``bin`` dirs
+  ## (``PATH``), then ``include`` / ``lib`` / ``pkgconfig`` / ``cmake`` (the
+  ## C/C++ search variables), then ``nimpath`` (``nim c --path:``).
+  ## ``producerChannelIdentity`` names them; ``producerChannelContent``
+  ## digests what is under them.
+  template addDirs(tag: string; dirs: seq[string]) =
+    for dir in dirs:
+      result.add(ProducerChannelDir(channel: tag, path: dir))
+  if producerMaterializedBinDirs.hasKey(selector):
+    addDirs("bin", producerMaterializedBinDirs[selector])
+  if producerMaterializedAuxPaths.hasKey(selector):
+    let aux = producerMaterializedAuxPaths[selector]
+    addDirs("include", aux.includeDirs)
+    addDirs("lib", aux.libDirs)
+    addDirs("pkgconfig", aux.pkgConfigDirs)
+    addDirs("cmake", aux.cmakePrefixDirs)
+    addDirs("nimpath", aux.nimPathDirs)
 
 proc producerChannelIdentity*(selector: string): string =
   ## Cross-Repo-Source-Consumption §4.3 (2026-10-12) — what a consuming action
@@ -5499,8 +5527,10 @@ proc producerChannelIdentity*(selector: string): string =
   ## directories the splice puts on its command line and environment (``bin``
   ## dirs on ``PATH``, C/C++ dirs on the search variables, Nim source roots on
   ## ``nim c --path:``). Their CONTENT is not here — it reaches the key through
-  ## the files the action reads — but the directories themselves are part of
-  ## what the action runs, so they are part of its weak fingerprint.
+  ## the files the action reads, or, for an action whose reads nothing
+  ## observes, through ``producerChannelContent`` — but the directories
+  ## themselves are part of what the action runs, so they are part of its
+  ## weak fingerprint.
   ##
   ## Stable across a source change and across a lock refresh for a producer
   ## consumed from a workspace checkout (the directories do not move). A
@@ -5510,26 +5540,20 @@ proc producerChannelIdentity*(selector: string): string =
   ## thing that distinguishes the new content from the old, which is still on
   ## disk unchanged.
   var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
-  template addDirs(tag: string; dirs: seq[string]) =
-    for dir in dirs:
-      payload.add(tag)
-      payload.add(dir)
-      payload.add('\x00')
-  if producerMaterializedBinDirs.hasKey(selector):
-    addDirs("bin:", producerMaterializedBinDirs[selector])
-  if producerMaterializedAuxPaths.hasKey(selector):
-    let aux = producerMaterializedAuxPaths[selector]
-    addDirs("include:", aux.includeDirs)
-    addDirs("lib:", aux.libDirs)
-    addDirs("pkgconfig:", aux.pkgConfigDirs)
-    addDirs("cmake:", aux.cmakePrefixDirs)
-    if hasNimProducerPaths(selector):
+  var nimProjectionTagged = false
+  for dir in producerChannelDirs(selector):
+    if dir.channel == "nimpath" and not nimProjectionTagged and
+        hasNimProducerPaths(selector):
       # The previous launch-only projection could successfully import a stale
       # configured library. Its observed reads remain fresh, so changing argv
       # projection alone cannot invalidate that result. Scope this transition
       # to actions actually handed Nim source roots; other channels stay stable.
       payload.add(NimProducerPathProjectionVersion & "\x00")
-    addDirs("nimpath:", aux.nimPathDirs)
+      nimProjectionTagged = true
+    payload.add(dir.channel)
+    payload.add(':')
+    payload.add(dir.path)
+    payload.add('\x00')
   digestHex(blake3DomainDigest(payload.bytesOf(), hdActionFingerprint))
 
 proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
@@ -5541,7 +5565,7 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ##
   ## WHICH ACTIONS CARRY THE PRODUCER'S IDENTITY (owner decision 2026-10-12,
   ## §4.3). The producer's source identity — a develop override's
-  ## ``contentIdentity`` (sibling root path + mtime), a lock pin's
+  ## ``contentIdentity`` (package, state, absolute path), a lock pin's
   ## ``revision`` + ``integrity`` — is folded ONLY into an action whose reads
   ## are not otherwise keyed (``readsAreKeyed`` false: a process whose
   ## dependencies come from a recognised format or a converter alone). For
@@ -5560,11 +5584,40 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ## change which module a compile resolves, and a cached record from a build
   ## without it says nothing about that.
   ##
+  ## RULE 2: THE CHANNEL CONTENT. Neither source identity above describes the
+  ## bytes an unobserved action can read: the develop identity names the
+  ## override, and a pin does not describe a placed sibling's uncommitted
+  ## edits. A report omits reads (``-MMD`` drops every ``-isystem`` header),
+  ## so for such an action the CONTENT of every channel directory the
+  ## producer hands it (``producerChannelDirs``) is folded as well, under
+  ## ``ProducerChannelContentFoldVersion``: any edit under those directories
+  ## — deep in a tree, through a symlink, mtime-preserving — moves its key.
+  ## The digest is computed lazily, once per producer per call, and only for
+  ## a producer some such action names, so a graph of monitored actions pays
+  ## nothing for it. When a channel entry cannot be read the digest would
+  ## describe a tree that is not on disk, and the action is made uncacheable
+  ## instead (``Failure-Semantics.md`` §"General Rules": ambiguous correctness
+  ## failures fail closed). A monitored action does NOT carry this fold: its
+  ## observed reads key it already (rule 1), and folding the whole tree would
+  ## miss every one of them on any edit, the defect the scoped rule removed.
+  ##
   ## An action that names NO materialized producer keeps its
   ## ``weakFingerprint`` byte-for-byte, and with ``producerSourceBindings``
   ## empty (no cross-repo producer) this is a whole-graph no-op.
   if producerSourceBindings.len == 0:
     return
+  var channelContents = initTable[string, ProducerChannelContent]()
+  proc channelContentOf(selector: string): ProducerChannelContent =
+    if selector notin channelContents:
+      let content = producerChannelContent(selector,
+        producerChannelDirs(selector))
+      if not content.complete:
+        stderr.writeLine("repro: warning: cross-repo producer '" &
+          selector & "': the content of its directories could not be read (" &
+          content.failure & "); actions that consume it without observed " &
+          "reads will not be cached")
+      channelContents[selector] = content
+    channelContents[selector]
   for action in actions.mitems:
     if action.toolIdentityRefs.len == 0:
       continue
@@ -5600,6 +5653,32 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
           digestHex(action.weakFingerprint)
         action.weakFingerprint =
           blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+      # Rule 2's content fold (see the doc comment): what the action can read
+      # through the producer's directories, since nothing observed it.
+      # A producer that hands the action no directory gives it nothing to
+      # read through a channel, so it contributes nothing here, and an action
+      # handed no producer directory at all keeps the binding-fold key.
+      var contentPayload = ProducerChannelContentFoldVersion & "\x00" &
+        digestHex(action.weakFingerprint) & "\x00"
+      var contentComplete = true
+      var contentFolded = false
+      for selector in selectors:
+        if producerChannelDirs(selector).len == 0:
+          continue
+        let content = channelContentOf(selector)
+        if not content.complete:
+          contentComplete = false
+          break
+        contentPayload.add(selector)
+        contentPayload.add('=')
+        contentPayload.add(content.digest)
+        contentPayload.add('\x00')
+        contentFolded = true
+      if not contentComplete:
+        action.cacheable = false
+      elif contentFolded:
+        action.weakFingerprint =
+          blake3DomainDigest(contentPayload.bytesOf(), hdActionFingerprint)
 
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
@@ -12540,8 +12619,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
     # directories folded; the rest get its source identity (develop
-    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
-    # when nothing was materialized (byte-identical to today).
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``) and the
+    # content digest of the directories they are handed (or become
+    # uncacheable when that content cannot be read). No-op when nothing was
+    # materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     # HL-10: a certifying run adds its lock-update node here, after every
     # fold, so the node changes no other action's cache key.
@@ -14329,8 +14410,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
     # directories folded; the rest get its source identity (develop
-    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
-    # when nothing was materialized (byte-identical to today).
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``) and the
+    # content digest of the directories they are handed (or become
+    # uncacheable when that content cannot be read). No-op when nothing was
+    # materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     # HL-10: a certifying run adds its lock-update node here, after every
     # fold, so the node changes no other action's cache key.
@@ -16978,6 +17061,18 @@ type
       ## leases, and failing the run over it would make an unrelated stale
       ## record block a command that was going to materialize its own state
       ## anyway. It must still be PRINTED — see ``runReproRunCommand``.
+    holds*: seq[StateConsumeHold]
+      ## Ephemeral-State-Leases.md §2.3 / §4.6: the IN-USE holds this consume
+      ## took on each group's states, one per consumed group, taken before
+      ## the group's reuse decision. They are STILL HELD when the bridge
+      ## returns: the consume is the run-edge's whole command, not this
+      ## reconcile, and the reaper must not destroy a state while it runs.
+      ## ``finishConsumedStateGroups`` ends the consume — renews at the end
+      ## and releases — and every caller must call it, however the command
+      ## ended.
+    consumedDesired*: seq[seq[ResourceInstance]]
+      ## The desired graph of each held group, in ``holds`` order, for the
+      ## end-of-consume daemon renew.
 
 proc buildStateGroupDesired*(lease: RunEdgeLease;
                              runEdgeName: string;
@@ -17055,6 +17150,57 @@ proc anyMemberUnlinked(desired: seq[ResourceInstance]): bool =
       return true
   false
 
+proc reconcileConsumedGroup(bridge: var RunConsumesBridgeResult;
+                            lease: RunEdgeLease;
+                            desired: seq[ResourceInstance];
+                            store: StateStore;
+                            providerArtifacts: openArray[
+                              tuple[typeId: string;
+                                    artifact: ResourceProviderArtifactRef]];
+                            scope: DaemonLeaseScope;
+                            endpoint: string;
+                            now: Time;
+                            sessionResolver: ResourceSessionResolver) =
+  ## One consumed group of ``reconcileConsumedStateGroups``, already held.
+  block:
+    # Materialize-or-reuse against the L1 store (the correctness source of
+    # truth — L2 reuse-on-digest-match / renew), then forward a best-effort
+    # daemon renew (L4). We drive the two steps ourselves rather than
+    # ``reconcileLeasedResources`` so we can observe whether the renew reached a
+    # daemon (``sent``) without a second redundant renew.
+    let outcome =
+      if anyMemberUnlinked(desired):
+        # OUT-OF-TREE members: reconcile over the provider session WITH the
+        # store, routing the always-linked synthetic consumer in-process.
+        if sessionResolver == nil:
+          raise newException(ValueError,
+            "required leased state group '" & lease.address &
+            "' has no provider session for its out-of-tree resources")
+        reconcileResourcesViaSession(desired, sessionResolver,
+          store = some(store), now = now,
+          # The harvested refs are PERSISTED with each record written for a
+          # type they name, so the reaper can reach that provider from the
+          # store alone (§4.2). The synthetic consumer, routed in-process
+          # below, is not in this set and so records no artifact.
+          providerArtifacts = providerArtifacts,
+          inProcess = proc (typeId: string): bool =
+            # Hybrid routing (spec §3.2): the always-linked synthetic run-edge
+            # consumer (registered in THIS process, no provider binary) runs
+            # in-process; the out-of-tree member types the CLI does not link go
+            # over the session. This is the ``isResourceProviderRegistered``
+            # gate the reconcile doc describes — and it lets the production
+            # ``sessionResolver`` map ONLY the real out-of-tree typeIds (the
+            # provider-artifact refs the resource-graph carries), never the
+            # synthetic consumer.
+            isResourceProviderRegistered(typeId))
+      else:
+        reconcileResources(desired, store = some(store), now = now)
+    bridge.reconciled.add(outcome)
+    bridge.renewedGroups.add(lease.address)
+    for edge in renewLeasesForConsumed(desired, scope, endpoint):
+      if edge.sent and lease.address notin bridge.daemonSent:
+        bridge.daemonSent.add(lease.address)
+
 proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
                                    runEdgeName: string;
                                    resources: seq[ResourceInstance];
@@ -17078,6 +17224,16 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ## ``keep`` are honored verbatim by the landed reference-counted MAX /
   ## keep-dominates fold — this bridge only assembles the desired graph and
   ## delegates.
+  ##
+  ## THE CONSUME OUTLIVES THIS CALL (Ephemeral-State-Leases.md §2.3 / §4.6).
+  ## Each group's states are held IN USE from before the group's reuse decision,
+  ## and the holds are returned still taken in ``holds``: the consume is the
+  ## run-edge's command, which runs after this returns, and the reaper must not
+  ## destroy a state while it does. The caller ends the consume with
+  ## ``finishConsumedStateGroups`` once the command has exited — on every path,
+  ## failures included — which renews at the end and releases. A caller that
+  ## never calls it holds the states until its process exits. On a raise, the
+  ## holds taken so far are released here, since nothing will use the states.
   ##
   ## Reaping is NOT done here — the L4 daemon wall-clock tick / L5 provider
   ## session (or ``repro reap`` / the reconcile-start opportunistic reap)
@@ -17172,48 +17328,60 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
     if reapPool != nil:
       try: reapPool.closeAll() except CatchableError: discard
 
-  for lease in consumes:
-    let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
-    if desired.len == 0:
-      result.missingGroups.add(lease.address)
+  # Ephemeral-State-Leases.md §4.6: each group's states are held IN USE from
+  # before its reuse decision until the caller ends the consume
+  # (``finishConsumedStateGroups``), so no reaper destroys them while the
+  # run-edge's command uses them. Taken AFTER the start sweep above, which
+  # must stay able to reap this run's own lapsed group. If this reconcile
+  # fails, nothing will use the states, so the holds are dropped here.
+  try:
+    for lease in consumes:
+      let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
+      if desired.len == 0:
+        result.missingGroups.add(lease.address)
+        continue
+      result.holds.add(holdConsumedStates(store, desired,
+        onBusy = proc (address: string) =
+          stderr.writeLine("repro run: waiting for a reap of `" & address &
+            "` to finish before consuming it")))
+      result.consumedDesired.add(desired)
+      reconcileConsumedGroup(result, lease, desired, store, providerArtifacts,
+        scope, endpoint, now, sessionResolver)
+  except CatchableError:
+    for hold in result.holds.mitems:
+      releaseConsumeHold(hold)
+    raise
+
+proc finishConsumedStateGroups*(bridge: var RunConsumesBridgeResult;
+                                scope: DaemonLeaseScope = dlsUser;
+                                endpoint = defaultUserDaemonEndpoint();
+                                now: Time = getTime()): seq[string] =
+  ## End the consume ``reconcileConsumedStateGroups`` began
+  ## (Ephemeral-State-Leases.md §2.3 / §4.6): renew every held group's leases
+  ## at ``now`` — the moment the run-edge's command finished — in the store
+  ## (under each record's lock) and, best-effort, to the daemon; then release
+  ## the in-use holds. So ``delayed(ttl)`` keeps the state ``ttl`` past the
+  ## END of its use, and ``immediate`` makes it reapable from here.
+  ##
+  ## Call it however the command ended, failures included: the consume is
+  ## over either way. Idempotent — a second call finds nothing held. A renewal
+  ## that fails is returned as a message rather than raised, because the
+  ## holds must be released regardless and the command's own outcome is the
+  ## run's result; the record then keeps the deadline stamped when the consume
+  ## began, which is the crash outcome and is safe.
+  for i in 0 ..< bridge.holds.len:
+    if not bridge.holds[i].isHeld:
       continue
-    # Materialize-or-reuse against the L1 store (the correctness source of
-    # truth — L2 reuse-on-digest-match / renew), then forward a best-effort
-    # daemon renew (L4). We drive the two steps ourselves rather than
-    # ``reconcileLeasedResources`` so we can observe whether the renew reached a
-    # daemon (``sent``) without a second redundant renew.
-    let outcome =
-      if anyMemberUnlinked(desired):
-        # OUT-OF-TREE members: reconcile over the provider session WITH the
-        # store, routing the always-linked synthetic consumer in-process.
-        if sessionResolver == nil:
-          raise newException(ValueError,
-            "required leased state group '" & lease.address &
-            "' has no provider session for its out-of-tree resources")
-        reconcileResourcesViaSession(desired, sessionResolver,
-          store = some(store), now = now,
-          # The harvested refs are PERSISTED with each record written for a
-          # type they name, so the reaper can reach that provider from the
-          # store alone (§4.2). The synthetic consumer, routed in-process
-          # below, is not in this set and so records no artifact.
-          providerArtifacts = providerArtifacts,
-          inProcess = proc (typeId: string): bool =
-            # Hybrid routing (spec §3.2): the always-linked synthetic run-edge
-            # consumer (registered in THIS process, no provider binary) runs
-            # in-process; the out-of-tree member types the CLI does not link go
-            # over the session. This is the ``isResourceProviderRegistered``
-            # gate the reconcile doc describes — and it lets the production
-            # ``sessionResolver`` map ONLY the real out-of-tree typeIds (the
-            # provider-artifact refs the resource-graph carries), never the
-            # synthetic consumer.
-            isResourceProviderRegistered(typeId))
-      else:
-        reconcileResources(desired, store = some(store), now = now)
-    result.reconciled.add(outcome)
-    result.renewedGroups.add(lease.address)
-    for edge in renewLeasesForConsumed(desired, scope, endpoint):
-      if edge.sent and lease.address notin result.daemonSent:
-        result.daemonSent.add(lease.address)
+    try:
+      renewConsumedStatesAtEnd(bridge.holds[i], now)
+      if i < bridge.consumedDesired.len:
+        discard renewLeasesForConsumed(bridge.consumedDesired[i], scope,
+                                       endpoint)
+    except CatchableError as err:
+      result.add("renewing " & bridge.holds[i].addresses.join(", ") &
+        " at the end of the consume failed: " & err.msg)
+    finally:
+      releaseConsumeHold(bridge.holds[i])
 
 # ---------------------------------------------------------------------------
 # Named-Runnable-Edges N3b — auto-build the out-of-tree session resolver.
@@ -17368,6 +17536,17 @@ proc runReproRunCommand(args: openArray[string];
       # exactly as N1. The reconcile NEVER blocks the run on a daemon: the store
       # write is the correctness source of truth (L2), the daemon renew is a
       # best-effort notification (L4), and idle reaping is the daemon's job.
+      #
+      # The consume does not end when the reconcile returns: the states are
+      # held IN USE (Ephemeral-State-Leases.md §4.6) until the run-edge's
+      # command below has exited, and only then renewed and released, so the
+      # deadline counts from the end of the use and nothing reaps the state
+      # while the command runs. The ``defer`` ends it on every path out of this
+      # branch — the command's exit, an early refusal, an exception.
+      var consumeBridge: RunConsumesBridgeResult
+      defer:
+        for problem in finishConsumedStateGroups(consumeBridge):
+          stderr.writeLine("repro run: lease renew: " & problem)
       if resolution.hasEntry and resolution.entry.kind == tekRunEdge and
           resolution.entry.consumes.len > 0:
         try:
@@ -17412,11 +17591,12 @@ proc runReproRunCommand(args: openArray[string];
             discard registerLeaseReapProvidersBestEffort(
               DaemonLeaseReapProvidersRequest(scope: dlsUser,
                 providers: providers))
-          let bridge = reconcileConsumedStateGroups(
+          consumeBridge = reconcileConsumedStateGroups(
             resolution.entry.consumes, resolution.entry.name,
             resolution.resources, resolution.groups, store,
             resolution.providerArtifacts,
             sessionResolver = sessionResolver)
+          template bridge: untyped = consumeBridge
           # §4.3 (a)/§4.4: what the start-of-reconcile sweep could not do.
           # NON-FATAL — it swept state belonging to LAPSED leases, none of
           # which this run asked for, so a stale record someone else left must
@@ -32315,6 +32495,10 @@ type
     actionDeps*: Table[string, seq[string]]
       ## Every declared action's dependencies (after inference), so a reader
       ## can walk a marked node's closure (TC-8e issuance).
+    bySelector*: seq[tuple[selector: string; materialized: HashSet[string]]]
+      ## Each non-empty selector the part was planned for, with the actions
+      ## that selector alone materializes, in selector order. Empty when the
+      ## part was planned for no name (a fragment-less path selector).
 
   CertificatePlan* = object
     ## A plan as the certificate query sees it. ``noCertify`` is
@@ -32354,12 +32538,17 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
                           projectRoot: string;
                           selectors: openArray[string]):
     CertificatePlanPart =
-  ## Resolve ``selectors`` against ``snapshot`` and record the actions their
-  ## union materializes, by the rules ``lowerProviderSnapshot`` applies: a
-  ## qualified ``<package>:<name>``, an action id, a build-target name, then
-  ## an implicit or explicit export name; a target selects the closure of
-  ## its members, an action the closure of its dependencies. An unknown or
-  ## ambiguous selector raises the same errors ``repro build`` reports.
+  ## Record the actions a build of ``selectors`` materializes from
+  ## ``snapshot``, by the selection the build itself lowers
+  ## (``selectProviderActions``): a qualified ``<package>:<name>``, an action
+  ## id, a build-target name, the ``<collection>#<member>`` shorthand, then an
+  ## implicit or explicit export name; with no non-empty selector (a path
+  ## selector without a ``#<name>`` fragment), the whole graph minus the
+  ## ``test`` / ``bench`` / ``lint`` collections. An unknown or ambiguous
+  ## selector raises the same errors ``repro build`` reports.
+  ##
+  ## Each non-empty selector's own selection is kept too (``bySelector``),
+  ## so a caller can say which selector certifies nothing.
   result.repository = certificateRepositoryRoot(projectRoot)
   result.certificates = aggregateCertificateExportTable(snapshot)
   result.targets = initTable[string, BuildTargetDef]()
@@ -32372,80 +32561,21 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
           node.stableName == "reprobuild.build-target.v1":
         let target = decodeBuildTargetPayload(toBytes(node.payload))
         result.targets[target.name] = target
-  var byId = initTable[string, BuildActionDef]()
-  for action in inferDeclaredActionDeps(declared, projectRoot):
-    byId[action.id] = action
-  let exportTable = aggregateTargetExportTable(snapshot)
-
-  proc resolveRoot(selector: string; targets: Table[string, BuildTargetDef]):
-      string =
-    for entry in exportTable.entries:
-      if entry.owningPackage & ":" & entry.name == selector:
-        return entry.actionId
-    if byId.hasKey(selector) or targets.hasKey(selector):
-      return selector
-    var owners: seq[string] = @[]
-    var chosen = ""
-    for entry in exportTable.entries:
-      if entry.name == selector:
-        if owners.find(entry.owningPackage) < 0:
-          owners.add(entry.owningPackage)
-        chosen = entry.actionId
-    if owners.len > 1:
-      var candidates: seq[string] = @[]
-      for owner in owners:
-        candidates.add(owner & ":" & selector)
-      candidates.sort()
-      var err = newException(BuildTargetAmbiguousError,
-        "target '" & selector & "' is exported by multiple packages: " &
-          candidates.join(", ") &
-          " — re-run with the qualified <package>:<name> form")
-      err.selectorName = selector
-      err.candidates = candidates
-      raise err
-    if owners.len == 1:
-      return chosen
-    var known: seq[string] = @[]
-    for id in byId.keys:
-      known.add(id)
-    for name in targets.keys:
-      known.add(name)
-    for entry in exportTable.entries:
-      if known.find(entry.name) < 0:
-        known.add(entry.name)
-    var err = newException(BuildTargetUnknownError,
-      "unknown build target: " & selector)
-    err.selectorName = selector
-    err.suggestions = topLevenshteinCandidates(selector, known)
-    raise err
-
-  var materialized = initHashSet[string]()
-  var expanded = initHashSet[string]()
-  proc includeAction(actionId: string) =
-    if materialized.contains(actionId) or not byId.hasKey(actionId):
-      return
-    materialized.incl(actionId)
-    for dep in byId[actionId].deps:
-      includeAction(dep)
-  proc includeTarget(name: string; targets: Table[string, BuildTargetDef]) =
-    if expanded.contains(name) or not targets.hasKey(name):
-      return
-    expanded.incl(name)
-    for nested in targets[name].targets:
-      includeTarget(nested, targets)
-    for actionId in targets[name].actions:
-      includeAction(actionId)
+  let inferred = inferDeclaredActionDeps(declared, projectRoot)
+  result.materialized = selectProviderActions(snapshot, inferred,
+    result.targets, selectors)
+  var nonEmpty: seq[string] = @[]
   for selector in selectors:
-    if selector.len == 0:
-      continue
-    let root = resolveRoot(selector, result.targets)
-    if result.targets.hasKey(root):
-      includeTarget(root, result.targets)
-    else:
-      includeAction(root)
-  result.materialized = materialized
-  for id, action in byId:
-    result.actionDeps[id] = action.deps
+    if selector.len > 0 and nonEmpty.find(selector) < 0:
+      nonEmpty.add(selector)
+  for selector in nonEmpty:
+    result.bySelector.add((selector: selector,
+      materialized:
+        if nonEmpty.len == 1: result.materialized
+        else: selectProviderActions(snapshot, inferred, result.targets,
+          [selector])))
+  for action in inferred:
+    result.actionDeps[action.id] = action.deps
 
 proc certificateNodeMembers*(part: CertificatePlanPart;
                              nodeKind: CertificateNodeKind;
@@ -32488,20 +32618,46 @@ proc certificateNodeClosure*(part: CertificatePlanPart;
       pending.add(dep)
 
 proc certificateNodeMaterialized(part: CertificatePlanPart;
-                                 entry: CertificateExportEntry): bool =
+                                 entry: CertificateExportEntry;
+                                 materialized: HashSet[string]): bool =
   ## A marked edge is materialized when the plan builds it. A marked target
   ## is materialized when the plan builds every edge the target groups,
   ## nested targets included: it "passes when it and its whole closure
   ## materialize" (Test-Certificates.md §"Marking a node"), so a plan that
   ## builds only some of its members does not contain it. A target that
-  ## groups no edge is never materialized.
+  ## groups no edge is never materialized. ``materialized`` is the set of
+  ## provider action ids the plan (or one selector of it) builds.
   let members = certificateNodeMembers(part, entry.nodeKind, entry.node)
   if members.len == 0:
     return false
   for actionId in members:
-    if not part.materialized.contains(actionId):
+    if not materialized.contains(actionId):
       return false
   true
+
+proc certificateNodeMaterialized(part: CertificatePlanPart;
+                                 entry: CertificateExportEntry): bool =
+  certificateNodeMaterialized(part, entry, part.materialized)
+
+proc selectorsCertifyingNothing*(part: CertificatePlanPart;
+                                 noCertify = false): seq[string] =
+  ## The selectors of ``part`` that, on their own, materialize no
+  ## certificate-producing node, in selector order (Test-Certificates.md
+  ## §"Marking a node": "selecting only a sub-target that is neither `test`
+  ## nor marked runs the tests and issues nothing"). ``repro test`` names
+  ## each, with the reason, so a run never ends without a certificate for a
+  ## target the user named and without saying why. Empty for a
+  ## ``--no-certify`` plan: that run asked for no certificate.
+  if noCertify:
+    return @[]
+  for entry in part.bySelector:
+    var certifies = false
+    for cert in part.certificates.entries:
+      if certificateNodeMaterialized(part, cert, entry.materialized):
+        certifies = true
+        break
+    if not certifies:
+      result.add(entry.selector)
 
 proc planCertificateNodes*(plan: CertificatePlan): seq[CertificatePlanNode] =
   ## Test-Certificates TC-9a: the certificate-producing nodes ``plan``
@@ -32623,8 +32779,11 @@ proc runCertificatesCommand*(args: openArray[string];
     let resolved = parseAndResolveSelectors(selectors,
       "repro certificates plan")
     # The anchor carries the first name as its fragment: ``.#<name>`` for
-    # this project, ``<sibling project file>#<name>`` for a sibling.
-    let anchorName = splitTarget(resolved.target).fragment
+    # this project, ``<sibling project file>#<name>`` for a sibling. It is
+    # derived as the build derives it (``parseBuildTarget``), so a
+    # fragment-less path plans no name, which the plan reads as the whole
+    # default graph the build of that path lowers.
+    let anchorName = parseBuildTarget(resolved.target).selectedActionId
     var names: seq[string] = @[]
     if anchorName.len > 0:
       names.add(anchorName)
@@ -89567,6 +89726,55 @@ proc plainTestBuild(buildArgs, selectors: seq[string];
     args.add(sel)
   runBuildCommand(args, publicCliPath)
 
+proc selectorSpelling(name: string; spellings: openArray[string]): string =
+  ## ``name`` (a selector as the certificate plan received it) in the
+  ## spelling the user typed: ``.#test#unit`` for ``test#unit``,
+  ## ``sib:suite`` for a sibling's ``suite``. ``name`` itself when no typed
+  ## selector carries it.
+  for typed in spellings:
+    if typed == name:
+      return typed
+  for typed in spellings:
+    if typed.find('#') >= 0 and splitTarget(typed).fragment == name:
+      return typed
+    let classified = classifyBuildSelector(typed)
+    if classified.kind == bskQualified and classified.name == name:
+      return typed
+  name
+
+proc reportSelectorsCertifyingNothing(part: CertificatePlanPart;
+                                      nodes: seq[CertificatePlanNode];
+                                      spellings: openArray[string];
+                                      anchorSelector: string) =
+  ## One line per selector the user named that certifies nothing on its
+  ## own, with the reason (reprobuild-pm issue
+  ## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md: a
+  ## run must not end without a certificate for a named target and without
+  ## saying why). A plan for no name at all (a path selector without a
+  ## ``#<name>`` fragment) is named by its anchor when it certifies nothing.
+  let declared = part.certificates.entries.len > 0
+  let why =
+    if declared:
+      "it selects no certificate-producing node: no node marked with " &
+        "`certificate \"<name>\", <handle>` (nor the implicit `test` node) " &
+        "is wholly in its plan, so the tests it selects ran without one — " &
+        "select a declared name ('repro certificates list') or mark the " &
+        "node in repro.nim"
+    else:
+      "it selects no certificate-producing node: the project declares none " &
+        "(no `certificate \"<name>\", <handle>` and no `test` node), so " &
+        "the tests it selects ran without one"
+  if part.bySelector.len == 0:
+    if nodes.len == 0 and anchorSelector.len > 0:
+      stderr.writeLine("repro test: no certificate for '" & anchorSelector &
+        "' — a path selector without a #<name> fragment builds the " &
+        "project's default graph, which leaves out the test, bench and lint " &
+        "collections; " & why)
+    return
+  for selector in selectorsCertifyingNothing(part):
+    stderr.writeLine("repro test: no certificate for '" &
+      selectorSpelling(selector, spellings) & "' — " & why)
+
 proc reportUnselectedCertificates(unselected: seq[string]) =
   ## The one line naming the project's marked nodes this run did not select.
   if unselected.len > 0:
@@ -89788,6 +89996,10 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   # also names a directory (``test`` beside a ``test/`` directory) would be
   # classified as a path again by the build.
   var buildSelectors: seq[string]
+  # What the user typed, and the resolved anchor, so a selector that
+  # certifies nothing is named in the user's spelling.
+  var spellings: seq[string]
+  var anchorSelector = ""
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     # So does ``REPROBUILD_NO_RUNQUOTA``, the documented full-bypass switch
@@ -89853,16 +90065,34 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
           "certificate-producing node (see 'repro certificates list'); " &
           "nothing to certify")
         return 2
-    let resolved = parseAndResolveSelectors(
-      (if selectors.len == 0: @[TestCollectionSelector] else: selectors),
-      "repro test")
-    let anchorName = splitTarget(resolved.target).fragment
+    let typedSelectors =
+      if selectors.len == 0: @[TestCollectionSelector] else: selectors
+    let resolved = parseAndResolveSelectors(typedSelectors, "repro test")
+    anchorSelector = resolved.target
+    # The name the build selects through the anchor, exactly as the build
+    # derives it (``parseBuildTarget``): a legacy ``<dir>#<module>`` anchor
+    # selects a module, not an action, and a fragment-less path selects no
+    # name at all, which the plan then reads as the whole default graph.
+    let anchorName = parseBuildTarget(resolved.target).selectedActionId
     if anchorName.len > 0:
       names.add(anchorName)
+    for typed in typedSelectors:
+      spellings.add(typed)
     for name in resolved.extraNameSelectors:
       if names.find(name) < 0:
         names.add(name)
-    buildSelectors = @[resolved.target] & resolved.extraNameSelectors
+    # An extra name the build would classify as a path again (one that
+    # carries ``#``, ``.`` or ``/``, such as the member shorthand
+    # ``test#unit`` taken from a second ``.#test#unit`` selector, or one
+    # that names an existing path) is handed over anchored on the same
+    # project, so the build selects exactly what the plan resolved.
+    let anchorBase = splitTarget(resolved.target).base
+    buildSelectors = @[resolved.target]
+    for extra in resolved.extraNameSelectors:
+      buildSelectors.add(
+        if classifyBuildSelector(extra).kind == bskPath:
+          (if anchorBase.len > 0: anchorBase else: ".") & "#" & extra
+        else: extra)
     info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
       selectDefaultAction = false, workRoot = workRoot, lowerGraph = false,
       bypassRunQuotaExplicit = bypassRunQuota)
@@ -89884,6 +90114,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       unselected.add(entry.name)
   if nodes.len == 0:
     let code = plainTestBuild(buildArgs, selectors, publicCliPath)
+    reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
     reportUnselectedCertificates(unselected)
     return code
 
@@ -90106,6 +90337,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       discard issueForCertificateNode(pre, run.node.name, verdict.commands,
         readSetFromMonitorDepFiles(verdict.depfiles, verdict.recordedReads,
           verdict.recordedSources), workspaceRoot, copyOut)
+  reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
   reportUnselectedCertificates(unselected)
   code
 

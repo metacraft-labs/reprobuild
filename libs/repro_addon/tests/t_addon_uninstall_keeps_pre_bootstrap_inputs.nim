@@ -357,3 +357,82 @@ suite "the ledger copy goes last":
     check again.errors.len == 0
     check not dirExists(st)
     check st in again.removed and (st / "ev" & " (store evidence)") in again.removed
+
+# ---------------------------------------------------------------------------
+# A11 code review round 14 (§13 decision 161, amending 150): the last step of
+# removing the state is the rmdir of /var/lib/repro itself, after the ledger
+# copy. It can fail when everything below it succeeded (EBUSY on a mount
+# point, EPERM below an immutable /var/lib). Then the report says precisely
+# that only the empty directory remains, and a re-run that finds it empty,
+# with no ledger, removes it and succeeds. The reviewer's probe V2: a parent
+# directory without write permission stands for the immutable /var/lib or
+# the mount point (the test runs without root); the real removal and the
+# real re-run step otherwise. Falsifiers ``empty-state-root-reported-vaguely``
+# and ``empty-state-root-left-unfinished``.
+# ---------------------------------------------------------------------------
+
+proc v2Scene(name: string): tuple[parent, st, lc: string] =
+  let parent = getTempDir() / ("repro-uninstall-v2-" & name & "-" &
+                               $getCurrentProcessId())
+  if dirExists(parent):
+    setFilePermissions(parent, {fpUserRead, fpUserWrite, fpUserExec})
+  removeDir(parent)
+  let st = parent / "var-lib-repro"
+  createDir(st / "agent")
+  createDir(st / "system" / "addon" / "discard-markers")
+  writeFile(st / "agent" / "attestation.key", "x")
+  let lc = ledgerCopyPath(st / "system")
+  writeLedger(lc, Ledger(generation: "g0"))
+  (parent, st, lc)
+
+proc leftUnder(d: string): seq[string] =
+  for p in walkDirRec(d, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+                                        pcLinkToDir}):
+    result.add(p)
+
+suite "the empty state root is the only step after the ledger copy":
+  test "V2: a failed rmdir of the root says only the empty directory remains, and a re-run finishes":
+    let s = v2Scene("finish")
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, @[s.st / "ev"])
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint $r.errors
+    check r.errors.len == 1
+    check r.errors.len == 1 and r.errors[0].startsWith(s.st & ": rmdir failed")
+    check r.errors.len == 1 and
+      "only the empty directory itself remains" in r.errors[0]
+    check r.errors.len == 1 and "a re-run that finds" in r.errors[0]
+    check s.st notin r.removed
+    check dirExists(s.st) and leftUnder(s.st).len == 0
+    check not fileExists(s.lc)
+    # The re-run: no ledger, nothing but the empty root.
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc)
+    check again.errors.len == 0
+    check not dirExists(s.st)
+    check again.removed.len == 1 and again.removed[0].startsWith(s.st)
+
+  test "a re-run whose rmdir still fails reports it precisely again":
+    let s = v2Scene("again")
+    removeFile(s.lc)
+    removeDir(s.st / "agent")
+    removeDir(s.st / "system" / "addon")   # system/ is left, empty
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    check finishEmptyStateRoot(r, s.st, s.lc)
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint $r.errors
+    check r.errors.len == 1 and r.errors[0].startsWith(s.st & ": rmdir failed")
+    check r.removed.len == 0
+    check dirExists(s.st) and leftUnder(s.st).len == 0   # system/ went
+
+  test "a re-run with a ledger copy, or anything but empty directories, is not finished this way":
+    let s = v2Scene("other")
+    var r: UninstallResult
+    check not finishEmptyStateRoot(r, s.st, s.lc)        # the ledger is there
+    removeFile(s.lc)
+    check not finishEmptyStateRoot(r, s.st, s.lc)        # a key file is there
+    check not finishEmptyStateRoot(r, s.parent / "absent", s.lc)
+    check r.errors.len == 0 and r.removed.len == 0
+    check fileExists(s.st / "agent" / "attestation.key")

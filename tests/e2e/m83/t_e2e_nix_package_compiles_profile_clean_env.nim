@@ -38,9 +38,12 @@
 ##   `create`, and nothing else (vacuity: the set is non-empty and equal to
 ##   the expected set, not merely containing it). Exactly one `.rbpi` is
 ##   published, under the spaced state directory; no planned file is written.
-## * The compile used the package's own pieces, read from nim's record of it
-##   (`<nimcache>/profile-build.json`): `currentDir` is the wrapper's
-##   `$REPROBUILD_SOURCE_ROOT`, the compiler configuration it read
+## * The compile used the package's own pieces, read from nim's records of
+##   it in the compile's nimcache: every module of reprobuild's own
+##   libraries (`libs/repro_*`, at least one of them `repro_profile`'s) the
+##   generated C embeds lies under the wrapper's `$REPROBUILD_SOURCE_ROOT`
+##   (`nix_package_support.ProfileCompileSources`), `profile-build.json`'s
+##   `currentDir` is that nimcache, the compiler configuration it read
 ##   (`configFiles[0]`) belongs to the wrapper's `$REPRO_NIM_COMPILER`, and
 ##   every C compile and the link ran ONE absolute
 ##   compiler that lies inside the package's runtime closure
@@ -96,7 +99,7 @@ type
   CompileRecord = object
     ## What nim recorded about the compile, and what was published.
     rbpiCount: int
-    currentDir: string
+    sources: ProfileCompileSources
     compilerConfig: string
       ## The first configuration file nim read: its own `nim.cfg`.
     cCommands: seq[string]
@@ -149,7 +152,7 @@ proc compileRecord(stateDir: string): CompileRecord =
   for path in walkDirRec(cacheDir / "nimcache"):
     if path.extractFilename == "profile-build.json":
       let doc = parseFile(path)
-      result.currentDir = doc["currentDir"].getStr()
+      result.sources = profileCompileSources(path.parentDir)
       if doc["configFiles"].len > 0:
         result.compilerConfig = doc["configFiles"][0].getStr()
       for entry in doc["compile"]:
@@ -231,7 +234,11 @@ else:
       check plan.rec.rbpiCount == 1
 
       # The compile ran against the package's sources, with its Nim ...
-      check plan.rec.currentDir == sourceRoot
+      # Printed, not only checkpointed, so a passing run records the evidence.
+      echo "    repro_profile modules: ", plan.rec.sources.profileModules,
+        "; repro_* library modules: ", plan.rec.sources.reproLibModules.len
+      check plan.rec.sources.ranInItsNimcache
+      check plan.rec.sources.compiledAgainst(sourceRoot)
       check plan.rec.compilerConfig.startsWith(
         nimCompiler.parentDir.parentDir & "/")
       # ... and one C compiler the package carries, found without PATH.
