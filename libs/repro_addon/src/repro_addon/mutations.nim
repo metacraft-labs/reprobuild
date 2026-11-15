@@ -1712,6 +1712,9 @@ const
                           "activator-boot-order-effective-unchecked",
                           # ... and the parse half.
                           "activator-boot-order-parse-unchecked",
+                          # ... and both, in the rule the two halves
+                          # share (service_floor.activatorBootOrderRefusal).
+                          "activator-boot-order-unchecked",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",
