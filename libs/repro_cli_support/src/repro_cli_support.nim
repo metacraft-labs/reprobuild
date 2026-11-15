@@ -55,6 +55,7 @@ import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
+import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
@@ -2524,6 +2525,57 @@ proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
   lines.sort()
   lines.join("\n")
 
+proc toolDeclaredInputCheckPolicyForRefs*(
+    profiles: Table[string, PathOnlyToolProfile];
+    refs: openArray[string]): Option[FileFingerprintPolicy] =
+  ## Caching-Architecture D2: the input-check policy an edge that states
+  ## none takes from the tools it names. Only a ref that RESOLVES to a tool
+  ## profile here counts -- by executable name, by bare package selector, or
+  ## (when neither matches, as ``mkToolIdentityResolver`` does) as an
+  ## executable a profile's realization exports -- so the declaration
+  ## travels with the resolved tool identity: a ref that resolves to nothing
+  ## (the C convention dispatched under ``--tool-provisioning=path`` sees no
+  ## profiles at all) leaves the edge on ``timestamp``. Each resolved ref is
+  ## looked up by the bare package name of its profile, then by its own
+  ## name (``repro_core/tool_input_check_policies``); with several declaring
+  ## tools the strongest policy wins. `none` when no resolved tool declares
+  ## one.
+  for refName in refs:
+    if refName.len == 0:
+      continue
+    var resolvedPackages: seq[string] = @[]
+    for profile in profiles.values:
+      let bare = bareToolSelector(profile.packageSelector)
+      if profile.executableName == refName or bare == refName:
+        resolvedPackages.add(bare)
+    if resolvedPackages.len == 0:
+      for profile in profiles.values:
+        for exported in profile.exportedExecutables:
+          let file = extractFilename(exported)
+          if file == refName or file == addFileExt(refName, ExeExt):
+            resolvedPackages.add(bareToolSelector(profile.packageSelector))
+            break
+    if resolvedPackages.len == 0:
+      continue
+    for key in resolvedPackages & @[refName]:
+      let declared = toolDeclaredInputCheckPolicy(key)
+      if declared.isSome:
+        result = some(if result.isSome:
+            strongestInputCheckPolicy(result.get(), declared.get())
+          else: declared.get())
+
+proc keyedOnToolDeclaredInputCheckPolicy*(weak: ContentDigest;
+                                          policy: FileFingerprintPolicy):
+    ContentDigest =
+  ## Mix a policy an edge took from its tools' declaration into its weak
+  ## fingerprint. The payload says "unstated" either way, so without this the
+  ## same edge would key identically whether it resolved to ``hybrid`` (a
+  ## tarball-provisioned ``gcc``) or to ``timestamp`` (no resolved profile).
+  var text = "reprobuild.toolDeclaredInputCheckPolicy.v1\n" & $policy & "\n"
+  for b in weak.bytes:
+    text.add(toHex(b, 2))
+  weakFingerprintFromText(text)
+
 proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
     seq[string] =
   ## The sub-tools that reach the engine as
@@ -3242,14 +3294,29 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.removeBeforeRun = payload.removeBeforeRun
     result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
+  # Caching-Architecture D2: an edge that states no policy takes the one its
+  # resolved tools declare, else the owner-decided default, timestamp.
+  var policyFromTools = false
   let actionCachePolicy =
     case payload.actionCachePolicy
+    of acfpUnstated:
+      let declared = toolDeclaredInputCheckPolicyForRefs(profiles,
+        payload.toolIdentityRefs)
+      if declared.isSome and declared.get() != ffpTimestamp:
+        policyFromTools = true
+        declared.get()
+      else:
+        ffpTimestamp
     of acfpTimestamp:
       ffpTimestamp
     of acfpChecksum:
       ffpChecksum
     of acfpHybrid:
       ffpHybrid
+  defer:
+    if policyFromTools:
+      result.weakFingerprint = keyedOnToolDeclaredInputCheckPolicy(
+        result.weakFingerprint, actionCachePolicy)
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
