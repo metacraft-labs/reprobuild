@@ -34,4 +34,4 @@ suite "t_dsl_outputs_lexical_scope_root_flag_inherited":
   test "t_dsl_outputs_lexical_scope_root_flag_inherited":
     let cmd = pkg.executables[0].commands[0]
     check cmd.name == "c"
-    check cmd.outputFlags == @["globalOut", "subOut"]
+    check cmd.ext.outputFlags == @["globalOut", "subOut"]

@@ -70,11 +70,9 @@
 ## moves them into the class where the recorded input set has to be
 ## complete on its own merits.
 ##
-## Where `NoTreeLifetimeGuard` holds, io-mon grades every capture incomplete.
-## The engine must therefore reject publication and reuse on each run. We
-## assert that outcome, including its exact loss marker, while still checking
-## the loaded library in `cacheInputPaths(evidence)` from every launch.
-## Complete-monitoring platforms retain the publication and reuse checks.
+## Every capture is complete (io-mon proves tree quiescence on every
+## platform), so each run checks the loaded library in
+## `cacheInputPaths(evidence)` and the publication and reuse of the record.
 
 import std/[options, os, osproc, sequtils, strutils, tempfiles, unittest]
 
@@ -83,7 +81,6 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
-import repro_test_support/descendant_guard_expectations
 
 const RepoRootMarker = "repro.nim"
 
@@ -255,27 +252,6 @@ proc checkLoadedInput(f: Fixture; r: ActionResult) =
   let library = expandFilename(f.libPath)
   check inputs.anyIt(it == f.libPath or it == library)
 
-proc checkFailsClosed(f: Fixture; r: ActionResult) =
-  ## io-mon requires incomplete captures without a tree-lifetime guard.
-  ## Assert the precise reason as well as the missing record, so an unrelated
-  ## publication failure cannot satisfy this platform's expected outcome.
-  var markers = 0
-  for diagnostic in r.evidence.diagnostics:
-    const lead = "monitor loss: "
-    if diagnostic.startsWith(lead) and
-        diagnostic[lead.len .. ^1].isTreeLifetimeLimitation:
-      inc markers
-  checkpoint("diagnostics: " & $r.evidence.diagnostics &
-    " publish skipped: " & r.cachePublishSkipReason)
-  check r.status == asSucceeded
-  check r.cacheDecision notin ReuseDecisions
-  check r.launched
-  check markers == 1
-  check "monitor-loss" in r.cachePublishSkipReason
-  var cache = openActionCache(f.cacheRoot / "action-cache")
-  check not cache.readHotRecord(f.monitoredRunEdge().weakFingerprint).found
-  f.checkLoadedInput(r)
-
 proc recordedInputs(f: Fixture): seq[FileFingerprint] =
   var cache = openActionCache(f.cacheRoot / "action-cache")
   let hot = cache.readHotRecord(f.monitoredRunEdge().weakFingerprint)
@@ -307,27 +283,20 @@ suite "a loaded shared library is a recorded input":
       # Denominator, and the whole point: the library must be IN the
       # recorded input set. Without this the invalidation below could
       # pass for an unrelated reason (e.g. a probe of the directory).
-      if NoTreeLifetimeGuard:
-        f.checkFailsClosed(r0)
-      else:
-        f.checkLoadedInput(r0)
-        let inputs = f.recordedInputs()
-        let libRecorded = inputs.anyIt(it.path.endsWith("libgreet.so"))
-        checkpoint("recorded inputs: " & $inputs.len &
-          "; 'libgreet.so' among them: " & $libRecorded)
-        check inputs.len > 0
-        check libRecorded
+      f.checkLoadedInput(r0)
+      let inputs = f.recordedInputs()
+      let libRecorded = inputs.anyIt(it.path.endsWith("libgreet.so"))
+      checkpoint("recorded inputs: " & $inputs.len &
+        "; 'libgreet.so' among them: " & $libRecorded)
+      check inputs.len > 0
+      check libRecorded
 
-      # Warm, nothing touched: reusable only with complete monitoring.
+      # Warm, nothing touched: reusable.
       let warm = runBuild(g, config)
       checkpoint("warm: decision=" & $warm.byId("libload/run").cacheDecision)
-      if NoTreeLifetimeGuard:
-        f.checkFailsClosed(warm.byId("libload/run"))
-        check f.runCount() == 2
-      else:
-        check warm.byId("libload/run").cacheDecision in ReuseDecisions
-        check not warm.byId("libload/run").launched
-        check f.runCount() == 1
+      check warm.byId("libload/run").cacheDecision in ReuseDecisions
+      check not warm.byId("libload/run").launched
+      check f.runCount() == 1
 
       # Change ONLY the library. The runner binary is untouched, and it
       # reads no file, so nothing the edge previously READ has changed —
@@ -342,21 +311,13 @@ suite "a loaded shared library is a recorded input":
       check r.cacheDecision notin ReuseDecisions
       check r.launched
       check r.status == asSucceeded
-      if NoTreeLifetimeGuard:
-        f.checkFailsClosed(r)
-      else:
-        f.checkLoadedInput(r)
-      check f.runCount() == (if NoTreeLifetimeGuard: 3 else: 2)
+      f.checkLoadedInput(r)
+      check f.runCount() == 2
       check f.runLogPath.readFile.contains("greet_value=2")
 
-      # Complete captures can reuse the new state; incomplete captures must
-      # still fail closed and retain the loaded-library evidence each time.
+      # The new state is reused.
       let settled = runBuild(g, config)
       checkpoint("settled: decision=" & $settled.byId("libload/run").cacheDecision)
-      if NoTreeLifetimeGuard:
-        f.checkFailsClosed(settled.byId("libload/run"))
-        check f.runCount() == 4
-      else:
-        check settled.byId("libload/run").cacheDecision in ReuseDecisions
-        check not settled.byId("libload/run").launched
-        check f.runCount() == 2
+      check settled.byId("libload/run").cacheDecision in ReuseDecisions
+      check not settled.byId("libload/run").launched
+      check f.runCount() == 2

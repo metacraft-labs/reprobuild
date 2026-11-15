@@ -159,14 +159,21 @@ commands:
             [--discard-unacknowledged-store-evidence]
       Reverse everything the ownership ledger records.
       --discard-unacknowledged-store-evidence discards store evidence the
-      Evidence sink has not acknowledged, after writing a record of it to
-      /var/log/repro-addon signed by the host's attestation key; without
-      that key it refuses.
+      Evidence sink has not acknowledged. Before removing anything it
+      writes an intent record to /var/log/repro-addon, signed by the
+      host's attestation key (without that key it refuses); after the
+      removal succeeded, a signed completion record beside it.
   verify-discard-record RECORD --key HEX
-      Check such a record: its signature (RECORD.sig) must be over exactly
-      the bytes of RECORD, by HEX, the host's enrolled attestation key
-      (required; without it this is a usage error, exit 2). Exit 0 only
-      then. Runs on any machine; the files may be copied off the host.
+      Check such a record (the intent record, or its completion): each
+      signature (FILE.sig) must be over exactly the bytes of FILE, by HEX,
+      the host's enrolled attestation key. Exit 0: the discard was
+      authorised and completed, every object removed. Exit 4: completed,
+      but some objects were kept with the store (--keep-store) and were
+      not discarded; they are listed apart. Exit 3: authorised, not
+      completed (the uninstall stopped before the objects were gone, or
+      their removal could not be made durable). Exit 1: it does not
+      verify. Exit 2: usage (no --key). Runs on any machine; the files may
+      be copied off the host.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only). --after-dpkg
       (the apt hook): also report packages that now own ledger paths and
@@ -506,6 +513,26 @@ proc selfcheckManagedWrite*(path: string): string =
 proc runMigrationPlanCli*(args: seq[string]): int
   ## Below, beside the other plan verbs.
 
+proc renderCompletedDiscard*(keyHex: string; removed, kept: seq[string]): string =
+  ## The operator-facing verdict of a completed discard (§13 decisions 64
+  ## and 81): the objects removed are "discarded unshipped", those the
+  ## completion records as kept with the store (``--keep-store``) are named
+  ## as kept, never as discarded.
+  # Round 10: with objects kept, the verdict names them first -- a plain
+  # "completed:" would read as every object gone.
+  let head = if kept.len > 0:
+      "completed with " & $kept.len & " object(s) kept with the store " &
+        "(--keep-store), not discarded"
+    else: "completed"
+  result = head & ": the intent record and its completion are signed by " &
+    keyHex & " over exactly their bytes; " & $removed.len &
+    " object(s) discarded unshipped:\n"
+  for o in removed: result.add("  " & o & "\n")
+  if kept.len > 0:
+    result.add($kept.len & " object(s) kept with the store (--keep-store), " &
+      "not discarded:\n")
+    for o in kept: result.add("  " & o & "\n")
+
 proc runAddonCli*(args: seq[string]): int =
   ## Dispatch ``repro system addon <args>``.
   if args.len == 0 or args[0] in ["-h", "--help", "help"]:
@@ -570,26 +597,51 @@ proc runAddonCli*(args: seq[string]): int =
                      "\n")
         return 2
       let v = verifyDiscardRecord(path, key)
-      if not v.ok:
+      case v.status
+      of dsInvalid:
         stderr.write("repro system addon verify-discard-record: " & path &
                      " does not verify: " & v.why & "\n")
         return 1
-      stdout.write("verified: " & path & " is signed by " & v.keyHex &
-                   " over exactly its bytes; " & $v.objects.len &
-                   " object(s) discarded unshipped:\n")
-      for o in v.objects: stdout.write("  " & o & "\n")
-      return 0
+      of dsAuthorised:
+        # §13 decision 81: never a discard that did not finish.
+        stdout.write("authorised, not completed: the intent record is " &
+                     "signed by " & v.keyHex & " over exactly its bytes, " &
+                     "but " & v.why & "; " & $v.objects.len &
+                     " object(s) were to be discarded unshipped:\n")
+        for o in v.objects: stdout.write("  " & o & "\n")
+        return 3
+      of dsCompleted, dsCompletedKept:
+        stdout.write(renderCompletedDiscard(v.keyHex, v.removed, v.kept))
+        # Round 9: an object kept with the store (--keep-store) is still on
+        # the host; it was not discarded, and the exit status says so too.
+        if v.kept.len > 0: return 4
+        return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))
-      if r.overrideRecord.len > 0:
+      if r.overrideRecord.len > 0 and r.resumedIntent:
+        # §13 decision 148: an earlier run's intent, carrying its discard
+        # marker; this run authorised nothing, so it never says it did.
+        stdout.write("completing the discard an earlier uninstall " &
+          "authorised and carried out (its discard marker " &
+          discardMarkerPath(custodySite(DefaultStateDir), r.overrideRecord) &
+          " is valid); its signed intent record is " & r.overrideRecord & "\n")
+      elif r.overrideRecord.len > 0:
         # §13 decisions 62 and 64: the record of what was discarded
         # unshipped, its signature beside it.
-        stdout.write("store evidence discarded before the Evidence sink " &
-          "acknowledged it; the signed record is " & r.overrideRecord &
-          " (signature " & r.overrideRecord & DiscardRecordSigExt &
-          "; check it with `repro system addon verify-discard-record " &
-          r.overrideRecord & " --key <enrolled key>`):\n" &
-          r.overrideRecordText)
+        stdout.write("discarding store evidence the Evidence sink has " &
+          "not acknowledged was authorised; the signed intent record is " &
+          r.overrideRecord & " (signature " & r.overrideRecord &
+          DiscardRecordSigExt & "):\n" & r.overrideRecordText)
+        if r.completionRecord.len > 0:
+          stdout.write("the discard completed; the signed completion " &
+            "record is " & r.completionRecord & " (signature " &
+            r.completionRecord & DiscardRecordSigExt & ")\n")
+        else:
+          stdout.write("the discard did NOT complete: there is no " &
+            "completion record\n")
+        stdout.write("check it with `repro system addon " &
+          "verify-discard-record " & r.overrideRecord &
+          " --key <enrolled key>`\n")
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
       for k in r.keptEvidence:
@@ -830,6 +882,10 @@ proc renderAddonSections*(r: AddonApplyResult): string =
     # Every weakening of the hardening floor, in every plan (§10.1, CONF-2).
     result.add("service floor exceptions:\n")
     for l in r.floorExceptions: result.add("  " & l & "\n")
+  if r.liveJudged.len > 0:
+    # What the carried-state live check read from systemd (§11.1).
+    result.add("carried-state live check judged:\n")
+    for u in r.liveJudged: result.add("  " & u & "\n")
   if r.baseIdentity.id.len > 0:
     # The base the plan was computed against (§7.4) and, after a
     # distribution upgrade, what changed since the current generation (§7.9).

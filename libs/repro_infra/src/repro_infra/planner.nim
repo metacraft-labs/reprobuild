@@ -29,6 +29,10 @@ import ./errors
 import ./plan_envelope
 import ./profile
 import ./state_dir
+from ./start_holds import templateOf
+
+const PlannerMutation {.strdefine: "reproAddonMutation".} = ""
+  ## A falsifying build (``repro_addon/mutations``); never a product build.
 
 # Re-export the shared graph kernel's value types + enum members so
 # callers of `repro_infra` see the same names they did before the
@@ -524,6 +528,39 @@ proc findResourceIndex(profile: SystemProfile;
       return i
   return -1
 
+proc triggeredUnitIndex(profile: SystemProfile; target: string): int =
+  ## The ``systemd.systemUnit`` systemd loads for the triggered unit
+  ## ``target``: the profile's unit of that name, else -- ``target`` an
+  ## instance ``foo@x.service`` -- the profile's template ``foo@.service``
+  ## (systemd.unit(5): an instance without a file of its own is loaded from
+  ## its template). -1 when the profile defines neither.
+  result = findResourceIndex(profile, $srkSystemdSystemUnit, target)
+  if result < 0:
+    let tmpl = templateOf(target)
+    if tmpl.len > 0:
+      result = findResourceIndex(profile, $srkSystemdSystemUnit, tmpl)
+
+proc triggerContent(r: SystemResource): (string, string) =
+  case r.kind
+  of srkSystemdSystemUnit: (r.suName, r.suContent)
+  of srkSystemdSystemTimer: (r.stName, r.stContent)
+  else: ("", "")
+
+proc triggerTargets*(profile: SystemProfile):
+    seq[tuple[trigger, target: string]] =
+  ## Every socket, timer and path unit of the profile with each unit it
+  ## triggers, read as the trigger edges read it (``profile.triggeredUnits``
+  ## over the unit's file and the profile's drop-ins onto it): the full
+  ## apply holds these triggers with the unit they trigger (§13 decision
+  ## 151), before either is written. A target only the host can resolve
+  ## (a host specifier) is left out.
+  for r in profile.resources:
+    let (name, content) = triggerContent(r)
+    if name.len == 0: continue
+    for target in triggeredUnits(name, @[content] &
+                                       profileDropInsOf(profile, name)):
+      if target.len > 0: result.add((trigger: name, target: target))
+
 proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
   ## Resolve every explicit `depends_on` entry + every implicit
   ## producer / consumer fact into an edge set over the profile's
@@ -574,6 +611,50 @@ proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
       let consumerIdx = findResourceIndex(profile, c.kind, c.name)
       if consumerIdx >= 0:
         record(result, producerIdx, consumerIdx, edkImplicit)
+
+  # 3. IMPLICIT edges from a trigger unit to the unit it triggers: the
+  # trigger is applied AFTER the unit it names, because systemd refuses
+  # to start a socket, timer or path unit whose target is not loaded
+  # ("Socket service ... not loaded, refusing"), and the full apply
+  # writes and starts units in this order. A profile therefore need not
+  # declare the service first nor spell out a `depends_on`.
+  for triggerIdx in 0 ..< profile.resources.len:
+    when PlannerMutation == "trigger-edges-omitted":
+      # FALSIFYING MUTATION: no trigger is ordered after its unit (§13
+      # decision 137).
+      break
+    let (tName, tContent) = triggerContent(profile.resources[triggerIdx])
+    if tName.len == 0: continue
+    # The trigger read as systemd reads it -- its file, then the profile's
+    # drop-ins onto it, with systemd's line grammar, blanks around `=`,
+    # `Accept=yes`'s template (`profile.triggeredUnits`; reprobuild-pm
+    # issue 2026-11-15-planner-trigger-edges-miss-a-spaced-service-key-
+    # accept-yes-and-a-template-instance).
+    for target in triggeredUnits(tName, @[tContent] &
+                                        profileDropInsOf(profile, tName)):
+      if target.len == 0: continue
+      let targetIdx = triggeredUnitIndex(profile, target)
+      if targetIdx < 0 or targetIdx == triggerIdx: continue
+      # The profile already orders the other way, directly or through
+      # other resources (the triggered unit depends_on the trigger):
+      # honour it rather than manufacture a cycle out of a valid profile.
+      # A path trigger -> ... -> target in the edges so far means exactly
+      # that.
+      var seen = newSeq[bool](profile.resources.len)
+      var stack = @[triggerIdx]
+      seen[triggerIdx] = true
+      var reverse = false
+      while stack.len > 0 and not reverse:
+        let n = stack.pop()
+        for e in result.edges:
+          if e.fromIdx == n and not seen[e.toIdx]:
+            if e.toIdx == targetIdx:
+              reverse = true
+              break
+            seen[e.toIdx] = true
+            stack.add e.toIdx
+      if not reverse:
+        record(result, targetIdx, triggerIdx, edkImplicit)
 
 proc topologicallyOrder*(profile: SystemProfile;
                          graph: DependencyGraph): seq[int] =

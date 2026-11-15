@@ -376,6 +376,8 @@ proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
     ("IO_MON_SRC", src & "/io-mon/src"),
     ("SHM_GSET_SRC", src & "/nim-shm-gset/src"),
     ("SHM_QUEUE_SRC", src & "/nim-shm-queue/src"),
+    ("CLI_SPEC_SRC", src & "/nim-cli-spec/src"),
+    ("CONFUTILS_SRC", src & "/nim-confutils"),
     ("CODETRACER_PINNED_SRC", src & "/codetracer/src"),
     ("REPRO_CT_TEST_RUNNER_SRC", src & "/reprobuild-ct-test-runner"),
     ("REPRO_TEST_ADAPTERS_SRC", src & "/reprobuild-test-adapters/src"),

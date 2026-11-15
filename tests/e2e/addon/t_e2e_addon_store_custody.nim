@@ -46,11 +46,57 @@
 ##    credential revoked at the sink), and ``--discard-store-evidence`` is
 ##    refused, removing nothing (decision 56). With
 ##    ``--discard-unacknowledged-store-evidence`` (decision 62) uninstall
-##    removes them, after writing a signed record of each object discarded
-##    unshipped to ``/var/log/repro-addon``, which it prints and which
-##    stays after it; ``repro system addon verify-discard-record`` accepts
-##    its signature with the attestation key bootstrap printed (decision
-##    64).
+##    removes them, after writing a signed intent record of each object
+##    discarded unshipped to ``/var/log/repro-addon``, and after the removal
+##    a signed completion record (decision 81); it prints both, and both
+##    stay after it. ``repro system addon verify-discard-record`` reports
+##    the discard "completed" (exit 0) with the attestation key bootstrap
+##    printed (decision 64) -- the completion signed with the key read
+##    before the removal took it.
+##
+## Round 11: before the final uninstall, the store's removal is made to
+## fail (``chattr +i`` on a file of the object left aside): the uninstall
+## exits non-zero, writes no completion (verify exit 3), and keeps the
+## state, the ledger copy, the store evidence and the attestation key;
+## after ``chattr -i`` (falsifier
+## ``uninstall-discards-state-after-failed-store-removal``). Then a store
+## evidence entry's removal is made to fail the same way: the uninstall
+## exits non-zero, does not report that entry removed, and again keeps the
+## state and the key (falsifier ``evidence-reported-removed-unchecked``).
+## That run passes ``--keep-store``, so the object left aside is still
+## there for the next one. Both runs keep the Evidence sink's configuration
+## and CA with the state, so a re-run can still ship (§13 decision 56,
+## amended 2026-11-14; falsifier ``sink-config-removed-in-step-4``). Between
+## them, the sink still not acknowledging, a plain
+## ``--discard-store-evidence`` is refused and asks the operator to wait
+## for the acknowledgement, never "they cannot be shipped". The second run
+## is that wait ending: the sink acknowledges again, and the same plain
+## flag ships the queued records and goes ahead, with no override and no
+## intent record. A third object is then left aside and the sink revoked
+## again, so the decision-62 runs below have records to discard unshipped.
+##
+## Round 12: the next run's completion cannot be written
+## (``/var/log/repro-addon`` made immutable once its intent record is
+## there): it exits non-zero and keeps the state, the ledger copy, the
+## attestation key (decision 81; falsifier
+## ``discard-completion-failure-discards-key``). With an operator's file in
+## ``/etc/repro`` made immutable, the run after (no evidence left) completes
+## that run's intent, fails at ``/etc/repro``, and keeps the state and the key again
+## (falsifier ``state-removed-after-root-failure``). The last run finishes,
+## and the first intent verifies as completed. The entries the runs report
+## removed are all the entries. (``ship-ok-without-sink-configuration``
+## is held here again by deleting the configuration by hand before a
+## re-run, §13 decision 149.)
+##
+## Round 13 (§13 decision 148): the run after the failed completion
+## completes that intent from its discard marker and says so, never
+## "discarding … was authorised"; and at the end EVERY intent record the
+## runs wrote is verified: only that one is completed, every other stays
+## "authorised, not completed" (falsifier ``resume-without-marker``: the
+## last plain run completes an earlier run's intent too). The marker's
+## binding, signature and timing are held at unit level
+## (``t_addon_review_round8`` cases 16 and 19-22), since no step here forges
+## a marker or fails a sync.
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -66,7 +112,9 @@
 ## (step 5: the override writes and prints no record),
 ## ``override-signs-other-bytes`` and ``override-empty-signature`` (step 5:
 ## ``verify-discard-record`` refuses the record), ``verify-accepts-missing-key``
-## (step 5: it verifies without ``--key``).
+## (step 5: it verifies without ``--key``), ``discard-completion-key-read-late``
+## (step 5: the completion is signed from the key file the removal took, so
+## there is none and the discard verifies as not completed).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -332,27 +380,269 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("the sink received the append and appended none of its records",
        refusedAppend and not aside2Appended, "")
 
+  # Round 11: the store's removal fails first (an immutable file inside the
+  # object left aside, without --keep-store). The discard is not completed,
+  # and the uninstall keeps the keys, the attestation key and the state,
+  # so the operator can clear the cause and run it again (spec §10.2
+  # step 5; reprobuild-pm issue 2026-11-14-addon-uninstall-removes-the-
+  # state-and-attestation-key-after-a-failed-store-removal-...).
+  # The store is a read-only bind mount until the uninstall unmounts it:
+  # while it is mounted, the flag is set through a private writable view.
+  let immutable = proc (flag: string): ExecOut =
+    g.exec("unshare --mount --propagation private /bin/sh -c " &
+      quoteShell("if mountpoint -q /repro/store; then mount -o " &
+                 "remount,bind,rw /repro/store || exit 1; fi; chattr " &
+                 flag & " " & aside2 & "/f"))
+  let imm = immutable("+i")
+  step("an object left aside is made immutable, so the store's removal fails",
+       imm.exitCode == 0, imm.stdout & imm.stderr)
+  # The entries the run must keep, by name: the directory alone survives a
+  # run that removes every entry (reprobuild-pm issue 2026-11-14-addon-
+  # store-custody-gate-checks-the-evidence-directory-not-its-entries-...).
+  let evidenceBefore = g.exec("ls -1 " & Evidence).stdout.strip()
+  let unF = g.exec(repro & " system addon uninstall " &
+                   "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
+  let said0 = unF.stdout & unF.stderr
+  record["uninstallFailedStore"] = %said0
+  let marker0 = "the signed intent record is "
+  var record0 = ""
+  if marker0 in said0:
+    record0 = said0[said0.find(marker0) + marker0.len .. ^1].splitLines()[0].split(' ')[0]
+    record0.removeSuffix(":")
+  step("with the store's removal failing, uninstall exits non-zero, writes no " &
+       "completion, and names the object as neither discarded nor kept",
+       unF.exitCode != 0 and "neither discarded nor kept" in said0 and
+         "the discard did NOT complete" in said0 and
+         "are kept: the uninstall is incomplete" in said0,
+       said0)
+  let v0 = g.exec(repro & " system addon verify-discard-record " &
+    quoteShell(record0) & " --key " & quoteShell(bs.attestationKey))
+  step("its intent verifies as authorised, not completed (exit 3)",
+       v0.exitCode == 3, v0.stdout & v0.stderr)
+  let keptState = g.exec("test -f /var/lib/repro/system/addon-ledger && " &
+    "test -f /var/lib/repro/agent/attestation.key && test -d " & Evidence)
+  step("the state, the ledger copy, the store evidence and the attestation " &
+       "key that must sign the completion are kept",
+       keptState.exitCode == 0 and entries > 0 and
+         evidenceBefore.splitLines().len == entries and
+         g.exec("ls -1 " & Evidence).stdout.strip() == evidenceBefore,
+       "before: " & evidenceBefore & "\n" &
+         g.exec("ls -la /var/lib/repro /var/lib/repro/agent " & Evidence &
+                " 2>&1").stdout)
+  # §13 decision 56: the sink's configuration and CA stay with the state
+  # an incomplete uninstall keeps, so a re-run can still ship (falsifier
+  # sink-config-removed-in-step-4).
+  let keptConf = g.exec("test -f /etc/repro/evidence.conf && " &
+    "test -f /etc/repro/evidence-sink.crt")
+  step("the Evidence sink's configuration and CA are kept with it",
+       keptConf.exitCode == 0, g.exec("ls -la /etc/repro 2>&1").stdout)
+  let unimm = immutable("-i")
+  step("the cause is cleared", unimm.exitCode == 0, unimm.stdout & unimm.stderr)
+  # Decision 56, amended (reprobuild-pm issue 2026-11-14-addon-uninstall-
+  # removes-the-sink-configuration-before-it-knows-the-run-will-finish-so-
+  # a-re-run-cannot-ship): the re-run, the sink still not acknowledging,
+  # refuses the plain flag and tells the operator to wait for the
+  # acknowledgement, which can come because the configuration was kept.
+  # Before the fix the configuration was gone, and the refusal said the
+  # records "cannot be shipped" (falsifier sink-config-removed-in-step-4).
+  let unW = g.exec(repro & " system addon uninstall --discard-store-evidence",
+                   timeoutSec = 1800)
+  let saidW = unW.stdout & unW.stderr
+  record["uninstallRerunUnacknowledged"] = %saidW
+  step("the re-run, the sink still not acknowledging: --discard-store-" &
+       "evidence is refused until the sink acknowledges, and nothing is " &
+       "removed (decision 56)",
+       unW.exitCode != 0 and "has not acknowledged" in saidW and
+         "run uninstall again once it has" in saidW and
+         "cannot be shipped" notin saidW and
+         "no later run can ship them" notin saidW and
+         "nothing was removed" in saidW and
+         g.evidenceCount() == entries and
+         g.exec("test -d " & aside2).exitCode == 0 and
+         g.exec("test -f /etc/repro/evidence.conf").exitCode == 0,
+       saidW)
+  # §13 decision 149 (A11 code review round 13): the path a host still
+  # reaches when the sink's configuration is gone with records queued --
+  # an operator who deleted it, or a state an older engine left. The
+  # configuration is deleted by hand; the plain flag is refused, the
+  # refusal names only the override, and nothing is removed (falsifier
+  # ship-ok-without-sink-configuration: the re-run reads the missing
+  # configuration as "nothing to wait for" and discards unrecorded).
+  let confGone = g.exec("cp -p /etc/repro/evidence.conf /root/evidence.conf.kept " &
+    "&& rm /etc/repro/evidence.conf")
+  let unG = g.exec(repro & " system addon uninstall --discard-store-evidence",
+                   timeoutSec = 1800)
+  let saidG = unG.stdout & unG.stderr
+  record["uninstallConfigurationGone"] = %saidG
+  step("with the sink's configuration deleted by hand and records queued, " &
+       "--discard-store-evidence is refused, the refusal names only the " &
+       "override, and nothing is removed (decision 149)",
+       confGone.exitCode == 0 and unG.exitCode != 0 and
+         "no later run can ship them" in saidG and
+         "run uninstall again once it has" notin saidG and
+         "nothing was removed" in saidG and
+         g.evidenceCount() == entries and
+         g.exec("test -d " & aside2).exitCode == 0 and
+         g.exec("test -f /var/lib/repro/system/addon-ledger").exitCode == 0,
+       saidG)
+  let confBack = g.exec("cp -p /root/evidence.conf.kept /etc/repro/evidence.conf")
+  step("the configuration is put back", confBack.exitCode == 0,
+       confBack.stdout & confBack.stderr)
+  # Round 11, the second half: the store evidence's removal fails (an
+  # immutable file in one entry). The run keeps the store (--keep-store),
+  # so the final run below still finds the object left aside; the other
+  # entries go, that one is not reported removed, and the state and the
+  # key are kept again.
+  let entry = g.exec("ls -d " & Evidence & "/*/ | head -n 1").stdout.strip().strip(
+    leading = false, chars = {'/'})
+  let entryFile = g.exec("find " & quoteShell(entry) &
+    " -type f | head -n 1").stdout.strip()
+  let immE = g.exec("chattr +i " & quoteShell(entryFile))
+  step("a file of a store evidence entry is made immutable",
+       entry.len > 0 and entryFile.len > 0 and immE.exitCode == 0,
+       entry & " " & entryFile & " " & immE.stdout & immE.stderr)
+  # The wait ends: the sink acknowledges again, and the plain flag the
+  # issue's operator was told to use ships the queued records (the object
+  # left aside among them) and goes ahead with no override.
+  sink.reinstate()
+  let sinceE = sink.headSeq()
+  let unE = g.exec(repro & " system addon uninstall --keep-store " &
+                   "--discard-store-evidence", timeoutSec = 1800)
+  let saidE = unE.stdout & unE.stderr
+  record["uninstallFailedEvidence"] = %saidE
+  step("with an evidence entry's removal failing, uninstall exits non-zero, " &
+       "does not report that entry removed, and keeps the state",
+       unE.exitCode != 0 and (entry & " (store evidence)") notin saidE and
+         "are kept: the uninstall is incomplete" in saidE,
+       saidE)
+  var aside2Acknowledged = false
+  for e in sink.entries():
+    if e.seq > sinceE and e.kind == ekRecord and $e.senderHostId == host and
+        e.record.field("evidence") == aside2:
+      aside2Acknowledged = true
+  step("the re-run shipped the queued records with the kept configuration, " &
+       "the sink appended them, and the plain --discard-store-evidence went " &
+       "ahead with no override (decision 56)",
+       aside2Acknowledged and "has not acknowledged" notin saidE and
+         "cannot be shipped" notin saidE and
+         "the signed intent record is " notin saidE and
+         saidE.count("(store evidence)") >= 1,
+       saidE)
+  let keptState1 = g.exec("test -f /var/lib/repro/system/addon-ledger && " &
+    "test -f /var/lib/repro/agent/attestation.key && test -d " &
+    quoteShell(entry))
+  step("the state, the ledger copy, that entry and the attestation key are " &
+       "kept again", keptState1.exitCode == 0,
+       g.exec("ls -la /var/lib/repro /var/lib/repro/agent " & Evidence &
+              " 2>&1").stdout)
+  let unimmE = g.exec("chattr -i " & quoteShell(entryFile))
+  step("that cause is cleared", unimmE.exitCode == 0,
+       unimmE.stdout & unimmE.stderr)
+  # Every record is acknowledged now. For decision 62's override below to
+  # have something to discard unshipped, a third object is left aside in
+  # the store (kept above) and the sink stops acknowledging again.
+  let aside3 = "/repro/store/tmp/custody-aside/20261107T000002Z-gate-3-a"
+  let leave3 = g.exec("unshare --mount --propagation private /bin/sh -c " &
+    quoteShell("if mountpoint -q /repro/store; then mount -o " &
+      "remount,bind,rw /repro/store || exit 1; fi; mkdir -p " & aside3 &
+      " && printf altered > " & aside3 & "/f && printf '%s\\n' " &
+      "/repro/store/prefixes/gate/3-a > " & aside3 & ".from"))
+  step("a third object is left aside in the store, and the sink stops " &
+       "acknowledging again", leave3.exitCode == 0, leave3.stderr)
+  sink.revoke(host)
+
   # Decision 62, the explicit recorded override: uninstall discards anyway,
   # after a signed local record of every object discarded unshipped, which
-  # it prints and leaves outside the state it removes.
-  let un = g.exec(repro & " system addon uninstall " &
-                  "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
-  record["uninstall"] = %(un.stdout & un.stderr)
-  let said = un.stdout & un.stderr
-  let marker = "the signed record is "
+  # it prints and leaves outside the state it removes. Round 12 (§13
+  # decision 81): this run's completion cannot be written --
+  # /var/log/repro-addon is made immutable once its intent record is there
+  # -- so the run keeps the state, the ledger copy and the attestation key
+  # (falsifier discard-completion-failure-discards-key).
+  let n0 = g.exec("ls /var/log/repro-addon/*-discard-intent.json 2>/dev/null | " &
+    "wc -l").stdout.strip()
+  let race = g.exec("(" & repro & " system addon uninstall " &
+    "--discard-unacknowledged-store-evidence > /root/u4.out 2>&1; " &
+    "echo $? > /root/u4.rc) & for i in $(seq 1 3000); do " &
+    "n=$(ls /var/log/repro-addon/*-discard-intent.json 2>/dev/null | wc -l); " &
+    "[ \"$n\" -gt " & n0 & " ] && break; sleep 0.01; done; " &
+    "chattr +i /var/log/repro-addon && echo IMMUTABLE-AFTER-INTENT; wait",
+    timeoutSec = 1800)
+  let said = g.exec("cat /root/u4.out").stdout
+  let rc4 = g.exec("cat /root/u4.rc").stdout.strip()
+  record["uninstall"] = %said
+  let marker = "the signed intent record is "
   var recordPath = ""
   if marker in said:
     recordPath = said[said.find(marker) + marker.len .. ^1].splitLines()[0]
     recordPath = recordPath.split(' ')[0]
     recordPath.removeSuffix(":")
-  step("with --discard-unacknowledged-store-evidence uninstall succeeds, " &
-       "names each store-evidence entry and prints its signed record",
-       un.exitCode == 0 and
-         said.count("(store evidence)") == entries and
+  step("with --discard-unacknowledged-store-evidence uninstall names each " &
+       "store-evidence entry and prints its signed intent record",
+       said.count("(store evidence)") + saidE.count("(store evidence)") ==
+           entries and said.count("(store evidence)") >= 1 and
          (aside2 & " (store evidence left aside)") in said and
+         (aside3 & " (store evidence left aside)") in said and
          recordPath.startsWith("/var/log/repro-addon/") and
-         aside2 in said[said.find(marker) .. ^1],
+         aside2 in said[said.find(marker) .. ^1] and
+         aside3 in said[said.find(marker) .. ^1],
        said)
+  let kept4 = g.exec("test -f /var/lib/repro/system/addon-ledger && " &
+    "test -f /var/lib/repro/agent/attestation.key")
+  step("its completion cannot be written: it exits non-zero and keeps the " &
+       "state, the ledger copy and the attestation key (decision 81)",
+       "IMMUTABLE-AFTER-INTENT" in race.stdout and rc4 != "0" and
+         "the discard did NOT complete" in said and
+         "completion record could not be written" in said and
+         "are kept: the uninstall is incomplete" in said and
+         kept4.exitCode == 0,
+       race.stdout & race.stderr & "\nrc=" & rc4 & "\n" & said & "\n" &
+         g.exec("ls -la /var/lib/repro /var/lib/repro/agent 2>&1").stdout)
+  let v4 = g.exec(repro & " system addon verify-discard-record " &
+    quoteShell(recordPath) & " --key " & quoteShell(bs.attestationKey))
+  step("its intent verifies as authorised, not completed (exit 3)",
+       v4.exitCode == 3, v4.stdout & v4.stderr)
+  let unimmL = g.exec("chattr -i /var/log/repro-addon")
+  step("that cause is cleared", unimmL.exitCode == 0,
+       unimmL.stdout & unimmL.stderr)
+
+  # Round 12 (A11 code review finding 3): an operator's file in /etc/repro
+  # that cannot be removed. The re-run, with no evidence left, completes the
+  # earlier run's intent (decision 81), then fails at /etc/repro, and
+  # keeps the state with its
+  # ledger copy and the key (falsifier state-removed-after-root-failure).
+  let note = g.exec("echo operator > /etc/repro/operator.note && " &
+    "chattr +i /etc/repro/operator.note")
+  step("an operator's file in /etc/repro is made immutable",
+       note.exitCode == 0, note.stdout & note.stderr)
+  let un3 = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
+  let said3 = un3.stdout & un3.stderr
+  record["uninstallEtcReproFails"] = %said3
+  let kept3 = g.exec("test -f /var/lib/repro/system/addon-ledger && " &
+    "test -f /var/lib/repro/agent/attestation.key")
+  step("the re-run completes the earlier discard, then fails at /etc/repro " &
+       "and keeps the state, the ledger copy and the attestation key",
+       un3.exitCode != 0 and
+         # §13 decision 148: an earlier run's intent with its marker,
+         # completed, and never announced as this run's authorisation.
+         "completing the discard an earlier uninstall authorised" in said3 and
+         ("its signed intent record is " & recordPath) in said3 and
+         "was authorised; the signed intent record" notin said3 and
+         "the discard completed; the signed completion record is " in said3 and
+         "/etc/repro" in said3 and
+         "are kept: the uninstall is incomplete" in said3 and
+         kept3.exitCode == 0,
+       said3 & "\n" & g.exec("ls -la /var/lib/repro /etc/repro 2>&1").stdout)
+  let unimmN = g.exec("chattr -i /etc/repro/operator.note")
+  step("that cause is cleared", unimmN.exitCode == 0,
+       unimmN.stdout & unimmN.stderr)
+
+  # The last run finishes: nothing is left to complete, and the state goes.
+  let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
+  record["uninstallLast"] = %(un.stdout & un.stderr)
+  step("the last run finishes, and the state and /etc/repro go",
+       un.exitCode == 0 and
+         g.exec("test -e /var/lib/repro || test -e /etc/repro").exitCode != 0,
+       un.stdout & un.stderr)
   let kept = g.exec("cat " & quoteShell(recordPath)).stdout
   # Decision 64: checked the way an operator checks it, with the command,
   # against the attestation key bootstrap printed (the enrolled one).
@@ -365,16 +655,45 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     quoteShell(recordPath))
   record["overrideVerifyWithoutKey"] = %(keyless.stdout & keyless.stderr)
   let signed = bs.attestationKey.len > 0 and verify.exitCode == 0 and
-    ("  " & aside2) in verify.stdout and keyless.exitCode == 2 and
-    "verified" notin keyless.stdout
+    verify.stdout.startsWith("completed: ") and
+    ("  " & aside2) in verify.stdout and
+    ("  " & aside3) in verify.stdout and keyless.exitCode == 2 and
+    "completed" notin keyless.stdout
   record["overrideRecord"] = %kept
+  # aside3's record was never acknowledged (the sink revoked again): it is
+  # the object discarded unshipped. aside2's was acknowledged by the plain
+  # re-run above, and the intent still names it among the objects removed.
   step("the record names the object discarded unshipped, stays after " &
-       "uninstall, and verify-discard-record accepts its signature with the " &
-       "enrolled key and refuses to verify without one (decisions 62, 64)",
+       "uninstall, and verify-discard-record reports the discard completed " &
+       "with the enrolled key and refuses to verify without one " &
+       "(decisions 62, 64, 81)",
        signed, kept & "\n" & verify.stdout & verify.stderr & "\n" &
        keyless.stdout & keyless.stderr)
   step("the evidence directory is gone with the state",
        g.exec("test -e " & Evidence).exitCode != 0, "")
+  # §13 decision 148 (the reviewer's VM probe, IE/I4): EVERY intent record
+  # this gate's runs wrote is checked at the end. Only the run whose
+  # objects were all removed and synced -- its completion failed, and the
+  # next run completed it from its discard marker -- verifies as completed.
+  # Every other one, the runs that stopped before their objects were gone
+  # (I0, the failed store removal; IE, the failed evidence removal), stays
+  # "authorised, not completed" (exit 3) for good (falsifiers
+  # resume-without-marker, marker-not-bound-to-intent,
+  # marker-signature-unchecked).
+  let intents = g.exec("ls /var/log/repro-addon/*-discard-intent.json")
+    .stdout.strip().splitLines()
+  var verdicts = ""
+  var allRight = intents.len >= 3 and recordPath in intents
+  for it in intents:
+    let v = g.exec(repro & " system addon verify-discard-record " &
+      quoteShell(it) & " --key " & quoteShell(bs.attestationKey))
+    verdicts.add(it & " exit=" & $v.exitCode & "\n")
+    let want = if it == recordPath: 0 else: 3
+    if v.exitCode != want: allRight = false
+  record["everyIntent"] = %verdicts
+  step("every earlier intent is checked: only the one whose run removed " &
+       "and synced all its objects is completed; the others stay " &
+       "authorised, not completed (decision 148)", allRight, verdicts)
 
 suite Gate:
   test "store custody: coverage, recovery with evidence, refusal":

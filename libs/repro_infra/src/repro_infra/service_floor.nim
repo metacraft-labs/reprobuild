@@ -100,6 +100,7 @@
 ## the engines of those versions stored, byte for byte.
 
 import std/[algorithm, sequtils, strutils, tables]
+from std/posix import realpath
 
 const FloorMutation {.strdefine: "reproAddonMutation".} = ""
   ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
@@ -144,10 +145,18 @@ template off5(h: FloorHalf): bool =
   Round5Off and h == fhParse
 
 const
-  FloorVersion* = "4"
+  FloorVersion* = "5"
     ## The floor version this module renders (see the header). A stored
     ## generation records the version it was rendered with; 1 and 2 are
-    ## the frozen ``service_floor_v1`` / ``service_floor_v2``.
+    ## the frozen ``service_floor_v1`` / ``service_floor_v2``, 3 is
+    ## ``service_floor_v3``. Version 4 is this module's floor lines without
+    ## the boot ordering version 5 adds to ``[Unit]``
+    ## (``FloorBootOrdering``; §13 decision 144).
+  FloorBootOrdering* = "After=repro-addon-reassert.service"
+    ## §13 decision 144: every floored unit (from floor version 5) starts
+    ## only after the add-on's boot re-assertion, which replays a pending
+    ## revert -- putting its start holds back -- before any floored unit
+    ## can start (systemd.unit(5), After=).
   ServiceFloorHardening* = "serviceFloor"
     ## The one value of the ``hardening`` field.
   WholeFloorException* = "serviceFloor"
@@ -1380,11 +1389,32 @@ proc floorNoExecMounts*(directives: openArray[tuple[key, value: string]]):
         let p = "-" & root & "/" & name
         if p notin result: result.add(p)
 
+proc literalPrefix*(path: string): string =
+  ## ``path`` up to the component holding its first specifier (``%i``,
+  ## ``%n``, ...; systemd.unit(5), "Specifiers"): ``/run/a9q/%i`` and
+  ## ``/run/a9q/x%i/y`` are ``/run/a9q``, so a template's place covers
+  ## every instance's (§13 decision 146). ``%%`` is a literal ``%`` and is
+  ## not a specifier. A path with no specifier is returned as it is.
+  when FloorMutation == "writable-specifier-resolved":
+    return path
+  var i = 0
+  while i < path.len:
+    if path[i] == '%':
+      if i + 1 < path.len and path[i + 1] == '%':
+        i += 2
+        continue
+      let slash = path.rfind('/', last = i)
+      return (if slash <= 0: "/" else: path[0 ..< slash])
+    inc i
+  path
+
 proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
     seq[string] =
   ## Every place the unit's ``[Service]`` lines make writable for it, as
   ## normalised paths: ``ReadWritePaths=``, each writable bind's
-  ## destination, each tmpfs, each ``*Directory=`` under its root.
+  ## destination, each tmpfs, each ``*Directory=`` under its root. A place
+  ## spelled with a specifier counts by its literal prefix
+  ## (``literalPrefix``; §13 decision 146).
   const roots = [("StateDirectory", "/var/lib"), ("RuntimeDirectory", "/run"),
                  ("CacheDirectory", "/var/cache"), ("LogsDirectory", "/var/log"),
                  ("ConfigurationDirectory", "/etc")]
@@ -1393,22 +1423,22 @@ proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
     of "ReadWritePaths":
       for t in v.splitWhitespace():
         let q = t.strip(leading = true, trailing = false, chars = {'-', '+'})
-        if q.startsWith("/"): result.add(normalisedPath(q))
+        if q.startsWith("/"): result.add(literalPrefix(normalisedPath(q)))
     of "BindPaths":
       for t in v.splitWhitespace():
         let parts = t.strip(leading = true, trailing = false,
                             chars = {'-', '+'}).split(':')
         let d = if parts.len >= 2: parts[1] else: parts[0]
-        if d.startsWith("/"): result.add(normalisedPath(d))
+        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
     of "TemporaryFileSystem":
       for t in v.splitWhitespace():
         let d = t.split(':')[0]
-        if d.startsWith("/"): result.add(normalisedPath(d))
+        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
     else:
       for (dk, root) in roots:
         if k == dk:
           for t in v.splitWhitespace():
-            result.add(normalisedPath(root & "/" & t.split(':')[0]))
+            result.add(literalPrefix(normalisedPath(root & "/" & t.split(':')[0])))
 
 type SocketOptionRule* = enum
   ## How the floor judges one ``[Socket]`` option of a unit that activates
@@ -1500,7 +1530,46 @@ const
     "SocketProtocol", "FlushPending", "Writable"]
     ## Round 5's list, kept for the falsifying build ``socket-options-by-list``.
 
-proc listenerRefusal*(unitName, value: string; service = ""): string =
+proc withBootOrdering*(content: string): string =
+  ## ``content`` with ``FloorBootOrdering`` as the first line of its
+  ## ``[Unit]`` section (a ``[Unit]`` section is added at the top when it
+  ## has none).
+  let at = content.find("[Unit]\n")
+  if at < 0: return "[Unit]\n" & FloorBootOrdering & "\n\n" & content
+  let b = at + "[Unit]\n".len
+  content[0 ..< b] & FloorBootOrdering & "\n" & content[b .. ^1]
+
+proc canonicalPlace*(path: string; resolveLinks = false): string =
+  ## ``path`` as the kernel resolves it, for comparing a listener with the
+  ## places a service can write (§13 decision 139): normalised, with
+  ## ``/var/run`` read as ``/run`` (a link to it on every base the add-on
+  ## supports: Filesystem Hierarchy Standard 3.0 §5.13, and systemd's
+  ## file-hierarchy(7)), and, with ``resolveLinks`` (on the host, the
+  ## effective half), every link on the longest existing prefix resolved
+  ## (realpath(3)), the rest appended as written.
+  result = normalisedPath(path)
+  when FloorMutation == "listener-writable-by-spelling":
+    return
+  if result == "/var/run" or result.startsWith("/var/run/"):
+    result = "/run" & result["/var/run".len .. ^1]
+  if resolveLinks and result.startsWith("/"):
+    var head = result
+    var tail = ""
+    while head.len > 1:
+      var buf: array[4097, char]
+      let r = realpath(head.cstring, cast[cstring](addr buf[0]))
+      if r != nil:
+        let resolved = $cast[cstring](addr buf[0])
+        result = normalisedPath(resolved & tail)
+        if result == "/var/run" or result.startsWith("/var/run/"):
+          result = "/run" & result["/var/run".len .. ^1]
+        return
+      let slash = head.rfind('/')
+      tail = head[slash .. ^1] & tail
+      head = if slash <= 0: "/" else: head[0 ..< slash]
+
+proc listenerRefusal*(unitName, value: string; service = "";
+                      serviceWritable: openArray[string] = []): string =
   ## Why a ``ListenStream=``/``ListenDatagram=``/``ListenSequentialPacket=``
   ## value of an activator is not one the floor allows, or "": a network
   ## address (``port``, ``addr:port``, ``[addr]:port``, ``vsock:cid:port``),
@@ -1544,6 +1613,25 @@ proc listenerRefusal*(unitName, value: string; service = ""): string =
         return np & " is not named for the unit (/run/" & stem & " or below " &
           "/run/" & stem & "/, so " &
           "the manager never creates, chowns or removes another's path)"
+      # Spec §10.1 round 12, "A listener below a place its service can write":
+      # deeper than /run/<stem>/<name>, the manager walks
+      # directories below the unit's own; if the service can write one of
+      # them it can replace it with a link (``/run/<stem>/sub`` ->
+      # ``/run/udev``), and the manager, as root, binds and unlinks through
+      # it. Directly at /run/<stem>/<name> only the final name is the
+      # service's to replace, which a bind or unlink does not follow.
+      when FloorMutation != "listener-below-writable-allowed":
+        if np["/run/".len .. ^1].split('/').len >= 3:
+          for w in serviceWritable:
+            # Compared as the kernel resolves them, never as spelled
+            # (§13 decision 139: `/var/run/a` covers `/run/a/sub/x`).
+            let wp = canonicalPlace(w)
+            if np.startsWith(wp & "/") or wp == "/":
+              return np & " lies below " & wp & ", which the service, or a " &
+                "unit sharing its stem, can write: it could turn a directory " &
+                "on the path into a link " &
+                "the manager follows as root (§10.1 round 12, \"A " &
+                "listener below a place its service can write\")"
     return ""
   if v.startsWith("@"):
     if not ownName(v[1 .. ^1].split('/')[0]):
@@ -1554,7 +1642,8 @@ proc listenerRefusal*(unitName, value: string; service = ""): string =
     return "not a network address or a unix socket path"
   ""
 
-proc socketOptionRefusal*(unitName, key, value: string; service = ""): string =
+proc socketOptionRefusal*(unitName, key, value: string; service = "";
+                          serviceWritable: openArray[string] = []): string =
   ## Why one ``[Socket]`` option of an activator is refused, or ""
   ## (``SocketOptionRules``).
   when FloorMutation == "socket-options-by-list":
@@ -1570,7 +1659,7 @@ proc socketOptionRefusal*(unitName, key, value: string; service = ""): string =
     if k != key: continue
     let v = value.strip()
     case rule
-    of sorListener: return listenerRefusal(unitName, v, service)
+    of sorListener: return listenerRefusal(unitName, v, service, serviceWritable)
     of sorBool:
       if v.toLowerAscii() notin ["yes", "no", "true", "false", "1", "0", "on", "off"]:
         return "not a boolean"
@@ -1610,7 +1699,8 @@ proc baseTreeActivatorRefusal*(unitName: string): string =
   ""
 
 proc activatorRefusal*(unitName, content: string; dropIn: bool;
-                       half = fhParse; service = ""): string =
+                       half = fhParse; service = "";
+                       serviceWritable: openArray[string] = []): string =
   ## A socket, timer or path unit that activates a floored service, or a
   ## drop-in onto one (A9 review rounds 5 and 7): the manager opens a
   ## socket's listeners as root and hands them to the service, applies its
@@ -1642,7 +1732,8 @@ proc activatorRefusal*(unitName, content: string; dropIn: bool;
         "service runs as root, outside the floor"
     if d.section == section:
       let why = case typ
-        of "socket": socketOptionRefusal(unitName, d.key, d.value, service)
+        of "socket": socketOptionRefusal(unitName, d.key, d.value, service,
+                                         serviceWritable)
         of "timer": (if d.key in TimerKeys: "" else: "is not a timer setting the floor allows")
         else: (if d.key in PathKeys: "" else: "is not a path-unit setting the floor allows (MakeDirectory= creates, as root)")
       if why.len > 0:

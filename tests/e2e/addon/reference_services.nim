@@ -366,6 +366,57 @@ proc engineFromEnv*(): string =
     raise newException(TestBedError, "REPRO_ADDON_ENGINE_CLOSURE must name " &
       "a store path with bin/reprobuild built from this tree")
 
+proc engineBuild*(engine: string): JsonNode =
+  ## The build of the engine closure ``engine``, read from the derivation
+  ## that produced it, for the gate record (``record["engineBuild"]``): the
+  ## record classifier (``scripts/addon_a13_classify.py``) compares it with
+  ## the engine build the cell names (reprobuild-pm issue
+  ## 2026-11-14-addon-a13-classifier-accepts-another-gates-record-and-an-
+  ## empty-green-one). A falsifying engine is the Nix package built with
+  ## ``overrideAttrs (_: { REPRO_ADDON_MUTATION = "<name>"; })`` (and the
+  ## seam build with ``REPRO_ADDON_TEST_SEAMS = "1"``), so the derivation's
+  ## environment says which engine this is. ``{"closure", "deriver",
+  ## "mutation", "testSeams"}``, or ``{"closure", "error"}`` when it cannot
+  ## be read -- never a guess. Both shapes of ``nix derivation show``: Nix
+  ## >= 2.32 nests the derivations under ``derivations`` and names outputs
+  ## by base name; older versions key them by full path
+  ## (https://nix.dev/manual/nix/latest/command-ref/new-cli/nix3-derivation-show).
+  result = %*{"closure": engine}
+  let (drvOut, drvRc) = execCmdEx("nix-store -q --deriver " &
+    quoteShell(engine))
+  let drv = drvOut.strip()
+  if drvRc != 0 or not drv.endsWith(".drv"):
+    result["error"] = %("no deriver: " & drv)
+    return
+  result["deriver"] = %drv
+  let (show, showRc) = execCmdEx("nix --extra-experimental-features " &
+    "nix-command derivation show " & quoteShell(drv),
+    options = {poUsePath})
+  if showRc != 0:
+    result["error"] = %("nix derivation show failed: " & show)
+    return
+  try:
+    let j = parseJson(show)
+    let drvs = if j.hasKey("derivations"): j["derivations"] else: j
+    var body: JsonNode
+    for name, d in drvs.pairs:
+      if name == drv or name == drv.extractFilename: body = d
+    if body == nil:
+      result["error"] = %("nix derivation show names no " & drv)
+      return
+    var outputs: seq[string]
+    for _, o in body["outputs"].pairs:
+      outputs.add(o{"path"}.getStr.extractFilename)
+    if engine.strip(chars = {'/'}, leading = false).extractFilename notin outputs:
+      result["error"] = %("the deriver's outputs " & $outputs &
+        " do not include the engine")
+      return
+    let env = body["env"]
+    result["mutation"] = %env{"REPRO_ADDON_MUTATION"}.getStr
+    result["testSeams"] = %(env{"REPRO_ADDON_TEST_SEAMS"}.getStr == "1")
+  except CatchableError as e:
+    result["error"] = %("unreadable derivation: " & e.msg)
+
 proc compileReference*(engine: string; pins: RefPins; mode: string;
                        activities: openArray[string];
                        host = AgentTarget): Compiled =

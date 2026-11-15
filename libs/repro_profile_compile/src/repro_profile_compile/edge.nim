@@ -564,11 +564,11 @@ proc profileRunBuildAction*(profileRoot, binaryPath, intentPath,
 ## import it without a cycle.
 ##
 ## NOTE: The canonical CLI recognizes the full ``internal io monitor`` triple.
-## Omitting the middle ``io`` category falls through to the unknown-subcommand
-## path and exits 2 with ``renderInternalUsage``, which surfaces from the build
-## engine as
-## ``__repro_profile_compile asFailed`` with the internal-namespace
-## usage as the diagnostic body.
+## Omitting the middle ``io`` category is an unknown subcommand of
+## ``internal``: a usage error (exit 2) whose message lists the namespace's
+## subcommands, which surfaces from the build engine as
+## ``__repro_profile_compile asFailed`` with that message as the diagnostic
+## body.
 const ProfileCompileMonitorCliArgs* = @["internal", "io", "monitor"]
 
 proc profileCompileEngineConfig*(stateDir, publicCliPath: string):

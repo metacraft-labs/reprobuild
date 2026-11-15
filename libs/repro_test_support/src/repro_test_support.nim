@@ -721,6 +721,22 @@ proc runquotaSocketEndpoint*(name: string): string =
   ## ``repro_core/paths.runquotaEndpointPath`` and is shared with the
   ## product's own daemon spawn, because a test that binds somewhere the
   ## shipped code would not is a test of something nobody runs.
+  ##
+  ## THE ENDPOINT IS THE TEST'S OWN, SO ITS POLICY IS ``private``. A daemon
+  ## the test starts in a directory the test user owns is, by the spec's
+  ## "Explicit private POSIX rendezvous", a ``RUNQUOTA_ENDPOINT_SCOPE=
+  ## private`` endpoint. Under the host scope that endpoint is judged
+  ## against the ``runquota`` account's uid on a host that has one, and the
+  ## daemon refuses it (``refusing a path owned by uid 1000 ... configured
+  ## daemon owner uid 953``) -- correctly for a host daemon, wrongly for a
+  ## test. Every fixture obtains its endpoint here, and the daemon and the
+  ## ``repro`` children it spawns inherit this process's environment, so
+  ## selecting the scope here puts the daemon and every client on one
+  ## policy without each fixture repeating it. A scope the test (or a test
+  ## about the host policy) already chose is left alone.
+  when defined(posix):
+    if not existsEnv("RUNQUOTA_ENDPOINT_SCOPE"):
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
   runquotaEndpointPath(name)
 
 const RunquotaRendezvousSocketNameBudget* = 24

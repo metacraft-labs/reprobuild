@@ -337,6 +337,8 @@ jobs:
             runquota-src=../runquota
             io-mon-src=../io-mon
             nim-shm-queue-src=../nim-shm-queue
+            nim-cli-spec-src=../nim-cli-spec
+            nim-confutils-src=../nim-confutils
             nim-stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
             test-certificates-tools-src=../test-certificates-tools
@@ -432,6 +434,18 @@ jobs:
       # asynchronously, and a release should not depend on it winning a race
       # with the end of the job. Linux only: that is the platform the consumer
       # lanes build, and setup-nix does not start the watcher on macOS.
+      # The refresh above is itself over an hour old by the time `.#release`
+      # has built (dispatch run 43294626712: the flake fetch below failed with
+      # "HTTP error 401 ... Bad credentials"), so mint a new token for this
+      # phase too.
+      - name: Refresh build authentication (cache publish)
+        if: runner.os == 'Linux'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
       - name: Publish the Nix package to the organisation cache
         if: runner.os == 'Linux'
         shell: bash
@@ -994,6 +1008,8 @@ jobs:
             runquota-src=../runquota
             io-mon-src=../io-mon
             nim-shm-queue-src=../nim-shm-queue
+            nim-cli-spec-src=../nim-cli-spec
+            nim-confutils-src=../nim-confutils
             nim-stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
             test-certificates-tools-src=../test-certificates-tools
@@ -1249,6 +1265,26 @@ jobs:
             --dir staging \
             --require-all
 
+      # ── Refuse if the tag no longer names the commit this run built ───────
+      #
+      # The legs built `github.sha`, fixed when the run started; the release is
+      # published under the tag NAME, which resolves to whatever the tag names
+      # when someone reads it. v0.2.24 published assets built from 7c670d248
+      # under a tag that had been moved to 8cd4a5051e 42 seconds after the run
+      # (attempt 2 of 43218423379) started, so an ancestry check against the
+      # tag credited the release with fixes its assets did not carry. Asking
+      # the remote (the checkout's own tag ref cannot have moved) closes that:
+      # checked here, before the release is touched at all (so a stale re-run
+      # cannot hide a correctly published release by drafting it), and again
+      # once the release is visible (below), so a move during the upload is
+      # caught too.
+      - name: Refuse if the tag no longer names this build (before upload)
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          BUILT_COMMIT: ${{ github.sha }}
+        run: bash scripts/release/assert_tag_names_commit.sh origin "${TAG}" "${BUILT_COMMIT}"
+
       # ── Force any pre-existing release for this tag back to draft ──────────
       #
       # `softprops/action-gh-release@v2` does NOT honour `draft: true` for a
@@ -1403,6 +1439,29 @@ jobs:
               release_id: release.id, draft: false,
             });
             core.info(`Published ${tag} with all ${expected.size} assets.`);
+
+      # The same check as before the upload, now that the release is public:
+      # the tag could have moved while the assets were uploading or while the
+      # draft was being verified. On a mismatch the release is hidden again and
+      # the packages below are not published, because the job fails here.
+      - name: Refuse if the tag no longer names this build (after publishing)
+        id: tag_after_publish
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          BUILT_COMMIT: ${{ github.sha }}
+        run: bash scripts/release/assert_tag_names_commit.sh origin "${TAG}" "${BUILT_COMMIT}"
+
+      - name: Hide the release again, its tag moved while it was publishing
+        if: failure() && steps.tag_after_publish.outcome == 'failure'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release edit "${TAG}" --repo "${GITHUB_REPOSITORY}" --draft=true
+          echo "::error::Release ${TAG} was returned to draft: its tag no longer names ${GITHUB_SHA}, the commit its assets were built from."
 
       # ── Add the packages to the organisation's repositories ────────────────
       #

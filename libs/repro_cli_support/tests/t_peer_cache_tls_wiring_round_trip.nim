@@ -26,12 +26,9 @@
 ## The built edge is MONITORED by the engine's io-monitor (owner decision
 ## 2026-10-29, Edge-Derived-Identities.md §3.4 item 1 rider: only a monitored
 ## or builtin record crosses hosts; until then it was evidenced by a make
-## depfile it wrote, which the engine now keeps local). On a platform where
-## io-mon cannot prove detached-descendant quiescence (`NoTreeLifetimeGuard`,
-## macOS) no monitored edge is published, so the build exchange is not
-## exercised there; the TLS handshake, identity and stranger checks still
-## run (the independent verification of M17 chunk 2 kept them: the chunk had
-## skipped the whole case there).
+## The TLS handshake, identity and stranger checks run alongside the build
+## exchange on every platform: io-mon proves detached-descendant quiescence
+## on Linux, Windows and macOS, so the monitored edge is published everywhere.
 ##
 ## MOCK POLICY — none: real loopback sockets, real BearSSL, real
 ## certificates on disk, the real build engine and disk stores.
@@ -45,8 +42,6 @@ import repro_hash
 import repro_local_store
 import repro_peer_cache
 from repro_test_support import prepareMonitorTools, ReprobuildRepoRoot
-from repro_test_support/descendant_guard_expectations import
-  NoTreeLifetimeGuard
 
 proc tlsConfigFor(stateHome: string; seeds = ""): PeerCacheConfig =
   ## The CLI's own parse of a `?tls=1` spec, with the node's state home.
@@ -145,51 +140,42 @@ suite "peer-cache TLS through the CLI/daemon wiring":
     check hostB.client.tlsConnsByPeerId.hasKey(hostA.selfPeerId)
     check hostB.client.connections.len == 0      # no plaintext connection
 
-    # The build exchange needs a record a node may publish: a monitored one.
-    # Where io-mon cannot prove detached-descendant quiescence
-    # (`NoTreeLifetimeGuard`, macOS) every monitored capture fails closed,
-    # and since the owner decision of 2026-10-29 a depfile-evidenced record
-    # does not cross hosts either (Edge-Derived-Identities.md §3.4 item 1
-    # rider), so there it is not exercised. The TLS checks around it -- the
-    # handshake, the certificate-derived identity, and the stranger's
-    # refusal -- do not depend on it and run everywhere.
-    if NoTreeLifetimeGuard:
-      checkpoint("build exchange not exercised: no monitored edge is " &
-        "published on this platform")
-    else:
-      # Producer A builds and publishes.
-      let wsA = base / "ws-a"
-      let wsB = base / "ws-b"
-      for ws in [wsA, wsB]:
-        createDir(ws)
-        writeFile(ws / "in.txt", "over tls\n")
-      let hooksA = newPeerCacheEngineHooks(hostA.client,
-        openPeerCacheStorage(base / "a-cache"), hostA.registry,
-        hostA.attestorFor())
-      let built = runBuild(copyAction(wsA),
-        engineConfig(base / "a-cache", wsA, hooksA))
-      checkpoint("producer: " & built.results[0].reason & " " &
-        built.results[0].stderr)
-      check built.results[0].status == asSucceeded
-      check hooksA.stats.publishes == 1
+    # The build exchange needs a record a node may publish: a monitored one
+    # (a depfile-evidenced record does not cross hosts, owner decision
+    # 2026-10-29, Edge-Derived-Identities.md §3.4 item 1 rider).
+    # Producer A builds and publishes.
+    let wsA = base / "ws-a"
+    let wsB = base / "ws-b"
+    for ws in [wsA, wsB]:
+      createDir(ws)
+      writeFile(ws / "in.txt", "over tls\n")
+    let hooksA = newPeerCacheEngineHooks(hostA.client,
+      openPeerCacheStorage(base / "a-cache"), hostA.registry,
+      hostA.attestorFor())
+    let built = runBuild(copyAction(wsA),
+      engineConfig(base / "a-cache", wsA, hooksA))
+    checkpoint("producer: " & built.results[0].reason & " " &
+      built.results[0].stderr)
+    check built.results[0].status == asSucceeded
+    check hooksA.stats.publishes == 1
 
-      # Consumer B gets it through the tunnel.
-      let hooksB = newPeerCacheEngineHooks(hostB.client,
-        openPeerCacheStorage(base / "b-cache"), hostB.registry,
-        hostB.attestorFor())
-      let fetched = runBuild(copyAction(wsB),
-        engineConfig(base / "b-cache", wsB, hooksB))
-      checkpoint("fetch: " & hooksB.stats.lastFetchReason & " install: " &
-        hooksB.stats.lastInstallReason)
-      check hooksB.stats.hits == 1
-      check fetched.results[0].cacheDecision == cdHit
-      check not fetched.results[0].launched
-      check readFile(wsB / "out" / "o.txt") == "over tls\n"
-      check hostB.client.memoRoundTripCount >= 2
-      check hostB.client.fetchRoundTripCount >= 2
-      check hostB.client.suspectMarks == 0
-      check hostA.server.memoRequestsServed >= 2
-      check hostA.server.tlsHandshakeRejectedCount == 0
+    # Consumer B gets it through the tunnel.
+    let hooksB = newPeerCacheEngineHooks(hostB.client,
+      openPeerCacheStorage(base / "b-cache"), hostB.registry,
+      hostB.attestorFor())
+    let fetched = runBuild(copyAction(wsB),
+      engineConfig(base / "b-cache", wsB, hooksB))
+    checkpoint("fetch: " & hooksB.stats.lastFetchReason & " install: " &
+      hooksB.stats.lastInstallReason)
+    check hooksB.stats.hits == 1
+    check fetched.results[0].cacheDecision == cdHit
+    check not fetched.results[0].launched
+    check readFile(wsB / "out" / "o.txt") == "over tls\n"
+    check hostB.client.memoRoundTripCount >= 2
+    check hostB.client.fetchRoundTripCount >= 2
+    check hostB.client.suspectMarks == 0
+    check hostA.server.memoRequestsServed >= 2
+    check hostA.server.tlsHandshakeRejectedCount == 0
 
     # Stranger C: its certificate is not among A's anchors.
     let hostC = startPeerCacheHost(tlsConfigFor(base / "c", seedA),

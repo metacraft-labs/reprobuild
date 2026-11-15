@@ -7,10 +7,16 @@
 ## static ``repro`` and the anchors to the guest's ``/run``, bootstraps with
 ## the digest the operator acknowledged, applies the profile and plans it
 ## again. Plan and apply are separate (§6.5.3, approved 2026-11-08 with that
-## change): the gate first runs the command WITHOUT ``--expect-plan`` and
-## checks it prints the digest, exits 3 and leaves the guest unbootstrapped
-## and its fingerprint unchanged; then with a digest that is not the host's,
-## which is refused the same way; then with the printed one.
+## change; the digest's coverage approved 2026-11-13): the gate first runs
+## the command WITHOUT ``--expect-plan`` and checks it prints the reviewable
+## plan (the preflight report and the profile text) and one digest over all
+## it would apply, exits 3, and leaves nothing persistent: the guest is
+## unbootstrapped, its fingerprint unchanged, and the ephemeral probe's
+## tmpfs and upload are gone (Anywhere Safety Contract §5's add-on
+## exception). Then with a digest that is not the host's, which is refused
+## the same way; then with the printed digest but a profile changed after
+## the review, which must be refused with nothing applied; then with the
+## printed digest and the reviewed profile.
 ## Afterwards, checked independently from the guest:
 ##
 ## - ``repro infra plan`` predicts nothing (no ledger change, no
@@ -35,6 +41,21 @@
 ## the test bed's own channel to it (gosti's SSH session, which the run
 ## created) and writes it there for the forwarded loopback port.
 ##
+## *Plan-only writes outside the fingerprint.* The fingerprint covers the
+## paths an add-on could own, not ``/root``, ``/var/tmp`` or the rest of
+## ``/var/lib``. So the gate also records the guest's clock before the
+## plan-only run and lists every path on every disk-backed filesystem that
+## changed since, refusing each one outside the disclosed allowlist of
+## incidental SSH writes (``plan_only_writes.nim``; Safety Contract §5).
+##
+## Falsifiers: an ENGINE built with
+## ``REPRO_ADDON_MUTATION=anywhere-digest-omits-profile`` (``just build``)
+## leaves the profile out of the digest; the changed profile is then
+## applied and the gate goes red. One built with
+## ``REPRO_ADDON_MUTATION=anywhere-probe-leaves-files`` leaves a file in
+## ``/var/tmp``, ``/root`` and ``/var/lib`` during plan-only mode, which
+## only the disk-write listing sees: the gate goes red on that step.
+##
 ## *Mocking.* None. A real guest, the real engine, the real add-on.
 
 import std/[json, os, osproc, strutils, times, unittest]
@@ -43,6 +64,7 @@ import repro_test_support/reasoned_skip
 import repro_peer_cache/auth as peerAuth
 
 import ./addon_testbed
+import ./plan_only_writes
 
 const
   Gate = "e2e_addon_anywhere_remote_bootstrap_converges_clean_guest"
@@ -122,10 +144,11 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
       hostKey.splitWhitespace()[0 .. 1].join(" ") & "\n")
     let (addonPath, addonSha) = artefact(b.debArch)
 
-    # ONE command (run three times: unacknowledged, wrongly acknowledged,
-    # acknowledged).
-    let base = quoteShell(engine()) & " anywhere --mode addon --host " & Host &
-      " --profile " & quoteShell(prof / "system.nim") &
+    # ONE command, run four times: unacknowledged, wrongly acknowledged,
+    # acknowledged with a profile changed after the review, acknowledged.
+    proc anywhereCmd(profile: string): string =
+      quoteShell(engine()) & " anywhere --mode addon --host " & Host &
+      " --profile " & quoteShell(profile) &
       " --addon-binary " & quoteShell(addonPath) & " --addon-sha256 " & addonSha &
       " --known-hosts " & quoteShell(prof / "known_hosts") &
       " --ssh-key " & quoteShell(g.keyPath) & " --ssh-port " & $port &
@@ -134,26 +157,81 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
       " --cache-url " & TestCacheUrl &
       " --recipient-out " & quoteShell(prof / "recipient.pub") &
       " --applied-profile-out " & quoteShell(prof / "applied.profile")
+    let base = anywhereCmd(prof / "system.nim")
     let target = " root@127.0.0.1"
+    proc ephemeralGone(): tuple[ok: bool; detail: string] =
+      # The plan-only probe's tmpfs and upload (Anywhere Safety Contract
+      # §5, add-on exception approved 2026-11-13): neither the directory
+      # nor a mount may remain.
+      let r = g.exec("if test -e /run/repro-anywhere; then echo dir-present; " &
+        "else echo dir-gone; fi; if findmnt -n /run/repro-anywhere; then " &
+        "echo mount-present; else echo mount-gone; fi")
+      ("dir-gone" in r.stdout and "mount-gone" in r.stdout, r.stdout)
 
-    # Without an acknowledged plan: the digest, and nothing applied.
+    # Without an acknowledged plan: the reviewable plan and its digest, and
+    # nothing persistent left (the base fingerprint is unchanged).
+    # The fingerprint covers only the paths an add-on could own, so the
+    # guest's clock is recorded first and every disk-backed filesystem is
+    # listed for what changed since (plan_only_writes.nim).
+    # systemd-timesyncd stamps /var/lib/systemd/timesync/clock on its own
+    # schedule and when it stops, whatever the run does: it is not an SSH
+    # write and not a log, so it is stopped (its stop-time write included)
+    # before the clock is taken instead of being allowlisted.
+    discard g.exec("systemctl stop systemd-timesyncd.service 2>/dev/null; true")
+    let t0 = g.run("date +%s.%N").strip()
     let (planOut, planRc) = execCmdEx(base & target)
     record["planOnlyOutput"] = %planOut
     var digest = ""
     for line in planOut.splitLines():
-      if line.strip().startsWith("plan digest:"):
+      if line.strip().startsWith("anywhere plan digest:"):
         digest = line.split(':', 1)[1].strip()
     let u1 = unbootstrapped()
-    let carried0 = g.exec("test -e /run/repro-anywhere && echo present || echo gone")
+    let carried0 = ephemeralGone()
+    let written = g.exec("bash -c " & quoteShell(listWritesScript(t0)))
+    let unexplained = unexplainedWrites(written.stdout)
+    # Back to the base's own state before the fingerprint, which lists
+    # active units.
+    discard g.exec("systemctl start systemd-timesyncd.service 2>/dev/null; true")
     let fPlan = g.takeFingerprint(repro)
     let dPlan = identityReport(f0, fPlan)
-    step("without --expect-plan it prints the digest and applies nothing",
+    step("plan-only wrote no file on a disk-backed filesystem beyond the " &
+         "disclosed SSH writes", written.exitCode == 0 and unexplained.len == 0,
+         "exit " & $written.exitCode & "\n" & written.stderr &
+           "\nunexplained writes:\n" & unexplained.join("\n") &
+           "\ndisk-backed mounts:\n" & g.exec("findmnt -rn -o TARGET,SOURCE,FSTYPE").stdout)
+    step("without --expect-plan it prints the plan and leaves nothing",
          planRc == 3 and digest.len == 64 and
-           "nothing was applied" in planOut and u1.ok and
-           carried0.stdout.strip() == "gone" and dPlan.ok,
+           "nothing was applied" in planOut and
+           "/etc/tb-anywhere/motd" in planOut and
+           "tb-anywhere-hello.service" in planOut and
+           "== the host's preflight" in planOut and u1.ok and
+           carried0.ok and dPlan.ok,
          "exit " & $planRc & "\n" & planOut & "\n" & u1.detail &
-           "\ncarried: " & carried0.stdout & "\n" & dPlan.text)
+           "\ncarried: " & carried0.detail & "\n" & dPlan.text)
     if digest.len == 0: return fails
+
+    # The profile changed after the review, run with the reviewed digest:
+    # refused before anything is written (the verifier's 2026-11-13
+    # experiment applied /etc/tb-anywhere/injected under the old digest).
+    createDir(prof / "swapped")
+    writeFile(prof / "swapped" / "system.nim", ProfileText.replace(
+      "  resources:\n",
+      "  resources:\n    fsSystemFile(path = \"/etc/tb-anywhere/injected\",\n" &
+      "      content = \"not in the acknowledged plan\\n\", address = \"injected\")\n"))
+    let (swapOut, swapRc) = execCmdEx(anywhereCmd(prof / "swapped" / "system.nim") &
+                                      " --expect-plan " & digest & target)
+    record["swappedProfileOutput"] = %swapOut
+    let uS = unbootstrapped()
+    let injected = g.exec("test -e /etc/tb-anywhere/injected && echo present || echo absent")
+    let fSwap = g.takeFingerprint(repro)
+    let dSwap = identityReport(f0, fSwap)
+    step("a profile changed after the acknowledgement is refused, nothing applied",
+         swapRc != 0 and "nothing was written" in swapOut and uS.ok and
+           injected.stdout.strip() == "absent" and dSwap.ok and
+           ephemeralGone().ok,
+         "exit " & $swapRc & "\n" & swapOut & "\n" & uS.detail &
+           "\ninjected: " & injected.stdout & "\n" & dSwap.text)
+    if swapRc == 0: return fails
 
     # A digest that is not this host's plan: refused, nothing written.
     let wrong = (if digest[0] == '0': "1" else: "0") & digest[1 .. ^1]

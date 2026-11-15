@@ -80,7 +80,10 @@ suite "lowered graph cache action round trip":
       fixedOutput: true,
       scratchDirs: @["/recipe/zlib/.repro/build/work"],
       removeBeforeRun: @["/recipe/zlib/.repro/output/install"],
-      expandsArgFiles: true)
+      expandsArgFiles: true,
+      cpuMinMilli: 1000,
+      cpuPreferredMilli: 16000,
+      widthFlag: "--test-threads")
 
     let decoded = loweredGraphActionRoundTripForTest(@[action])
     check decoded.len == 1
@@ -121,6 +124,11 @@ suite "lowered graph cache action round trip":
     # A warm build that lost it would launch a sub-tool compiler without the
     # compile and link channels a cold build gives it.
     check roundTrip.subToolIdentityRefs == action.subToolIdentityRefs
+    # A warm build that lost them would run a ranged test at a fixed width
+    # and launch it without the flag that passes the grant on.
+    check roundTrip.cpuMinMilli == 1000'u32
+    check roundTrip.cpuPreferredMilli == 16000'u32
+    check roundTrip.widthFlag == "--test-threads"
 
     # The declared/passthrough CLASSIFICATION must survive the cache, and
     # this is not a formality. Before it was serialised, a warm build
@@ -197,7 +205,7 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 16'u8
+    check encoded[versionOffset] == 17'u8
     check encoded[versionOffset + 1] == 0'u8
     # An older version could not carry the newer per-action fields (v5:
     # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
@@ -209,7 +217,8 @@ suite "lowered graph cache action round trip":
     # sentinel; v13: the remove-before-run output list, after the scratch
     # directories; v14: optional output candidates; v15: the `@FILE:`
     # expansion flag, whose predecessor stored the expanded argv; v16: the
-    # sub-tool list after it). Decoding such a record under
+    # sub-tool list after it; v17: the width range and width flag after
+    # that). Decoding such a record under
     # the current layout would silently return defaults for every action rather
     # than failing, so the rejection below is what makes a field's absence
     # impossible instead of invisible.
@@ -223,7 +232,7 @@ suite "lowered graph cache action round trip":
     # what that value now spells. Poking an ancient version instead would leave
     # the one skew that can silently mis-restore a warm edge's capture unasserted
     # by anything.
-    encoded[versionOffset] = 15'u8
+    encoded[versionOffset] = 16'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)

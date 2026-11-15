@@ -80,10 +80,6 @@
 ##      the entry (`fetchTwoPhase`, naming the policy), installs nothing and
 ##      executes the action. The refusal is a miss, not a suspicion.
 ##
-## On a platform where io-mon cannot prove detached-descendant quiescence
-## (`NoTreeLifetimeGuard`, macOS) no monitored edge is published, so the gate
-## is skipped there with that reason.
-##
 ## Owner decision 2026-10-29 ("builtins yes, depfiles no"; Edge-Derived-
 ## Identities.md §3.4 item 1 rider, §10 decision 23), at both ends:
 ##
@@ -154,8 +150,6 @@ import repro_cas_store
 import repro_cli_support/peer_cache_wiring
 from repro_test_support import prepareMonitorTools, ReprobuildRepoRoot
 import repro_test_support/reasoned_skip
-from repro_test_support/descendant_guard_expectations import
-  NoTreeLifetimeGuard
 
 import ./m7_test_pki
 
@@ -986,25 +980,12 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     check statusInt(statusA, "fetch_hits_served") >= 2
     result = true
 
-const MonitoredEdgeUnpublishableHere =
-  "io-mon cannot prove detached-descendant quiescence on this platform, so " &
-  "every monitored capture fails closed and no monitored edge is " &
-  "published; since the owner decision of 2026-10-29 a depfile-evidenced " &
-  "edge does not cross hosts either (Edge-Derived-Identities.md §3.4 item " &
-  "1 rider), so the gate's compile has nothing to exchange here"
-
 suite "Distributed-Execution M0: two-phase peer cache over real LAN sockets":
 
   test "t_peer_cache_two_phase_lan_roundtrip":
     # Hardened nodes (one-hour host-CA leaves).
-    if NoTreeLifetimeGuard:
-      skip(MonitoredEdgeUnpublishableHere)
-    else:
-      check runTwoPhaseRoundtrip(tpHardened)
+    check runTwoPhaseRoundtrip(tpHardened)
 
   test "t_peer_cache_two_phase_lan_roundtrip (trusted profile, the default)":
     # Trusted nodes (pinned long-lived host keys) — the product default.
-    if NoTreeLifetimeGuard:
-      skip(MonitoredEdgeUnpublishableHere)
-    else:
-      check runTwoPhaseRoundtrip(tpTrusted)
+    check runTwoPhaseRoundtrip(tpTrusted)

@@ -1,4 +1,5 @@
-## `repro reap` reaches `runReapCli` instead of falling through to usage.
+## `repro reap` reaches the reaper (`runReap`, the entry `runReapCli` wraps)
+## instead of falling through to usage.
 ##
 ## Ephemeral-State-Leases.md §4.3 names `repro reap --once` as fallback (b) —
 ## the reason the lease model does not require a daemon for correctness — and
@@ -22,8 +23,8 @@
 ##
 ##   1. `repro reap --once --state-root=<empty>` reaches the verb: it prints the
 ##      verb's own report (`state-root=`, `reaped:`, `kept:`) and exits 0.
-##      Control: a neighbouring *undispatched* spelling (`repro reapx`) prints
-##      the usage banner and does NOT print a reap report — so arm 1 is evidence
+##      Control: a neighbouring *undispatched* spelling (`repro reapx`) is an
+##      unknown command and does NOT print a reap report — so arm 1 is evidence
 ##      about the `reap` arm and not about the binary in general.
 ##   2. The sweep targets the `--state-root` it was given and ONLY that one:
 ##      two stores are seeded identically, one is named, and the other must come
@@ -88,11 +89,15 @@ suite "repro reap is a dispatched verb":
     # An empty store is nothing to do, which is success.
     check res.code == 0
 
-    # POSITIVE CONTROL for the control: a spelling with no dispatch arm falls
-    # through to usage and prints no reap report. Without this, arm 1 could pass
+    # POSITIVE CONTROL for the control: a spelling repro does not declare is
+    # a usage error and prints no reap report. Without this, arm 1 could pass
     # on a binary that printed a reap report for every argv.
     let undispatched = runShell(shellCommand([bin, "reapx", "--once"]))
-    check undispatched.output.contains("usage: repro")
+    # A usage error: the parser names the word as an unknown command (not
+    # as a stray argument, and before the flag after it) and points at help.
+    check undispatched.output.contains(
+      "unknown subcommand 'reapx' for 'repro'")
+    check undispatched.output.contains("Run `repro --help`")
     check not undispatched.output.contains("repro reap: state-root=")
     # The exit code is the sharper half of the control, and the pair is what
     # makes arm 1 meaningful: a dispatched verb with nothing to do exits 0, an

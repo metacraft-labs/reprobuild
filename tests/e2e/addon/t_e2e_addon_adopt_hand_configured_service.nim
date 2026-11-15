@@ -57,6 +57,14 @@
 ##   vaultwarden fails with the file missing; red;
 ## - ``REPRO_ADDON_MUTATION=import-writes-skeleton`` (the import keeps a copy
 ##   of its skeleton under ``/etc``): step 1's fingerprint differs; red.
+## - ``REPRO_ADDON_MUTATION=narrowed-live-set`` (the switch holds, reloads
+##   and judges the carried-state live set only when it writes a unit file;
+##   spec §11.1, A13 review rounds 7 and 8): case 2e's credentials-only
+##   switch (a rollback between two generations of one profile text that
+##   differ only in the probe's credential) restarts its probe on the root
+##   definition the operator left loaded, and its uid marker reads 0; red.
+##   Case 2d stays green under it (its dependency restart's unit driver
+##   reloads systemd).
 ## - ``REPRO_A13_MUTATION=converge-touches-state`` (gate-level: the converged
 ##   tmpfiles rule for alertmanager's directory names mode 0700 instead of
 ##   the directory's 0750): the converge changes the directory, step 3's
@@ -620,9 +628,19 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     # only a file the service ``depends_on``: no unit file changes, and the
     # service is restarted (§7.3). The switch must hold the service, reload,
     # and judge it as systemd then loads it before restarting it -- so it
-    # never runs as root. Falsifier: the add-on build narrowed-live-set (the
-    # set judged, held and reloaded for only in a switch that writes a unit
-    # file), under which the restart runs the loaded root definition.
+    # never runs as root. Not a falsifier cell: under the add-on build
+    # narrowed-live-set (the set judged, held and reloaded for only in a
+    # switch that writes a unit file) the restart still runs the on-disk
+    # definition, because the planner dispatches a dependency restart's own
+    # unit driver, which rewrites the unit file and reloads systemd at step
+    # 3 (posix_system_driver.applySystemdSystemUnit; measured at 66235698d0
+    # with every systemctl call of the switch logged). That reload is
+    # incidental to how the driver writes. The VM falsifier of
+    # narrowed-live-set is case 2e, a credentials-only switch, which no
+    # driver reloads for; the decision itself is also tested in
+    # t_addon_carried_state_fails_closed (liveCheckAtStep6). This case
+    # stays as the outcome: the restart never runs the definition the
+    # operator removed.
     let depUnit = "a13r7-dep.service"
     let depFile = "/etc/a13r7/dep.conf"
     proc depProfile(content: string): string =
@@ -656,13 +674,28 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       ".d/10-root.conf && systemctl daemon-reload && rm -rf " &
       "/etc/systemd/system/" & depUnit & ".d")
     let loadedUser = g.run("systemctl show -P User " & depUnit).strip()
+    # Diagnosis (A13 round 7): what reloaded systemd, if anything, during
+    # the switch, and what systemd had loaded before and after it.
+    let needReload0 = g.run("systemctl show -P NeedDaemonReload " & depUnit).strip()
+    let since2 = g.run("cut -d' ' -f1 /proc/uptime").strip()
     let d2 = g.applyProfile(repro, "dep2", depProfile("v2\n"))
     let d2Out = d2.stdout & d2.stderr
     let uids2 = g.run("cat /var/lib/a13r7-dep/uids 2>/dev/null || true").strip()
     let inv2 = g.invocation(depUnit)
+    let until2 = g.run("cut -d' ' -f1 /proc/uptime").strip()
+    let managerDuring = "switch window " & since2 & " .. " & until2 & " s\n" &
+      g.run("journalctl -b --no-pager -o short-monotonic _PID=1 2>&1 | " &
+        "grep -E -i 'reload|" & depUnit & "' | tail -60")
     record["everySwitch"] = %*{"exit": d2.exitCode, "loadedUserBefore": loadedUser,
       "uids": uids2, "invocationBefore": inv1, "invocationAfter": inv2,
-      "restarted": inv1 != inv2, "ranAsRoot": "0" in uids2.splitLines()}
+      "restarted": inv1 != inv2, "ranAsRoot": "0" in uids2.splitLines(),
+      "needDaemonReloadBefore": needReload0,
+      "needDaemonReloadAfter": g.run("systemctl show -P NeedDaemonReload " &
+        depUnit).strip(),
+      "userAfter": g.run("systemctl show -P User " & depUnit).strip(),
+      "managerDuring": managerDuring,
+      "transitions": d2Out[max(0, d2Out.find("service transitions")) ..<
+        min(d2Out.len, max(0, d2Out.find("service transitions")) + 400)]}
     step("the operator's reload left systemd's loaded definition running " &
          "the service as root (the case's premise)", loadedUser == "root",
          loadedUser)
@@ -677,6 +710,425 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let after2 = g.applyProfile(repro, "skeleton2b", skeleton2)
     step("after the manifest is gone, the switch back to the skeleton succeeds",
          after2.exitCode == 0, after2.stdout & after2.stderr)
+    if fails.len > 0: return fails
+
+    # --- 2e. The every-switch cross-check where no driver reloads (spec
+    # §11.1: "a credentials-only restart dispatches no driver, and no part
+    # of the check may depend on it"; A13 review round 8). The shape of 2d,
+    # but the switch changes only the service's credential: no unit file,
+    # drop-in or depends_on resource changes, so the infra planner
+    # dispatches no unit driver and nothing reloads systemd at step 3; the
+    # add-on's own transition list restarts the unit for its credentials
+    # (``plannedSecretChanges``, ``UnitFacts.credentialsChanged``). Only
+    # step 6's own hold, reload and judgement (``liveCheckAtStep6``) stand
+    # between the restart and the root definition the operator left loaded.
+    # Falsifier: the add-on build narrowed-live-set (no reload and no
+    # judgement in a switch that writes no unit file), under which the
+    # restart runs the service as root.
+    #
+    # The switch is a rollback between two generations of one profile text
+    # whose envelope copies hold different values. ``secret put`` cannot make
+    # it: it seals the new value into the current generation's own copy too,
+    # materialises it and restarts the running consumer itself
+    # (``secrets_ops.secretPut``), so the next apply of the same profile
+    # finds nothing changed (measured at fc1d005655, round 8: "service
+    # transitions: none"). So the put happens before the operator's reload,
+    # in a generation the rollback leaves, and the rollback to the first
+    # generation brings back the first value.
+    let credUnit = "a13r8-cred.service"
+    let credSvc = "a13r8-cred"
+    let credDir = "/var/lib/a13r8-cred"
+    let credSecret = "/run/repro/secrets/" & credSvc & "/token"
+    let credProfile = skeleton2 &
+      "\nsecrets.secretFile {\n  service = \"" & credSvc & "\"\n" &
+      "  name = \"token\"\n}\n\n" &
+      "systemd.systemUnit {\n  name = \"" & credUnit & "\"\n  content = " &
+      q("[Unit]\nDescription=A13 credentials-only every-switch probe\n\n" &
+        "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+        "StateDirectory=a13r8-cred\n" &
+        # The uid marker, as 2d's; and the credential the run was given
+        # (``%d`` is its credentials directory), the positive control that
+        # the restart is the credential's.
+        "ExecStartPre=/bin/sh -c 'id -u >> " & credDir & "/uids; cat %d/token " &
+        ">> " & credDir & "/tokens; echo >> " & credDir & "/tokens'\n" &
+        "ExecStart=/bin/sleep infinity\n\n[Install]\n" &
+        "WantedBy=multi-user.target\n") &
+      "\n  credentials = [\"token\"]\n" &
+      "  floorExceptions = [\"serviceFloor: the A13 credentials-only " &
+      "every-switch probe\"]\n}\n"
+    let token1 = "a13r8-first-" & $epochTime().int64
+    let put1 = g.exec("printf '%s' '" & token1 & "' | " & repro &
+      " system addon secret put --service " & credSvc & " --name token")
+    step("the probe's credential is put as a secret", put1.exitCode == 0,
+         put1.stdout & put1.stderr)
+    discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
+      "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
+      "\"repro-state-set/1\", \"host\": \"a13r8\", \"createdAt\": " &
+      "\"2026-11-14T00:00:00Z\", \"entries\": []}' > " &
+      "/var/lib/repro/system/carried/state-set.json")
+    let c1 = g.applyProfile(repro, "cred1", credProfile)
+    let credGen1 = extractFilename(g.run("readlink " &
+      "/var/lib/repro/system/current").strip())
+    let cUids1 = g.run("cat " & credDir & "/uids 2>/dev/null || true").strip()
+    let cTokens1 = g.run("cat " & credDir & "/tokens 2>/dev/null || true").strip()
+    step("a confined service that loads a credential is applied and runs " &
+         "confined with it, carried state on the host",
+         c1.exitCode == 0 and cUids1.len > 0 and "0" notin cUids1.splitLines() and
+         cTokens1.splitLines()[^1] == token1,
+         c1.stdout & c1.stderr & "\nuids: " & cUids1 & "\ntokens: " & cTokens1)
+    # A second generation of the same profile text, then the new value put
+    # into it (the put restarts the probe, still confined: nothing but the
+    # files is loaded yet).
+    let c1b = g.applyProfile(repro, "cred1b", credProfile)
+    let credGen2 = extractFilename(g.run("readlink " &
+      "/var/lib/repro/system/current").strip())
+    step("the same profile applied again commits a second generation",
+         c1b.exitCode == 0 and credGen2.len > 0 and credGen2 != credGen1,
+         c1b.stdout & c1b.stderr & "\n" & credGen1 & " -> " & credGen2)
+    let token2 = "a13r8-second-" & $epochTime().int64
+    let put2 = g.exec("printf '%s' '" & token2 & "' | " & repro &
+      " system addon secret put --service " & credSvc & " --name token")
+    let cTokensPut = g.run("cat " & credDir & "/tokens 2>/dev/null || true").strip()
+    step("the probe's credential is put again with a new value, and the " &
+         "probe has it", put2.exitCode == 0 and token2 != token1 and
+         cTokensPut.splitLines()[^1] == token2,
+         put2.stdout & put2.stderr & "\ntokens: " & cTokensPut)
+    let cInv1 = g.invocation(credUnit)
+    discard g.run("mkdir -p /etc/systemd/system/" & credUnit & ".d && printf " &
+      "'[Service]\\nUser=root\\n' > /etc/systemd/system/" & credUnit &
+      ".d/10-root.conf && systemctl daemon-reload && rm -rf " &
+      "/etc/systemd/system/" & credUnit & ".d")
+    let cLoadedUser = g.run("systemctl show -P User " & credUnit).strip()
+    let cNeedReload0 = g.run("systemctl show -P NeedDaemonReload " &
+      credUnit).strip()
+    step("the operator's reload left systemd's loaded definition running " &
+         "the credentials probe as root (the case's premise)",
+         cLoadedUser == "root", cLoadedUser)
+    let secretBefore = g.run("sha256sum " & credSecret & " 2>&1 || true").strip()
+    # The probe's unit files as the switch finds them: their bytes, inode
+    # and modification time. A unit driver dispatched for the probe rewrites
+    # its unit file (2d's case); a credentials-only switch leaves them.
+    let unitFilesCmd = "cd /etc/systemd/system && for f in " & credUnit & " " &
+      credUnit & ".d/*; do [ -e \"$f\" ] && stat -c '%n %i %Y %s' \"$f\" && " &
+      "sha256sum \"$f\"; done; true"
+    let unitFilesBefore = g.run(unitFilesCmd).strip()
+    let cSince = g.run("cut -d' ' -f1 /proc/uptime").strip()
+    let c2 = g.exec(repro & " system rollback " & credGen1, timeoutSec = 1200)
+    let c2Out = c2.stdout & c2.stderr
+    let cUntil = g.run("cut -d' ' -f1 /proc/uptime").strip()
+    let cUids2 = g.run("cat " & credDir & "/uids 2>/dev/null || true").strip()
+    let cTokens2 = g.run("cat " & credDir & "/tokens 2>/dev/null || true").strip()
+    let cInv2 = g.invocation(credUnit)
+    let secretAfter = g.run("sha256sum " & credSecret & " 2>&1 || true").strip()
+    let unitFilesAfter = g.run(unitFilesCmd).strip()
+    # A restart for the credential alone: the materialised credential
+    # changed and no unit file of the probe was written. (A rollback prints
+    # no transition list, so it is read from the host.)
+    let credOnly = secretBefore != secretAfter and
+      unitFilesBefore.len > 0 and unitFilesAfter == unitFilesBefore
+    let cManager = "switch window " & cSince & " .. " & cUntil & " s\n" &
+      g.run("journalctl -b --no-pager -o short-monotonic _PID=1 2>&1 | " &
+        "grep -E -i 'reload|" & credSvc & "' | tail -60")
+    record["credentialSwitch"] = %*{"exit": c2.exitCode,
+      "generations": [credGen1, credGen2],
+      "loadedUserBefore": cLoadedUser, "uids": cUids2,
+      "invocationBefore": cInv1, "invocationAfter": cInv2,
+      "restarted": cInv1 != cInv2, "ranAsRoot": "0" in cUids2.splitLines(),
+      "credentialsOnly": credOnly,
+      "unitFilesBefore": unitFilesBefore, "unitFilesAfter": unitFilesAfter,
+      "credentialChanged": secretBefore != secretAfter,
+      "secretBefore": secretBefore, "secretAfter": secretAfter,
+      "tokenReached": cTokens2.splitLines()[^1] == token1,
+      "needDaemonReloadBefore": cNeedReload0,
+      "needDaemonReloadAfter": g.run("systemctl show -P NeedDaemonReload " &
+        credUnit).strip(),
+      "userAfter": g.run("systemctl show -P User " & credUnit).strip(),
+      "managerDuring": cManager,
+      "output": c2Out}
+    step("a switch that changes only a service's credential judges it as " &
+         "systemd loads it before restarting it: it never runs as root",
+         "0" notin cUids2.splitLines() and
+         ((c2.exitCode == 0 and cInv1 != cInv2) or
+          (c2.exitCode != 0 and "ECarriedStatePending" in c2Out)),
+         c2Out & "\nuids: " & cUids2 & "\ninvocation " & cInv1 & " -> " & cInv2 &
+         "\n" & cManager)
+    step("the credentials-only switch restarted the probe for its credential " &
+         "alone, and the restarted probe has the value it brought back",
+         credOnly and c2.exitCode == 0 and cInv1 != cInv2 and
+         cTokens2.splitLines()[^1] == token1,
+         c2Out & "\ntokens: " & cTokens2 & "\nsecret " & secretBefore & " -> " &
+         secretAfter & "\nunit files:\n" & unitFilesBefore & "\n->\n" &
+         unitFilesAfter)
+    discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
+      "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
+    let after3 = g.applyProfile(repro, "skeleton2c", skeleton2)
+    step("after the credentials case, the switch back to the skeleton succeeds",
+         after3.exitCode == 0, after3.stdout & after3.stderr)
+    if fails.len > 0: return fails
+
+    # --- 2f. A confined template on an add-on host with carried state (§13
+    # decision 135): the switch's live check judges the template through its
+    # observation instance and its instances -- systemd refuses to show a
+    # template by name -- so a profile with one applies, and the instances
+    # an enabled target pulls in start. Falsifier: the add-on build
+    # template-live-by-name, under which the template is read by name and
+    # the switch is refused. The template must read as confined to the
+    # static analysis, or the live check never judges it: no specifier in
+    # a path setting (``RuntimeDirectory=a13r9-%i`` read as reaching
+    # everything, and the round-8 run of this case judged nothing; the
+    # record's voidRuns). The step that reads the switch's ``carried-state
+    # live check judged`` section is what shows it was judged.
+    let tplUnit = "a13r9-tpl@.service"
+    let tplProfile = mergeSkeletons([skeleton2,
+      "systemd.systemUnit {\n  name = \"" & tplUnit & "\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-135 probe: a confined template\n\n" &
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+      "StateDirectory=a13r9-tpl\n" &
+      "ExecStart=/bin/sh -c 'id -u > /var/lib/a13r9-tpl/%i.uid; exec /bin/sleep infinity'\n\"\n" &
+      "  enabled = false\n" &
+      "  floorExceptions = [\"serviceFloor: the A13 decision-135 template probe\"]\n}\n\n" &
+      "systemd.systemUnit {\n  name = \"a13r9-tpl.target\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-135 probe: wants two instances\n" &
+      "Wants=a13r9-tpl@a.service a13r9-tpl@b.service\n\n[Install]\n" &
+      "WantedBy=multi-user.target\n\"\n}\n"])
+    discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
+      "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
+      "\"repro-state-set/1\", \"host\": \"a13r9\", \"createdAt\": " &
+      "\"2026-11-14T00:00:00Z\", \"entries\": []}' > " &
+      "/var/lib/repro/system/carried/state-set.json")
+    let tp = g.applyProfile(repro, "tpl", tplProfile)
+    let tpOut = tp.stdout & tp.stderr
+    let uidA = g.run("cat /var/lib/a13r9-tpl/a.uid 2>/dev/null || true").strip()
+    let uidB = g.run("cat /var/lib/a13r9-tpl/b.uid 2>/dev/null || true").strip()
+    # The switch's report of what its live check read from systemd.
+    var tplJudged: seq[string]
+    var inJudged = false
+    for l in tpOut.splitLines():
+      if l.startsWith("carried-state live check judged:"):
+        inJudged = true
+      elif inJudged and l.startsWith("  "):
+        tplJudged.add(l.strip())
+      else:
+        inJudged = false
+    let tplObserve = "a13r9-tpl@repro-addon-observe.service"
+    let tplJudgedOk = tplObserve in tplJudged and
+      "a13r9-tpl@a.service" in tplJudged and "a13r9-tpl@b.service" in tplJudged
+    record["decision135AddOn"] = %*{"exit": tp.exitCode, "uidA": uidA, "uidB": uidB,
+      "ran": uidA.len > 0 and uidB.len > 0 and uidA != "0" and uidB != "0",
+      "judged": tplJudged, "judgedTemplate": tplJudgedOk,
+      "refusedTemplate": (tplUnit & ": its loaded unit cannot be read") in tpOut}
+    step("decision 135, add-on host: the switch's live check judged the " &
+         "template through its observation instance and its instances",
+         tplJudgedOk, tplJudged.join(" ") & "\n" & tpOut)
+    step("decision 135, add-on host: a profile with a confined template " &
+         "applies with carried state on the host, and the instances an " &
+         "enabled target pulls in start confined",
+         tp.exitCode == 0 and uidA.len > 0 and uidB.len > 0 and
+           uidA != "0" and uidB != "0",
+         tpOut & "\nuids: " & uidA & " " & uidB)
+    discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
+      "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
+    let after4 = g.applyProfile(repro, "skeleton2d", skeleton2)
+    step("after the manifest is gone, the switch back to the skeleton " &
+         "succeeds (decision 135 probe removed)",
+         after4.exitCode == 0, after4.stdout & after4.stderr)
+    if fails.len > 0: return fails
+
+    # --- 2g. Triggers of held units on an add-on host (§13 decision 151).
+    # A socket (Accept=no) and a path unit whose confined services the
+    # switch's live check judges (carried state on the host) and therefore
+    # holds. While a switch runs, connections keep arriving and the path
+    # keeps existing (a loop in the guest). The switch stops and holds the
+    # triggers with their services and starts them again once its check
+    # passes: afterwards both are active and their services run. A refused
+    # switch (a generator makes a third unit root at the switch's reload)
+    # leaves neither trigger failed, and once the generator is gone the
+    # next switch brings both up. Falsifier: the add-on build
+    # triggers-left-running, under which each trigger fires at its held
+    # service until systemd's trigger rate limit fails it for good.
+    let trigWaiver = "  floorExceptions = [\"serviceFloor: the A13 decision-151 probe\"]\n"
+    let trigProfile = skeleton2 &
+      "\nsystemd.systemUnit {\n  name = \"a13r10.socket\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: a socket\n\n" &
+      "[Socket]\nListenStream=127.0.0.1:18720\n\n[Install]\nWantedBy=sockets.target\n\"\n}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10.service\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: socket-activated\n\n" &
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nStateDirectory=a13r10\n" &
+      "ExecStart=/bin/sh -c 'id -u > /var/lib/a13r10/sock.ran; exec /bin/sleep infinity'\n\"\n" &
+      "  enabled = false\n" & trigWaiver & "}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10.path\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: a path unit\n\n" &
+      "[Path]\nPathExists=/run/a13r10-job\nUnit=a13r10-p.service\n\n" &
+      "[Install]\nWantedBy=paths.target\n\"\n}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10-p.service\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: path-activated\n\n" &
+      "[Service]\nType=oneshot\nRemainAfterExit=yes\nDynamicUser=yes\n" &
+      "NoNewPrivileges=yes\nStateDirectory=a13r10p\n" &
+      "ExecStart=/bin/sh -c 'id -u > /var/lib/a13r10p/path.ran'\n\"\n" &
+      "  enabled = false\n" & trigWaiver & "}\n" &
+      "systemd.systemUnit {\n  name = \"a13r10-bad.service\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-151 probe: generation @GEN@\n\n" &
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nStateDirectory=a13r10b\n" &
+      "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
+      trigWaiver & "}\n"
+    let trigAgitate = "rm -f /run/a13r10-stop; touch /run/a13r10-job; " &
+      "nohup bash -c 'while [ ! -e /run/a13r10-stop ]; do timeout 1 bash -c " &
+      "\"exec 3<>/dev/tcp/127.0.0.1/18720\" 2>/dev/null; touch /run/a13r10-job; " &
+      "sleep 0.3; done' >/dev/null 2>&1 &"
+    let trigCalm = "touch /run/a13r10-stop; sleep 1; true"
+    # Before each switch: the triggers' services stopped and the socket's
+    # backlog flushed, so each trigger fires as soon as anything lets it
+    # while the switch holds its service (a running service is served by
+    # its trigger without firing, and decision 151 leaves it alone).
+    let trigReset = "touch /run/a13r10-stop; sleep 1; systemctl stop " &
+      "a13r10.socket a13r10.service a13r10.path a13r10-p.service; rm -f " &
+      "/run/a13r10-job /var/lib/a13r10/sock.ran /var/lib/a13r10p/path.ran; " &
+      "systemctl start a13r10.socket a13r10.path; true"
+    # Each trigger's state, and whether its service ran (its uid marker,
+    # waited for a little, after a connection made now).
+    let trigCheck = "timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18720' " &
+      "2>/dev/null; for i in $(seq 15); do [ -s /var/lib/a13r10/sock.ran ] && " &
+      "[ -s /var/lib/a13r10p/path.ran ] && break; sleep 1; done; " &
+      "systemctl show -p ActiveState -p Result a13r10.socket | tr '\\n' ' '; echo; " &
+      "systemctl show -p ActiveState -p Result a13r10.path | tr '\\n' ' '; echo; " &
+      "cat /var/lib/a13r10/sock.ran 2>/dev/null; echo; " &
+      "cat /var/lib/a13r10p/path.ran 2>/dev/null; echo"
+    discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
+      "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
+      "\"repro-state-set/1\", \"host\": \"a13r10\", \"createdAt\": " &
+      "\"2026-11-15T00:00:00Z\", \"entries\": []}' > " &
+      "/var/lib/repro/system/carried/state-set.json")
+    let t0 = g.applyProfile(repro, "trig0", trigProfile.replace("@GEN@", "0"))
+    step("decision 151, add-on host: the trigger probes apply with carried " &
+         "state on the host", t0.exitCode == 0, t0.stdout & t0.stderr)
+    # A passing switch while the socket's service already runs and its
+    # connections keep arriving (the common case): decision 151 leaves a
+    # trigger whose unit runs alone -- with Accept=no the service holds the
+    # listening socket, so the socket could not be started again -- and the
+    # service stays reachable through it after the switch.
+    discard g.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/18720' " &
+      "2>/dev/null; for i in $(seq 15); do [ -s /var/lib/a13r10/sock.ran ] " &
+      "&& break; sleep 1; done; true")
+    let runBefore = g.exec("systemctl show -p ActiveState -p InvocationID " &
+      "a13r10.service | tr '\\n' ' '").stdout.strip()
+    discard g.exec(trigAgitate)
+    let t1r = g.applyProfile(repro, "trig1r", trigProfile.replace("@GEN@", "1r"))
+    discard g.exec(trigCalm)
+    let runAfter = g.exec("systemctl show -p ActiveState -p InvocationID " &
+      "a13r10.service | tr '\\n' ' '; systemctl show -p ActiveState -p " &
+      "Result a13r10.socket | tr '\\n' ' '; timeout 2 bash -c 'exec " &
+      "3<>/dev/tcp/127.0.0.1/18720' && echo reachable").stdout.strip()
+    let t1rOk = t1r.exitCode == 0 and "ActiveState=active" in runBefore and
+      runAfter.count("ActiveState=active") == 2 and "reachable" in runAfter
+    record["decision151Running"] = %*{"exit": t1r.exitCode,
+      "before": runBefore, "after": runAfter, "ok": t1rOk}
+    step("decision 151, add-on switch (service running): a socket whose " &
+         "service runs with connections arriving stays active through a " &
+         "passing switch, and the service stays reachable",
+         t1rOk, t1r.stdout & t1r.stderr & "\nbefore: " & runBefore &
+         "\nafter: " & runAfter)
+    # A passing switch (a unit file changes) while the triggers are agitated,
+    # from their services stopped, so each would fire at its held service.
+    discard g.exec(trigReset)
+    discard g.exec(trigAgitate)
+    let t1 = g.applyProfile(repro, "trig1", trigProfile.replace("@GEN@", "1"))
+    discard g.exec(trigCalm)
+    let t1State = g.exec(trigCheck).stdout.splitLines()
+    let t1Ok = t1.exitCode == 0 and t1State.len >= 4 and
+      "ActiveState=active" in t1State[0] and "ActiveState=active" in t1State[1] and
+      t1State[2].strip().len > 0 and t1State[2].strip() != "0" and
+      t1State[3].strip().len > 0 and t1State[3].strip() != "0"
+    record["decision151Pass"] = %*{"exit": t1.exitCode, "state": t1State,
+      "ok": t1Ok}
+    step("decision 151, add-on switch: a socket with connections arriving " &
+         "and a path unit whose path exists, held through a passing switch, " &
+         "are active after it and their services run",
+         t1Ok, t1.stdout & t1.stderr & "\n" & t1State.join("\n"))
+    # A refused switch, from the triggers' services stopped and the socket's
+    # backlog flushed, so each trigger fires as soon as anything lets it.
+    discard g.exec(trigReset)
+    discard g.run("mkdir -p /etc/systemd/system-generators && printf " &
+      "'#!/bin/sh\\nmkdir -p \"$1/a13r10-bad.service.d\"\\nprintf " &
+      "\"[Service]\\\\nUser=root\\\\n\" > \"$1/a13r10-bad.service.d/10-root.conf\"" &
+      "\\n' > /etc/systemd/system-generators/a13r10-gen " &
+      "&& chmod 755 /etc/systemd/system-generators/a13r10-gen")
+    discard g.exec(trigAgitate)
+    let t2 = g.applyProfile(repro, "trig2", trigProfile.replace("@GEN@", "2"))
+    discard g.exec(trigCalm)
+    let t2Out = t2.stdout & t2.stderr
+    let t2State = g.exec(trigCheck).stdout.splitLines()
+    let t2NotFailed = t2State.len >= 2 and "failed" notin t2State[0] and
+      "trigger-limit-hit" notin t2State[0] and "failed" notin t2State[1] and
+      "trigger-limit-hit" notin t2State[1]
+    record["decision151Refused"] = %*{"exit": t2.exitCode,
+      "refusedForReason": "a13r10-bad.service as systemd loaded it is not confined" in t2Out,
+      "state": t2State, "notFailed": t2NotFailed}
+    step("decision 151, add-on switch refused: neither trigger is failed " &
+         "after a refused switch during which they were agitated",
+         t2.exitCode != 0 and
+           "a13r10-bad.service as systemd loaded it is not confined" in t2Out and
+           t2NotFailed,
+         t2Out & "\n" & t2State.join("\n"))
+    discard g.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
+      "/run/systemd/generator/a13r10-bad.service.d; systemctl daemon-reload")
+    let t3 = g.applyProfile(repro, "trig3", trigProfile.replace("@GEN@", "3"))
+    let t3State = g.exec(trigCheck).stdout.splitLines()
+    let t3Ok = t3.exitCode == 0 and t3State.len >= 4 and
+      "ActiveState=active" in t3State[0] and "ActiveState=active" in t3State[1] and
+      t3State[2].strip().len > 0 and t3State[2].strip() != "0" and
+      t3State[3].strip().len > 0 and t3State[3].strip() != "0"
+    # §13 decision 155: a trigger that cannot start again fails the switch;
+    # the revert cannot start it either, records it and commits, so the
+    # host is pending; `recover` starts it once the cause is cleared. A
+    # transient socket of the gate's own takes the port as soon as the
+    # switch has stopped the probe's socket. Falsifier: the add-on build
+    # trigger-restart-failure-ignored (the switch passes, the socket down).
+    discard g.exec(trigReset)
+    discard g.exec("touch /run/a13r10-job; rm -f /run/a13r10-blockstop; " &
+      "nohup bash -c 'until [ -e /run/a13r10-blockstop ]; do " &
+      "systemd-run --quiet --unit=a13r10-blocker " &
+      "--socket-property=ListenStream=127.0.0.1:18720 /bin/sleep infinity " &
+      ">/dev/null 2>&1 && systemctl is-active --quiet a13r10-blocker.socket " &
+      "&& break; systemctl stop a13r10-blocker.socket a13r10-blocker.service " &
+      ">/dev/null 2>&1; systemctl reset-failed a13r10-blocker.socket " &
+      "a13r10-blocker.service >/dev/null 2>&1; sleep 0.1; done' >/dev/null 2>&1 &")
+    let t4 = g.applyProfile(repro, "trig4", trigProfile.replace("@GEN@", "4"))
+    let t4Out = t4.stdout & t4.stderr
+    discard g.exec("touch /run/a13r10-blockstop; sleep 1; true")
+    let pendingFile = g.exec("cat /var/lib/repro/system/" &
+      "triggers-to-restart 2>/dev/null").stdout.strip()
+    let blocked = g.exec("systemctl is-active a13r10-blocker.socket").stdout.strip()
+    discard g.exec("systemctl stop a13r10-blocker.socket " &
+      "a13r10-blocker.service; true")
+    let rc = g.exec(repro & " system addon recover")
+    let rcOut = rc.stdout & rc.stderr
+    let t4After = g.exec("systemctl show -p ActiveState -p Result " &
+      "a13r10.socket | tr '\\n' ' '; test -e /var/lib/repro/system/" &
+      "triggers-to-restart && echo still-pending; true").stdout.strip()
+    let t4Ok = t4.exitCode != 0 and blocked == "active" and
+      "a13r10.socket" in pendingFile and rc.exitCode == 0 and
+      "trigger a13r10.socket started again" in rcOut and
+      "ActiveState=active" in t4After and "still-pending" notin t4After
+    record["decision155"] = %*{"exit": t4.exitCode, "blocked": blocked,
+      "pending": pendingFile, "recoverExit": rc.exitCode, "recover": rcOut,
+      "after": t4After, "ok": t4Ok}
+    step("decision 155: a trigger that cannot start again fails the switch, " &
+         "the revert commits with the host pending, and recover starts it " &
+         "once the cause is cleared", t4Ok, t4Out & "\npending: " &
+         pendingFile & "\nblocker: " & blocked & "\nrecover: " & rcOut &
+         "\nafter: " & t4After)
+    record["decision151Recovered"] = %*{"exit": t3.exitCode, "state": t3State,
+      "ok": t3Ok}
+    step("decision 151, add-on switch after the refusal: once the generator " &
+         "is gone the next switch brings both triggers back, active, and " &
+         "their services run", t3Ok, t3.stdout & t3.stderr & "\n" &
+         t3State.join("\n"))
+    discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
+      "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
+    let after5 = g.applyProfile(repro, "skeleton2e", skeleton2)
+    step("after the manifest is gone, the switch back to the skeleton " &
+         "succeeds (decision 151 probes removed)",
+         after5.exitCode == 0, after5.stdout & after5.stderr)
     if fails.len > 0: return fails
 
     # --- 3. Converge: hardened, from the store, state untouched.

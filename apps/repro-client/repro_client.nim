@@ -179,9 +179,10 @@
 ##      ``internalReproHelperCliPath`` returns ``getAppFilename()`` whatever
 ##      the file is called. `libs/repro_cli_support/tests/
 ##      t_image_identity_is_declared_not_filename.nim` is the standing proof,
-##      from a test binary called ``t_…``. The same literal is what
-##      ``renderUsage`` prints, so the engine's usage text and every ``repro
-##      …`` diagnostic still say ``repro`` too. Nothing had to learn a second
+##      from a test binary called ``t_…``. Help and usage errors name the
+##      program ``repro`` too (repro's command-line description), so the
+##      engine's usage text and every ``repro …`` diagnostic still say
+##      ``repro``. Nothing had to learn a second
 ##      name; the rename is a FILENAME change and only that.
 ##   2. "Moving the engine breaks ``siblingTryCompileProviderPath`` /
 ##      ``siblingStandardProviderPath`` (silent degradation to per-project
@@ -265,6 +266,12 @@ import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_daemon_core
 import repro_cli_support/dev_env_fast_path
+# repro's command-line description, read at COMPILE TIME only: the flag
+# tables below are constants, and no parser or grammar is linked. A
+# completion request (`repro __complete <shell> ...`) is not `build`, so it
+# is handed over to the engine unchanged, which answers it from the same
+# description.
+import repro_cli_support/cli_description
 
 const
   FullCliEnvVar = "REPRO_FULL_CLI"
@@ -459,27 +466,40 @@ proc flagMatches(arg, name: string): bool =
   ## caught by the same comparison on the flag token itself.
   arg == name or arg.startsWith(name & "=")
 
+proc attachedValue(arg: string; spellings: openArray[string]):
+    tuple[found: bool, value: string] =
+  ## The value of ``--flag=value`` when ``arg`` is that form of one of
+  ## ``spellings``.
+  for spelling in spellings:
+    if arg.startsWith(spelling & "="):
+      return (true, arg[spelling.len + 1 .. ^1])
+  (false, "")
+
 const
-  ClientHandledFlags = [
-    # Return from `runBuildCommand` before the daemon dispatch: the full
-    # image runs these in-process and writes to its own stdout.
-    "--print-solved-graph",
-    "--list-targets",
-    "--list-targets-json",
-    "--only",
-    # Select the daemon mode itself, with per-mode fallback semantics.
-    "--daemon",
-    # Leave client-side work after the daemon answers, or turn a fallback
-    # into a hard error.
-    "--write-benchmark",
-    "--write-stats",
-    "--stats-groups",
-    # Client-side terminal rendering; see the module header. ``--progress``
-    # is NOT in this list: it is handled by ``shouldRouteToDaemon`` directly,
-    # because ``--progress=quiet`` selects the very mode that makes routing
-    # safe while every other value forbids it.
-    "--progress-bars"
-  ]
+  ClientHandledFlags = reproThinClientHandOverFlags()
+    ## Every spelling of a ``build`` flag the full CLI processes itself, so
+    ## an invocation carrying one is handed over. Generated at compile time
+    ## from repro's command-line description (the flags it declares
+    ## ``clientSide = true``; see ``repro_cli_support/cli_description``), so
+    ## no flag list is written twice; the parser is not linked. The groups,
+    ## and why each is here:
+    ##
+    ## * ``--print-solved-graph``, ``--list-targets``,
+    ##   ``--list-targets-json``, ``--only`` return from ``runBuildCommand``
+    ##   before the daemon dispatch: the full image runs them in-process and
+    ##   writes to its own stdout.
+    ## * ``--daemon`` selects the daemon mode itself, with per-mode fallback
+    ##   semantics.
+    ## * ``--write-benchmark``, ``--write-stats``, ``--stats-groups`` leave
+    ##   client-side work after the daemon answers, or turn a fallback into
+    ##   a hard error.
+    ## * ``--progress-bars`` is client-side terminal rendering; see the
+    ##   module header.
+  ProgressFlags = reproFlagSpellings(@["build"], "progress")
+    ## ``--progress`` is NOT client-handled: it is routable exactly when it
+    ## selects quiet progress (the very mode that makes routing safe), which
+    ## ``shouldRouteToDaemon`` checks itself. Its spellings come from the
+    ## same description.
 
 proc isQuietValue(value: string): bool =
   value.strip().toLowerAscii() == "quiet"
@@ -515,7 +535,7 @@ proc shouldRouteToDaemon(args: seq[string]): bool =
       # Everything after `--` is forwarded to the action verbatim and is not
       # a build flag.
       break
-    if arg == "--progress":
+    if arg in ProgressFlags:
       # Space form. A missing or non-quiet value is the full image's problem
       # (it may even be an error); hand over either way.
       if i + 1 >= args.len or not isQuietValue(args[i + 1]):
@@ -523,10 +543,11 @@ proc shouldRouteToDaemon(args: seq[string]): bool =
       quietFromFlag = true
       inc i, 2
       continue
-    if arg.startsWith("--progress="):
+    let progressValue = attachedValue(arg, ProgressFlags)
+    if progressValue.found:
       # Every occurrence must be quiet. Requiring all of them rather than the
       # last makes the answer independent of the full image's last-wins order.
-      if not isQuietValue(arg[len("--progress=") .. ^1]):
+      if not isQuietValue(progressValue.value):
         return false
       quietFromFlag = true
       inc i

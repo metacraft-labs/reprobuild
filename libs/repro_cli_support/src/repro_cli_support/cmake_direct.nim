@@ -22,8 +22,13 @@ proc cmakeDirectBuildIdentity*(meta: TryCompileMetadata;
     packageName: TryCompileProviderPackageName)
   for tool in meta.usedTools:
     if tool in required:
+      # No version range: a wrapper stands for whichever tool CMake selected,
+      # and nothing declares a version for it. The resolver still probes the
+      # sidecar's executable and keys its report into the profile. A
+      # placeholder range here refused every real compiler (gcc 14 is not
+      # `>=1.0 <2.0`); see `cmake_develop_interface.cmakeToolUse`.
       project.toolUses.add(InterfaceToolUse(
-        rawConstraint: tool & " >=1.0 <2.0",
+        rawConstraint: tool,
         packageSelector: tool,
         executableName: tool))
       required.excl(tool)

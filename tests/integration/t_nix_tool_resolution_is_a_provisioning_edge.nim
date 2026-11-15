@@ -47,6 +47,7 @@ import repro_cli_support
 import repro_core
 import repro_depfile
 import repro_interface_artifacts
+import repro_test_support/owned_processes
 import repro_test_support/process_fixtures
 import repro_test_support/reasoned_skip
 import repro_tool_profiles
@@ -180,7 +181,9 @@ proc close(f: Fixture) =
   when not defined(windows):
     let socketPath = nixDaemonSocketPath(nixDaemonHelperKey(
       getEnv("REPROBUILD_NIX_DAEMON_BIN")))
-    discard execCmd("pkill -f " & quoteShell(socketPath) & " || true")
+    # The private helper these cases' resolutions started, found through its
+    # socket (never by pattern, which would reach other runs' helpers).
+    discard stopUnixSocketServer(socketPath)
   f.dropRoots()
   for path in f.realized:
     if path.len > 0 and dirExists(path):

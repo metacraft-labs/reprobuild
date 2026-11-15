@@ -68,6 +68,7 @@ import ./service_account
 import ./service_floor
 import ./systemd_values
 import ./systemd_syntax
+export isTemplateUnit
 import ./privileged_daemons
 
 const CarriedMutation {.strdefine: "reproAddonMutation".} = ""
@@ -1670,15 +1671,97 @@ proc liveReachUnits*(p: SystemProfile; dir = CarriedStateDir;
     if unitReach(r, p, lookup, root).all: continue   # refused or required
     result.add(r.suName)
 
+const TemplateObservationInstance* = "repro-addon-observe"
+  ## The instance a template is observed through: systemd shows a template
+  ## only through an instance, and this one never runs (A9's floor check
+  ## observes a template the same way, spec §10.1).
+
+proc observationInstanceOf*(tmpl: string): string =
+  ## ``foo@repro-addon-observe.service`` for the template ``foo@.service``;
+  ## any other name as it is.
+  if not isTemplateUnit(tmpl): return tmpl
+  let at = tmpl.find('@')
+  tmpl[0 .. at] & TemplateObservationInstance & tmpl[at + 1 .. ^1]
+
+proc generationInstancesOf*(tmpl: string;
+                            resources: openArray[SystemResource]): seq[string] =
+  ## The instances of the template ``tmpl`` (``foo@.service``) a generation
+  ## names: a drop-in for one, a unit of that name, or a unit whose text
+  ## names one (a ``Wants=``, an ``After=``, any token).
+  if not isTemplateUnit(tmpl): return
+  let at = tmpl.find('@')
+  let typ = tmpl[tmpl.rfind('.') .. ^1]
+  let stem = tmpl[0 .. at]
+  proc consider(n: string; acc: var seq[string]) =
+    if n.startsWith(stem) and n.endsWith(typ) and n.len > stem.len + typ.len and
+        n != tmpl and n notin acc:
+      acc.add(n)
+  for r in resources:
+    case r.kind
+    of srkSystemdSystemDropIn: consider(r.diUnit, result)
+    of srkSystemdSystemUnit:
+      consider(r.suName, result)
+      for t in r.suContent.splitWhitespace():
+        for w in t.split({'=', ' '}):
+          consider(w, result)
+    else: discard
+
+proc runningInstancesArgs*(tmpl: string): seq[string] =
+  ## The ``systemctl`` arguments that list the instances of ``tmpl`` systemd
+  ## has running or starting (``list-units`` over ``foo@*.service``).
+  let at = tmpl.find('@')
+  @["list-units", "--plain", "--no-legend", "--no-pager",
+    "--state=active,activating,reloading", "--",
+    tmpl[0 .. at] & "*" & tmpl[at + 1 .. ^1]]
+
+proc parseRunningInstances*(tmpl, listUnitsOutput: string): seq[string] =
+  ## The instance names of ``tmpl`` in ``systemctl list-units`` output
+  ## (``runningInstancesArgs``); never the template or its observation
+  ## instance.
+  let at = tmpl.find('@')
+  if at <= 0: return
+  for l in listUnitsOutput.splitLines():
+    let w = l.splitWhitespace()
+    if w.len > 0 and w[0].startsWith(tmpl[0 .. at]) and w[0] != tmpl and
+        w[0] != observationInstanceOf(tmpl) and w[0] notin result:
+      result.add(w[0])
+
+proc liveJudgedNames*(units: openArray[string]; p: SystemProfile;
+                      running: proc (tmpl: string): seq[string] {.closure.} = nil):
+    seq[string] =
+  ## The names the live check reads from ``systemctl show`` for ``units``
+  ## (§13 decision 135): a unit as it is; a template never by its own name,
+  ## which systemd refuses, but through its observation instance, every
+  ## instance the generation names and every instance ``running`` reports
+  ## (the host's running or requested ones).
+  for u in units:
+    if not isTemplateUnit(u):
+      if u notin result: result.add(u)
+      continue
+    when CarriedMutation == "template-live-by-name":
+      # FALSIFYING MUTATION: round 7's reading -- the template shown by its
+      # own name, which systemd refuses.
+      if u notin result: result.add(u)
+    else:
+      var names = @[observationInstanceOf(u)]
+      names.add(generationInstancesOf(u, p.resources))
+      if running != nil: names.add(running(u))
+      for n in names:
+        if n notin result: result.add(n)
+
 proc liveReachProblems*(units: openArray[string]; p: SystemProfile;
                         show: proc (unit: string): Table[string, string] {.closure.};
-                        root = "/"): seq[string] =
+                        root = "/";
+                        running: proc (tmpl: string): seq[string] {.closure.} = nil):
+    seq[string] =
   ## ``liveConfinementProblem`` for each of ``units`` as systemd loaded
   ## it (``show``: its ``systemctl show`` properties, read after the
   ## switch's daemon-reload and before any start): one problem per unit
-  ## that systemd loaded unconfined, or whose properties cannot be read.
+  ## that systemd loaded unconfined, or whose properties cannot be read. A
+  ## template is read through its instances (``liveJudgedNames``, §13
+  ## decision 135; ``running`` names the host's running ones).
   let lookup = hostAccountLookup(root, p)
-  for u in units:
+  for u in liveJudgedNames(units, p, running):
     var props: Table[string, string]
     try: props = show(u)
     except CatchableError as e:

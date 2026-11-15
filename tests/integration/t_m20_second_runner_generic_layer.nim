@@ -116,8 +116,12 @@ type DaemonHandle = object
 
 proc startRunQuotaDaemon(socketPath, identityFile: string): DaemonHandle =
   let process = startProcess(requireRunQuotaDaemonBin(repoRoot()),
+    # CAPTURE IS TURNED ON EXPLICITLY: it is off by default (it costs
+    # more than RunQuota's measurement budget allows), and this test reads
+    # the rows it writes.
     args = @["--socket", socketPath,
              "--host-identity-file", identityFile,
+             "--measurement", "capture=on",
              "--ambient-sample-interval-millis", "0"],
     options = {poStdErrToStdOut})
   for _ in 0 ..< 400:

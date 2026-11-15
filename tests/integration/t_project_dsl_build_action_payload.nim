@@ -363,10 +363,10 @@ suite "project DSL build action payload":
     # The lists at the tail of the payload hold empty strings, each exactly
     # the four-byte minimum of a string, and one of them ends the payload. The
     # bound is then met with equality, so an off-by-one in the comparison
-    # would refuse this payload. The last check of the test confirms that a
-    # list of three empty strings really does end the current payload: a
-    # version that appends a field after it fails there, rather than quietly
-    # testing nothing at the boundary.
+    # would refuse this payload. The last checks of the test confirm that a
+    # list of three empty strings really does end the version-32 payload, and
+    # where it sits in the current one: a version that appends a field after
+    # it fails there, rather than quietly testing nothing at the boundary.
     var action = markedAction()
     action.scratchDirs = @["", "", ""]
     action.removeBeforeRun = @["", "", ""]
@@ -397,8 +397,18 @@ suite "project DSL build action payload":
     check current.cacheEntryIdentity.isSome
     check current.cacheEntryIdentity.get().selectedOptions["optionMarker"] ==
       "on"
-    # A u32 count of 3 and three zero-length strings, as the last 16 bytes.
-    check currentImage[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+    # Version 32 is the last whose payload ends with that list: a u32 count of
+    # 3 and three zero-length strings, as its last 16 bytes. Decoding it above
+    # therefore met the bound with equality, and this confirms that it did.
+    let image32 = encodeBuildActionPayloadAtVersion(action, 32'u16)
+    check image32[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    # The current payload ends with the width fields (v33): two u32 (the
+    # range) and an empty string (the flag), 12 zero bytes for an unsized
+    # action, after the same list. A version that appends another field fails
+    # here rather than quietly testing nothing at the boundary.
+    check currentImage[^12 .. ^1] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    check currentImage[^28 .. ^13] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
 
   test "version 4 payloads decode with default CLI argument formatting":

@@ -37,21 +37,130 @@
 ##     all eight listed, in each of three runs (the list does not depend on
 ##     scheduling).
 ##
+## 15-18. A file a ``staticExec`` command reads whose name strace escapes
+##     (non-ASCII bytes, ``>``, a newline, a backslash): listed (strace
+##     ``-xx``, decoded), and an edit to it after the build is refused.
+## 19. A workspace binary a ``staticExec`` command executes (``execve``):
+##     listed, and a newer one refused.
+## 20. A directory a ``staticExec`` command lists (``getdents``): its
+##     Nim entries are recorded, and a new ``.nim`` entry refuses the
+##     binary; a new non-Nim entry does not (§13 decisions 80 and 111).
+## 21. A traced workspace path that is no longer a file when the list is
+##     written fails the writer: no list, never a silent drop.
+## 22. A strace that prints a format the writer does not parse (a wrapper
+##     that drops ``-xx``, as any strace whose ``-y`` paths are text does):
+##     the writer fails, no list is written, and the binary is refused --
+##     never a list of ``module`` entries alone that accepts the binary
+##     after its ``staticRead`` input changed.
+## 23. A strace that traces none of the writer's syscalls (a wrapper that
+##     replaces ``-e trace=``): the positive control -- the entry module's
+##     own ``open`` -- is missing, so the writer fails and writes no list.
+## 24. (round 9, decision 111) A ``.nimcache/`` directory, another directory,
+##     a ``result`` link and a non-source file added to directories the
+##     compiler listed (the tree root among them) are not a change.
+## 25. (round 9, decision 111) A new ``.nim`` file in a directory the
+##     compiler searched (the tree root, the app's directory) is refused.
+## 26-27. (round 9) A file read under a name with a trailing, or a
+##     leading, space is checked under that name, not under the decoy of
+##     the trimmed name beside it.
+## 28. A successful open of a workspace file whose fd path strace marks
+##     ``(deleted)`` (printed after the closing ``>``): the file was read
+##     and the list cannot check it, so the writer fails -- it is never
+##     skipped as a failed syscall, which left the ``staticRead`` file out
+##     of the list.
+## 29. A ``staticExec`` command that makes an ``O_TMPFILE`` file (Python's
+##     ``tempfile.TemporaryFile()``, glibc ``tmpfile()``) and reopens it
+##     through ``/proc/self/fd``: strace prints both opens ``(deleted)``,
+##     and they are anonymous, never sources, so the list is written.
+## 30. (round 9) A directory a ``staticExec`` command lists whose name
+##     ends in a space is recorded and checked under that name: a new
+##     ``.nim`` entry in it is refused, and one in the decoy directory of
+##     the trimmed name beside it is not.
+##
+## 31-34. (§13 decision 114) In a tree
+##     whose app imports ``pkgx/util`` through ``--path:vendor``: a
+##     package directory ``apps/foo/pkgx`` that shadows the import,
+##     ``apps/foo/foo.nim.cfg``, ``apps/foo/nim.cfg`` and a parent
+##     ``apps/nim.cfg`` (each adding a define) are each refused, and
+##     accepted again once removed.
+## 35-36. (§13 decision 115 (A)) A ``nim.cfg``, and a ``config.nims``, in
+##     the workspace root (above the package root, never listed) are
+##     refused, and accepted again once removed.
+## 37. (decision 115 (A)) With ``--path:vendor --path:vendor2`` (vendor2
+##     searched first), a ``vendor2/pkgx/util.nim`` that shadows the import
+##     is refused: when vendor2 was empty, when ``vendor2/pkgx`` already
+##     held another module, and when vendor2 did not exist. A rebuild
+##     shows the shadow is real.
+## 38. (decision 115 (B)) Each of the fixed list's directories (.direnv,
+##     .repro, nimcache, htmldocs, test-logs, and decision 114's
+##     .nimcache, build, .git, result where absent) created in the listed
+##     tree root, with a ``.nim`` inside, is not a change.
+## 39. (decision 115) A ``tmp`` or ``docs`` directory there is refused:
+##     the cost the owner accepted.
+## 40. (§13 decision 142) Built with ``--skipUserCfg``, as
+##     scripts/build_apps.sh builds a guarded helper, a ``nim.cfg`` or
+##     ``config.nims`` in ``$XDG_CONFIG_HOME/nim`` neither refuses the
+##     helper nor changes a rebuild.
+## 41. (decision 142) A helper built without the flag is refused.
+## 42. (round 12, decision 115 (B) narrowed) A fixed-list name as a later
+##     import component: ``vend2/pkgx/build/util.nim`` shadowing
+##     ``import pkgx/build/util`` from vend1 is refused.
+## 43. (round 12) Under an execute-only parent the list is written, a new
+##     ``nim.cfg`` there is refused (``configs-probed``), and a listed
+##     directory that can no longer be listed is refused.
+## 44. (round 12) A relative ``--path`` is recorded absolute, and the
+##     helper is accepted from ``/`` and from a directory with its own
+##     ``vendor/``.
+##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
 ## 5), ``fresh-skips-c-sources`` (case 8), ``fresh-skips-headers`` (case
 ## 9), ``fresh-skips-static-reads`` (case 10), ``fresh-ignores-list-binary``
-## (case 11); and the script's ``WRITE_HELPER_DEPS_MUTATION`` in the
-## environment: ``keep-old-list`` (case 12), ``relative-to-script-dir``
-## (case 13), ``single-trace`` (case 14).
+## (case 11), ``fresh-ignores-listings`` (cases 20, 25); and the script's
+## ``WRITE_HELPER_DEPS_MUTATION`` in the environment: ``keep-old-list``
+## (case 12), ``relative-to-script-dir`` (case 13), ``single-trace``
+## (case 14), ``text-paths`` (cases 15-18; it is the round-7 trace, so
+## 19-25 go red with it), ``no-execve`` (case 19), ``no-listing``
+## (cases 20, 25, and 24, which first checks that the root and the app's
+## directory were listed), ``drop-unresolved`` (case 21),
+## ``accept-unparsed`` (cases 22 and 23), ``listing-digests-every-entry``
+## (cases 20, 24: round 8's digest of every name, written and checked as
+## the list says), ``trim-edge-spaces`` (case 26: the path written without
+## its trailing space, as round 8's strip() read it; case 27's leading
+## space sits after the path's "/", so no line strip reaches it, and it is
+## a positive case only; case 30: the listing written for the trimmed
+## directory name), ``suffix-is-failure`` (case 28; ``accept-unparsed``
+## turns it red too), ``deleted-is-unparsed`` (case 29),
+## ``listing-skips-subdirectories`` (case 31), ``listing-skips-project-cfg``
+## (case 32), ``listing-skips-nim-cfg`` (cases 33 and 34) and
+## ``no-parent-listings`` (case 34, the parent ``apps/nim.cfg``; it also
+## turns case 25's tree-root ``.nim`` red, and case 24, which checks that
+## the tree root was listed). Cases 33 and 34's files are refused by their
+## ``configs`` lines too (decision 115 (A)); the cases check the listing's
+## own message, which comes first, so each falsifier still turns them
+## red. ``no-parent-configs``
+## (cases 35 and 36), ``no-search-listings`` (case 37) and
+## ``listing-counts-tool-dirs`` (case 38), ``import-listings-exclude-tool-dirs``
+## (case 42), ``configs-fail-unreadable`` (case 43), ``relative-search-paths``
+## (case 44); and the builds ``-d:reproAddonMutation=fresh-accepts-user-config``
+## (case 41) and ``helper-built-without-skip-user-cfg`` (case 40, this
+## test's own: its fixture built without the flag).
+##
+## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
+## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
+## caller selects a strace, and it stands in for a strace build that prints
+## another format (or the caller's PATH strace, which path mode runs),
+## which cannot be installed on demand.
 ##
 ## Mocks: none -- the real compiler, the real script, strace.
 
-import std/[os, osproc, strutils, tempfiles, times, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_test_support/fresh_binary
 
 const RepoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+const TestMutation {.strdefine: "reproAddonMutation".} = ""
+  ## Case 40's own falsifier, ``helper-built-without-skip-user-cfg``.
 
 let base = createTempDir("fresh-binary-", "")
 let tree = base / "tree"
@@ -79,6 +188,37 @@ for p in parInputs: writeFile(p, "read concurrently\n")
 var parCmd = ""
 for p in parInputs: parCmd.add("cat " & p & " & ")
 parCmd.add("wait")
+# Round 8: names strace escapes, an executed workspace binary, a listed
+# directory (§13 decision 80).
+let fooDir = tree / "apps" / "foo"
+let nonAscii = fooDir / "\xC3\xA9.txt"           # "é.txt"
+let gtName = fooDir / "a>b.txt"
+let nlName = fooDir / "nl\nx.txt"
+let bsName = fooDir / "bs\\c.txt"
+let helloSrc = fooDir / "hello.c"
+let hello = fooDir / "hello"
+let listDir = fooDir / "listdir"
+for p in [nonAscii, gtName, nlName, bsName]: writeFile(p, "escaped by strace\n")
+# Round 9: names with a trailing and a leading space, each beside a decoy
+# of the trimmed name.
+let trailing = fooDir / "tr.txt "
+let leading = fooDir / " lead.txt"
+for p in [trailing, leading]: writeFile(p, "a name with an edge space\n")
+for p in [fooDir / "tr.txt", fooDir / "lead.txt"]: writeFile(p, "decoy\n")
+# ...and a listed directory whose name ends in a space, beside a decoy of
+# the trimmed name with the same entries (so the two digests agree until
+# the case adds an entry).
+let spaceDir = fooDir / "ld "
+let spaceDirDecoy = fooDir / "ld"
+for d in [spaceDir, spaceDirDecoy]:
+  createDir(d)
+  writeFile(d / "one.nim", "discard\n")
+writeFile(helloSrc, "#include <stdio.h>\nint main(void){puts(\"hello\");return 0;}\n")
+block:
+  let (o, c) = execCmdEx(quoteShellCommand(["gcc", "-o", hello, helloSrc]))
+  doAssert c == 0, o
+createDir(listDir)
+writeFile(listDir / "one.txt", "listed\n")
 writeFile(lib, "proc greeting*(): string = \"hello\"\n")
 writeFile(outside, "proc farAway*(): string = \"from outside\"\n")
 writeFile(included, "proc part(): string = \"included\"\n")
@@ -90,7 +230,12 @@ proc writeApp(extra = "") =
     "const fromExec = staticExec(\"cat " & execInput & "\")\n" &
     "const fromRel = staticExec(\"cat rel-input.txt\")\n" &
     "const fromPar = staticExec(\"" & parCmd & "\")\n" &
-    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len\n" & extra)
+    "const fromEscaped = staticExec(\"cat \xC3\xA9.txt 'a>b.txt' nl?x.txt bs?c.txt\")\n" &
+    "const fromHello = staticExec(\"./hello\")\n" &
+    "const fromListing = staticExec(\"ls listdir\")\n" &
+    "const fromSpaces = staticExec(\"cat 'tr.txt ' ' lead.txt'\")\n" &
+    "const fromSpaceDir = staticExec(\"ls 'ld '\")\n" &
+    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len, fromEscaped.len, fromHello, fromListing, fromSpaces.len, fromSpaceDir\n" & extra)
 writeApp()
 let binary = tree / "build" / "bin" / addFileExt("foo-helper", ExeExt)
 
@@ -98,9 +243,12 @@ proc build() =
   ## Compile the tree and write its dependency list, after dating its
   ## sources a minute back (an earlier case may have dated one into the
   ## future).
-  for src in @[lib, app, included, outside, csrc, header, blob, execInput, relInput] & parInputs:
+  for src in @[lib, app, included, outside, csrc, header, blob, execInput, relInput,
+               nonAscii, gtName, nlName, bsName, hello, trailing, leading] & parInputs:
     setLastModificationTime(src, getTime() - initDuration(seconds = 60))
-  let flags = @["--path:" & tree / "libs" / "foolib" / "src",
+  # --skipUserCfg as scripts/build_apps.sh builds a guarded helper (§13
+  # decision 142).
+  let flags = @["--skipUserCfg", "--path:" & tree / "libs" / "foolib" / "src",
                 "--path:" & parentDir(outside)]
   let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
     "--warnings:off"] & flags & @["--nimcache:" & tree / "build" / "nimcache" / "foo-helper",
@@ -244,6 +392,504 @@ suite "a helper binary is used only when built from the tree under test":
         if p notin deps: missing.add(p)
       checkpoint "run " & $run & ": missing " & $missing
       check missing.len == 0
+
+  for (n, label, p) in [(15, "a non-ASCII name", nonAscii), (16, "a name with '>'", gtName),
+                        (17, "a name with a newline", nlName), (18, "a name with a backslash", bsName)]:
+    test $n & ": a file with " & label & " a staticExec command reads is checked":
+      build()
+      check p in helperDependencies(tree, "foo-helper")
+      check refusal() == ""
+      touchAfterBinary(p)
+      let why = refusal()
+      checkpoint why
+      check ("older than " & p) in why
+
+  test "19: a workspace binary a staticExec command executes is checked":
+    build()
+    check hello in helperDependencies(tree, "foo-helper")
+    check refusal() == ""
+    touchAfterBinary(hello)
+    let why = refusal()
+    checkpoint why
+    check ("older than " & hello) in why
+
+  test "20: a directory a staticExec command lists is checked by its Nim entries":
+    build()
+    check refusal() == ""
+    # §13 decision 111: a name that cannot change what the compiler
+    # resolves does not count, even in a listing a command made.
+    writeFile(listDir / "two.txt", "a new entry\n")
+    check refusal() == ""
+    writeFile(listDir / "two.nim", "discard\n")
+    let why = refusal()
+    checkpoint why
+    check ("listing of " & listDir & " that has changed") in why
+    removeFile(listDir / "two.nim")
+    check refusal() == ""
+
+  test "21: a traced workspace path that is not a file fails the list":
+    # Its own tree: a staticExec that reads a file and removes it, so the
+    # path the trace names is no file when the list is written.
+    let t2 = base / "tree21"
+    let app2 = t2 / "apps" / "gone" / "gone.nim"
+    createDir(parentDir(app2))
+    writeFile(app2, "const g = staticExec(\"echo x > gone.txt; cat gone.txt; rm gone.txt\")\necho g\n")
+    let bin2 = t2 / "build" / "bin" / "gone"
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off", "--nimcache:" & t2 / "build" / "nimcache" / "gone",
+      "--out:" & bin2, app2]))
+    doAssert c1 == 0, o1
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "gone", app2]),
+      workingDir = t2)
+    checkpoint o2
+    check c2 != 0
+    check "not what they were traced as" in o2
+    check not fileExists(t2 / "build" / "nimcache" / "gone" / "gone.deps")
+
+  proc straceWrapper(name, filter: string): string =
+    ## A ``REPRO_STRACE`` that runs the real strace with its arguments
+    ## rewritten by the bash ``filter`` (which reads ``$a``, appends to
+    ## ``args``).
+    let real = findExe("strace")
+    doAssert real.len > 0, "strace is required"
+    result = base / name
+    writeFile(result, "#!/usr/bin/env bash\nargs=()\nfor a in \"$@\"; do\n" &
+      filter & "\ndone\nexec " & quoteShell(real) & " \"${args[@]}\"\n")
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+
+  proc writeWith(strace: string): (string, int) =
+    let env = "REPRO_STRACE=" & quoteShell(strace) & " "
+    execCmdEx(env & quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "foo-helper", app,
+      "--skipUserCfg", "--path:" & tree / "libs" / "foolib" / "src",
+      "--path:" & parentDir(outside)]), workingDir = tree)
+
+  test "22: a trace in a format the writer does not parse fails the list":
+    build()
+    check refusal() == ""
+    let (o, c) = writeWith(straceWrapper("strace-no-xx",
+      "  [ \"$a\" = -xx ] || args+=(\"$a\")"))
+    checkpoint o
+    check c != 0
+    check "could not parse" in o
+    check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
+    check "has no dependency list" in refusal()
+
+  test "23: a trace without the entry module's own open fails the list":
+    build()
+    check refusal() == ""
+    let (o, c) = writeWith(straceWrapper("strace-traces-nothing",
+      "  case \"$a\" in trace=*) args+=(\"trace=getpid\") ;; *) args+=(\"$a\") ;; esac"))
+    checkpoint o
+    check c != 0
+    check "positive control" in o
+    check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
+    check "has no dependency list" in refusal()
+
+  test "24: a .nimcache, a .git, a build directory or a result link in a listed directory is not a change":
+    # §13 decision 111: what a plain `nim c` (config.nims's default
+    # <checkout>/.nimcache), `just build` or `nix build` leaves in the
+    # tree root, a directory the compiler's package search lists.
+    build()
+    check refusal() == ""
+    let listed = helperListings(tree, "foo-helper")
+    checkpoint $listed
+    check listed.anyIt(it.dir == tree)
+    check listed.anyIt(it.dir == fooDir)
+    createDir(tree / ".nimcache" / "foo")
+    writeFile(tree / ".nimcache" / "foo" / "x.c", "/* generated */\n")
+    createDir(tree / ".git" / "objects")
+    createSymlink(tree / "build", tree / "result")
+    writeFile(fooDir / "notes.md", "not a source\n")
+    let why = refusal()
+    checkpoint why
+    check why == ""
+
+  test "25: a new .nim file in a directory the compiler searched is refused":
+    build()
+    check refusal() == ""
+    for d in [tree, fooDir]:
+      writeFile(d / "shadow.nim", "discard\n")
+      let why = refusal()
+      checkpoint why
+      check ("listing of " & d & " that has changed") in why
+      removeFile(d / "shadow.nim")
+      check refusal() == ""
+
+  for (n, label, p) in [(26, "a trailing", trailing), (27, "a leading", leading)]:
+    test $n & ": a name with " & label & " space is checked under its own name, not its decoy's":
+      build()
+      check p in helperDependencies(tree, "foo-helper")
+      check refusal() == ""
+      touchAfterBinary(p)
+      let why = refusal()
+      checkpoint why
+      check ("older than " & p) in why
+
+  test "28: a successful open strace marks (deleted) fails the list":
+    # The wrapper runs the real strace, then marks ONLY the open of
+    # blob.txt the way strace prints an fd whose file is gone
+    # (`= 3<path>(deleted)`), so the entry module's open -- the positive
+    # control -- is untouched and only this line's handling is tested.
+    let real = findExe("strace")
+    doAssert real.len > 0, "strace is required"
+    var blobHex = ""
+    for c in "/blob.txt": blobHex.add("\\\\x" & toHex(ord(c), 2).toLowerAscii)
+    let wrapper = base / "strace-marks-deleted"
+    writeFile(wrapper, "#!/usr/bin/env bash\nout=''\nprev=''\n" &
+      "for a in \"$@\"; do [ \"$prev\" = -o ] && out=\"$a\"; prev=\"$a\"; done\n" &
+      quoteShell(real) & " \"$@\"\nrc=$?\n" &
+      "for f in \"$out\".*; do sed -i -E 's/^(open[a-z0-9]*\\(.*\\) += [0-9]+<[^>]*" &
+      blobHex & ">)$/\\1(deleted)/' \"$f\"; done\nexit $rc\n")
+    setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+    build()
+    check refusal() == ""
+    let (o, c) = writeWith(wrapper)
+    checkpoint o
+    check c != 0
+    check "opened and then deleted" in o
+    check blob in o
+    check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
+    check "has no dependency list" in refusal()
+
+  test "29: an O_TMPFILE file a staticExec command makes does not fail the list":
+    # Its own tree, so the other cases do not depend on python3. The
+    # command makes an anonymous file (O_TMPFILE) and reopens it through
+    # /proc/self/fd; strace prints both opens `<...>(deleted)`.
+    let py = findExe("python3")
+    doAssert py.len > 0, "python3 is required"
+    let t3 = base / "tree29"
+    let app3 = t3 / "apps" / "tmpf" / "tmpf.nim"
+    createDir(parentDir(app3))
+    writeFile(app3, "const t = staticExec(\"" & py & " -c 'import os, tempfile; " &
+      "f = tempfile.TemporaryFile(); f.write(b\\\"x\\\"); f.flush(); " &
+      "os.close(os.open(\\\"/proc/self/fd/%d\\\" % f.fileno(), os.O_RDONLY)); " &
+      "print(\\\"made\\\")'\")\necho t\n")
+    let bin3 = t3 / "build" / "bin" / "tmpf"
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off", "--skipUserCfg",
+      "--nimcache:" & t3 / "build" / "nimcache" / "tmpf",
+      "--out:" & bin3, app3]))
+    doAssert c1 == 0, o1
+    let (ob, cb) = execCmdEx(quoteShellCommand(@[bin3]))
+    doAssert cb == 0 and "made" in ob, ob
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "tmpf", app3,
+      "--skipUserCfg"]),
+      workingDir = t3)
+    checkpoint o2
+    check c2 == 0
+    check fileExists(t3 / "build" / "nimcache" / "tmpf" / "tmpf.deps")
+    check freshRepoBinary(t3, "tmpf") == bin3
+
+  test "30: a listed directory whose name ends in a space is checked under its own name":
+    build()
+    var dirs: seq[string]
+    for (d, _, _) in helperListings(tree, "foo-helper"): dirs.add(d)
+    checkpoint $dirs
+    check spaceDir in dirs
+    check refusal() == ""
+    # The directory the command listed first, while the decoy is as it
+    # was: an edit to it alone must be refused (a list that recorded the
+    # decoy accepts it).
+    writeFile(spaceDir / "two.nim", "discard\n")
+    let why = refusal()
+    checkpoint why
+    check ("listing of " & spaceDir & " that has changed") in why
+    removeFile(spaceDir / "two.nim")
+    check refusal() == ""
+    # The decoy is not what was listed: a new entry there changes nothing.
+    writeFile(spaceDirDecoy / "two.nim", "discard\n")
+    check refusal() == ""
+
+  # ---- §13 decision 114 (the owner's decision on reprobuild-pm issue
+  # 2026-11-13-helper-list-listing-filter-accepts-a-new-package-directory-
+  # or-nim-cfg-that-changes-the-build): what else changes what the
+  # compiler resolves. Its own tree: an app that imports ``pkgx/util``
+  # through ``--path:vendor`` and reads a define.
+  let rt = base / "tree-resolve"
+  let rApp = rt / "apps" / "foo" / "foo.nim"
+  let rBin = rt / "build" / "bin" / "rfoo"
+  proc buildResolve(paths = @["vendor"]; skipUserCfg = true;
+                    relative = false) =
+    ## ``paths``: the ``--path`` directories under ``rt``, in order (Nim
+    ## searches a later one first). ``relative``: given relative to ``rt``,
+    ## where the compiler and the writer run.
+    var flags: seq[string]
+    if skipUserCfg: flags.add("--skipUserCfg")
+    for d in paths: flags.add("--path:" & (if relative: d else: rt / d))
+    createDir(rt / "vendor" / "pkgx")
+    createDir(parentDir(rApp))
+    writeFile(rt / "vendor" / "pkgx" / "util.nim", "proc which*(): string = \"vendor\"\n")
+    writeFile(rApp, "import pkgx/util\nwhen defined(probeFlag): echo \"flag\"\necho which()\n")
+    for p in [rApp, rt / "vendor" / "pkgx" / "util.nim"]:
+      setLastModificationTime(p, getTime() - initDuration(seconds = 60))
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off"] & flags & @[
+      "--nimcache:" & rt / "build" / "nimcache" / "rfoo", "--out:" & rBin, rApp]),
+      workingDir = rt)
+    doAssert c1 == 0, o1
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "rfoo", rApp] & flags),
+      workingDir = rt)
+    doAssert c2 == 0, o2
+  proc rRefusal(): string =
+    try:
+      discard freshRepoBinary(rt, "rfoo")
+      ""
+    except StaleHelperBinary as e:
+      e.msg
+
+  for (n, label, rel, body) in [
+      (31, "a package directory that shadows an import", "apps/foo/pkgx/util.nim",
+       "proc which*(): string = \"local shadow\"\n"),
+      (32, "a <project>.nim.cfg", "apps/foo/foo.nim.cfg", "-d:probeFlag\n"),
+      (33, "a nim.cfg beside the project", "apps/foo/nim.cfg", "-d:probeFlag\n"),
+      (34, "a nim.cfg in a parent directory", "apps/nim.cfg", "-d:probeFlag\n")]:
+    test $n & ": " & label & " added after the build is refused":
+      buildResolve()
+      check rRefusal() == ""
+      createDir(parentDir(rt / rel))
+      writeFile(rt / rel, body)
+      let why = rRefusal()
+      checkpoint why
+      check "that has changed since" in why
+      removeFile(rt / rel)
+      if n == 31: removeDir(rt / "apps" / "foo" / "pkgx")
+      check rRefusal() == ""
+
+  # ---- §13 decision 115 (A): the directories the compiler resolves in
+  # without listing them. ``base`` is the writer's workspace root for
+  # ``rt`` (the parent of the directory it runs in), above the package
+  # root, where Nim reads nim.cfg and config.nims but lists nothing.
+  for (n, cfg, body) in [(35, "nim.cfg", "-d:probeFlag\n"),
+                         (36, "config.nims", "switch(\"define\", \"probeFlag\")\n")]:
+    test $n & ": a " & cfg & " in the workspace root, above the package root, is refused":
+      buildResolve()
+      check rRefusal() == ""
+      check helperConfigs(rt, "rfoo").anyIt(it.dir == base)
+      check helperConfigs(rt, "rfoo").anyIt(it.dir == "/")
+      writeFile(base / cfg, body)
+      let why = rRefusal()
+      checkpoint why
+      check ("built when " & base & " held other Nim configuration files") in why
+      removeFile(base / cfg)
+      check rRefusal() == ""
+
+  test "37: a shadowing package in a search directory the compiler never listed is refused":
+    # ``--path:vendor2`` comes later, so Nim searches it first: a
+    # ``vendor2/pkgx/util.nim`` shadows ``vendor/pkgx/util.nim``. The
+    # compiler only probes vendor2 for the file, never lists it.
+    let shadow = rt / "vendor2" / "pkgx" / "util.nim"
+    let body = "proc which*(): string = \"vendor2 shadow\"\n"
+    # vendor2 empty at build time: the new package directory is refused.
+    createDir(rt / "vendor2")
+    buildResolve(@["vendor", "vendor2"])
+    check rRefusal() == ""
+    check helperListings(rt, "rfoo").anyIt(it.dir == rt / "vendor2")
+    createDir(parentDir(shadow))
+    writeFile(shadow, body)
+    var why = rRefusal()
+    checkpoint why
+    check ("listing of " & rt / "vendor2" & " that has changed") in why
+    # ...and it does change the build: a rebuild prints the shadow.
+    block:
+      let (o, c) = execCmdEx(quoteShellCommand(@["nim", "c", "-r",
+        "--hints:off", "--warnings:off", "--path:" & rt / "vendor",
+        "--path:" & rt / "vendor2", "--nimcache:" & rt / "build" / "probe",
+        "--out:" & rt / "build" / "probe" / "p", rApp]))
+      checkpoint o
+      check c == 0 and "vendor2 shadow" in o
+    removeFile(shadow)
+    # vendor2/pkgx already there (another module in it): the new util.nim
+    # is in a directory the import would be looked up in.
+    writeFile(rt / "vendor2" / "pkgx" / "other.nim", "discard\n")
+    buildResolve(@["vendor", "vendor2"])
+    check rRefusal() == ""
+    writeFile(shadow, body)
+    why = rRefusal()
+    checkpoint why
+    check ("listing of " & rt / "vendor2" / "pkgx" & " that has changed") in why
+    removeDir(rt / "vendor2")
+    # vendor2 absent at build time: its listing is recorded as no names,
+    # and creating it is refused (here the tree root's listing, which
+    # gains the subdirectory, is checked first).
+    buildResolve(@["vendor", "vendor2"])
+    check rRefusal() == ""
+    check (rt / "vendor2", listingDigest(rt / "vendor2"), false) in
+      helperListings(rt, "rfoo")
+    createDir(parentDir(shadow))
+    writeFile(shadow, body)
+    why = rRefusal()
+    checkpoint why
+    check "that has changed since" in why
+    removeDir(rt / "vendor2")
+    check rRefusal() == ""
+
+  # ---- §13 decision 115 (B): a checkout's tool directories are not a
+  # change; ``tmp`` and ``docs`` are (the accepted cost).
+  const ToolDirs = [".nimcache", "build", ".git", "result", ".direnv",
+                    ".repro", "nimcache", "htmldocs", "test-logs"]
+  test "38: the checkout's tool directories created after the build are not a change":
+    build()
+    check refusal() == ""
+    var made: seq[string]
+    for d in ToolDirs:
+      if dirExists(tree / d) or symlinkExists(tree / d): continue
+      createDir(tree / d)
+      writeFile(tree / d / "x.nim", "discard\n")
+      made.add(d)
+      let why = refusal()
+      checkpoint d & ": " & why
+      check why == ""
+    checkpoint $made
+    check ".direnv" in made and "test-logs" in made
+    for d in made: removeDir(tree / d)
+
+  test "39: a tmp or docs directory created after the build is refused":
+    build()
+    check refusal() == ""
+    for d in ["tmp", "docs"]:
+      createDir(tree / d)
+      let why = refusal()
+      checkpoint d & ": " & why
+      check ("listing of " & tree & " that has changed") in why
+      removeDir(tree / d)
+      check refusal() == ""
+
+  # ---- A11 code review round 12. A tree of its own per case, built and
+  # listed the way scripts/build_apps.sh does a guarded helper.
+  proc buildIn(t, name, app: string; flags: seq[string]; cwd = ""): string =
+    ## Compiles ``app`` to ``t/build/bin/name`` and writes its list, both in
+    ## ``cwd`` (default ``t``); "" when both succeed, else their output.
+    let wd = if cwd.len > 0: cwd else: t
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off"] & flags & @["--nimcache:" & t / "build" / "nimcache" / name,
+      "--out:" & t / "build" / "bin" / name, app]), workingDir = wd)
+    if c1 != 0: return "nim c: " & o1
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", name, app] & flags),
+      workingDir = wd)
+    if c2 != 0: return "write_helper_deps: " & o2
+    ""
+  proc refusalOf(t, name: string): string =
+    try:
+      discard freshRepoBinary(t, name)
+      ""
+    except StaleHelperBinary as e:
+      e.msg
+
+  test "40: the user's Nim configuration neither changes nor refuses a helper built with --skipUserCfg":
+    # §13 decision 142. The test's own falsifier,
+    # -d:reproAddonMutation=helper-built-without-skip-user-cfg, builds it
+    # without the flag: the list says so, and the helper is refused.
+    let xdg = base / "xdg"
+    createDir(xdg / "nim")
+    putEnv("XDG_CONFIG_HOME", xdg)
+    defer: delEnv("XDG_CONFIG_HOME")
+    buildResolve(skipUserCfg = TestMutation != "helper-built-without-skip-user-cfg")
+    var why = rRefusal()
+    checkpoint why
+    check why == ""
+    for (cfg, body) in [("nim.cfg", "-d:probeFlag\n"),
+                        ("config.nims", "switch(\"define\", \"probeFlag\")\n")]:
+      writeFile(xdg / "nim" / cfg, body)
+      why = rRefusal()
+      checkpoint cfg & ": " & why
+      check why == ""
+      # Built the same way again, the helper does not change: the flag
+      # keeps the file out (without it, the rebuild prints "flag").
+      let (o, c) = execCmdEx(quoteShellCommand(@["nim", "c", "-r",
+        "--hints:off", "--warnings:off", "--skipUserCfg",
+        "--path:" & rt / "vendor", "--nimcache:" & rt / "build" / "probe40",
+        "--out:" & rt / "build" / "probe40" / "p", rApp]))
+      checkpoint o
+      check c == 0 and "flag" notin o
+      removeFile(xdg / "nim" / cfg)
+
+  test "41: a helper built reading the user's Nim configuration is refused":
+    # Falsifier: -d:reproAddonMutation=fresh-accepts-user-config.
+    buildResolve(skipUserCfg = false)
+    let why = rRefusal()
+    checkpoint why
+    check "was built without --skipUserCfg" in why
+
+  test "42: a fixed-list name as a later import component is a change":
+    # Round 12 narrows decision 115 (B) to an import path's first
+    # component: with `import pkgx/build/util` found in vend1, a new
+    # vend2/pkgx/build/util.nim (vend2 searched first) shadows it.
+    # Falsifier: WRITE_HELPER_DEPS_MUTATION=import-listings-exclude-tool-dirs.
+    let t = base / "tree-build-component"
+    createDir(t / "vend1" / "pkgx" / "build")
+    createDir(t / "vend2" / "pkgx")
+    createDir(t / "apps" / "b")
+    writeFile(t / "vend1" / "pkgx" / "build" / "util.nim",
+      "proc which*(): string = \"vend1 build\"\n")
+    writeFile(t / "vend2" / "pkgx" / "other.nim", "discard\n")
+    let app = t / "apps" / "b" / "b.nim"
+    writeFile(app, "import pkgx/build/util\necho which()\n")
+    let flags = @["--skipUserCfg", "--path:" & t / "vend1", "--path:" & t / "vend2"]
+    let built = buildIn(t, "bfoo", app, flags)
+    checkpoint built
+    check built == ""
+    check refusalOf(t, "bfoo") == ""
+    let shadow = t / "vend2" / "pkgx" / "build" / "util.nim"
+    createDir(parentDir(shadow))
+    writeFile(shadow, "proc which*(): string = \"VENDOR2 build SHADOW\"\n")
+    let why = refusalOf(t, "bfoo")
+    checkpoint why
+    check ("listing of " & t / "vend2" / "pkgx" & " that has changed") in why
+    removeDir(t / "vend2" / "pkgx" / "build")
+    check refusalOf(t, "bfoo") == ""
+
+  test "43: a parent directory that cannot be listed is probed, not a failure":
+    # Round 12: under an execute-only directory the compile works, so the
+    # list must too. Nim opens nim.cfg and config.nims there by name; the
+    # list looks them up the same way (configs-probed). Falsifier:
+    # WRITE_HELPER_DEPS_MUTATION=configs-fail-unreadable.
+    let xo = base / "xo"
+    let t = xo / "ws" / "t"
+    let app = t / "apps" / "u" / "u.nim"
+    createDir(parentDir(app))
+    writeFile(app, "when defined(probeFlag): echo \"flag\"\necho \"u\"\n")
+    setFilePermissions(xo, {fpUserWrite, fpUserExec, fpGroupExec, fpOthersExec})
+    defer: setFilePermissions(xo, {fpUserRead, fpUserWrite, fpUserExec})
+    let built = buildIn(t, "ufoo", app, @["--skipUserCfg"])
+    checkpoint built
+    check built == ""
+    check refusalOf(t, "ufoo") == ""
+    if built == "":
+      check helperConfigs(t, "ufoo").anyIt(it.dir == xo and it.probed)
+    writeFile(xo / "nim.cfg", "-d:probeFlag\n")
+    var why = refusalOf(t, "ufoo")
+    checkpoint why
+    check ("built when " & xo & " held other Nim configuration files") in why
+    removeFile(xo / "nim.cfg")
+    check refusalOf(t, "ufoo") == ""
+    # A directory listed when the list was written and unlistable now is
+    # refused, never read as empty.
+    setFilePermissions(t / "apps", {fpUserWrite, fpUserExec})
+    why = refusalOf(t, "ufoo")
+    setFilePermissions(t / "apps", {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint why
+    check "cannot be now" in why or ("listing of " & t / "apps") in why
+
+  test "44: a relative --path is recorded absolute and checked from any directory":
+    # Round 12. Falsifier: WRITE_HELPER_DEPS_MUTATION=relative-search-paths.
+    buildResolve(relative = true)
+    let sp = helperSearchPath(rt, "rfoo")
+    checkpoint $sp
+    check sp.allIt(it.isAbsolute)
+    let here = getCurrentDir()
+    defer: setCurrentDir(here)
+    let other = base / "cwd44"
+    createDir(other / "vendor")
+    for d in ["/", other]:
+      setCurrentDir(d)
+      let why = rRefusal()
+      checkpoint d & ": " & why
+      check why == ""
 
   test "7: no binary, or no dependency list, is refused":
     build()

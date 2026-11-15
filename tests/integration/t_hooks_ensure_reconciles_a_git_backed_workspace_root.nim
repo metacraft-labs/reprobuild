@@ -443,6 +443,14 @@ suite "hooks ensure reconciles a git-backed workspace root":
       check isDispatcher(hooksDirOf(fx.root) / "pre-push")
       # ...and it did NOT reach into the sibling checkouts.
       check not fileExists(hooksDirOf(fx.root / "lib-0") / "pre-push")
+      # ...and it SAYS so: a success line alone reads as if the workspace
+      # were covered (issue 2026-11-13: every branched workspace was left
+      # ungated behind exactly that line). The note names the missing state
+      # file and every declared repo it did not touch, and the remedy.
+      check "workspace-state.toml is missing" in res.output
+      for name in fx.repoNames:
+        check name in res.output.split("NOT touched:")[^1]
+      check "repro ws enable" in res.output
 
   test "test_a_surviving_hook_repairs_a_deleted_pre_push_gate":
     # The dev shell runs pre-commit's installer on EVERY entry

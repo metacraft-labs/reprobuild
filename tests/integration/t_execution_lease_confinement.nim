@@ -1154,3 +1154,48 @@ int main(void) {
       waitFor sleepAsync(50)
       check exfilHits[] == 0                  # denied below the server
       exfil.close()
+
+  test "the Seatbelt wrapper starts the action under any POSIX sh and passes it no descriptor above 2":
+    ## reprobuild-pm issues/2026-11-11-seatbelt-lease-wrapper-exits-under-dash-
+    ## at-the-first-descriptor-above-9. The wrapper used to close inherited
+    ## descriptors with `eval "exec $n>&-"` in the shell; dash reads
+    ## `exec 12>&-` as "exec the command 12", which ends the shell, so the
+    ## action never started whenever the worker held a descriptor above 9.
+    ## Seatbelt exists only on macOS, so the wrapper is driven here with a
+    ## stand-in `sandbox-exec` (it skips `-f <profile>` and runs the command)
+    ## and each shell available on the host; the property under test is the
+    ## wrapper's shell and descriptor handling, not the profile. A worker
+    ## descriptor 12 (no close-on-exec) must not reach the action, and must
+    ## be exactly as it was in the worker afterwards.
+    let base = getTempDir() / ("repro-seatbelt-wrapper-" & $getCurrentProcessId())
+    createDir(base)
+    defer: removeDir(base)
+    let fake = base / "sandbox-exec"
+    writeFile(fake, "#!/bin/sh\nshift 2\nexec \"$@\"\n")
+    setFilePermissions(fake, {fpUserRead, fpUserWrite, fpUserExec})
+    var shells = @["/bin/sh"]
+    let dash = findExe("dash")
+    if dash.len > 0: shells.add(dash)
+    else: echo "[note] no dash on PATH: only /bin/sh was exercised"
+    let held = posix.open("/dev/null", O_RDONLY)
+    check held >= 0
+    check dup2(held, 12) == 12
+    discard posix.close(held)
+    defer: discard posix.close(12)
+    for shell in shells:
+      let outPath = base / "out"
+      let errPath = base / "err"
+      let child = startSeatbeltWrapper(shell, fake, base / "unused.sb",
+        outPath, errPath,
+        @["/bin/sh", "-c", "n=3; while [ $n -le 64 ]; do [ -e /dev/fd/$n ] && echo FD-$n; n=$((n+1)); done; echo scanned"],
+        base, newStringTable(modeCaseSensitive))
+      let code = child.waitForExit()
+      child.close()
+      checkpoint shell & ": stderr: " & readFile(errPath)
+      check code == 0
+      # No descriptor 3..64: not the worker's descriptor 12, and not the
+      # copies of its own stdio pipes `startProcess` would leave above 2.
+      # (Probed by number, not by listing /dev/fd, so the probing shell's own
+      # directory handle cannot be mistaken for a leak.)
+      check readFile(outPath).splitWhitespace == @["scanned"]
+      check (fcntl(12, F_GETFD) and FD_CLOEXEC) == 0

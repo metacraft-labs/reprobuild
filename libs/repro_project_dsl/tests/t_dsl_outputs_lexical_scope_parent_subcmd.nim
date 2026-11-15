@@ -38,4 +38,4 @@ suite "t_dsl_outputs_lexical_scope_parent_subcmd":
   test "t_dsl_outputs_lexical_scope_parent_subcmd":
     let target = findCmd(@["build", "target"])
     check target.name == "target"
-    check target.outputFlags == @["dir", "name"]
+    check target.ext.outputFlags == @["dir", "name"]

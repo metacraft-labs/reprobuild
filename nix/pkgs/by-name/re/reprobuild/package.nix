@@ -146,6 +146,22 @@
     rev = "84fd76b174d4868e703ba3d599668ee340e0b6ea";
     hash = "sha256-ph1AMDJSXCDuvC4JH6NxSU7yXEFYz4UjJ1zW+Tj19EA=";
   },
+  # Added after the `src` commit, so it mirrors this tree's `flake.lock`
+  # (see the Sources header).
+  cliSpecSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim-cli-spec";
+    rev = "a9684dfc1e659af309acf646915dbfe400896b65";
+    hash = "sha256-k09Pe0+9Ue0+OK7nt/aULCRPW3MXMcK34btX65kMJAM=";
+  },
+  # Added after the `src` commit too: confutils over a clispec description,
+  # which repro's own command line is.
+  confutilsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim-confutils";
+    rev = "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
+    hash = "sha256-P20Zi4iwayGpeDyH1zG619F9eLuRgJolm5Zcv1Z564A=";
+  },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
@@ -303,6 +319,8 @@ stdenv.mkDerivation (finalAttrs: {
     IO_MON_SRC = "${ioMonSrc}/src";
     SHM_GSET_SRC = "${shmGsetSrc}/src";
     SHM_QUEUE_SRC = "${shmQueueSrc}/src";
+    CLI_SPEC_SRC = "${cliSpecSrc}/src";
+    CONFUTILS_SRC = "${confutilsSrc}";
     # Tier 3 of `config.nims`'s incremental-test-seam resolution, and the tier
     # this build has always needed. It runs in a pure sandbox with no
     # `../codetracer` in reach, so before this variable existed the packaged
@@ -450,6 +468,8 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default IO_MON_SRC ${ioMonSrc}/src \
         --set-default SHM_GSET_SRC ${shmGsetSrc}/src \
         --set-default SHM_QUEUE_SRC ${shmQueueSrc}/src \
+        --set-default CLI_SPEC_SRC ${cliSpecSrc}/src \
+        --set-default CONFUTILS_SRC ${confutilsSrc} \
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
@@ -546,6 +566,8 @@ stdenv.mkDerivation (finalAttrs: {
         ioMonSrc
         shmGsetSrc
         shmQueueSrc
+        cliSpecSrc
+        confutilsSrc
         codetracerSrc
         ctTestRunnerSrc
         testAdaptersSrc

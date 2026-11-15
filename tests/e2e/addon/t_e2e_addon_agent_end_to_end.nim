@@ -14,11 +14,15 @@
 ##    (``quarantined``) with no new apply attempt;
 ## 5. a fixed sequence 4 applies, and the quarantine is gone.
 ##
+## Falsifying mutation (``REPRO_ADDON_MUTATION=agent-ignores-quarantine``):
+## the tick never reads the quarantine record, so step 4's later tick
+## retries sequence 3 instead of reporting it ``quarantined``: red.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_agent_end_to_end``).
 ##
 ## *Mocking.* None: real units, a real HTTP origin, real signatures.
 
-import std/[json, strutils, times, unittest]
+import std/[json, os, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -130,7 +134,9 @@ suite "e2e_addon_agent_end_to_end":
         let record = %*{"gate": "e2e_addon_agent_end_to_end",
           "base": b.name, "arch": b.debArch,
           "backend": (if useIncus(): "incus" else: "qemu"),
-          "mutation": mutation(), "reprobuild": gitHead(),
+          "mutation": mutation(),
+          # tickUnits reads it; the record classifier requires it.
+          "gateMutation": getEnv("REPRO_A13_MUTATION"), "reprobuild": gitHead(),
           "started": $now().utc}
         let f = runBase(b, record)
         record["verdict"] = %(if f.len == 0: "green" else: "red")

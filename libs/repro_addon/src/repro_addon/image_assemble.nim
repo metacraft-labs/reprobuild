@@ -179,6 +179,10 @@ proc storePrefixesNow(): seq[string] =
       for k2, v in walkDir(p):
         if k2 in {pcDir, pcLinkToDir}: result.add v
 
+const RandomSeedPath* = "/var/lib/systemd/random-seed"
+  ## systemd's saved entropy (systemd-random-seed.service(8)), credited at
+  ## the next boot: never an image's.
+
 proc cleanUp*(spec: AssemblySpec; payload: string; root = "/";
               rotateJournal = true) =
   ## Remove what the assembly added that the add-on does not own and put
@@ -213,7 +217,20 @@ proc cleanUp*(spec: AssemblySpec; payload: string; root = "/";
     # assembly boot's machine id and SSH host keys in the image, so every
     # device boots with the same identity.
     discard
-  removeIfPresent(root / "var/lib/systemd/random-seed")
+  if rotateJournal:
+    # systemd-random-seed.service saves a fresh seed when it STOPS, i.e. at
+    # the assembly's power-off, after this clean-up
+    # (https://www.freedesktop.org/software/systemd/man/latest/systemd-random-seed.service.html).
+    # Stop it now -- the save happens here -- so the removal below is the
+    # last word and power-off has nothing left to stop.
+    when not mutated("image-keeps-random-seed"):
+      discard runHostTool(["/usr/bin/systemctl", "stop",
+                           "systemd-random-seed.service"], timeoutSec = 120)
+    else:
+      # FALSIFYING MUTATION (see mutations.nim): the unit stays active and
+      # writes the assembly boot's seed into the image at power-off.
+      discard
+  removeIfPresent(root / RandomSeedPath.strip(chars = {'/'}, trailing = false))
   removeIfPresent(root / "var/lib/systemd/credential.secret")
   if rotateJournal:
     discard runHostTool(["/usr/bin/journalctl", "--rotate"], timeoutSec = 60)

@@ -51,6 +51,14 @@
 ## ``engine-agent-pointer-refusal-unwired``  the CLI does not act on the
 ##                                      untrusted-pointer route, and the
 ##                                      tick takes the plain apply
+## ``agent-ignores-pause``            a tick never reads the pause marker
+##                                      a local rollback wrote, so the next
+##                                      tick re-converges over the rollback
+##                                      instead of reporting ``aoPaused``
+## ``agent-ignores-quarantine``         a tick never reads the quarantine
+##                                      record, so a reverted deployment is
+##                                      retried instead of being reported
+##                                      ``aoRolledBack``
 ## ===================================  ====================================
 
 const AgentMutation {.strdefine: "reproAddonMutation".} = ""
@@ -67,7 +75,9 @@ const KnownAgentMutations* = ["rdmf-ignores-revoked-keys",
                               "engine-agent-ignores-pin",
                               "agent-select-by-source-order",
                               "engine-agent-ignores-untrusted-pointer",
-                              "engine-agent-pointer-refusal-unwired"]
+                              "engine-agent-pointer-refusal-unwired",
+                              "agent-ignores-pause",
+                              "agent-ignores-quarantine"]
 
 template agentMutated*(name: static string): bool =
   ## True only in the build compiled with ``-d:reproAddonMutation=<name>``.

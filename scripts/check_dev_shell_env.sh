@@ -979,6 +979,24 @@ case "$(uname -s)" in
     else
       mapfile -t shim_imposed < <(preload_shim_imposed_runtime_dirs "$shim_path")
       mapfile -t shim_subjects < <(preload_shim_toolchain_subjects)
+      # c. NO DT_RUNPATH AT ALL, whatever it names. Assertion (a) cannot see a
+      #    runpath to a directory that does not exist, and that is exactly what
+      #    every shim built in a dev shell carried (stdenv's `-rpath $out/lib`,
+      #    `$out` being `<checkout>/outputs/out`): any DT_RUNPATH switches off
+      #    the host program's DT_RPATH for the shim's dependencies, so a program
+      #    on a C runtime of its own cannot load it. See
+      #    `preload_shim_runpath_tag_entries`.
+      mapfile -t shim_runpath < <(preload_shim_runpath_tag_entries "$shim_path")
+      if [[ ${#shim_runpath[@]} -gt 0 ]]; then
+        printf 'FAIL: the monitor shim carries a DT_RUNPATH (a preloaded library must carry none):\n' >&2
+        printf '  %s\n' "${shim_runpath[@]}" >&2
+        printf '%s\n' \
+          '  It switches off the DT_RPATH of every program the shim is preloaded' \
+          '  into for the shim'"'"'s own dependencies. Remedy: link the shim through' \
+          '  preload_shim_link_without_rpath (scripts/lib/preloaded_shim_loader.sh)' \
+          '  or shimLinkEnvironment in repro.nim; do not relax the check.' >&2
+        failures=$((failures + 1))
+      fi
       if [[ ${#shim_imposed[@]} -eq 0 ]]; then
         printf 'monitor shim: %s (%d toolchain subject(s) on PATH).\n' \
           'imposes no C runtime on the processes it is preloaded into' \

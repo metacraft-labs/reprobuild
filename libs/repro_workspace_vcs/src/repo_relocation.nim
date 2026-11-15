@@ -196,10 +196,11 @@ proc runGit(probe: RelocationGitProbe; args: openArray[string]):
 proc isGitCheckout*(probe: RelocationGitProbe; dir: string): bool =
   ## Whether `dir` is a git working tree, asked the way git itself answers it.
   ##
-  ## `dirExists(dir / ".git")` is the cheaper test the sync path uses and it is
-  ## WRONG here: a worktree-based or submodule-absorbed checkout carries a
-  ## `.git` FILE, and a directory inside a repo answers yes to `rev-parse`
-  ## while holding no `.git` of its own. `--git-dir` plus the
+  ## The sync path's cheaper presence test, `hasGitEntry` (a `.git` directory
+  ## or file), only says something is there; it does not say git can use it,
+  ## which is what a relocation must know before it moves anything. Nor does a
+  ## bare `rev-parse` answer it: a directory inside a repo answers yes while
+  ## holding no `.git` of its own. `--git-dir` plus the
   ## `--is-inside-work-tree` check keeps the answer about THIS directory.
   try:
     if not dirExists(dir):

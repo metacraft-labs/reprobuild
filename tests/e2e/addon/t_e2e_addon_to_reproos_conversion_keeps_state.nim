@@ -115,7 +115,7 @@
 ## conversion is a reinstall, and ReproOS is the engine's full realisation
 ## on a re-identified guest.
 
-import std/[json, os, strutils, tables, times, unittest]
+import std/[json, os, sequtils, strutils, tables, times, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_addon/generation0
@@ -486,12 +486,18 @@ const
     ## Where the decision-79 probe services write their uid when they run.
   R7TargetSvc = "eth-r7-tsvc.service"
   R7SocketSvc = "eth-r7-ssvc.service"
+  R7Socket = "eth-r7-sock.socket"
+  R7Timer = "eth-r7-tmr.timer"
+  R7TimerSvc = "eth-r7-tmsvc.service"
   R7Resources = """
       # A13 owner decision 79: confined static services (not enabled, no
       # [Install]) that only another unit's start pulls in -- an enabled
       # target's Wants=, an enabled socket's Wants= -- held by the full
       # apply's carried-state check while the drivers start that unit, and
-      # brought up after the check by the start job issued again.
+      # brought up after the check by the start job issued again. The
+      # socket is declared BEFORE the service it names, on purpose: the
+      # planner orders a trigger unit after the unit it triggers, so the
+      # natural order must apply (a regression guard for that ordering).
       systemdSystemUnit(name = "eth-r7-tgt.target",
         content = "[Unit]\nDescription=A13 decision-79 probe: a target\n" &
           "Wants=eth-r7-tsvc.service\n\n[Install]\nWantedBy=multi-user.target\n",
@@ -514,7 +520,86 @@ const
           "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
         enabled = false,
-        address = "r7SocketSvc")"""
+        address = "r7SocketSvc")
+      # §13 decision 137: a timer declared BEFORE the service it names, as
+      # the socket above is. The planner applies a trigger after the unit
+      # it triggers (systemd refuses to start a timer whose unit is not
+      # loaded); red under the engine build ``trigger-edges-omitted``.
+      systemdSystemUnit(name = "eth-r7-tmr.timer",
+        content = "[Unit]\nDescription=A13 decision-137 probe: a timer " &
+          "declared before its service\n\n[Timer]\nOnActiveSec=1s\n" &
+          "Unit=eth-r7-tmsvc.service\n\n[Install]\nWantedBy=timers.target\n",
+        address = "r7Timer")
+      systemdSystemUnit(name = "eth-r7-tmsvc.service",
+        content = "[Unit]\nDescription=A13 decision-137 probe: started by a " &
+          "timer\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r7TimerSvc")"""
+  R9MarkerDir = "/var/lib/a13-r9"
+    ## Where the decision-135 template's instances write their uid.
+  R9Instances = ["eth-r9-tpl@a.service", "eth-r9-tpl@b.service"]
+  R9Resources = """
+      # A13 owner decision 135: a confined template service (static, not
+      # enabled) whose instances an enabled target pulls in. The full
+      # apply's live check judges it through its observation instance and
+      # its instances -- systemd refuses to show a template by name -- and
+      # the instances come up after the check.
+      systemdSystemUnit(name = "eth-r9-tpl@.service",
+        content = "[Unit]\nDescription=A13 decision-135 probe: a confined " &
+          "template\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r9\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r9/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r9Template")
+      systemdSystemUnit(name = "eth-r9-tpl.target",
+        content = "[Unit]\nDescription=A13 decision-135 probe: wants two " &
+          "instances\nWants=eth-r9-tpl@a.service eth-r9-tpl@b.service\n\n" &
+          "[Install]\nWantedBy=multi-user.target\n",
+        address = "r9TemplateTarget")"""
+  R10MarkerDir = "/var/lib/a13-r10"
+    ## Where the decision-151 probes write their uid.
+  R10Port = 18710
+  R10Socket = "eth-r10-sock.socket"
+  R10SocketSvc = "eth-r10-sock.service"
+  R10Path = "eth-r10-path.path"
+  R10PathSvc = "eth-r10-path.service"
+  R10Job = "/var/lib/a13-r10/job"
+  R10Resources = """
+      # A13 owner decision 151: a socket (Accept=no) and a path unit whose
+      # confined services are held by the full apply's live check. While an
+      # apply holds them, a connection keeps arriving and the path exists;
+      # the triggers are stopped and held with their services, and both
+      # come back up and start their services once the check passes. Red
+      # under the engine build ``triggers-left-running``: each trigger
+      # fires at its held service until systemd's trigger rate limit fails
+      # it for good.
+      systemdSystemUnit(name = "eth-r10-sock.socket",
+        content = "[Unit]\nDescription=A13 decision-151 probe: a socket\n\n" &
+          "[Socket]\nListenStream=127.0.0.1:18710\n\n" &
+          "[Install]\nWantedBy=sockets.target\n",
+        address = "r10Socket")
+      systemdSystemUnit(name = "eth-r10-sock.service",
+        content = "[Unit]\nDescription=A13 decision-151 probe: socket-activated\n\n" &
+          "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r10\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r10/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r10SocketSvc")
+      systemdSystemUnit(name = "eth-r10-path.path",
+        content = "[Unit]\nDescription=A13 decision-151 probe: a path unit\n\n" &
+          "[Path]\nPathExists=/var/lib/a13-r10/job\n\n" &
+          "[Install]\nWantedBy=paths.target\n",
+        address = "r10Path")
+      systemdSystemUnit(name = "eth-r10-path.service",
+        content = "[Unit]\nDescription=A13 decision-151 probe: path-activated\n\n" &
+          "[Service]\nType=oneshot\nRemainAfterExit=yes\nProtectSystem=strict\n" &
+          "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/a13-r10\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r10/%n.ran'\n",
+        enabled = false,
+        address = "r10PathSvc")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -562,7 +647,7 @@ const
         address = "validatorShadow")"""
 
 const ProbeWritableDirs = ["/var/lib/a13-r4", "/var/lib/a13-r5", "/var/lib/a13-r6",
-                           "/var/lib/a13-r7"]
+                           "/var/lib/a13-r7", "/var/lib/a13-r9", "/var/lib/a13-r10"]
   ## The writable directories the probe units name besides the carried one,
   ## created on the converted host before any probe is applied. systemd
   ## refuses to start a unit whose ``ReadWritePaths=`` names a missing path
@@ -590,7 +675,7 @@ static:
   # Every probe unit's writable path is one the gate creates, or the carried
   # directory itself: checked when the gate compiles.
   var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &
-    R7Resources & ShadowResource
+    R7Resources & R9Resources & R10Resources & ShadowResource
   for (_, _, res, _, _) in R4Probes: all.add(res)
   for (_, _, res, _, _, _) in R5Probes: all.add(res)
   for (_, res, _, _, _) in R6Probes: all.add(res)
@@ -598,6 +683,40 @@ static:
     doAssert p in ProbeWritableDirs or p == "/var/lib/ethereum/validator",
       "a probe unit's ReadWritePaths= names " & p & ", which the gate does " &
       "not create (add it to ProbeWritableDirs)"
+
+proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode)
+
+proc startAgitator(g: Guest) =
+  ## While a full apply runs (§13 decision 151): keep connecting to the
+  ## decision-151 socket and keep its path unit's path in place, so either
+  ## trigger fires at once if anything leaves it running under the hold.
+  discard g.exec("rm -f /run/a13r10-stop; touch " & R10Job & "; " &
+    "nohup bash -c 'while [ ! -e /run/a13r10-stop ]; do " &
+    "timeout 1 bash -c \"exec 3<>/dev/tcp/127.0.0.1/" & $R10Port & "\" " &
+    "2>/dev/null; touch " & R10Job & "; sleep 0.3; done' >/dev/null 2>&1 &")
+
+proc stopAgitator(g: Guest) =
+  discard g.exec("touch /run/a13r10-stop; sleep 1; true")
+
+proc triggerCase(g: Guest): (bool, JsonNode) =
+  ## After a full apply: each decision-151 trigger is active (not failed by
+  ## its rate limit) and its service ran, the socket's on a connection made
+  ## now. Waits for the markers a little.
+  var ev = newJObject()
+  var ok = true
+  discard g.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" & $R10Port &
+    "' 2>/dev/null; true")
+  for (label, trig, svc) in [("socket", R10Socket, R10SocketSvc),
+                             ("path", R10Path, R10PathSvc)]:
+    let show = g.exec("systemctl show -p ActiveState -p Result " & trig).stdout
+    let active = "ActiveState=active" in show
+    let (ran, e) = g.unitRan(svc, R10MarkerDir & "/" & svc & ".ran")
+    e["trigger"] = %show.strip()
+    e["triggerActive"] = %active
+    e["ran"] = %ran
+    ev[label] = e
+    ok = ok and active and ran and e["markerContent"].getStr != "0"
+  (ok, ev)
 
 proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode) =
   ## Whether ``unit`` really ran: the file its command writes when it runs
@@ -628,7 +747,78 @@ proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode) =
       "/run/systemd/system/" & unit & ".d /etc/systemd/system/" & unit &
       ".d 2>&1; date --iso-8601=ns; echo '--- audit'; grep -a " & unit &
       " /var/lib/repro/system/generations/" & gen & "/log/apply.log 2>&1 | " &
-      "tail -10").stdout
+      # The audit log is binary: keep printable text only, so the record
+      # stays valid UTF-8 JSON (a raw byte made a round-8 record unreadable).
+      "tail -10 | LC_ALL=C tr -cd '\\11\\12\\15\\40-\\176'").stdout
+
+proc unitDiagnosis(g: Guest; unit: string): JsonNode =
+  ## How systemd sees ``unit`` now, kept in the record of every run: its
+  ## status, this boot's journal, the properties a start depends on, and
+  ## every hold drop-in in force for it (A13 round 7: the decision-79
+  ## socket's start failed under the hold with no journal to say why).
+  %*{
+    "status": g.exec("systemctl status --no-pager -l " & unit & " 2>&1 | tail -40").stdout,
+    "journal": g.exec("journalctl -u " & unit & " -b --no-pager -o short-monotonic 2>&1 | tail -80").stdout,
+    "show": g.exec("systemctl show -p Result,ActiveState,SubState,ConditionResult," &
+      "Requires,Wants,After,Triggers,TriggeredBy " & unit & " 2>&1").stdout,
+    "holds": g.exec("for d in /run/systemd/system/" & unit & ".d /etc/systemd/system/" &
+      unit & ".d; do [ -d $d ] || continue; for f in $d/*.conf; do echo \"== $f\"; " &
+      "cat $f; done; done 2>&1").stdout}
+
+proc managerStartJobsDone*(verbose: string): int =
+  ## How many start jobs systemd (PID 1) completed for a unit, from
+  ## ``journalctl -o verbose _PID=1 UNIT=<unit>``: the entries whose fields
+  ## carry ``JOB_TYPE=start`` and ``JOB_RESULT=done``. A line the service
+  ## itself writes ("Started ...") is not the manager's and is not counted
+  ## (A13 round 7: counting every "Started" line of ``journalctl -u``
+  ## counted a line of the validator's own output as a second start).
+  var start, done = false
+  for l in verbose.splitLines():
+    if l.len > 0 and l[0] != ' ':
+      # An entry's header line: the previous entry is complete.
+      if start and done: inc result
+      start = false
+      done = false
+    let t = l.strip()
+    if t == "JOB_TYPE=start": start = true
+    if t == "JOB_RESULT=done": done = true
+  if start and done: inc result
+
+const
+  CapturedValidatorStart = """
+Fri 2026-11-13 03:25:39.519523 UTC [s=23bf;i=efd]
+    JOB_TYPE=start
+    MESSAGE=Starting eth-validator.service - Ethereum validator client (reference activity)...
+    JOB_ID=3106
+    INVOCATION_ID=55feea00d759497483a46cda9c50578a
+Fri 2026-11-13 03:25:39.603467 UTC [s=23bf;i=efe]
+    JOB_TYPE=start
+    JOB_RESULT=done
+    JOB_ID=3106
+    INVOCATION_ID=55feea00d759497483a46cda9c50578a
+    MESSAGE=Started eth-validator.service - Ethereum validator client (reference activity).
+"""
+    ## Captured, debian-13 (A13 round 7): one start job of the validator.
+
+static:
+  doAssert managerStartJobsDone(CapturedValidatorStart) == 1
+  doAssert managerStartJobsDone(CapturedValidatorStart & CapturedValidatorStart) == 2
+  # The service's own output is not the manager's.
+  doAssert managerStartJobsDone("Fri 2026-11-13 03:26:00 UTC [x]\n" &
+    "    MESSAGE=Started beacon node connection\n") == 0
+
+proc unitStarts(g: Guest; unit: string): JsonNode =
+  ## Every message systemd (PID 1) logged about ``unit`` this boot, with the
+  ## job and the invocation each belongs to (``-o verbose``'s JOB_ID,
+  ## JOB_TYPE, JOB_RESULT, INVOCATION_ID), so each start can be attributed
+  ## to a job; and the manager's own journal around them.
+  %*{
+    "verbose": g.exec("journalctl -b --no-pager -o verbose _PID=1 UNIT=" & unit &
+      " 2>&1 | grep -E '^[A-Z][a-z]{2} |^    (MESSAGE|JOB_ID|JOB_TYPE|JOB_RESULT|" &
+      "INVOCATION_ID|_SOURCE_MONOTONIC_TIMESTAMP)=' | tail -200").stdout,
+    "manager": g.exec("journalctl -b --no-pager -o short-monotonic _PID=1 2>&1 | " &
+      "grep -E 'eth-|repro-|a13r|Starting|Started|Stopp|Failed|Dependency' | " &
+      "tail -400").stdout}
 
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
@@ -664,6 +854,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   try:
     let engine = engineFromEnv()
     record["engine"] = %engine
+    record["engineBuild"] = engineBuild(engine)
     let eng = enginePath(engine)
     dd = newDataDisk(4)
     # ------------------------------------------------------------------
@@ -825,10 +1016,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       raise newException(CatchableError, "the reference profile's " &
         "validator account is not where the gate adds the shadow unit")
     writeFile(work / "system.nim", src0.replace(anchor, anchor & ShadowResource &
-      R5Resources & R6Resources & R7Resources & R5TuneResource))
+      R5Resources & R6Resources & R7Resources & R9Resources & R10Resources &
+      R5TuneResource))
     # The next generation: the same, without the tune drop-in (finding 3).
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
-      ShadowResource & R5Resources & R6Resources & R7Resources))
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
@@ -1122,6 +1315,51 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
             else: ""), judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") &
            detail)
+    # Owner decision 153 (decided 2026-11-15): on a partial refusal, a unit
+    # that Requires= a refused unit stays held with it, and the apply says
+    # so. eth-r10-gen.service is refused by the live check (a generator
+    # makes it root at the apply's reload, as round 6's live probe);
+    # eth-r10-req.service is confined, enabled and Requires= it. Without
+    # the rule it is released and started, and systemd counts its
+    # requirement's condition-skipped start as satisfied.
+    block:
+      discard nw.run("rm -f " & ProbeMarkerDir & "/*.ran")
+      discard nw.run("mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
+        "mkdir -p \"$1/eth-r10-gen.service.d\"\\nprintf \"[Service]\\\\nUser=root\\\\n\" " &
+        "> \"$1/eth-r10-gen.service.d/10-root.conf\"\\n' > " &
+        "/etc/systemd/system-generators/a13r10-gen && chmod 755 " &
+        "/etc/systemd/system-generators/a13r10-gen")
+      let req = "      systemdSystemUnit(name = \"eth-r10-req.service\",\n" &
+        "        content = \"[Unit]\\nDescription=A13 decision-153 probe: " &
+        "requires a refused unit\\nRequires=eth-r10-gen.service\\n" &
+        "After=eth-r10-gen.service\\n\\n[Service]\\n" &
+        R6Confined.replace("\n", "\\n") &
+        "ReadWritePaths=/var/lib/a13-r5\\nExecStart=/bin/sh -c 'id -u > " &
+        ProbeMarkerDir & "/eth-r10-req.service.ran'\\n\\n[Install]\\n" &
+        "WantedBy=multi-user.target\\n\",\n        address = \"r10Req\")\n"
+      let pf = probeFile("r10req")
+      writeFile(work / pf, probeProfile("r10req",
+        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req))
+      nw.copyTo(work / pf, RefDir / pf)
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
+        pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let reported = "eth-r10-req.service requires eth-r10-gen.service" in o
+      let heldReq = nw.exec("test -f /etc/systemd/system/eth-r10-req.service.d/" &
+        "zz-repro-carried-check-hold.conf").exitCode == 0
+      let journal = nw.exec("journalctl -b --no-pager -o short-monotonic " &
+        "-u eth-r10-req.service 2>&1").stdout
+      let ran = nw.exec("test -s " & ProbeMarkerDir &
+        "/eth-r10-req.service.ran").exitCode == 0
+      let started = journalStarted(journal, "eth-r10-req.service") or ran
+      record["decision153"] = %*{"exit": r.exitCode, "reported": reported,
+        "heldInEtc": heldReq, "started": started, "judged": judged(o)}
+      discard nw.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
+        "/etc/systemd/system/eth-r10-gen.service.d && systemctl daemon-reload")
+      step("decision 153: a unit that requires a unit the live check refuses " &
+           "stays held with it, never started, and the apply says why",
+           r.exitCode != 0 and reported and heldReq and not started,
+           o & "\n" & journal & "\nheld: " & $heldReq & " ran: " & $ran)
     # A stored plan made now, before install-unit: no requirement is due
     # yet, so the plan has none (finding 4; applied after the restore).
     let planFile = probeFile("r5plan")
@@ -1225,8 +1463,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "ln -sf /usr/lib/systemd/system/" & R6Dist7 &
       " /etc/systemd/system/eth-r6-linked.service.wants/" & R6Dist7)
     discard nw.run("systemctl daemon-reload")
-    # --- 4. The full realisation.
+    # --- 4. The full realisation, with the decision-151 triggers agitated
+    # throughout.
+    nw.startAgitator()
     let applied = nw.exec(applyCmd, timeoutSec = 3600)
+    nw.stopAgitator()
     record["applyOutput"] = %((applied.stdout & applied.stderr)[0 ..< min(
       4000, (applied.stdout & applied.stderr).len)])
     step("the reinstalled host realises the activities in full",
@@ -1287,24 +1528,167 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # under the engine builds ``reissue-skips-targets`` and
     # ``reissue-skips-sockets``, each on its own step.
     record["decision79"] = newJObject()
+    # Kept in every run (A13 round 7): how systemd saw the decision-79 units
+    # and the validator's starts right after the full apply.
+    record["decision79Diagnosis"] = %*{
+      "socket": nw.unitDiagnosis("eth-r7-sock.socket"),
+      "socketService": nw.unitDiagnosis(R7SocketSvc),
+      "targetService": nw.unitDiagnosis(R7TargetSvc),
+      "validatorStarts": nw.unitStarts(DefaultValidatorUnit)}
+    # Both halves are recorded before either is asserted: under a falsifier
+    # the run stops at its first red step, and the classifier requires the
+    # other half's evidence -- that it is up and ran -- in every decision-79
+    # falsifier cell (A13 round 7: recorded one after the other, the target
+    # falsifier's stop left the socket half unrecorded).
+    var d79: seq[tuple[label, svc, active: string; ran: bool; ev: JsonNode]]
     for (label, svc) in [("target", R7TargetSvc), ("socket", R7SocketSvc)]:
       let active = nw.exec("systemctl is-active " & svc).stdout.strip()
       let (ran, ev) = nw.unitRan(svc, R7MarkerDir & "/" & svc & ".ran")
       ev["active"] = %active
       record["decision79"][label] = ev
       record["decision79"][label]["ran"] = %ran
+      d79.add((label, svc, active, ran, ev))
+    for (label, svc, active, ran, ev) in d79:
       step("decision 79, " & label & ": a confined static service an enabled " &
            label & " pulls in is up after the apply",
            active == "active" and ran and ev["markerContent"].getStr != "0",
            $ev & "\n" & nw.exec("systemctl status --no-pager " & svc &
              " 2>&1 | tail -15").stdout)
+    # Owner decision 151 (decided 2026-11-15): the triggers of the held
+    # units are stopped and held for the apply, so a connection or a path
+    # event during it fails neither; both are active after it, and their
+    # services run.
+    block:
+      let (ok, ev) = nw.triggerCase()
+      record["decision151"] = %*{"firstApply": ev}
+      step("decision 151, full apply (first realisation): a socket with " &
+           "connections arriving and a path unit whose path exists, held " &
+           "through the apply, are active after it and their services run",
+           ok, $ev)
+    # Owner decision 137 (decided 2026-11-14): a trigger declared before the
+    # unit it triggers -- the socket and the timer above -- is applied after
+    # it, so systemd does not refuse its start, and the unit it triggers
+    # runs. Red under the engine build ``trigger-edges-omitted`` (the
+    # planner without the trigger edges): the apply refuses each trigger,
+    # "not loaded".
+    block:
+      let applyOut = applied.stdout & applied.stderr
+      var d137 = newJObject()
+      for (label, trig, svc) in [("socket", R7Socket, R7SocketSvc),
+                                 ("timer", R7Timer, R7TimerSvc)]:
+        # The timer fires 1 s after it starts; give it the time.
+        discard nw.exec("for i in $(seq 20); do [ -s " & R7MarkerDir & "/" &
+          svc & ".ran ] && break; sleep 1; done; true")
+        let active = nw.exec("systemctl is-active " & trig).stdout.strip()
+        let (ran, ev) = nw.unitRan(svc, R7MarkerDir & "/" & svc & ".ran")
+        # Refused for the order: the apply reports the trigger's
+        # ``enable --now`` failed (it says only "Job failed"), and systemd's
+        # own reason in this boot's journal of the trigger is that the unit
+        # it triggers was not loaded ("Socket service ... not loaded,
+        # refusing", "Refusing to start, unit ... to trigger not loaded").
+        var applyRefused = false
+        for l in applyOut.splitLines():
+          if ("'" & trig & "' failed") in l: applyRefused = true
+        let journalNotLoaded = "not loaded" in nw.exec("journalctl -b -u " &
+          trig & " --no-pager 2>&1").stdout
+        let refused = applyRefused and journalNotLoaded
+        ev["triggerActive"] = %active
+        ev["applyRefused"] = %applyRefused
+        ev["journalNotLoaded"] = %journalNotLoaded
+        ev["refusedNotLoaded"] = %refused
+        ev["ran"] = %ran
+        d137[label] = ev
+        step("decision 137, " & label & " first: a " & label & " declared " &
+             "before the service it triggers is applied, active, and its " &
+             "service ran", active == "active" and ran and not refused and
+             ev["markerContent"].getStr != "0",
+             $ev & "\n" & nw.exec("systemctl status --no-pager " & trig &
+               " " & svc & " 2>&1 | tail -25").stdout)
+      record["decision137"] = d137
+    # Owner decision 135 (decided 2026-11-14): a confined template service
+    # is judged through its instances, never by its own name, so on the
+    # converted host its instances come up after the full apply's check.
+    # Red under the engine build ``template-live-by-name`` (the template
+    # read by name, refused by systemd, held: the instances never start).
+    block:
+      var ev = newJObject()
+      var allRan = true
+      for inst in R9Instances:
+        let (ran, e) = nw.unitRan(inst, R9MarkerDir & "/" & inst & ".ran")
+        e["active"] = %nw.exec("systemctl is-active " & inst).stdout.strip()
+        ev[inst] = e
+        allRan = allRan and ran and e["active"].getStr == "active"
+      # What the full apply's live check read from systemd (its
+      # ``live check`` line): the template must be in it, through its
+      # observation instance and both instances, or this case judged
+      # nothing and its green says nothing about decision 135.
+      var judged: seq[string]
+      for l in applied.stdout.splitLines():
+        let k = l.find("live check   : ")
+        if k >= 0: judged = l[k + len("live check   : ") .. ^1].splitWhitespace()
+      let observe = "eth-r9-tpl@repro-addon-observe.service"
+      let judgedTemplate = observe in judged and
+        R9Instances.allIt(it in judged)
+      record["decision135Converted"] = %*{"instances": ev, "ran": allRan,
+        "judged": judged, "judgedTemplate": judgedTemplate,
+        "judgedByName": "eth-r9-tpl@.service" in judged,
+        "applyRefusedTemplate": "eth-r9-tpl@.service: its loaded unit cannot be read" in
+          (applied.stdout & applied.stderr)}
+      step("decision 135, converted host: the full apply's live check judged " &
+           "the template through its observation instance and its instances",
+           judgedTemplate, judged.join(" "))
+      step("decision 135, converted host: a confined template's instances " &
+           "an enabled target pulls in are up after the full apply",
+           allRan, $ev)
     # Finding 3: the next generation no longer declares the tune drop-in;
     # a host realised in full removes it (and keeps the requirement). Red
     # under the engine build ``full-apply-keeps-undeclared-dropins``.
     let tuneBefore = nw.exec("test -f " & R5TuneDropIn).exitCode == 0
+    # Decision 151 again, with both triggers active before the apply: their
+    # services stopped, the socket's backlog flushed and the path gone, so
+    # each fires as soon as anything lets it while the apply holds them.
+    discard nw.exec("systemctl stop " & R10Socket & " " & R10SocketSvc & " " &
+      R10Path & " " & R10PathSvc & "; rm -f " & R10Job & " " & R10MarkerDir &
+      "/*.ran; systemctl start " & R10Socket & " " & R10Path & "; true")
+    nw.startAgitator()
     let nextApply = nw.exec(env & eng & " infra apply --profile " & RefDir &
       "/system_next.nim --host " & AgentTarget & " --no-preview",
       timeoutSec = 3600)
+    nw.stopAgitator()
+    block:
+      let (ok, ev) = nw.triggerCase()
+      record["decision151"]["nextApply"] = ev
+      step("decision 151, full apply (next generation, triggers active " &
+           "before it): the socket and the path unit, held through the " &
+           "apply, are active after it and their services run", ok, $ev)
+    # Decision 151 with the socket's service running and connections
+    # arriving during the apply (the common case): a trigger whose unit runs
+    # cannot fire at the hold and is left alone -- with Accept=no the
+    # service holds the listening socket, so a stopped socket could not be
+    # started again -- and the service stays reachable.
+    block:
+      discard nw.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+        $R10Port & "' 2>/dev/null; for i in $(seq 15); do [ -s " & R10MarkerDir &
+        "/" & R10SocketSvc & ".ran ] && break; sleep 1; done; true")
+      let before = nw.exec("systemctl show -p ActiveState " & R10SocketSvc).stdout.strip()
+      nw.startAgitator()
+      let runApply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      nw.stopAgitator()
+      let after = nw.exec("systemctl show -p ActiveState " & R10SocketSvc &
+        "; systemctl show -p ActiveState -p Result " & R10Socket &
+        "; timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" & $R10Port &
+        "' && echo reachable").stdout
+      let ok = runApply.exitCode == 0 and before == "ActiveState=active" and
+        after.count("ActiveState=active") == 2 and "reachable" in after
+      record["decision151"]["running"] = %*{"exit": runApply.exitCode,
+        "before": before, "after": after, "ok": ok}
+      step("decision 151, full apply (service running): a socket whose " &
+           "service runs with connections arriving stays active through the " &
+           "apply, and the service stays reachable", ok,
+           runApply.stdout & runApply.stderr & "\nbefore: " & before &
+           "\nafter: " & after)
     step("round 5, undeclared: a drop-in the next generation no longer " &
          "declares is removed by the full apply, the requirement kept",
          tuneBefore and nextApply.exitCode == 0 and
@@ -1344,8 +1728,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # signed a conflicting message.
     let firstStart = nw.monotonicOf(DefaultValidatorUnit,
                                     "ExecMainStartTimestampMonotonic")
-    let starts = nw.exec("journalctl -b -u " & DefaultValidatorUnit &
-      " --no-pager | grep -c 'Started' || true").stdout.strip()
+    # The manager's completed start jobs this boot, not every "Started"
+    # line of the unit's journal: the validator's own output has them too.
+    let starts = $managerStartJobsDone(nw.exec("journalctl -b --no-pager " &
+      "-o verbose _PID=1 UNIT=" & DefaultValidatorUnit & " 2>&1").stdout)
     step("on the new host the validator first started after the restore",
          restoredDone > 0 and firstStart > restoredDone and starts == "1",
          "restore done " & $restoredDone & ", validator start " & $firstStart &

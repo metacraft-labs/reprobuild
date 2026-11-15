@@ -29,6 +29,7 @@ import repro_dev_env_engine
 import repro_interface_artifacts
 from repro_local_store import ffpChecksum
 import repro_tool_profiles
+import repro_test_support/owned_processes
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -407,8 +408,10 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
             delEnv("LD_LIBRARY_PATH")
           putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
           putEnv("USER", previousUser)
-          discard execCmd("pkill -f -u $USER " & quoteShell(socketPath) &
-            " || true")
+          # The helper ``resolveNixTool`` started on this case's private
+          # socket, found through the socket itself -- never by pattern,
+          # which would also stop a concurrent run's helper.
+          discard stopUnixSocketServer(socketPath)
           removeFile(socketPath)
 
         var useDef = InterfaceToolUse(
@@ -441,6 +444,16 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     let previousUser = getEnv("USER")
     putEnv("USER", "repro-nix-provisioner-" & $getCurrentProcessId())
     defer: putEnv("USER", previousUser)
+    # The helper this case starts listens on a socket named after the
+    # per-run USER above, so stopping that socket's server stops this run's
+    # helper and no other run's. Without it the helper lingers until its
+    # idle timeout. The socket's lock and log files are this run's alone
+    # too, so they go with it instead of accumulating in the socket dir.
+    let helperSocket = nixDaemonSocketPath(nixDaemonHelperKey(daemonPath))
+    defer:
+      discard stopUnixSocketServer(helperSocket)
+      for path in [helperSocket, helperSocket & ".lock", helperSocket & ".log"]:
+        removeFile(path)
 
     # Assert daemon binary is built and present
     check fileExists(daemonPath)
@@ -527,6 +540,12 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     # Clean up receipt
     removeFile(receiptFile)
 
+    # The helper is on the socket the teardown stops, so the teardown is not
+    # aimed at nothing; stopping it leaves nothing listening there.
+    check unixSocketServerPid(helperSocket) > 0
+    check stopUnixSocketServer(helperSocket)
+    check unixSocketServerPid(helperSocket) == -1
+
   when defined(posix):
     test "reported flake inputs are relative to a symlinked action cwd":
       let repoRoot = findRepoRoot()
@@ -547,6 +566,15 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       let previousUser = getEnv("USER")
       putEnv("USER", "repro-nix-provisioner-alias-" & $getCurrentProcessId())
       defer: putEnv("USER", previousUser)
+      # As in Scenario 3.1: this run's helper, found through its private
+      # socket, is stopped when the case ends.
+      let helperSocket = nixDaemonSocketPath(
+        nixDaemonHelperKey(findNixDaemon(repoRoot)))
+      defer:
+        discard stopUnixSocketServer(helperSocket)
+        for path in [helperSocket, helperSocket & ".lock",
+            helperSocket & ".log"]:
+          removeFile(path)
 
       # This explicit alias reproduces /var -> /private/var on macOS even
       # when the host's temporary directory itself has no symlink component.
@@ -601,6 +629,10 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       check outside.evidence.monitorReads.len == 0
       check evcForeignProvisionerReport in outside.evidence.evidenceProvenance
       check evcMonitorCapture notin outside.evidence.evidenceProvenance
+
+      check unixSocketServerPid(helperSocket) > 0
+      check stopUnixSocketServer(helperSocket)
+      check unixSocketServerPid(helperSocket) == -1
 
   when defined(linux):
     test "a helper slower to start than two seconds is waited for":

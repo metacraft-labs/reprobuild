@@ -44,6 +44,7 @@ suites=(
   libs/repro_addon/tests/t_addon_review_round3.nim
   libs/repro_addon/tests/t_addon_review_round4.nim
   libs/repro_addon/tests/t_addon_review_round5.nim
+  libs/repro_addon/tests/t_addon_review_round8.nim
   libs/repro_peer_cache/tests/t_evidence_sink_append_only_and_liveness.nim
   libs/repro_peer_cache/tests/t_evidence_store_receipts_and_key_separation.nim
   libs/repro_peer_cache/tests/t_sim_tls_smoke_pass_stops_its_peers.nim

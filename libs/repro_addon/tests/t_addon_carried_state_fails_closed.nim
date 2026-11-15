@@ -38,10 +38,19 @@
 ## (R7-4), ``dependency-links-unread`` (R7-5, R7-7),
 ## ``requirement-name-not-reserved`` (R7-6), ``privileged-daemons-unread``
 ## (decision 58), ``restore-requirement-skips-closure`` (decision 60);
-## round 7: ``boot-closure-reads-generation-dropins`` (P60-2),
+## round 8: ``template-live-by-name`` (decision 135, a template read
+## through its instances);
+## round 7: ``narrowed-live-set`` (a switch that writes no unit file; the
+## decision alone -- its use at the switch's step 6 is falsified end to end
+## by case 2e of ``tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service``,
+## a credentials-only switch, A13 review round 8),
+## ``boot-closure-reads-generation-dropins`` (P60-2),
 ## ``polkit-subject-rebind-trusted`` (P58-1, P58-2 and the other binding
 ## forms), ``reissue-skips-targets`` and ``reissue-skips-sockets``
-## (decision 79, each on its own case).
+## (decision 79, each on its own case); 2026-11-14:
+## ``reissue-skips-unit-state``, ``reissue-skips-timers``,
+## ``refusal-holds-every-unit``, ``shared-hold-lifted-by-passed-instance`` and
+## ``trigger-fired-under-hold-not-started``.
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
@@ -56,9 +65,10 @@ import repro_core/host_apply_lock
 
 import repro_infra
 import repro_infra/systemd_syntax
+import repro_infra/start_holds
 from repro_test_support import testCaseScratchSlug
 import repro_elevation
-import repro_addon/[addon_apply, adoption_cli, state_sets, transitions]
+import repro_addon/[addon_apply, adoption_cli, reassert, state_sets, transitions]
 
 const
   Validator = """systemd.systemUnit {
@@ -1156,6 +1166,81 @@ suite "the requirement follows the distribution's dependency closure (decision 6
       "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
     check "nofile.service" in carriedRequirementUnits(parseSystemProfile(starter), d, root)
 
+suite "the live check judges a template through its instances (decision 135)":
+  # systemd's show refuses a template name ("neither a valid invocation ID
+  # nor unit name"): the stub raises for one, as systemd does.
+  proc stubShow(rootUnits: seq[string]): proc (u: string): Table[string, string] =
+    result = proc (u: string): Table[string, string] =
+      if isTemplateUnit(u):
+        raise newException(OSError, "Unit name " & u &
+          " is neither a valid invocation ID nor unit name.")
+      var t = {"ProtectSystem": "strict", "DynamicUser": "no",
+               "NoNewPrivileges": "yes", "User": "app", "Group": "app",
+               "SupplementaryGroups": ""}.toTable
+      if u in rootUnits: t["User"] = "root"
+      t
+
+  const Tpl = "systemd.systemUnit {\n  name = \"tpl@.service\"\n" &
+    "  content = \"[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+    "User=app\nReadWritePaths=/var/lib/other\nExecStart=/bin/true\n\"\n}\n"
+  const Starter = "systemd.systemUnit {\n  name = \"st.target\"\n" &
+    "  content = \"[Unit]\nWants=tpl@a.service\n\"\n}\n"
+
+  test "the judged names: the observation instance, the generation's and the running instances":
+    let p = parseSystemProfile(Tpl & Starter)
+    let names = liveJudgedNames(["tpl@.service", "plain.service"], p,
+      proc (t: string): seq[string] = @["tpl@b.service"])
+    checkpoint $names
+    check names == @["tpl@repro-addon-observe.service", "tpl@a.service",
+                     "tpl@b.service", "plain.service"]
+    check "tpl@.service" notin names
+
+  test "a confined template whose instances systemd loads confined passes":
+    let (root, d) = installedR6("r9-tpl")
+    let p = parseSystemProfile(Tpl & Starter)
+    check liveReachUnits(p, d, root) == @["tpl@.service"]
+    let problems = liveReachProblems(liveReachUnits(p, d, root), p,
+      stubShow(@[]), root, proc (t: string): seq[string] = @["tpl@b.service"])
+    checkpoint $problems
+    check problems.len == 0
+
+  test "an instance systemd loads as root is refused, by its instance name":
+    let (root, d) = installedR6("r9-tpl2")
+    let p = parseSystemProfile(Tpl & Starter)
+    let problems = liveReachProblems(liveReachUnits(p, d, root), p,
+      stubShow(@["tpl@b.service"]), root, proc (t: string): seq[string] = @["tpl@b.service"])
+    checkpoint $problems
+    check problems.len == 1
+    check "tpl@b.service as systemd loaded it is not confined" in problems[0]
+
+  test "list-units output: the instances, never the template or the observation instance":
+    let out0 = "tpl@a.service loaded active running A\n" &
+      "tpl@repro-addon-observe.service loaded inactive dead O\n" &
+      "tpl@.service loaded inactive dead T\nother@x.service loaded active running X\n"
+    check parseRunningInstances("tpl@.service", out0) == @["tpl@a.service"]
+    check runningInstancesArgs("tpl@.service")[^1] == "tpl@*.service"
+
+suite "the switch judges its services in every switch (round 7, finding 1)":
+  test "a switch that writes no unit file holds, reloads and judges the services":
+    # A switch changing only a file a confined service depends_on (or its
+    # credentials) restarts it at step 7: carried state on the host, the
+    # services are judged anyway.
+    let d = liveCheckAtStep6(anyUnitChange = false, replaying = false,
+                             recordOnly = false, ["a.service", "b.service"])
+    check d.reload
+    check d.judged == @["a.service", "b.service"]
+
+  test "control: no services to judge and no unit change, no reload":
+    let d = liveCheckAtStep6(false, false, false, [])
+    check not d.reload
+    check d.judged.len == 0
+
+  test "control: a unit change reloads; a record-only switch judges nothing":
+    check liveCheckAtStep6(true, false, false, []).reload
+    let r = liveCheckAtStep6(true, false, true, ["a.service"])
+    check r.reload
+    check r.judged.len == 0
+
 suite "the boot closure leaves the generation's drop-ins out (round 7)":
   proc bootHost(root: string) =
     hostFile(root, "/lib/systemd/system/default.target",
@@ -1297,6 +1382,162 @@ suite "the drivers' start jobs are issued again after the check (decision 79)":
     checkpoint $jobs
     check jobs == @["r.service"]
 
+suite "every driver's start is issued again after the check (decision 79, 2026-11-14)":
+  ## Mocking: ``LiveHost`` stands for systemd's answers and ``start``: a unit
+  ## test has no systemd whose jobs or timers it could read (the conversion
+  ## gate runs the real ones). What is asserted is which units are started,
+  ## in which order, and which are left held.
+  proc unitState(name: string; running: bool): PlannedOperation =
+    PlannedOperation(operation: PrivilegedOperation(kind: pokSystemdUnitState,
+      usName: name, usEnabled: true, usRunning: running))
+
+  proc timer(name: string; running: bool): PlannedOperation =
+    PlannedOperation(operation: PrivilegedOperation(kind: pokSystemdSystemTimer,
+      stName: name, stEnabled: true, stRunning: running))
+
+  proc none(u: string): bool = false
+
+  test "a unitState start of a unit the profile does not own is issued again":
+    check driverStartJobs([unitState("multi-user.target", true)], none) ==
+      @["multi-user.target"]
+
+  test "a unitState that was already running, stopped or destroyed has no job":
+    check driverStartJobs([unitState("multi-user.target", true)],
+      proc (u: string): bool = true).len == 0
+    check driverStartJobs([unitState("x.service", false)], none).len == 0
+    check driverStartJobs([PlannedOperation(operation: PrivilegedOperation(
+      kind: pokSystemdUnitState, usName: "d.service", usRunning: true,
+      usDestroy: true))], none).len == 0
+
+  test "a running systemTimer's start is issued again, a stopped one's is not":
+    check driverStartJobs([timer("x.timer", true), timer("y.timer", false)],
+      none) == @["x.timer"]
+    check driverStartJobs([PlannedOperation(operation: PrivilegedOperation(
+      kind: pokSystemdSystemTimer, stName: "d.timer", stRunning: true,
+      stDestroy: true))], none).len == 0
+
+  proc fakeHost(active: seq[string]; shows: Table[string, Table[string, string]];
+                log: ref seq[string]; failing = ""): LiveHost =
+    LiveHost(
+      isActive: proc (u: string): bool = u in active,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add(u)
+        (u != failing, "refused " & u))
+
+  let held = {"ConditionResult": "no", "ConditionTimestampMonotonic": "5000"}.toTable
+  let heldBefore = {"ConditionResult": "no", "ConditionTimestampMonotonic": "900"}.toTable
+  let passing = {"ConditionResult": "yes", "ConditionTimestampMonotonic": "5000"}.toTable
+  let neverTested = {"ConditionResult": "yes", "ConditionTimestampMonotonic": "0"}.toTable
+  let timerShows = {"x.timer": {"Triggers": "x.service"}.toTable}.toTable
+
+  test "a trigger that fired under the hold: its held service is started once":
+    var shows = timerShows
+    shows["x.service"] = held
+    var log = new seq[string]
+    let host = fakeHost(@["x.timer"], shows, log)
+    let fired = firedUnderHold(["x.timer"], ["x.service"], [], host, 1000)
+    check fired == @["x.service"]
+    let p = parseSystemProfile("")
+    check releaseStarts(p, ["x.service"], ["x.service"], [], [], ["x.timer"],
+      fired, host).len == 0
+    check log[] == @["x.timer", "x.service"]
+
+  test "a service the hold did not skip is left to its trigger":
+    for st in [heldBefore, passing, neverTested]:
+      var shows = timerShows
+      shows["x.service"] = st
+      var log = new seq[string]
+      check firedUnderHold(["x.timer"], ["x.service"], [], fakeHost(@[], shows, log), 1000).len == 0
+    # already active, not judged by the check, or refused
+    var shows = timerShows
+    shows["x.service"] = held
+    var log = new seq[string]
+    check firedUnderHold(["x.timer"], ["x.service"], [],
+      fakeHost(@["x.service"], shows, log), 1000).len == 0
+    check firedUnderHold(["x.timer"], ["other.service"], [],
+      fakeHost(@[], shows, log), 1000).len == 0
+    check firedUnderHold(["x.timer"], ["x.service"], ["x.service"],
+      fakeHost(@[], shows, log), 1000).len == 0
+
+  test "a path unit's trigger is read the same way":
+    var shows = {"w.path": {"Triggers": "w.service"}.toTable}.toTable
+    shows["w.service"] = held
+    var log = new seq[string]
+    check firedUnderHold(["w.path"], ["w.service"], [], fakeHost(@[], shows, log), 1000) ==
+      @["w.service"]
+
+  test "one refusal holds only the refused unit; the others start":
+    let problems = ["floored unit: bad.service as systemd loaded it reaches the carried state"]
+    let refused = refusedUnits(["ok.service", "bad.service"], problems)
+    check refused == @["bad.service"]
+    var log = new seq[string]
+    let host = fakeHost(@["ok.target"], initTable[string, Table[string, string]](), log)
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "ok.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+}
+""")
+    discard p
+    check releaseStarts(p, ["ok.service", "bad.service"], ["ok.service"],
+      refused, ["ok.service"], ["bad.service", "ok.target"], [], host).len == 0
+    check "bad.service" notin log[]
+    check "ok.target" in log[]
+
+  test "a passed instance does not lift the hold its refused sibling shares":
+    let n = "zz-repro-carried-check-hold.conf"
+    check liftableHolds(["foo@b.service", "ok.service"], ["foo@a.service"], n) ==
+      @[holdPath("ok.service", n)]
+    check liftableHolds(["foo@b.service"], ["foo@a.service"], n,
+      PersistentUnitDir).len == 0
+    check liftableHolds(["foo@b.service", "foo@c.service"], [], n) ==
+      @[holdPath("foo@b.service", n)]
+
+  test "a refusal no unit is named in holds every unit":
+    check refusedUnits(["a.service", "b.service"],
+      ["carried state reached after the reload (decided again after the reload)"]) ==
+      @["a.service", "b.service"]
+    check refusedUnits(["a.service"], []).len == 0
+
+  test "a template is refused by its instances' problems (decision 135)":
+    # liveReachProblems names a template's instances, never the template.
+    let problems = ["floored unit: foo@b.service as systemd loaded it runs as root"]
+    check refusedUnits(["foo@.service", "ok.service"], problems) ==
+      @["foo@.service"]
+    # A unit whose name merely starts like the stem is not the template's.
+    check refusedUnits(["foo@.service", "ok.service"],
+      ["floored unit: foobar.service as systemd loaded it runs as root"]) ==
+      @["foo@.service", "ok.service"]
+
+  test "a passed template starts its instances that ran before, never its name (decision 135)":
+    var log = new seq[string]
+    let host = fakeHost(@["t.target"], initTable[string, Table[string, string]](), log)
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "foo@.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+  enabled = false
+}
+""")
+    check releaseStarts(p, ["foo@.service"], ["foo@.service"], [],
+      ["foo@a.service", "foo@b.service", "bar.service"],
+      ["foo@.service", "t.target"], [], host).len == 0
+    check log[] == @["foo@a.service", "foo@b.service", "t.target"]
+    # Refused: none of its instances start.
+    log[].setLen(0)
+    check releaseStarts(p, ["foo@.service"], [], ["foo@.service"],
+      ["foo@a.service"], [], [], host).len == 0
+    check log[].len == 0
+
+  test "a failed start is reported, and the others still start":
+    var log = new seq[string]
+    let host = fakeHost(@["a.target", "b.target"], initTable[string, Table[string, string]](), log, "a.target")
+    let probs = releaseStarts(parseSystemProfile(""), ["s.service"], ["s.service"],
+      [], [], ["a.target", "b.target"], [], host)
+    check log[] == @["a.target", "b.target"]
+    check probs.len == 1 and "a.target" in probs[0]
+
 suite "the live cross-check is one shared check (round 6)":
   test "liveReachUnits names the services judged confined, liveReachProblems judges them":
     let (root, d) = installedR6("r7-live")
@@ -1318,3 +1559,173 @@ suite "the live cross-check is one shared check (round 6)":
     check liveReachProblems(["lv.service"], p, failing, root).len == 1
 
 removeDir(scratch)
+
+suite "held units' triggers, the triggers to fire again, and requirers of a refused unit (decisions 151-153)":
+  # The release's systemd reads and starts are closures (``LiveHost``), so
+  # the order and the choice of what is stopped and started is tested
+  # without a running systemd; the VM cases run the real manager.
+  proc host9(active: seq[string]; shows: Table[string, Table[string, string]];
+             log: ref seq[string]): LiveHost =
+    LiveHost(
+      isActive: proc (u: string): bool = u in active,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("start " & u)
+        (true, ""),
+      stop: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("stop " & u)
+        (true, ""),
+      resetFailed: proc (u: string) = log[].add("reset-failed " & u))
+
+  test "decision 151: a held unit's loaded triggers are read from its TriggeredBy=":
+    let shows = {
+      "a.service": {"TriggeredBy": "a.socket a.path foo.target"}.toTable,
+      "tpl@x.service": {"TriggeredBy": "tpl@x.timer"}.toTable}.toTable
+    var log = new seq[string]
+    check loadedTriggersOf(["a.service", "tpl@x.service", "gone.service"],
+      host9(@[], shows, log)) == @["a.socket", "a.path", "tpl@x.timer"]
+
+  test "decision 151: the profile's own triggers of held units, an instance's by its template":
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "x.socket"
+  content = "[Socket]\nListenStream=/run/x\n"
+}
+systemd.systemUnit {
+  name = "bk.timer"
+  content = "[Timer]
+OnActiveSec=1
+Unit=bk@daily.service
+"
+}
+systemd.systemUnit {
+  name = "other.timer"
+  content = "[Timer]
+OnActiveSec=1
+"
+}
+""")
+    check profileTriggersOf(p, ["x.service", "bk@.service"]) == @["x.socket", "bk.timer"]
+
+  test "decision 151: a stopped trigger comes back with reset-failed, but a refused unit's and an unloaded one":
+    let shows = {
+      "a.socket": {"LoadState": "loaded"}.toTable,
+      "gone.path": {"LoadState": "not-found"}.toTable,
+      "r.socket": {"LoadState": "loaded"}.toTable}.toTable
+    var log = new seq[string]
+    check triggerRestarts(["a.socket", "gone.path", "r.socket"], ["r.socket"],
+      host9(@[], shows, log)).len == 0
+    check log[] == @["reset-failed a.socket", "start a.socket"]
+
+  test "decision 151: a trigger whose unit runs is not stopped, unless the apply restarts that unit":
+    let shows = {
+      "run.socket": {"Triggers": "run.service"}.toTable,
+      "idle.socket": {"Triggers": "idle.service"}.toTable,
+      "re.path": {"Triggers": "re.service"}.toTable,
+      "off.timer": {"Triggers": "off.service"}.toTable}.toTable
+    var log = new seq[string]
+    let host = host9(@["run.socket", "run.service", "idle.socket", "re.path",
+                       "re.service"], shows, log)
+    # run.service serves its own socket (with Accept=no it holds the
+    # listening descriptor: a stop and start of the socket could not bind
+    # again); idle.service does not run; re.service runs but is restarted
+    # under the hold; off.timer is not active.
+    check triggersToStop(["run.socket", "idle.socket", "re.path", "off.timer"],
+      ["re.service"], host) == @["idle.socket", "re.path"]
+
+  test "decision 151: a socket whose RemainAfterExit=yes oneshot service has run is left alone":
+    # reprobuild-pm issue 2026-11-15-addon-switch-a-socket-stopped-for-a-hold-
+    # while-its-service-runs-cannot-start-again (A9's reapply gate): the
+    # oneshot ran and exited, and systemd reports it ActiveState=active, so
+    # its socket cannot fire at the hold; stopped, it could not start again
+    # ("Socket service a9r-sk.service already active, refusing").
+    let shows = {
+      "a9r-sk.socket": {"Triggers": "a9r-sk.service"}.toTable,
+      "a9r-sk.service": {"ActiveState": "active", "SubState": "exited",
+                         "Type": "oneshot", "RemainAfterExit": "yes"}.toTable}.toTable
+    var log = new seq[string]
+    let host = LiveHost(
+      isActive: proc (u: string): bool =
+        u == "a9r-sk.socket" or shows[u].getOrDefault("ActiveState") == "active",
+      show: proc (u: string): Table[string, string] = shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    check triggersToStop(["a9r-sk.socket"], [], host).len == 0
+    # Restarted under the hold, it can fire: the socket is stopped then.
+    check triggersToStop(["a9r-sk.socket"], ["a9r-sk.service"], host) ==
+      @["a9r-sk.socket"]
+
+  test "decision 152: the triggers looked at are every held unit's, not only the drivers' starts":
+    check fireSources(["d.timer"], ["u.timer", "d.timer"]) == @["d.timer", "u.timer"]
+
+  test "decision 152: an instance timer of a judged template that fired under the hold":
+    let heldShow = {"ConditionResult": "no", "ConditionTimestampMonotonic": "5000"}.toTable
+    var shows = {"tpl@daily.timer": {"Triggers": "tpl@daily.service"}.toTable}.toTable
+    shows["tpl@daily.service"] = heldShow
+    var log = new seq[string]
+    check firedUnderHold(["tpl@daily.timer"], ["tpl@.service"], [],
+      host9(@["tpl@daily.timer"], shows, log), 1000) == @["tpl@daily.service"]
+
+  test "decision 153: a unit that requires or binds to a refused unit stays held, transitively":
+    let shows = {
+      "dep.service": {"Requires": "bad.service network.target"}.toTable,
+      "dep2.service": {"BindsTo": "dep.service"}.toTable,
+      "inst.service": {"Requires": "tpl@a.service"}.toTable,
+      "free.service": {"Requires": "other.service", "Wants": "bad.service"}.toTable}.toTable
+    var log = new seq[string]
+    let held = requiringRefused(
+      ["dep2.service", "dep.service", "inst.service", "free.service"],
+      ["bad.service", "tpl@.service"], host9(@[], shows, log))
+    var units: seq[string]
+    for (u, because) in held: units.add(u & " <- " & because)
+    check units.len == 3
+    check "dep.service <- bad.service" in units
+    check "dep2.service <- dep.service" in units
+    check "inst.service <- tpl@a.service" in units
+
+suite "a trigger that cannot start again leaves the host pending (decision 155)":
+  # A state directory of the test's own (the real filesystem); systemd is a
+  # closure, so a start that fails can be staged without a host.
+  test "recover starts each recorded trigger again; one that still fails stays recorded":
+    let dir = getTempDir() / ("t155-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeTriggersToRestart(dir, ["a.socket", "b.socket"])
+    check hasTriggersToRestart(dir)
+    var log = new seq[string]
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("start " & u)
+        (u == "a.socket", "Job failed"),
+      resetFailed: proc (u: string) = log[].add("reset-failed " & u))
+    let r = retryTriggerRestarts(dir, host)
+    check not r.ok
+    check log[] == @["reset-failed a.socket", "start a.socket",
+                     "reset-failed b.socket", "start b.socket"]
+    check readTriggersToRestart(dir) == @["b.socket"]
+    check "trigger a.socket started again" in r.lines
+    let again = retryTriggerRestarts(dir, LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, "")))
+    check again.ok
+    check not hasTriggersToRestart(dir)
+
+  test "the pending-switch guard refuses while a recorded trigger does not start":
+    let dir = getTempDir() / ("t155g-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeTriggersToRestart(dir, ["b.socket"])
+    let refused = checkPendingSwitches(dir,
+      proc (d: string): RecoveryOutcome {.closure, gcsafe.} =
+        RecoveryOutcome(resolved: false, lines: @["b.socket did not start"]),
+      pointer = dir / "no-pointer")
+    check not refused.ok
+    check "b.socket did not start" in refused.why
+    let passes = checkPendingSwitches(dir,
+      proc (d: string): RecoveryOutcome {.closure, gcsafe.} =
+        RecoveryOutcome(resolved: true),
+      pointer = dir / "no-pointer")
+    check passes.ok

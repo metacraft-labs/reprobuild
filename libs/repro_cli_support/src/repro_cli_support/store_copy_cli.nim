@@ -1,8 +1,9 @@
 ## `repro store copy` — the command-line face of
 ## `repro_local_store/store_copy`.
 ##
-## This module only parses arguments, resolves the source store root exactly
-## as the other `repro store` subcommands resolve it, and prints the report.
+## This module only takes the parsed arguments, resolves the source store
+## root exactly as the other `repro store` subcommands resolve it, and
+## prints the report.
 ## All copy behaviour lives in the library.
 ##
 ## One decision belongs to the caller and is passed in as a hook: whether
@@ -10,7 +11,7 @@
 ## system store), and taking that lock. The main CLI module owns it, and
 ## that module imports this one.
 
-import std/[json, os, strutils]
+import std/[json, os]
 import repro_local_store/store
 when not defined(windows):
   import repro_local_store/store_copy
@@ -22,15 +23,12 @@ type
       ## Runs `body` holding whatever lock writers of `destinationRoot`
       ## must hold, and returns its result.
 
-const StoreCopyUsage* = """usage:
-  repro store copy [PREFIX...] [--root-id=ID]... --to=STORE-ROOT
-                   [--store-root=PATH] [--json]
-PREFIX is a prefix of the source store, as an absolute path or as
-prefixes/<pkg>/<dir>; a path inside a prefix names that prefix.
---root-id copies every prefix a registered source root holds."""
+const StoreCopyHelpHint = "run `repro store copy --help` for its usage"
 
 when defined(windows):
-  proc runStoreCopyCommand*(args: seq[string]; hooks: StoreCopyCliHooks): int =
+  proc runStoreCopyCommand*(prefixes, rootIds: seq[string];
+                            destinationRoot, storeRootFlag: string;
+                            emitJson: bool; hooks: StoreCopyCliHooks): int =
     stderr.writeLine("repro store copy: not supported on Windows")
     1
 else:
@@ -59,35 +57,21 @@ else:
       echo "external (import metadata only; payload not copied): " & p
     echo "held by root:    " & r.rootId
 
-  proc runStoreCopyCommand*(args: seq[string]; hooks: StoreCopyCliHooks): int =
-    ## `args[0]` is `copy`.
-    var req: StoreCopyRequest
-    var storeRootFlag = ""
-    var emitJson = false
-    for raw in (if args.len > 1: args[1 .. ^1] else: @[]):
-      if raw.startsWith("--store-root="):
-        storeRootFlag = raw.split('=', 1)[1]
-      elif raw.startsWith("--to="):
-        req.destinationRoot = raw.split('=', 1)[1]
-      elif raw.startsWith("--root-id="):
-        req.rootIds.add(raw.split('=', 1)[1])
-      elif raw == "--json":
-        emitJson = true
-      elif raw in ["-h", "--help"]:
-        echo StoreCopyUsage
-        return 0
-      elif raw.startsWith("--"):
-        stderr.writeLine("repro store copy: unknown flag: " & raw)
-        return 2
-      else:
-        req.prefixes.add(raw)
+  proc runStoreCopyCommand*(prefixes, rootIds: seq[string];
+                            destinationRoot, storeRootFlag: string;
+                            emitJson: bool; hooks: StoreCopyCliHooks): int =
+    ## `repro store copy [PREFIX...] [--root-id=ID]... --to=STORE-ROOT
+    ## [--store-root=PATH] [--json]`, its command line parsed from repro's
+    ## description (`repro_cli_support/cli_description`).
+    var req = StoreCopyRequest(prefixes: prefixes, rootIds: rootIds,
+      destinationRoot: destinationRoot)
     if req.destinationRoot.len == 0:
-      stderr.writeLine("repro store copy: --to=STORE-ROOT is required\n" &
-        StoreCopyUsage)
+      stderr.writeLine("repro store copy: --to=STORE-ROOT is required; " &
+        StoreCopyHelpHint)
       return 2
     if req.prefixes.len == 0 and req.rootIds.len == 0:
       stderr.writeLine("repro store copy: name at least one PREFIX or " &
-        "--root-id\n" & StoreCopyUsage)
+        "--root-id; " & StoreCopyHelpHint)
       return 2
     # Resolving the roots and taking the destination's lock can fail too;
     # every failure is reported as one `error:` line and exit 1, never a

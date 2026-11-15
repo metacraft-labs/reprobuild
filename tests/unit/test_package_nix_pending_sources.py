@@ -208,9 +208,17 @@ class PendingSourcesRealTree(unittest.TestCase):
         # test-certificates-tools-src postdates the `src` commit, and this
         # tree's lock moved it while the default stayed put.
         tree_lock = json.loads((ROOT / 'flake.lock').read_text())
-        node = tree_lock['nodes'][tree_lock['nodes'][tree_lock['root']]['inputs'][
-            'test-certificates-tools-src']]
-        old_rev = node['locked']['rev']
+        # The revision the refusal must quote is the default package.nix
+        # carries, not this tree's flake.lock: the two differ legitimately
+        # whenever the tree's pin has moved past the one the `src` commit
+        # already has (the input is then not pending, and the default keeps
+        # mirroring the `src` commit's lock).
+        defaults = re.findall(
+            r'\n  testCertificatesToolsSrc \? fetchFromGitHub \{[^}]*?'
+            r'rev = "([0-9a-f]{40})"',
+            (ROOT / PACKAGE_NIX).read_text())
+        self.assertEqual(len(defaults), 1, defaults)
+        old_rev = defaults[0]
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             for rel in self.FILES:

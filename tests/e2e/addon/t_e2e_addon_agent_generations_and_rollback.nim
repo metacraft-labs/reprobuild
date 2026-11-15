@@ -74,6 +74,10 @@
 ## objects, and with those dropped, restarted keep-svc for its adopted
 ## dependency.
 ##
+## Falsifying mutation (``REPRO_ADDON_MUTATION=agent-ignores-pause``): the
+## tick never reads the pause marker, so step 3's tick after the rollback
+## is not ``aoPaused`` and re-converges over the rollback: red.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``. *Mocking.* None: real guests, the
 ## static add-on binary, manifests signed with the deploy agent's own code.
 

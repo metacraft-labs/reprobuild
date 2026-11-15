@@ -8,9 +8,14 @@
 ## ``repro cache …`` entry point and the binary-cache integration-test
 ## helper drive ONE copy of the handlers.
 ##
-## The dispatcher adds no behaviour beyond argv parsing + process exit
-## codes; it routes each subcommand to the same ``substituteInProcess`` +
-## HTTP-publish machinery the build engine uses during ``repro build``.
+## The handlers add no behaviour beyond process exit codes; each routes to
+## the same ``substituteInProcess`` + HTTP-publish machinery the build engine
+## uses during ``repro build``. ``repro cache`` parses its command line from
+## repro's description and calls the typed handlers (``cacheLookup``,
+## ``cacheSubstitute``, ``cachePublish``, ``cacheDeriveKey``,
+## ``cacheGenKey``); ``runCacheSubcommand`` is the argv front end of the
+## test-only driver (``tests/repro_binary_cache_client_cli.nim``), and
+## ``identityFromPublishFlags`` reads the identity flags a producer renders.
 ##
 ## ## Subcommands
 ##
@@ -143,6 +148,31 @@ Environment:
 """
 
 type
+  CacheIdentityValues* = object
+    ## The identity flags of ``publish`` and ``derive-key`` as given, before
+    ## they are checked (``identityArgsOf``). An empty value leaves its field
+    ## out of the identity.
+    packageName*: string
+    packageVersion*: string
+    platformCpu*: string
+    platformOs*: string
+    platformAbi*: string
+    platformLibc*: string
+    toolchainName*: string
+    toolchainVersion*: string
+    toolchainHostLdSo*: string
+    toolchainExtra*: string
+    providerRevision*: string
+    deps*: seq[string]
+      ## ``--dep``: dependency entry keys (an empty one is skipped).
+    options*: seq[string]
+      ## ``--option``: ``name=value`` pairs.
+
+  CacheUsageError* = object of ValueError
+    ## A value of the command line that is malformed in a way only the
+    ## handler can tell (an ``--option`` that is not ``name=value``): a usage
+    ## error, exit 2.
+
   PublishArgs = object
     entryKeyHex: string
     prefixDir: string
@@ -226,11 +256,11 @@ proc loadProducerKeypair*(): peerAuth.PeerKeypair =
 # lookup / substitute
 # ---------------------------------------------------------------------------
 
-proc cmdLookup(args: seq[string]): int =
-  if args.len != 1:
-    stderr.writeLine(Usage)
-    return 2
-  let hex = parseEntryKeyHex(args[0])
+proc cacheLookup*(entryKey: string): int =
+  ## ``repro cache lookup <entry-key-hex>``: exit 0 on a hit, 1 on a miss,
+  ## 3 when the cache cannot answer. Raises ``ValueError`` for a malformed
+  ## key.
+  let hex = parseEntryKeyHex(entryKey)
   let baseUrl = defaultCacheUrl()
   let url = baseUrl & "/manifests/" & hex
   let client = newCacheHttpClient(baseUrl, 15_000)
@@ -253,12 +283,18 @@ proc cmdLookup(args: seq[string]): int =
     stderr.writeLine("lookup failed: " & e.msg)
     return 3
 
-proc cmdSubstitute(args: seq[string]): int =
-  if args.len != 2:
+proc cmdLookup(args: seq[string]): int =
+  if args.len != 1:
     stderr.writeLine(Usage)
     return 2
-  let hex = parseEntryKeyHex(args[0])
-  let outDir = args[1]
+  cacheLookup(args[0])
+
+proc cacheSubstitute*(entryKey, outDir: string): int =
+  ## ``repro cache substitute <entry-key-hex> <out-prefix-dir>``: exit 0
+  ## when the entry was fetched from a trusted cache and extracted, 1 on a
+  ## miss or a refusal, 2 for a malformed cache configuration. Raises
+  ## ``ValueError`` for a malformed key.
+  let hex = parseEntryKeyHex(entryKey)
 
   let storeRoot = defaultStoreRoot()
   createDir(storeRoot)
@@ -328,10 +364,50 @@ proc cmdSubstitute(args: seq[string]): int =
 # publish
 # ---------------------------------------------------------------------------
 
+proc identityArgsOf(v: CacheIdentityValues; cpuGiven = false): PublishArgs =
+  ## The identity ``v`` names, checked: the CPU family canonicalised, every
+  ## dependency key validated, every option split at its first ``=``. An
+  ## empty CPU leaves the field out unless ``cpuGiven`` says the flag was
+  ## written with an empty value, which names no family.
+  result.packageName = v.packageName
+  result.packageVersion = v.packageVersion
+  if v.platformCpu.len > 0 or cpuGiven:
+    # Canonicalised to the family the cache keys by (`armhf` → `armv7`,
+    # `amd64` → `x86_64`); a token no host derives is refused, because an
+    # entry published under it could never be substituted.
+    let parsed = parsePlatformCpuToken(v.platformCpu)
+    if not parsed.ok or parsed.cpu == pcAny:
+      raise newException(ValueError,
+        "--platform-cpu '" & v.platformCpu & "' names no CPU family the " &
+        "binary cache keys by (x86_64, aarch64, armv7, x86)")
+    result.platformCpu = $parsed.cpu
+  result.platformOs = v.platformOs
+  result.platformAbi = v.platformAbi
+  result.platformLibc = v.platformLibc
+  result.toolchainName = v.toolchainName
+  result.toolchainVersion = v.toolchainVersion
+  result.toolchainHostLdSo = v.toolchainHostLdSo
+  result.toolchainExtra = v.toolchainExtra
+  result.providerRevision = v.providerRevision
+  for dep in v.deps:
+    if dep.len > 0:
+      result.depHex.add(parseEntryKeyHex(dep))
+  for option in v.options:
+    let eq = option.find('=')
+    if eq <= 0:
+      raise newException(CacheUsageError,
+        "--option requires name=value form")
+    result.options.add((option[0 ..< eq], option[eq + 1 .. ^1]))
+
 proc parseIdentityFlags(flagArgs: seq[string]): PublishArgs =
+  ## The identity flags of the test driver's argv (``runCacheSubcommand``)
+  ## and of a producer's rendered flags (``identityFromPublishFlags``);
+  ## ``repro cache`` parses them from repro's description instead.
   # ``allowWhitespaceAfterColon = false`` keeps ``--platform-libc=`` from
   # consuming the next argv slot as its value (the build-script prelude
   # routinely passes empty values to opt out of a field).
+  var v = CacheIdentityValues()
+  var cpuGiven = false
   var p = initOptParser(flagArgs, allowWhitespaceAfterColon = false)
   while true:
     p.next()
@@ -339,37 +415,30 @@ proc parseIdentityFlags(flagArgs: seq[string]): PublishArgs =
     of cmdEnd: break
     of cmdShortOption, cmdLongOption:
       case p.key
-      of "package-name": result.packageName = p.val
-      of "package-version": result.packageVersion = p.val
+      of "package-name": v.packageName = p.val
+      of "package-version": v.packageVersion = p.val
       of "platform-cpu":
-        # Canonicalised to the family the cache keys by (`armhf` → `armv7`,
-        # `amd64` → `x86_64`); a token no host derives is refused, because
-        # an entry published under it could never be substituted.
-        let parsed = parsePlatformCpuToken(p.val)
-        if not parsed.ok or parsed.cpu == pcAny:
-          raise newException(ValueError,
-            "--platform-cpu '" & p.val & "' names no CPU family the " &
-            "binary cache keys by (x86_64, aarch64, armv7, x86)")
-        result.platformCpu = $parsed.cpu
-      of "platform-os": result.platformOs = p.val
-      of "platform-abi": result.platformAbi = p.val
-      of "platform-libc": result.platformLibc = p.val
-      of "toolchain-name": result.toolchainName = p.val
-      of "toolchain-version": result.toolchainVersion = p.val
-      of "toolchain-host-ldso": result.toolchainHostLdSo = p.val
-      of "toolchain-extra": result.toolchainExtra = p.val
-      of "provider-revision": result.providerRevision = p.val
-      of "dep":
-        if p.val.len > 0:
-          result.depHex.add(parseEntryKeyHex(p.val))
-      of "option":
-        let eq = p.val.find('=')
-        if eq <= 0:
-          stderr.writeLine("--option requires name=value form")
-          quit(2)
-        result.options.add((p.val[0 ..< eq], p.val[eq + 1 .. ^1]))
+        v.platformCpu = p.val
+        cpuGiven = true
+      of "platform-os": v.platformOs = p.val
+      of "platform-abi": v.platformAbi = p.val
+      of "platform-libc": v.platformLibc = p.val
+      of "toolchain-name": v.toolchainName = p.val
+      of "toolchain-version": v.toolchainVersion = p.val
+      of "toolchain-host-ldso": v.toolchainHostLdSo = p.val
+      of "toolchain-extra": v.toolchainExtra = p.val
+      of "provider-revision": v.providerRevision = p.val
+      of "dep": v.deps.add(p.val)
+      of "option": v.options.add(p.val)
       else: discard
     of cmdArgument: discard
+  identityArgsOf(v, cpuGiven)
+
+proc cmdSubstitute(args: seq[string]): int =
+  if args.len != 2:
+    stderr.writeLine(Usage)
+    return 2
+  cacheSubstitute(args[0], args[1])
 
 proc parsePublishArgs(args: seq[string]): PublishArgs =
   if args.len < 2:
@@ -403,13 +472,23 @@ proc identityFromPublishFlags*(flagArgs: seq[string]): CacheEntryIdentity =
   ## printed.
   identityFromArgs(parseIdentityFlags(flagArgs))
 
-proc cmdDeriveKey(args: seq[string]): int =
-  let parsed = parseIdentityFlags(args)
-  let idy = identityFromArgs(parsed)
-  echo deriveCacheEntryKeyHex(idy)
+proc cacheDeriveKey*(identity: CacheIdentityValues): int =
+  ## ``repro cache derive-key [identity-flags]``: print the entry key.
+  ## Raises ``CacheUsageError`` for a malformed ``--option`` and
+  ## ``ValueError`` for another malformed value.
+  echo deriveCacheEntryKeyHex(identityFromArgs(identityArgsOf(identity)))
   return 0
 
-proc cmdGenKey(args: seq[string]): int =
+proc cmdDeriveKey(args: seq[string]): int =
+  try:
+    let parsed = parseIdentityFlags(args)
+    echo deriveCacheEntryKeyHex(identityFromArgs(parsed))
+    return 0
+  except CacheUsageError as e:
+    stderr.writeLine(e.msg)
+    return 2
+
+proc cacheGenKey*(): int =
   ## Generates an ECDSA-P256 keypair and writes the matching key + cert
   ## files at the env-configured paths if missing. Returns 0 on success,
   ## or 0 too if the files already exist (idempotent). Useful for
@@ -429,7 +508,10 @@ proc cmdGenKey(args: seq[string]): int =
   echo pubHex
   return 0
 
-proc cmdPublish(rawArgs: seq[string]): int =
+proc cmdGenKey(args: seq[string]): int =
+  cacheGenKey()
+
+proc publish(args: PublishArgs): int =
   ## M9.L.4-refactor Step A: thin wrapper that translates CLI flags +
   ## env vars into a ``PublishInProcessRequest`` and forwards to the
   ## library implementation. The pre-existing drift-guard +
@@ -444,7 +526,6 @@ proc cmdPublish(rawArgs: seq[string]): int =
   ##   * exit 0 — server accepted the publish.
   ##   * stdout — ``published <entryKeyHex>`` on success.
   ##   * stderr — diagnostic text on failure (unchanged).
-  let args = parsePublishArgs(rawArgs)
   let idy = identityFromArgs(args)
   let kp =
     try: loadProducerKeypair()
@@ -478,17 +559,34 @@ proc cmdPublish(rawArgs: seq[string]): int =
   echo "output-digest blake3:", res.rawArchiveDigestHex
   return 0
 
+proc cachePublish*(entryKey, prefixDir: string;
+                   identity: CacheIdentityValues): int =
+  ## ``repro cache publish <entry-key-hex> <prefix-dir> [identity-flags]``.
+  ## Raises ``CacheUsageError`` for a malformed ``--option`` and
+  ## ``ValueError`` for another malformed value; the exit codes are
+  ## ``publish``'s.
+  var args = identityArgsOf(identity)
+  args.entryKeyHex = parseEntryKeyHex(entryKey)
+  args.prefixDir = prefixDir
+  publish(args)
+
+proc cmdPublish(rawArgs: seq[string]): int =
+  try:
+    publish(parsePublishArgs(rawArgs))
+  except CacheUsageError as e:
+    stderr.writeLine(e.msg)
+    2
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
 proc runCacheSubcommand*(args: seq[string]): int =
-  ## Routes ``repro cache <subcommand> …`` (``args`` is everything AFTER
-  ## the ``cache`` verb) to the shared handlers. Adds no behaviour beyond
-  ## argv parsing + exit codes — the substitution / publish semantics
-  ## (including R1 trust) come from the shared library. This is the SAME
-  ## dispatch the historical standalone ``repro-binary-cache-client``
-  ## exposed under its own ``main``.
+  ## The test-only driver's argv front end over the typed handlers
+  ## (``args`` is everything after the subcommand selector's program name),
+  ## the dispatch the historical standalone ``repro-binary-cache-client``
+  ## exposed under its own ``main``. ``repro cache`` does not use it: its
+  ## command line is parsed from repro's description.
   if args.len == 0:
     echo Usage
     return 0

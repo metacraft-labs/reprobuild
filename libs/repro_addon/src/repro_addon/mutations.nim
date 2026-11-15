@@ -36,6 +36,10 @@
 ## ``uninstall-discards-state-on-drift``      uninstall removes the state
 ##                                            directory and ledger even
 ##                                            when it left drift behind
+## ``uninstall-discards-state-after-failed-store-removal``
+##                                            uninstall removes the state
+##                                            even when the store's own
+##                                            removal failed
 ## ``recipient-key-0644``                     bootstrap writes the recipient
 ##                                            key group- and world-readable
 ## ``provisions-publisher-key``               bootstrap also leaves a binary
@@ -51,6 +55,20 @@
 ## ``image-keeps-first-boot-state``           the image assembly's clean-up
 ##                                            keeps the assembly boot's
 ##                                            machine id and SSH host keys
+## ``anywhere-digest-omits-profile``         `repro anywhere`'s plan digest
+##                                            does not cover the profile
+##                                            text it applies (an ENGINE
+##                                            mutation: build with
+##                                            REPRO_ADDON_MUTATION set)
+## ``anywhere-probe-leaves-files``           `repro anywhere`'s clean-up
+##                                            leaves a file in /var/tmp,
+##                                            /root and /var/lib (an ENGINE
+##                                            mutation: build with
+##                                            REPRO_ADDON_MUTATION set)
+## ``image-keeps-random-seed``               the image assembly's clean-up
+##                                            leaves systemd-random-seed
+##                                            running, so power-off writes
+##                                            the assembly's seed
 ## ``observer-never-package-owned``           the collision observer reports
 ##                                            no package provenance: no
 ##                                            path is package-owned and no
@@ -569,14 +587,62 @@
 ## ``polkit-subject-rebind-trusted``         a polkit rule that rebinds
 ##                                           ``subject`` is judged by its
 ##                                           ``subject`` guards (decision 58)
+## ``template-live-by-name``                the live check reads a template
+##                                           by its own name, which systemd
+##                                           refuses (decision 135)
+## ``triggers-left-running``               neither the full apply nor the
+##                                           add-on switch stops or holds
+##                                           the triggers of held units
+##                                           (decision 151)
+## ``trigger-restart-failure-ignored``     a trigger that does not start
+##                                           again is dropped, and the
+##                                           switch goes on (decision 155)
+## ``triggers-of-running-units-stopped``   every active trigger of a held
+##                                           unit is stopped, also one whose
+##                                           unit runs (decision 151)
+## ``fired-from-driver-starts-only``       the triggers to fire again are
+##                                           taken from the drivers' starts
+##                                           alone (decision 152)
+## ``fired-instance-unmapped``             an instance trigger's unit is
+##                                           not mapped to its judged
+##                                           template (decision 152)
+## ``requirers-of-refused-released``       a unit that requires a refused
+##                                           unit is released (decision 153)
+## ``trigger-edges-omitted``               the planner orders no socket,
+##                                           timer or path unit after the
+##                                           unit it triggers (decision 137)
+## ``live-check-call-site-reverted``       the add-on switch's call site
+##                                           decides step 6's reload and
+##                                           judgement from a unit-file
+##                                           change alone, not through
+##                                           ``liveCheckAtStep6`` (red on
+##                                           the adopt gate's case 2e)
+## ``start-holds-after-driver-writes``     the add-on switch writes its
+##                                           start holds at step 6, after
+##                                           the drivers' reloads loaded
+##                                           the generation (decision 136)
 ## ``narrowed-live-set``                     the add-on switch judges and
 ##                                           holds no unit in a switch that
-##                                           changes no unit file
+##                                           changes no unit file (red in
+##                                           t_addon_carried_state_fails_closed
+##                                           and in the adopt gate's case
+##                                           2e, a credentials-only switch)
 ## ``reissue-skips-targets``                 after a full apply's live check,
 ##                                           the start jobs of the targets the
 ##                                           drivers started are not
 ##                                           re-issued (decision 79)
 ## ``reissue-skips-sockets``                 the same for sockets
+## ``reissue-skips-unit-state``              the same for a ``systemd.unitState``
+##                                           start (2026-11-14)
+## ``reissue-skips-timers``                  the same for a ``systemd.systemTimer``
+##                                           start
+## ``shared-hold-lifted-by-passed-instance`` a passed template instance lifts the
+##                                           hold its refused sibling shares
+## ``refusal-holds-every-unit``              one refused unit keeps every
+##                                           judged unit held and down
+## ``trigger-fired-under-hold-not-started``  a timer or path unit's trigger that
+##                                           fired under the hold does not
+##                                           get its service started
 ## ``adopt-without-profile``                 ``repro system adopt`` takes
 ##                                           drifted bytes the profile does
 ##                                           not declare (decision 61)
@@ -907,16 +973,89 @@
 ##                                            and staticExec inputs
 ## ``fresh-ignores-list-binary``              fresh_binary accepts a list
 ##                                            written for another binary
+## ``fresh-ignores-listings``                 fresh_binary does not check a
+##                                            listed directory's entries
+##                                            (decision 80)
+## ``fresh-accepts-user-config``              fresh_binary accepts a helper
+##                                            built without --skipUserCfg
+##                                            (decision 142)
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
-## ``override-record-kept-on-failed-write``  a record whose write failed
-##                                            after its rename stays, with
-##                                            its signature (round 7's rule,
-##                                            withdrawn in round 8)
-## ``override-record-kept-after-failed-uninstall``  an uninstall that stops
-##                                            after the gate with the store
-##                                            evidence in place leaves its
-##                                            discard record (round 8)
+## ``override-rollback-removes-sig``         an intent record whose write
+##                                            failed after its rename loses
+##                                            its signature (decision 81)
+## ``discard-verify-ignores-completion``      verify-discard-record reports
+##                                            "completed" from the intent
+##                                            record alone (decision 81)
+## ``discard-verify-completion-sig-alone``    a completion signature without
+##                                            its record counts as completed
+## ``discard-verify-skips-intent-digest``     a completion of another intent
+##                                            record counts
+## ``discard-verify-skips-completion-signature``  the completion record is
+##                                            parsed, not verified: no
+##                                            signature, key or schema check
+## ``discard-verify-reports-intent-objects``  the verdict lists the intent's
+##                                            objects as discarded, whatever
+##                                            the completion records (kept
+##                                            objects reported discarded)
+## ``discard-completion-held-by-cleanup-error`` a cleanup failure after
+##                                            the evidence is gone holds
+##                                            the completion back (round 8;
+##                                            decision 113 withdraws it)
+## ``discard-completed-objects-present``      the completion is written while
+##                                            a discarded object is still in
+##                                            place
+## ``discard-failed-removal-counted-as-kept`` a store aside still on disk after
+##                                            a failed removal is listed as
+##                                            kept with the store, without
+##                                            --keep-store
+## ``discard-completion-key-read-late``       the completion is signed from
+##                                            the key file, which the removal
+##                                            took
+## ``discard-completion-failure-discards-key`` uninstall goes on to remove the
+##                                            attestation key and the state
+##                                            when the discard's completion
+##                                            could not be written
+## ``resume-without-marker``                  a re-run completes the newest
+##                                            uncompleted intent, marker or
+##                                            not (decision 148)
+## ``marker-not-bound-to-intent``             a discard marker is accepted
+##                                            for an intent it does not bind
+## ``marker-before-sync``                     the discard marker is written
+##                                            before the removal is synced
+## ``marker-signature-unchecked``             an unsigned or forged discard
+##                                            marker is accepted
+## ``ledger-copy-removed-with-the-rest``      /var/lib/repro is removed in
+##                                            one recursive removal, so a
+##                                            part-way failure can take the
+##                                            ledger copy (decision 150)
+## ``sink-config-removed-in-step-4``          the Evidence sink's
+##                                            configuration and CA go with
+##                                            the other /etc objects
+##                                            (decision 56)
+## ``state-removed-after-root-failure``       the state goes although
+##                                            /etc/repro, a key or the
+##                                            secrets ramfs failed
+## ``ship-ok-without-sink-configuration``     uninstall reads a missing sink
+##                                            configuration as "nothing to
+##                                            wait for" though records are
+##                                            queued, so a re-run discards
+##                                            them without a signed record
+## ``evidence-reported-removed-unchecked``    a store evidence entry is
+##                                            reported removed although its
+##                                            removal failed, and the
+##                                            uninstall goes on to the keys
+## ``finish-trusts-kept-list``                finishDiscard counts a listed
+##                                            object as kept without
+##                                            --keep-store
+## ``discard-completion-skips-sync``          the completion is written
+##                                            without making the removal
+##                                            durable (decision 112)
+## ``intent-overwrites-existing``             a discard record is written
+##                                            over one of the same name
+## ``discard-completion-sync-error-swallowed`` a completion record whose
+##                                            directory sync failed is not
+##                                            reported
 ## ``verify-accepts-missing-key``             verify-discard-record verifies
 ##                                            without --key (round 6)
 ## ``sim-skips-stop``                         the simulator's TLS smoke pass
@@ -951,8 +1090,12 @@ const
                           "image-omits-gen0-ledger", "image-omits-store-closure",
                           "image-bakes-recipient-key",
                           "image-keeps-first-boot-state",
+                          "image-keeps-random-seed",
+                          "anywhere-digest-omits-profile",
+                          "anywhere-probe-leaves-files",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
+                          "uninstall-discards-state-after-failed-store-removal",
                           "observer-never-package-owned",
                           "observer-checks-path-text-only",
                           "exclusive-as-plain-restart",
@@ -1286,7 +1429,124 @@ const
                           # unit is not running; a birth time compared
                           # with the invocation's start more precisely
                           # than the file system stamps it.
-                          "recreated-while-stopped", "btime-exact",
+                          "recreated-while-stopped",
+                          # A9 round 12: a restart's InvocationID not
+                          # compared; the 100 ms window dropped; the run
+                          # read in two calls; a template judged by the
+                          # instance checked, not the one that ran; the
+                          # migration without listeners; a statx error
+                          # read as absent; the birth time not compared;
+                          # a listener below a directory its service can
+                          # write.
+                          "recreated-same-invocation", "recreated-window-exact",
+                          "view-two-calls", "observation-instance-judged-alone",
+                          "migration-skips-listeners", "statx-errors-absent",
+                          "same-identity-ignores-btime",
+                          "listener-below-writable-allowed",
+                          # a revert refused by its own floor check,
+                          # leaving the host pending.
+                          "revert-refuses-on-floor",
+                          # the start step records a template's
+                          # directory for its observation instance.
+                          "start-step-records-first-unit",
+                          # a template's remade directory judged without
+                          # the instances the generation names, so a
+                          # record naming its observation instance splits
+                          # the names' verdicts; a directory refused for
+                          # one name of a template accepted for a later
+                          # one in the same check (issue 2026-11-13).
+                          "template-instances-unjudged",
+                          "template-refusal-forgotten",
+                          # a template's remade directory recorded and
+                          # logged once per name that accepted it; one a
+                          # later name refused written anyway.
+                          "template-acceptance-per-name",
+                          "template-refused-written",
+                          # a start in a switch leaves the recorded
+                          # InvocationID of an unchanged directory as it
+                          # was.
+                          "record-keeps-old-invocation",
+                          # a revert holds a refusal's subject even when
+                          # the generation does not install it.
+                          "revert-holds-any-subject",
+                          # a revert's hold written to /run, so a
+                          # reboot starts the held unit.
+                          "revert-hold-runtime-only",
+                          # a revert hold exempted from the loaded-file
+                          # rules by its name, whatever it says.
+                          "revert-hold-any-content",
+                          # a unit whose revert hold a passing apply
+                          # clears is left down.
+                          "cleared-hold-not-started",
+                          # a revert's hold is recorded in no ledger,
+                          # so uninstall leaves it behind (issue
+                          # 2026-11-14).
+                          "revert-hold-unledgered",
+                          # a replay forgets the hold directories its
+                          # interrupted revert recorded, so they are left
+                          # unclaimed.
+                          "replayed-hold-dir-unclaimed",
+                          # the staging directory of a revert's hold is
+                          # not synced before its record says staged.
+                          "revert-hold-staging-not-synced",
+                          # a staged record whose directory is gone stays
+                          # staged, so a later <unit>.d at that path is
+                          # claimed.
+                          "revert-hold-gone-dir-reclaimed",
+                          # a revert-hold directory record that exists
+                          # but cannot be read is taken as empty, and the
+                          # next step rewrites it with only that step.
+                          "revert-hold-record-unreadable-as-empty",
+                          # uninstall removes only the holds a ledger
+                          # names, not those of a revert that died before
+                          # its ledger.
+                          "uninstall-ignores-unledgered-holds",
+                          # recovery starts a unit a revert holds and
+                          # reports it started.
+                          "recovery-starts-held-units",
+                          # a passing switch that clears a revert hold
+                          # removes its directory whenever it is left
+                          # empty, an operator's too.
+                          "revert-hold-clear-removes-any-dir",
+                          # the record of a revert's hold directories is
+                          # cleared when its ledger is written, not at
+                          # its commit, so a replay after a crash in
+                          # between leaves them unclaimed.
+                          "revert-hold-dirs-cleared-at-ledger",
+                          # a revert's hold is written unsynced, so a
+                          # power loss brings it back empty and the held
+                          # unit starts at boot.
+                          "revert-hold-not-synced",
+                          # a revert removes the start holds and reloads
+                          # before its persistent hold is written, and
+                          # reloads whether the write failed or not.
+                          "revert-hold-written-after-release",
+                          # a remade directory born any time after its
+                          # run's start is accepted: no upper bound at
+                          # the main process's start.
+                          "recreated-no-upper-bound",
+                          # a listener's covering places are those of
+                          # the activated service alone, not of every
+                          # unit sharing its stem.
+                          "listener-writable-own-unit-only",
+                          # a listener's covering places are compared as
+                          # spelled (/var/run is not /run, no link is
+                          # resolved).
+                          "listener-writable-by-spelling",
+                          # a hold is written with writeFile, whose
+                          # failure on a full file system goes unseen.
+                          "hold-written-unchecked",
+                          # a floored unit is not ordered after the boot
+                          # re-assertion, so a reboot before recovery
+                          # starts it with no hold.
+                          "floored-not-after-reassert",
+                          # decision 141's bound counts from the main
+                          # process's start (ExecMainStartTimestamp).
+                          "recreated-bound-from-main-start",
+                          # a template's writable place is read only
+                          # through its observation instance, its
+                          # specifiers resolved for that instance.
+                          "writable-specifier-resolved",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1386,8 +1646,30 @@ const
                           "boot-closure-reads-generation-dropins",
                           "polkit-subject-rebind-trusted",
                           "narrowed-live-set",
+                          # A13 review round 8, §13 decision 135.
+                          "template-live-by-name",
+                          # §13 decision 136.
+                          "start-holds-after-driver-writes",
+                          # The every-switch check's call site (owner
+                          # decision on the round-8 wiring issue).
+                          "live-check-call-site-reverted",
+                          # §13 decision 137: the planner's trigger edges.
+                          "trigger-edges-omitted",
+                          # A13 review round 9, §13 decisions 151-153.
+                          "triggers-left-running",
+                          "triggers-of-running-units-stopped",
+                          # §13 decision 155.
+                          "trigger-restart-failure-ignored",
+                          "fired-from-driver-starts-only",
+                          "fired-instance-unmapped",
+                          "requirers-of-refused-released",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
+                          "reissue-skips-unit-state",
+                          "reissue-skips-timers",
+                          "refusal-holds-every-unit",
+                          "shared-hold-lifted-by-passed-instance",
+                          "trigger-fired-under-hold-not-started",
                           "plan-ignores-profile-digest",
                           # The conversion gate's falsifiers of three
                           # round-5 static readings: each with the full
@@ -1520,8 +1802,33 @@ const
                           "fresh-ignores-list-binary",
                           "override-sig-write-error-swallowed",
                           "verify-accepts-missing-key", "sim-skips-stop",
-                          "override-record-kept-on-failed-write",
-                          "override-record-kept-after-failed-uninstall"]
+                          # Round 8: §13 decision 81.
+                          "override-rollback-removes-sig",
+                          "discard-verify-ignores-completion",
+                          "discard-verify-completion-sig-alone",
+                          "discard-verify-skips-intent-digest",
+                          "discard-verify-skips-completion-signature",
+                          "discard-verify-reports-intent-objects",
+                          "discard-completion-held-by-cleanup-error",
+                          "discard-completion-skips-sync",
+                          "finish-trusts-kept-list",
+                          "evidence-reported-removed-unchecked",
+                          "ship-ok-without-sink-configuration",
+                          "sink-config-removed-in-step-4",
+                          "ledger-copy-removed-with-the-rest",
+                          "resume-without-marker",
+                          "marker-not-bound-to-intent",
+                          "marker-before-sync",
+                          "marker-signature-unchecked",
+                          "state-removed-after-root-failure",
+                          "intent-overwrites-existing",
+                          "discard-completed-objects-present",
+                          "discard-failed-removal-counted-as-kept",
+                          "discard-completion-key-read-late",
+                          "discard-completion-failure-discards-key",
+                          "discard-completion-sync-error-swallowed",
+                          "fresh-ignores-listings",
+                          "fresh-accepts-user-config"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

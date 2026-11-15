@@ -107,6 +107,20 @@ type
       ## egress observer; owner decision 2026-11-04): ``path`` is
       ## ``<family> <name>``. Created by generation 0's observer unit,
       ## removed by uninstall; no other table is ever the add-on's.
+    lcRevertHold = "revertHold"
+      ## A revert's persistent hold (spec §10.1, §13 decision 133),
+      ## ``/etc/systemd/system/<unit>.d/zz-repro-addon-revert-hold.conf``
+      ## holding exactly the revert's hold text; ``unit`` names the unit
+      ## (a template's, for its instances) it keeps from starting. Not a
+      ## profile resource: every ledger written while the hold is on the
+      ## host records it (``resource`` is ``revert-hold``), the passing
+      ## switch that removes it records it no longer, and uninstall
+      ## removes it with the drop-ins (spec §6.4 step 2). The
+      ## ``<unit>.d`` directory a revert created for it is an ``lcDir``
+      ## entry of the same resource. Recorded so that no hold outlives the
+      ## add-on and keeps an operator's own unit of that name from ever
+      ## starting (issue 2026-11-14-floor-a-revert-hold-is-in-no-ledger-
+      ## so-uninstall-leaves-it).
 
   LedgerEntry* = object
     class*: LedgerClass
@@ -302,7 +316,7 @@ proc observeDrift*(e: LedgerEntry): string =
   ## store prefixes, retained accounts) are checked by their own owners and
   ## report "" here.
   case e.class
-  of lcEtcFile, lcUnit, lcDropIn:
+  of lcEtcFile, lcUnit, lcDropIn, lcRevertHold:
     if e.isLink:
       if not symlinkExists(e.path):
         if fileExists(e.path):
@@ -484,7 +498,7 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
       if isEtcPath(e.path):
         result.add(ExpectedRecord(component: fcEtc, key: e.path,
           value: "d " & e.mode & " " & e.owner))
-    of lcEtcFile, lcDropIn:
+    of lcEtcFile, lcDropIn, lcRevertHold:
       result.add(ExpectedRecord(component: fcEtc, key: e.path,
         value: fileValue(e), baseValue: e.replaced))
     of lcUnit:

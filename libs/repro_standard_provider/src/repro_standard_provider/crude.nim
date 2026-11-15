@@ -248,8 +248,21 @@ proc emitCrudeFragment*(projectRoot: string;
                        packageName: string;
                        nativeBuildArgv: openArray[string];
                        outputDirs: openArray[string];
-                       inputGlob: openArray[string] = ["**/*"]):
+                       inputGlob: openArray[string] = ["**/*"];
+                       toolCacheDirs: openArray[string] = [];
+                       outputFiles: openArray[string] = [];
+                       widthFlag = ""):
                          GraphFragment {.gcsafe.} =
+  ## ``toolCacheDirs`` are directories the delegated tool owns for its own
+  ## reuse (cargo's ``target``): pruned from the inputs like an output
+  ## directory, but NOT declared as an output, so the engine neither records
+  ## nor clears them and the tool's incremental state survives from build to
+  ## build (Tool-Owned-Caches.md). ``outputFiles`` are declared outputs of the
+  ## action that are files (a delegated build's answer about what it
+  ## produced). ``widthFlag`` sizes the action: it asks RunQuota for a width
+  ## range and the engine writes the granted width after that flag, in the
+  ## command (``sized_tools``).
+  ##
   ## See module doc. Build the single-action Mode B fragment for
   ## ``packageName``. Idempotent — callers may invoke this repeatedly
   ## across requests; the action id is derived from ``packageName`` so
@@ -265,10 +278,11 @@ proc emitCrudeFragment*(projectRoot: string;
         "supplied no command to delegate to)")
     let argvSeq = @nativeBuildArgv
     let outputsSeq = @outputDirs
-    let inputs = collectCrudeInputs(projectRoot, outputsSeq, inputGlob)
+    let inputs = collectCrudeInputs(projectRoot,
+      @outputDirs & @toolCacheDirs, inputGlob)
     let absoluteOutputs = block:
       var acc: seq[string] = @[]
-      for o in outputsSeq:
+      for o in outputsSeq & @outputFiles:
         if isAbsolute(o):
           acc.add(o)
         else:
@@ -286,7 +300,8 @@ proc emitCrudeFragment*(projectRoot: string;
         pool = "compile",
         cacheable = true,
         dependencyPolicy = automaticMonitorPolicy(),
-        commandStatsId = "standard-provider.crude")
+        commandStatsId = "standard-provider.crude",
+        sizedBy = widthFlag)
       # Single-action target: register exactly ONE alias so the engine's
       # "direct target alias" bookkeeping (libs/repro_cli_support) doesn't
       # complain about two distinct target names pointing at the same

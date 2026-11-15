@@ -7,6 +7,8 @@ libs/ct_test_surface/src/ct_test_surface.nim
 libs/repro_attest/src/repro_attest/cloud_lease.nim
 libs/repro_binary_cache_client/src/repro_binary_cache_client/engine_publisher.nim
 libs/repro_build_engine/src/repro_build_engine.nim
+libs/repro_cargo_edge/src/repro_cargo_edge/edge.nim
+libs/repro_cargo_edge/src/repro_cargo_edge/rustc_wrapper.nim
 libs/repro_cli_support/src/repro_cli_support.nim
 libs/repro_cli_support/src/repro_cli_support/dev_session.nim
 libs/repro_cli_support/src/repro_cli_support/disk.nim

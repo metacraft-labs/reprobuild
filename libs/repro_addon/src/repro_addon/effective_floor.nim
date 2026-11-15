@@ -84,6 +84,16 @@ const
   StartHoldText* = "# Written by the ReproOS add-on switch: the unit may not " &
     "start until its\n# effective configuration has been checked against " &
     "its hardening floor.\n[Unit]\n" & StartHoldAssertion & "\n"
+  RevertHoldName* = "zz-repro-addon-revert-hold.conf"
+    ## The persistent drop-in a revert writes, under ``/etc/systemd/system``,
+    ## for each unit of the generation its own floor check refused (§13
+    ## decision 133): the same assertion as the start hold, so the unit
+    ## does not start, at a reboot either, until a later switch's check
+    ## passes and removes it.
+  RevertHoldText* = "# Written by the ReproOS add-on's revert: its floor " &
+    "check refused this unit,\n# which may not start until an apply " &
+    "whose check it passes removes this file.\n[Unit]\n" &
+    StartHoldAssertion & "\n"
   CredentialRoot* = "/run/repro/secrets"
     ## Where the add-on stages a service's credentials (``profile``'s
     ## ``SecretsRunRoot``): ``LoadCredential=`` may read only
@@ -712,16 +722,19 @@ type
     invocationStart*: int64
       ## when its current invocation began (``InactiveExitTimestamp``),
       ## nanoseconds since the epoch; 0 when unknown
+    mainStart*: int64
+      ## when the main process of its current or last run started
+      ## (``ExecMainStartTimestamp``), nanoseconds since the epoch; 0 when
+      ## systemd does not say. Read in the same ``systemctl show`` as the
+      ## start, the end and the state (§13 decision 141).
     stopped*: bool
       ## the unit is not running (its ``ActiveState`` is none of
       ## ``active``, ``activating``, ``reloading``), or systemd does not say
-    clockResolution*: int64
-      ## how far, in nanoseconds, a file system's timestamp may lag the
-      ## precise clock systemd stamps an invocation with: the kernel takes
-      ## inode times from the coarse clock (fs/inode.c ``current_time``,
-      ## ``ktime_get_coarse_real_ts64``), so a directory made just after the
-      ## invocation began can carry a birth time up to one tick earlier;
-      ## ``clock_getres(CLOCK_REALTIME_COARSE)``
+    lastStop*: int64
+      ## when its last run ended (``InactiveEnterTimestamp``), nanoseconds
+      ## since the epoch; 0 when unknown. Read with the start, the
+      ## ``InvocationID`` and the state in one ``systemctl show``, so the
+      ## four are one snapshot (A9 review round 12, finding 5).
 
 # statx(2) through the raw system call: glibc and the static musl build
 # both have syscall(2), and the struct is the kernel's own
@@ -759,32 +772,32 @@ const
   StatxIno = 0x100'u32
   StatxBtime = 0x800'u32
 
-proc statxOf(path: string; follow: bool): tuple[ok: bool; buf: StatxBuf] =
-  ## ``statx(2)`` of ``path``: the inode and the birth time it reports.
+proc statxOf(path: string; follow: bool): tuple[ok: bool; buf: StatxBuf; err: cint] =
+  ## ``statx(2)`` of ``path``: the inode and the birth time it reports, or
+  ## the ``errno`` it failed with (``ENOSYS`` where there is no statx).
   when SysStatx < 0:
-    return (false, StatxBuf())
+    return (false, StatxBuf(), ENOSYS)
   else:
     var buf: StatxBuf
     let flags = (if follow: 0 else: AtSymlinkNoFollow)
     let r = c_syscall(clong(SysStatx), cint(AtFdcwd), path.cstring, cint(flags),
                       cuint(StatxIno or StatxBtime), addr buf)
-    (r == 0, buf)
-
-proc coarseResolutionNs*(): int64 =
-  ## The resolution of the coarse real-time clock the kernel stamps inode
-  ## times with (one tick), in nanoseconds; 0 where it cannot be read, so
-  ## comparisons stay exact.
-  when defined(linux):
-    var ts: Timespec
-    # CLOCK_REALTIME_COARSE (include/uapi/linux/time.h).
-    if clock_getres(ClockId(5), ts) == 0:
-      return int64(ts.tv_sec) * 1_000_000_000'i64 + int64(ts.tv_nsec)
-  0
+    (r == 0, buf, (if r == 0: 0.cint else: errno))
 
 proc identityOfPath*(path: string): PathIdentity =
   ## ``path``'s identity now (not following a final link), or not there.
-  let (ok, b) = statxOf(path, follow = false)
-  if not ok: return (false, 0'u64, 0'u64, 0'i64)
+  ## Only ``ENOENT`` (and ``ENOTDIR`` on a component) means absent. Any other
+  ## failure (``EACCES``, ``EPERM`` from a filter, ``ELOOP``, ``EIO``,
+  ## ``ENOSYS``) reads as a path that exists with no identity known: it
+  ## never matches a record and is never taken as absent, so every check
+  ## that needs it refuses (A9 review round 12, finding 6).
+  let (ok, b, err) = statxOf(path, follow = false)
+  if not ok:
+    when mutated("statx-errors-absent"):
+      return (false, 0'u64, 0'u64, 0'i64)   # Falsifying build: round 11's reading
+    else:
+      if err in [ENOENT, ENOTDIR]: return (false, 0'u64, 0'u64, 0'i64)
+      return (true, 0'u64, 0'u64, 0'i64)
   let bt =
     when mutated("identity-without-btime"):
       1'i64        # Falsifying build: every birth time alike, so device and inode decide
@@ -797,15 +810,33 @@ proc identityOfPath*(path: string): PathIdentity =
 proc birthTimeOf*(path: string; follow = true): int64 =
   ## ``path``'s birth time in nanoseconds (following links unless told
   ## not to), or 0 where the file system reports none.
-  let (ok, b) = statxOf(path, follow)
+  let (ok, b, _) = statxOf(path, follow)
   if not ok or (b.mask and StatxBtime) == 0: return 0
   b.btime.tvSec * 1_000_000_000'i64 + int64(b.btime.tvNsec)
 
-proc sameIdentity(c: CreatedDir; now: PathIdentity): bool =
+proc sameIdentity*(c: CreatedDir; now: PathIdentity): bool =
   ## The recorded directory is the one at the path now: same device,
-  ## inode and birth time, the birth time known (§13 decision 76).
-  now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
-    c.ino == now.ino and c.btime == now.btime
+  ## inode and birth time, the birth time known (§13 decision 76). The one
+  ## comparison of a record with a path's identity: the effective check
+  ## (``createdForUnit``, ``startMayCreate``) and the record's own upkeep
+  ## (``addon_apply.recordCreatedDirs``, ``recordStartedSince``) all call
+  ## it, so the falsifier below reaches every one of them (issue
+  ## 2026-11-13-floor-decision-76-birth-time-is-never-tested-against-a-reused-inode).
+  when mutated("same-identity-ignores-btime"):
+    # Falsifying build: both birth times known, but not compared, so a
+    # reused inode passes (A9 review round 12, finding 7).
+    now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
+      c.ino == now.ino
+  else:
+    now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
+      c.ino == now.ino and c.btime == now.btime
+
+const ObservationInstanceTag* = "@repro-addon-observe."
+  ## The instance name the add-on checks a template under
+  ## (``collision.templateObservationName``); it never runs.
+
+proc isObservationInstance*(unit: string): bool =
+  ObservationInstanceTag in unit
 
 proc flooredKey*(unit: string): string =
   ## The floored resource a unit name stands for: a template's instances
@@ -855,6 +886,61 @@ proc startMayCreate*(path, unit: string; now: PathIdentity;
   path in created and flooredKey(created[path].unit) == flooredKey(unit) and
     sameIdentity(created[path], now)
 
+type
+  RecreatedAcceptance* = object
+    ## A template's directory that §13 decision 71 accepted as made again
+    ## under one or more of its names in one effective check, not yet
+    ## recorded or logged (``noteRecreated``, ``commitRecreatedProblems``).
+    path*: string        ## the directory (a first component)
+    unit*: string        ## the instance whose run made it, as first judged
+    key*: string         ## the setting that declares it (``RuntimeDirectory``, ...)
+    view*: SystemdView   ## systemd's state it was accepted on
+    names*: seq[string]  ## the names of the template that accepted it
+
+proc noteRecreated*(t: var seq[RecreatedAcceptance];
+                    name, path, unit, key: string; v: SystemdView) =
+  ## Hold the acceptance of ``path`` under the template's name ``name``
+  ## until every name of the template has been checked: one entry per
+  ## directory, whichever names accept it, so it is recorded and logged
+  ## once (§13 decision 71; issue 2026-11-13-floor-template-observation-
+  ## instance-refuses-a-directory-its-instance-restart-made).
+  when not mutated("template-acceptance-per-name"):
+    # Falsifying build: one entry per name, so a directory is recorded and
+    # logged once for every name that accepted it.
+    for a in t.mitems:
+      if a.path == path:
+        if name notin a.names: a.names.add(name)
+        return
+  t.add(RecreatedAcceptance(path: path, unit: unit, key: key, view: v,
+                            names: @[name]))
+
+proc commitRecreatedProblems*(t: openArray[RecreatedAcceptance];
+                              refused: HashSet[string];
+                              write: proc (path, unit: string; v: SystemdView): bool;
+                              written: var seq[RecreatedAcceptance]): seq[string] =
+  ## After every name of a template has been checked: record and log each
+  ## held acceptance once, through ``write``, unless any name of the
+  ## template refused the directory (``refused``, rule existing-tree), in
+  ## whatever order, so a refused check rewrites no record. ``written``
+  ## gets each one written. A write that fails refuses the directory under
+  ## each name that accepted it -- one tagged line each, the result -- as
+  ## an acceptance that cannot be logged is not made (§13 decision 71; A9
+  ## review round 11, finding 6; issue 2026-11-13-floor-template-
+  ## observation-instance-refuses-a-directory-its-instance-restart-made).
+  for a in t:
+    when not mutated("template-refused-written"):
+      # Falsifying build: a directory a later name refused is written
+      # anyway.
+      if a.path in refused: continue
+    if write != nil and write(a.path, a.unit, a.view):
+      written.add(a)
+      continue
+    for n in a.names:
+      result.add(n & ": " & a.key & " " & a.path &
+        ": systemd made it again for the unit, but the acceptance could " &
+        "not be recorded and logged (§13 decision 71); it stays refused " &
+        "[rule:existing-tree key:" & a.key & "]")
+
 proc declaredDirectories*(show: ShowProps): seq[string] =
   ## Every directory the unit declares, as systemd resolves it: each
   ## ``RuntimeDirectory=``, ``StateDirectory=``, ``CacheDirectory=``,
@@ -865,17 +951,36 @@ proc declaredDirectories*(show: ShowProps): seq[string] =
       let d = t.split(':')[0]
       if d.len > 0: result.add(normalisedPath(root & "/" & d))
 
-proc bornBefore*(btime, start, resolution: int64): bool =
-  ## ``btime``, a file system's birth time, is earlier than ``start``, a
-  ## time systemd took from the precise clock, by more than the coarse
-  ## clock's ``resolution`` the file system stamps with (§13 decision 77:
-  ## "not earlier than" is judged at the resolution the birth time has).
-  when mutated("btime-exact"):
-    # Falsifying build: the precise comparison, which refuses a directory
-    # systemd made within a tick of the invocation's start.
-    btime < start
-  else:
-    btime + max(resolution, 0'i64) < start
+const RestartWindowNs* = 100_000_000'i64
+  ## Spec §10.1 round 12, "A directory made again outside a switch": how much
+  ## earlier than the start systemd reports a directory made for that start
+  ## may be born. systemd 252 makes it in the child it forks before it
+  ## stamps the start (up to 17.6 ms measured on debian-12); 100 ms covers
+  ## that with room. The residual -- a tree a root process makes in that
+  ## window before a start is taken as systemd's -- is reported to the
+  ## owner, whose answer to that question is still open: this is an
+  ## implementation amendment, not an owner decision.
+
+const RunStartToleranceNs* = (when hostCPU == "amd64": 1_000_000_000'i64
+                              else: 8_000_000_000'i64)
+  ## §13 decisions 141, 145 and 147: how much later than the start of a
+  ## unit's run (``InactiveExitTimestamp``) a directory systemd made for it
+  ## may be born. systemd makes the directories as it spawns the run's first
+  ## process (systemd 257 first executes its ``systemd-executor``), after it
+  ## stamps that start. Measured, birth minus ``InactiveExitTimestamp``, over
+  ## transient units with and without an ``ExecStartPre=``, idle and under 2x
+  ## and 8x ``nproc`` busy loops, on a host at load average 40 to 60 (the A9
+  ## round-14 record):
+  ##
+  ## * amd64 (KVM): at most 9.2 ms on debian-12 (systemd 252), 215.9 ms on
+  ##   debian-13 (systemd 257) -- over round 13's 250 ms with no margin, so
+  ##   1 s (4.6 times the worst);
+  ## * arm64 (debian-13) and armhf (ubuntu-24.04), under TCG emulation: at
+  ##   most 3.54 s and 3.42 s, so 8 s (2.3 times the worst). Native hardware
+  ##   was not measured.
+  ##
+  ## The residual: a tree a root process makes at the path within this long
+  ## after a run of the unit begins is taken as systemd's.
 
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
@@ -889,14 +994,19 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
   ## 1. the record names ``path`` for this same unit;
   ## 2. ``path`` is exactly one of the directories the unit declares
   ##    (``declaredDirectories``), never a prefix or a parent of one;
-  ## 3. systemd's state shows it made the directory for the unit's current
-  ##    invocation: the directory's birth time is not earlier than the
-  ##    current invocation's start (§13 decision 77), for a static and a
-  ##    dynamic user alike. Where the file system reports no birth time, or
-  ##    systemd no start, it is refused. Neither ownership nor ctime counts:
-  ##    systemd's adoption of an existing tree (it chowns it, or moves a
-  ##    public one into ``private/``) and any write into it change both, and
-  ##    neither makes the tree new.
+  ## 3. systemd's state shows a run of the unit made it (§13 decision 77,
+  ##    as spec §10.1 round 12, "A directory made again outside a switch" and
+  ##    "A stopped unit's directory" amend it), for a static and a dynamic
+  ##    user alike: the unit's
+  ##    ``InvocationID`` differs from the one recorded (it started again
+  ##    since), and the directory was born no earlier than
+  ##    ``RestartWindowNs`` before that run's start; for a unit that is not
+  ##    running now, also no later than that run's end. Where the file
+  ##    system reports no birth time, or systemd no invocation, start or
+  ##    (for a stopped unit) end, it is refused. Neither ownership nor ctime
+  ##    counts: systemd's adoption of an existing tree (it chowns it, or
+  ##    moves a public one into ``private/``) and any write into it change
+  ##    both, and neither makes the tree new.
   when not mutated("recreated-unrecorded-accepted"):
     if path notin created: return "the add-on has no record of it"
     if flooredKey(created[path].unit) != flooredKey(unit):
@@ -914,18 +1024,50 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
       return ""
     return "ctime predates the invocation"
   elif not mutated("recreated-systemd-unchecked"):
-    when not mutated("recreated-while-stopped"):
-      # A unit that is not running has no invocation making its
-      # directories: a tree made at the path after its last start (by a
-      # package, tmpfiles.d, an operator) is not systemd's.
-      if v.stopped:
-        return "the unit is not running, so no invocation of it made it"
     if v.btime == 0:
       return "the file system reports no birth time for it"
+    if v.invocationId.len == 0:
+      return "systemd reports no invocation of the unit"
+    when not mutated("recreated-same-invocation"):
+      if path in created and v.invocationId == created[path].invocation:
+        return "the unit has not started again since the add-on recorded it " &
+          "(the same InvocationID), so no run of it made this tree"
     if v.invocationStart <= 0:
-      return "systemd reports no start for the unit's current invocation"
-    if bornBefore(v.btime, v.invocationStart, v.clockResolution):
-      return "it was born before the unit's current invocation began"
+      return "systemd reports no start for the unit's last run"
+    let window = (when mutated("recreated-window-exact"): 0'i64 else: RestartWindowNs)
+    if v.btime < v.invocationStart - window:
+      return "it was born more than " & $(window div 1_000_000) &
+        " ms before the unit's last run began"
+    if v.stopped:
+      # Spec §10.1 round 12, "A stopped unit's directory": a stopped
+      # unit's directory passes only if it was
+      # born within its last run; a tree made after that run ended (a
+      # package, tmpfiles.d, an operator) is not systemd's.
+      when not mutated("recreated-while-stopped"):
+        if v.lastStop <= 0 or v.lastStop < v.invocationStart:
+          return "the unit is not running and systemd reports no end of its last run"
+        if v.btime > v.lastStop:
+          return "the unit is not running, and the tree was born after its last run ended"
+    # §13 decision 141, as decision 145 amends it: an upper bound, counted
+    # from the start of the run (``InactiveExitTimestamp``, read in the
+    # same ``systemctl show`` as the rest), not from its main process.
+    # systemd makes a unit's directories when it spawns the run's FIRST
+    # process -- its first ``ExecCondition=``/``ExecStartPre=`` command, or
+    # the first ``ExecStart=`` of a oneshot -- which may be seconds before
+    # the main process (A9 review round 14, finding 3). A tree born later
+    # than the tolerance after the run began is not systemd's.
+    when mutated("recreated-bound-from-main-start"):
+      # Falsifying build: round 13's bound, from the main process.
+      if v.mainStart <= 0:
+        return "systemd reports no start of the main process of the unit's last run"
+      if v.btime > v.mainStart + RunStartToleranceNs:
+        return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
+          " ms after the main process of the unit's last run started"
+    elif not mutated("recreated-no-upper-bound"):
+      if v.btime > v.invocationStart + RunStartToleranceNs:
+        return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
+          " ms after the unit's last run began, so that run, not systemd " &
+          "setting it up, made it (§13 decisions 141 and 145)"
   ""
 
 proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =
@@ -1245,13 +1387,39 @@ const ListenerKeys* = "Listen,ListenStream,ListenDatagram,ListenSequentialPacket
   ## (systemd.socket(5)), so the parse-time rules' rerun over the file does
   ## not report the listener the dedicated rule already refused.
 
+proc isAddonHold*(path, content: string): bool =
+  ## ``path`` is one of the add-on's own holds, which the rules about
+  ## loaded files do not judge: the switch's start hold, or a revert's
+  ## persistent hold (§13 decision 133) holding exactly ``RevertHoldText``.
+  ## A file of that name with other content is judged like any drop-in.
+  if path.endsWith("/" & StartHoldName): return true
+  when mutated("revert-hold-any-content"):
+    # Falsifying build: a revert hold exempted by its name alone.
+    path.endsWith("/" & RevertHoldName)
+  else:
+    path.endsWith("/" & RevertHoldName) and content == RevertHoldText
+
+proc writablePlacesOf*(show: ShowProps): seq[string] =
+  ## The places the unit can write, as systemd reports its settings
+  ## (``floorWritablePlaces`` over ``ReadWritePaths=``, writable binds,
+  ## tmpfs and every ``*Directory=``), for spec
+  ## §10.1 round 12, "A listener below a place its service can write".
+  var ds: seq[tuple[key, value: string]]
+  for k in ["ReadWritePaths", "BindPaths", "TemporaryFileSystem", "StateDirectory",
+            "RuntimeDirectory", "CacheDirectory", "LogsDirectory",
+            "ConfigurationDirectory"]:
+    let v = show.getOrDefault(k)
+    if v.len > 0: ds.add((key: k, value: v))
+  floorWritablePlaces(ds)
+
 proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         fragment: string; ownDropIns: openArray[string];
                         loaded: openArray[tuple[path, content: string]] = [];
                         startsOf: proc (u: string): seq[string] = nil;
                         ownUnits = initHashSet[string]();
                         conflictsOf: proc (unit: string): seq[string] = nil;
-                        listenerProvenance: proc (path: string): string = nil):
+                        listenerProvenance: proc (path: string): string = nil;
+                        serviceWritable: seq[string] = @[]):
                         seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
   ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
@@ -1291,7 +1459,7 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
       continue
     when not mutated("activator-show-unjudged"):
       let address = (if open >= 0: l[0 ..< open] else: l).strip()
-      let why = listenerRefusal(unit, address, serviceName)
+      let why = listenerRefusal(unit, address, serviceName, serviceWritable)
       if why.len > 0:
         problem2("listener", ListenerKeys, "listener " & l & ": " & why)
       elif address.startsWith("/") and listenerProvenance != nil:
@@ -1402,6 +1570,26 @@ type
     systemdView*: proc (path, unit: string; show: ShowProps): SystemdView
       ## systemd's own state of a directory of the unit (§13 decision 71);
       ## ``nil``: none is consulted, so a changed identity is refused
+    runningInstances*: proc (tmpl: string): seq[string]
+      ## the instances of the template ``tmpl`` (``a@.service``) systemd
+      ## reports running; a template's remade directory is judged against
+      ## the instance that ran (A9 review round 12, finding 4); ``nil``:
+      ## only the instance the record names
+    templateInstances*: seq[string]
+      ## for an instance of a template, or its observation instance: the
+      ## instances of that template the generation names
+      ## (``floorInstancesOf``). A template's remade directory is judged
+      ## against the same instances whichever name is checked (§13
+      ## decision 71; issue 2026-11-13, floor template observation
+      ## instance); empty: none beyond the recorded and running ones
+    templateRefused*: ref HashSet[string]
+      ## shared by every name of one template within one effective check:
+      ## the directories an earlier name refused (rule existing-tree). One
+      ## in it is not accepted as made again for a later name, and
+      ## ``commitRecreatedProblems`` writes none an earlier name accepted, so the
+      ## names reach one verdict and a refused check does not rewrite the
+      ## record it refused (§13 decision 71; same issue); ``nil``: each
+      ## name is judged alone
     onRecreated*: proc (path, unit: string; v: SystemdView): bool
       ## told of each directory decision 71 would accept: it records the
       ## directory again under its new identity and writes the audit
@@ -1754,19 +1942,68 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
             # §13 decision 71: made again by systemd for the unit's current
             # invocation, outside a switch.
             if fp.path in e.createdDirs and e.systemdView != nil:
-              let v = e.systemdView(fp.path, unit, show)
-              if systemdRecreated(fp.path, unit, declaredDirectories(show),
-                                  e.createdDirs, dynamic, v).len == 0:
+              # A template's directory is judged against the instances
+              # that can have run and made it again: the one the record
+              # names, every one systemd reports running, and every one
+              # the generation names -- never the observation instance,
+              # which never runs. The set is the same whichever name of
+              # the template is checked, so every name reaches one verdict
+              # (A9 review round 12, finding 4; §13 decision 71; issue
+              # 2026-11-13-floor-template-observation-instance-refuses-a-
+              # directory-its-instance-restart-made). Condition 1 still
+              # holds the record to this template.
+              let recorded = e.createdDirs[fp.path].unit
+              var runUnits: seq[string]
+              when mutated("observation-instance-judged-alone"):
+                runUnits = @[unit]
+              else:
+                if flooredKey(recorded) == flooredKey(unit) and '@' in unit:
+                  var cands: seq[string]
+                  cands.add(recorded)
+                  if e.runningInstances != nil:
+                    cands.add(e.runningInstances(flooredKey(unit)))
+                  when not mutated("template-instances-unjudged"):
+                    # Falsifying build: the generation's instances left
+                    # out, so a record naming the observation instance
+                    # falls back to the name checked.
+                    cands.add(e.templateInstances)
+                  for i in cands:
+                    if i notin runUnits and not isObservationInstance(i) and
+                        flooredKey(i) == flooredKey(unit):
+                      runUnits.add(i)
+                if runUnits.len == 0: runUnits = @[unit]
+              # Refused for an earlier name of this template in this check:
+              # not accepted for a later one, even if systemd's state moved
+              # between the two reads, so the check does not rewrite the
+              # record of an apply it refuses (same issue).
+              let refusedBefore =
+                when mutated("template-refusal-forgotten"): false
+                else: e.templateRefused != nil and fp.path in e.templateRefused[]
+              var runUnit = ""
+              var v: SystemdView
+              var accepted = false
+              if not refusedBefore:
+                for cand in runUnits:
+                  let cv = e.systemdView(fp.path, cand, show)
+                  if systemdRecreated(fp.path, unit, declaredDirectories(show),
+                                      e.createdDirs, dynamic, cv).len == 0:
+                    runUnit = cand
+                    v = cv
+                    accepted = true
+                    break
+              if accepted:
                 when mutated("unlogged-acceptance"):
-                  if e.onRecreated != nil: discard e.onRecreated(fp.path, unit, v)
+                  if e.onRecreated != nil: discard e.onRecreated(fp.path, runUnit, v)
                   continue
                 else:
-                  if e.onRecreated != nil and e.onRecreated(fp.path, unit, v): continue
+                  if e.onRecreated != nil and e.onRecreated(fp.path, runUnit, v): continue
+                  if e.templateRefused != nil: e.templateRefused[].incl(fp.path)
                   problem2("existing-tree", fp.key, fp.key & " " & fp.path &
                            ": systemd made it again for the unit, but the " &
                            "acceptance could not be recorded and logged (§13 " &
                            "decision 71); it stays refused")
                   continue
+          if e.templateRefused != nil: e.templateRefused[].incl(fp.path)
           problem2("existing-tree", fp.key, fp.key & " " & fp.path & ": " & why &
                    "; it exists and was not created for this unit (§13 decision 57)")
       for (k, p) in created:
@@ -1924,7 +2161,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
     # applied at exec time and has no property): the files it loaded may
     # carry only keys the floor knows.
     for (path, content) in e.loaded:
-      if path.endsWith("/" & StartHoldName): continue   # the switch's own hold
+      if isAddonHold(path, content): continue   # the add-on's own hold
       let dropIn = path != e.fragment
       for d in sectionDirectives(content):
         # Only the settings systemd does not report (PermissionsStartOnly=):
@@ -1951,7 +2188,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       let ownUnits = e.ownUnits
       let isOwn = proc (u: string): bool = ownUnitOf(u, ownUnits)
       for (path, content) in e.loaded:
-        if path.endsWith("/" & StartHoldName): continue
+        if isAddonHold(path, content): continue
         let why = conflictsRefusal(unit, content, isOwn, half = fhEffective)
         if why.len > 0: rerun("conflicts", path & ", by the floor's rules: " & why)
       if own.len > 0:
@@ -1964,7 +2201,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
             if why.len > 0: rerun("parse-rule", "by the floor's rules: " & why)
         except EServiceFloor as x: rerun("parse-rule", "by the floor's rules: " & x.msg)
         for (path, content) in e.loaded:
-          if path == e.fragment or path.endsWith("/" & StartHoldName): continue
+          if path == e.fragment or isAddonHold(path, content): continue
           try:
             let why = dropInFloorRefusal(unit, own, content, exParsed,
                                          half = fhEffective)

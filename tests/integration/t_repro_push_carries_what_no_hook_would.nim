@@ -54,8 +54,11 @@ suite "repro push carries what no hook would":
     defer: removeDir(fx.scratch)
     wireStoreGateway(fx)
     installHooks(fx)
-    # ``repro push`` publishes lock records to the backend's upstream, through
-    # the backend's own hook.
+    # The workspace keeps the default ``publish_locks`` (off): the pre-push gate
+    # writes the commit's lock record into this record store and does not
+    # publish it, and ``repro push`` must not demand that it be remotely proven
+    # (Workspace-Manifests.md §"`publish_locks`"). The publishing side is
+    # covered by t_repro_push_real_hooks_publish_outgoing_head_and_closure.
     let manifests = fx.workspaceRoot / ".repro" / "manifests"
     let manifestBare = fx.scratch / "manifests.git"
     discard gitOut(fx.scratch, "init", "--bare", manifestBare)
@@ -98,6 +101,10 @@ suite "repro push carries what no hook would":
     check accepted.code == 0
     check "repro hooks: certificates: " in accepted.output # What the hook did.
     check upstreamTip(fx) == commit
+    check "not remotely proven" notin accepted.output
+    check "final-lock-verification" notin accepted.output
+    # Nothing was published to the record store's upstream, as the default says.
+    check commit notin gitOut(manifestBare, "ls-tree", "-r", "--name-only", "HEAD")
     check noteOnRemote(fx.upstreamBare, tree).count("# --- test-certificate ---") == 1
     check noteOnRemote(fx.upstreamBare, commit) == ""
 

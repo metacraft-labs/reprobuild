@@ -40,6 +40,26 @@ resolve_shm_queue_src() {
   return 2
 }
 
+# clispec: the `cli:` language and typed CLI model repro_project_dsl builds on,
+# so every DSL compile needs it.
+resolve_cli_spec_src() {
+  if resolve_repo_source_path "CLI_SPEC_SRC" "clispec.nim" "../nim-cli-spec/src"; then
+    return 0
+  fi
+  echo "missing nim-cli-spec source; set CLI_SPEC_SRC or provide ../nim-cli-spec/src" >&2
+  return 2
+}
+
+# confutils (the metacraft-labs fork), rooted at its checkout: repro's own
+# command line is instantiated through ``confutils/clispec_config``.
+resolve_confutils_src() {
+  if resolve_repo_source_path "CONFUTILS_SRC" "confutils.nim" "../nim-confutils"; then
+    return 0
+  fi
+  echo "missing nim-confutils source; set CONFUTILS_SRC or provide ../nim-confutils" >&2
+  return 2
+}
+
 # The marker for nim-bearssl is the module the build actually needs, not the
 # package's root file.
 #

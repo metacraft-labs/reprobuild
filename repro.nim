@@ -38,7 +38,7 @@
 
 {.experimental: "callOperator".}
 
-import std/[os, osproc, sequtils, strutils]
+import std/[algorithm, os, osproc, sequtils, strutils]
 # Ambient-execution hatches. Every call below is bootstrap tier: the recipe has
 # to locate a host tool BEFORE any engine-provisioned prefix exists, so a typed
 # execution profile is not available to it. Naming the hatch says so at the
@@ -819,6 +819,42 @@ proc missingI686ToolchainNote(): string =
     "with 'pacman -S mingw-w64-i686-gcc', or point IO_MON_I686_GCC at an " &
     "existing i686 gcc.exe."
 
+proc shimLinkEnvironment(): seq[(string, string)] =
+  ## The link environment of the Linux preload shim: no rpath of the linker
+  ## wrapper's making may reach it. The same rule, for the same reasons, as
+  ## ``preload_shim_link_without_rpath`` in
+  ## ``scripts/lib/preloaded_shim_loader.sh``, which states them at length:
+  ##
+  ## * ``NIX_DONT_SET_RPATH=1`` stops the nixpkgs ``ld`` wrapper adding an
+  ##   rpath entry for every ``-L`` directory, the C runtime's included.
+  ## * every ``NIX_LDFLAGS*`` variable is emptied, because stdenv's setup puts
+  ##   ``-rpath $out/lib`` into ``NIX_LDFLAGS``, and in ``nix develop``
+  ##   ``$out`` is ``<checkout>/outputs/out``. An action's environment is
+  ##   layered over the engine's own, so without this the shim came out with
+  ##   a DT_RUNPATH naming that nonexistent build-host directory, and any
+  ##   DT_RUNPATH on a preloaded library switches off the host program's
+  ##   DT_RPATH for the library's dependencies: a program that finds its C
+  ##   runtime through its own DT_RPATH then cannot start under the monitor
+  ##   (``libm.so.6: cannot open shared object file``).
+  ##
+  ## The shim needs nothing ``NIX_LDFLAGS`` carries: its DT_NEEDED is the C
+  ## runtime, which the compiler driver finds on its own. Both are
+  ## nixpkgs-specific and inert elsewhere; the artifact checks (run_tests.sh
+  ## after ``.#test-fixtures``, and
+  ## ``tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim``,
+  ## which replays this edge's lowered link) are the guarantee.
+  result = @[("NIX_DONT_SET_RPATH", "1"), ("NIX_LDFLAGS", "")]
+  # The wrapper also reads the role-salted spellings
+  # (``NIX_LDFLAGS_<target>``, ``_FOR_TARGET``, ``_BEFORE``); empty whichever
+  # of them the engine's environment carries, so none can be layered in.
+  # Sorted, so the action's environment does not depend on `environ` order.
+  var salted: seq[string] = @[]
+  for key, _ in envPairs():
+    if key.startsWith("NIX_LDFLAGS") and key != "NIX_LDFLAGS":
+      salted.add(key)
+  for key in sorted(salted):
+    result.add((key, ""))
+
 proc pinnedToolDir(root, tool, version, probe: string): string =
   ## ``<root>/<tool>/<version>`` when it exists and carries `probe`, else
   ## "". Same contract as ``env.ps1``'s ``Test-Path`` guards: a missing or
@@ -919,7 +955,7 @@ package reprobuild:
       # The owning Linux shell already supplies this cross-platform binary.
       "pwsh"
       # scripts/write_helper_deps.sh traces the Nim compiler's front end
-      # with `strace -ff -y` (staticRead targets, what staticExec commands
+      # with `strace -ff -y -xx` (staticRead targets, what staticExec commands
       # read); the edge `reprobuild.helper-deps.repro-binary-cache` names
       # it. A tool the build runs, so it is declared here and never
       # realized for a `--target`. In path mode it resolves from PATH like
@@ -1079,12 +1115,13 @@ package reprobuild:
 
     # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
     #
-    # Each of the four names a workspace PROJECT whose ``repro.nim``
+    # Each of the five names a workspace PROJECT whose ``repro.nim``
     # declares a ``library`` and NO ``executable``:
     #
     #   reprobuild-test-adapters -> ``library repro_test_adapters`` (src/)
     #   nim-stackable-hooks      -> ``library stackable_hooks``     (src/)
     #   nim-shm-queue            -> ``library shm_queue``           (src/)
+    #   nim-cli-spec             -> ``library clispec``             (src/)
     #   test-certificates-tools  -> ``library test_certificates``   (src/)
     #
     # That is Cross-Repo-Source-Consumption §4.2a (SC-11), the Nim
@@ -1138,6 +1175,18 @@ package reprobuild:
     "reprobuild-test-adapters"
     "nim-stackable-hooks"
     "nim-shm-queue"
+    # clispec: the ``cli:`` description language and typed CLI model
+    # ``repro_project_dsl`` builds every ``executable … cli:`` block on. Same
+    # SC-11 channel and the same one-change rule: this line and its
+    # ``repro.lock`` entry.
+    "nim-cli-spec"
+    # NOT LISTED: nim-confutils, which the engine imports for its own command
+    # line (``confutils/clispec_config``, through ``CONFUTILS_SRC`` in
+    # ``config.nims``). The fork has no ``repro.nim`` declaring a
+    # ``library``, so it is not a workspace project this channel can resolve:
+    # a ``uses:`` line for it would buy a lock entry and no ``--path:``, the
+    # half-truth the io-mon note below describes. It is pinned by
+    # ``flake.lock`` and ``.github/sibling-repos`` until it declares one.
     # The test-certificate standard's store, note framing and two-note merge
     # (``import test_certificates`` in repro_cli_support). Same SC-11 channel
     # and the same one-change rule: this line and its ``repro.lock`` entry.
@@ -1418,6 +1467,9 @@ package reprobuild:
 
   executable attestationAgent:
     name: "attestation-agent"
+
+  executable reproRustcWrapper:
+    name: "repro-rustc-wrapper"
 
 
   # Bootstrap-And-Self-Build B2: test-helper executables.
@@ -2476,6 +2528,8 @@ package reprobuild:
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
       let releaseSmokeTest =
         source == "tests/unit/test_release_smoke_dev_exec.py"
+      let releaseTagTest =
+        source == "tests/unit/test_release_tag_names_build.py"
       let confinementSystemdAnalyzeTest =
         source == "tests/unit/test_daemon_worker_confinement_systemd_analyze.py"
       let pyExecute = pythonUnittest.run(
@@ -2504,6 +2558,11 @@ package reprobuild:
             "scripts/release/with_windows_archive_runquota.ps1",
             ".github/workflows/release.yml",
             "scripts/verify_release.sh", "repro.nim"]
+        elif releaseTagTest:
+          # The guard, and the workflow whose publish-job steps the test runs.
+          # It copies the guard into the runner clone it builds.
+          @["scripts/release/assert_tag_names_commit.sh",
+            ".github/workflows/release.yml"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
           # threshold and lease-floor inputs and header they read.
@@ -2533,6 +2592,10 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
+      # Real git and bash: a bare repository as the remote, `git ls-remote`
+      # against it, and the workflow steps' `run:` lines under bash.
+      if releaseTagTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
       if releaseSmokeTest:
         # Bind actual declared child tools into the filtered execute PATH.
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "just"])
@@ -2861,6 +2924,9 @@ package reprobuild:
       binary = "build/bin/repro-binary-cache",
       defines = @["release", "ssl"],
       paths = sourceOnlyNimPaths,
+      # A helper tests run from build/bin is built without the user's Nim
+      # configuration (ReproOS Add-On Mode spec §13 decision 142).
+      skipUserCfg = true,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       runInSourceDir = true,
@@ -2896,7 +2962,7 @@ package reprobuild:
     when defined(linux):
       var binaryCacheDepsArgs = @["bash", "scripts/write_helper_deps.sh",
         "repro-binary-cache", "apps/repro-binary-cache/repro_binary_cache.nim",
-        "--define:release", "--define:ssl"]
+        "--skipUserCfg", "--define:release", "--define:ssl"]
       for p in sourceOnlyNimPaths: binaryCacheDepsArgs.add("--path:" & p)
       let binaryCacheDeps = shell(
         command = quoteShellCommand(binaryCacheDepsArgs),
@@ -2958,6 +3024,23 @@ package reprobuild:
       nimcache = "build/nimcache/attestation-agent",
       runInSourceDir = true,
       actionId = "reprobuild.apps.attestation-agent"))
+
+    # Thin cargo edge: the RUSTC_WRAPPER of a leased cargo action. A row of
+    # ``apps/entrypoints.txt`` and therefore a member of ``.#apps`` too; it
+    # sits beside the engine, where the engine looks for it
+    # (``libs/repro_cargo_edge``).
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-rustc-wrapper/repro_rustc_wrapper.nim",
+      binary = "build/bin/repro-rustc-wrapper",
+      # ``reproVendoredHash`` as in the entrypoints row: a wrapper that
+      # started two more shared libraries on every rustc would pay for them
+      # once per compile.
+      defines = @["release", "reproVendoredHash"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-rustc-wrapper",
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.repro-rustc-wrapper"))
 
     # Dependency-Attribution MAC-1 — the thin daemon client, and since the
     # thin-client-on-PATH rename the image that OWNS THE NAME ``repro``. This
@@ -4088,13 +4171,17 @@ package reprobuild:
         # the compiler, while the shim — the actual cause — appeared nowhere.
         #
         # The shim's DT_NEEDED list is the C runtime and nothing else, so it
-        # needs no rpath at all. The variable is understood by one family of
-        # toolchains and inert elsewhere, which is why it is not the guarantee:
-        # ``scripts/lib/preloaded_shim_loader.sh`` states the property, the
-        # ``build_apps.sh`` publish step refuses a shim that violates it, and
+        # needs no rpath at all — and must carry no DT_RUNPATH of any kind,
+        # which is why ``shimLinkEnvironment`` also empties ``NIX_LDFLAGS``
+        # (stdenv's ``-rpath $out/lib``; see that proc). The variables are
+        # understood by one family of toolchains and inert elsewhere, which is
+        # why they are not the guarantee: ``scripts/lib/preloaded_shim_loader.sh``
+        # states the property, ``scripts/run_tests.sh`` refuses the shim this
+        # edge publishes if it violates it, and
         # ``tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim``
-        # gates it on the artifact this edge produces.
-        extraEnv = @[("NIX_DONT_SET_RPATH", "1")] &
+        # and ``t_preloaded_monitor_shim_carries_no_runpath.nim`` gate it on
+        # the artifact this edge produces.
+        extraEnv = shimLinkEnvironment() &
           # The one Nim switch an image in an installed prefix needs, which
           # no project config can give this edge (the file says why).
           (if shimZigTarget != nil:

@@ -37,6 +37,7 @@ import std/[os, osproc, strutils, tempfiles, times, unittest]
 import repro_build_engine
 import repro_interface_artifacts
 import repro_tool_profiles
+import repro_test_support/owned_processes
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -135,8 +136,9 @@ suite "Nix tool realizations are GC-rooted under the tool store":
     var bumped = ""
     defer:
       setCurrentDir(previousDir)
-      discard execCmd("pkill -f -u " & quoteShell(previousUser) & " " &
-        quoteShell(socketPath) & " || true")
+      # The private helper this case's resolution started, found through its
+      # socket (never by pattern, which would reach other runs' helpers).
+      discard stopUnixSocketServer(socketPath)
       putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
       putEnv("USER", previousUser)
       removeDir(storeRoot)

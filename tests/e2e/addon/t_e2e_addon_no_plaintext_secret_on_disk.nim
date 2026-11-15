@@ -184,9 +184,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         @[("canary-web/canary", c3), ("canary-web/put", c2)], pub)
       discard g.run("rm -f " & SeamDir & "/test-paused-at /root/addon/tick2.rc; " &
         "printf 'secrets-mid-write\\n' > " & SeamDir & "/test-pause-at")
-      discard g.run("setsid nohup sh -c '" & repro & " system addon agent-tick " &
-        "--target " & Target & " --source " & m2 & " > /root/addon/tick2.log " &
-        "2>&1; echo $? > /root/addon/tick2.rc' > /dev/null 2>&1 < /dev/null &")
+      g.startGuestSession(repro & " system addon agent-tick --target " &
+        Target & " --source " & m2 & " > /root/addon/tick2.log 2>&1; " &
+        "echo $? > /root/addon/tick2.rc", "/root/addon/tick2.group")
       var paused = false
       for i in 0 ..< 600:
         if g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null").stdout.strip() ==
@@ -200,7 +200,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                            " | tr -d ' \\n'").stdout.strip()
       step("C3 was in the secrets directory when the tick was killed",
            inPlace == canaryForms(c3)[3].bytes, inPlace)
-      discard g.exec("pkill -9 -f '[a]ddon agent-tick'; sleep 1")
+      g.stopGuestSession("/root/addon/tick2.group")
       step("the tick is dead", g.exec("pgrep -f '[a]ddon agent-tick'").exitCode != 0, "")
       g.shutdown()
       var n2 = needles
@@ -254,8 +254,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         " system addon secret put --service swap-probe --name held " &
         "> /root/addon/held.log 2>&1\n")
       g.copyTo(g.runDir / "held.sh", "/root/addon/held.sh")
-      discard g.run("setsid nohup sh /root/addon/held.sh > /dev/null 2>&1 " &
-                    "< /dev/null &")
+      g.startGuestSession("sh /root/addon/held.sh", "/root/addon/held.group")
       var held = false
       for i in 0 ..< 120:
         if g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null").stdout.strip() ==
@@ -288,7 +287,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         ">/dev/null 2>&1; sync", timeoutSec = 900)
       let used = g.exec("swapon --show=NAME,USED --noheadings --bytes").stdout
       record["swapUsed"] = %used
-      discard g.exec("pkill -9 -f '[s]ecret put --service swap-probe'; sleep 1")
+      g.stopGuestSession("/root/addon/held.group")
       g.shutdown()
       var n3 = needles
       for f in canaryForms(c4): n3.add(("c4-" & f.form, f.bytes))

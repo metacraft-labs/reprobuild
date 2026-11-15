@@ -125,6 +125,26 @@ suite "a temporary probed with a trailing separator":
       check transientWriteKey(temporary & "\\") notin transient
     check transientWriteKey("/") == "/"
 
+  test "a temporary read through a symlinked spelling is the same write":
+    ## macOS: `/tmp` and `/var` are symlinks into `/private`. GCC writes
+    ## `$TMPDIR/cc<random>.s` and the monitor records the write under the
+    ## physical spelling but the open under the spelled one. The spelled
+    ## read must be recognised as the action's own transient write.
+    let scratch = freshRoot("symlink")
+    let physical = scratch / "real"
+    createDir(physical)
+    let link = scratch / "link"
+    createSymlink(physical, link)
+    let temporary = physical / "ccbmaWUG.s"
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    discard foldMonitorRecordsEvidence(
+      [observed(mrFileWrite, moFileWrite, temporary)], scratch, evidence,
+      seen)
+    let transient = transientOwnWrites(evidence)
+    check transientWriteKey(temporary) in transient
+    check transientWriteKey(link / "ccbmaWUG.s") in transient
+
   test "a write whose key names a file on disk is not a temporary":
     ## `main.c/` cannot be stat'ed when `main.c` is a regular file, but
     ## its key is `main.c`, which exists.

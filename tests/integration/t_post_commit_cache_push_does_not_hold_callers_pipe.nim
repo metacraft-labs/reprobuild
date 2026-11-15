@@ -47,6 +47,7 @@
 import std/[monotimes, os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_test_support
+import repro_test_support/owned_processes
 import repro_workspace_manifests
 import shared_clones
 
@@ -152,32 +153,26 @@ proc killProcessTree(pid: int) =
   except CatchableError:
     discard
 
-proc sweepStrayProcesses(marker: string) =
-  ## Kill, as a tree, anything still alive whose command line names
-  ## ``marker`` (the scratch directory's basename): the held cache push, its
-  ## git children and the shared-bare gc that follows it. See
-  ## ``t_post_commit_dispatch_returns_and_detached_push_lands`` for why the
-  ## basename and why a tree.
+proc stopDetachedPush(record: string; job: ProcessJob) =
+  ## Stop the cache push the dispatch detached, with its git children and the
+  ## shared-bare gc that follows it -- and nothing else. Never by pattern: a
+  ## command-line match reaches whatever else on the host names the same
+  ## string (reprobuild-pm issue 2026-11-13).
+  ##
+  ## * POSIX: the push is a ``setsid`` session, and the recorder this case put
+  ##   first on the dispatch's ``PATH`` recorded its process-group id. Every
+  ##   process of the detached work inherits that group.
+  ## * Windows: the case adopted the dispatch into ``job`` as it started it,
+  ##   and every process the dispatch's tree creates joins the job -- the
+  ##   engine the thin client starts, the push the engine starts and the gc
+  ##   the push starts -- so terminating the job ends exactly that tree.
+  ##   Parentage could not find the push: its parent, the engine, has
+  ##   exited by now.
   try:
     when defined(windows):
-      let powershell = findExe("powershell")
-      if powershell.len == 0:
-        return
-      let script =
-        "$m = '" & marker.replace("'", "''") & "'; " &
-        "Get-CimInstance Win32_Process | Where-Object { " &
-        "$_.ProcessId -ne $PID -and $_.CommandLine -and " &
-        "$_.CommandLine.Contains($m) } | ForEach-Object { $_.ProcessId }"
-      let found = runShell(shellCommand(@[powershell, "-NoProfile",
-        "-NonInteractive", "-Command", script]))
-      for line in found.output.splitLines:
-        let pid = line.strip()
-        if pid.len > 0 and pid.allCharsInSet({'0' .. '9'}):
-          killProcessTree(parseInt(pid))
+      discard job.terminate()
     else:
-      let pkill = findExe("pkill")
-      if pkill.len > 0:
-        discard runShell(shellCommand(@[pkill, "-9", "-f", marker]))
+      discard stopRecordedSessions(record)
   except CatchableError:
     discard
 
@@ -257,10 +252,9 @@ proc cacheRefSha(gitBin, bare, workspaceName: string): string =
     "--verify", "--quiet", "refs/cache/" & workspaceName & "/main"]))
   if probe.code != 0: "" else: probe.output.strip()
 
-proc teardown(scratch: string) =
-  let marker = extractFilename(scratch)
+proc teardown(scratch: string; job: ProcessJob) =
   for round in 0 .. 1:
-    sweepStrayProcesses(marker)
+    stopDetachedPush(scratch / "detached-sessions", job)
     try:
       removeDirEventually(scratch, attempts = 50, sleepMs = 100)
       return
@@ -275,7 +269,18 @@ suite "post-commit cache push stdio":
     doAssert gitBin.len > 0, "this case drives real git pushes; install git"
     let reproBin = reproBinary()
     let scratch = createTempDir("repro-pc-pipe-", "")
-    defer: teardown(scratch)
+    var job = openProcessJob()
+    defer: job.close()
+    defer: teardown(scratch, job)
+    # POSIX: record the session the dispatch detaches the push into, so the
+    # teardown can stop exactly that work (see ``stopDetachedPush``).
+    let sessionRecord = scratch / "detached-sessions"
+    let recording = installSetsidRecorder(scratch / "setsid-recorder",
+      sessionRecord, findExe("setsid"))
+    let previousPath = getEnv("PATH")
+    if recording:
+      putEnv("PATH", scratch / "setsid-recorder" & PathSep & previousPath)
+    defer: putEnv("PATH", previousPath)
 
     let fx = buildFixture(gitBin, scratch)
     holdCachePushes(fx.bare)
@@ -294,6 +299,10 @@ suite "post-commit cache push stdio":
       args = ["hooks", "dispatch", "post-commit", "--repo-root", fx.repoPath,
         "--"],
       options = {poStdErrToStdOut})
+    # Windows: into the job at once, before the client can start the
+    # engine, so the whole tree -- the detached push included -- is in it
+    # (the ``processesStarted`` control below says whether that held).
+    discard job.adopt(dispatch.processID)
     let pipe = dispatch.outputHandle
     var output = ""
     var state = psOpen
@@ -339,4 +348,13 @@ suite "post-commit cache push stdio":
       sleep(200)
     check landed == expectedSha
     check fileExists(fx.bare / "hold-started")
+    # Control on the teardown: the detached push went through the recorder,
+    # so the teardown can reach it. Without this, a teardown that stops
+    # nothing would be indistinguishable from a clean run.
+    if recording:
+      check recordedSessions(sessionRecord).len == 1
+    # Windows: the job holds at least the client, the engine it started and
+    # the detached push; fewer means the dispatch was adopted too late.
+    when defined(windows):
+      check job.processesStarted() >= 3
     dispatch.close()

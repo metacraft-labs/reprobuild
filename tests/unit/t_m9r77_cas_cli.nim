@@ -1,8 +1,9 @@
 ## M9.R.77.5 — regression tests for the ``repro cas`` R11 Layer-1 CLI.
 ##
 ## The CLI is a thin wrapper over the ``repro_cas_store`` facade; the
-## test drives ``runCasCommand`` directly and checks exit codes +
-## side effects on the on-disk store. Full end-to-end CLI process
+## test drives ``repro cas`` in-process (``runCasCommand`` below: repro's real
+## command-line parser and dispatch) and checks exit codes + side effects
+## on the on-disk store. Full end-to-end CLI process
 ## spawn is covered elsewhere.
 ##
 ## Pins:
@@ -25,6 +26,10 @@ from repro_core/paths import extendedPath
 
 import repro_cas_store
 import repro_cli_support
+
+proc runCasCommand(args: seq[string]): int =
+  ## ``repro cas <args>``, parsed and dispatched as the engine does.
+  runReproCommandLineInProcess(@["cas"] & args)
 
 proc putBlob(root: string; payload: seq[byte]): ContentHash =
   var cas = openCasStore(root)

@@ -329,6 +329,12 @@ dev-shell-hooks:
     bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
     bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
 
+# The test runner uses the host's RunQuota daemon, and keeps a private
+# per-user endpoint only where no host service answers. Needs `runquota` and
+# `runquotad`; see tests/test_run_tests_runquota_endpoint.sh.
+test-run-tests-runquota-endpoint:
+    bash ./tests/test_run_tests_runquota_endpoint.sh
+
 dev-env-full-regression:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/dev-env-full-regression.log
@@ -775,6 +781,17 @@ lint:
     # it. Each instance passed alone and failed only in full runs. No
     # allowlist; source scan, no compiler, same cost class as its neighbours.
     python3 ./scripts/check_fixed_test_scratch_dirs.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse test, benchmark or helper code that kills processes by name or
+    # pattern (`pkill`, `pkill -f`, `killall`, `pgrep | xargs kill`, and the
+    # Windows spellings). On a shared host a pattern also matches every
+    # other session's process of the same shape: a fixed-path `pkill -f`
+    # cleanup here stopped every concurrent run's nix helper, and committed
+    # root scripts ran `pkill -f 'cmake.*reproos'` (reprobuild-pm issue
+    # 2026-11-13). Self-test first, so a scanner that lost its power cannot
+    # pass the tree. Source scan, no compiler, same cost class as its
+    # neighbours.
+    python3 ./scripts/check_pattern_kills.py --self-test 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_pattern_kills.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT
@@ -833,6 +850,11 @@ lint:
     # issue 2026-10-31). Reads git and three files, no evaluation; the test
     # first, so a check that has lost its power cannot pass the tree.
     python3 ./tests/unit/test_package_nix_pending_sources.py 2>&1 | tee -a test-logs/lint.log
+    # The A13 record classifier judges a record by its cell's gate, base and
+    # builds, and a green record only when complete (reprobuild-pm issue
+    # 2026-11-14-addon-a13-classifier-accepts-another-gates-record-and-an-
+    # empty-green-one). Synthetic records, no VM, under a second.
+    python3 ./tests/unit/test_addon_a13_classify.py 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_package_nix_pending_sources.py 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,

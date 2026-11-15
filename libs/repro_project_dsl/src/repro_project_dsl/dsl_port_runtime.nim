@@ -4065,10 +4065,13 @@ proc currentServiceName*(): string =
 ## Why ``DslCliParamKind`` and not ``CliParamKind``?
 ## ─────────────────────────────────────────────────────────────────────────
 ##
-## ``types.nim`` already exports a legacy ``CliParamKind* = enum
-## cpkPositional, cpkFlag`` used by the typed-tool wrapper / ``parseParam``
-## chain. Reusing the type name would collide; the enum LITERAL ``cpkFlag``
-## is also shared. Nim's overload resolution disambiguates same-named
+## The clispec library's CLI model (re-exported by ``repro_project_dsl``)
+## already has ``CliParamKind* = enum cpkPositional, cpkFlag``, used by the
+## typed-tool wrapper and clispec's ``parseCliParam``. The M6 lowering reads
+## a ``cli:`` body's declaration heads with clispec's ``parseCliParamHead``
+## and records them here in its own, smaller vocabulary. Reusing the type
+## name would collide; the enum LITERAL ``cpkFlag`` is also shared. Nim's
+## overload resolution disambiguates same-named
 ## enum literals via the expected-type rule at the comparison site, so
 ## ``params[0].kind == cpkPos`` and ``params[0].kind == cpkFlag`` both
 ## resolve to the M6 enum when ``params[0].kind`` is typed as

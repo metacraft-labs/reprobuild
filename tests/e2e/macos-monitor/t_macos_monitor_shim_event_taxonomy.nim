@@ -1,5 +1,4 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
-import repro_test_support/descendant_guard_expectations
 import repro_test_support/reasoned_skip
 
 import io_mon
@@ -246,21 +245,17 @@ int main(int argc, char **argv) {
       let records = dep.records
       let canonicalInputPath = expandFilename(inputPath)
       let canonicalChildInputPath = expandFilename(childInputPath)
-      let subsystem = descendantSubsystemEvidence(dep)
-      check subsystem.completeness == mcComplete
+      check dep.completeness == mcComplete
       check dep.backendFamily == mbfMacosHooks
       check records.len > 0
 
       let supportProfile = evaluateMonitorEvidence(dep,
         MacosMonitorShimTaxonomyCapabilities)
       check supportProfile.backendFamily == mbfMacosHooks
-      # From io-mon 3d47bb1 (G42) on, macOS has its tree-lifetime guard, so
-      # the raw capture of this quiesced fixture is complete, not only the
-      # subsystem view of it.
-      check dep.completeness == mcComplete
+      # io-mon's macOS tree-lifetime guard (docs/usage.md, "The macOS
+      # tree-lifetime guard (normative)") makes the capture of this quiesced
+      # fixture complete.
       check supportProfile.evidenceComplete
-      check evaluateMonitorEvidence(subsystem,
-        MacosMonitorShimTaxonomyCapabilities).evidenceComplete
       check mcapEndpointSecurity notin supportProfile.supportedCapabilities
       check mcapHybrid notin supportProfile.supportedCapabilities
       check mcapLibraryLoad in supportProfile.supportedCapabilities
@@ -322,8 +317,7 @@ int main(int argc, char **argv) {
             record.threadId != 0:
           inc threadedWrites
       check threadedWrites >= 5
-      check dep.summary.eventLossCount == 1
-      check subsystem.summary.eventLossCount == 0
+      check dep.summary.eventLossCount == 0
 
       # rename/renameat is now a SUPPORTED macOS capability: io-mon fix
       # 60a72b6 added rename hooking on both the interpose and body-patch
@@ -331,7 +325,7 @@ int main(int argc, char **argv) {
       # path (the gnulib/autotools ``mv $@t $@`` atomic-write idiom). It is
       # accordingly part of ``MacosMonitorShimTaxonomyCapabilities`` and of the
       # macOS supported set in io-mon's ``capabilities.nim``. Requiring
-      # ``mcapRename`` must leave the subsystem evidence complete with no
+      # ``mcapRename`` must leave the evidence complete with no
       # capability gap (rename used to be an unsupported gap before the hook
       # landed).
       check mcapRename in MacosMonitorShimTaxonomyCapabilities
@@ -339,7 +333,6 @@ int main(int argc, char **argv) {
       renameRequired.incl mcapRename
       let renameRequiredProfile = evaluateMonitorEvidence(dep, renameRequired)
       check renameRequiredProfile.evidenceComplete
-      check evaluateMonitorEvidence(subsystem, renameRequired).evidenceComplete
       check mcapRename in renameRequiredProfile.supportedCapabilities
       check not hasGap(renameRequiredProfile, mcapRename, true)
       # The fixture's ``rename(create-truncate.txt -> renamed-unsupported.txt)``

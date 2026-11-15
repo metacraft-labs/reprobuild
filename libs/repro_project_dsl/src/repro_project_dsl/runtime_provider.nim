@@ -1209,3 +1209,34 @@ when defined(reproProviderMode):
       stderr.writeLine("repro project provider: error: " & err.msg)
       1
 
+else:
+  # Outside provider mode the two entry points above do not exist, and a
+  # call to one used to fail as `undeclared identifier: 'buildPackageFragment'`
+  # followed by spelling suggestions. That reads as a missing import or a
+  # rename and never names the define, so the reader looks in the wrong
+  # place (reprobuild-pm issues/2026-11-14-test-from-source-custom-convention-
+  # does-not-compile-buildpackagefragment-undeclared.md). These stand-ins
+  # accept every call shape the real procs do and carry the `{.error.}`
+  # pragma, which Nim reports at each CALL SITE, naming the define instead.
+  #
+  # The receivers are `untyped` template parameters so that those arguments
+  # are not type-checked first: `ProviderGraphRequest`, `GraphFragment` and
+  # `DevEnvResult` come from `repro_provider_runtime`, which this module
+  # re-exports only in provider mode. A template that is never called costs
+  # nothing, and an unexpanded reference in another template or generic does
+  # not trigger the error, so code that only mentions these names outside
+  # provider mode is unaffected.
+  const ProviderModeOnlyMessage =
+    "exists only when compiled with -d:reproProviderMode. The engine and " &
+    "the provider binaries compile with it, and repro_tests.nim enrolls " &
+    "every test that reaches it with defines: @[\"reproProviderMode\"]; " &
+    "a standalone `nim c` or `nim check` must pass -d:reproProviderMode too"
+
+  template buildPackageFragment*(pkg, request, buildProc: untyped;
+                                 includeDefault = true): untyped {.
+      error: "buildPackageFragment " & ProviderModeOnlyMessage.} =
+    discard
+
+  template buildPackageDevEnv*(pkg, request, devEnvProc: untyped): untyped {.
+      error: "buildPackageDevEnv " & ProviderModeOnlyMessage.} =
+    discard

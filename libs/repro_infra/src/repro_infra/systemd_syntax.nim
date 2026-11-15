@@ -40,6 +40,20 @@ const SyntaxMutation {.strdefine: "reproAddonMutation".} = ""
 const Blanks = {' ', '\t', '\n', '\r'}
   ## systemd's ``WHITESPACE``.
 
+proc isTemplateUnit*(unit: string): bool =
+  ## ``foo@.service``: a template unit name (``systemd.unit(5)``,
+  ## "Description"), which ``systemctl show`` and ``start`` refuse.
+  let at = unit.find('@')
+  at > 0 and at + 1 < unit.len and unit[at + 1] == '.'
+
+proc templateOfUnit*(unit: string): string =
+  ## The template an instance name belongs to (``foo@x.service`` ->
+  ## ``foo@.service``, ``systemd.unit(5)``), else ``unit`` itself: a
+  ## template and a plain name map to themselves.
+  let at = unit.find('@')
+  let dot = unit.rfind('.')
+  if at > 0 and dot > at + 1: unit[0 .. at] & unit[dot .. ^1] else: unit
+
 proc systemdRawLines*(text: string): seq[string] =
   ## ``text`` split into lines as ``read_line_full`` splits it: an end of
   ## line is a run of ``\n`` and ``\r`` in which neither repeats (``\r\n``

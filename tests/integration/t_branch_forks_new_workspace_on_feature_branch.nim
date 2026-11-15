@@ -316,6 +316,18 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       check recorded.get() == "feature-x"
       check readWorkspaceFeatureStarted(forkPath)
 
+      # The fork carries its project set AND its gate from the start: every
+      # member repo and the root hold the managed pre-push dispatcher, so the
+      # first push from the new workspace is gated (issue 2026-11-13). Read
+      # back from disk, not from the report.
+      check fileExists(forkPath / ".repro" / "workspace-state.toml")
+      for repoDir in [forkPath, forkPath / "lib-a", forkPath / "lib-b"]:
+        let prePush = repoDir / ".git" / "hooks" / "pre-push"
+        check fileExists(prePush)
+        if fileExists(prePush):
+          check "reprobuild hook dispatcher" in readFile(prePush)
+        check fileExists(repoDir / ".git" / "hooks" / "pre-push.repro-managed")
+
       # Report shape.
       let report = readForkReport(forkPath)
       check report["exitCode"].getInt() == 0
@@ -682,6 +694,10 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       check res.code == 0
       check currentBranch(gitBin, forkPath / "lib-a") == "review-me"
       check currentBranch(gitBin, forkPath / "lib-b") == "review-me"
+      # The adopted fork is a workspace like any other: it carries the state
+      # file, or `hooks ensure --vcs` and the pre-push gate treat it as a
+      # single repo (issue 2026-11-13).
+      check fileExists(forkPath / ".repro" / "workspace-state.toml")
 
       # The mirror-image refusal: a branch that exists nowhere cannot be
       # adopted, so neither flag can silently do the other's job.

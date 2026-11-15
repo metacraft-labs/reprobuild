@@ -217,9 +217,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       @[("old-web/legacy", "L5"), ("x-web/token", "X5"), ("h-web/token", "H5")], k3)
     discard g.run("rm -f " & SeamDir & "/test-paused-at; printf " &
       "'rotation-after-rename\\n' > " & SeamDir & "/test-pause-at")
-    discard g.run("setsid nohup sh -c '" & repro & " system addon agent-tick " &
-      "--target " & Target & " --source " & m5 & " > /root/addon/tick5.log " &
-      "2>&1' > /dev/null 2>&1 < /dev/null &")
+    g.startGuestSession(repro & " system addon agent-tick --target " & Target &
+      " --source " & m5 & " > /root/addon/tick5.log 2>&1",
+      "/root/addon/tick5.group")
     var paused = false
     for i in 0 ..< 600:
       if g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null").stdout.strip() ==
@@ -229,8 +229,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       sleep(500)
     step("tick 5 paused after the rotation's rename", paused,
          g.exec("cat /root/addon/tick5.log").stdout)
-    discard g.exec("pkill -9 -f '[a]ddon agent-tick'; sleep 1; rm -f " &
-                   SeamDir & "/test-paused-at")
+    g.stopGuestSession("/root/addon/tick5.group")
+    discard g.exec("rm -f " & SeamDir & "/test-paused-at")
     step("the crash left recipient.pub behind the key",
          g.recipientPubHex() != k3, g.recipientPubHex())
     r = g.exec(repro & " system addon recover", timeoutSec = 1200)
@@ -252,9 +252,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       @[("old-web/legacy", "L6"), ("x-web/token", "X6"), ("h-web/token", "H6")], k4)
     discard g.run("rm -f " & SeamDir & "/test-paused-at; printf " &
       "'rotation-after-overwrite\\n' > " & SeamDir & "/test-pause-at")
-    discard g.run("setsid nohup sh -c '" & repro & " system addon agent-tick " &
-      "--target " & Target & " --source " & m6 & " > /root/addon/tick6.log " &
-      "2>&1' > /dev/null 2>&1 < /dev/null &")
+    g.startGuestSession(repro & " system addon agent-tick --target " & Target &
+      " --source " & m6 & " > /root/addon/tick6.log 2>&1",
+      "/root/addon/tick6.group")
     paused = false
     for i in 0 ..< 600:
       if g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null").stdout.strip() ==
@@ -264,8 +264,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       sleep(500)
     step("tick 6 paused after overwriting the old key", paused,
          g.exec("cat /root/addon/tick6.log").stdout)
-    discard g.exec("pkill -9 -f '[a]ddon agent-tick'; sleep 1; rm -f " &
-                   SeamDir & "/test-paused-at")
+    g.stopGuestSession("/root/addon/tick6.group")
+    discard g.exec("rm -f " & SeamDir & "/test-paused-at")
     step("the crash left the key all NUL bytes, the next key in place",
          g.exec("test -e /var/lib/repro/agent/recipient.key.next && " &
            "[ -z \"$(tr -d '\\000' < /var/lib/repro/agent/recipient.key)\" ]").exitCode == 0,

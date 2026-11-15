@@ -418,6 +418,37 @@ proc signText*(text: string; keyPath = AttestationKeyPath):
   finally:
     for i in 0 ..< kp.privateKey.len: kp.privateKey[i] = 0
 
+type TextSigner* = object
+  ## The attestation key, read once and held in memory, for a record that
+  ## must be signed after the key file itself is removed: the completion
+  ## record of an uninstall's discard (§13 decision 81), written after the
+  ## uninstall removed ``/var/lib/repro`` and the key with it. ``wipe``
+  ## zeroes the private half.
+  kp: PeerKeypair
+  publicKeyHex*: string
+  loaded*: bool
+
+proc loadTextSigner*(keyPath = AttestationKeyPath): TextSigner =
+  ## Reads the key at ``keyPath``. Raises when it cannot be read.
+  result.kp.privateKey = peerAuth.loadPrivateKeyFile(keyPath)
+  try:
+    result.kp.publicKey = peerAuth.derivePublicKey(result.kp.privateKey)
+  except CatchableError:
+    for i in 0 ..< result.kp.privateKey.len: result.kp.privateKey[i] = 0
+    raise
+  result.publicKeyHex = toHex(result.kp.publicKey)
+  result.loaded = true
+
+proc signWith*(s: TextSigner; text: string): string =
+  ## ``text`` signed, hex. Raises when ``s`` holds no key.
+  if not s.loaded:
+    raise newException(AttestationError, "no attestation key is loaded")
+  toHex(peerAuth.signMessage(s.kp, cast[seq[byte]](text)))
+
+proc wipe*(s: var TextSigner) =
+  for i in 0 ..< s.kp.privateKey.len: s.kp.privateKey[i] = 0
+  s.loaded = false
+
 proc attestationPublicKeyHex*(keyPath = AttestationKeyPath): string =
   ## The public half of the attestation key at ``keyPath``, hex. Raises when
   ## the key cannot be read.

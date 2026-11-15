@@ -260,6 +260,10 @@ if [[ -z "${BEARSSL_SRC:-}" ]]; then
 fi
 shm_queue_src="$(resolve_shm_queue_src)"
 export SHM_QUEUE_SRC="${shm_queue_src}"
+CLI_SPEC_SRC="$(resolve_cli_spec_src)"
+export CLI_SPEC_SRC
+CONFUTILS_SRC="$(resolve_confutils_src)"
+export CONFUTILS_SRC
 
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -283,22 +287,30 @@ case "$(uname -s)" in
     export REPRO_DAEMON_ENDPOINT="${REPRO_TEST_DAEMON_DIR}/d.sock"
     ;;
 esac
-# THE SHARED PER-USER runquotad, likewise (POSIX). On a host with no RunQuota
-# service every `repro` adopts or starts ONE runquotad per user, on a
-# well-known socket, and that daemon outlives the invocation (reprobuild-pm
-# spec/RunQuota-Host-Configuration.md, "The shared per-user daemon (POSIX)").
-# Left alone, the suite's builds would start, adopt -- and, being another
-# build, ask to make way -- the developer's own daemon, and every other process
-# of the user would lease against the suite's. A directory of the run's own
-# keeps the suite on a daemon of its own; tests that need a separate one still
-# name theirs. Under /tmp, not TMPDIR: the socket path must fit sun_path.
+# WHICH runquotad THE SUITE USES (POSIX). The suite uses the host's daemon when
+# there is one, so its builds draw on the host's one budget instead of a
+# whole budget of their own (scripts/lib/runquota_test_endpoint.sh decides and
+# says why; REPRO_TEST_RUNQUOTA=auto|host|private overrides). Only where no
+# host service answers does the run get a per-user endpoint directory of its
+# own: on a host with no RunQuota service every `repro` adopts or starts ONE
+# runquotad per user, on a well-known socket that outlives the invocation, and
+# a `repro` built from the tree under test would adopt
+# the developer's own daemon and, being another build, ask it to make way.
+# Tests of RunQuota itself name their own endpoint either way. Under /tmp, not
+# TMPDIR: the socket path must fit sun_path.
+# shellcheck source=scripts/lib/runquota_test_endpoint.sh
+. "${repo_root}/scripts/lib/runquota_test_endpoint.sh"
 REPRO_TEST_RUNQUOTA_DIR=""
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     ;;
   *)
-    REPRO_TEST_RUNQUOTA_DIR="$(mktemp -d /tmp/repro-test-rq.XXXXXX)"
-    export RUNQUOTA_USER_ENDPOINT_DIR="${REPRO_TEST_RUNQUOTA_DIR}/u"
+    repro_test_runquota_decide || exit 2
+    if [[ "${REPRO_TEST_RUNQUOTA_MODE}" == private ]]; then
+      REPRO_TEST_RUNQUOTA_DIR="$(mktemp -d /tmp/repro-test-rq.XXXXXX)"
+      export RUNQUOTA_USER_ENDPOINT_DIR="${REPRO_TEST_RUNQUOTA_DIR}/u"
+    fi
+    echo "run_tests: RunQuota: ${REPRO_TEST_RUNQUOTA_MODE} daemon (${REPRO_TEST_RUNQUOTA_REASON})" >&2
     ;;
 esac
 _repro_test_daemon_cleanup() {
@@ -333,6 +345,36 @@ trap _repro_test_daemon_cleanup EXIT
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
 
+# The loader-inertness rules for the preloaded shim: how it is linked
+# (``preload_shim_link_without_rpath``) and the verdict on what came out
+# (``preload_shim_search_path_findings``).
+# shellcheck source=scripts/lib/preloaded_shim_loader.sh
+source scripts/lib/preloaded_shim_loader.sh
+
+# Refuse to run the suite with a published shim a preloaded library must not
+# be: one with any DT_RUNPATH, or one that carries a C runtime on its search
+# path. Called after EVERY step that (re)publishes ``build/lib``'s shim — the
+# bootstrap below and the engine's own ``.#test-fixtures`` shim edge — so no
+# build path that produces it goes unchecked. The last one is the shim the
+# suite actually injects; it was never checked here before, and it is the one
+# that carried a runpath to ``<checkout>/outputs/out/lib`` into every monitored
+# program of the run.
+require_loader_inert_monitor_shim() {
+  local stage="$1" shim_to_check shim_findings
+  [[ "$(uname -s)" == "Linux" ]] || return 0
+  shim_to_check="build/lib/librepro_monitor_shim.so"
+  [[ -f "${shim_to_check}" ]] || return 0
+  if ! preload_shim_have_elf_tools; then
+    echo "monitor shim (${stage}): ${shim_to_check} is present, so every monitored child in this run is preloaded with it, but patchelf and/or readelf is not on PATH and its dynamic section cannot be read. Refused rather than skipped: a shim that carries a DT_RUNPATH or a C runtime loads fine here and kills monitored programs that run on a different one. Run the suite from the dev shell, which provides both." >&2
+    return 1
+  fi
+  shim_findings="$(preload_shim_search_path_findings "${shim_to_check}")"
+  [[ -n "${shim_findings}" ]] || return 0
+  echo "monitor shim (${stage}):" >&2
+  preload_shim_report_search_path_findings "${shim_to_check}" "${shim_findings}"
+  return 1
+}
+
 # Seed the io-monitor shim for provider compilation on warm checkouts; the
 # graph-owned ``.#test-fixtures`` edge verifies the canonical artifact later.
 bootstrap_monitor_shim() {
@@ -345,19 +387,20 @@ bootstrap_monitor_shim() {
     echo "missing io-mon shim builder at ${io_mon_src}/scripts/build_shim.sh; set IO_MON_SRC" >&2
     return 2
   fi
-  # NIX_DONT_SET_RPATH: the shim must not carry a C runtime of its own. This
-  # is the same requirement, for the same reason, as the shim build in
+  # The shim must carry no DT_RUNPATH and no C runtime of its own. This is
+  # the same requirement, for the same reason, as the shim build in
   # ``scripts/build_apps.sh`` — the library published here is LD_PRELOADed
   # into compilers, linkers and wrapper scripts that were built elsewhere,
-  # and the nixpkgs ``ld`` wrapper otherwise gives it a DT_RUNPATH naming the
-  # C runtime it was linked against. See
-  # ``scripts/lib/preloaded_shim_loader.sh``; the refusal below, not this
-  # variable, is the guarantee.
-  NIX_DONT_SET_RPATH=1 \
+  # and a dev shell's linker wrapper otherwise gives it a DT_RUNPATH (the C
+  # runtime it was linked against, and stdenv's ``$out/lib``). See
+  # ``preload_shim_link_without_rpath`` in
+  # ``scripts/lib/preloaded_shim_loader.sh``; the refusal below, not that
+  # function, is the guarantee.
   IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib" \
   IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
   IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
   SHM_QUEUE_SRC="${shm_queue_src}" \
+    preload_shim_link_without_rpath \
     bash "${io_mon_src}/scripts/build_shim.sh"
 }
 printf 'Bootstrapping monitor shim for provider compilation\n' >&2
@@ -371,6 +414,11 @@ else
   }
 fi
 
+# A build report is attributable only to the invocation that wrote it; see the
+# header of the library for the failure this prevents.
+# shellcheck source=scripts/lib/build_report_attribution.sh
+source scripts/lib/build_report_attribution.sh
+
 # The published shim must be observationally inert for the loader before the
 # suite starts injecting it into every process a build action runs.
 #
@@ -378,37 +426,7 @@ fi
 # opt-out variable ever stops being honoured; the warm-reuse arm can hand the
 # suite a library some earlier run left behind. Either way the artifact is
 # what decides, exactly as it does in ``scripts/build_apps.sh``.
-# shellcheck source=scripts/lib/preloaded_shim_loader.sh
-source scripts/lib/preloaded_shim_loader.sh
-# A build report is attributable only to the invocation that wrote it; see the
-# header of the library for the failure this prevents.
-# shellcheck source=scripts/lib/build_report_attribution.sh
-source scripts/lib/build_report_attribution.sh
-if [[ "$(uname -s)" == "Linux" ]]; then
-  shim_to_check="build/lib/librepro_monitor_shim.so"
-  if [[ -f "${shim_to_check}" ]]; then
-    if ! preload_shim_have_elf_tools; then
-      echo "monitor shim: ${shim_to_check} is present, so every monitored child in this run is preloaded with it, but patchelf and/or readelf is not on PATH and its DT_RUNPATH cannot be read. Refused rather than skipped: a shim that carries a C runtime loads fine here and kills every monitored compile that runs on a different one. Run the suite from the dev shell, which provides both." >&2
-      exit 1
-    fi
-    shim_imposed="$(preload_shim_imposed_runtime_dirs "${shim_to_check}")"
-    if [[ -n "${shim_imposed}" ]]; then
-      echo "" >&2
-      echo "monitor shim: ${shim_to_check} carries a C runtime on its own DT_RUNPATH:" >&2
-      while IFS="$(printf '\t')" read -r imposed_dir imposed_sonames; do
-        [[ -n "${imposed_dir}" ]] || continue
-        echo "  ${imposed_dir}" >&2
-        echo "      provides: ${imposed_sonames}" >&2
-      done <<EOF
-${shim_imposed}
-EOF
-      echo "  This library is LD_PRELOADed into processes built elsewhere, so it must" >&2
-      echo "  take its C runtime from the host process rather than supply one. See" >&2
-      echo "  scripts/lib/preloaded_shim_loader.sh; do not relax this check." >&2
-      exit 1
-    fi
-  fi
-fi
+require_loader_inert_monitor_shim "bootstrap" || exit 1
 
 # Fail fast when the Nim toolchain cannot complete a compile under the monitor
 # shim. Every test that builds anything goes through a monitored provider
@@ -654,6 +672,10 @@ repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
 # M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
+# ``.#test-fixtures`` rebuilt ``build/lib``'s shim through repro.nim's own
+# monitor-shim edge, a second build path with its own link environment; check
+# the library the suite will actually inject, not only the bootstrap's.
+require_loader_inert_monitor_shim "after .#test-fixtures" || exit 1
 # The Nix package of THIS tree (`nix build .#default`), which the
 # installed-package gates (tests/e2e/m83/t_e2e_nix_package_compiles_profile*)
 # run. Built once here instead of once per case: the build runs in the nix

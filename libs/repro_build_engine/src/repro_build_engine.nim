@@ -145,6 +145,7 @@ import repro_cas_store
 import io_mon
 import repro_platform
 import repro_runquota
+import repro_cargo_edge/wrapper_env
 # M17: the ``ext_repro_action`` schema, the compatibility key, and the
 # row shape. A leaf module by construction — it imports only the hash
 # library — so the engine can build a row without the row's definition
@@ -410,6 +411,19 @@ type
     pool*: string
     poolUnits*: uint32
     cpuMilli*: uint32
+    cpuMinMilli*: uint32
+    cpuPreferredMilli*: uint32
+      ## A CPU RANGE instead of the single ``cpuMilli`` (negotiated widths):
+      ## RunQuota grants the widest width in it that is free. Zero
+      ## ``cpuPreferredMilli`` (the default) asks for exactly ``cpuMilli``.
+      ## Not part of the action's key: the width changes how fast the action
+      ## runs, never what it produces.
+    widthFlag*: string
+      ## The flag through which the action's command takes its width, for a
+      ## child that does not take jobserver tokens (``--test-threads``,
+      ## ``-j``, ``--workers``). The GRANTED width is passed with it at launch
+      ## (``repro_runquota.applyGrantedWidth``); the argv the action is keyed
+      ## on is the declared one. Empty: the command line is left alone.
     memoryBytes*: uint64
     commandStatsId*: string
     cacheable*: bool
@@ -2622,6 +2636,9 @@ type
     queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
     inlineFailure: ActionResult
     resultPath: string
+    queuedAtMs: int
+      ## When a candidate's offer came back QUEUED (engine monotonic ms);
+      ## how long it waited is what sizes the advertised frontier.
     monitorSlot: int
       ## HM-4. Index into the scheduler's ``MonitorHostPool`` for an
       ## ``rpkMonitorHost`` entry; ``-1`` for every other kind. An INDEX and
@@ -3603,6 +3620,8 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              outputs: openArray[string] = []; pool = ""; poolUnits = 1'u32;
              optionalOutputs: openArray[string] = [];
              cpuMilli = 1000'u32; memoryBytes = 0'u64;
+             cpuMinMilli = 0'u32; cpuPreferredMilli = 0'u32;
+             widthFlag = "";
              commandStatsId = ""; cacheable = false;
              weakFingerprint = weakFingerprintFromText(id);
              actionCachePolicy = ffpTimestamp;
@@ -3676,6 +3695,9 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     pool: pool,
     poolUnits: poolUnits,
     cpuMilli: cpuMilli,
+    cpuMinMilli: cpuMinMilli,
+    cpuPreferredMilli: cpuPreferredMilli,
+    widthFlag: widthFlag,
     memoryBytes: memoryBytes,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
@@ -5418,7 +5440,12 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
       return default
     if node[name].kind != JInt:
       fail("field '" & name & "' must be an integer")
-    uint32(node[name].getInt())
+    let value = node[name].getBiggestInt()
+    # Refused, not converted: `uint32` of a negative or oversized value
+    # raises a defect instead of a graph error the user can read.
+    if value < 0 or value > BiggestInt(high(uint32)):
+      fail("field '" & name & "' must be between 0 and " & $high(uint32))
+    uint32(value)
 
   let id = stringField("id")
   if id.len == 0:
@@ -5432,6 +5459,9 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let pool = stringField("pool", required = false)
   let poolUnits = uintField("poolUnits", 1'u32)
   let cpuMilli = uintField("cpuMilli", 1000'u32)
+  let cpuMinMilli = uintField("cpuMinMilli", 0'u32)
+  let cpuPreferredMilli = uintField("cpuPreferredMilli", 0'u32)
+  let widthFlag = stringField("widthFlag", required = false)
   let commandStatsId = stringField("commandStatsId", required = false)
   let cacheable = boolField("cacheable", default = false)
   # The record's id names the action, not the command: two records with one
@@ -5440,6 +5470,8 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   result = action(id, argv, cwd = cwd, deps = deps, inputs = inputs,
     outputs = outputs, optionalOutputs = stringSeqField("optionalOutputs"),
     pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
+    cpuMinMilli = cpuMinMilli, cpuPreferredMilli = cpuPreferredMilli,
+    widthFlag = widthFlag,
     commandStatsId = commandStatsId, cacheable = cacheable,
     weakFingerprint = weakFingerprint, env = env,
     governingLockIdentity = governingLockIdentity)
@@ -12038,6 +12070,21 @@ proc transientWriteKey*(path: string): string =
     result = path
   while result.len > 1 and result.endsWith("/"):
     result.setLen(result.len - 1)
+  # The same temporary is also recorded under a symlinked spelling: macOS's
+  # `/tmp` and `/var` (and so `$TMPDIR`) are links into `/private`, and GCC
+  # writes `$TMPDIR/cc<random>.s` which the monitor sees opened as spelled
+  # but written as the kernel reached it. Paths are compared as the file
+  # reached, not as spelled (spec/Monitor-Hook-Shim.md, "Metadata, Probe,
+  # And Symlink APIs"), so key by the physical path. The temporary is gone,
+  # so `canonicalPolicyPath` resolves its existing prefix and re-attaches the
+  # absent tail. Windows keeps its own folding above.
+  when not defined(windows):
+    # `canonicalPolicyPath` folds a backslash into `/`; on POSIX a
+    # backslash is a filename character (see above), so such a name keeps its spelling.
+    if result.isAbsolute and '\\' notin result:
+      result = canonicalPolicyPath(result)
+      while result.len > 1 and result.endsWith("/"):
+        result.setLen(result.len - 1)
 
 proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## Paths the action itself WROTE that no longer exist once it finished:
@@ -12397,8 +12444,25 @@ proc describeFailedAction*(item: ActionResult): string =
     parts.add(item.stderr)
   if item.stdout.len > 0:
     parts.add(item.stdout)
-  if item.launched and item.stderr.len == 0 and item.stdout.len == 0:
-    parts.add("the action wrote nothing to stdout or stderr")
+  if item.stderr.len == 0 and item.stdout.len == 0:
+    # An action that failed WITHOUT producing output still has a recorded
+    # cause in the places below. A report built from the output alone read
+    # `<id> asFailed` for an action that never launched (a refused monitor
+    # plan, unpublishable evidence, a missing declared output), which left a
+    # consumer nothing to act on.
+    if item.missingOutputs.len > 0:
+      parts.add("declared outputs not produced: " &
+        item.missingOutputs.join(", "))
+    if item.evidence.diagnostics.len > 0:
+      parts.add(item.evidence.diagnostics.join("\n"))
+    if item.reason.len > 0 and item.status != asBlocked:
+      parts.add("reason: " & item.reason)
+  if parts.len == 1:
+    if item.launched:
+      parts.add("the action wrote nothing to stdout or stderr")
+    elif item.status != asBlocked:
+      parts.add("the action did not launch and the engine recorded no " &
+        "reason; rerun with `repro build --log=actions` for its trace")
   parts.join("\n")
 
 proc processCwd(action: BuildAction; process: ProcessSpec): string =
@@ -15122,6 +15186,36 @@ proc preparedActionEnv(action: BuildAction;
   preparedActionEnv(action, config,
     collectResolvedAuxPaths(action, config.toolIdentityResolver))
 
+proc cargoRustcWrapperEntries(action: BuildAction;
+                              env: seq[string]): seq[string] =
+  ## The environment entries that put the rustc wrapper in front of the
+  ## compiler of a sized cargo action (``libs/repro_cargo_edge``). Added at
+  ## launch and not to the action's description, so the wrapper changes
+  ## neither the action's key nor what cargo writes: it is a measurement.
+  ##
+  ## Only an action that cargo itself runs under a lease's width (a sized
+  ## ``cargo build``/``install``/``test``) gets it: the wrapper reports through
+  ## ``RUNQUOTA_PARENT_LEASE``, which only a leased action has. Off unless
+  ## ``REPRO_RUSTC_WRAPPER`` says on (or the default has been turned on after
+  ## its overhead measurement), and absent when the wrapper executable is not
+  ## beside the engine, where it runs as if the feature did not exist.
+  if action.cpuMinMilli == 0'u32 or action.widthFlag != "-j":
+    return
+  let start = executedImageArgvIndex(action.argv)
+  if start < 0 or start >= action.argv.len:
+    return
+  # Cargo itself (a typed cargo call), or a helper that runs it through the
+  # thin cargo edge (the standard provider's delegated build).
+  let runsCargo = isCargoProgram(action.argv[start]) or
+    (start + 1 < action.argv.len and action.argv[start + 1] == EdgeHelperFlag)
+  if not runsCargo:
+    return
+  if not wrapperEnabled(getEnv(WrapperSwitchEnv)):
+    return
+  let wrapper = wrapperBinaryPath(getAppFilename().parentDir,
+    getEnv(WrapperPathEnv))
+  rustcWrapperEntries(env, wrapper)
+
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec =
@@ -15155,7 +15249,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
     argv: (if shellUmaskWrap: umaskWrappedArgv(deferred.argv)
            else: deferred.argv),
     cwd: action.cwd,
-    env: deferred.env,
+    env: deferred.env & cargoRustcWrapperEntries(action, deferred.env),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit,
     isolatedEnv: isolatedEnv)
@@ -16718,6 +16812,25 @@ proc startBypassRunQuotaProcess(action: BuildAction;
       discard
   return startDirect(preparedRunQuotaCommand(action, config))
 
+proc withWidthPlaceholders(action: BuildAction): BuildAction =
+  ## The action with a placeholder where its width flag's value goes, before
+  ## the launch wrappers re-quote its argv; RunQuota's launch fills it with
+  ## the grant (``repro_runquota.applyGrantedWidth``). Only the RunQuota
+  ## launch paths use it: under the bypass there is no grant, and the
+  ## command line is left as declared.
+  ##
+  ## The flag is placed in the command the action EXECUTES: on the wrapped
+  ## monitor path its argv is ``<repro> internal io monitor … -- <argv>``,
+  ## and a flag placed before the wrapper's own ``--`` would be read by the
+  ## monitor instead (``executedImageArgvIndex``).
+  result = action
+  if action.widthFlag.len > 0:
+    let start = executedImageArgvIndex(action.argv)
+    if start < 0:
+      return
+    result.argv = action.argv[0 ..< start] &
+      widthPlaceholderArgv(action.argv[start .. ^1], action.widthFlag)
+
 proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
                           resultPath: string;
                           poolCapacity: uint32): Process =
@@ -16728,11 +16841,14 @@ proc startRunQuotaProcess(action: BuildAction; config: BuildEngineConfig;
     label: action.id,
     commandStatsId: action.commandStatsId,
     cpuMilli: action.cpuMilli,
+    cpuMinMilli: action.cpuMinMilli,
+    cpuPreferredMilli: action.cpuPreferredMilli,
     memoryBytes: action.memoryBytes,
     namedPool: action.pool,
     namedPoolUnits: action.poolUnits,
     namedPoolCapacity: poolCapacity)
-  let command = preparedRunQuotaCommand(action, config)
+  var command = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
+  command.widthFlag = action.widthFlag
   let helper = if config.runQuotaCliPath.len > 0: config.runQuotaCliPath
     else: defaultRunQuotaHelperPath()
   startProcess(helper, args = helperCliArgs(rq, command, resultPath),
@@ -16743,13 +16859,18 @@ proc runQuotaRequest(action: BuildAction): ReproResourceRequest =
     label: action.id,
     commandStatsId: action.commandStatsId,
     cpuMilli: action.cpuMilli,
+    cpuMinMilli: action.cpuMinMilli,
+    cpuPreferredMilli: action.cpuPreferredMilli,
     memoryBytes: action.memoryBytes,
     namedPool: action.pool,
     namedPoolUnits: action.poolUnits)
 
 proc runQuotaCommand(action: BuildAction; config: BuildEngineConfig):
     ReproCommandSpec =
-  preparedRunQuotaCommand(action, config)
+  ## The command as RunQuota launches it. Its width flag is filled with the
+  ## granted width at launch, once the grant is known.
+  result = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
+  result.widthFlag = action.widthFlag
 
 proc finishBypassRunQuotaProcess(id: string;
                                  process: var ReproDirectRunningProcess;
@@ -19773,7 +19894,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # so a cold first run and every later one keyed it differently.
     let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
-      if isLaunchMachinery(path) or transientWriteKey(path) in transient or
+      if isLaunchMachinery(path) or
+          (transient.len > 0 and transientWriteKey(path) in transient) or
           isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
@@ -20131,7 +20253,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
-          transientWriteKey(path) in transient or isOwnOutput(action, path):
+          (transient.len > 0 and transientWriteKey(path) in transient) or
+          isOwnOutput(action, path):
         continue
       elif path in probed:
         result.probes.add(path)
@@ -21309,6 +21432,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc engineNowMs(): int =
     int(monotonicNowNs() div 1_000_000'i64)
 
+  # THE ADVERTISED FRONTIER (Build-Engine-And-Scheduler.md § Negotiated
+  # widths): how many candidates stay offered and not yet granted. It grows
+  # while grants come back as fast as the build offers and halves once a
+  # queued candidate waits past the threshold, within ``maxParallel``.
+  var frontier = initFrontierSizer(int(maxParallel), frontierWaitMillis())
+
+  proc pendingInlineCount(): int =
+    for item in running:
+      if item.processKind == rpkInlineRunQuotaPending:
+        inc result
+
   proc pollInlineRunQuotaGrants(): int =
     result = -1
     if not inlineRunQuotaSessionOpen or not hasPendingInlineRunQuota():
@@ -21342,6 +21476,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             failRunningAction(j, "runquota denied queued lease: " &
               grant.diagnostic)
             return j
+          frontier.noteQueuedGrant(engineNowMs() - running[j].queuedAtMs)
           try:
             var queued = running[j].queuedRunQuotaProcess
             running[j].runQuotaProcess = startGrantedWithRunQuota(
@@ -21412,6 +21547,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       runQuotaLastAliveMs = -1
       return
     let now = engineNowMs()
+    var oldestWaitMs = 0
+    for item in running:
+      if item.processKind == rpkInlineRunQuotaPending:
+        oldestWaitMs = max(oldestWaitMs, now - item.queuedAtMs)
+    frontier.noteOldestWait(oldestWaitMs, now)
     if runQuotaLastAliveMs < 0:
       # The offer that queued the candidate was itself a round trip.
       runQuotaLastAliveMs = now
@@ -22181,7 +22321,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
       var i = 0
       while i < ready.len and
-          uint32(running.len + stagedInlineLaunches.len) < maxParallel:
+          uint32(running.len + stagedInlineLaunches.len) < maxParallel and
+          (not inlineRunQuotaSessionOpen or
+            pendingInlineCount() + stagedInlineLaunches.len < frontier.width):
         raiseIfCancelled()
         let id = ready[i]
         var action = actionsById[id]
@@ -23477,6 +23619,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           completed = terminalCount()
           launchedAny = true
         else:
+          var grantedAtOnce = 0
+          let offeredAtMs = engineNowMs()
           for k, staged in stagedInlineLaunches:
             let offer = offers[k]
             var startEvent = "launched"
@@ -23488,6 +23632,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             of rqokStarted:
               runQuotaProcess = offer.running
               processKind = rpkInlineRunQuota
+              inc grantedAtOnce
             of rqokQueued:
               queuedRunQuotaProcess = offer.queued
               processKind = rpkInlineRunQuotaPending
@@ -23502,11 +23647,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               runQuotaProcess: runQuotaProcess,
               queuedRunQuotaProcess: queuedRunQuotaProcess,
               resultPath: staged.resultPath,
+              queuedAtMs: offeredAtMs,
               monitorSlot: -1
             ))
             runResult.trace(staged.id, startEvent, startDetail)
             emitProgress(bpkActionStarted, staged.id)
             launchedAny = true
+          frontier.noteGrantedAtOnce(grantedAtOnce)
 
       if completed >= buildGraph.actions.len:
         break

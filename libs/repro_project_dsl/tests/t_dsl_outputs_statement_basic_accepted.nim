@@ -40,4 +40,4 @@ suite "t_dsl_outputs_statement_basic_accepted":
     let cmd = exe.commands[0]
     check cmd.name == "c"
     check cmd.path == @["c"]
-    check cmd.outputFlags == @["out"]
+    check cmd.ext.outputFlags == @["out"]

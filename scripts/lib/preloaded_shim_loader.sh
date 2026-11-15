@@ -32,6 +32,18 @@
 # the monitor-shim edge in `repro.nim`) is what stops it being added; the
 # functions below are what refuses to ship the shim if it ever comes back.
 #
+# THE SECOND RULE: NO DT_RUNPATH AT ALL. A guest must also not stop its host
+# from helping it. Any DT_RUNPATH on the shim, even one naming a directory that
+# does not exist, switches off the host program's DT_RPATH for the shim's own
+# dependencies, so a program that finds its C runtime through its DT_RPATH (a
+# toolchain carrying its own glibc) cannot load the shim at all. Every shim
+# built in a nixpkgs dev shell used to carry exactly that: `-rpath $out/lib`
+# from stdenv's `NIX_LDFLAGS`, with `$out` the nonexistent
+# `<checkout>/outputs/out`. The check for the first rule could not see it,
+# because a directory that does not exist provides no C runtime.
+# `preload_shim_link_without_rpath` is how the shim is linked;
+# `preload_shim_search_path_findings` is the verdict every gate applies.
+#
 # WHY THIS IS NOT "the two glibcs must be the same". Two different C-runtime
 # builds are not automatically a problem — measured on the host this was
 # written on, three system tools run on a different glibc store path than the
@@ -111,6 +123,147 @@ preload_shim_runpath_dirs() {
   raw="$(patchelf --print-rpath "$file" 2>/dev/null)" || return 0
   [[ -n "$raw" ]] || return 0
   tr ':' '\n' <<<"$raw" | grep -v '^[[:space:]]*$'
+}
+
+# The entries of a library's DT_RUNPATH tag ONLY, one per line, in order.
+#
+# Unlike `preload_shim_runpath_dirs` this separates the two tags, because for a
+# PRELOADED library they differ in a way that matters: the presence of a
+# DT_RUNPATH on the shim — whatever it names, even a directory that does not
+# exist — switches off the HOST PROGRAM's DT_RPATH for the shim's own
+# dependencies. glibc's loader consults the requesting object's DT_RPATH and
+# then its loaders' DT_RPATHs only when the requesting object has no
+# DT_RUNPATH (the search order in ld.so(8),
+# https://man7.org/linux/man-pages/man8/ld.so.8.html, and `_dl_map_object` in
+# glibc's elf/dl-load.c, which walks the loader chain's DT_RPATHs only under
+# `loader->l_info[DT_RUNPATH] == NULL`, and then the executable's). A program
+# whose libraries come from a C runtime of its own — its PT_INTERP and
+# DT_RPATH rewritten to point at that runtime, the shape of a toolchain realized into a store with its sysroot
+# glibc — then resolves the shim's `libm.so.6` & co. against the shim's
+# RUNPATH and that loader's compiled-in defaults alone, finds nothing, and
+# dies before `main`:
+#
+#   ar: error while loading shared libraries: libm.so.6: cannot open shared
+#     object file: No such file or directory
+#
+# So for the shim ANY DT_RUNPATH entry is a defect, not just one that names a
+# C runtime; `preload_shim_imposed_runtime_dirs` below cannot see this case,
+# because a directory that does not exist provides nothing. Read with
+# `readelf -d`, which names the tag; `patchelf --print-rpath` prints either.
+preload_shim_runpath_tag_entries() {
+  local file="$1" line raw
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      *"(RUNPATH)"*"Library runpath: ["*"]"*)
+        raw="${line#*Library runpath: [}"
+        raw="${raw%]*}"
+        tr ':' '\n' <<<"$raw" | grep -v '^[[:space:]]*$'
+        ;;
+    esac
+  done < <(LC_ALL=C readelf -d -W "$file" 2>/dev/null)
+  return 0
+}
+
+# Run "$@" — a command that links the preload shim — with no rpath of the
+# linker wrapper's making.
+#
+# Two nixpkgs mechanisms put an rpath on every library linked in a dev shell,
+# and the shim must carry neither (see `preload_shim_runpath_tag_entries` for
+# why ANY runpath breaks it):
+#
+#   * the `ld` wrapper adds an entry for every `-L` directory that supplied a
+#     library, which always includes the C runtime's own `lib` directory.
+#     `NIX_DONT_SET_RPATH=1` switches that off.
+#   * stdenv's setup (`pkgs/stdenv/generic/setup.sh`, the `NIX_NO_SELF_RPATH`
+#     block) puts `-rpath $out/lib` into `NIX_LDFLAGS` when the shell is
+#     entered. In `nix develop`, `$out` is `<checkout>/outputs/out`, so every
+#     shim built from a dev shell came out with a DT_RUNPATH naming a
+#     directory of the build host that does not exist. `NIX_DONT_SET_RPATH`
+#     does not touch it: it is an explicit linker argument, not one the
+#     wrapper derives. `NIX_NO_SELF_RPATH` is read only when the shell is set
+#     up, which is too late to help here.
+#
+# The shim's DT_NEEDED is the C runtime and nothing else, which the compiler
+# driver locates on its own, so the link needs nothing that `NIX_LDFLAGS`
+# carries: every `NIX_LDFLAGS*` variable (the plain one and the role-salted
+# `NIX_LDFLAGS_<target>` / `_FOR_TARGET` / `_BEFORE` spellings the wrapper also
+# reads) is removed from the link's environment. Inert under a toolchain that
+# reads none of these variables; the artifact checks in this file, not this
+# function, are the guarantee. `repro.nim`'s monitor-shim edge applies the same
+# rule to the engine-built shim (`shimLinkEnvironment`).
+#
+# The names come from bash's `${!prefix@}` expansion, not `compgen -e`: the
+# bash a nixpkgs dev shell provides is built without programmable completion,
+# so `compgen` does not exist there, and the first version of this function
+# silently removed nothing in exactly the shell it exists for.
+#
+# The loop variable is deliberately not called `name`: a dev shell EXPORTS
+# `name` (the derivation's), a function-local of that name stays exported, and
+# the link would then run with the shell's `name` overwritten.
+preload_shim_link_without_rpath() {
+  local -a unset_args=()
+  local ldflags_var
+  for ldflags_var in ${!NIX_LDFLAGS@}; do
+    unset_args+=(-u "$ldflags_var")
+  done
+  env ${unset_args[@]+"${unset_args[@]}"} NIX_DONT_SET_RPATH=1 "$@"
+}
+
+# Every way a built shim's search path is wrong for a preloaded library, as
+# `kind<TAB>detail` rows; empty for a shim that is inert. The kinds:
+#
+#   runpath<TAB><dir>                  any DT_RUNPATH entry (see above)
+#   runtime<TAB><dir><TAB><sonames>    an RPATH/RUNPATH dir providing a C runtime
+#
+# This is the verdict the gates on the published shim apply
+# (`scripts/build_apps.sh`, and `scripts/run_tests.sh` before and after the
+# engine's own shim edge) and the one
+# `tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim` asserts,
+# so that no build path is checked by a weaker rule than another. The
+# `just lint` gate (`scripts/check_dev_shell_env.sh`) applies the same two
+# rules through the two listers it is built from. A pure lister, like
+# `preload_shim_imposed_runtime_dirs`: always returns 0.
+preload_shim_search_path_findings() {
+  local file="$1" dir rest
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    printf 'runpath\t%s\n' "$dir"
+  done < <(preload_shim_runpath_tag_entries "$file")
+  while IFS=$'\t' read -r dir rest; do
+    [[ -n "$dir" ]] || continue
+    printf 'runtime\t%s\t%s\n' "$dir" "$rest"
+  done < <(preload_shim_imposed_runtime_dirs "$file")
+  return 0
+}
+
+# Print `preload_shim_search_path_findings` for a human, on stderr, with the
+# remedy. Shared by every gate so the explanation cannot drift between them.
+preload_shim_report_search_path_findings() {
+  local shim="$1" findings="$2" kind dir sonames
+  echo "" >&2
+  echo "monitor shim: ${shim} has a search path a preloaded library must not have:" >&2
+  while IFS=$'\t' read -r kind dir sonames; do
+    [[ -n "$kind" ]] || continue
+    case "$kind" in
+      runpath)
+        echo "  DT_RUNPATH ${dir}" >&2 ;;
+      runtime)
+        echo "  carries a C runtime on its own search path: ${dir}" >&2
+        echo "      provides: ${sonames}" >&2 ;;
+    esac
+  done <<EOF
+${findings}
+EOF
+  echo "  This library is LD_PRELOADed into processes built elsewhere, so its C" >&2
+  echo "  runtime dependencies must resolve through the process that loads it." >&2
+  echo "  Any DT_RUNPATH on it switches off that process's DT_RPATH for them, so a" >&2
+  echo "  program on a C runtime of its own dies before main ('libm.so.6: cannot" >&2
+  echo "  open shared object file'); a directory that provides a C runtime hands" >&2
+  echo "  the process a second one. Remedy: link the shim through" >&2
+  echo "  preload_shim_link_without_rpath (scripts/lib/preloaded_shim_loader.sh)," >&2
+  echo "  or shimLinkEnvironment for the repro.nim edge; do not relax this check." >&2
 }
 
 # The RUNPATH entries of a preloaded library that would hand a host process a C

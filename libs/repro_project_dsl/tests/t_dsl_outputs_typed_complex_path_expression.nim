@@ -51,8 +51,8 @@ suite "t_dsl_outputs_typed_complex_path_expression":
   test "t_dsl_outputs_typed_complex_path_expression":
     check pkg.executables.len == 1
     let cmd = pkg.executables[0].commands[0]
-    check cmd.typedOutputs.len == 1
-    let td = cmd.typedOutputs[0]
+    check cmd.ext.typedOutputs.len == 1
+    let td = cmd.ext.typedOutputs[0]
     check td.fieldName == "testBinary"
     check td.types == @["CargoTestBinary"]
     # The stored repr must preserve the parenthesised form so M1's

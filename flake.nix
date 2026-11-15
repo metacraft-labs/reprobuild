@@ -358,7 +358,27 @@
       # built on the runtime without the shim failed to load ("undefined symbol:
       # repro_linux_sig_safe_flush_at_signal_death") and
       # t_stackable_hooks_extracted_process_tree's extracted runtime exited 127.
-      url = "github:metacraft-labs/io-mon/35829647d603b481276d2632b39ec2a9ce3625b2";
+      # Bumped 35829647 -> a7b272f6 (2026-11-14, io-mon `agents`): the Linux
+      # shim builder removes the dev shell's linker-wrapper rpaths from its link
+      # (stdenv's `-rpath $out/lib` in NIX_LDFLAGS named a directory that never
+      # exists) and refuses to publish a shim carrying any DT_RUNPATH, which
+      # stopped programs that find their C runtime through their own DT_RPATH
+      # from loading the shim. 58048ea gives macOS Apple toolchain drop-ins the
+      # shim's default SDK.
+      # Bumped a7b272f6 -> 4212d138 (2026-11-14, io-mon `agents`): the Linux
+      # shim excludes its own image from inline-syscall patching by the address
+      # of its trap handler, not by its file name, so a copy of the shim under
+      # another name (a `REPRO_MONITOR_SHIM_LIB` override) no longer patches
+      # its own raw syscalls and kills every program with SIGTRAP. 77bf297f
+      # runs an inline clone with a child stack outside the trap handler.
+      # Bumped 4212d138 -> 30d85793 (2026-11-15, io-mon `agents`): on macOS a
+      # monitored root whose own command is a SIP-protected binary (an action
+      # spelled `/bin/sh -c ...`) is spawned through its non-SIP drop-in, so
+      # its tree is captured instead of lost and the result can be published.
+      # The range also carries Linux fixes (wordexp/pidfd_spawn process starts,
+      # an uninjectable /bin/sh under system/popen reported as a loss, a
+      # refusal to build the shim against a non-glibc libc).
+      url = "github:metacraft-labs/io-mon/30d85793e891c1a80859d52a9eb197b42d56752c";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -402,7 +422,32 @@
       # landing branch and its complete compiler source closure.
       # Bumped 91451f22 -> 84fd76b (2026-10-30, `agents`): the same preallocation
       # for a new ring segment file as nim-shm-gset's shards.
-      url = "github:metacraft-labs/nim-shm-queue/84fd76b174d4868e703ba3d599668ee340e0b6ea";
+      url = "github:metacraft-labs/nim-shm-queue/8dff4ad246ff4b15ef63ddf7d65938af3115f844";
+      flake = false;
+    };
+    nim-cli-spec-src = {
+      # nim-cli-spec ships the ``clispec`` package: the ``cli:`` description
+      # language and its typed CLI model. repro_project_dsl builds every
+      # ``executable … cli:`` block on it, so every DSL, recipe and provider
+      # compile imports it. config.nims reads CLI_SPEC_SRC (after a
+      # ``../nim-cli-spec`` sibling); the sandboxed package build + override-free
+      # CI jobs have no sibling, so seed it from here — exactly like
+      # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
+      # .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-cli-spec/a9684dfc1e659af309acf646915dbfe400896b65";
+      flake = false;
+    };
+    nim-confutils-src = {
+      # nim-confutils (the metacraft-labs fork; mainline ``codetracer``) ships
+      # ``confutils/clispec_config``: confutils instantiated over a clispec
+      # description. repro's own command line is such a description
+      # (``repro_cli_support/cli_program``), so the engine compile imports it.
+      # Only the clispec bridge and its layers are imported, which need no
+      # serialization library; the package root (no ``src/``) is the import
+      # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
+      # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
+      # repro.lock and .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-confutils/1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
       flake = false;
     };
     nimcrypto-src = {
@@ -525,7 +570,11 @@
       # test preserves r7.
       # Bumped 7533478 -> c1d55ce (2026-11-05) with io-mon-src: io-mon e66e05c9
       # imports `platform/linux_image_code_ranges`, which arrives in c1d55ce.
-      url = "github:metacraft-labs/nim-stackable-hooks/c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a";
+      # Bumped c1d55ce -> d715806 (2026-11-14): the `agents-to-dev-2026-11-01`
+      # promotion merge, now the tip of both `dev` and `agents`. Its tree is
+      # identical to c1d55ce, but a checkout synced to either branch is at this
+      # commit, and the engine refuses a placed sibling off its pin.
+      url = "github:metacraft-labs/nim-stackable-hooks/d715806424e8373708494913e59a48237978cc2a";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -559,7 +608,10 @@
       # until the v0.1.0 tag carries it; then it moves to the tag, with
       # `repro lock update`, which moves this URL, flake.lock and repro.lock
       # together (CI clones the sibling at repro.lock's revision).
-      url = "github:metacraft-labs/test-certificates-tools/4b395de551d86c745d6eb8ebf7c7228df25298f5";
+      # Moved 4b395de -> a726655 (2026-11-14), the sibling's `agents` tip: the
+      # version now lives inside src/, so a consumer that ships src/ alone
+      # compiles. 4b395de is an ancestor.
+      url = "github:metacraft-labs/test-certificates-tools/a726655886808d1062390d05c50f4fce03150eb4";
       flake = false;
     };
     # A source-only input was removed from this set, and this note is where
@@ -972,6 +1024,8 @@
       io-mon-src,
       nim-shm-gset-src,
       nim-shm-queue-src,
+      nim-cli-spec-src,
+      nim-confutils-src,
       nim-fork-src,
       nim-csources-src,
       ct-trace-format-src,
@@ -1204,6 +1258,8 @@
               (row "STACKABLE_HOOKS_SRC" "nim-stackable-hooks-src" "/src")
               (row "SHM_GSET_SRC" "nim-shm-gset-src" "/src")
               (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
+              (row "CLI_SPEC_SRC" "nim-cli-spec-src" "/src")
+              (row "CONFUTILS_SRC" "nim-confutils-src" "")
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
               (row "TEST_CERTIFICATES_TOOLS_SRC" "test-certificates-tools-src" "/src")
@@ -1447,6 +1503,8 @@
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
+                export CLI_SPEC_SRC=${nim-cli-spec-src}/src
+                export CONFUTILS_SRC=${nim-confutils-src}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
@@ -1571,6 +1629,8 @@
               ioMonSrc = io-mon-src;
               shmGsetSrc = nim-shm-gset-src;
               shmQueueSrc = nim-shm-queue-src;
+              cliSpecSrc = nim-cli-spec-src;
+              confutilsSrc = nim-confutils-src;
               codetracerSrc = codetracer-src;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
               testAdaptersSrc = reprobuild-test-adapters-src;
@@ -1725,6 +1785,8 @@
                 IO_MON_SRC|${io-mon-src}/src
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
+                CLI_SPEC_SRC|${nim-cli-spec-src}/src
+                CONFUTILS_SRC|${nim-confutils-src}
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
@@ -1954,6 +2016,8 @@
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
+                                      ${nim-cli-spec-src} \
+                                      ${nim-confutils-src} \
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
                                       ${reprobuild-test-adapters-src} \
@@ -2084,6 +2148,8 @@
                   pkgs.go
                   pkgs.rustc
                   pkgs.cargo
+                  # The test runner the sized-nextest case drives.
+                  pkgs.cargo-nextest
                   pkgs.gfortran
                   pkgs.fpc
                   pkgs.ldc
@@ -2565,6 +2631,8 @@
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
+            CLI_SPEC_SRC = "${nim-cli-spec-src}/src";
+            CONFUTILS_SRC = "${nim-confutils-src}";
             # Kernel UAPI syscall tables for the CONF-3 lease-floor derivation
             # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.
             REPRO_LINUX_UAPI_INCLUDE =

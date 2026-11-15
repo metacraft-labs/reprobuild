@@ -205,21 +205,26 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     let fixtureRoot = prepareFixtureRoot(repoRoot)
     defer: removeDir(fixtureRoot)
     let daemonPath = findNixDaemon(repoRoot)
-    let socketPath = "/tmp/reprobuild-nix-daemon-ipc.sock"
+    # A socket private to this run, in a directory of its own. It used to be
+    # the FIXED ``/tmp/reprobuild-nix-daemon-ipc.sock``, which every run on
+    # the host shared, so each run began by ``pkill -f``-ing whatever served
+    # it -- every concurrent run's helper, and any process of the user whose
+    # command line named the path (reprobuild-pm issue 2026-11-13). A private
+    # path has no previous owner to stop. Not in ``fixtureRoot``: the
+    # expression request below has Nix read that directory, and a socket
+    # there is a file type Nix refuses to copy.
+    let socketDir = createTempDir("repro-nix-daemon-ipc-sock-", "")
+    defer: removeDir(socketDir)
+    let socketPath = socketDir / "nix-daemon.sock"
     
     # Assert daemon binary is built and present
     check fileExists(daemonPath)
     
-    # Stop any running instance and remove old socket
-    discard execCmd("pkill -f -u $USER reprobuild-nix-daemon-ipc.sock || true")
-    removeFile(socketPath)
-    
     # Spawn the daemon, keeping its handle so this case stops and reaps the
-    # helper it started, also when an exception ends the case early. This
-    # helper's socket, `.lock` and `.log` are under /tmp, not in a fixture
-    # root, so its shutdown writes do not race the fixture removal the way
-    # the loader-env case's did; waiting still means no helper of this case
-    # outlives it. See ``stopHelperAndWait``.
+    # helper it started, also when an exception ends the case early. Its
+    # socket, ``.lock`` and ``.log`` live in ``socketDir``, so the helper
+    # must have EXITED before that is removed: this ``defer`` runs before
+    # the ``removeDir(socketDir)`` above. See ``stopHelperAndWait``.
     let daemonProcess = startProcess(daemonPath,
       args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
       options = {})

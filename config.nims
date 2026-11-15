@@ -566,6 +566,9 @@ for libName in [
   # and deletes stale build units (docs/cargo-gc.md). ``repro_cli_support``
   # imports it for `repro cargo`.
   "repro_cargo_gc",
+  # Thin cargo edge: the transparent rustc wrapper, its environment and
+  # product discovery from cargo's JSON (docs/cargo-edge.md).
+  "repro_cargo_edge",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from
@@ -855,12 +858,18 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # missing nim-shm-gset, which is exactly the version skew that breaks the build.
 # These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
+proc siblingCheckout(sibling: string): string =
+  ## The checkout a sibling package path lies in: ``../nim-shm-gset/src`` is
+  ## in ``../nim-shm-gset``; a package rooted at its checkout
+  ## (``../nim-confutils``) is its own.
+  if sibling.extractFilename() == "src": sibling.parentDir() else: sibling
+
 proc pinnedSiblingRevision(sibling: string): string =
   ## The revision this repository pins for `sibling`, keyed by the sibling
   ## directory's name: its `deps` entry in the committed `repro.lock`, else a
   ## `name=<sha>` / `name!=<sha>` line of `.github/sibling-repos` (which lists
   ## a sibling repro.lock pins by its bare name only). "" when neither pins it.
-  let name = sibling.parentDir().extractFilename()   # ../nim-shm-gset/src -> nim-shm-gset
+  let name = siblingCheckout(sibling).extractFilename()
   let lockPath = repoPath("repro.lock")
   if fileExists(lockPath):
     # One inline table per `deps` entry, with no nested braces.
@@ -891,7 +900,8 @@ proc pinnedSiblingRevision(sibling: string): string =
 proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: int] =
   ## `gorgeEx` runs relative to the script's directory, not the process's, so
   ## the sibling's checkout is named absolutely.
-  gorgeEx("git -C " & quoteShell(repoPath(sibling.parentDir())) & " " & args)
+  gorgeEx("git -C " & quoteShell(repoPath(siblingCheckout(sibling))) & " " &
+    args)
 
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   ## Sibling-first, but never silently against an explicit pin.
@@ -953,6 +963,21 @@ addSiblingFirstPackagePath(".." / "nim-shm-queue" / "src", "SHM_QUEUE_SRC",
   "shm_queue.nim")
 addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
   "shm_gset.nim")
+# clispec: the ``cli:`` description language and its typed CLI model, which
+# ``repro_project_dsl`` builds every ``executable … cli:`` block on (and so
+# every recipe and provider compile imports). Developed side by side with this
+# repository, so the same sibling-first policy as the shm libraries applies:
+# the ``../nim-cli-spec`` checkout, else the ``$CLI_SPEC_SRC`` pin.
+addSiblingFirstPackagePath(".." / "nim-cli-spec" / "src", "CLI_SPEC_SRC",
+  "clispec.nim")
+# confutils (the metacraft-labs fork): ``confutils/clispec_config`` is how
+# repro's own command line is instantiated from its clispec description
+# (``repro_cli_support/cli_program``). The package is rooted at the checkout
+# (no ``src/``), and only the clispec bridge is imported, so none of
+# confutils' serialization dependencies are needed. Same policy: the
+# ``../nim-confutils`` checkout, else the ``$CONFUTILS_SRC`` pin.
+addSiblingFirstPackagePath(".." / "nim-confutils", "CONFUTILS_SRC",
+  "confutils.nim")
 
 # SHM-GSET: TWO independent users of one data structure, and the distinction is
 # easy to lose. io-mon's Linux dependency-capture channel is the grow-only
@@ -1714,3 +1739,12 @@ block worktreeLocalNimcache:
   if rel.len > 0:
     cacheDir.add("/" & rel)
   switch("nimcache", cacheDir & "/" & project & suffix)
+
+# The adopt gate's structural check (tests/e2e/addon/adopt_gate_source.nim)
+# parses the gate's whole source with macros.parseStmt at compile time, once
+# for the gate and once for each of its negative controls. With the A13
+# round-9 trigger case the source outgrew the Nim VM's default loop budget
+# (10 000 000 iterations). The check refuses any configuration file of the
+# gate's own, so the budget is raised here, for that compile only.
+if projectName() == "t_e2e_addon_adopt_hand_configured_service":
+  switch("maxLoopIterationsVM", "100000000")

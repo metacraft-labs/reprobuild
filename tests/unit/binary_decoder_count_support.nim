@@ -33,12 +33,14 @@ proc checkCountMutations(encoded: seq[byte]; decode: proc (data: seq[byte]) {.cl
   ## before allocating. One aggregate budget prevents later allocations from
   ## hiding behind an earlier iteration's memory high-water mark.
   decode(encoded) # Nonempty valid control, including nested collections.
-  doAssert encodedCountOffsets.len == expectedCounts,
-    "fixture must reach all expected collections: recorded " &
-    $encodedCountOffsets.len & ", expected " & $expectedCounts
-  echo "  checked count fields: ", encodedCountOffsets.len
+  # Take the recorded offsets and clear the shared recorder before asserting,
+  # so one failing case cannot leak its offsets into the next case's count.
   let offsets = encodedCountOffsets
   encodedCountOffsets = @[]
+  doAssert offsets.len == expectedCounts,
+    "fixture must reach all expected collections: recorded " &
+    $offsets.len & ", expected " & $expectedCounts
+  echo "  checked count fields: ", offsets.len
   let before = getMaxMem()
   for rawOffset in offsets:
     let offset = rawOffset + offsetAdjustment

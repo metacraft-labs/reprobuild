@@ -167,6 +167,10 @@ const BuiltSourcePackageRoots = [
   ("GOSTI_SRC", compileTimeSourceRoot("GOSTI_SRC")),
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
+  ("CLI_SPEC_SRC", compileTimeSourceRoot("CLI_SPEC_SRC")),
+  # confutils: repro's own command line (``repro_cli_support/cli_program``)
+  # is instantiated through it, so a nested compile of the engine needs it.
+  ("CONFUTILS_SRC", compileTimeSourceRoot("CONFUTILS_SRC")),
   ("REPRO_CT_TEST_RUNNER_SRC",
     compileTimeSourceRoot("REPRO_CT_TEST_RUNNER_SRC")),
   # The PIN, not ``CODETRACER_SRC``. This table is re-exported into every
@@ -3134,7 +3138,7 @@ proc toProjectInterface*(pkg: PackageDef;
     for cmd in exe.commands:
       var normalizedCmd = InterfaceCommand(
         name: cmd.name,
-        providerEntrypointId: cmd.providerEntrypointId,
+        providerEntrypointId: cmd.ext.providerEntrypointId,
         location: SourceLocation(file: cmd.sourceFile, line: cmd.sourceLine))
       for param in cmd.params:
         normalizedCmd.params.add(toInterfaceParam(param))
@@ -5060,6 +5064,17 @@ proc reprobuildExternalLibsRoot(workDir: string): string =
   if result.len == 0:
     result = siblingReprobuildLibsRoot(workDir)
 
+proc explicitSourceEnv(envName: string): string =
+  ## ``$<envName>`` when the caller set it, "" when it is unset OR still holds
+  ## the value this CLI seeded itself (``seedSourcePackageEnvironment``). A
+  ## seeded root is the engine's own build-time snapshot, a default: it must
+  ## rank below the consumer's sibling checkout, or a workspace whose pinned
+  ## ``repro`` lags the tree being compiled would compile that tree against
+  ## the engine's older copy of a library (e.g. runquota's ``withWidthRange``
+  ## missing in 0.2.18's snapshot).
+  if envName in seededSourcePackageEnvironmentNames(): ""
+  else: getEnv(envName)
+
 proc markedPackageRoot(candidate, marker: string): string =
   if candidate.len == 0:
     return ""
@@ -5089,13 +5104,17 @@ proc resolveBootstrapPackagePath*(envName: string;
   ## 2. each candidate path in declaration order (if it contains marker)
   ## 3. the source root captured when ``repro`` was built
   ## 4. "" (caller skips the ``--path:`` flag entirely)
-  let envPath = markedPackageRoot(getEnv(envName), marker)
+  let envPath = markedPackageRoot(explicitSourceEnv(envName), marker)
   if envPath.len > 0:
     return envPath
   for candidate in candidates:
     let resolved = markedPackageRoot(candidate, marker)
     if resolved.len > 0:
       return resolved
+  # Seeded (engine snapshot) value: only after every checkout candidate.
+  let seededPath = markedPackageRoot(getEnv(envName), marker)
+  if seededPath.len > 0:
+    return seededPath
   markedPackageRoot(builtCandidate, marker)
 
 proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
@@ -5134,9 +5153,11 @@ proc resolveCtIncrementalAdapterPath(anchorRoot: string): string =
 
 proc resolveRunquotaRoot(anchorRoot, consumerParent: string): string =
   let marker = "libs" / "runquota_core" / "src" / "runquota_core.nim"
-  for candidate in [getEnv("RUNQUOTA_SRC"),
+  # Seeded engine snapshot last (see ``explicitSourceEnv``).
+  for candidate in [explicitSourceEnv("RUNQUOTA_SRC"),
                     anchorRoot.parentDir / "runquota",
-                    consumerParent / "runquota"]:
+                    consumerParent / "runquota",
+                    getEnv("RUNQUOTA_SRC")]:
     if candidate.len > 0 and fileExists(extendedPath(candidate / marker)):
       return candidate
   ""
@@ -5289,6 +5310,12 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
     ("SHM_GSET_SRC", anchored([
       ".." / "nim-shm-gset" / "src",
     ]), "shm_gset.nim"),
+    # ``repro_project_dsl`` builds every ``cli:`` block on the clispec library
+    # (nim-cli-spec), so every producer's ``repro.nim`` imports it. Mirror
+    # config.nims (CLI_SPEC_SRC), exactly as SHM_QUEUE_SRC above.
+    ("CLI_SPEC_SRC", anchored([
+      ".." / "nim-cli-spec" / "src",
+    ]), "clispec.nim"),
     ("REPRO_TEST_ADAPTERS_SRC", anchored([
       ".." / "reprobuild-test-adapters" / "src",
     ]), "repro_test_adapters" / "test_runner.nim"),
@@ -6763,6 +6790,11 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   result.addExternalPackagePath(workDir, "SHM_GSET_SRC", [
     ".." / "nim-shm-gset" / "src",
   ], "shm_gset.nim")
+  # `repro_project_dsl` imports `clispec` (the `cli:` language and its typed
+  # model), so every DSL compile needs it, for the same reason.
+  result.addExternalPackagePath(workDir, "CLI_SPEC_SRC", [
+    ".." / "nim-cli-spec" / "src",
+  ], "clispec.nim")
   result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
     ".." / "reprobuild-test-adapters" / "src",
   ], "repro_test_adapters" / "test_runner.nim")

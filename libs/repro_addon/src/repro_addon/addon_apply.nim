@@ -66,6 +66,7 @@ from std/posix import Statvfs, statvfs, Stat, lstat, stat, rmdir, S_ISLNK, ENOEN
   O_TRUNC, O_RDONLY, O_CLOEXEC, fsync
 import std/posix as posix
 import std/uri
+import std/sysrand
 import repro_binary_cache_client/http_pool
 
 import repro_core/host_apply_lock
@@ -315,6 +316,10 @@ type
       ## or under an older floor version (``floorIntroducedUnits``): each
       ## is a changed unit file and a restart, listed apart in the plan;
       ## an agent apply refuses them (spec §10.1).
+    liveJudged*: seq[string]
+      ## The units step 6's carried-state live check read from systemd, by
+      ## the name it read them under (a template through its instances,
+      ## §13 decision 135); empty when it judged none.
     floorExceptions*: seq[string]
       ## The target profile's hardening-floor exceptions (spec §10.1,
       ## CONF-2): ``<unit>: <Setting>: <reason>`` each, printed in every
@@ -322,6 +327,11 @@ type
     failedAtFloor*: seq[string]
       ## Non-empty when the switch failed after its flip and the rollback
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
+    heldAtRevert*: seq[string]
+      ## A revert whose own effective-unit check refused units: each refusal
+      ## line. The revert commits; those units keep their start hold and
+      ## are not started, until a later switch's check passes (spec §10.1,
+      ## A9 review round 12).
 
 const
   DefaultStateDir* = SystemStateDir
@@ -1315,29 +1325,91 @@ proc floorInstancesOf(tmpl: string; resources: openArray[SystemResource]):
     seq[string] =
   ## The instances of a floored template (``foo@.service``) the generation
   ## names: a drop-in for one, a unit that depends on one, or a unit of
-  ## that name. systemd will not show the template itself.
-  let at = tmpl.find('@')
-  let typ = tmpl[tmpl.rfind('.') .. ^1]
-  let stem = tmpl[0 .. at]
-  proc consider(n: string; acc: var seq[string]) =
-    if n.startsWith(stem) and n.endsWith(typ) and n.len > stem.len + typ.len and
-        n != tmpl and n notin acc:
-      acc.add(n)
-  for r in resources:
-    case r.kind
-    of srkSystemdSystemDropIn: consider(r.diUnit, result)
-    of srkSystemdSystemUnit:
-      consider(r.suName, result)
-      for t in r.suContent.splitWhitespace():
-        for w in t.split({'=', ' '}):
-          consider(w, result)
-    else: discard
+  ## that name. systemd will not show the template itself. The same reading
+  ## the carried-state live check uses (``carried_state.generationInstancesOf``).
+  generationInstancesOf(tmpl, resources)
 
 proc floorTemplateOf(name: string): string =
   ## ``foo@.service`` for an instance ``foo@x.service``, else "".
   let at = name.find('@')
   let dot = name.rfind('.')
   if at > 0 and dot > at + 1: name[0 .. at] & name[dot .. ^1] else: ""
+
+proc revertHeldUnits*(refusals: openArray[string]; ownUnits: HashSet[string];
+                      floored: openArray[string]): seq[string] =
+  ## The units a revert keeps on hold for its floor check's ``refusals``
+  ## (spec §10.1, A9 review round 12): each refusal's subject when it is a
+  ## unit the generation installs (a template, for an instance), else
+  ## every floored unit of the generation (``floored``): a refusal about a
+  ## host's type-wide drop-in, the search path or the manager bears on all
+  ## of them. Never a name the generation does not install: a hold on
+  ## ``service`` would be a type-wide drop-in that keeps every service on
+  ## the host from starting.
+  for l in refusals:
+    let c = l.find(": ")
+    let subj = if c > 0: l[0 ..< c].strip() else: ""
+    var u = ""
+    when mutated("revert-holds-any-subject"):
+      # Falsifying build: the first cut, any subject held as named.
+      u = (let t = floorTemplateOf(subj); if t.len > 0: t else: subj)
+    else:
+      let t = floorTemplateOf(subj)
+      if t.len > 0 and t in ownUnits: u = t
+      elif subj in ownUnits: u = subj
+    if u.len == 0:
+      for f in floored:
+        if f notin result: result.add(f)
+    elif u notin result:
+      result.add(u)
+
+proc generationUnitNames*(resources: openArray[SystemResource]): HashSet[string] =
+  ## The units the generation installs (not a drop-in onto a base unit).
+  result = initHashSet[string]()
+  for r in resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+      result.incl(r.suName)
+
+proc holdUnitOf(path: string): string =
+  ## The unit whose drop-in directory holds ``path``
+  ## (``/etc/systemd/system/<unit>.d/<name>``).
+  result = extractFilename(parentDir(path))
+  if result.endsWith(".d"): result.setLen(result.len - 2)
+
+proc addonRevertHolds*(genUnits: HashSet[string];
+                       dirs: openArray[string] = [PersistentUnitDir, RuntimeUnitDir]):
+                       seq[string] =
+  ## The revert holds the add-on wrote (§13 decision 133): a regular file
+  ## named ``RevertHoldName`` holding exactly ``RevertHoldText``, on a unit
+  ## the generation installs (a template's directory covers its instances).
+  ## Anything else of that name -- other content, a link, a unit the
+  ## generation does not install -- is not one: the effective check judges
+  ## it like any drop-in, and no apply removes it (A9 review round 13).
+  for d in dirs:
+    var found: seq[string]
+    try: found = staleHolds(RevertHoldName, d)
+    except OSError: continue
+    for h in found:
+      when mutated("revert-hold-any-content"):
+        # Falsifying build: every file of that name is a hold.
+        result.add(h)
+      else:
+        if symlinkExists(h) or holdUnitOf(h) notin genUnits: continue
+        var c = ""
+        try: c = readFile(h)
+        except IOError, OSError: continue
+        if c == RevertHoldText: result.add(h)
+
+proc holdInTheWay*(path: string): bool =
+  ## A file at ``path`` (a revert hold's place) that the revert must not
+  ## write over: a link, or a file whose text is not a prefix of
+  ## ``RevertHoldText`` -- an operator's, or one planted. An empty or
+  ## truncated hold (a write a full file system cut short, a power loss
+  ## before it reached the disk) is not the add-on's hold, and is never in
+  ## the way of the hold it failed to be (A9 review round 14, finding 1).
+  if symlinkExists(path): return true
+  if not fileExists(path): return false
+  try: not RevertHoldText.startsWith(readFile(path))
+  except IOError, OSError: true
 
 proc startHoldPath*(unit: string): string =
   ## Where the switch's start hold for ``unit`` (a template's, for an
@@ -1363,6 +1435,112 @@ proc writeStartHolds*(resources: openArray[SystemResource];
   for u in extra:
     if u notin units: units.add(u)
   writeHolds(units, StartHoldName, StartHoldText)
+
+const HeldTriggersFile = "held-triggers"
+  ## The triggers a switch stopped for its holds (§13 decision 151), one
+  ## per line, in the state directory: written before any is stopped, so a
+  ## switch refused after its flip leaves them for the revert's switch to
+  ## start again, and a crash leaves them for the next switch.
+
+proc heldTriggersPath(stateDir: string): string = stateDir / HeldTriggersFile
+
+proc readHeldTriggers*(stateDir: string): seq[string] =
+  ## The triggers on record as stopped for a hold; empty when none is.
+  let p = heldTriggersPath(stateDir)
+  if not fileExists(p): return
+  for l in readFile(p).splitLines():
+    let t = l.strip()
+    if t.len > 0 and t notin result: result.add(t)
+
+proc writeHeldTriggers*(stateDir: string; triggers: openArray[string]) =
+  ## Record ``triggers`` as stopped for a hold (durably: a checked write,
+  ## renamed into place), or remove the record when there are none.
+  let p = heldTriggersPath(stateDir)
+  if triggers.len == 0:
+    if fileExists(p): removeFile(p)
+    return
+  writeHoldFile(p, triggers.join("\n") & "\n")
+
+const TriggersToRestartFile = "triggers-to-restart"
+  ## §13 decision 155: the triggers a revert could not start again. While
+  ## the file names any, the host is pending: the next switch first retries
+  ## them (the pending-switch guard) and refuses while one still does not
+  ## start, and `repro system addon recover` retries them and says so.
+
+proc triggersToRestartPath(stateDir: string): string =
+  stateDir / TriggersToRestartFile
+
+proc readTriggersToRestart*(stateDir: string): seq[string] =
+  let p = triggersToRestartPath(stateDir)
+  if not fileExists(p): return
+  for l in readFile(p).splitLines():
+    let t = l.strip()
+    if t.len > 0 and t notin result: result.add(t)
+
+proc writeTriggersToRestart*(stateDir: string; triggers: openArray[string]) =
+  let p = triggersToRestartPath(stateDir)
+  if triggers.len == 0:
+    if fileExists(p): removeFile(p)
+    return
+  writeHoldFile(p, triggers.join("\n") & "\n")
+
+proc hasTriggersToRestart*(stateDir: string): bool =
+  readTriggersToRestart(stateDir).len > 0
+
+proc addonLiveHost*(): LiveHost =
+  ## systemctl, as the full apply's release reads and drives it.
+  LiveHost(
+    isActive: proc (u: string): bool = unitIsActive(u),
+    show: proc (u: string): Table[string, string] = systemctlShow(u),
+    start: proc (u: string): tuple[ok: bool, output: string] =
+      let r = runSystemctlArgs(["start", "--", u])
+      (r.exitCode == 0, r.output),
+    stop: proc (u: string): tuple[ok: bool, output: string] =
+      let r = runSystemctlArgs(["stop", "--", u])
+      (r.exitCode == 0, r.output),
+    resetFailed: proc (u: string) =
+      discard runSystemctlArgs(["reset-failed", "--", u]))
+
+proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
+    tuple[ok: bool; lines: seq[string]] =
+  ## §13 decision 155: start again each trigger a revert could not, after a
+  ## ``reset-failed``; those that start leave the record, and each outcome
+  ## is a line of the report. ``ok`` when none is left. ``host0`` is
+  ## systemctl unless a caller (a test) gives another.
+  let host = if host0.start == nil: addonLiveHost() else: host0
+  var left: seq[string]
+  for t in readTriggersToRestart(stateDir):
+    let failed = triggerRestarts([t], [], host)
+    if failed.len == 0:
+      result.lines.add("trigger " & t & " started again")
+    else:
+      left.add(t)
+      for f in failed:
+        result.lines.add(f & " (still pending: run `repro system addon " &
+          "recover` once its cause is cleared)")
+  writeTriggersToRestart(stateDir, left)
+  result.ok = left.len == 0
+
+proc hostRunningInstances*(tmpl: string): seq[string]
+
+proc heldTriggersOf*(resources: openArray[SystemResource];
+                     held: openArray[string]; host: LiveHost): seq[string] =
+  ## The socket, path and timer units of the ``held`` units (§13 decision
+  ## 151): the generation's own, whatever their target, and every one
+  ## systemd has loaded that triggers a held unit, one of a held
+  ## template's instances or its observation instance.
+  var profile = SystemProfile()
+  for r in resources: profile.resources.add(r)
+  result = profileTriggersOf(profile, held)
+  var names: seq[string]
+  for u in held:
+    names.add(u)
+    if isTemplateUnit(u):
+      names.add(observationInstanceOf(u))
+      for i in floorInstancesOf(u, resources): names.add(i)
+      for i in hostRunningInstances(u): names.add(i)
+  for t in loadedTriggersOf(names, host):
+    if t notin result: result.add(t)
 
 proc removeStartHolds*(holds: openArray[string]) =
   ## Remove each hold file, and its directory only when the hold was the
@@ -1495,13 +1673,23 @@ proc writeDurably(path, text: string) =
       if n < 0: raiseOSError(osLastError(), tmp)
       off += n
     if fsync(fd) != 0: raiseOSError(osLastError(), tmp)
-  finally:
+  except CatchableError:
     discard posix.close(fd)
+    discard posix.unlink(tmp.cstring)
+    raise
+  # close(2)'s result is checked too: it can be the only report of a write
+  # error (A9 review round 14, finding 1), and so is the directory's fsync.
+  if posix.close(fd) != 0:
+    let e = osLastError()
+    discard posix.unlink(tmp.cstring)
+    raiseOSError(e, "close " & tmp)
   moveFile(tmp, path)
   let dfd = posix.open(parentDir(path).cstring, O_RDONLY or O_CLOEXEC)
-  if dfd >= 0:
-    discard fsync(dfd)
-    discard posix.close(dfd)
+  if dfd < 0: raiseOSError(osLastError(), "open " & parentDir(path))
+  let synced = fsync(dfd)
+  let e = osLastError()
+  discard posix.close(dfd)
+  if synced != 0: raiseOSError(e, "fsync " & parentDir(path))
 
 proc writeCreatedDirs(stateDir: string; t: Table[string, CreatedDir]) =
   var text = ""
@@ -1537,13 +1725,22 @@ proc recordCreatedDirs*(stateDir, unit: string;
     when mutated("created-dirs-by-path"):
       t[path] = c
     else:
-      if now.exists and now.btime != 0 and now.dev == c.dev and now.ino == c.ino and
-          now.btime == c.btime:
+      if sameIdentity(c, now):
         t[path] = c
   for (path, u) in pending:
     when not mutated("created-dirs-per-step"):
       if u != unit: continue
-    if path in t: continue
+    if path in t:
+      # The same directory, now the run this start began (spec §10.1
+      # round 12, "A directory made again outside a switch"): its
+      # InvocationID is recorded, so a tree made at the path later in this
+      # same run is not taken as a new run's (A9 review round 12).
+      when not mutated("record-keeps-old-invocation"):
+        if invocation.len > 0 and t[path].invocation != invocation and
+            flooredKey(t[path].unit) == flooredKey(unit):
+          t[path].invocation = invocation
+          t[path].unit = unit
+      continue
     let now = identityOf(path)
     if now.exists and now.btime != 0:
       t[path] = entryOf(u, now, invocation)
@@ -1552,36 +1749,70 @@ proc recordCreatedDirs*(stateDir, unit: string;
 
 proc recordStartedSince*(stateDir: string;
                          pending: openArray[tuple[path, unit: string]];
-                         sinceNs: int64;
                          invocationOf: proc (u: string): tuple[id: string; start: int64];
-                         identityOf: proc (p: string): PathIdentity = identityOfPath;
-                         resolution = coarseResolutionNs()) =
-  ## After the start step: each pending directory of a unit the switch did
-  ## not start by name, but which started during it (a template instance a
-  ## ``Wants=`` pulled in, an instance its socket started), is recorded for
-  ## that unit when systemd's state shows the unit's own start made it:
-  ## the unit's current invocation began at or after ``sinceNs`` (this
-  ## switch's start step), and the directory was born at or after that
-  ## invocation began (§13 decisions 68 and 77; A9 review round 11, finding
-  ## 4). Anything else stays unrecorded, so it is refused at the next apply.
+                         identityOf: proc (p: string): PathIdentity = identityOfPath) =
+  ## After the start step (spec §10.1 round 12, "What the start step made"):
+  ## each pending directory -- one
+  ## the check found absent -- that exists now is recorded for the unit it
+  ## was pending for, as ``recordCreatedDirs`` does for a unit the switch
+  ## started by name. That covers a unit the switch did not start by name
+  ## but that started during it (a template instance a ``Wants=`` pulled
+  ## in), and a directory its activator's start made for it (a socket's
+  ## start makes the listener's parent, ``/run/<stem>``, which is the
+  ## service's ``RuntimeDirectory=``; A9 review round 12, finding 3). The
+  ## residual is the start step's own: a tree another process makes there
+  ## between the check and the start is recorded as the unit's. The
+  ## unit's ``InvocationID`` is recorded with it, empty when it has none.
   when mutated("dependency-starts-unrecorded"): return
   when mutated("created-dirs-ignored"): return
   var t = readCreatedDirs(stateDir)
   var changed = false
+  # One entry per path. A template's directory is pending for its
+  # observation instance, which never runs, and for each instance the
+  # generation names; it is recorded for an instance that has a run
+  # (an InvocationID), never for the observation instance while one does
+  # (A9 review round 12, finding 4).
+  var order: seq[string]
+  var units = initTable[string, seq[string]]()
   for (path, u) in pending:
+    if path notin units: order.add(path)
+    units.mgetOrPut(path, @[]).add(u)
+  for path in order:
     let now = identityOf(path)
     if not now.exists or now.btime == 0: continue
+    var same = false
     if path in t:
       let c = t[path]
       # Kept while it is still that directory; a stale entry (the unit's
-      # restart made it again) is replaced by the same evidence.
-      if c.dev == now.dev and c.ino == now.ino and c.btime == now.btime: continue
-    let inv = invocationOf(u)
-    if inv.id.len == 0 or inv.start <= 0 or inv.start < sinceNs: continue
-    # The birth time is the coarse clock's (``bornBefore``): a directory
-    # made within a tick of the invocation's start can read as earlier.
-    if bornBefore(now.btime, inv.start, resolution): continue
-    t[path] = entryOf(u, now, inv.id)
+      # restart made it again) is replaced.
+      same = sameIdentity(c, now)
+    var best = ""
+    var bestId = ""
+    when mutated("start-step-records-first-unit"):
+      # Falsifying build: round 12's first cut, the first pending unit
+      # (the observation instance, for a template).
+      best = units[path][0]
+      bestId = invocationOf(best).id
+    for u in units[path]:
+      when mutated("start-step-records-first-unit"): break
+      let id = invocationOf(u).id
+      if best.len == 0 or (bestId.len == 0 and id.len > 0) or
+          (isObservationInstance(best) and not isObservationInstance(u) and
+           (id.len > 0 or bestId.len == 0)):
+        best = u
+        bestId = id
+    if same:
+      # The same directory: only the run it now belongs to is refreshed
+      # (spec §10.1 round 12, "A directory made again outside a
+      # switch"), so a later tree in this run is not a new run's.
+      when not mutated("record-keeps-old-invocation"):
+        if bestId.len > 0 and t[path].invocation != bestId and
+            flooredKey(t[path].unit) == flooredKey(best):
+          t[path].invocation = bestId
+          t[path].unit = best
+          changed = true
+      continue
+    t[path] = entryOf(best, now, bestId)
     changed = true
   if changed: writeCreatedDirs(stateDir, t)
 
@@ -1632,6 +1863,36 @@ proc installedDirectories*(unitFile: string; dropIns: openArray[string]): seq[st
     for v in vals.getOrDefault(k):
       let d = v.split(':')[0]
       if d.len > 0 and '/' notin d: result.add(normalisedPath(root & "/" & d))
+
+proc installedListeners*(unitFile: string; dropIns: openArray[string]):
+    tuple[service: string; paths: seq[string]] =
+  ## The unix listeners an activator the add-on installed declares, and the
+  ## service it starts, read from the files the add-on wrote for it (its
+  ## unit file, then its own drop-ins; an empty assignment resets), for the
+  ## one-time migration (spec §10.1 round 12, "The migration records
+  ## listeners").
+  let name = extractFilename(unitFile)
+  let dot = name.rfind('.')
+  if dot <= 0 or name[dot + 1 .. ^1] != "socket": return
+  var explicit, accept = ""
+  var vals: seq[string]
+  for f in @[unitFile] & @dropIns:
+    var text = ""
+    try: text = readFile(f)
+    except IOError, OSError: continue
+    for d in serviceFloor.sectionDirectives(text, ["Socket"]):
+      case d.key
+      of "Service": explicit = d.value.strip()
+      of "Accept": accept = d.value.strip()
+      of "ListenStream", "ListenDatagram", "ListenSequentialPacket":
+        if d.value.strip().len == 0: vals = @[]
+        elif d.value.strip().startsWith("/"): vals.add(normalisedPath(d.value.strip()))
+      else: discard
+  result.paths = vals
+  result.service =
+    if explicit.len > 0: explicit
+    elif accept.toLowerAscii() in ["yes", "true", "1", "on"]: name[0 ..< dot] & "@.service"
+    else: name[0 ..< dot] & ".service"
 
 proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
                          invocationOf: proc (unit: string): string;
@@ -1724,44 +1985,115 @@ proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
             t[path] = c
           else:
             if audit(path, c): t[path] = c
+    # Spec §10.1 round 12, "The migration records listeners": the unix
+    # listeners of the activators that generation
+    # installed for its floored services, as its own files declare them and
+    # where the listener rule allows them, recorded for the activator, so
+    # the first apply under this engine, and its revert, pass decision 78's
+    # existing-listener rule.
+    when not mutated("migration-skips-listeners"):
+      var flooredFiles = initHashSet[string]()
+      for (unit, file) in units:
+        try:
+          if FloorMarker in readFile(file): flooredFiles.incl(unit)
+        except IOError, OSError: discard
+      for (unit, file) in units:
+        if not unit.endsWith(".socket") or file.len == 0 or '@' in unit: continue
+        let (service, paths) = installedListeners(file, dropIns.getOrDefault(unit))
+        let at = service.find('@')
+        let sdot = service.rfind('.')
+        let tpl = if at > 0 and sdot > at: service[0 .. at] & service[sdot .. ^1] else: service
+        if service notin flooredFiles and tpl notin flooredFiles: continue
+        for path in paths:
+          if inAddOnTree(path) or path in t: continue
+          if serviceFloor.listenerRefusal(unit, path, service).len > 0: continue
+          let now = identityOf(path)
+          if now.exists and now.btime != 0:
+            let c = entryOf(unit, now, invocationOf(unit))
+            if audit(path, c): t[path] = c
   writeCreatedDirs(stateDir, t)
   for k, v in t: result.add((k, v))
 
-proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
-  ## The unit's current ``InvocationID`` and when that invocation began
-  ## (``InactiveExitTimestamp``, nanoseconds since the epoch, read with
-  ## microseconds in UTC: systemctl(1) ``--timestamp=us+utc``), or empty
-  ## when systemd does not say.
+type UnitRun* = object
+  ## One snapshot of a unit's run, from one ``systemctl show`` (A9 review
+  ## round 12, finding 5): its ``InvocationID``, when its current or last
+  ## run began (``InactiveExitTimestamp``) and ended
+  ## (``InactiveEnterTimestamp``, for a unit not running), and whether it
+  ## runs (``ActiveState``). Times are nanoseconds since the epoch, 0 when
+  ## systemd does not say.
+  id*: string
+  start*, stop*: int64
+  mainStart*: int64
+    ## ``ExecMainStartTimestamp``: when the run's main process started
+    ## (§13 decision 141)
+  running*: bool
+
+proc parseUtcStamp(v: string): int64 =
+  ## "Sun 2026-11-08 10:00:00.123456 UTC" (``--timestamp=us+utc``) in
+  ## nanoseconds since the epoch, or 0.
+  let parts = v.strip().splitWhitespace()
+  if parts.len == 4 and parts[3] == "UTC":
+    try:
+      let dt = parse(parts[1] & " " & parts[2].split('.')[0], "yyyy-MM-dd HH:mm:ss", utc())
+      var us = 0'i64
+      if '.' in parts[2]: us = parseBiggestInt(parts[2].split('.')[1])
+      return dt.toTime.toUnix * 1_000_000_000'i64 + us * 1000
+    except ValueError, TimeParseError: discard
+  0
+
+proc parseUnitRun*(output: string): UnitRun =
+  ## ``UnitRun`` from the output of ``systemctl show --timestamp=us+utc -p
+  ## InvocationID -p InactiveExitTimestamp -p InactiveEnterTimestamp -p
+  ## ActiveState``.
+  for l in output.splitLines():
+    let eq = l.find('=')
+    if eq <= 0: continue
+    let k = l[0 ..< eq]
+    let v = l[eq + 1 .. ^1].strip()
+    case k
+    of "InvocationID": result.id = v
+    of "InactiveExitTimestamp": result.start = parseUtcStamp(v)
+    of "InactiveEnterTimestamp": result.stop = parseUtcStamp(v)
+    of "ExecMainStartTimestamp": result.mainStart = parseUtcStamp(v)
+    of "ActiveState": result.running = v in ["active", "activating", "reloading"]
+    else: discard
+
+proc unitRun*(unit: string;
+              show: proc (args: seq[string]): tuple[exitCode: int; output: string] = nil):
+              UnitRun =
+  ## ``unit``'s run, read in one ``systemctl show`` (``show`` stands in for
+  ## systemctl in tests); empty when systemd does not say.
+  let args = @["show", "--no-pager", "--timestamp=us+utc", "-p", "InvocationID",
+               "-p", "InactiveExitTimestamp", "-p", "InactiveEnterTimestamp",
+               "-p", "ExecMainStartTimestamp",
+               "-p", "ActiveState", "--", unit]
   try:
-    let r = runSystemctl(@["show", "--no-pager", "--timestamp=us+utc", "-p",
-                           "InvocationID", "-p", "InactiveExitTimestamp", "--", unit])
+    let r = (if show != nil: show(args)
+             else: (let x = runSystemctl(args); (x.exitCode, x.output)))
     if r.exitCode != 0: return
-    for l in r.output.splitLines():
-      if l.startsWith("InvocationID="): result.id = l["InvocationID=".len .. ^1].strip()
-      elif l.startsWith("InactiveExitTimestamp="):
-        let v = l["InactiveExitTimestamp=".len .. ^1].strip()
-        # "Sun 2026-11-08 10:00:00.123456 UTC"
-        let parts = v.splitWhitespace()
-        if parts.len == 4 and parts[3] == "UTC":
-          try:
-            let dt = parse(parts[1] & " " & parts[2].split('.')[0], "yyyy-MM-dd HH:mm:ss", utc())
-            var us = 0'i64
-            if '.' in parts[2]: us = parseBiggestInt(parts[2].split('.')[1])
-            result.start = dt.toTime.toUnix * 1_000_000_000'i64 + us * 1000
-          except ValueError, TimeParseError: discard
+    result = parseUnitRun(r.output)
   except CatchableError: discard
 
-proc unitRunning*(unit: string): bool =
-  ## systemd reports ``unit`` running: its ``ActiveState`` is ``active``,
-  ## ``activating`` or ``reloading`` (systemd.unit(5)); false when it does
-  ## not say.
-  try:
-    let r = runSystemctl(@["show", "--no-pager", "-p", "ActiveState", "--value", "--", unit])
-    if r.exitCode != 0: return false
-    r.output.strip() in ["active", "activating", "reloading"]
-  except CatchableError: false
+proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
+  ## The unit's current ``InvocationID`` and when that invocation began
+  ## (``unitRun``).
+  let r = unitRun(unit)
+  (r.id, r.start)
 
-proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
+proc hostRunningInstances*(tmpl: string): seq[string] =
+  ## The instances of the template ``tmpl`` (``a@.service``) systemd reports
+  ## active, activating or reloading (``systemctl list-units``); empty when
+  ## it does not say.
+  if tmpl.find('@') <= 0: return
+  try:
+    let r = runSystemctl(runningInstancesArgs(tmpl))
+    if r.exitCode != 0: return
+    result = parseRunningInstances(tmpl, r.output)
+  except CatchableError: discard
+
+proc hostSystemdView*(path, unit: string; show: ShowProps;
+                      systemctlShow: proc (args: seq[string]):
+                        tuple[exitCode: int; output: string] = nil): SystemdView =
   ## systemd's own state of ``path``, a directory of ``unit``, for §13
   ## decisions 71 and 77: the directory's birth time (through systemd's own
   ## ``private/<name>`` link of a dynamic user and no other link) and the
@@ -1799,11 +2131,23 @@ proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
     result.owner = int(st.st_uid)
     result.ctime = int64(st.st_ctim.tv_sec)
   result.btime = birthTimeOf(target)
-  let inv = unitInvocation(unit)
-  result.invocationId = inv.id
-  result.invocationStart = inv.start
-  result.stopped = not unitRunning(unit)
-  result.clockResolution = coarseResolutionNs()
+  when mutated("view-two-calls"):
+    # Falsifying build: round 11's two reads, the start and the state from
+    # separate calls.
+    let a = unitRun(unit, systemctlShow)
+    let b = unitRun(unit, systemctlShow)
+    result.invocationId = a.id
+    result.invocationStart = a.start
+    result.lastStop = a.stop
+    result.mainStart = a.mainStart
+    result.stopped = not b.running
+  else:
+    let run = unitRun(unit, systemctlShow)
+    result.invocationId = run.id
+    result.invocationStart = run.start
+    result.lastStop = run.stop
+    result.mainStart = run.mainStart
+    result.stopped = not run.running
 
 proc refusalLine*(subject, code, key, msg: string): string =
   ## A refusal line of the effective check that no rule of
@@ -1814,6 +2158,69 @@ proc refusalLine*(subject, code, key, msg: string): string =
     subject & ": " & msg
   else:
     subject & ": " & msg & " [rule:" & code & " key:" & key & "]"
+
+proc stemUnitsLoaded*(stem: string): seq[string] =
+  ## Every unit of stem ``stem`` systemd knows: loaded (``list-units
+  ## --all``) or with a unit file (``list-unit-files``), templates
+  ## included. Raises when systemctl will not list them.
+  for verb in [@["list-units", "--all"], @["list-unit-files"]]:
+    let r = runSystemctl(verb & @["--plain", "--no-legend", "--no-pager", "--",
+                                  stem & ".*", stem & "@*"])
+    if r.exitCode != 0 and r.output.strip().len > 0 and
+        "0 unit" notin r.output:
+      raise newException(OSError, "systemctl " & verb.join(" ") & " " & stem &
+        ".*: " & r.output.strip())
+    for l in r.output.splitLines():
+      let w = l.splitWhitespace()
+      if w.len > 0 and unitStem(w[0]) == stem and w[0] notin result:
+        result.add(w[0])
+
+proc stemWritablePlaces*(service: string; show: ShowProps;
+                         resources: openArray[SystemResource];
+                         problem: var string): seq[string] =
+  ## The places a listener below ``/run/<stem>/`` must not lie under, for
+  ## the activated ``service`` (§13 decision 139, the effective half): what
+  ## the service can write as systemd loaded it, what every other unit of
+  ## its stem systemd knows can write (a template through its observation
+  ## instance), and what the generation's own units and drop-ins of that
+  ## stem declare -- each resolved as the kernel resolves it (``/var/run``
+  ## is ``/run``; links on the existing prefix followed). ``problem`` is set
+  ## when a unit of the stem cannot be read: the listener is then refused.
+  var raw = writablePlacesOf(show)
+  when not mutated("listener-writable-own-unit-only"):
+    let stem = unitStem(service)
+    for r in resources:
+      if r.kind == srkSystemdSystemUnit and unitStem(r.suName) == stem:
+        raw.add(floorWritablePlaces(serviceDirectives(renderedSystemUnitContent(r))))
+      elif r.kind == srkSystemdSystemDropIn and unitStem(r.diUnit) == stem:
+        raw.add(floorWritablePlaces(serviceDirectives(r.diContent)))
+    var names: seq[string]
+    try: names = stemUnitsLoaded(stem)
+    except CatchableError as ex:
+      problem = ex.msg
+    for n in names:
+      if n == service: continue
+      try:
+        let sh = parseShow(showUnitText(templateObservationName(n)))
+        raw.add(writablePlacesOf(sh))
+        # A template, shown through its observation instance, has its
+        # specifiers resolved for that instance, which no real instance
+        # is. Its own files are read too, and a place spelled with a
+        # specifier counts by its literal prefix (§13 decision 146; A9
+        # review round 14, finding 4).
+        let at = n.find('@')
+        if at > 0 and n.find('.', at) == at + 1:
+          when not mutated("writable-specifier-resolved"):
+            for f in @[sh.getOrDefault("FragmentPath")] &
+                     sh.getOrDefault("DropInPaths").splitWhitespace():
+              if f.len == 0: continue
+              raw.add(floorWritablePlaces(serviceDirectives(readFile(f))))
+      except CatchableError as ex:
+        problem = "systemd will not show " & n & ", a unit sharing the stem " &
+          stem & ", or its files cannot be read: " & ex.msg
+  for w in raw:
+    let c = canonicalPlace(w, resolveLinks = true)
+    if c notin result: result.add(c)
 
 proc effectiveFloorCheck*(resources: openArray[SystemResource];
                           owned: seq[string] = @[];
@@ -1841,6 +2248,11 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
   for d in resources:
     if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
   for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
+  # A revert's persistent holds are the add-on's own (§13 decision 133):
+  # only a file holding exactly the hold's text, on a unit the generation
+  # installs (A9 review round 13); any other file of that name is judged.
+  let revertHoldFiles = addonRevertHolds(generationUnitNames(resources))
+  for h in revertHoldFiles: own.incl(h)
   var ownUnits = initHashSet[string]()
   for d in resources:
     if d.kind == srkSystemdSystemUnit: ownUnits.incl(d.suName)
@@ -1886,12 +2298,31 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
       groupsRead = true
     let denied = deniedCalls(rendered, groups)
     var names: seq[string]
+    # For a template: the instances the generation names, which every name
+    # of it judges a remade directory against, and the directories an
+    # earlier name refused, which a later name does not accept, so all its
+    # names reach one verdict and a refused check rewrites no record (§13
+    # decision 71; issue 2026-11-13-floor-template-observation-instance-
+    # refuses-a-directory-its-instance-restart-made).
+    var tmplInstances: seq[string]
+    var tmplRefused: ref HashSet[string] = nil
     if r.suName.contains("@."):
+      tmplInstances = floorInstancesOf(r.suName, resources)
+      tmplRefused = new HashSet[string]
+      tmplRefused[] = initHashSet[string]()
       when not mutated("unnamed-instances-unchecked"):
         names.add(templateObservationName(r.suName))
-      names.add(floorInstancesOf(r.suName, resources))
+      names.add(tmplInstances)
     else:
       names = @[r.suName]
+    # A template's directories decision 71 accepts are held until every
+    # name of it has been checked, then recorded and logged once each, and
+    # only if no name refused them (``commitRecreatedProblems``; same
+    # issue). So is what the start step would record for them
+    # (``startMayCreate``'s ``acceptedNow``): it stands only for a
+    # directory that was written.
+    var tentative: seq[RecreatedAcceptance]
+    var heldPending: seq[tuple[path, unit: string]]
     for name in names:
       var e = EffectiveInput(unit: name, rendered: rendered,
         version: r.suFloorVersion, exceptions: r.suFloorExceptions,
@@ -1900,16 +2331,27 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
         adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf,
         createdDirs: created, ledgerDirs: ledgerDirs,
-        systemdView: hostSystemdView)
+        systemdView: proc (p, u: string; s: ShowProps): SystemdView =
+          hostSystemdView(p, u, s),
+        runningInstances: hostRunningInstances,
+        templateInstances: tmplInstances, templateRefused: tmplRefused)
       var acceptedNow: seq[string]
-      e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
-        # Recorded again and logged, or not accepted (§13 decision 71; A9
-        # review round 11, finding 6).
-        if acceptRecreatedLogged == nil or not acceptRecreatedLogged(path, unit, v):
-          return false
-        acceptedNow.add(path)
-        if recreated != nil: recreated[].add((path, unit, v))
-        true
+      var held: seq[tuple[path, unit: string; v: SystemdView]]
+      if tmplRefused != nil:
+        # A template: held, decided after its last name.
+        e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
+          held.add((path, unit, v))
+          acceptedNow.add(path)
+          true
+      else:
+        e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
+          # Recorded again and logged, or not accepted (§13 decision 71; A9
+          # review round 11, finding 6).
+          if acceptRecreatedLogged == nil or not acceptRecreatedLogged(path, unit, v):
+            return false
+          acceptedNow.add(path)
+          if recreated != nil: recreated[].add((path, unit, v))
+          true
       for o in resources:
         if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
             effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
@@ -1919,6 +2361,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
           e.ownDropIns.add((path: targetPathOf(d), content: d.diContent))
       e.ownDropIns.add((path: startHoldPath(name), content: StartHoldText))
+      for h in revertHoldFiles:
+        e.ownDropIns.add((path: h, content: RevertHoldText))
       try:
         let text = showUnitText(name)
         e.show = parseShow(text)
@@ -1934,6 +2378,13 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
           result.add(refusalLine(name, "unreadable", "FragmentPath,DropInPaths",
                                  "cannot read " & f & ", which systemd loaded"))
       result.add(effectiveFloorProblems(e))
+      for h in held:
+        var key = ""
+        for fp in firstComponentPaths(e.show):
+          if fp.path == h.path:
+            key = fp.key
+            break
+        noteRecreated(tentative, name, h.path, h.unit, key, h.v)
       # The first components the unit's start may create, or make again on
       # a restart (§13 decisions 57 and 68; ``startMayCreate``).
       if pending != nil:
@@ -1942,7 +2393,10 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
           # this switch's restart of the unit makes it again.
           if startMayCreate(fp.path, name, identityOfPath(fp.path), created,
                             acceptedNow):
-            pending[].add((fp.path, name))
+            if tmplRefused != nil and fp.path in acceptedNow:
+              heldPending.add((fp.path, name))
+            else:
+              pending[].add((fp.path, name))
       # The units that trigger it: sockets, timers, path units (A9 review
       # round 5, finding 2), whoever defines them.
       when not mutated("activators-unchecked"):
@@ -1975,12 +2429,35 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
               if createdForUnit(path, act, now, created, ledgerDirs): return ""
               if pending != nil and startMayCreate(path, act, now, created):
                 pending[].add((path, act))
+              # A path statx could not read (EACCES, a filter's EPERM, ELOOP)
+              # is no less refused (A9 review round 12, finding 6).
+              if now.dev == 0 and now.ino == 0 and now.btime == 0:
+                return "its identity cannot be read"
               "it exists"
+            # §13 decision 139: the places every unit sharing the service's
+            # stem can write. When one of them cannot be read, every place
+            # is taken as writable, so only a listener below /run/<stem>/
+            # is refused: fail closed where it matters.
+            var stemProblem = ""
+            var writable = stemWritablePlaces(name, e.show, resources, stemProblem)
+            if stemProblem.len > 0: writable = @["/"]
             result.add(activatorProblems(a, ash, parseShowLines(at),
                                          unitPath(a), aown, aloaded, startsOf,
-                                         ownUnits, conflictsOf, listenerProvenance))
+                                         ownUnits, conflictsOf, listenerProvenance,
+                                         serviceWritable = writable))
           except CatchableError as ex:
             result.add(refusalLine(a, "show", "-", ex.msg))
+    if tmplRefused != nil:
+      var committed: seq[RecreatedAcceptance]
+      result.add(commitRecreatedProblems(tentative, tmplRefused[],
+                                         acceptRecreatedLogged, committed))
+      var written = initHashSet[string]()
+      for a in committed:
+        written.incl(a.path)
+        if recreated != nil: recreated[].add((a.path, a.unit, a.view))
+      if pending != nil:
+        for hp in heldPending:
+          if hp.path in written: pending[].add(hp)
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =
@@ -2138,6 +2615,318 @@ proc dirEntry(path, resource: string): LedgerEntry =
   let st = statOwner(path)
   LedgerEntry(class: lcDir, path: path, mode: st.mode, owner: st.owner,
               resource: resource)
+
+const RevertHoldResource* = "revert-hold"
+  ## The ``resource`` of a revert hold's ledger entries (``lcRevertHold``
+  ## and the ``lcDir`` a revert created for one). Not a profile resource:
+  ## a removal never walks it, and since it is not empty the entries are
+  ## not carried forward as bootstrap's are; every ledger write records
+  ## the holds on the host afresh (``revertHoldEntries``).
+
+const RevertHoldStagingPrefix* = ".repro-addon-revert-hold."
+  ## The name a revert gives the ``<unit>.d`` it is about to create for a
+  ## hold while it fills it (``placeRevertHold``), followed by 32 random
+  ## hex digits. systemd reads no directory of that name (it does not end
+  ## in ``.d``), and nothing else can name it in advance.
+
+type RevertHoldDirRecord* = tuple[dir, staging, phase: string]
+  ## One line of ``revertHoldDirsPath``: the ``<unit>.d`` a revert means to
+  ## create, the staging directory it fills first, and how far it got:
+  ## ``intended`` (written before the staging directory is made),
+  ## ``staged`` (it exists; the next step renames it to ``dir``) or
+  ## ``abandoned`` (it is not, or no longer, to become ``dir``). The last
+  ## line of a pair decides.
+
+proc revertHoldDirsPath*(stateDir: string): string =
+  ## The record of the ``<unit>.d`` directories a revert creates for its
+  ## holds (``RevertHoldDirRecord``), each step written durably before the
+  ## step it announces. It is how a later switch knows which directory is
+  ## the add-on's when the revert that made it died before its commit,
+  ## without guessing from what the directory holds: a ``<unit>.d`` is the
+  ## add-on's exactly when its record says ``staged`` and the staging
+  ## directory is gone, because the only way it goes while ``staged`` is
+  ## the rename into ``<unit>.d``, which never replaces anything
+  ## (``renameNoReplace``). Removed when the switch that wrote it, or the
+  ## replay that finishes it, commits (``clearRevertHoldDirs``): until then
+  ## a replay starts from the ledger the interrupted switch started from,
+  ## which does not name them.
+  addonDir(stateDir) / "revert-hold-dirs"
+
+proc validStaging(staging, root: string): bool =
+  let n = extractFilename(staging)
+  staging == normalizedPath(staging) and parentDir(staging) == root and
+    n.startsWith(RevertHoldStagingPrefix) and
+    n.len == RevertHoldStagingPrefix.len + 32 and
+    n[RevertHoldStagingPrefix.len .. ^1].allCharsInSet(HexDigits)
+
+proc readRevertHoldDirRecords*(stateDir: string;
+                               root = PersistentUnitDir): seq[RevertHoldDirRecord] =
+  ## ``revertHoldDirsPath``, one entry per (directory, staging) pair, its
+  ## last phase. Only a ``<unit>.d`` directly under ``root`` and a staging
+  ## name ``validStaging`` accepts, so a damaged record names nothing else.
+  ## None when absent or unreadable: a reader only claims less, and every
+  ## writer reads through ``revertHoldDirsForAppend``, which refuses an
+  ## unreadable record rather than rewrite it from nothing.
+  var text = ""
+  try: text = readFile(revertHoldDirsPath(stateDir))
+  except IOError, OSError: return
+  for l in text.splitLines():
+    let f = l.split('\t')
+    if f.len != 3: continue
+    let (d, st, ph) = (f[0], f[1], f[2])
+    if d != normalizedPath(d) or parentDir(d) != root or not d.endsWith(".d") or
+        not validStaging(st, root) or ph notin ["intended", "staged", "abandoned"]:
+      continue
+    var found = false
+    for r in result.mitems:
+      if r.dir == d and r.staging == st:
+        r.phase = ph
+        found = true
+    if not found: result.add((d, st, ph))
+
+proc revertHoldDirsForAppend(stateDir: string): string =
+  ## The text of ``revertHoldDirsPath`` that the next step is appended to.
+  ## Only a record that does not exist (``lstat`` says ``ENOENT``) is
+  ## empty. One that exists and cannot be read (``EACCES``, ``EIO``, ...)
+  ## raises: the append rewrites the whole file, so taking it as empty
+  ## would drop every earlier ``intended`` and ``staged`` step, and the
+  ## directories they claim would be forgotten (spec §4.2; issue
+  ## 2026-11-15-floor-a-revert-hold-directory-record-is-rewritten-empty-
+  ## when-it-cannot-be-read). ``placeRevertHold`` then raises before it
+  ## takes a step, and the unit keeps its start hold.
+  let p = revertHoldDirsPath(stateDir)
+  try:
+    result = readFile(p)
+  except IOError, OSError:
+    when mutated("revert-hold-record-unreadable-as-empty"):
+      # Falsifying build: the engine before the fix, any read error taken
+      # as no record.
+      return ""
+    else:
+      var st: Stat
+      if lstat(p.cstring, st) != 0 and osLastError().int32 == ENOENT:
+        return ""
+      raise newException(IOError, p & ": the revert-hold directory " &
+        "record exists but cannot be read: " & getCurrentExceptionMsg())
+
+proc recordRevertHoldDir(stateDir: string; r: RevertHoldDirRecord) =
+  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises,
+  ## also when the record exists and cannot be read
+  ## (``revertHoldDirsForAppend``).
+  let text = revertHoldDirsForAppend(stateDir)
+  createDir(addonDir(stateDir))
+  writeFileAtomic(revertHoldDirsPath(stateDir),
+                  text & r.dir & "\t" & r.staging & "\t" & r.phase & "\n", 0o600)
+
+proc writeRevertHoldFile(p: string) =
+  ## The hold file, durably: the hold exists to keep a refused unit down
+  ## across a reboot (§13 decision 133), and a power loss after the revert
+  ## must not bring it back as an empty drop-in, which systemd reads as no
+  ## assertion and starts the unit at boot, before recovery runs. Written
+  ## whole and synced, with its directory, never through a link
+  ## (``writeFileNoFollow``). Raises.
+  when mutated("revert-hold-not-synced") or mutated("hold-written-unchecked"):
+    # Falsifying builds: the hold written with Nim's writeFile, unsynced
+    # and with fclose's result discarded (A9 review round 14, finding 1:
+    # on a full file system it leaves an empty hold and raises nothing).
+    writeFile(p, RevertHoldText)
+  else:
+    writeFileNoFollow(p, RevertHoldText, 0o644)
+    # Read back: only a file holding the text is a hold (round 14).
+    if readFile(p) != RevertHoldText:
+      raise newException(OSError, p & " does not hold the hold's text")
+
+proc dropStaging(stateDir: string; r: RevertHoldDirRecord) =
+  ## A staging directory that is not to become ``r.dir``: recorded
+  ## ``abandoned`` first, so a crash part-way cannot leave the record
+  ## saying ``staged`` with the staging directory gone (which reads as
+  ## renamed), then emptied of the hold and removed. Raises.
+  recordRevertHoldDir(stateDir, (r.dir, r.staging, "abandoned"))
+  if dirExists(r.staging) and not symlinkExists(r.staging):
+    discard removeLeafNoFollow(r.staging / RevertHoldName)
+    discard removeEmptyDirNoFollow(r.staging)
+
+proc placeRevertHold*(stateDir, unit: string; root = PersistentUnitDir):
+    tuple[hold, createdDir: string] =
+  ## Write the revert's hold for ``unit`` (its template's, for an
+  ## instance) and return its path and, when this created the ``<unit>.d``
+  ## it is in, that directory (else ""). Raises; the caller then keeps the
+  ## unit's start hold.
+  ##
+  ## An existing ``<unit>.d`` -- an operator's, a package's or an earlier
+  ## revert's -- gets the hold written into it and is never claimed. A
+  ## missing one is made under a staging name (``RevertHoldStagingPrefix``),
+  ## filled, and renamed into place with ``renameNoReplace``, each step
+  ## recorded before it is taken (``revertHoldDirsPath``). If a
+  ## ``<unit>.d`` appeared in the meantime the rename fails, the staging
+  ## directory is dropped and the hold goes into the one that appeared,
+  ## unclaimed. So a directory is the add-on's only if the add-on made it
+  ## (spec §4.2), and a crash at any point leaves enough on record for the
+  ## next switch to tell which (``claimedRevertHoldDirs``).
+  let p = holdPath(unit, RevertHoldName, root)
+  let d = parentDir(p)
+  result.hold = p
+  if dirExists(d) or symlinkExists(d):
+    writeRevertHoldFile(p)
+    return
+  var nonce = ""
+  for b in urandom(16): nonce.add(toHex(b, 2).toLowerAscii())
+  let st = root / (RevertHoldStagingPrefix & nonce)
+  recordRevertHoldDir(stateDir, (d, st, "intended"))
+  try:
+    createDir(st)
+    # Durable before ``staged`` is: a record that says ``staged`` over a
+    # staging directory a power loss took back would read as renamed, and
+    # an operator's ``<unit>.d`` made before the replay would be claimed.
+    when not mutated("revert-hold-staging-not-synced"):
+      syncDirNoFollow(root)
+  except CatchableError:
+    try: dropStaging(stateDir, (d, st, "intended"))
+    except CatchableError: discard
+    raise
+  recordRevertHoldDir(stateDir, (d, st, "staged"))
+  try:
+    writeRevertHoldFile(st / RevertHoldName)
+    let rc = renameNoReplace(root, extractFilename(st), extractFilename(d))
+    if rc == EEXIST:
+      # Someone made the <unit>.d in between: theirs, not claimed.
+      dropStaging(stateDir, (d, st, "staged"))
+      writeRevertHoldFile(p)
+      return
+    if rc != 0:
+      raiseOSError(OSErrorCode(rc), "rename " & st & " to " & d)
+  except CatchableError:
+    try: dropStaging(stateDir, (d, st, "staged"))
+    except CatchableError: discard
+    raise
+  when not mutated("revert-hold-not-synced"):
+    syncDirNoFollow(root)
+  result.createdDir = d
+
+proc claimedRevertHoldDirs*(stateDir: string;
+                            root = PersistentUnitDir): seq[string] =
+  ## The ``<unit>.d`` directories ``revertHoldDirsPath`` shows a revert
+  ## made: each whose record says ``staged`` and whose staging directory is
+  ## gone, renamed into it. Every staging directory a revert left behind is
+  ## dropped on the way (``dropStaging``): the revert did not get to rename
+  ## it, so the ``<unit>.d``, if one exists, is not the add-on's. A
+  ## ``staged`` record whose directory is gone (removed since, by a passing
+  ## switch or an uninstall) is recorded ``abandoned``: a ``<unit>.d`` made
+  ## at that path afterwards is someone else's.
+  when mutated("replayed-hold-dir-unclaimed"):
+    # Falsifying build: an interrupted revert's directories are forgotten.
+    return
+  for r in readRevertHoldDirRecords(stateDir, root):
+    let stagingThere = dirExists(r.staging) or symlinkExists(r.staging)
+    if stagingThere:
+      try: dropStaging(stateDir, r)
+      except CatchableError: discard
+    elif r.phase == "staged":
+      if dirExists(r.dir) and not symlinkExists(r.dir):
+        if r.dir notin result: result.add(r.dir)
+      else:
+        when not mutated("revert-hold-gone-dir-reclaimed"):
+          try: recordRevertHoldDir(stateDir, (r.dir, r.staging, "abandoned"))
+          except CatchableError: discard
+
+proc clearRevertHoldDirs*(stateDir: string) =
+  ## The record's directories are in the committed ledger now. Called at
+  ## the commit, before the pending marker goes: a crash in between is
+  ## finished by ``reassert.finishCommittedSwitch``, which never replays.
+  ## A staging directory still named in it is dropped first; one that
+  ## could not be keeps the record, so a later switch drops it.
+  discard claimedRevertHoldDirs(stateDir)
+  for r in readRevertHoldDirRecords(stateDir):
+    if dirExists(r.staging) or symlinkExists(r.staging): return
+  try: removeFile(revertHoldDirsPath(stateDir))
+  except OSError: discard
+
+proc revertHoldEntries*(previous: openArray[LedgerEntry];
+                        installed: HashSet[string];
+                        written: openArray[string];
+                        createdDirs: openArray[string];
+                        root = PersistentUnitDir): seq[LedgerEntry] =
+  ## The ledger entries for the revert holds on the host (spec §10.1,
+  ## §13 decision 133; issue 2026-11-14-floor-a-revert-hold-is-in-no-
+  ## ledger-so-uninstall-leaves-it): a revert hold is an add-on object, so
+  ## the ledger of every switch that writes one, and of every later switch
+  ## while it is there, records it and uninstall removes it (§6.4 step 2).
+  ##
+  ## A file ``<root>/<unit>.d/`` ``RevertHoldName`` is the add-on's only
+  ## when it is a regular file (never a link) holding exactly
+  ## ``RevertHoldText`` -- the content test the floor check applies
+  ## (``isAddonHold``) -- and the add-on wrote it: ``written`` by this
+  ## switch, recorded by the ``previous`` ledger, or on a unit the
+  ## generation installs (``installed``; a revert writes a hold for no
+  ## other unit, and this also takes over a hold an engine before the fix
+  ## wrote). A file of that name anywhere else, or with other bytes, is
+  ## not claimed: uninstall must never remove an operator's file.
+  ##
+  ## The directory holding a hold is the add-on's when this switch created
+  ## it (``createdDirs``) or the previous ledger recorded it so, for as long
+  ## as it exists; uninstall removes it only once it is empty.
+  when mutated("revert-hold-unledgered"):
+    # Falsifying build: the engine before the fix, recording no hold.
+    return
+  var prevHolds = initHashSet[string]()
+  var dirs: seq[string]
+  for e in previous:
+    if e.class == lcRevertHold: prevHolds.incl(e.path)
+    elif e.class == lcDir and e.resource == RevertHoldResource and
+        e.path notin dirs:
+      dirs.add(e.path)
+  for d in createdDirs:
+    if d notin dirs: dirs.add(d)
+  for d in dirs:
+    if dirExists(d) and not symlinkExists(d):
+      result.add(dirEntry(d, RevertHoldResource))
+  var holds: seq[string]
+  try: holds = staleHolds(RevertHoldName, root)
+  except OSError: return
+  for h in holds:
+    let dir = parentDir(h)
+    var unit = extractFilename(dir)
+    if not unit.endsWith(".d"): continue
+    unit.setLen(unit.len - 2)
+    if h notin written and h notin prevHolds and unit notin installed:
+      continue
+    if symlinkExists(h) or not fileExists(h): continue
+    var text = ""
+    try: text = readFile(h)
+    except IOError, OSError: continue
+    if text != RevertHoldText: continue
+    var e = fileEntry(lcRevertHold, h, RevertHoldResource, "")
+    e.unit = unit
+    result.add(e)
+
+proc clearRevertHolds*(holds: openArray[string];
+                       previous: openArray[LedgerEntry];
+                       recorded: openArray[string]): seq[string] =
+  ## Remove the revert ``holds`` -- the add-on's own (``addonRevertHolds``),
+  ## which a switch whose check passed clears (§13 decision 133) -- and
+  ## return those removed. A hold's ``<unit>.d`` directory goes with it,
+  ## once empty, only when the add-on owns it: a ``dir`` entry of the
+  ## ``previous`` ledger, or one a revert ``recorded`` before creating it
+  ## (``claimedRevertHoldDirs``). Removal deletes only ledger entries (spec
+  ## §4.2): an operator's own empty ``<unit>.d`` that a revert put its hold
+  ## in stays, as uninstall leaves it. ``removeHolds`` would ``rmdir`` any
+  ## parent left empty.
+  var owned = initHashSet[string]()
+  for e in previous:
+    if e.class == lcDir: owned.incl(e.path)
+  for d in recorded: owned.incl(d)
+  for h in holds:
+    try: discard removeLeafNoFollow(h)
+    except CatchableError: continue
+    result.add(h)
+    let d = parentDir(h)
+    when mutated("revert-hold-clear-removes-any-dir"):
+      # Falsifying build: the parent goes whenever it is empty, an
+      # operator's too (the start holds' ``removeHolds``).
+      discard rmdir(d.cstring)
+    else:
+      if d in owned and not symlinkExists(d):
+        discard rmdir(d.cstring)   # fails, harmlessly, when not empty
 
 proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry];
                 driver: CollisionDriver): seq[LedgerEntry] =
@@ -3382,6 +4171,25 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
 proc liveReachProfile(resources: openArray[SystemResource]): SystemProfile =
   for r in resources: result.resources.add(r)
 
+proc liveCheckAtStep6*(anyUnitChange, replaying, recordOnly: bool;
+                       liveUnits: openArray[string]):
+    tuple[reload: bool; judged: seq[string]] =
+  ## Step 6's decision (spec §11.1, §13 decision 59): whether the switch
+  ## holds, reloads and judges, and the services it judges. Every switch
+  ## that writes a unit file, replays, or has services to judge (carried
+  ## state on the host) reloads; a switch that is not record-only judges
+  ## every service of ``liveUnits`` -- also a switch that writes no unit
+  ## file but restarts one whose ``depends_on`` file or credentials changed
+  ## (A13 review round 7, finding 1). The reload the switch relies on is
+  ## this one: a unit driver's own reload in step 3 (the dependency restart
+  ## the planner dispatches rewrites the unit file and reloads) is incidental
+  ## to how that driver writes, and a credentials-only restart has none.
+  let every =
+    when mutated("narrowed-live-set"): false
+    else: liveUnits.len > 0
+  result.reload = anyUnitChange or replaying or every
+  if result.reload and not recordOnly: result.judged = @liveUnits
+
 proc liveReachUnitsFor(opts: AddonApplyOptions;
                        resources: openArray[SystemResource]): seq[string] =
   ## The services the carried-state cross-check judges for this switch
@@ -3396,7 +4204,8 @@ proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string
 
 proc liveReachProblemsFor(opts: AddonApplyOptions; units: seq[string];
                           resources: openArray[SystemResource];
-                          stateDir: string): seq[string] =
+                          stateDir: string;
+                          judged: var seq[string]): seq[string] =
   ## After step 6's reload, before any start: each of ``units`` re-judged
   ## from ``systemctl show`` (``carried_state.liveReachProblems``, shared
   ## with ``runInfraApply``), and the carried-state refusal decided again
@@ -3406,8 +4215,19 @@ proc liveReachProblemsFor(opts: AddonApplyOptions; units: seq[string];
   when mutated("addon-live-reach-skipped"):
     return
   let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
-  result = liveReachProblems(units, liveReachProfile(resources),
-    proc (u: string): Table[string, string] = showUnit(u), root)
+  # A template is judged through its observation instance, the instances
+  # the generation names and the ones systemd reports running (§13
+  # decision 135), never by its own name.
+  # One reading of each template's running instances serves both the
+  # check and the report of what it judged (``liveJudged``).
+  var runningSeen = initTable[string, seq[string]]()
+  let running = proc (t: string): seq[string] =
+    if t notin runningSeen: runningSeen[t] = hostRunningInstances(t)
+    runningSeen[t]
+  let profile = liveReachProfile(resources)
+  judged = liveJudgedNames(units, profile, running)
+  result = liveReachProblems(units, profile,
+    proc (u: string): Table[string, string] = showUnit(u), root, running)
   when not mutated("post-reload-refusal-skipped"):
     let why = carriedRefusalFor(opts, stateDir)
     if why.len > 0: result.add(why & " (decided again after the reload)")
@@ -5366,6 +6186,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved,
       storedTarget: storedTarget, storedTargetRecorded: true))
   var secretsFailure = ""
+  var heldAtRevert: seq[string]   # spec §10.1: what a revert keeps on hold
+  # The revert holds this switch wrote, and the ``<unit>.d`` directories it
+  # created for them: the ledger records both (``revertHoldEntries``).
+  var revertHoldsWritten: seq[string]
+  var revertHoldDirsCreated: seq[string]
   if not opts.planOnly:
     writeSecretsSource(stateDir, secretsSource)
   var marker = PendingMarker(fromGeneration: committedPrevious,
@@ -5434,10 +6259,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # an operator's reload after a host generator changed its output
   # included. So wherever the check has units to judge, the switch holds
   # them, reloads, and judges them before step 7, whatever else it changes
-  # (A13 review round 7, finding 1).
-  let liveCheckEverySwitch =
-    when mutated("narrowed-live-set"): false
-    else: preWriteLiveUnits.len > 0
+  # (A13 review round 7, finding 1; ``liveCheckAtStep6``).
+  let step6 =
+    when mutated("live-check-call-site-reverted"):
+      # FALSIFYING MUTATION: the call site goes back to the round-6 test,
+      # deciding the hold, reload and judgement itself from whether the
+      # switch writes a unit file (or replays) instead of asking
+      # ``liveCheckAtStep6``; a credentials-only restart then runs on what
+      # systemd last loaded.
+      (reload: anyUnitChange or replaying,
+       judged: (if (anyUnitChange or replaying) and not opts.recordOnly:
+                  preWriteLiveUnits
+                else: newSeq[string]()))
+    else:
+      liveCheckAtStep6(anyUnitChange, replaying, opts.recordOnly,
+                       preWriteLiveUnits)
   let sysctlKeys = block:
     var keys: seq[string]
     for p in plans:
@@ -5497,6 +6333,89 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     purpose == "apply" and not replaying and
     generationAgentSequence(stateDir, committedPrevious) < opts.rollbackFloor
   var hookFailedAtFloor: seq[string]
+  var startHolds: seq[string]   # spec §10.1: kept until the check passes
+  var hookLiveJudged: seq[string]  # what step 6's live check read (§11.1)
+  var liveUnits: seq[string]    # §11.1: the carried-state cross-check's
+
+  proc holdTriggers() =
+    ## Stop and hold the triggers of every unit the switch holds (§13
+    ## decision 151), recorded before any is stopped: a socket with a
+    ## pending connection or a path unit whose path exists would otherwise
+    ## fire at a held unit until systemd's trigger rate limit fails it for
+    ## good, and a step-3 ``enable --now`` of a trigger is skipped by its
+    ## hold. The triggers come back at the check's pass, the undo of a
+    ## refused switch, or the revert's own switch (``restartHeldTriggers``).
+    when not mutated("triggers-left-running") and
+        not mutated("floor-start-unheld"):
+      if opts.recordOnly: return
+      let host = addonLiveHost()
+      var held = flooredUnitNames(composed.resources)
+      for u in liveUnits:
+        if u notin held: held.add(u)
+      let triggers = heldTriggersOf(composed.resources, held, host)
+      var stopped = readHeldTriggers(stateDir)
+      var toStop: seq[string]
+      # Only those that could fire at a held unit (``triggersToStop``): the
+      # switch stops a running unit itself only in step 2, which pauses
+      # its triggers already, and restarts the rest after its check.
+      for t in triggersToStop(triggers, [], host):
+        if t notin stopped: toStop.add(t)
+      if toStop.len > 0:
+        writeHeldTriggers(stateDir, stopped & toStop)
+        for t in toStop: discard host.stop(t)
+      for h in writeHolds(triggers, StartHoldName, StartHoldText):
+        if h notin startHolds: startHolds.add(h)
+
+  proc restartHeldTriggers(keepHeld: proc (t: string): bool = nil): seq[string] =
+    ## Start again every trigger on record as stopped for a hold, after a
+    ## ``reset-failed`` (§13 decision 151), but those ``keepHeld`` names:
+    ## the triggers of a unit a revert keeps held stay down with it, on
+    ## record for the switch that clears its hold. A trigger that does not
+    ## start fails the switch (§13 decision 155): the problem is returned,
+    ## and the trigger stays on record for the revert's switch. A revert
+    ## that cannot start it either moves it to the record of triggers to
+    ## restart and commits: the host is then pending until `repro system
+    ## addon recover` starts it (``retryTriggerRestarts``).
+    when not mutated("triggers-left-running"):
+      var keep, go, toRestart: seq[string]
+      let host = addonLiveHost()
+      let reverting = purpose == "revert" or
+        (replaying and opts.replayOf == "revert")
+      for t in readHeldTriggers(stateDir):
+        if keepHeld != nil and keepHeld(t): keep.add(t) else: go.add(t)
+      for t in go:
+        let failed = triggerRestarts([t], [], host)
+        if failed.len == 0: continue
+        when mutated("trigger-restart-failure-ignored"):
+          # FALSIFYING MUTATION: a trigger that does not start again is
+          # dropped, and the switch goes on as if it had.
+          continue
+        if reverting:
+          toRestart.add(t)
+          for f in failed:
+            stderr.writeLine("repro-addon: " & f & "; the revert commits, " &
+              "and the host is pending until `repro system addon recover` " &
+              "starts it (§13 decision 155)")
+        else:
+          keep.add(t)
+          for f in failed: result.add(f)
+      writeHeldTriggers(stateDir, keep)
+      if toRestart.len > 0:
+        writeTriggersToRestart(stateDir,
+          readTriggersToRestart(stateDir) & toRestart)
+
+  proc releaseUnflippedHolds() =
+    ## The start holds of a switch refused before its flip: nothing of the
+    ## new generation was written, and the old one stands, so its units
+    ## may start again (step 2's undo restarts them), and so may the
+    ## triggers the holds stopped (§13 decision 151).
+    if startHolds.len == 0: return
+    removeStartHolds(startHolds)
+    startHolds.setLen(0)
+    try: daemonReload()
+    except CatchableError: discard
+    for pr in restartHeldTriggers():
+      stderr.writeLine("repro-addon: " & pr)
 
   proc beforeSet(planId: string) {.gcsafe.} =
     ## Steps 2 and 3: pre-stop, then flip. A refusal here (an exclusive
@@ -5504,6 +6423,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     {.cast(gcsafe).}:
       when TestPauseSeam:
         testSeamPause()
+      # The start holds go in before the privileged set, as the full apply
+      # writes its holds (§13 decision 136): the drivers' own reloads in
+      # steps 3-5 load the generation's definitions, and from the first of
+      # them until step 6's check passes no socket, timer, D-Bus request or
+      # ``Wants=`` may start a floored or judged unit on a definition
+      # nothing has checked. The reload makes the holds effective now.
+      when not mutated("start-holds-after-driver-writes"):
+        if step6.reload and not opts.recordOnly:
+          liveUnits = step6.judged
+          startHolds = writeStartHolds(composed.resources, liveUnits)
+          holdTriggers()
+          if startHolds.len > 0: daemonReload()
       marker.planId = planId
       writePendingMarker(stateDir, marker)
       for u in runningManagedUnits(previous):
@@ -5598,9 +6529,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     {.cast(gcsafe).}:
       var problems: seq[string]
       var reloadedAt = 0.0
-      var startHolds: seq[string]   # spec §10.1: kept until the check passes
       var createdPending: seq[tuple[path, unit: string]]  # §13 decision 57
-      var liveUnits: seq[string]    # §11.1: the carried-state cross-check's
         ## CLOCK_MONOTONIC seconds just after step 6's daemon-reload; 0
         ## when there was none.
       hookGeneration = generationId
@@ -5610,7 +6539,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       when not mutated("migration-ignores-engine"):
         try:
           createDir(generationDir(stateDir, generationId))
-          writeFile(recordKeptMarker(stateDir, generationId), "")
+          writeDurably(recordKeptMarker(stateDir, generationId), "")
         except IOError, OSError:
           problems.add("cannot mark generation " & generationId & " as written " &
                        "by an engine that keeps the record of floored units' " &
@@ -5629,17 +6558,25 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # the daemon reload, sysctl through the host's own service, and
       # the kernel values a removed sysctl resource leaves behind.
       try:
-        if anyUnitChange or replaying or liveCheckEverySwitch:
-          # The start holds go in before the reload: from it until the
-          # effective-unit check passes, no floored unit can start (a
-          # socket, a timer, D-Bus or a Wants= would otherwise start it on
-          # definitions nothing has checked yet; spec §10.1, round 4).
+        if step6.reload:
+          # The start holds have been in place since before the privileged
+          # set (``beforeSet``, §13 decision 136); they stay from this
+          # reload until the effective-unit check passes (spec §10.1).
           if not opts.recordOnly:
-            liveUnits =
-              when mutated("live-units-chosen-after-writes"):
-                liveReachUnitsFor(opts, composed.resources)
-              else: preWriteLiveUnits
-            startHolds = writeStartHolds(composed.resources, liveUnits)
+            when mutated("live-units-chosen-after-writes"):
+              # FALSIFYING MUTATION: the judged services are chosen after
+              # the drivers' writes.
+              liveUnits = liveReachUnitsFor(opts, composed.resources)
+              for h in writeStartHolds(composed.resources, liveUnits):
+                if h notin startHolds: startHolds.add(h)
+            elif mutated("start-holds-after-driver-writes"):
+              # FALSIFYING MUTATION: the holds go in only here, after the
+              # drivers' reloads loaded the generation's definitions.
+              liveUnits = step6.judged
+              startHolds = writeStartHolds(composed.resources, liveUnits)
+            # A trigger the drivers' writes loaded only now (a host unit
+            # linked to a held one) is stopped and held too.
+            holdTriggers()
           daemonReload()
           # From here on every start runs the generation's definitions:
           # step 7 accepts an exclusive instance started after this point
@@ -5823,8 +6760,13 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                   resourceAddress: "directory:" & path,
                   outcome: "recreated-accepted",
                   diagnostic: unit & ": made again by systemd for invocation " &
-                    v.invocationId & ", born " & $v.btime & " ns >= invocation " &
-                    "start " & $v.invocationStart & " ns (§13 decisions 71, 77)",
+                    v.invocationId & " (recorded: another), born " & $v.btime &
+                    " ns, run started " & $v.invocationStart & " ns, main process " &
+                    $v.mainStart & " ns" &
+                    (if v.stopped: ", ended " & $v.lastStop & " ns" else: ", running") &
+                    " (§13 decision 71; §10.1 round 12, \"A directory " &
+                    "made again outside a switch\", \"A stopped unit's " &
+                    "directory\")",
                   recordClass: AuditClassLiveState))
                 acceptRecreated(stateDir, path, unit, v.invocationId)
                 true
@@ -5835,15 +6777,146 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # as confined must be confined as systemd reads it too, or nothing
           # starts (a problem stops step 7, and the switch reverts).
           let reachLive = liveReachProblemsFor(opts, liveUnits,
-                                               composed.resources, stateDir)
+                                               composed.resources, stateDir,
+                                               hookLiveJudged)
           if reachLive.len > 0:
             problems.add(reachLive.join("; ") & "; nothing was started")
-          if notHeld.len > 0:
+          # A revert does not refuse on its own floor check (spec §10.1, A9
+          # review round 12): it goes back to the generation the failed
+          # switch left, whose units the switch it reverts never started.
+          # Each unit the check refuses keeps its start hold and is not
+          # started, so nothing hands it the tree or listener refused; the
+          # revert commits with the refusals recorded, and the host is not
+          # left pending. The next switch checks the unit again.
+          var floorRefusals = notHeld
+          let revertHolds =
+            when mutated("revert-refuses-on-floor"): false
+            else: (purpose == "revert" or (replaying and opts.replayOf == "revert")) and
+                  reachLive.len == 0 and notHeld.len > 0
+          if revertHolds:
+            var genUnits = initHashSet[string]()
+            for r in composed.resources:
+              if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+                genUnits.incl(r.suName)
+            let held = revertHeldUnits(notHeld, genUnits,
+                                       flooredUnitNames(composed.resources))
+            proc isHeld(u: string): bool =
+              u in held or floorTemplateOf(u) in held
+            # A trigger of a held unit stays down with it (§13 decision
+            # 151): started, it would fire at the hold until its rate limit.
+            let host = addonLiveHost()
+            proc triggersHeld(t: string): bool =
+              if not isTriggerUnit(t): return false
+              var targets: seq[string]
+              try: targets = triggeredUnits(host.show(t))
+              except CatchableError: discard
+              var profile = SystemProfile()
+              for r in composed.resources: profile.resources.add(r)
+              for (pt, target) in triggerTargets(profile):
+                if pt == t: targets.add(target)
+              for u in targets:
+                if isHeld(u): return true
+            var kept: seq[Transition]
+            for t in stepTransitions:
+              if t.verb in {tvStart, tvRestart, tvStopStart, tvReload} and
+                  (isHeld(t.unit) or triggersHeld(t.unit)):
+                continue
+              kept.add(t)
+            stepTransitions = kept
+            var keepActive = initHashSet[string]()
+            for u in assumeActive:
+              if not isHeld(u): keepActive.incl(u)
+            assumeActive = keepActive
+            # §13 decision 133: persistent, so a reboot does not start a
+            # held unit either; only a switch whose check passes removes it.
+            let holdDir =
+              when mutated("revert-hold-runtime-only"): RuntimeUnitDir
+              else: PersistentUnitDir
+            when mutated("revert-hold-written-after-release"):
+              # Falsifying build: round 12's order. The start holds go and
+              # systemd is reloaded whether or not the hold was written.
+              discard clearStaleStartHolds()
+              removeStartHolds(startHolds)
+              startHolds.setLen(0)
+              for u in held:
+                try:
+                  let placed = placeRevertHold(stateDir, u, holdDir)
+                  if placed.hold notin revertHoldsWritten:
+                    revertHoldsWritten.add(placed.hold)
+                  if placed.createdDir.len > 0:
+                    revertHoldDirsCreated.add(placed.createdDir)
+                except CatchableError:
+                  problems.add("the revert's hold could not be written: " &
+                               getCurrentExceptionMsg())
+              try: daemonReload()
+              except CatchableError as ex: problems.add(ex.msg)
+            else:
+              # A9 review round 13: the persistent hold is written first,
+              # and the start holds go -- with a reload -- only once every
+              # held unit has one. If a write fails, the start holds stay,
+              # nothing is reloaded, and the revert does not commit: the
+              # pending marker keeps it recoverable (`repro system addon
+              # recover` replays it), and until then no unit the check
+              # refused is ever without a hold.
+              # The ledger records the holds and the drop-in directories the
+              # revert creates for them: each directory is made under a
+              # staging name and renamed into place, every step recorded
+              # first, so an attempt that dies before its commit leaves the
+              # replay able to tell exactly which it made, and never claims
+              # one that was there before (``placeRevertHold``).
+              var notWritten: seq[string]
+              if notWritten.len == 0:
+                for u in held:
+                  # A file of that name that is not the add-on's hold -- an
+                  # operator's, or one planted -- is never replaced (§4.3: a
+                  # present file the ledger does not name is not the
+                  # add-on's to overwrite); the unit then keeps its start hold.
+                  let p = holdPath(u, RevertHoldName, holdDir)
+                  if holdInTheWay(p):
+                    notWritten.add(u & " (" & p & " is there and is not the " &
+                                   "add-on's hold)")
+                    continue
+                  try:
+                    let placed = placeRevertHold(stateDir, u, holdDir)
+                    if placed.hold notin revertHoldsWritten:
+                      revertHoldsWritten.add(placed.hold)
+                    if placed.createdDir.len > 0 and
+                        placed.createdDir notin revertHoldDirsCreated:
+                      revertHoldDirsCreated.add(placed.createdDir)
+                  except CatchableError:
+                    notWritten.add(u & " (" & getCurrentExceptionMsg() & ")")
+              if notWritten.len == 0:
+                discard clearStaleStartHolds()
+                removeStartHolds(startHolds)
+                startHolds.setLen(0)
+                try: daemonReload()
+                except CatchableError as ex: problems.add(ex.msg)
+              else:
+                problems.add("the revert's hold could not be written for " &
+                  notWritten.join(", ") & "; their start holds stay and " &
+                  "systemd was not reloaded, so none of them can start now; " &
+                  "the revert is not committed. Once the hold can be written, " &
+                  "run `repro system addon recover`. A reboot first runs the " &
+                  "boot re-assertion, which replays this revert and puts the " &
+                  "start holds back before any unit rendered with floor " &
+                  "version 5 or later starts (§13 decision 144)")
+            heldAtRevert = notHeld
+            # Once the start holds are gone, the triggers they stopped come
+            # back, but those of a held unit (§13 decision 151).
+            if startHolds.len == 0:
+              for pr in restartHeldTriggers(triggersHeld): problems.add(pr)
+            stderr.writeLine("repro-addon: the revert keeps " & held.join(", ") &
+              " on hold, not started: its floor check refused them:\n  " &
+              notHeld.join("\n  "))
+            floorRefusals = @[]
+          if floorRefusals.len > 0:
             # One refusal per line: each ends with its rule tag, and the
             # gate reads them line by line (A9 review round 9, finding 3).
             problems.add($adFloorNotEffective & ":\n  " & notHeld.join("\n  ") &
               "\n  nothing was started")
-          if reachLive.len > 0 or notHeld.len > 0:
+          if revertHolds:
+            discard
+          elif reachLive.len > 0 or notHeld.len > 0:
             # Refused: the holds stay until the revert's own switch has
             # checked its generation and cleared them (A13 review round 6,
             # finding 6), so no socket, timer or dependency starts a unit
@@ -5856,10 +6929,42 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # definitions.
             let stale = clearStaleStartHolds()
             removeStartHolds(startHolds)
-            if startHolds.len > 0 or stale.len > 0:
+            # A revert's holds go once a switch's check passes (§13
+            # decision 133), wherever a build wrote them.
+            # Only the add-on's own: exactly the hold's text, on a unit the
+            # generation installs or one the previous ledger records as a
+            # hold (A9 review round 13). An operator's file of that name is
+            # never removed, nor an operator's directory one is in.
+            var holdUnits = generationUnitNames(composed.resources)
+            for e in previous.entries:
+              if e.class == lcRevertHold: holdUnits.incl(holdUnitOf(e.path))
+            let revertStale = clearRevertHolds(addonRevertHolds(holdUnits),
+                                               previous.entries,
+                                               claimedRevertHoldDirs(stateDir))
+            # A unit a revert held is started now if the generation enables
+            # it and it is not running: the hold, not the unit, kept it down,
+            # and an unchanged unit has no transition of its own (§13
+            # decision 133).
+            when not mutated("cleared-hold-not-started"):
+              for h in revertStale:
+                let u = holdUnitOf(h)
+                if '@' in u: continue      # a template: its instances start by their own triggers
+                var planned = false
+                for t in stepTransitions:
+                  if t.unit == u: planned = true
+                if planned: continue
+                for rr in composed.resources:
+                  if rr.kind == srkSystemdSystemUnit and rr.suName == u and rr.suEnabled and
+                      not unitIsActive(u):
+                    stepTransitions.add(Transition(unit: u, verb: tvStart,
+                      reason: "a revert held it; its hold is cleared"))
+            if startHolds.len > 0 or stale.len > 0 or revertStale.len > 0:
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
             startHolds.setLen(0)
+            # The triggers the holds stopped come back (§13 decision 151),
+            # this switch's and any a refused switch left on record.
+            for pr in restartHeldTriggers(): problems.add(pr)
       if startHolds.len > 0 and clean and problems.len == 0:
         # The check did not run (a record-only replay, a falsifying build):
         # the holds must not outlive the switch that wrote them.
@@ -5867,6 +6972,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         startHolds.setLen(0)
         try: daemonReload()
         except CatchableError as ex: problems.add(ex.msg)
+        for pr in restartHeldTriggers(): problems.add(pr)
       if clean and problems.len == 0:
         try:
           # What a floored unit's own start created is that unit's (§13
@@ -5883,14 +6989,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 try: recordCreatedDirs(stateDir, u, createdPending,
                                        invocation = unitInvocation(u).id)
                 except IOError, OSError: discard
-          let stepAt = getTime()
-          let startStepNs = stepAt.toUnix * 1_000_000_000'i64 +
-                            int64(stepAt.nanosecond)
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
                    afterStart = recordAfter)
           if not opts.nonBlockingStarts and createdPending.len > 0:
-            try: recordStartedSince(stateDir, createdPending, startStepNs, unitInvocation)
+            try: recordStartedSince(stateDir, createdPending, unitInvocation)
             except IOError, OSError: discard
           # A replay or a revert plans the units the interrupted switch had
           # running as running, but `try-restart` leaves a unit the crash
@@ -6032,6 +7135,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             readLiveSysctl(e.path) == e.value and e.replaced != e.value
           else: false
         if stillOurs: put(e)
+      # The revert holds on the host (§13 decision 133): add-on objects,
+      # recorded by every ledger written while they are there, so uninstall
+      # removes them (§6.4 step 2). A switch whose check passed removed
+      # them above, and its ledger no longer lists them.
+      block:
+        var installed = initHashSet[string]()
+        for r in composed.resources:
+          if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+            installed.incl(r.suName)
+        var dirs = revertHoldDirsCreated
+        for d in claimedRevertHoldDirs(stateDir):
+          if d notin dirs: dirs.add(d)
+        for e in revertHoldEntries(previous.entries, installed,
+                                   revertHoldsWritten, dirs):
+          put(e)
       when mutated("switch-fails-before-ledger"):
         const Trigger = "/var/tmp/repro-addon-fail-before-ledger"
         if fileExists(Trigger):
@@ -6043,6 +7161,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         createDir(parentDir(generationLedgerPath(stateDir, generationId)))
         writeLedger(generationLedgerPath(stateDir, generationId), l)
       writeLedger(ledgerCopyPath(stateDir), l)
+      when mutated("revert-hold-dirs-cleared-at-ledger"):
+        # Falsifying build: the record goes with the ledger, before the
+        # commit (``clearRevertHoldDirs``).
+        clearRevertHoldDirs(stateDir)
       writeFileAtomic(ownProfilePath(stateDir), ownText, 0o600)
       # A resource whose removal was left in place at write time stays in
       # the stored profile, like one left as drift at plan time.
@@ -6128,7 +7250,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # A refusal decided before the flip (an exclusive unit that would
       # overlap): nothing was switched, but step 2 may already have
       # stopped or disabled units. They are put back -- the marker named
-      # each before it was touched -- and the old generation stands.
+      # each before it was touched -- and the old generation stands, its
+      # units no longer held (§13 decision 136).
+      releaseUnflippedHolds()
       let undoProblems = undoPreStop(marker)
       clearPendingMarker(stateDir)
       clearPendingPlan(stateDir)
@@ -6141,6 +7265,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   except CatchableError as e:
     infraError = "repro infra apply failed: " & e.msg
   result.generationId = hookGeneration
+  result.liveJudged = hookLiveJudged
   result.ledger = newLedger
   if keptAsDrift.len > 0 and not mutated("apply-prints-reviewed-plan"):
     # What steps 2 and 7 executed, not the reviewed plan: the re-check
@@ -6318,12 +7443,25 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # marker goes, so a crash here is finished by the recovery's re-assert
   # (``secrets_ops.reassertSecrets`` completes it from the source record).
   commitSecretsOf(stateDir, secretsLayout, result.generationId)
+  result.heldAtRevert = heldAtRevert
+  for l in heldAtRevert:
+    appendAuditRecord(applyLogPath(stateDir, result.generationId), AuditRecord(
+      timestamp: getTime().toUnix(), operationKind: "addon.floor",
+      resourceAddress: "unit:" & l.split(": ")[0],
+      outcome: "held-at-revert", diagnostic: l,
+      recordClass: AuditClassLiveState))
   if secretsFailure.len > 0:
     appendAuditRecord(applyLogPath(stateDir, result.generationId), AuditRecord(
       timestamp: getTime().toUnix(), operationKind: "addon.secrets",
       resourceAddress: "generation:" & result.generationId,
       outcome: "secrets-failed", diagnostic: secretsFailure,
       recordClass: AuditClassLiveState))
+  # Committed: this switch's ledger, which claimed every directory the
+  # record names, is the one the next switch starts from. Not before: a
+  # replay starts from the ledger the interrupted switch started from
+  # (its pending plan's), so until the commit the record is the only
+  # place that names them.
+  clearRevertHoldDirs(stateDir)
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
   # A switch the rollback floor kept in place is resolved by its commit.

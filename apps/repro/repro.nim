@@ -13,9 +13,10 @@
 ## literal in `runThinApp("repro")` below is what
 ## `runningImageIsReproCli` reads to permit self-spawning the internal verbs
 ## (`internal io monitor`, `__repro-extract-interface`,
-## `__repro-compile-provider`), and it is what `renderUsage` prints — so the
-## usage text and every diagnostic still say `repro`, which is the command a
-## user typed. The rename is a FILENAME change and nothing else. Verified: this
+## `__repro-compile-provider`); and help, usage errors and completion scripts
+## name the program `repro` (`repro_cli_support/cli_description`), so they
+## and every diagnostic still say `repro`, which is the command a user
+## typed. The rename is a FILENAME change and nothing else. Verified: this
 ## image builds a `reprobuild.nim` project, provider-compile edge included,
 ## under the filenames `repro`, `reprobuild` and `zzz-not-a-repro` alike;
 ## with the declaration arm of that predicate removed the last of those fails

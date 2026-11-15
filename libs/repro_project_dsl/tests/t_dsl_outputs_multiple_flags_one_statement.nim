@@ -31,4 +31,4 @@ suite "t_dsl_outputs_multiple_flags_one_statement":
     check pkg.executables.len == 1
     let cmd = pkg.executables[0].commands[0]
     check cmd.name == "c"
-    check cmd.outputFlags == @["out", "dep"]
+    check cmd.ext.outputFlags == @["out", "dep"]

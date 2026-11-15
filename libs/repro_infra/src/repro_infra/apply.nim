@@ -23,7 +23,7 @@
 ## supplies the typed drivers the broker dispatches and does NOT
 ## re-implement the elevation mechanism.
 
-import std/[os, strutils, times]
+import std/[monotimes, os, strutils, tables, times]
 
 import repro_core/host_apply_lock
 import repro_elevation
@@ -37,6 +37,7 @@ import ./plan_envelope
 import ./planner
 import ./profile
 import ./state_dir
+import ./systemd_syntax
 when defined(posix):
   import std/tables
   import ./carried_state
@@ -283,6 +284,12 @@ type
       ## edges that ran a local process this apply (not a cache hit /
       ## substitute). This is the "M built locally" number.
     auditLogPath*: string
+    liveJudged*: seq[string]
+      ## The units the carried-state live check read from systemd, by the
+      ## name it read them under (``carried_state.liveJudgedNames``: a
+      ## template through its instances, §13 decision 135); empty when the
+      ## check did not run. Reported so an operator, and a gate, can see
+      ## what the check covered.
     diagnostics*: seq[string]
     buildActionResults*: seq[BuildActionApplyOutcome]
       ## Windows-System-Resources Phase G. Per-edge outcomes reported
@@ -607,27 +614,317 @@ var pendingSwitchGuard*: PendingSwitchGuard = nil
 proc driverStartJobs*(planned: openArray[PlannedOperation];
                       isActive: proc (unit: string): bool): seq[string] =
   ## The units whose start or restart job the drivers issue in this
-  ## privileged set (§13 decision 79), in plan order: every
-  ## ``systemd.systemUnit`` the plan writes that is enabled (its driver
-  ## runs ``enable --now``, whatever its type: a target, a socket, a timer
-  ## or a service) and every one that is running before the set and whose
-  ## restart the profile does not hold (its driver restarts it after its
-  ## change; ``isActive`` is asked before anything is written). A held unit
-  ## a start pulls in through its dependencies is skipped by its hold;
-  ## after the carried-state check passes, these jobs are issued again so
-  ## systemd brings it up through the same dependencies.
+  ## privileged set (§13 decision 79), in plan order, for every driver that
+  ## starts a unit:
+  ## - every ``systemd.systemUnit`` the plan writes that is enabled (its
+  ##   driver runs ``enable --now``, whatever its type: a target, a socket, a
+  ##   timer or a service) and every one that is running before the set and
+  ##   whose restart the profile does not hold (its driver restarts it after
+  ##   its change);
+  ## - every ``systemd.unitState`` that is to run and was not running before
+  ##   the set (its driver runs ``systemctl start`` only then), a unit the
+  ##   profile does not own such as ``multi-user.target``;
+  ## - every ``systemd.systemTimer`` that is to run (its driver runs
+  ##   ``systemctl start`` unconditionally).
+  ## ``isActive`` is asked before anything is written. A held unit a start
+  ## pulls in through its dependencies is skipped by its hold; after the
+  ## carried-state check passes, these jobs are issued again so systemd
+  ## brings it up through the same dependencies.
   for p in planned:
     let op = p.operation
-    if op.kind != pokSystemdSystemUnit or op.suDestroy: continue
-    if not (op.suEnabled or (not op.suRestartHeld and isActive(op.suName))):
+    case op.kind
+    of pokSystemdSystemUnit:
+      if op.suDestroy: continue
+      if not (op.suEnabled or (not op.suRestartHeld and isActive(op.suName))):
+        continue
+      when ApplyMutation == "reissue-skips-targets":
+        # FALSIFYING MUTATION: a target's job is not issued again.
+        if op.suName.endsWith(".target"): continue
+      when ApplyMutation == "reissue-skips-sockets":
+        # FALSIFYING MUTATION: a socket's job is not issued again.
+        if op.suName.endsWith(".socket"): continue
+      if op.suName notin result: result.add(op.suName)
+    of pokSystemdUnitState:
+      when ApplyMutation == "reissue-skips-unit-state":
+        # FALSIFYING MUTATION: a unitState start is not issued again.
+        continue
+      if op.usDestroy or not op.usRunning or isActive(op.usName): continue
+      if op.usName notin result: result.add(op.usName)
+    of pokSystemdSystemTimer:
+      when ApplyMutation == "reissue-skips-timers":
+        # FALSIFYING MUTATION: a timer's start is not issued again.
+        continue
+      if op.stDestroy or not op.stRunning: continue
+      if op.stName notin result: result.add(op.stName)
+    else:
       continue
-    when ApplyMutation == "reissue-skips-targets":
-      # FALSIFYING MUTATION: a target's job is not issued again.
-      if op.suName.endsWith(".target"): continue
-    when ApplyMutation == "reissue-skips-sockets":
-      # FALSIFYING MUTATION: a socket's job is not issued again.
-      if op.suName.endsWith(".socket"): continue
-    if op.suName notin result: result.add(op.suName)
+
+proc refusedUnits*(units, problems: openArray[string]): seq[string] =
+  ## The judged units the check's ``problems`` name (a problem reads
+  ## ``... : <unit> ...`` or ``... : <unit>: ...``). A problem that names
+  ## none of them (the refusal decided again over the host as the reload
+  ## left it) cannot be attributed, so it holds every unit: a refusal that
+  ## cannot say whom it concerns lets nothing start (§11.1). A template's
+  ## problems name its instances (§13 decision 135), so a problem naming
+  ## any ``<stem>@...`` refuses the template, whose hold holds them all.
+  if problems.len == 0: return
+  for u in units:
+    let stem = if isTemplateUnit(u): u[0 .. u.find('@')] else: ""
+    for pr in problems:
+      let named = if stem.len > 0: (": " & stem) in pr
+                  else: (": " & u & " ") in pr or (": " & u & ":") in pr
+      if named and u notin result: result.add(u)
+  when ApplyMutation == "refusal-holds-every-unit":
+    # FALSIFYING MUTATION: one refused unit holds them all.
+    if result.len > 0: result = @units
+  if result.len == 0: result = @units
+
+proc triggeredUnits*(show: Table[string, string]): seq[string] =
+  ## The units a timer or path unit triggers: ``Triggers=`` of
+  ## ``systemctl show``.
+  for u in show.getOrDefault("Triggers").splitWhitespace():
+    if u notin result: result.add(u)
+
+proc skippedUnderHold*(show: Table[string, string];
+                       holdStampUsec: int64): bool =
+  ## Whether a start of the unit whose ``systemctl show`` is ``show`` was
+  ## skipped by a ``Condition…=`` hold written at ``holdStampUsec`` (a
+  ## ``CLOCK_MONOTONIC`` reading, microseconds): its last condition test
+  ## failed, at or after the hold. A timer's or path unit's trigger that
+  ## fired under the hold leaves exactly this behind, and no other state:
+  ## the one-shot elapse of a monotonic timer is spent, and ``start`` of a
+  ## trigger unit that is already active adds no job for what it triggers.
+  if show.getOrDefault("ConditionResult") != "no": return false
+  let ts = show.getOrDefault("ConditionTimestampMonotonic", "0")
+  try: parseBiggestInt(ts) >= holdStampUsec and parseBiggestInt(ts) > 0
+  except ValueError: false
+
+type
+  LiveHost* = object
+    ## The systemd reads and starts of the carried-state check's release,
+    ## as closures so the order of the starts can be tested without a
+    ## running systemd.
+    isActive*: proc (unit: string): bool
+    show*: proc (unit: string): Table[string, string]
+    start*: proc (unit: string): tuple[ok: bool, output: string]
+    stop*: proc (unit: string): tuple[ok: bool, output: string]
+      ## nil where the caller stops nothing (the release alone).
+    resetFailed*: proc (unit: string)
+      ## nil where the caller resets nothing.
+
+proc heldBy*(u: string; units: openArray[string]): bool =
+  ## Whether ``u`` is one of ``units`` or an instance of a template among
+  ## them (§13 decision 152: ``tpl@daily.service`` is held by the judged
+  ## ``tpl@.service``).
+  when ApplyMutation == "fired-instance-unmapped":
+    # FALSIFYING MUTATION: an instance is not mapped to its template.
+    u in units
+  else:
+    u in units or templateOfUnit(u) in units
+
+proc firedUnderHold*(driverStarts, units, refused: openArray[string];
+                     host: LiveHost; holdStampUsec: int64): seq[string] =
+  ## The judged, passed, inactive units that a timer or path unit the
+  ## drivers started triggered while the hold was in place (§13 decision
+  ## 79 as amended 2026-11-14). Read before the holds are lifted.
+  for t in driverStarts:
+    if not (t.endsWith(".timer") or t.endsWith(".path")): continue
+    var triggers: seq[string]
+    try: triggers = triggeredUnits(host.show(t))
+    except CatchableError: continue
+    for u in triggers:
+      if not heldBy(u, units) or heldBy(u, refused) or u in result: continue
+      if host.isActive(u): continue
+      var st: Table[string, string]
+      try: st = host.show(u)
+      except CatchableError: continue
+      when ApplyMutation == "trigger-fired-under-hold-not-started":
+        # FALSIFYING MUTATION: a trigger that fired under the hold is
+        # not noticed.
+        continue
+      if skippedUnderHold(st, holdStampUsec): result.add(u)
+
+proc releaseStarts*(p: SystemProfile; units, passed, refused, wasActive,
+                    driverStarts, fired: openArray[string];
+                    host: LiveHost): seq[string] =
+  ## What a full apply starts once its check has judged ``units``, after
+  ## the holds of the ``passed`` ones are lifted: the problems that
+  ## reports. Nothing is started for a ``refused`` unit, which stays held;
+  ## the rest of the units start whatever the refusal (§11.1).
+  # What the drivers would have started: every unit the profile enables,
+  # and every unit that was running before (its restart was skipped).
+  var started: seq[string]
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suName notin passed: continue
+    if isTemplateUnit(r.suName):
+      # A template is not started by name (systemd refuses it): the
+      # instances that were running before start again (§13 decision 135).
+      let stem = r.suName[0 .. r.suName.find('@')]
+      for i in wasActive:
+        if i.startsWith(stem) and i notin started:
+          started.add(i)
+          let s = host.start(i)
+          if not s.ok:
+            result.add("systemctl start " & i & " after the " &
+              "carried-state check: " & s.output.strip())
+      continue
+    if r.suEnabled or r.suName in wasActive:
+      started.add(r.suName)
+      let s = host.start(r.suName)
+      if not s.ok:
+        result.add("systemctl start " & r.suName & " after the " &
+          "carried-state check: " & s.output.strip())
+  # And what their jobs pulled in (§13 decision 79, decided 2026-11-08 by
+  # the owner): a held unit another unit's start wants -- a static
+  # service an enabled target or socket pulls in -- was skipped by its
+  # hold. Each start or restart job the drivers issued is issued again,
+  # as a start: systemd adds the jobs of its dependencies as it did for
+  # the driver, so the held units come up as on a host without carried
+  # state, and a unit already running is not restarted a second time
+  # (its restart's stop half ran in the drivers' job).
+  for u in driverStarts:
+    if u in started or u in refused or isTemplateUnit(u): continue
+    # Not a unit that ran and exited, or failed, in the drivers' job (a
+    # one-shot service): issuing its start again would run it twice.
+    # Its pulled-in units were queued by that job and stay as the hold
+    # left them (spec §11.1, the residual of decision 79).
+    if u notin units and not host.isActive(u): continue
+    started.add(u)
+    let s = host.start(u)
+    if not s.ok:
+      result.add("systemctl start " & u & " (re-issued after the " &
+        "carried-state check, §13 decision 79): " & s.output.strip())
+  # A trigger that fired under the hold: its service's start was skipped
+  # and the trigger will not fire it again (§13 decision 79, 2026-11-14).
+  for u in fired:
+    if u in started or u in refused: continue
+    let s = host.start(u)
+    if not s.ok:
+      result.add("systemctl start " & u & " (its timer or path unit " &
+        "fired while the carried-state check held it, §13 decision 79): " &
+        s.output.strip())
+
+const TriggerSuffixes = [".socket", ".path", ".timer"]
+
+proc isTriggerUnit*(u: string): bool =
+  for s in TriggerSuffixes:
+    if u.endsWith(s): return true
+
+proc loadedTriggersOf*(names: openArray[string]; host: LiveHost): seq[string] =
+  ## The socket, path and timer units systemd has loaded that trigger any
+  ## of ``names`` (each one's ``TriggeredBy=``; §13 decisions 151 and 152):
+  ## the held units' triggers that are not the profile's own, a host's
+  ## socket for a profile service, and an instance's own timer.
+  for n in names:
+    var props: Table[string, string]
+    try: props = host.show(n)
+    except CatchableError: continue
+    for t in props.getOrDefault("TriggeredBy").splitWhitespace():
+      if isTriggerUnit(t) and t notin result: result.add(t)
+
+proc fireSources*(driverStarts, heldTriggers: openArray[string]): seq[string] =
+  ## The triggers whose activations the release looks at (§13 decision
+  ## 152): every trigger of a held unit, not only those the drivers
+  ## started -- an unchanged timer whose ``OnCalendar=`` elapsed during a
+  ## long privileged set is one of them.
+  result = @driverStarts
+  when ApplyMutation == "fired-from-driver-starts-only":
+    # FALSIFYING MUTATION: only the drivers' starts are looked at.
+    return
+  for t in heldTriggers:
+    if t notin result: result.add(t)
+
+proc profileTriggersOf*(p: SystemProfile; units: openArray[string]): seq[string] =
+  ## The profile's own socket, path and timer units whose triggered unit
+  ## is held (an instance by its template): known before any of them is
+  ## written or loaded, so the apply can hold them with their unit.
+  for (trigger, target) in triggerTargets(p):
+    if heldBy(target, units) and trigger notin result: result.add(trigger)
+
+proc triggersToStop*(triggers, stopping: openArray[string];
+                     host: LiveHost): seq[string] =
+  ## Of the active ``triggers``, those that could fire at a held unit
+  ## during the hold (§13 decision 151), which are stopped for it: a trigger
+  ## whose units are all running cannot -- an active service serves its own
+  ## socket (with ``Accept=no`` it holds the listening descriptor, so a
+  ## stop and start of the socket would fail to bind again), and a path or
+  ## timer start of an active unit adds no job -- unless one of them is
+  ## among ``stopping``, the running units the hold's apply restarts.
+  for t in triggers:
+    if not host.isActive(t): continue
+    var targets: seq[string]
+    try: targets = triggeredUnits(host.show(t))
+    except CatchableError: discard
+    var canFire = targets.len == 0
+    for u in targets:
+      if u in stopping or not host.isActive(u): canFire = true
+    when ApplyMutation == "triggers-of-running-units-stopped":
+      # FALSIFYING MUTATION: every active trigger is stopped.
+      canFire = true
+    if canFire and t notin result: result.add(t)
+
+proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
+                      host: LiveHost): seq[string] =
+  ## Start again each of ``triggers`` once its hold is gone, after a
+  ## ``reset-failed`` (§13 decision 151): every trigger comes back up. One
+  ## systemd no longer loads (the generation removed it) is left alone,
+  ## and so is a trigger of a refused unit, which stays held with it.
+  ## Returns the problems.
+  for t in triggers:
+    if t in refusedTriggers: continue
+    var props: Table[string, string]
+    try: props = host.show(t)
+    except CatchableError: continue
+    if props.getOrDefault("LoadState") != "loaded": continue
+    if host.resetFailed != nil: host.resetFailed(t)
+    let s = host.start(t)
+    if not s.ok:
+      result.add("systemctl start " & t & " (a trigger stopped for the " &
+        "carried-state check's hold, §13 decision 151): " & s.output.strip())
+
+proc requiringRefused*(passed, refused: openArray[string]; host: LiveHost):
+    seq[tuple[unit, because: string]] =
+  ## The passed units that ``Requires=`` or ``BindsTo=`` a refused unit,
+  ## directly or through another such unit (§13 decision 153): each stays
+  ## held with the unit it requires, which the apply reports. A refused
+  ## template refuses the instances it holds.
+  when ApplyMutation == "requirers-of-refused-released":
+    # FALSIFYING MUTATION: a unit that requires a refused one is released.
+    return
+  var held = @refused
+  var changed = true
+  while changed:
+    changed = false
+    for u in passed:
+      if heldBy(u, held): continue
+      var props: Table[string, string]
+      try: props = host.show(u)
+      except CatchableError: continue
+      for key in ["Requires", "BindsTo"]:
+        var hit = ""
+        for d in props.getOrDefault(key).splitWhitespace():
+          if heldBy(d, held): hit = d
+        if hit.len > 0:
+          result.add((unit: u, because: hit))
+          held.add(u)
+          changed = true
+          break
+
+when defined(posix):
+  proc liftableHolds*(passed, refused: openArray[string]; name: string;
+                      dir = RuntimeUnitDir): seq[string] =
+    ## The hold files of the ``passed`` units that may be removed: not one a
+    ## ``refused`` unit still needs. A template's instances share one hold
+    ## file (``holdPath``), so a passed instance must not lift the hold of a
+    ## refused sibling.
+    var kept: seq[string]
+    when ApplyMutation != "shared-hold-lifted-by-passed-instance":
+      # FALSIFYING MUTATION (when absent): a passed instance lifts the
+      # shared hold of a refused sibling.
+      for u in refused: kept.add(holdPath(u, name, dir))
+    for u in passed:
+      let h = holdPath(u, name, dir)
+      if h notin kept and h notin result: result.add(h)
 
 when defined(posix):
   type LiveCheck = object
@@ -639,11 +936,47 @@ when defined(posix):
     holds: seq[string]
     wasActive: seq[string]
     driverStarts: seq[string]
+    holdStampUsec: int64   ## CLOCK_MONOTONIC (us) just before the holds
+    triggers: seq[string]
+      ## The socket, path and timer units of the held units, held with
+      ## them (§13 decision 151): none fires while its unit is held.
+    triggersActive: seq[string]
+      ## Those that were active before the hold, stopped for it.
+
+  proc liveHost(): LiveHost =
+    LiveHost(
+      isActive: proc (u: string): bool =
+        runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0,
+      show: proc (u: string): Table[string, string] = systemctlShow(u),
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        let r = runSystemctlArgs(["start", "--", u])
+        (r.exitCode == 0, r.output),
+      stop: proc (u: string): tuple[ok: bool, output: string] =
+        let r = runSystemctlArgs(["stop", "--", u])
+        (r.exitCode == 0, r.output),
+      resetFailed: proc (u: string) =
+        discard runSystemctlArgs(["reset-failed", "--", u]))
+
+  proc stopTriggers(triggers, stopping: openArray[string]; host: LiveHost;
+                    stopped: var seq[string]) =
+    ## Stop each trigger that could fire at a held unit and remember it
+    ## (§13 decision 151; ``triggersToStop``): a socket with a pending
+    ## connection, or a path unit whose path exists, would otherwise fire at
+    ## a held unit until systemd's trigger rate limit fails it for good.
+    for t in triggersToStop(triggers, stopping, host):
+      if t in stopped: continue
+      stopped.add(t)
+      discard host.stop(t)
 
   proc liveCheckHoldText(): string =
     holdText(hmCondition, "Written by repro infra apply: the unit may not " &
       "start until its loaded configuration has been checked against the " &
       "carried-state reach (ReproOS Add-On Mode spec §11.1).")
+
+  proc hostRunningInstances(tmpl: string): seq[string] =
+    ## The instances of ``tmpl`` systemd has running or starting.
+    let r = runSystemctlArgs(runningInstancesArgs(tmpl))
+    if r.exitCode == 0: result = parseRunningInstances(tmpl, r.output)
 
   proc beginLiveCheck(p: SystemProfile; dir, root: string;
                       planned: openArray[PlannedOperation]): LiveCheck =
@@ -657,85 +990,148 @@ when defined(posix):
     result.units = liveReachUnits(p, dir, root)
     if result.units.len == 0: return
     for u in result.units:
+      if isTemplateUnit(u):
+        # A template never runs; its running instances do (§13 decision
+        # 135). Their restarts are skipped under the template's hold too.
+        for i in hostRunningInstances(u):
+          if i notin result.wasActive: result.wasActive.add(i)
+        continue
       let r = runSystemctlArgs(["is-active", "--quiet", "--", u])
       if r.exitCode == 0: result.wasActive.add(u)
     result.driverStarts = driverStartJobs(planned,
       proc (u: string): bool =
         runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0)
-    result.holds = writeHolds(result.units, CarriedCheckHoldName,
-                              liveCheckHoldText())
+    # The triggers of the held units (§13 decision 151): the profile's own,
+    # known before they are written, and whatever systemd has loaded that
+    # triggers a held unit or one of a held template's instances. Each is
+    # stopped if it runs and held with its unit, so the drivers' ``enable
+    # --now`` of a trigger does not start it either.
+    when ApplyMutation != "triggers-left-running":
+      let host = liveHost()
+      let names = liveJudgedNames(result.units, p,
+        proc (t: string): seq[string] = hostRunningInstances(t))
+      result.triggers = profileTriggersOf(p, result.units)
+      for t in loadedTriggersOf(names, host):
+        if t notin result.triggers: result.triggers.add(t)
+      # The running units this apply restarts under the hold: their
+      # triggers could fire once the restart's stop half has run.
+      var stopping: seq[string]
+      for u in result.driverStarts:
+        if host.isActive(u): stopping.add(u)
+      stopTriggers(result.triggers, stopping, host, result.triggersActive)
+    result.holdStampUsec = getMonoTime().ticks div 1000
+    result.holds = writeHolds(result.units & result.triggers,
+                              CarriedCheckHoldName, liveCheckHoldText())
     systemctlOrRaise(["daemon-reload"])
 
-  proc finishLiveCheck(c: LiveCheck; p: SystemProfile; dir, root: string): seq[string] =
+  proc finishLiveCheck(c0: LiveCheck; p: SystemProfile; dir, root: string;
+                       judged: var seq[string]): seq[string] =
     ## After the privileged set: reload, judge each held unit as systemd
     ## loaded it (``liveReachProblems``, the add-on switch's own check), and
     ## either release and start what should run, or keep the refused units
     ## held -- in ``/etc`` too, so a reboot does not start them -- and
     ## report each as a problem of this apply.
+    var c = c0
     if c.units.len == 0: return
     systemctlOrRaise(["daemon-reload"])
+    let host = liveHost()
+    when ApplyMutation != "triggers-left-running":
+      # A trigger systemd loaded only now (a host unit the generation's
+      # writes linked to a held unit) is stopped too, unheld: it is
+      # started again with the others once the check passes.
+      let names = liveJudgedNames(c.units, p,
+        proc (t: string): seq[string] = hostRunningInstances(t))
+      for t in loadedTriggersOf(names, host):
+        if t notin c.triggers:
+          c.triggers.add(t)
+          stopTriggers([t], [], host, c.triggersActive)
     var problems: seq[string]
     when not LiveCheckSkipped:
+      # One reading of each template's running instances serves both the
+      # check and the report of what it judged.
+      var runningSeen = initTable[string, seq[string]]()
+      let running = proc (t: string): seq[string] =
+        if t notin runningSeen: runningSeen[t] = hostRunningInstances(t)
+        runningSeen[t]
+      judged = liveJudgedNames(c.units, p, running)
       problems = liveReachProblems(c.units, p,
-        proc (u: string): Table[string, string] = systemctlShow(u), root)
+        proc (u: string): Table[string, string] = systemctlShow(u), root,
+        running)
       # And the refusal again over the host as the reload left it: a
       # drop-in a generator made at a reload of this apply is read now.
       when ApplyMutation != "post-reload-refusal-skipped":
         let why = carriedStateRefusal(p, dir, root)
         if why.len > 0: problems.add(why & " (decided again after the reload)")
-    if problems.len > 0:
-      var refused: seq[string]
-      for u in c.units:
-        for pr in problems:
-          if (": " & u & " ") in pr or (": " & u & ":") in pr:
-            if u notin refused: refused.add(u)
-      if refused.len == 0: refused = c.units
-      discard writeHolds(refused, CarriedCheckHoldName, liveCheckHoldText(),
-                         PersistentUnitDir)
-      systemctlOrRaise(["daemon-reload"])
+    var refused = refusedUnits(c.units, problems)
+    var passed: seq[string]
+    for u in c.units:
+      if u notin refused: passed.add(u)
+    # §13 decision 153: a passed unit that requires a refused one stays
+    # held with it, and is reported so.
+    if refused.len > 0:
+      for (u, because) in requiringRefused(passed, refused, host):
+        refused.add(u)
+        problems.add("ECarriedStatePending: " & u & " requires " & because &
+          ", which the carried-state check refused; held because of it")
+      var still: seq[string]
+      for u in passed:
+        if u notin refused: still.add(u)
+      passed = still
+    # The triggers of a refused unit stay held with it; the rest go.
+    var refusedTriggers: seq[string]
+    for t in c.triggers:
+      var targets: seq[string]
+      try: targets = triggeredUnits(host.show(t))
+      except CatchableError: discard
+      for (pt, target) in triggerTargets(p):
+        if pt == t and target notin targets: targets.add(target)
+      for u in targets:
+        if heldBy(u, refused) and t notin refusedTriggers:
+          refusedTriggers.add(t)
+    # A refused unit stays held -- in ``/etc`` too, so a reboot does not
+    # start it -- and is reported as a problem of this apply. The units
+    # that passed are released and started all the same: one refusal does
+    # not keep the rest down until the next apply or boot (§11.1).
+    if refused.len > 0:
+      discard writeHolds(refused & refusedTriggers, CarriedCheckHoldName,
+                         liveCheckHoldText(), PersistentUnitDir)
       for pr in problems:
         result.add(pr & "; the unit is held (not started) until an apply " &
           "whose check it passes")
-      return
-    removeHolds(c.holds)
+    # Read before the holds are lifted: which triggers fired under them.
+    # §13 decision 152: every trigger of a held unit, not only those the
+    # drivers started.
+    let fired = firedUnderHold(fireSources(c.driverStarts, c.triggers),
+                               c.units, refused, host, c.holdStampUsec)
+    # One hold covers every instance of a template: it stays while any
+    # instance it covers is refused, in ``/run`` and in ``/etc`` alike.
+    var passedTriggers: seq[string]
+    for t in c.triggers:
+      if t notin refusedTriggers: passedTriggers.add(t)
+    var lifted: seq[string]
+    for h in liftableHolds(passed & passedTriggers, refused & refusedTriggers,
+                           CarriedCheckHoldName):
+      if h in c.holds: lifted.add(h)
+    removeHolds(lifted)
     var persistent: seq[string]
-    for u in c.units:
-      let h = holdPath(u, CarriedCheckHoldName, PersistentUnitDir)
+    for h in liftableHolds(passed & passedTriggers, refused & refusedTriggers,
+                           CarriedCheckHoldName, PersistentUnitDir):
       if fileExists(h): persistent.add(h)
     removeHolds(persistent)
     systemctlOrRaise(["daemon-reload"])
-    # What the drivers would have started: every unit the profile enables,
-    # and every unit that was running before (its restart was skipped).
-    var started: seq[string]
-    for r in p.resources:
-      if r.kind != srkSystemdSystemUnit or r.suName notin c.units: continue
-      if r.suEnabled or r.suName in c.wasActive:
-        started.add(r.suName)
-        let s = runSystemctlArgs(["start", "--", r.suName])
-        if s.exitCode != 0:
-          result.add("systemctl start " & r.suName & " after the " &
-            "carried-state check: " & s.output.strip())
-    # And what their jobs pulled in (§13 decision 79, decided 2026-11-08 by
-    # the owner): a held unit another unit's start wants -- a static
-    # service an enabled target or socket pulls in -- was skipped by its
-    # hold. Each start or restart job the drivers issued is issued again,
-    # as a start: systemd adds the jobs of its dependencies as it did for
-    # the driver, so the held units come up as on a host without carried
-    # state, and a unit already running is not restarted a second time
-    # (its restart's stop half ran in the drivers' job).
-    for u in c.driverStarts:
-      if u in started: continue
-      # Not a unit that ran and exited, or failed, in the drivers' job (a
-      # one-shot service): issuing its start again would run it twice.
-      # Its pulled-in units were queued by that job and stay as the hold
-      # left them (spec §11.1, the residual of decision 79).
-      if u notin c.units and
-          runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode != 0:
-        continue
-      let s = runSystemctlArgs(["start", "--", u])
-      if s.exitCode != 0:
-        result.add("systemctl start " & u & " (re-issued after the " &
-          "carried-state check, §13 decision 79): " & s.output.strip())
+    # §13 decision 151: every trigger of a passed unit comes back up --
+    # those stopped for the hold, and those the drivers started (an enabled
+    # trigger's ``enable --now``, skipped by its hold) -- before the units
+    # start, so a socket-activated service is handed its socket.
+    var restart: seq[string]
+    for t in c.triggersActive & c.driverStarts:
+      if t in c.triggers and t notin restart: restart.add(t)
+    result.add(triggerRestarts(restart, refusedTriggers, host))
+    result.add(releaseStarts(p, c.units, passed, refused, c.wasActive,
+                             c.driverStarts, fired, host))
+    for t in refusedTriggers:
+      result.add("ECarriedStatePending: " & t & " stays stopped: it " &
+        "triggers a unit the carried-state check refused")
 
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
@@ -1010,7 +1406,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
 
   when defined(posix):
     for pr in finishLiveCheck(liveCheck, parseSystemProfile(profileText),
-                              liveDir, liveRoot):
+                              liveDir, liveRoot, result.liveJudged):
       inc result.errorCount
       result.diagnostics.add(pr)
 

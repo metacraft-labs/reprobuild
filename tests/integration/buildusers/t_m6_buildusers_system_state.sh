@@ -60,6 +60,59 @@ on_exit() {
   fi
 }
 
+# Process groups of the runs this harness started as "$CALLER" (see
+# run_as_caller_in_own_session). Ending them ends exactly what this harness
+# started -- never every process of a user (`pkill -u`), nor anything found
+# by name or pattern (reprobuild-pm issue 2026-11-13).
+CALLER_GROUPS=()
+CALLER_INNER_RECORDS=()
+CALLER_RUNS=0
+
+# Start `su "$CALLER" -c <command>` in the background and record the process
+# groups the run can occupy. Two, because su(1) differs by implementation:
+#
+# * the OUTER group. setsid(1) makes `su` the leader of a new session; a
+#   background job of this non-interactive script does not lead a process
+#   group, so setsid does not fork and `$!` is that session's -- and
+#   group's -- id. shadow's su keeps the command's shell in it.
+# * the INNER group. util-linux su puts the command's shell in a session of
+#   its OWN (`-c` does, unlike `--session-command`), out of the outer
+#   group's reach. That shell records its `$$` before it execs the command,
+#   so the session it leads is recorded too. Under shadow's su the same
+#   `$$` leads no group, and `end_caller_groups` skips it.
+run_as_caller_in_own_session() {
+  local out="$1"; shift
+  CALLER_RUNS=$((CALLER_RUNS + 1))
+  local inner="$WORK/caller-run-$CALLER_RUNS.group"
+  rm -f "$inner"
+  setsid su -s /bin/sh "$CALLER" -c "echo \$\$ > '$inner'; exec $1" >"$out" 2>&1 &
+  CALLER_PID=$!
+  CALLER_GROUPS+=("$CALLER_PID")
+  CALLER_INNER_RECORDS+=("$inner")
+}
+
+end_caller_groups() {
+  local g i r
+  # `${a[@]+...}`: an empty array is "unbound" to `set -u` before bash 4.4,
+  # and this runs from the EXIT trap of a harness that may die before its
+  # first run.
+  local groups=(${CALLER_GROUPS[@]+"${CALLER_GROUPS[@]}"})
+  for r in ${CALLER_INNER_RECORDS[@]+"${CALLER_INNER_RECORDS[@]}"}; do
+    g="$(cat "$r" 2>/dev/null || true)"
+    case "$g" in ''|*[!0-9]*) continue ;; esac
+    groups+=("$g")
+  done
+  for g in ${groups[@]+"${groups[@]}"}; do
+    [ "$g" -gt 1 ] || continue
+    # Signalled only while the group has members: an id the kernel has
+    # since reissued is never hit, and a recorded shell pid that never led
+    # a group (shadow's su) is not a group at all.
+    kill -0 -- "-$g" 2>/dev/null || continue
+    kill -KILL -- "-$g" 2>/dev/null || true
+    for i in $(seq 50); do kill -0 -- "-$g" 2>/dev/null || break; sleep 0.1; done
+  done
+}
+
 cleanup_accounts() {
   bash "$PROVISION" destroy --group "$GROUP" --prefix "$PREFIX" --count "$COUNT" \
     >/dev/null 2>&1 || true
@@ -69,8 +122,9 @@ cleanup_accounts() {
   # while any process still runs as the account -- and because that
   # failure was discarded, a run that died mid-flight left a real system
   # account behind on the host, silently, in a harness whose entire
-  # contract is to leave none. Reap the stragglers first, then insist.
-  pkill -KILL -u "$CALLER" >/dev/null 2>&1 || true
+  # contract is to leave none. End this harness's own runs first, then
+  # insist.
+  end_caller_groups
   userdel -f "$CALLER" >/dev/null 2>&1 || true
 }
 trap on_exit EXIT
@@ -149,9 +203,9 @@ echo "=== phase 2: DEFAULT path (no build_uid in manifest), before provisioning 
 
 mk_manifest "$WORK/default.manifest"
 rm -f "$WORK/d1".*
-su -s /bin/sh "$CALLER" -c "'$LAUNCHER' --manifest='$WORK/default.manifest' -- '$WORK/d1'" \
-  >"$WORK/default.log" 2>&1 &
-DEF_PID=$!
+run_as_caller_in_own_session "$WORK/default.log" \
+  "'$LAUNCHER' --manifest='$WORK/default.manifest' -- '$WORK/d1'"
+DEF_PID=$CALLER_PID
 wait "$DEF_PID" || true
 
 DEFAULT_INSIDE_BEFORE="$(cat "$WORK/d1.uid" 2>/dev/null || echo MISSING)"
@@ -303,9 +357,9 @@ echo "=== phase 7: default path UNCHANGED after provisioning (clause 2.3) ==="
 # exists on this host. The default install must be completely unaffected
 # by the fact that the hardened mode is available.
 rm -f "$WORK/d2".*
-su -s /bin/sh "$CALLER" -c "'$LAUNCHER' --manifest='$WORK/default.manifest' -- '$WORK/d2'" \
-  >"$WORK/default2.log" 2>&1 &
-wait $! || true
+run_as_caller_in_own_session "$WORK/default2.log" \
+  "'$LAUNCHER' --manifest='$WORK/default.manifest' -- '$WORK/d2'"
+wait "$CALLER_PID" || true
 DEFAULT_INSIDE_AFTER="$(cat "$WORK/d2.uid" 2>/dev/null || echo MISSING)"
 
 assert_eq "default path still maps the caller to uid 0 inside its namespace" "0" "$DEFAULT_INSIDE_AFTER"
@@ -326,7 +380,7 @@ echo "=== phase 8: teardown and census ==="
 bash "$PROVISION" destroy --group "$GROUP" --prefix "$PREFIX" --count "$COUNT" >"$WORK/destroy.log" 2>&1
 assert_empty "build group removed again" "$(gid_of "$GROUP")"
 assert_empty "${PREFIX}01 removed again" "$(uid_of "${PREFIX}01")"
-pkill -KILL -u "$CALLER" >/dev/null 2>&1 || true
+end_caller_groups
 userdel -f "$CALLER" >/dev/null 2>&1 || true
 # Asserted, not assumed: userdel(8) refuses while a process still runs as
 # the account, and a discarded refusal is how a test harness quietly
