@@ -7,6 +7,8 @@
 ## was implicated, and what the user can do about it. Silent
 ## fail-open is forbidden by the milestone contract.
 
+from std/strutils import join
+
 type
   EHomeApply* = object of CatchableError
     ## Root of the apply pipeline exception hierarchy. The pipeline
@@ -68,6 +70,17 @@ type
     ## error message verbatim.
     packageId*: string
     adapter*: string
+
+  EApplyUnrealizablePackages* = object of EApplyRealizeFailed
+    ## Packages of an applied concern that have no realization on the
+    ## target, refused before the apply changes anything (CLI/home/apply.md
+    ## §Concerns Applied On This Host): before the partial-apply marker, the
+    ## generation directory, the store and any launcher. A subtype of
+    ## ``EApplyRealizeFailed`` so a handler of realize failures still
+    ## catches it. ``packageIds`` and ``reasons`` are parallel and name
+    ## EVERY such package; the inherited ``packageId`` is the first.
+    packageIds*: seq[string]
+    reasons*: seq[string]
 
   EApplyAppBundleFailed* = object of EHomeApply
     ## Step 9b: placing a realized macOS application bundle in its
@@ -257,6 +270,30 @@ proc raiseRealizeFailed*(packageId, adapter, msg: string) {.noreturn.} =
   e.stepName = "realize"
   e.packageId = packageId
   e.adapter = adapter
+  raise e
+
+proc raiseUnrealizablePackages*(packageIds, reasons: seq[string])
+    {.noreturn.} =
+  ## Refuse the apply over ``packageIds`` (``EApplyUnrealizablePackages``),
+  ## each with the parallel entry of ``reasons``. Raised from planning, so
+  ## ``step`` is the realize step the packages could not reach. The message
+  ## carries no command prefix: the apply runs under `repro home apply`,
+  ## `add`, `set`, `adopt` and the remote build, and each caller names
+  ## itself.
+  doAssert packageIds.len > 0 and packageIds.len == reasons.len
+  var lines: seq[string]
+  for i, id in packageIds:
+    lines.add("  " & id & ": " & reasons[i])
+  var e = newException(EApplyUnrealizablePackages,
+    $packageIds.len & " package(s) of an applied " &
+    "concern have no realization on this host; nothing was changed:\n" &
+    lines.join("\n"))
+  e.step = 7
+  e.stepName = "realize"
+  e.packageId = packageIds[0]
+  e.adapter = "<selection>"
+  e.packageIds = packageIds
+  e.reasons = reasons
   raise e
 
 proc raiseAppBundleFailed*(packageId, resourceAddress, bundleName,
