@@ -287,7 +287,7 @@ TARGET.update({
     "mutcallsite": "a switch that changes only a service's credential judges it",
     "mutnoedges": "decision 137, unheld socket first:",
     "muttrigconv": "decision 151, full apply (first realisation):",
-    "muttrigheld": "decision 151, add-on switch: an Accept=yes socket hit by a burst",
+    "muttrigheld": "decision 151, add-on switch: while the switch holds their units",
     "mutrestartignored": "decision 160: a trigger that cannot start again fails the switch",
     "mutrevertstarts": "decision 160: a trigger that cannot start again fails the switch",
 })
@@ -390,16 +390,26 @@ def on_target_rec(kind, rec):
         return (on_target(kind, steps) and u.get("exit") == 0 and
                 u.get("blocked") == "active")
     if kind == "muttrigheld":
-        # Red because the burst failed the socket by its trigger rate limit
-        # while the switch held its service, not for another reason: the
-        # switch applied, and the socket was left running into the window.
-        d = rec.get("decision151Seam", {})
+        # Red because both triggers fired at their held units in the
+        # window, each by its own observable, not for another reason: the
+        # socket accepted connections (its NAccepted grew) and the path
+        # unit started its held service; and the switch paused and applied.
+        d = rec.get("decision151Window", {})
         st = {x["step"]: x for x in steps}
-        applied = any(n.startswith("generation D applies once checked") and x["ok"]
-                      for n, x in st.items())
-        return (on_target(kind, steps) and applied and
-                limit_hit(d.get("after", "")) and
-                "ActiveState=inactive" not in d.get("during", ""))
+        def ok_step(prefix):
+            return any(n.startswith(prefix) and x["ok"] for n, x in st.items())
+        def count(v):
+            try:
+                return int(str(v).strip())
+            except ValueError:
+                return None
+        before, during = count(d.get("acceptedBefore")), count(d.get("acceptedDuring"))
+        starts = count(d.get("pathServiceStarts"))
+        return (on_target(kind, steps) and
+                ok_step("generation D pauses after the drivers' writes") and
+                ok_step("generation D applies once checked") and
+                before is not None and during is not None and during > before and
+                starts is not None and starts > 0)
     if kind in ("mutliveset", "mutcallsite"):
         # The credentials-only switch changed the probe's materialised
         # credential and wrote none of its unit files (``credentialsOnly``),
@@ -639,11 +649,10 @@ GREEN = {
                      "it fails"),
     "floorupgrade": (24, "and its service serves page-prefloor"),
     # Generation C (§13 decision 136) adds eight steps to the A9 gate, and
-    # generation D (§13 decision 151) three more.
-    "heldwin": (20, "decision 151, add-on switch: an Accept=yes socket hit by "
-                    "a burst of connections while the switch holds its service "
-                    "is active after the switch, and an instance runs on a "
-                    "connection"),
+    # generation D (§13 decision 151) four more.
+    "heldwin": (21, "decision 151, add-on switch: after the switch the socket "
+                    "and the path unit are active, an instance runs on a "
+                    "connection, and the path's service ran"),
     "hardreset": (181, "uninstall"),
     "parity": (59, "the add-on guest's re-assert materialises the token and "
                    "starts the failed vaultwarden again"),
@@ -731,13 +740,18 @@ def green_incomplete(kind, rec):
     steps = rec.get("steps", [])
     least, last = GREEN[kind]
     if kind == "heldwin":
-        # §13 decision 151: the socket was stopped for the hold (inactive in
-        # the window), and is up after the switch with an instance run.
+        # §13 decision 151: both triggers were stopped for the hold (the
+        # window's own observables), and are up after the switch with their
+        # services run.
+        w = rec.get("decision151Window")
+        if (not isinstance(w, dict) or w.get("ok") is not True or
+                w.get("acceptedBefore") != w.get("acceptedDuring") or
+                str(w.get("pathServiceStarts")) != "0"):
+            return ("decision151Window %r, expected both triggers stopped in "
+                    "the window" % w)
         d = rec.get("decision151Seam")
-        if (not isinstance(d, dict) or d.get("ok") is not True or
-                "ActiveState=inactive" not in d.get("during", "")):
-            return ("decision151Seam %r, expected the socket inactive in the "
-                    "window and up after" % d)
+        if not isinstance(d, dict) or d.get("ok") is not True:
+            return "decision151Seam %r, expected both triggers up after" % d
     red = [st["step"] for st in steps if not st.get("ok")]
     if red:
         return "green record with red steps: %r" % red

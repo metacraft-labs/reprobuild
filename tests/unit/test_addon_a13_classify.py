@@ -76,10 +76,13 @@ CONV = "e2e_addon_to_reproos_conversion_keeps_state"
 TICK = "e2e_addon_tick_observes_a_fresh_cycle"
 HARDRESET = "e2e_addon_hard_reset_at_every_step"
 HELD = "e2e_addon_floor_held_until_checked"
-HELD_D151 = ("decision 151, add-on switch: an Accept=yes socket hit by a "
-             "burst of connections while the switch holds its "
-             "service is active after the switch, and an "
-             "instance runs on a connection")
+HELD_D151 = ("decision 151, add-on switch: after the switch the socket "
+             "and the path unit are active, an instance runs on a "
+             "connection, and the path's service ran")
+HELD_D151_WINDOW = ("decision 151, add-on switch: while the switch holds "
+                    "their units, the socket and the path unit are stopped "
+                    "(no connection accepted under a burst, no start of the "
+                    "path's service while its path exists)")
 ENGINE = "/nix/store/00000000000000000000000000000000-reprobuild-test"
 
 ADOPT_EVERY_SWITCH_STEPS = [
@@ -251,11 +254,16 @@ def green(kind, base="debian-13"):
                               "vaultwarden again")
     elif kind == "heldwin":
         rec = base_record(HELD, base, with_gate_mutation=False)
-        rec["steps"] = padded([], 20, HELD_D151)
+        rec["steps"] = padded([], 21, HELD_D151)
+        rec["decision151Window"] = {
+            "socket": "Result=success NAccepted=3 NRefused=0 ActiveState=inactive",
+            "acceptedBefore": "3", "acceptedDuring": "3",
+            "path": "Result=success ActiveState=inactive",
+            "pathServiceStarts": "0", "ok": True}
         rec["decision151Seam"] = {
-            "during": "No such file or directory\nActiveState=inactive "
-                      "Result=success NAccepted=3 NRefused=0",
-            "after": "ActiveState=active Result=success",
+            "during": "Result=success NAccepted=3 NRefused=0 ActiveState=inactive",
+            "after": "Result=success ActiveState=active",
+            "pathAfter": "Result=success ActiveState=active active",
             "startedBefore": "6", "startedAfter": "7", "ok": True}
     else:
         raise KeyError(kind)
@@ -342,16 +350,24 @@ def red_record(kind, base="debian-13"):
     elif kind == "muttrigheld":
         rec = base_record(HELD, base, mutation="triggers-left-running",
                           with_gate_mutation=False)
+        # As measured at reprobuild c5237a255d: 130 connections accepted in
+        # the window, and the socket up again after the switch.
+        rec["decision151Window"] = {
+            "socket": "Result=success NAccepted=133 NRefused=172 ActiveState=active",
+            "acceptedBefore": "3", "acceptedDuring": "133",
+            "path": "Result=success ActiveState=active",
+            "pathServiceStarts": "12", "ok": False}
         rec["decision151Seam"] = {
-            "during": "No such file or directory\nActiveState=failed "
-                      "Result=trigger-limit-hit NAccepted=201 NRefused=0",
-            "after": "ActiveState=failed Result=trigger-limit-hit",
-            "startedBefore": "6", "startedAfter": "6", "ok": False}
+            "during": "Result=success NAccepted=133 NRefused=172 ActiveState=active",
+            "after": "Result=success ActiveState=active",
+            "pathAfter": "Result=success ActiveState=active active",
+            "startedBefore": "3", "startedAfter": "4", "ok": True}
         rec["steps"] = [ok("and the service runs after C"),
                         ok("generation D pauses after the drivers' writes, "
                            "before step 6"),
+                        red(HELD_D151_WINDOW),
                         ok("generation D applies once checked"),
-                        red(HELD_D151)]
+                        ok(HELD_D151)]
     elif kind == "mutrevertstarts":
         rec = base_record(ADOPT, base, mutation="revert-starts-unstartable-trigger")
         rec["decision160"] = {"exit": 1, "blocked": "active",
@@ -592,15 +608,19 @@ class TheIssuesDoctoredInputs(unittest.TestCase):
     def test_a_held_window_record_without_generation_d(self):
         # §13 decision 151: generation D's evidence is part of a green
         # record: the socket down in the window, up after the switch.
-        for change in ("drop", "notOk", "activeDuring"):
+        for change in ("drop", "notOk", "dropWindow", "accepted", "pathFired"):
             with self.subTest(change=change):
                 rec = green("heldwin")
                 if change == "drop":
                     del rec["decision151Seam"]
                 elif change == "notOk":
                     rec["decision151Seam"]["ok"] = False
+                elif change == "dropWindow":
+                    del rec["decision151Window"]
+                elif change == "accepted":
+                    rec["decision151Window"]["acceptedDuring"] = "5"
                 else:
-                    rec["decision151Seam"]["during"] = "ActiveState=active"
+                    rec["decision151Window"]["pathServiceStarts"] = "2"
                 ok_, _, why = cls.classify("heldwin-debian-13", rec)
                 self.assertFalse(ok_, why)
 
@@ -947,22 +967,29 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutrestartignored")
         rec["decision160"]["blocked"] = "inactive"
         self.assertRejected("mutrestartignored-debian-13", rec)
-        # §13 decision 151, add-on half: red because the burst failed the
-        # socket by its rate limit, after a switch that applied.
+        # §13 decision 151, add-on half: red at the window step because
+        # each trigger fired at its held unit, by its own observable, in a
+        # switch that paused and applied.
         rec = red_record("muttrigheld")
-        rec["decision151Seam"]["after"] = "ActiveState=active Result=success"
+        rec["decision151Window"]["acceptedDuring"] = "3"   # socket did not fire
         self.assertRejected("muttrigheld-debian-13", rec)
         rec = red_record("muttrigheld")
-        rec["steps"][2]["ok"] = False     # the switch itself failed
+        rec["decision151Window"]["pathServiceStarts"] = "0"  # path did not fire
         self.assertRejected("muttrigheld-debian-13", rec)
         rec = red_record("muttrigheld")
-        rec["decision151Seam"]["during"] = "ActiveState=inactive Result=success"
+        rec["decision151Window"]["pathServiceStarts"] = "not a count"
+        self.assertRejected("muttrigheld-debian-13", rec)
+        rec = red_record("muttrigheld")
+        rec["steps"][3]["ok"] = False     # the switch itself failed
+        self.assertRejected("muttrigheld-debian-13", rec)
+        rec = red_record("muttrigheld")
+        rec["steps"][2]["ok"] = True      # green at the window step
+        self.assertRejected("muttrigheld-debian-13", rec)
+        rec = red_record("muttrigheld")
+        del rec["decision151Window"]
         self.assertRejected("muttrigheld-debian-13", rec)
         rec = red_record("muttrigheld")
         rec["mutation"] = ""
-        self.assertRejected("muttrigheld-debian-13", rec)
-        del rec["decision151Seam"]
-        rec["mutation"] = "triggers-left-running"
         self.assertRejected("muttrigheld-debian-13", rec)
 
 
