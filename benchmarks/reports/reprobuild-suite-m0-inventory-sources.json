@@ -1619,8 +1619,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1552,
-      "platform/destructive": 179,
+      "integration": 1551,
+      "platform/destructive": 180,
       "pure unit": 765,
       "unclassified": 339
     },
@@ -5537,7 +5537,7 @@
       "source": "tests/integration/t_executed_binary_is_a_recorded_input.nim"
     },
     {
-      "class": "integration",
+      "class": "platform/destructive",
       "matches": [
         {
           "assignedCommandVariable": "cc",
@@ -14951,8 +14951,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_nix_store_roots_large_closure.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42081,8 +42081,8 @@
     },
     {
       "binary": "build/test-bin/t_execution_lease_confinement",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -42093,7 +42093,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
