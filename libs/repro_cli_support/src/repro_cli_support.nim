@@ -32,6 +32,9 @@ import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
+# The content identity of a producer's channel directories, folded into the
+# keys of consumer actions whose reads nothing observes (§4.3 rule 2).
+import repro_cli_support/producer_channel_content
 # repro's own command line: the generated parser, help and completion.
 import repro_cli_support/cli_program
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
@@ -181,6 +184,7 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/cross_target_flag
 import repro_cli_support/dev_session
+import repro_cli_support/dev_session_access
 from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
 when not defined(windows):
@@ -511,11 +515,11 @@ const LegacyVerbSynopses = [
     "repro dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale] [--pre-activation-env=PATH]\n" &
       "repro dev-env deactivate <rollback-manifest> [--shell=bash|zsh|fish|nushell|pwsh]\n"),
   ("up",
-    "repro up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS] [--replace [--force]]\n"),
+    "repro up [selector] [--activity=name] [--foreground] [--http=HOST:PORT [--http-allow-remote]] [--ready-timeout=MS] [--replace [--force]]\n"),
   ("down",
     "repro down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n"),
   ("dev",
-    "repro dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n"),
+    "repro dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT [--http-allow-remote]] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n"),
   ("hooks",
     "repro hooks ensure|reinstall|uninstall [--vcs] [--record-store] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n"),
   ("check",
@@ -5131,26 +5135,25 @@ var producerSourceBindings*: Table[string, ResolvedPackageBinding] =
   ##
   ## In develop mode the entry is the ``rpbkOverride``
   ## ``ResolvedPackageBinding`` the SC-1 hook returned — carrying the develop
-  ## override's ``contentIdentity`` (``computeOverrideContentIdentity``,
-  ## ``override_resolution.nim:235-263``, which folds the sibling checkout's
-  ## local-path root mtime). ``foldProducerSourceIdentities`` (below) drives
-  ## the NEVER-CALLED-OUTSIDE-A-TEST ``foldOverridesIntoFingerprint``
-  ## (``override_resolution.nim:349-380``) with these bindings — activating that
-  ## fold at the splice seam IS the SC-4 invalidation hook: a change to the
-  ## sibling producer's source (a new mtime -> a new ``contentIdentity``) shifts
-  ## the consumer action's weak fingerprint so the consumer rebuilds.
+  ## override's ``contentIdentity`` (``computeOverrideContentIdentity``), which
+  ## NAMES the override (package, state, absolute path) and says nothing about
+  ## the bytes under it. In lock-pinned mode it is a synthesized binding whose
+  ## ``contentIdentity`` digests the producer ``LockedDep``'s pinned
+  ## ``revision`` + ``integrity`` (``lockPinnedSourceBinding``), so a refreshed
+  ## pin moves the key; a placed sibling checkout can still carry uncommitted
+  ## edits the pin does not describe.
   ##
-  ## In lock-pinned mode the source identity is the producer ``LockedDep``'s
-  ## pinned ``revision`` + ``integrity`` (``repro_lock.nim:143-149``); it is
-  ## projected onto the SAME fold framing by synthesizing a ``rpbkOverride``
-  ## binding whose ``contentIdentity`` is a digest of ``revision`` + ``integrity``
-  ## (a refreshed pin shifts the consumer cache key; an unchanged pin does not).
-  ##
-  ## Since 2026-10-12 (§4.3, scoped rule) these identities are folded only into
-  ## actions whose reads nothing observes (``readsAreKeyed`` false); a
-  ## monitored action is keyed on what it read under the producer root plus
-  ## the producer's realized directories (``producerChannelIdentity``). See
-  ## ``foldProducerSourceIdentities``.
+  ## Neither identity is the producer's source CONTENT. That reaches a key in
+  ## one of two ways (§4.3, scoped rule since 2026-10-12; see
+  ## ``foldProducerSourceIdentities``): a monitored or built-in action is keyed
+  ## on what it read under the producer root (rule 1), and an action whose
+  ## reads nothing observes (``readsAreKeyed`` false) additionally folds the
+  ## content of the producer's channel directories (``producerChannelContent``,
+  ## rule 2). An earlier scheme put the producer root's mtime in the develop
+  ## identity and relied on it for rule 2; an edit below the root does not
+  ## change that mtime, so report-keyed consumers got stale hits
+  ## (reprobuild-pm issue 2026-11-12, "develop-mode rule 2 invalidation uses a
+  ## directory mtime").
   ##
   ## Empty for a build that consumes no cross-repo producer, so a no-producer
   ## action's cache key is byte-identical to today
@@ -5269,38 +5272,6 @@ proc lockPinnedSourceBinding*(selector: string; dep: LockedDep):
       packageName: selector, fetchUrl: coordUrl, revision: coordRevision),
     override: DevelopOverrideEntry(package: selector, state: "pinned"),
     localPathAbsolute: "",
-    contentIdentity: identity)
-
-proc onDiskSiblingSourceBinding*(selector, siblingRoot: string):
-    ResolvedPackageBinding =
-  ## Cross-Repo-Source-Consumption SC-4 (§4.3, develop-mode on-disk-sibling arm)
-  ## — project a producer consumed as a plain on-disk workspace sibling (no
-  ## develop-override entry, no committed lock pin: ``pbkOnDiskSibling``) onto
-  ## the SAME ``foldOverridesIntoFingerprint`` framing develop mode uses, by
-  ## synthesizing an ``rpbkOverride`` binding whose ``contentIdentity`` folds the
-  ## sibling's absolute root path + its root mtime — the develop-editable analogue
-  ## of ``computeOverrideContentIdentity`` (a develop override with ``state ==
-  ## "editable"`` points at exactly this same sibling checkout, so the folded
-  ## identity matches). A touched sibling root shifts the digest and therefore the
-  ## consumer cache key; an unchanged sibling leaves it stable.
-  let absRoot = absolutePath(siblingRoot)
-  let mtimeIso =
-    try:
-      if dirExists(extendedPath(absRoot)) or fileExists(extendedPath(absRoot)):
-        $getLastModificationTime(extendedPath(absRoot))
-      else:
-        ""
-    except CatchableError:
-      ""
-  var payload = "cross-repo-producer-sibling-source.v1\x00" & selector &
-    "\x00" & absRoot & "\x00" & mtimeIso & "\x00"
-  let identity = toHex(blake3DomainDigest(payload.bytesOf(),
-    hdActionFingerprint).bytes)
-  ResolvedPackageBinding(
-    kind: rpbkOverride,
-    shadowed: UpstreamPackageBinding(packageName: selector),
-    override: DevelopOverrideEntry(package: selector, state: "editable"),
-    localPathAbsolute: absRoot,
     contentIdentity: identity)
 
 # ---------------------------------------------------------------------------
@@ -5521,9 +5492,35 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
 
 const NimProducerPathProjectionVersion = "nim-path-projection:restore-after-config.v2"
 
+const ProducerChannelContentFoldVersion =
+  "cross-repo-producer-channel-content-fold.v1"
+  ## Leads rule 2's channel-content fold. New with that fold, so no record
+  ## keyed before it (on the root-mtime develop identity) can match a key
+  ## carrying it.
+
 proc hasNimProducerPaths(selector: string): bool =
   producerMaterializedAuxPaths.hasKey(selector) and
     producerMaterializedAuxPaths[selector].nimPathDirs.anyIt(it.len > 0)
+
+proc producerChannelDirs*(selector: string): seq[ProducerChannelDir] =
+  ## The realized directories the splice hands a consumer of ``selector``, in
+  ## the fixed channel order both producer folds frame them in: ``bin`` dirs
+  ## (``PATH``), then ``include`` / ``lib`` / ``pkgconfig`` / ``cmake`` (the
+  ## C/C++ search variables), then ``nimpath`` (``nim c --path:``).
+  ## ``producerChannelIdentity`` names them; ``producerChannelContent``
+  ## digests what is under them.
+  template addDirs(tag: string; dirs: seq[string]) =
+    for dir in dirs:
+      result.add(ProducerChannelDir(channel: tag, path: dir))
+  if producerMaterializedBinDirs.hasKey(selector):
+    addDirs("bin", producerMaterializedBinDirs[selector])
+  if producerMaterializedAuxPaths.hasKey(selector):
+    let aux = producerMaterializedAuxPaths[selector]
+    addDirs("include", aux.includeDirs)
+    addDirs("lib", aux.libDirs)
+    addDirs("pkgconfig", aux.pkgConfigDirs)
+    addDirs("cmake", aux.cmakePrefixDirs)
+    addDirs("nimpath", aux.nimPathDirs)
 
 proc producerChannelIdentity*(selector: string): string =
   ## Cross-Repo-Source-Consumption §4.3 (2026-10-12) — what a consuming action
@@ -5531,8 +5528,10 @@ proc producerChannelIdentity*(selector: string): string =
   ## directories the splice puts on its command line and environment (``bin``
   ## dirs on ``PATH``, C/C++ dirs on the search variables, Nim source roots on
   ## ``nim c --path:``). Their CONTENT is not here — it reaches the key through
-  ## the files the action reads — but the directories themselves are part of
-  ## what the action runs, so they are part of its weak fingerprint.
+  ## the files the action reads, or, for an action whose reads nothing
+  ## observes, through ``producerChannelContent`` — but the directories
+  ## themselves are part of what the action runs, so they are part of its
+  ## weak fingerprint.
   ##
   ## Stable across a source change and across a lock refresh for a producer
   ## consumed from a workspace checkout (the directories do not move). A
@@ -5542,26 +5541,20 @@ proc producerChannelIdentity*(selector: string): string =
   ## thing that distinguishes the new content from the old, which is still on
   ## disk unchanged.
   var payload = "cross-repo-producer-channel.v1\x00" & selector & "\x00"
-  template addDirs(tag: string; dirs: seq[string]) =
-    for dir in dirs:
-      payload.add(tag)
-      payload.add(dir)
-      payload.add('\x00')
-  if producerMaterializedBinDirs.hasKey(selector):
-    addDirs("bin:", producerMaterializedBinDirs[selector])
-  if producerMaterializedAuxPaths.hasKey(selector):
-    let aux = producerMaterializedAuxPaths[selector]
-    addDirs("include:", aux.includeDirs)
-    addDirs("lib:", aux.libDirs)
-    addDirs("pkgconfig:", aux.pkgConfigDirs)
-    addDirs("cmake:", aux.cmakePrefixDirs)
-    if hasNimProducerPaths(selector):
+  var nimProjectionTagged = false
+  for dir in producerChannelDirs(selector):
+    if dir.channel == "nimpath" and not nimProjectionTagged and
+        hasNimProducerPaths(selector):
       # The previous launch-only projection could successfully import a stale
       # configured library. Its observed reads remain fresh, so changing argv
       # projection alone cannot invalidate that result. Scope this transition
       # to actions actually handed Nim source roots; other channels stay stable.
       payload.add(NimProducerPathProjectionVersion & "\x00")
-    addDirs("nimpath:", aux.nimPathDirs)
+      nimProjectionTagged = true
+    payload.add(dir.channel)
+    payload.add(':')
+    payload.add(dir.path)
+    payload.add('\x00')
   digestHex(blake3DomainDigest(payload.bytesOf(), hdActionFingerprint))
 
 proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
@@ -5573,7 +5566,7 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ##
   ## WHICH ACTIONS CARRY THE PRODUCER'S IDENTITY (owner decision 2026-10-12,
   ## §4.3). The producer's source identity — a develop override's
-  ## ``contentIdentity`` (sibling root path + mtime), a lock pin's
+  ## ``contentIdentity`` (package, state, absolute path), a lock pin's
   ## ``revision`` + ``integrity`` — is folded ONLY into an action whose reads
   ## are not otherwise keyed (``readsAreKeyed`` false: a process whose
   ## dependencies come from a recognised format or a converter alone). For
@@ -5592,11 +5585,40 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
   ## change which module a compile resolves, and a cached record from a build
   ## without it says nothing about that.
   ##
+  ## RULE 2: THE CHANNEL CONTENT. Neither source identity above describes the
+  ## bytes an unobserved action can read: the develop identity names the
+  ## override, and a pin does not describe a placed sibling's uncommitted
+  ## edits. A report omits reads (``-MMD`` drops every ``-isystem`` header),
+  ## so for such an action the CONTENT of every channel directory the
+  ## producer hands it (``producerChannelDirs``) is folded as well, under
+  ## ``ProducerChannelContentFoldVersion``: any edit under those directories
+  ## — deep in a tree, through a symlink, mtime-preserving — moves its key.
+  ## The digest is computed lazily, once per producer per call, and only for
+  ## a producer some such action names, so a graph of monitored actions pays
+  ## nothing for it. When a channel entry cannot be read the digest would
+  ## describe a tree that is not on disk, and the action is made uncacheable
+  ## instead (``Failure-Semantics.md`` §"General Rules": ambiguous correctness
+  ## failures fail closed). A monitored action does NOT carry this fold: its
+  ## observed reads key it already (rule 1), and folding the whole tree would
+  ## miss every one of them on any edit, the defect the scoped rule removed.
+  ##
   ## An action that names NO materialized producer keeps its
   ## ``weakFingerprint`` byte-for-byte, and with ``producerSourceBindings``
   ## empty (no cross-repo producer) this is a whole-graph no-op.
   if producerSourceBindings.len == 0:
     return
+  var channelContents = initTable[string, ProducerChannelContent]()
+  proc channelContentOf(selector: string): ProducerChannelContent =
+    if selector notin channelContents:
+      let content = producerChannelContent(selector,
+        producerChannelDirs(selector))
+      if not content.complete:
+        stderr.writeLine("repro: warning: cross-repo producer '" &
+          selector & "': the content of its directories could not be read (" &
+          content.failure & "); actions that consume it without observed " &
+          "reads will not be cached")
+      channelContents[selector] = content
+    channelContents[selector]
   for action in actions.mitems:
     if action.toolIdentityRefs.len == 0:
       continue
@@ -5632,6 +5654,32 @@ proc foldProducerSourceIdentities*(actions: var seq[BuildAction]) =
           digestHex(action.weakFingerprint)
         action.weakFingerprint =
           blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+      # Rule 2's content fold (see the doc comment): what the action can read
+      # through the producer's directories, since nothing observed it.
+      # A producer that hands the action no directory gives it nothing to
+      # read through a channel, so it contributes nothing here, and an action
+      # handed no producer directory at all keeps the binding-fold key.
+      var contentPayload = ProducerChannelContentFoldVersion & "\x00" &
+        digestHex(action.weakFingerprint) & "\x00"
+      var contentComplete = true
+      var contentFolded = false
+      for selector in selectors:
+        if producerChannelDirs(selector).len == 0:
+          continue
+        let content = channelContentOf(selector)
+        if not content.complete:
+          contentComplete = false
+          break
+        contentPayload.add(selector)
+        contentPayload.add('=')
+        contentPayload.add(content.digest)
+        contentPayload.add('\x00')
+        contentFolded = true
+      if not contentComplete:
+        action.cacheable = false
+      elif contentFolded:
+        action.weakFingerprint =
+          blake3DomainDigest(contentPayload.bytesOf(), hdActionFingerprint)
 
 proc durableFileEvidence(path: string): DurableFileEvidence =
   try:
@@ -12572,8 +12620,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
     # directories folded; the rest get its source identity (develop
-    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
-    # when nothing was materialized (byte-identical to today).
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``) and the
+    # content digest of the directories they are handed (or become
+    # uncacheable when that content cannot be read). No-op when nothing was
+    # materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     # HL-10: a certifying run adds its lock-update node here, after every
     # fold, so the node changes no other action's cache key.
@@ -14361,8 +14411,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
     # directories folded; the rest get its source identity (develop
-    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``). No-op
-    # when nothing was materialized (byte-identical to today).
+    # ``contentIdentity`` / lock-pinned ``revision``+``integrity``) and the
+    # content digest of the directories they are handed (or become
+    # uncacheable when that content cannot be read). No-op when nothing was
+    # materialized (byte-identical to today).
     foldProducerSourceIdentities(scheduledActions)
     # HL-10: a certifying run adds its lock-update node here, after every
     # fold, so the node changes no other action's cache key.
@@ -18330,6 +18382,11 @@ type
       ## Preserve explicit scope before selection resolution supplies default.
     foreground: bool
     httpBind: string
+      ## ``--http``, or empty for the platform default transport (AF_UNIX
+      ## on POSIX, ``127.0.0.1:0`` on Windows); see ``dev_session_access``.
+    httpAllowRemote: bool
+      ## ``--http-allow-remote``: the explicit opt-in a non-loopback
+      ## ``--http`` host needs.
     debounceMs: int
     force: bool
     replace: bool
@@ -18376,7 +18433,10 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
   ## future command gets the refusal until someone writes down that it
   ## waits.
   var selection = DevEnvCliSelection()
-  result.httpBind = "127.0.0.1:0"
+  # Empty: the platform default transport, chosen by the listener. A
+  # loopback TCP port is no longer the default on POSIX, because every
+  # local account can connect to one (§"Control API Access Control").
+  result.httpBind = ""
   result.debounceMs = 250
   var i = 0
   while i < args.len:
@@ -18400,6 +18460,14 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       result.replace = true
     elif arg == "--http" or arg.startsWith("--http="):
       result.httpBind = valueFromFlag(args, i, "--http")
+    elif arg == AllowRemoteFlag:
+      # Only the commands that START a session bind anything; they are the
+      # ones that take `--ready-timeout`. `down` refuses the flag rather
+      # than accepting one that would do nothing.
+      if not acceptReadyTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.httpAllowRemote = true
     elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
       result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
       if result.debounceMs < 0:
@@ -18431,6 +18499,12 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       raise newException(ValueError,
         "unexpected " & commandName & " argument: " & arg)
     inc i
+  # The bind restriction is checked here, before any session state exists:
+  # a non-loopback host needs the explicit opt-in.
+  if result.httpBind.len > 0:
+    let parts = parseHttpBind(result.httpBind)
+    refuseNonLoopbackBind(result.httpBind, parts.host,
+      result.httpAllowRemote)
   selection.resolveDevEnvSelection()
   result.selection = selection
 
@@ -18454,6 +18528,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     lockSliceId: parsed.selection.lockSliceId,
     developOverridesPath: parsed.selection.developOverridesPath,
     httpBind: parsed.httpBind,
+    httpAllowRemote: parsed.httpAllowRemote,
     debounceMs: parsed.debounceMs)
 
 proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
@@ -18474,6 +18549,8 @@ proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
     "--http", config.httpBind,
     "--debounce-ms", $config.debounceMs
   ]
+  if config.httpAllowRemote:
+    result.add(AllowRemoteFlag)
   if config.foreground:
     result.add("--foreground")
 
@@ -20310,8 +20387,11 @@ proc runDownCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "dev session metadata is missing httpBind: " & metadataPath)
   try:
-    let response = httpRequest(httpBindValue, "/session/stop",
-      httpMethod = "POST")
+    # Authenticated with the token the session published the path of; a
+    # caller that cannot read it is refused here, by name, before any
+    # request is sent.
+    let response = controlRequest(controlClientFor(metadata),
+      "/session/stop", httpMethod = "POST")
     if response.status < 200 or response.status >= 300:
       raise newException(IOError,
         "session stop request failed with HTTP " & $response.status &
@@ -20433,6 +20513,7 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     lockSliceId: valueAfterFlag(args, "--lock-slice"),
     developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
     httpBind: valueAfterFlag(args, "--http"),
+    httpAllowRemote: args.find(AllowRemoteFlag) >= 0,
     debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
   # W2 — a ``repro dev`` / ``repro up`` session starts services and runs
   # watch-cycle tasks in the activated environment, so it is an activation
@@ -20451,7 +20532,8 @@ proc runDevSessionHttpHelper(args: openArray[string]): int =
     sessionId: valueAfterFlag(args, "--session-id"),
     sessionDir: valueAfterFlag(args, "--session-dir"),
     host: valueAfterFlag(args, "--host"),
-    port: if portText.len > 0: parseInt(portText) else: 0))
+    port: if portText.len > 0: parseInt(portText) else: 0,
+    allowRemote: args.find(AllowRemoteFlag) >= 0))
 
 const
   DirenvManagedBlockId = "repro-dev-env-direnv"
@@ -33634,6 +33716,66 @@ proc projectCleanSnapshotStores(buildRoot: string): seq[string] =
         result.add(variantDir)
   result.sort()
 
+proc cleanContainerOutputs(action: BuildActionDef): seq[string] =
+  ## The declared outputs of the DSL action ``action`` that are CONTAINER
+  ## directories: a directory the action declares only to say it exists,
+  ## while other writers fill it (Incremental-Invalidation.md §"Non-regular
+  ## outputs", "Container directory outputs"). ``fs.ensureDir``'s one output,
+  ## and the output root of ``fs.preserveTree``.
+  ##
+  ## This is the twin, over the provider payload a snapshot stores, of
+  ## ``repro_build_engine.containerDirectoryOutputs``, which classifies the
+  ## LOWERED action for the revalidation and restore paths. Both read the
+  ## action's built-in kind; keep them in step. The paths are returned as the
+  ## action spells them, which is how the provider spells the action's
+  ## owned-effect claims (``runtime_provider``).
+  if action.call.packageName != "reprobuild.builtin" or
+      action.call.executableName != "fs":
+    return
+  case action.call.subcommand
+  of "ensureDir":
+    if action.outputs.len == 1:
+      result.add(action.outputs[0])
+  of "preserveTree":
+    for arg in action.call.arguments:
+      if arg.name == "outputRoot" and arg.encodedValue.len > 0:
+        result.add(arg.encodedValue)
+  else:
+    discard
+
+proc classifyContainerClaims(snapshot: var ProviderGraphSnapshot) =
+  ## Mark the owned-effect claims of ``snapshot`` that name a CONTAINER
+  ## directory output as ``oekDirectory``, so that ``repro clean`` removes the
+  ## container only once its members are gone and nothing else is left in it,
+  ## instead of deleting its tree with every other writer's output and every
+  ## user file in it (clean.md §"Ownership Records").
+  ##
+  ## The provider claims every declared output as ``oekFile``. The
+  ## classification comes from the ACTION, not from the record
+  ## (Incremental-Invalidation.md §"Non-regular outputs"): each fragment's
+  ## action nodes carry the provider payload, and a claim names its producing
+  ## action in ``payload``. Deciding it here, when the snapshot is read,
+  ## covers snapshots that older builds wrote as well. A node whose payload
+  ## does not decode leaves its claims as they are.
+  for fragment in snapshot.fragments.mitems:
+    var containers: seq[(string, string)]   # (action id, normalized path)
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      var action: BuildActionDef
+      try:
+        action = decodeBuildActionPayload(toBytes(node.payload))
+      except CatchableError:
+        continue
+      for path in cleanContainerOutputs(action):
+        containers.add((action.id, os.normalizedPath(path)))
+    if containers.len == 0:
+      continue
+    for claim in fragment.effectClaims.mitems:
+      if claim.kind == oekFile and
+          (claim.payload, os.normalizedPath(claim.identity)) in containers:
+        claim.kind = oekDirectory
+
 proc runCleanCommand(args: openArray[string]): int =
   ## ``repro clean``: remove the materialised outputs the project's build
   ## state records as its own.
@@ -33644,7 +33786,8 @@ proc runCleanCommand(args: openArray[string]): int =
   ## executor that prunes the outputs of a vanished edge
   ## (``applyProjectClean``). The snapshots, the action cache, the content
   ## store, ``.repro/stats/`` and every unclaimed file stay, so the next build
-  ## still reuses the cache.
+  ## still reuses the cache. A container directory output is removed only once
+  ## it is empty (``classifyContainerClaims``).
   ##
   ## Exit 0 when every deletable output is gone (or, with ``--dry-run``, was
   ## listed), 1 when a deletion failed, 2 on a usage error.
@@ -33677,7 +33820,9 @@ proc runCleanCommand(args: openArray[string]): int =
   var snapshots: seq[ProviderGraphSnapshot]
   for buildRoot in projectCleanBuildRoots(projectRoot, workRoot):
     for store in projectCleanSnapshotStores(buildRoot):
-      snapshots.add(loadProviderGraphSnapshot(store))
+      var snapshot = loadProviderGraphSnapshot(store)
+      classifyContainerClaims(snapshot)
+      snapshots.add(snapshot)
 
   let res = applyProjectClean(snapshots, projectRoot, dryRun = dryRun)
   for act in res.actions:
