@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2833,
+    "nimTestBinaries": 2834,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 770,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2880
+    "testEntries": 2881
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1638,7 +1638,7 @@
     "classificationCounts": {
       "graph-fixture": 23,
       "integration": 1563,
-      "platform/destructive": 181,
+      "platform/destructive": 182,
       "pure unit": 770,
       "unclassified": 343
     },
@@ -1854,9 +1854,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2833,
+    "nimTestBinaryCount": 2834,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2880
+    "testEntryCount": 2881
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16082,6 +16082,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_apt_install_store_identity_is_byte_keyed",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_apt_install_store_identity_is_byte_keyed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_c1_dsl_parse",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -16636,7 +16653,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

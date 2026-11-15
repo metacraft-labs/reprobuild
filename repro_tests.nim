@@ -4469,6 +4469,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"t_deb_reader_\" & $getCurrentProc..."),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_apt_install_store_identity_is_byte_keyed.nim",
+    binary: "build/test-bin/t_apt_install_store_identity_is_byte_keyed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim",
     binary: "build/test-bin/t_c1_dsl_parse",
     defines: @[],
@@ -5027,7 +5038,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim",
