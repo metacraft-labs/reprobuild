@@ -147,23 +147,39 @@ suite "M9.R.81 dependency root env vars":
       let scratch = getTempDir() / "t_m9r81_only_existing_siblings"
       if dirExists(scratch):
         removeDir(scratch)
+      # A sibling is a RECIPE (Caching-Architecture.md D5): a directory
+      # holding a project file. A bare directory of the same name is not.
       createDir(scratch / "qt6-base")
+      writeFile(scratch / "qt6-base" / "repro.nim", "")
+      createDir(scratch / "gcc")
       defer: removeDir(scratch)
       let entries = dependencyRootEnvEntries(scratch,
         @["qt6-base >=6", "gcc >=11"], onlyExistingSiblings = true)
       check entries == @[("DEP_QT6_BASE_ROOT",
         scratch & "/qt6-base/.repro/output/install")]
+      # A `reprobuild.nim` makes a recipe too.
+      writeFile(scratch / "gcc" / "reprobuild.nim", "")
+      check dependencyRootEnvEntries(scratch, @["gcc >=11"],
+        onlyExistingSiblings = true) == @[("DEP_GCC_ROOT",
+          scratch & "/gcc/.repro/output/install")]
 
   test "buildAction registry carries package dependency roots":
     # The dependencies are siblings of the project here, as in a catalog.
     let tests = currentSourcePath.parentDir.parentDir
     var made: seq[string] = @[]
+    var madeFiles: seq[string] = @[]
     for dep in ["native-tool", "qt6-base", "dep.with+dots", "runtime+tool",
                 "libxkbcommon", "mesa"]:
       if not dirExists(tests / dep):
         createDir(tests / dep)
         made.add(tests / dep)
+      # Each sibling holds a recipe (D5); the file goes with its directory.
+      if not fileExists(tests / dep / "repro.nim"):
+        writeFile(tests / dep / "repro.nim", "")
+        madeFiles.add(tests / dep / "repro.nim")
     defer:
+      for f in madeFiles:
+        try: removeFile(f) except OSError: discard
       for d in made:
         try: removeDir(d) except OSError: discard
     withLegacyMirrorMode:
@@ -250,6 +266,15 @@ suite "M9.R.81 dependency root env vars":
 
     writeRealizationInfoFile(recipesRoot, "unit", "1.0.0", ownHashHex)
     writeRealizationInfoFile(recipesRoot, "qt6-base", "6.6.2", depHashHex)
+    # The dependency is a sibling RECIPE (D5), not only a sidecar directory.
+    # Removed with the directory above when the test made that directory.
+    let depRecipe = recipesRoot / "qt6-base" / "repro.nim"
+    let depRecipeExisted = fileExists(depRecipe)
+    if not depRecipeExisted:
+      writeFile(depRecipe, "")
+    defer:
+      if not depRecipeExisted and fileExists(depRecipe):
+        removeFile(depRecipe)
 
     withInstallMirrorEnv("hashed", storeRoot):
       resetBuildActionRegistry()
