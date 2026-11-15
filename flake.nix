@@ -2965,6 +2965,13 @@
               # B build (grub-install reached ``modinfo.sh`` search
               # only after the switch to ``grub2_efi``).
               pkgs.qemu
+              # The add-on VM gates' restricted-guest mirror relay
+              # (`tests/e2e/addon/addon_testbed.nim`, `relayPort`): a guest
+              # booted with QEMU `restrict=on` reaches the time-shifted
+              # snapshot mirror only through a `guestfwd` that runs
+              # `socat STDIO TCP:127.0.0.1:<port>`, and
+              # `scripts/run_addon_gate.sh` refuses to start without it.
+              pkgs.socat
               pkgs.grub2_efi
               pkgs.kmod
               # ReproOS add-on mode A16 (`repro infra image`, spec §6.5.2):
