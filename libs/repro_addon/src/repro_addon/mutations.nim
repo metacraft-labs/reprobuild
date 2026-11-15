@@ -596,7 +596,7 @@
 ##                                           (decision 151)
 ## ``trigger-restart-failure-ignored``     a trigger that does not start
 ##                                           again is dropped, and the
-##                                           switch goes on (decision 155)
+##                                           switch goes on (decision 160)
 ## ``triggers-of-running-units-stopped``   every active trigger of a held
 ##                                           unit is stopped, also one whose
 ##                                           unit runs (decision 151)
@@ -1184,7 +1184,8 @@ const
                           # A8 review M5: agent-repin's falsifier.
                           "agent-repin-keeps-allow-list",
                           # Read by repro_profile_compile (compile.nim), which
-                          # cannot import this module: decision 31's refusal.
+                          # cannot import this module: decision 31's refusal of
+                          # a compile that resolves no C compiler.
                           "profile-cc-unresolved-unrefused",
                           # Read by repro_dsl_stdlib's apt_closure.nim: the
                           # legacy adoption without its verification.
@@ -1658,7 +1659,7 @@ const
                           # A13 review round 9, §13 decisions 151-153.
                           "triggers-left-running",
                           "triggers-of-running-units-stopped",
-                          # §13 decision 155.
+                          # §13 decision 160.
                           "trigger-restart-failure-ignored",
                           "fired-from-driver-starts-only",
                           "fired-instance-unmapped",

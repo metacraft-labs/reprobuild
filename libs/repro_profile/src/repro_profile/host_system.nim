@@ -41,7 +41,7 @@
 ## * `full`: this configuration manages the whole system (the default when
 ##   the key is absent). The block form `{mode: full, activities: [...]}`
 ##   selects system activities on such a host (decided 2026-10-30, spec
-##   §13 decision 17), with the same validation as `addOn`; the bare
+##   §13 decision 19), with the same validation as `addOn`; the bare
 ##   `system: full` means exactly what an absent key means.
 ##
 ## `repro home export` carries the attribute for the Nix side

@@ -478,6 +478,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       record["beforeMain-" & label] = %evp
       r = g.applyProfile(repro, label & "2", pu(label & "2"))
       let outp = r.stdout & r.stderr
+      # Decision 145: the bound counts from the run's start.
       step("a root tree made 3 s into the run, before its main process (" & label &
            "), is refused (§13 decision 145)", r.exitCode != 0 and
            "[rule:existing-tree" in outp and "/var/lib/a9r-p" in outp, evp & outp)
@@ -494,6 +495,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["laterInTheRun"] = %evm
     r = g.applyProfile(repro, "m1", st("m1"))
     let outm = r.stdout & r.stderr
+    # Decision 141's upper bound: born no later than the run's start.
     step("a root tree made 3 s into a run that began outside a switch is refused " &
          "(§13 decision 141)", r.exitCode != 0 and "[rule:existing-tree" in outm and
          "/var/lib/a9r-st" in outm, outm & evm)

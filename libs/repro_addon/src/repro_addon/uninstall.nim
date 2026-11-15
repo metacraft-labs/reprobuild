@@ -472,7 +472,7 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
   ## §13 decisions 62, 63 and 64: the signed local record of the store
   ## evidence an uninstall discards before the sink acknowledged its
   ## records -- every object, every record still queued, why, and the
-  ## public half of the key that signs it. The file holds exactly the bytes
+  ## public half of the attestation key that signs it. The file holds exactly the bytes
   ## signed; the signature (hex) is ``<record>.sig``. The caller has checked
   ## that the attestation key exists (decision 63). Raises when the record
   ## or its signature cannot be written: then nothing is discarded.
@@ -765,7 +765,7 @@ proc validDiscardMarker*(custody: CustodySite; intentPath, intentText,
 proc unfinishedDiscardIntent*(custody: CustodySite;
                               dir = UninstallOverrideDir):
     tuple[path, text: string; objects: seq[string]] =
-  ## §13 decisions 62, 81, 113 and 148: the newest intent record in
+  ## §13 decisions 62, 81, 113 and 148: the newest discard intent record in
   ## ``dir`` that the host's own attestation key signed, that has no
   ## completion record, and that carries a valid discard marker
   ## (``validDiscardMarker``), or an empty path. Its run removed and synced

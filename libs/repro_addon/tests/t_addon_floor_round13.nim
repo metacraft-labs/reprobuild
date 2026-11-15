@@ -1,6 +1,7 @@
 ## The hardening floor after the A9 review's round 13 (ReproOS Add-On Mode
-## spec §10.1 and §13 decisions 133, 139 and 141; reprobuild-pm issues
-## 2026-11-14-floor-*):
+## spec §10.1 and §13 decisions 133, 139 and 141 -- a revert holds across a
+## reboot, every unit that shares the stem, an upper bound; reprobuild-pm
+## issues 2026-11-14-floor-*):
 ##
 ## - §13 decision 139: a listener below ``/run/<stem>/`` is refused when a
 ##   place ANY unit sharing the stem can write covers it -- a template of the
@@ -111,7 +112,7 @@ suite "§13 decision 139: the places every unit of the stem can write":
     check listenerRefusal("a.socket", "/run/a/sub/control", "a.service",
                           ["/run/a"]).len > 0
 
-suite "§13 decision 141, as 144 amends it: no later than the run's start":
+suite "§13 decision 141's upper bound, as 145 amends it: no later than the run's start":
   let created = {"/var/lib/a": CreatedDir(unit: "a.service", invocation: "I0")}.toTable
   proc view(btime, mainStart: int64; stopped = false): SystemdView =
     SystemdView(dynamicUid: -1, owner: 1000, btime: btime, invocationId: "I1",
