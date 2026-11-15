@@ -160,10 +160,12 @@ def green(kind, base="debian-13"):
                                    "uidB": "61235", "ran": True,
                                    "judgedTemplate": True,
                                    "refusedTemplate": False}
-        rec["decision151AddOn"] = {
-            "pass": {"exit": 0, "ok": True},
-            "refused": {"exit": 1, "notFailed": True, "refusedForReason": True},
-            "recovered": {"exit": 0, "ok": True}}
+        rec["decision151Running"] = {"exit": 0, "ok": True}
+        rec["decision151Pass"] = {"exit": 0, "ok": True}
+        rec["decision151Refused"] = {"exit": 1, "notFailed": True,
+                                     "refusedForReason": True}
+        rec["decision151Recovered"] = {"exit": 0, "ok": True}
+        rec["decision155"] = {"exit": 1, "blocked": "active", "ok": True}
     elif kind in ("conv", "convseam"):
         rec = base_record(CONV, base, engine=ENGINE,
                           seams=(kind == "convseam"))
@@ -183,7 +185,8 @@ def green(kind, base="debian-13"):
             up = {l: {"triggerActive": True, "ran": True,
                       "trigger": "ActiveState=active Result=success"}
                   for l in ("socket", "path")}
-            rec["decision151"] = {"firstApply": up, "nextApply": dict(up)}
+            rec["decision151"] = {"firstApply": up, "nextApply": dict(up),
+                                  "running": {"exit": 0, "ok": True}}
             rec["decision153"] = {"exit": 1, "reported": True,
                                   "heldInEtc": True, "started": False,
                                   "judged": True}
@@ -322,14 +325,23 @@ def red_record(kind, base="debian-13"):
                             "active after it and their services run")]
     elif kind == "muttrigadopt":
         rec = base_record(ADOPT, base, mutation="triggers-left-running")
-        rec["decision151AddOn"] = {"pass": {"exit": 0, "ok": False, "state": [
+        rec["decision151Pass"] = {"exit": 0, "ok": False, "state": [
             "ActiveState=failed Result=trigger-limit-hit ",
-            "ActiveState=failed Result=trigger-limit-hit ", "", ""]}}
+            "ActiveState=failed Result=trigger-limit-hit ", "", ""]}
         rec["steps"] = [ok("bootstrap"),
                         red("decision 151, add-on switch: a socket with "
                             "connections arriving and a path unit whose path "
                             "exists, held through a passing switch, are "
                             "active after it and their services run"),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "mutrestartignored":
+        rec = base_record(ADOPT, base, mutation="trigger-restart-failure-ignored")
+        rec["decision155"] = {"exit": 0, "blocked": "active", "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 155: a trigger that cannot start again "
+                            "fails the switch, the revert commits with the "
+                            "host pending, and recover starts it once the "
+                            "cause is cleared"),
                         red("stopped at the first red step under the mutation")]
     elif kind == "mutnoedges":
         rec = base_record(CONV, base, engine=ENGINE,
@@ -399,7 +411,7 @@ GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutreceipt", "mutliveset", "mutcallsite", "muttplconv", "muttpladopt",
              "mutholdwin", "mutnoedges", "mutreissuetgt", "mutreissuesock",
-             "muttrigconv", "muttrigadopt"]
+             "muttrigconv", "muttrigadopt", "mutrestartignored"]
 
 
 class Accepts(unittest.TestCase):
@@ -816,6 +828,9 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = green("conv")
         del rec["decision151"]["nextApply"]
         self.assertRejected("conv-debian-13", rec)
+        rec = green("conv")
+        rec["decision151"]["running"]["ok"] = False
+        self.assertRejected("conv-debian-13", rec)
 
     def test_a_green_conversion_whose_requirer_ran(self):
         for field, value in (("started", True), ("reported", False),
@@ -826,12 +841,18 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
                 self.assertRejected("conv-debian-13", rec)
 
     def test_a_green_adopt_whose_trigger_failed(self):
-        for part, field in (("pass", "ok"), ("refused", "notFailed"),
-                            ("refused", "refusedForReason"),
-                            ("recovered", "ok")):
-            with self.subTest(part=part, field=field):
+        for key, field in (("decision151Running", "ok"),
+                           ("decision151Pass", "ok"),
+                           ("decision151Refused", "notFailed"),
+                           ("decision151Refused", "refusedForReason"),
+                           ("decision151Recovered", "ok"),
+                           ("decision155", "ok")):
+            with self.subTest(key=key, field=field):
                 rec = green("adopt")
-                rec["decision151AddOn"][part][field] = False
+                rec[key][field] = False
+                self.assertRejected("adopt-debian-13", rec)
+                rec = green("adopt")
+                del rec[key]
                 self.assertRejected("adopt-debian-13", rec)
 
     def test_a_trigger_falsifier_red_for_another_reason(self):
@@ -841,8 +862,14 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
                 rec["decision151"]["firstApply"][l]["trigger"] = \
                     "ActiveState=inactive Result=success"
                 self.assertRejected("muttrigconv-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        rec["decision155"]["exit"] = 1
+        self.assertRejected("mutrestartignored-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        rec["decision155"]["blocked"] = "inactive"
+        self.assertRejected("mutrestartignored-debian-13", rec)
         rec = red_record("muttrigadopt")
-        rec["decision151AddOn"]["pass"]["state"][1] = "ActiveState=active Result=success "
+        rec["decision151Pass"]["state"][1] = "ActiveState=active Result=success "
         self.assertRejected("muttrigadopt-debian-13", rec)
         rec = red_record("muttrigadopt")
         rec["mutation"] = ""

@@ -841,6 +841,28 @@ proc profileTriggersOf*(p: SystemProfile; units: openArray[string]): seq[string]
   for (trigger, target) in triggerTargets(p):
     if heldBy(target, units) and trigger notin result: result.add(trigger)
 
+proc triggersToStop*(triggers, stopping: openArray[string];
+                     host: LiveHost): seq[string] =
+  ## Of the active ``triggers``, those that could fire at a held unit
+  ## during the hold (§13 decision 151), which are stopped for it: a trigger
+  ## whose units are all running cannot -- an active service serves its own
+  ## socket (with ``Accept=no`` it holds the listening descriptor, so a
+  ## stop and start of the socket would fail to bind again), and a path or
+  ## timer start of an active unit adds no job -- unless one of them is
+  ## among ``stopping``, the running units the hold's apply restarts.
+  for t in triggers:
+    if not host.isActive(t): continue
+    var targets: seq[string]
+    try: targets = triggeredUnits(host.show(t))
+    except CatchableError: discard
+    var canFire = targets.len == 0
+    for u in targets:
+      if u in stopping or not host.isActive(u): canFire = true
+    when ApplyMutation == "triggers-of-running-units-stopped":
+      # FALSIFYING MUTATION: every active trigger is stopped.
+      canFire = true
+    if canFire and t notin result: result.add(t)
+
 proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
                       host: LiveHost): seq[string] =
   ## Start again each of ``triggers`` once its hold is gone, after a
@@ -935,14 +957,14 @@ when defined(posix):
       resetFailed: proc (u: string) =
         discard runSystemctlArgs(["reset-failed", "--", u]))
 
-  proc stopTriggers(triggers: openArray[string]; host: LiveHost;
+  proc stopTriggers(triggers, stopping: openArray[string]; host: LiveHost;
                     stopped: var seq[string]) =
-    ## Stop each active trigger and remember it (§13 decision 151): a
-    ## socket with a pending connection, or a path unit whose path exists,
-    ## would otherwise fire at a held unit until systemd's trigger rate
-    ## limit fails it for good.
-    for t in triggers:
-      if t in stopped or not host.isActive(t): continue
+    ## Stop each trigger that could fire at a held unit and remember it
+    ## (§13 decision 151; ``triggersToStop``): a socket with a pending
+    ## connection, or a path unit whose path exists, would otherwise fire at
+    ## a held unit until systemd's trigger rate limit fails it for good.
+    for t in triggersToStop(triggers, stopping, host):
+      if t in stopped: continue
       stopped.add(t)
       discard host.stop(t)
 
@@ -991,7 +1013,12 @@ when defined(posix):
       result.triggers = profileTriggersOf(p, result.units)
       for t in loadedTriggersOf(names, host):
         if t notin result.triggers: result.triggers.add(t)
-      stopTriggers(result.triggers, host, result.triggersActive)
+      # The running units this apply restarts under the hold: their
+      # triggers could fire once the restart's stop half has run.
+      var stopping: seq[string]
+      for u in result.driverStarts:
+        if host.isActive(u): stopping.add(u)
+      stopTriggers(result.triggers, stopping, host, result.triggersActive)
     result.holdStampUsec = getMonoTime().ticks div 1000
     result.holds = writeHolds(result.units & result.triggers,
                               CarriedCheckHoldName, liveCheckHoldText())
@@ -1017,7 +1044,7 @@ when defined(posix):
       for t in loadedTriggersOf(names, host):
         if t notin c.triggers:
           c.triggers.add(t)
-          stopTriggers([t], host, c.triggersActive)
+          stopTriggers([t], [], host, c.triggersActive)
     var problems: seq[string]
     when not LiveCheckSkipped:
       # One reading of each template's running instances serves both the
@@ -1092,15 +1119,16 @@ when defined(posix):
       if fileExists(h): persistent.add(h)
     removeHolds(persistent)
     systemctlOrRaise(["daemon-reload"])
-    result.add(releaseStarts(p, c.units, passed, refused, c.wasActive,
-                             c.driverStarts, fired, host))
     # §13 decision 151: every trigger of a passed unit comes back up --
-    # those that ran before the hold, and those the drivers started (an
-    # enabled trigger's ``enable --now``, skipped by its hold).
+    # those stopped for the hold, and those the drivers started (an enabled
+    # trigger's ``enable --now``, skipped by its hold) -- before the units
+    # start, so a socket-activated service is handed its socket.
     var restart: seq[string]
     for t in c.triggersActive & c.driverStarts:
       if t in c.triggers and t notin restart: restart.add(t)
     result.add(triggerRestarts(restart, refusedTriggers, host))
+    result.add(releaseStarts(p, c.units, passed, refused, c.wasActive,
+                             c.driverStarts, fired, host))
     for t in refusedTriggers:
       result.add("ECarriedStatePending: " & t & " stays stopped: it " &
         "triggers a unit the carried-state check refused")
