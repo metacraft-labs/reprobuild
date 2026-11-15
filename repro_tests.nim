@@ -24720,6 +24720,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_repro_clean_keeps_what_a_container_output_holds.nim",
+    binary: "build/test-bin/t_repro_clean_keeps_what_a_container_output_holds",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim",
     binary: "build/test-bin/t_repro_clean_removes_owned_outputs_and_keeps_caches",
     defines: @[],
