@@ -1696,6 +1696,10 @@ proc adoptOne(st: var Store; storeRoot, path: string; prefixId: PrefixIdBytes;
     raise newException(IOError, "apt closure: " & path & " carries a " &
       "receipt for another prefix")
   if not st.lookupPrefix(prefixId).found:
+    # The adopted tree and the receipt just written beside it are durable
+    # before the row names them (Local-Content-Addressed-Store §"Write
+    # Protocol" steps 4a and 5a).
+    syncPlacedPrefixDurably(path)
     discard st.insertPrefixOrIgnore(PrefixRow(prefixId: prefixId,
       packageName: rec.packageName, version: rec.version, realizedPath: rel,
       adapter: rec.adapter, receiptDigest: receiptDigest(rec),

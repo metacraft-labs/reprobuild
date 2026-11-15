@@ -28,6 +28,7 @@ import repro_home_intent
 import repro_home_resources
 import repro_homebrew_adapter
 import repro_local_store
+import repro_tool_profiles/scoop_removal
 
 import ./app_activation
 from ./builtin_adapter import appPlacedItem, isMacosInstallerApp
@@ -245,6 +246,18 @@ type
                                         ## in the desired set or the
                                         ## pipeline raises
                                         ## `EAdoptUndeclared`.
+    uninstallFromScoop*: bool           ## `--uninstall-from-scoop`: a
+                                        ## Scoop package this transition
+                                        ## drops may be removed from
+                                        ## Scoop (only the versions
+                                        ## Reprobuild installed, only
+                                        ## when no non-profile root
+                                        ## holds any prefix of the app).
+                                        ## false (the default) leaves
+                                        ## every Scoop install in place
+                                        ## (Scoop-Catalog-Adapter.md
+                                        ## § Opt-In Cleanup Governed by
+                                        ## Store GC Roots).
     reconcileStowDrift*: bool           ## M72: when true, the stow
                                         ## materializer replaces a
                                         ## conflicting target instead
@@ -2651,38 +2664,31 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
           prevFileDigests[gf.absoluteOutputPath] = gf.postWriteDigest
           if gf.ownershipPolicy in {gfoStowSymlink, gfoStowCopy}:
             recordedStow[gf.absoluteOutputPath] = gf
-        # Preview Scoop package removals (Scoop-Catalog-Adapter.md § Removal):
-        # any Scoop package recorded by the active generation that is no longer
-        # selected via the Scoop adapter in the new plan will be uninstalled.
+        # Preview Scoop package removals (Scoop-Catalog-Adapter.md § Opt-In
+        # Cleanup Governed by Store GC Roots): a Scoop app the active
+        # generation recorded and the new plan no longer selects through
+        # the Scoop adapter. The verdict is the same `planDroppedScoopRecord`
+        # the apply executes, so `--plan` shows exactly what will be removed.
         var plannedScoopApps: HashSet[string]
         for pp in packagePreviews:
           let app = previewedScoopApp(pp)
           if app.len > 0:
             plannedScoopApps.incl(app)
+        var previewedDropped: HashSet[string]
         for rp in prevManifest.realizedPackages:
           let sc = recordedScoopApp(rp)
-          if sc.ok and sc.app notin plannedScoopApps:
-            let otherHolders = heldByNonProfileRoot(store, rp.realizedPrefixId)
-            if otherHolders.len == 0:
-              result.items.add(PlanItem(
-                category: "package",
-                name: rp.packageId,
-                action: piaDestroy,
-                concern: hcPackages,
-                notApplied: hcPackages notin owned,
-                detail: "scoop uninstall " & sc.app & " (was " & sc.bucket &
-                  "/" & sc.app & (if sc.version.len > 0: "@" & sc.version
-                                  else: "") & ")"))
-            else:
-              result.items.add(PlanItem(
-                category: "package",
-                name: rp.packageId,
-                action: piaSkip,
-                concern: hcPackages,
-                notApplied: hcPackages notin owned,
-                detail: "scoop app " & sc.app &
-                  " retained in Scoop (still held by store root(s): " &
-                  otherHolders.join(", ") & ")"))
+          if sc.ok and sc.app notin plannedScoopApps and
+              not previewedDropped.containsOrIncl(sc.app):
+            let removal = planDroppedScoopRecord(store, rp,
+              opts.uninstallFromScoop)
+            result.items.add(PlanItem(
+              category: "package",
+              name: rp.packageId,
+              action: (if scoopRemovalDestroys(removal): piaDestroy
+                       else: piaSkip),
+              concern: hcPackages,
+              notApplied: hcPackages notin owned,
+              detail: describeScoopRemoval(removal)))
       except CatchableError:
         discard
 
@@ -3441,21 +3447,26 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               # (listed in `result.released`), never deleted.
               if gf.absoluteOutputPath notin newPaths and filesApplied:
                 deleteRemovedFile(gf.absoluteOutputPath)
-            # Uninstall Scoop packages that the previous generation owned via
-            # the Scoop adapter (`adapter == "scoop"`) and that are no longer
-            # realized via Scoop in the new generation (Scoop-Catalog-Adapter.md
-            # § Removal).
-            if hcPackages in owned:
+            # A Scoop package the previous generation owned via the Scoop
+            # adapter (`adapter == "scoop"`) and the new generation no longer
+            # realizes via Scoop is removed from Scoop only when the apply
+            # was given `--uninstall-from-scoop`, only for the versions
+            # Reprobuild installed, and only when no non-profile root holds
+            # any prefix of the app (Scoop-Catalog-Adapter.md § Opt-In
+            # Cleanup Governed by Store GC Roots).
+            if hcPackages in owned and opts.uninstallFromScoop:
               var newScoopApps: HashSet[string]
               for r in realized:
                 let app = realizedScoopApp(r)
                 if app.len > 0:
                   newScoopApps.incl(app)
+              var handled: HashSet[string]
               for rp in prevManifest.realizedPackages:
                 let sc = recordedScoopApp(rp)
-                if sc.ok and sc.app notin newScoopApps:
-                  if heldByNonProfileRoot(store, rp.realizedPrefixId).len == 0:
-                    uninstallScoopRecord(sc.app)
+                if sc.ok and sc.app notin newScoopApps and
+                    not handled.containsOrIncl(sc.app):
+                  executeScoopRemoval(store,
+                    planDroppedScoopRecord(store, rp, true))
             # Same for managed blocks.
             var newBlockKeys: seq[string]
             for mb in appliedManagedBlocks:
