@@ -1519,6 +1519,10 @@ const
                           # the activated service alone, not of every
                           # unit sharing its stem.
                           "listener-writable-own-unit-only",
+                          # an activator is classified, and judged, from
+                          # its own unit file alone: a profile drop-in's
+                          # Service= or Unit= is not read.
+                          "activator-own-file-only",
                           # a listener's covering places are compared as
                           # spelled (/var/run is not /run, no link is
                           # resolved).
