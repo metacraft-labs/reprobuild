@@ -1402,6 +1402,7 @@ tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_s
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim	nim	2
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim	nim	3
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim	nim	1
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.nim	nim	4
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim	nim	4
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	nim	3
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	nim	4
@@ -2664,6 +2665,7 @@ tests/unit/t_install_mirror_relocation.nim	nim	30
 tests/unit/t_install_mirror_shell_tools.nim	nim	2
 tests/unit/t_install_mirror_tool_metadata.nim	nim	8
 tests/unit/t_interrupted_fast_forward_inspection.nim	nim	16
+tests/unit/t_lease_records_are_concurrency_safe.nim	nim	6
 tests/unit/t_libclang_package.nim	nim	2
 tests/unit/t_library_stage_alias.nim	nim	4
 tests/unit/t_local_file_cannot_declare_policy.nim	nim	1
