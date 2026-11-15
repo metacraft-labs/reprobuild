@@ -1070,6 +1070,32 @@ when defined(posix):
       check audit.output.contains("[arm64e]")
       check audit.output.contains("incorrect install ID")
 
+    test "an LC_RPATH outside the package closure is rejected":
+      # The Homebrew prefix the 2026-10-23 aarch64-darwin package carried
+      # ahead of its own closure; no such directory has to exist.
+      let fixture = makeFixture(repoRoot)
+      defer: removeDir(fixture.root)
+      let foreign = "/opt/homebrew/opt/openssl@3/lib"
+      writeFile(fixture.metadataPath(fixture.executable, "arm64", "rpaths"),
+        foreign & "\n" & fixture.runtimeDirs.join("\n") & "\n")
+      let audit = fixture.runAudit()
+      check audit.exitCode != 0
+      check audit.output.contains("[arm64]")
+      check audit.output.contains("LC_RPATH outside the package closure")
+      check audit.output.contains(foreign)
+
+    test "a store RPATH that is not a required runtime dir is rejected":
+      # The other symptom: a second clingo from a build-host store glob.
+      let fixture = makeFixture(repoRoot)
+      defer: removeDir(fixture.root)
+      let foreign = "/nix/store/00000000000000000000000000000000-clingo-5.8.0/lib"
+      writeFile(fixture.metadataPath(fixture.library, "arm64e", "rpaths"),
+        fixture.runtimeDirs.join("\n") & "\n" & foreign & "\n")
+      let audit = fixture.runAudit()
+      check audit.exitCode != 0
+      check audit.output.contains("[arm64e]")
+      check audit.output.contains("LC_RPATH outside the package closure")
+
     test "bare Darwin loader dependency is rejected":
       let fixture = makeFixture(repoRoot)
       defer: removeDir(fixture.root)

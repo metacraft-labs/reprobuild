@@ -18,6 +18,7 @@
 ## output is only quoted on failure (`add`, which may warn per file) run with
 ## the streams merged.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tables]
 
 import repro_core/ambient_execution
@@ -71,7 +72,7 @@ proc runGit*(gitExe: string; args: openArray[string];
     if input.len > 0:
       stdinStream.write(input)
     stdinStream.close()
-    result.output = p.outputStream.readAll()
+    result.output = drainStream(p.outputStream)
     result.code = p.waitForExit()
   finally:
     # The merged stderr shares stdout's descriptor; `osproc.close` would

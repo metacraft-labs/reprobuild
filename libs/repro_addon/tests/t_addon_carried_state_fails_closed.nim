@@ -59,7 +59,7 @@
 ## host apply lock is the real lock, at a test path (``REPRO_HOST_APPLY_LOCK``),
 ## held by a real second process (``flock``).
 
-import std/[json, os, osproc, strutils, tables, unittest]
+import std/[json, os, osproc, sets, strutils, tables, unittest]
 
 import repro_core/host_apply_lock
 
@@ -512,10 +512,23 @@ suite "reach is default-deny":
       delEnv("REPRO_HOST_APPLY_LOCK")
       delEnv("REPRO_HOST_APPLY_LOCK_WAIT_SECONDS")
     let holdDir = r / "etc/systemd/system/eth-validator.service.d"
+    # The holder marks `ready` only once flock(1) has granted it the lock,
+    # and the apply starts only after that marker exists. A fixed sleep
+    # here raced the holder on a loaded host: when `flock` started late the
+    # apply took the lock first, saw no hold, and the case failed for a
+    # product defect that did not exist (reprobuild-pm issue
+    # 2026-11-15-carried-state-host-lock-recheck-test-races-its-flock-holder).
+    let ready = scratch / "host-apply-2.ready"
+    removeFile(ready)
     let holder = startProcess("flock", args = [lock, "sh", "-c",
-      "sleep 2; mkdir -p " & quoteShell(holdDir) & " && echo x > " &
+      "touch " & quoteShell(ready) & "; sleep 2; mkdir -p " &
+      quoteShell(holdDir) & " && echo x > " &
       quoteShell(holdDir / HoldDropInName)], options = {poUsePath})
-    sleep(500)
+    var waited = 0
+    while not fileExists(ready) and waited < 60_000:
+      sleep(50)
+      waited += 50
+    require fileExists(ready)   # the holder never got the lock: say so
     var why = ""
     try:
       var l = hostLockWithCarriedRecheck(AddonApplyOptions(stateDir:
@@ -1729,3 +1742,40 @@ suite "a trigger that cannot start again leaves the host pending (decision 160)"
         RecoveryOutcome(resolved: true),
       pointer = dir / "no-pointer")
     check passes.ok
+
+  test "decision 160: once a marker is resolved, recover starts the recorded triggers too":
+    let dir = getTempDir() / ("t160r-" & $getCurrentProcessId())
+    createDir(dir)
+    defer: removeDir(dir)
+    writeTriggersToRestart(dir, ["a.socket"])
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    let r = afterRecovery(RecoveryOutcome(resolved: true,
+      lines: @["replayed the switch to completion"]), dir, host)
+    check r.resolved
+    check "trigger a.socket started again" in r.lines
+    check not hasTriggersToRestart(dir)
+
+  test "decision 160: a trigger the revert recorded is started by none of step 7's sources":
+    # The same trigger as a planned start, as a trigger step 2 paused, and
+    # as a unit planned as running that is down: step 7 starts it from none.
+    var assume = initHashSet[string]()
+    assume.incl("t.socket")
+    assume.incl("other.service")
+    let inputs = step7Inputs(
+      @[Transition(unit: "t.socket", verb: tvStart, reason: "enabled"),
+        Transition(unit: "u.service", verb: tvRestart, reason: "changed")],
+      @["t.socket", "p.socket"], assume, ["t.socket"])
+    var units: seq[string]
+    for tr in inputs.transitions: units.add(tr.unit)
+    check units == @["u.service"]
+    check inputs.paused == @["p.socket"]
+    check "t.socket" notin inputs.assumeActive
+    check "other.service" in inputs.assumeActive
+    # Nothing excluded (not a revert): everything stays.
+    let same = step7Inputs(@[Transition(unit: "t.socket", verb: tvStart,
+      reason: "enabled")], @["t.socket"], assume, [])
+    check same.transitions.len == 1 and same.paused == @["t.socket"] and
+      "t.socket" in same.assumeActive

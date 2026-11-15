@@ -61,6 +61,8 @@ type
 
 const
   StartHoldName* = "zz-repro-addon-floor-hold.conf"
+  RuntimeHoldDir* = "/run/systemd/system"
+    ## Where start holds live (``start_holds.RuntimeUnitDir``).
     ## The runtime drop-in the switch writes for every floored unit before
     ## step 6's reload and removes once the unit passes this check (spec
     ## §10.1, A9 review round 4, finding 7): an assertion that always
@@ -722,6 +724,10 @@ type
     invocationStart*: int64
       ## when its current invocation began (``InactiveExitTimestamp``),
       ## nanoseconds since the epoch; 0 when unknown
+    nRestarts*: int
+      ## ``NRestarts``, read in the same call (§13 decision 156)
+    restartDelay*: int64
+      ## the ``Restart=`` delay in nanoseconds, read in the same call
     mainStart*: int64
       ## when the main process of its current or last run started
       ## (``ExecMainStartTimestamp``), nanoseconds since the epoch; 0 when
@@ -982,6 +988,23 @@ const RunStartToleranceNs* = (when hostCPU == "amd64": 1_000_000_000'i64
   ## The residual: a tree a root process makes at the path within this long
   ## after a run of the unit begins is taken as systemd's.
 
+proc runStartOf*(v: SystemdView): int64 =
+  ## When the unit's current or last run really began (§13 decision 156).
+  ## ``InactiveExitTimestamp``, except after an automatic restart
+  ## (``NRestarts`` above 0): systemd 257 stamps that when the unit leaves
+  ## ``failed`` for its ``RestartSec=`` wait, so the run itself begins the
+  ## delay later, and it is ``InactiveExitTimestamp`` plus the delay --
+  ## never later than the main process's start, which no run follows, so
+  ## that on systemd 252, which stamps the new run's start itself, the
+  ## bound does not move out by the delay.
+  result = v.invocationStart
+  when mutated("recreated-bound-from-inactive-exit-only"):
+    return
+  if v.nRestarts > 0 and v.restartDelay > 0:
+    var s = v.invocationStart + v.restartDelay
+    if v.mainStart > 0: s = min(s, v.mainStart)
+    result = max(result, s)
+
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
                        v: SystemdView): string =
@@ -1064,7 +1087,7 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
         return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
           " ms after the main process of the unit's last run started"
     elif not mutated("recreated-no-upper-bound"):
-      if v.btime > v.invocationStart + RunStartToleranceNs:
+      if v.btime > runStartOf(v) + RunStartToleranceNs:
         return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
           " ms after the unit's last run began, so that run, not systemd " &
           "setting it up, made it (§13 decisions 141 and 145)"
@@ -1391,8 +1414,18 @@ proc isAddonHold*(path, content: string): bool =
   ## ``path`` is one of the add-on's own holds, which the rules about
   ## loaded files do not judge: the switch's start hold, or a revert's
   ## persistent hold (§13 decision 133) holding exactly ``RevertHoldText``.
-  ## A file of that name with other content is judged like any drop-in.
-  if path.endsWith("/" & StartHoldName): return true
+  ## A file of that name with other content is judged like any drop-in,
+  ## and so is a start hold that is not exactly ``StartHoldText`` in a
+  ## regular file under the runtime unit directory: the hold the switch
+  ## writes on an activator (§13 decisions 151 and 155) is exempt, a file
+  ## planted under its name is not.
+  if path.endsWith("/" & StartHoldName):
+    when mutated("start-hold-any-content"):
+      # Falsifying build: a start hold exempted by its name alone.
+      return true
+    else:
+      return path.startsWith(RuntimeHoldDir & "/") and not symlinkExists(path) and
+        content == StartHoldText
   when mutated("revert-hold-any-content"):
     # Falsifying build: a revert hold exempted by its name alone.
     path.endsWith("/" & RevertHoldName)
@@ -1601,6 +1634,10 @@ type
     startsOf*: proc (unit: string): seq[string]
       ## what another unit starts, as systemd reports it (``nil``: only the
       ## unit's own dependencies are followed)
+    orderedBeforeOf*: proc (unit: string): seq[string]
+      ## the units another unit is ordered before (its ``Before=``), as
+      ## systemd reports it (``nil``: only the unit's own ``Before=`` is
+      ## followed)
     inspectPath*: proc (path: string; uid: int; dynamic: bool): string
       ## why the manager may not create ``path`` for the unit, as it is on
       ## the host now (``managerPathProblem``)
@@ -2095,7 +2132,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         continue
       var inWritable = false
       for w in places:
-        if np == w or np.startsWith(w & "/"):
+        if placeCovers(w, np):
           problem2("environment-file-writable", "EnvironmentFile", "EnvironmentFile " & np & " lies in the writable place " & w)
           inWritable = true
       # One rule per refusal: a file in a writable place is refused whatever
@@ -2129,6 +2166,21 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         problem2("system-state", StartingDependencyKeys.join(","), "starts " &
                  route[^1] & " (" & route.join(" -> ") &
                  "), which changes the whole system's state")
+    # Spec §10.1, "A floored unit's own ordering": a unit systemd orders
+    # after the boot re-assertion (the floor's ``FloorBootOrdering``) must
+    # not also be ordered before it, by any chain of ``Before=`` systemd
+    # reports (its own and every other unit's, implicit ones included):
+    # that is an ordering cycle, broken at every boot by deleting a job of
+    # systemd's choosing.
+    if FloorReassertUnit in words(show.getOrDefault("After")):
+      let orderedBeforeOf = e.orderedBeforeOf
+      let route = bootOrderingCycleRoute(unit,
+        proc (u: string): seq[string] =
+          if u == unit: words(show.getOrDefault("Before"))
+          elif orderedBeforeOf != nil: orderedBeforeOf(u)
+          else: @[])
+      if route.len > 0:
+        problem2("boot-ordering", "Before", bootOrderingCycleReason(route))
     result.add(conflictsProblems(unit, show, e.ownUnits))
     # Every unit of the generation the unit reaches is held to decision 55:
     # starting it stops what its Conflicts= names.

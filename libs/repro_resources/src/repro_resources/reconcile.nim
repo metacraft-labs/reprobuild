@@ -255,24 +255,164 @@ proc writeUnconsumedStateRecord*(store: StateStore; inst: ResourceInstance;
   ## with those defaults, as this write always did: a non-leased reconcile
   ## has never failed on a damaged record, and there is no lease in it to
   ## carry forward that anyone could read.
+  ##
+  ## The read and the write are one step under the record lock (§4.6): a
+  ## renew that landed between them would otherwise be overwritten by the
+  ## lease fields this write read before it.
   var rec = buildStateRecord(inst, binding)
-  var prior = none(ResourceStateRecord)
-  if hasStateRecord(store, inst.address):
-    try:
-      prior = some(readStateRecord(store, inst.address))
-    except IOError, StateStoreCodecError:
-      discard
-    if prior.isSome:
-      let p = prior.get
-      rec.holders = p.holders
-      rec.keepHolders = p.keepHolders
-      rec.keepHoldersKnown = p.keepHoldersKnown
-      rec.effectiveDeadline = p.effectiveDeadline
-      rec.lastRenewed = p.lastRenewed
-  # The provider artifact is carried forward on the same terms as the lease
-  # above — see `carriedProviderArtifact`.
-  rec.providerArtifact = carriedProviderArtifact(prior, providerArtifact)
-  writeStateRecord(store, rec)
+  withStateRecordLock(store, inst.address):
+    var prior = none(ResourceStateRecord)
+    if hasStateRecord(store, inst.address):
+      try:
+        prior = some(readStateRecord(store, inst.address))
+      except IOError, StateStoreCodecError:
+        discard
+      if prior.isSome:
+        let p = prior.get
+        rec.holders = p.holders
+        rec.keepHolders = p.keepHolders
+        rec.keepHoldersKnown = p.keepHoldersKnown
+        rec.effectiveDeadline = p.effectiveDeadline
+        rec.lastRenewed = p.lastRenewed
+    # The provider artifact is carried forward on the same terms as the lease
+    # above — see `carriedProviderArtifact`.
+    rec.providerArtifact = carriedProviderArtifact(prior, providerArtifact)
+    writeStateRecord(store, rec)
+
+proc writeRenewedStateRecord*(store: StateStore; inst: ResourceInstance;
+                              binding: ResourceBinding;
+                              renewals: seq[LeasedDep]; now: Time;
+                              providerArtifact =
+                                none(ResourceProviderArtifactRef)) =
+  ## Persist the record of a leased state THIS run consumed: this run's
+  ## `renewals` merged into the existing record's whole holder state
+  ## (`mergeHolderDeadlines`), `lastRenewed = now`, and the provider artifact
+  ## carried forward (`carriedProviderArtifact`).
+  ##
+  ## The read of the existing record and the write are ONE step under the
+  ## record lock (Ephemeral-State-Leases.md §4.6). Two consumers of one state
+  ## (or a consumer and the daemon's renew handler) that each read, merged
+  ## and renamed would otherwise drop whichever holder the other added — and
+  ## when the dropped one is a `keep` holder, the state loses its pin.
+  ##
+  ## `merged.effective` is `none` when this state has NO reap deadline (a
+  ## recorded `keep` holder, or no dated holder) — persisted as an OPTIONAL
+  ## deadline (`none` = never reap), NOT an epoch-0/PAST sentinel that the
+  ## reaper's `deadline < now` gate would wrongly reap. The keep holders are
+  ## written BY NAME, so the record says which of the two `none`s it is and
+  ## who pins it.
+  withStateRecordLock(store, inst.address):
+    let existing =
+      if hasStateRecord(store, inst.address):
+        some(readStateRecord(store, inst.address))
+      else:
+        none(ResourceStateRecord)
+    let merged = mergeHolderDeadlines(existing, renewals, now)
+    writeStateRecord(store, inst, binding,
+      holders = merged.holders,
+      effectiveDeadline = merged.effective,
+      lastRenewed = now,
+      keepHolders = merged.keepHolders,
+      keepHoldersKnown = merged.keepHoldersKnown,
+      providerArtifact = carriedProviderArtifact(existing, providerArtifact))
+
+# ---------------------------------------------------------------------------
+# The consume hold (Ephemeral-State-Leases.md §2.3 / §4.6): in-flight liveness.
+# ---------------------------------------------------------------------------
+
+type
+  HeldStateLocksObj = object
+    ## The open in-use locks of one `StateConsumeHold`. Behind a `ref` so the
+    ## hold can be copied freely (it travels inside result objects) while the
+    ## locks are released exactly once: explicitly by `releaseConsumeHold`, or,
+    ## failing that, when the last copy of the hold is dropped — so a hold the
+    ## caller discarded does not keep its states in use for the rest of the
+    ## process's life.
+    locks: seq[ReproFileLock]
+
+  HeldStateLocks = ref HeldStateLocksObj
+
+  StateConsumeHold* = object
+    ## The in-use holds one consume takes on the leased states it consumes,
+    ## and the renewals it re-applies when the consume ENDS.
+    ##
+    ## Held from before the reuse decision until the consume ends — for a
+    ## run-edge, until its command has exited — so the reaper, which must
+    ## claim a state's in-use lock exclusively before destroying it, cannot
+    ## destroy a state while a consume is using it, however long the consume
+    ## outlives its `ttl`, and an `immediate` lease cannot be reaped before
+    ## its consume finishes. A consumer that dies mid-run releases the holds
+    ## with its file descriptors, so a crash never pins a state: its record
+    ## keeps the deadline stamped when the consume started, and that lapses.
+    store*: StateStore
+    addresses*: seq[string]
+      ## The consumed state addresses, sorted, each held once.
+    renewals*: Table[string, seq[LeasedDep]]
+      ## Per state address, the leases this consume renews.
+    held: HeldStateLocks
+
+proc `=destroy`(x: HeldStateLocksObj) =
+  for lock in x.locks:
+    var open = lock
+    releaseStateLock(open)
+  `=destroy`(x.locks)
+
+proc holdConsumedStates*(store: StateStore; desired: seq[ResourceInstance];
+                         onBusy: proc (address: string) {.closure.} = nil):
+    StateConsumeHold =
+  ## Take a shared in-use hold on every state `desired` consumes (each
+  ## `consumes` target), in ascending address order. Blocks while a reap of
+  ## one of them is in progress; `onBusy` is told which, once per address.
+  ## On failure every hold already taken is released before the raise.
+  result.store = store
+  result.held = HeldStateLocks()
+  result.renewals = collectLeaseHolders(desired)
+  for address in result.renewals.keys:
+    result.addresses.add(address)
+  result.addresses.sort()
+  try:
+    for heldAddress in result.addresses:
+      let address = heldAddress   # an owned copy, which the hook captures
+      # `LockBusyHook` is gcsafe; the caller's hook (typically a stderr
+      # notice) is called on this thread only, while it waits.
+      let hook: LockBusyHook =
+        if onBusy == nil: nil
+        else: (proc () {.gcsafe.} =
+                 {.cast(gcsafe).}: onBusy(address))
+      result.held.locks.add(holdStateInUse(store, address, hook))
+  except CatchableError:
+    for lock in result.held.locks.mitems:
+      releaseStateLock(lock)
+    result.held.locks = @[]
+    raise
+
+proc isHeld*(hold: StateConsumeHold): bool =
+  ## Whether the hold still pins its states (taken and not yet released).
+  if hold.held == nil: return false
+  for lock in hold.held.locks:
+    if lock.isHeld: return true
+  false
+
+proc renewConsumedStatesAtEnd*(hold: StateConsumeHold; now: Time) =
+  ## The end-of-consume renewal (§2.3): re-apply each consumed state's
+  ## renewals at `now`, the moment the consume ENDED, so `delayed(ttl)` keeps
+  ## the state `ttl` past the end of its last use and `immediate` makes it
+  ## reapable from the end, not from the start. Each state is renewed under
+  ## its record lock. A state whose record is gone is skipped (nothing
+  ## reaps a held state, so only an explicit teardown removes one).
+  for address in hold.addresses:
+    withStateRecordLock(hold.store, address):
+      if hasStateRecord(hold.store, address):
+        var rec = readStateRecord(hold.store, address)
+        for ld in hold.renewals.getOrDefault(address):
+          applyHolderRenewal(rec, ld.consumerId, ld.policy, now)
+        writeStateRecord(hold.store, rec)
+
+proc releaseConsumeHold*(hold: var StateConsumeHold) =
+  ## Drop every in-use hold. Idempotent; every copy of `hold` sees it.
+  if hold.held == nil: return
+  for lock in hold.held.locks.mitems:
+    releaseStateLock(lock)
 
 proc reconcileResources*(desired: seq[ResourceInstance];
                          recorded: seq[ResourceBinding] = @[];
@@ -326,6 +466,13 @@ proc reconcileResources*(desired: seq[ResourceInstance];
     if store.isSome: collectLeaseHolders(desired)
     else: initTable[string, seq[LeasedDep]]()
 
+  # The in-use holds the reuse decisions below take (§4.6), released when
+  # this reconcile returns or raises.
+  var inUseHolds: seq[ReproFileLock] = @[]
+  defer:
+    for lock in inUseHolds.mitems:
+      releaseStateLock(lock)
+
   for inst in topoOrder(desired):
     let def = lookupResourceProvider(inst.typeId)   # hard error on unknown
     let drv = def.driver
@@ -342,11 +489,19 @@ proc reconcileResources*(desired: seq[ResourceInstance];
     # L2 cross-run reuse: a leased state with a PRESENT, digest-matching
     # store record is already up + current — reuse it WITHOUT observing or
     # re-applying the provider (the store record is the reuse index).
+    #
+    # The decision is taken under an in-use hold (§4.6), kept until this
+    # reconcile returns: a reap of this record already in progress is waited
+    # out (it removes the record, and the state is then materialized afresh),
+    # and no reap can start between the decision and the renewal below. A
+    # caller that goes on USING the state holds its own (`holdConsumedStates`).
     var reuseRec = none(ResourceStateRecord)
-    if isLeasedState and store.isSome and hasStateRecord(store.get, inst.address):
-      let rec = readStateRecord(store.get, inst.address)
-      if rec.present and rec.digest == desiredDigest:
-        reuseRec = some(rec)
+    if isLeasedState and store.isSome:
+      inUseHolds.add(holdStateInUse(store.get, inst.address))
+      if hasStateRecord(store.get, inst.address):
+        let rec = readStateRecord(store.get, inst.address)
+        if rec.present and rec.digest == desiredDigest:
+          reuseRec = some(rec)
 
     var effective = none(ResourceBinding)
     var action: ResourceActionKind
@@ -393,30 +548,12 @@ proc reconcileResources*(desired: seq[ResourceInstance];
     # the reference-counted MAX effective deadline.
     if store.isSome and effective.isSome and effective.get.present:
       if isLeasedState:
-        let existing =
-          if hasStateRecord(store.get, inst.address):
-            some(readStateRecord(store.get, inst.address))
-          else:
-            none(ResourceStateRecord)
-        let merged = mergeHolderDeadlines(existing, renewals, now)
-        # `merged.effective` is `none` when this state has NO reap deadline
-        # (a recorded `keep` holder, or no dated holder) — persisted as an
-        # OPTIONAL deadline (`none` = never reap), NOT an epoch-0/PAST
-        # sentinel that the reaper's `deadline < now` gate would wrongly
-        # reap. The keep holders are written BY NAME, so the record says
-        # which of the two `none`s it is and who pins it.
-        writeStateRecord(store.get, inst, effective.get,
-          holders = merged.holders,
-          effectiveDeadline = merged.effective,
-          lastRenewed = now,
-          keepHolders = merged.keepHolders,
-          keepHoldersKnown = merged.keepHoldersKnown,
-          # This path reconciles IN-PROCESS, so it has no artifact of its own to
-          # record — but an existing record may carry one from a session
-          # reconcile of the same resource, and dropping it here would withdraw
-          # a later reap's only route to it (`carriedProviderArtifact`).
-          providerArtifact = carriedProviderArtifact(existing,
-            none(ResourceProviderArtifactRef)))
+        # This path reconciles IN-PROCESS, so it has no artifact of its own to
+        # record — but an existing record may carry one from a session
+        # reconcile of the same resource, and `writeRenewedStateRecord`
+        # carries it forward rather than withdrawing a later reap's only route
+        # to it (`carriedProviderArtifact`).
+        writeRenewedStateRecord(store.get, inst, effective.get, renewals, now)
       else:
         # Not consumed this run: carry any existing lease forward untouched.
         writeUnconsumedStateRecord(store.get, inst, effective.get)

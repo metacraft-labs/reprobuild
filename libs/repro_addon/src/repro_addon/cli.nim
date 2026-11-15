@@ -83,6 +83,7 @@ import ./reassert
 import ./seams
 import ./secrets_ops
 import ./agent_split
+import ./boot_holds
 import ./static_tree
 import ./store_root
 import ./switch
@@ -625,6 +626,17 @@ proc runAddonCli*(args: seq[string]): int =
           "authorised and carried out (its discard marker " &
           discardMarkerPath(custodySite(DefaultStateDir), r.overrideRecord) &
           " is valid); its signed intent record is " & r.overrideRecord & "\n")
+        if r.completionRecord.len > 0:
+          stdout.write("the discard completed; the signed completion " &
+            "record is " & r.completionRecord & " (signature " &
+            r.completionRecord & DiscardRecordSigExt & ")\n")
+        else:
+          stdout.write("the discard did NOT complete: there is no " &
+            "completion record\n")
+        # §13 decision 162: the same verify hint a plain run prints.
+        stdout.write("check it with `repro system addon " &
+          "verify-discard-record " & r.overrideRecord &
+          " --key <enrolled key>`\n")
       elif r.overrideRecord.len > 0:
         # §13 decisions 62 and 64: the record of what was discarded
         # unshipped, its signature beside it.
@@ -688,6 +700,15 @@ proc runAddonCli*(args: seq[string]): int =
             atBoot = true)))
         except CatchableError as e:
           stdout.write("repro-addon reassert: degraded\n  " & e.msg & "\n")
+        # The holds the boot-hold unit wrote are lifted once the pending
+        # switch is resolved (§13 decision 159); a switch still pending
+        # keeps them.
+        try:
+          for l in releaseBootHolds(DefaultStateDir,
+                                    reload = proc () = daemonReload()):
+            stdout.write("repro-addon boot-holds: " & l & "\n")
+        except CatchableError as e:
+          stdout.write("repro-addon boot-holds: " & e.msg & "\n")
         # A host bootstrapped before the shipping path unit's fix (the drill's
         # D1) is migrated here, by one switch, rather than waiting for its
         # next generation (A11 review finding 8).

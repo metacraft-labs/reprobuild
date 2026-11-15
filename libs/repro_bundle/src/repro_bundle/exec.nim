@@ -4,6 +4,7 @@
 ## repro store exists, and on the creating side `nix` must be the operator's
 ## own. Every call goes through `uncontrolled*`, so it stays labelled.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles]
 import repro_core/ambient_execution
 
@@ -45,7 +46,7 @@ proc runShell*(script: string; cwd = ""; stdinData = "";
   if stdinData.len > 0:
     p.inputStream.write(stdinData)
   p.inputStream.close()
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.code = p.waitForExit()
   p.close()
   result.errors = readFile(errPath)

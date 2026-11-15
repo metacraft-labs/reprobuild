@@ -524,7 +524,11 @@ const
       # §13 decision 137: a timer declared BEFORE the service it names, as
       # the socket above is. The planner applies a trigger after the unit
       # it triggers (systemd refuses to start a timer whose unit is not
-      # loaded); red under the engine build ``trigger-edges-omitted``.
+      # loaded). Its service is judged by the live check, so decision 151
+      # holds this timer too and starts it only after the check: that hold
+      # orders it as well, and the engine build ``trigger-edges-omitted``
+      # is green here (A13 review round 9, measured at reprobuild
+      # 9e78a755bd). The R11 probes, which no hold orders, falsify it.
       systemdSystemUnit(name = "eth-r7-tmr.timer",
         content = "[Unit]\nDescription=A13 decision-137 probe: a timer " &
           "declared before its service\n\n[Timer]\nOnActiveSec=1s\n" &
@@ -600,6 +604,51 @@ const
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r10/%n.ran'\n",
         enabled = false,
         address = "r10PathSvc")"""
+  R11MarkerDir = "/var/lib/a13-r11"
+    ## Where the decision-137 unheld probes write their uid.
+  R11Port = 18711
+  R11Socket = "eth-r11-sock.socket"
+  R11SocketSvc = "eth-r11-ssvc.service"
+  R11Timer = "eth-r11-tmr.timer"
+  R11TimerSvc = "eth-r11-tmsvc.service"
+  R11Resources = """
+      # A13 owner decision 137, on triggers no hold orders: a socket and a
+      # timer, each declared BEFORE the service it triggers, whose services
+      # are not confined (root, as a host's maintenance jobs are). The full
+      # apply's live check judges only the services the static analysis
+      # takes as confined (``liveReachUnits``: a unit that reaches
+      # everything is refused or requires the restore instead), so neither
+      # these services nor their triggers are held (decision 151 stops and
+      # holds only the triggers of held units), and nothing but the
+      # planner's trigger edges applies a trigger after its service. Only in
+      # the next generation, applied after the restore. Red under the engine
+      # build ``trigger-edges-omitted``: systemd refuses each trigger whose
+      # service is not loaded yet.
+      systemdSystemUnit(name = "eth-r11-sock.socket",
+        content = "[Unit]\nDescription=A13 decision-137 probe: an unheld " &
+          "socket declared before its service\n\n[Socket]\n" &
+          "ListenStream=127.0.0.1:18711\nService=eth-r11-ssvc.service\n\n" &
+          "[Install]\nWantedBy=sockets.target\n",
+        address = "r11Socket")
+      systemdSystemUnit(name = "eth-r11-ssvc.service",
+        content = "[Unit]\nDescription=A13 decision-137 probe: an unconfined " &
+          "socket-activated service\n\n[Service]\n" &
+          "ExecStart=/bin/sh -c 'mkdir -p /var/lib/a13-r11; id -u > " &
+          "/var/lib/a13-r11/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r11SocketSvc")
+      systemdSystemUnit(name = "eth-r11-tmr.timer",
+        content = "[Unit]\nDescription=A13 decision-137 probe: an unheld " &
+          "timer declared before its service\n\n[Timer]\nOnActiveSec=1s\n" &
+          "Unit=eth-r11-tmsvc.service\n\n[Install]\nWantedBy=timers.target\n",
+        address = "r11Timer")
+      systemdSystemUnit(name = "eth-r11-tmsvc.service",
+        content = "[Unit]\nDescription=A13 decision-137 probe: an unconfined " &
+          "timer-activated service\n\n[Service]\nType=oneshot\n" &
+          "ExecStart=/bin/sh -c 'mkdir -p /var/lib/a13-r11; id -u > " &
+          "/var/lib/a13-r11/%n.ran'\n",
+        enabled = false,
+        address = "r11TimerSvc")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -675,7 +724,7 @@ static:
   # Every probe unit's writable path is one the gate creates, or the carried
   # directory itself: checked when the gate compiles.
   var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &
-    R7Resources & R9Resources & R10Resources & ShadowResource
+    R7Resources & R9Resources & R10Resources & R11Resources & ShadowResource
   for (_, _, res, _, _) in R4Probes: all.add(res)
   for (_, _, res, _, _, _) in R5Probes: all.add(res)
   for (_, res, _, _, _) in R6Probes: all.add(res)
@@ -1019,9 +1068,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       R5Resources & R6Resources & R7Resources & R9Resources & R10Resources &
       R5TuneResource))
     # The next generation: the same, without the tune drop-in (finding 3).
+    # And the decision-137 unheld triggers (R11), new in this generation.
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
       ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
-      R10Resources))
+      R10Resources & R11Resources))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
@@ -1571,9 +1621,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # Owner decision 137 (decided 2026-11-14): a trigger declared before the
     # unit it triggers -- the socket and the timer above -- is applied after
     # it, so systemd does not refuse its start, and the unit it triggers
-    # runs. Red under the engine build ``trigger-edges-omitted`` (the
-    # planner without the trigger edges): the apply refuses each trigger,
-    # "not loaded".
+    # runs. Kept as a regression case: decision 151 holds these triggers
+    # (their services are judged) and orders them too, so the engine build
+    # ``trigger-edges-omitted`` is red on the R11 probes after the next
+    # generation's apply, not here.
     block:
       let applyOut = applied.stdout & applied.stderr
       var d137 = newJObject()
@@ -1658,6 +1709,53 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "/system_next.nim --host " & AgentTarget & " --no-preview",
       timeoutSec = 3600)
     nw.stopAgitator()
+    # Owner decision 137 on triggers no hold orders (R11): the next
+    # generation adds an unheld socket and an unheld timer, each declared
+    # before its unconfined service. Applied after their services, both
+    # are active and their services ran (the socket's on a connection made
+    # now). Recorded for both before either is asserted.
+    block:
+      let applyOut = nextApply.stdout & nextApply.stderr
+      var judged: seq[string]
+      for l in nextApply.stdout.splitLines():
+        let k = l.find("live check   : ")
+        if k >= 0: judged = l[k + len("live check   : ") .. ^1].splitWhitespace()
+      discard nw.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+        $R11Port & "' 2>/dev/null; true")
+      var d137u = newJObject()
+      var cases: seq[(string, bool, JsonNode)]
+      for (label, trig, svc) in [("socket", R11Socket, R11SocketSvc),
+                                 ("timer", R11Timer, R11TimerSvc)]:
+        discard nw.exec("for i in $(seq 20); do [ -s " & R11MarkerDir & "/" &
+          svc & ".ran ] && break; sleep 1; done; true")
+        let active = nw.exec("systemctl is-active " & trig).stdout.strip()
+        let (ran, ev) = nw.unitRan(svc, R11MarkerDir & "/" & svc & ".ran")
+        var applyRefused = false
+        for l in applyOut.splitLines():
+          if ("'" & trig & "' failed") in l: applyRefused = true
+        let journalNotLoaded = "not loaded" in nw.exec("journalctl -b -u " &
+          trig & " --no-pager 2>&1").stdout
+        ev["triggerActive"] = %active
+        ev["applyRefused"] = %applyRefused
+        ev["journalNotLoaded"] = %journalNotLoaded
+        ev["refusedNotLoaded"] = %(applyRefused and journalNotLoaded)
+        ev["ran"] = %ran
+        # The premise: neither the service nor its trigger was held -- the
+        # live check did not judge the service, and no hold drop-in names
+        # either.
+        ev["serviceJudged"] = %(svc in judged)
+        ev["holdLeft"] = %nw.exec("ls /run/systemd/system/" & trig & ".d " &
+          "/run/systemd/system/" & svc & ".d 2>/dev/null").stdout.strip()
+        d137u[label] = ev
+        cases.add((label, active == "active" and ran and
+          not (applyRefused and journalNotLoaded), ev))
+      d137u["exit"] = %nextApply.exitCode
+      record["decision137Unheld"] = d137u
+      for (label, ok, ev) in cases:
+        step("decision 137, unheld " & label & " first: a " & label &
+             " declared before the unconfined service it triggers, which no " &
+             "hold orders, is applied, active, and its service ran",
+             ok and not ev["serviceJudged"].getBool, $ev)
     block:
       let (ok, ev) = nw.triggerCase()
       record["decision151"]["nextApply"] = ev

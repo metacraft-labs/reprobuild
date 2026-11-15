@@ -46,9 +46,13 @@
 ## was accidentally load-bearing and this loop would hang. That case is real
 ## and documented in this tree (``repro_interface_artifacts.runCommand``: on
 ## Windows ``nim`` exits while ``gcc`` still holds the write handle, which is
-## why that path writes to a temp-file sink instead of a pipe). So this is a
-## helper to apply after asking whether the child can outlive its own stdout,
-## NOT a sweep to run over every ``readAll`` in the tree.
+## why that path writes to a temp-file sink instead of a pipe). So ask
+## whether the child can outlive its own stdout before choosing a pipe at
+## all. A site that must not wait for end of input cannot use
+## ``streams.readAll`` either -- that read is complete on POSIX (where it
+## blocks for EOF anyway) and cut short on Windows -- so it uses a bounded
+## read or carries the waiver ``scripts/check_process_stream_readall.py``
+## describes.
 ##
 ## A bounded alternative exists and is deliberately not duplicated here:
 ## ``tools/test-runner``'s ``drainProbePipe`` polls ``PeekNamedPipe`` /
@@ -62,16 +66,26 @@ proc drainStream*(s: Stream): string =
   ## Read ``s`` until its write end closes, rather than until the first short
   ## read. A nil stream reads as "".
   ##
-  ## The loop is ``9c8a97d6``'s: ``atEnd`` is accurate on both backends
-  ## (Nim 2.2's ``hsAtEnd`` is set only on a zero-byte read — the
-  ## ``br < bufLen`` variant that would have made this loop useless is
-  ## commented out in ``osproc``), so repeating ``readAll`` until ``atEnd``
-  ## terminates exactly at EOF.
+  ## The stop condition is a read that returns 0 bytes, and nothing else:
+  ## not ``atEnd`` (a stream may report it early), not "fewer bytes than I
+  ## asked for" (a pipe's ordinary behaviour), and not ``readAll`` (which
+  ## stops on exactly that). A zero-byte read is end of input on every
+  ## backend: ``hsReadData`` sets ``atTheEnd`` only for it on Windows, and
+  ## ``fread`` returns 0 only at EOF on POSIX. So the answer does not depend
+  ## on how the child chunked its writes
+  ## (reprobuild-pm issue 2026-10-27, "Process output read with
+  ## ``Stream.readAll`` stops at the first short read").
   if s == nil:
     return ""
   result = ""
-  while not s.atEnd():
-    result.add(s.readAll())
+  var buffer = newString(32 * 1024)
+  while true:
+    let count = s.readData(addr buffer[0], buffer.len)
+    if count <= 0:
+      break
+    let used = result.len
+    result.setLen(used + count)
+    copyMem(addr result[used], addr buffer[0], count)
 
 # ---------------------------------------------------------------------------
 # Draining stdout and stderr at the same time.

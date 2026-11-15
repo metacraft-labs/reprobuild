@@ -63,6 +63,8 @@ else:
 import blake3
 import ssz_serialization
 import repro_core                       # writeString / readString / writeU32Le …
+import repro_core/file_lock             # per-record locks (§4.6)
+export file_lock.ReproFileLock, file_lock.LockBusyHook, file_lock.isHeld
 from repro_home_generations/pointer import Digest256, DigestSize
 import repro_resources/instance
 import repro_resources/marshal          # marshalAttrs / unmarshalAttrs /
@@ -1016,6 +1018,85 @@ proc removeStateRecord*(store: StateStore; address: string) =
   let p = recordPath(store, address)
   if fileExists(p):
     removeFile(p)
+
+# ---------------------------------------------------------------------------
+# Per-record concurrency (Ephemeral-State-Leases.md §4.6).
+#
+# Several processes read and write one record — a consuming reconcile, the
+# daemon's renew handler, the reaper of a daemon tick, of the start of another
+# consuming reconcile or of `repro reap`. The atomic rename keeps every record
+# whole, but a read-modify-write is three steps, and two of them interleaved
+# lose the first one's update (the last rename wins). Two locks per record,
+# both `flock`-style files under `<store>/locks/`, settle it:
+#
+#   * the RECORD lock (`<name>.lock`, exclusive, held for a few milliseconds):
+#     every read-modify-write of a record, and the reaper's re-check and
+#     remove, run inside it (`withStateRecordLock`);
+#   * the IN-USE lock (`<name>.inuse`): a consumer holds it SHARED for the
+#     whole consume, from before its reuse decision until the consume ends
+#     (`holdStateInUse`); the reaper must take it EXCLUSIVE, without waiting,
+#     before it may destroy the state (`tryClaimStateForReap`), and keeps it
+#     until the record is removed. So a state in use is never destroyed, a
+#     reap in progress is never reused, and a consumer that dies releases its
+#     hold with its file descriptors — no heartbeat, no stale pin.
+#
+# Lock order, where both are held: in-use first, then record. The reaper never
+# WAITS for an in-use lock, so no cycle is possible.
+#
+# The lock files are never removed. Removing a lock file another process has
+# open would let a third process lock a fresh file of the same name while the
+# second still holds the old one — two "exclusive" holders. They are empty,
+# one pair per address ever recorded, and skipped by the listing (it reads
+# only files directly under the store root).
+# ---------------------------------------------------------------------------
+
+const LocksDirName* = "locks"
+  ## The store subdirectory holding the per-record lock files.
+
+proc recordLockBase(store: StateStore; address: string): string =
+  store.root / LocksDirName / extractFilename(recordPath(store, address))
+
+proc stateRecordLockPath*(store: StateStore; address: string): string =
+  ## The file whose exclusive lock serialises `address`'s read-modify-write.
+  recordLockBase(store, address) & ".lock"
+
+proc stateInUseLockPath*(store: StateStore; address: string): string =
+  ## The file a consumer holds shared while it uses `address`'s state.
+  recordLockBase(store, address) & ".inuse"
+
+template withStateRecordLock*(store: StateStore; address: string;
+                              body: untyped) =
+  ## Run `body` holding `address`'s record lock (exclusive, blocking). Every
+  ## read-modify-write of a record goes through here, so concurrent writers
+  ## of one record serialise instead of overwriting each other's update.
+  ## Critical sections must stay short: no provider call, no destroy.
+  var recordLockHeld = acquireExclusiveFileLock(
+    stateRecordLockPath(store, address))
+  try:
+    body
+  finally:
+    releaseExclusiveFileLock(recordLockHeld)
+
+proc holdStateInUse*(store: StateStore; address: string;
+                     onBusy: LockBusyHook = nil): ReproFileLock =
+  ## Take a SHARED in-use hold on `address` for a consume, waiting while a
+  ## reap of it is in progress (that reap removes the record, and the caller,
+  ## once it holds, finds it gone and materializes afresh). Release it with
+  ## `releaseStateLock` when the consume ends; process death releases it too.
+  acquireSharedFileLock(stateInUseLockPath(store, address), onBusy)
+
+proc tryClaimStateForReap*(store: StateStore; address: string;
+                           lock: var ReproFileLock): bool =
+  ## Take `address`'s in-use lock EXCLUSIVELY without waiting: true when no
+  ## consumer holds it (the caller may now re-check and destroy the state,
+  ## and must release the lock only after the record is removed), false when
+  ## a consume is in progress — the state is in use and must not be reaped.
+  tryAcquireExclusiveFileLock(stateInUseLockPath(store, address), lock)
+
+proc releaseStateLock*(lock: var ReproFileLock) =
+  ## Release a hold from `holdStateInUse` or `tryClaimStateForReap`.
+  ## Idempotent.
+  releaseExclusiveFileLock(lock)
 
 type
   ForeignStateRecord* = object

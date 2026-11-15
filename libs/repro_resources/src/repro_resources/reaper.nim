@@ -166,6 +166,9 @@ type
     rfkUnreapable   ## attempted; the per-record op RAISED (see `reason`)
     rfkBlocked      ## NOT attempted: a record that DEPENDS on it is unreapable,
                     ## so destroying it would break the reverse-topo invariant
+    rfkInUse        ## NOT attempted: a `force` sweep selected it, but a consume
+                    ## is using the state right now (§4.6) — `force` overrides
+                    ## lease deadlines, never a consume in progress
 
   ReapFailure* = object
     ## One record the sweep SELECTED but could not reap. Deliberately NOT
@@ -541,6 +544,11 @@ proc isReapable*(rec: ResourceStateRecord; now: Time; force = false): bool =
   ##   * a live holder (a recorded keep holder, or `holders[c] > now`) ->
   ##     NEVER reap (still pinned / in use).
   ##   * otherwise reap iff `effectiveDeadline.get <= now`.
+  ##
+  ## This is the gate on what a RECORD says. The other half of liveness is a
+  ## consume in progress, which no record field can say (§4.6): `reapRecord`
+  ## checks it, on the in-use lock, before it destroys anything — `force`
+  ## included.
   if force:
     return rec.present
   if rec.effectiveDeadline.isNone:
@@ -660,8 +668,21 @@ proc reconstructFor(transport: ReapTransport;
   else:
     reconstructInstanceOpaque(rec)
 
+type
+  ReapAttemptKind* = enum
+    ## What one `reapRecord` call did with the record it was handed.
+    raReaped     ## destroyed (or found already absent) and its record removed
+    raInUse      ## a consume holds the state (§4.6): not touched
+    raKept       ## re-read under the record lock, no longer due: not touched
+    raVanished   ## its record was already gone (another reaper removed it)
+
+  ReapAttempt* = object
+    kind*: ReapAttemptKind
+    event*: ReapEvent              ## meaningful for `raReaped` only
+
 proc reapRecord*(store: StateStore; transport: ReapTransport;
-                 rec: ResourceStateRecord): ReapEvent =
+                 rec: ResourceStateRecord; now: Time = getTime();
+                 force = false): ReapAttempt =
   ## Destroy ONE record's real-world state and remove its store record.
   ##
   ## Crash-safe + idempotent: reconstruct the instance from the persisted
@@ -690,26 +711,65 @@ proc reapRecord*(store: StateStore; transport: ReapTransport;
   ## `reconstructFor`. An in-process reap needs this process to hold the
   ## attrs codec; a session reap does not, because the payload is forwarded
   ## to the provider.
-  let handler = reapHandlerFor(rec.typeId)
-  if not handler.isNil:
-    let outcome = handler(rec)
-    if not outcome.destroyed:
-      raise newException(ReapDeclinedError,
-        "the reap handler for typeId '" & rec.typeId &
-        "' declined to destroy `" & rec.address & "`: " &
-        (if outcome.detail.len > 0: outcome.detail
-         else: "the handler gave no detail, which is itself a defect"))
-    removeStateRecord(store, rec.address)
-    return ReapEvent(address: rec.address, typeId: rec.typeId,
-      wasPresent: outcome.wasPresent)
-  let inst = reconstructFor(transport, rec)
-  let observed = observeVia(transport, inst, none(ResourceBinding))
-  var wasPresent = false
-  if observed.present:
-    wasPresent = true
-    discard destroyVia(transport, inst, observed)
-  removeStateRecord(store, rec.address)
-  ReapEvent(address: rec.address, typeId: rec.typeId, wasPresent: wasPresent)
+  ##
+  ## CONCURRENCY (§4.6). `rec` is what the caller's SCAN saw, and another
+  ## process may have acted on the record since. So, before anything is
+  ## destroyed:
+  ##
+  ##   1. the record's in-use lock is claimed EXCLUSIVELY, without waiting. A
+  ##      consume holds it shared for as long as it uses the state, so a
+  ##      refusal means the state is in use right now: `raInUse`, untouched;
+  ##   2. under the record lock, the record is READ AGAIN and the gate
+  ##      re-applied to the fresh copy (`isReapable(fresh, now, force)`): one
+  ##      a renew extended since the scan is `raKept`, one another reaper
+  ##      already removed is `raVanished`, and only a record still due is
+  ##      destroyed — the FRESH copy, not the scanned one.
+  ##
+  ## The in-use claim is kept until the record is removed, so a consume that
+  ## starts meanwhile waits and then finds no record, rather than reusing a
+  ## state that is being destroyed. The record lock is NOT held across the
+  ## destroy (a provider call can take minutes, and every renewer of this
+  ## record would stall behind it); it is taken again for the removal.
+  var claim: ReproFileLock
+  if not tryClaimStateForReap(store, rec.address, claim):
+    return ReapAttempt(kind: raInUse)
+  try:
+    var fresh: ResourceStateRecord
+    var due = false
+    var vanished = false
+    withStateRecordLock(store, rec.address):
+      if not hasStateRecord(store, rec.address):
+        vanished = true
+      else:
+        fresh = readStateRecord(store, rec.address)
+        due = isReapable(fresh, now, force)
+    if vanished:
+      return ReapAttempt(kind: raVanished)
+    if not due:
+      return ReapAttempt(kind: raKept)
+    var wasPresent = false
+    let handler = reapHandlerFor(fresh.typeId)
+    if not handler.isNil:
+      let outcome = handler(fresh)
+      if not outcome.destroyed:
+        raise newException(ReapDeclinedError,
+          "the reap handler for typeId '" & fresh.typeId &
+          "' declined to destroy `" & fresh.address & "`: " &
+          (if outcome.detail.len > 0: outcome.detail
+           else: "the handler gave no detail, which is itself a defect"))
+      wasPresent = outcome.wasPresent
+    else:
+      let inst = reconstructFor(transport, fresh)
+      let observed = observeVia(transport, inst, none(ResourceBinding))
+      if observed.present:
+        wasPresent = true
+        discard destroyVia(transport, inst, observed)
+    withStateRecordLock(store, rec.address):
+      removeStateRecord(store, rec.address)
+    ReapAttempt(kind: raReaped, event: ReapEvent(address: fresh.address,
+      typeId: fresh.typeId, wasPresent: wasPresent))
+  finally:
+    releaseStateLock(claim)
 
 proc reapFailureReason(transport: ReapTransport; store: StateStore;
                        rec: ResourceStateRecord; raised: string): string =
@@ -956,12 +1016,27 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
   # so the report names the blast radius rather than just its size.
   var blockedBy = initTable[string, string]()
 
+  # Records held back because a dependent of theirs is LIVE — in use by a
+  # consume, or renewed since the scan (§4.6). Not a failure: the dependent
+  # still needs them, which is exactly what keeping a record means, so they go
+  # to `skipped` rather than `failed`.
+  var keptFor = initHashSet[string]()
+
   proc holdDependencies(rec: ResourceStateRecord; culprit: string) =
     for dep in rec.dependsOn:
       if dep in selectedAddrs and dep notin blockedBy:
         blockedBy[dep] = culprit
 
+  proc keepDependencies(rec: ResourceStateRecord) =
+    for dep in rec.dependsOn:
+      if dep in selectedAddrs:
+        keptFor.incl(dep)
+
   for rec in ordered:
+    if rec.address in keptFor and rec.address notin blockedBy:
+      result.skipped.add(rec.address)
+      keepDependencies(rec)
+      continue
     if rec.address in blockedBy:
       result.failed.add(ReapFailure(
         address: rec.address, typeId: rec.typeId, kind: rfkBlocked,
@@ -972,7 +1047,29 @@ proc reapOnce*(store: StateStore; now: Time = getTime();
       holdDependencies(rec, blockedBy[rec.address])
       continue
     try:
-      result.reaped.add(reapRecord(store, effectiveTransport, rec))
+      let attempt = reapRecord(store, effectiveTransport, rec, now, force)
+      case attempt.kind
+      of raReaped:
+        result.reaped.add(attempt.event)
+      of raInUse:
+        # In use is LIVE (§4.6), the strongest holder there is: an ordinary
+        # sweep keeps it like any other live state; a `force` sweep was asked
+        # to destroy it and could not, which the caller must hear about. Either
+        # way it still exists, so what it depends on is held.
+        if force:
+          result.failed.add(ReapFailure(
+            address: rec.address, typeId: rec.typeId, kind: rfkInUse,
+            reason: "a consume is using it right now; it was not destroyed"))
+          holdDependencies(rec, rec.address)
+        else:
+          result.skipped.add(rec.address)
+          keepDependencies(rec)
+      of raKept:
+        # Renewed since the scan: kept, and its dependencies with it.
+        result.skipped.add(rec.address)
+        keepDependencies(rec)
+      of raVanished:
+        discard
     except CatchableError as err:
       result.failed.add(ReapFailure(
         address: rec.address, typeId: rec.typeId, kind: rfkUnreapable,

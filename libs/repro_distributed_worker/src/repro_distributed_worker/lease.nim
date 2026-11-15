@@ -102,7 +102,7 @@
 ## user provisioned by M6).
 
 import std/[algorithm, asyncdispatch, asyncnet, json, nativesockets, net, os,
-            osproc, streams, strtabs, strutils, times]
+            osproc, streams, strtabs, strutils, tables, times]
 when defined(posix):
   import std/posix
 
@@ -814,21 +814,112 @@ when defined(posix):
       copyMem(addr result[old], addr buf[0], n)
 
 when defined(posix):
+  type
+    LeaseProcess* = object
+      ## The wrapper process of a macOS lease, started as the LEADER OF A
+      ## PROCESS GROUP of its own (`pid == pgid`), so the whole lease can be
+      ## signalled as one. `osproc` cannot do that (its spawn offers no
+      ## `POSIX_SPAWN_SETPGROUP`), hence this small spawn of our own.
+      pid*: Pid
+      reaped: bool
+      status: int
+
+  proc exitCodeOf(status: cint): int =
+    if WIFEXITED(status): int(WEXITSTATUS(status))
+    elif WIFSIGNALED(status): 128 + int(WTERMSIG(status))
+    else: int(status)
+
+  proc running*(p: var LeaseProcess): bool =
+    ## True until the wrapper has exited (reaping it when it has).
+    if p.reaped: return false
+    var st: cint
+    let r = waitpid(p.pid, st, WNOHANG)
+    if r == p.pid:
+      p.reaped = true
+      p.status = exitCodeOf(st)
+      return false
+    if r < 0:
+      p.reaped = true
+      p.status = -1
+      return false
+    true
+
+  proc waitForExit*(p: var LeaseProcess): int =
+    ## Blocks until the wrapper exits and returns its exit code (128+signal
+    ## when a signal ended it).
+    if not p.reaped:
+      var st: cint
+      while true:
+        let r = waitpid(p.pid, st, 0)
+        if r == p.pid:
+          p.status = exitCodeOf(st)
+          break
+        if r < 0 and errno != EINTR:
+          p.status = -1
+          break
+      p.reaped = true
+    p.status
+
+  proc descendantsOf*(root: Pid): seq[Pid] =
+    ## Every live descendant of `root` (not `root` itself), found by walking
+    ## the parent links of the process table (`ps`, a fixed system binary).
+    ## This finds what a process group cannot: a descendant that called
+    ## `setsid`/`setpgid` and so left the group.
+    var children: Table[int, seq[int]]
+    let (text, code) = uncontrolledExecCmdEx("/bin/ps -A -o pid= -o ppid=")
+    if code != 0: return @[]
+    for line in text.splitLines:
+      let f = line.splitWhitespace
+      if f.len != 2: continue
+      try:
+        children.mgetOrPut(parseInt(f[1]), @[]).add(parseInt(f[0]))
+      except ValueError: discard
+    var todo = @[int(root)]
+    while todo.len > 0:
+      let cur = todo.pop()
+      for c in children.getOrDefault(cur):
+        result.add(Pid(c))
+        todo.add(c)
+
+  proc killProcessTree*(p: LeaseProcess) =
+    ## SIGKILLs the wrapper's whole process tree: its process group and every
+    ## descendant, including those that left the group with `setsid`.
+    ##
+    ## The descendants are listed BEFORE anything dies, because killing a
+    ## process reparents its children to launchd and the parent links the walk
+    ## follows are gone. They are SIGSTOPped as they are found (and the walk
+    ## repeated until nothing new appears) so none can fork its way out of the
+    ## snapshot while it is taken; SIGKILL ends a stopped process.
+    var victims: seq[Pid] = @[]
+    for _ in 0 ..< 16:
+      var fresh = false
+      for d in descendantsOf(p.pid):
+        if d notin victims:
+          victims.add(d)
+          discard posix.kill(d, SIGSTOP)
+          fresh = true
+      if not fresh: break
+    discard posix.kill(-p.pid, SIGKILL)
+    discard posix.kill(p.pid, SIGKILL)
+    for d in victims:
+      discard posix.kill(d, SIGKILL)
+
   proc startSeatbeltWrapper*(shell, sandboxExec, profilePath, stdoutPath,
                              stderrPath: string; argv: seq[string];
-                             cwd: string; env: StringTableRef): Process =
+                             cwd: string; env: StringTableRef): LeaseProcess =
     ## Starts `argv` under `sandboxExec -f profilePath`, stdout/stderr to
-    ## files, stdin from /dev/null, through `shell -c`. Exported for
+    ## files, stdin from /dev/null, through `shell -c`, as the leader of a new
+    ## process group (see `LeaseProcess`, `killProcessTree`). Exported for
     ## `runLeaseSeatbelt` and its tests (which substitute `shell` and a fake
     ## `sandboxExec`, since Seatbelt exists only on macOS).
     ##
     ## stdout/stderr go to files (a pipe the daemon does not drain while the
     ## action runs would stall it). The redirecting shell runs OUTSIDE the
     ## sandbox; `exec` replaces it with sandbox-exec, which applies the profile
-    ## before the action's first instruction.
+    ## before the action's first instruction. The shell also does the `cd`,
+    ## because `posix_spawn` has no portable working-directory action.
     ##
-    ## No descriptor above stderr may reach the action: `startProcess` passes
-    ## on whatever the daemon holds without close-on-exec, and an inherited
+    ## No descriptor above stderr may reach the action: an inherited
     ## socket (a peer connection, the control socket, a listener) is a channel
     ## no Seatbelt network rule governs (review fix, 2026-10-19;
     ## `t_execution_lease_confinement`, `BREACH-fd`). That is enforced from
@@ -836,25 +927,44 @@ when defined(posix):
     ## (`repro_core/descriptor_inheritance`), not by a close loop in the shell:
     ## a POSIX shell's redirections name descriptors 0-9 only, and dash reads
     ## `exec 12>&-` as "exec the command 12", which kills the wrapper.
-    ##
-    ## `poParentStreams`: without it `startProcess` creates three pipes AFTER
-    ## the descriptors are marked, and the action would inherit its own end of
-    ## each at a number above 2. Nothing here reads them; the shell redirects
-    ## 0, 1 and 2 itself before the exec.
+    ## `posix_spawn` creates no pipes of its own, so the child holds nothing
+    ## but 0, 1 and 2, which the shell redirects before the exec.
     ##
     ## THE WINDOW IS PROCESS-WIDE (see `descriptor_inheritance`). It is held
-    ## across the synchronous `startProcess` only, with no `await` inside, and
+    ## across the synchronous spawn only, with no `await` inside, and
     ## the lease backend runs on one dispatcher thread, so no other spawn of
     ## this process overlaps it.
-    let script = "p=$1; o=$2; e=$3; x=$4; shift 4; " &
+    let script = "p=$1; o=$2; e=$3; x=$4; c=$5; shift 5; " &
+      "cd \"$c\" || exit 126; " &
       "exec \"$x\" -f \"$p\" \"$@\" >\"$o\" 2>\"$e\" </dev/null"
+    let args = @[shell, "-c", script, "sh", profilePath, stdoutPath,
+                 stderrPath, sandboxExec, cwd] & argv
+    var cargs = allocCStringArray(args)
+    var envStrs: seq[string] = @[]
+    for k, v in env.pairs: envStrs.add(k & "=" & v)
+    var cenv = allocCStringArray(envStrs)
+    defer:
+      deallocCStringArray(cargs)
+      deallocCStringArray(cenv)
+    var attr: Tposix_spawnattr
+    doAssert posix_spawnattr_init(attr) == 0
+    defer: discard posix_spawnattr_destroy(attr)
+    doAssert posix_spawnattr_setflags(attr, POSIX_SPAWN_SETPGROUP) == 0
+    doAssert posix_spawnattr_setpgroup(attr, 0) == 0   # 0: a group of its own
+    var actions: Tposix_spawn_file_actions
+    doAssert posix_spawn_file_actions_init(actions) == 0
+    defer: discard posix_spawn_file_actions_destroy(actions)
     let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+    var pid: Pid
+    var rc: cint
     try:
-      result = uncontrolledStartProcess(shell, args = @["-c", script, "sh",
-        profilePath, stdoutPath, stderrPath, sandboxExec] & argv,
-        workingDir = cwd, env = env, options = {poParentStreams})
+      rc = posix_spawn(pid, shell.cstring, actions, attr, cargs, cenv)
     finally:
       restoreInheritableDescriptors(madeCloseOnExec)
+    if rc != 0:
+      raise newException(OSError, "cannot start " & shell & ": " &
+        $strerror(rc))
+    LeaseProcess(pid: pid)
 
 when defined(posix):
  proc runLeaseSeatbelt(spec: LeaseSpec;
@@ -915,7 +1025,7 @@ when defined(posix):
      env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
    var envTable = newStringTable(modeCaseSensitive)
    for (k, v) in env: envTable[k] = v
-   let child = startSeatbeltWrapper("/bin/sh", "/usr/bin/sandbox-exec",
+   var child = startSeatbeltWrapper("/bin/sh", "/usr/bin/sandbox-exec",
      profilePath, spec.metaDir / "stdout", spec.metaDir / "stderr",
      spec.argv, spec.cwd, envTable)
    var waitedMs = 0
@@ -924,11 +1034,13 @@ when defined(posix):
      takeLog(readAvailable(logFd))
      waitedMs += 20
      if spec.timeoutMs > 0 and waitedMs > spec.timeoutMs:
-       child.kill()
+       # The whole tree, not just the top process: the action's compiler and
+       # anything else it started must not outlive the lease (Linux kills the
+       # PID namespace, Windows the Job Object).
+       killProcessTree(child)
        outcome.timedOut = true
        break
    outcome.exitCode = child.waitForExit()
-   child.close()
    outcome.stdout = readCapped(spec.metaDir / "stdout")
    outcome.stderr = readCapped(spec.metaDir / "stderr")
    running[] = false

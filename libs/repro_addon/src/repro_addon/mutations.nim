@@ -594,6 +594,12 @@
 ##                                           add-on switch stops or holds
 ##                                           the triggers of held units
 ##                                           (decision 151)
+## ``revert-starts-unstartable-trigger``   the revert's step 7 starts a
+##                                           trigger it recorded as
+##                                           unstartable (decision 160)
+## ``recover-skips-triggers-after-marker`` recover retries the triggers to
+##                                           restart only when no marker
+##                                           was pending (decision 160)
 ## ``trigger-restart-failure-ignored``     a trigger that does not start
 ##                                           again is dropped, and the
 ##                                           switch goes on (decision 160)
@@ -1029,6 +1035,15 @@
 ##                                            one recursive removal, so a
 ##                                            part-way failure can take the
 ##                                            ledger copy (decision 150)
+## ``empty-state-root-reported-vaguely``     the failed rmdir of the empty
+##                                            /var/lib/repro is reported as
+##                                            round 13 did, without saying
+##                                            only an empty directory remains
+##                                            (decision 161)
+## ``empty-state-root-left-unfinished``       a re-run that finds an empty
+##                                            /var/lib/repro and no ledger
+##                                            stops on the missing ledger
+##                                            (decision 161)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1530,6 +1545,20 @@ const
                           # the activated service alone, not of every
                           # unit sharing its stem.
                           "listener-writable-own-unit-only",
+                          # an activator is classified, and judged, from
+                          # its own unit file alone: a profile drop-in's
+                          # Service= or Unit= is not read.
+                          "activator-own-file-only",
+                          # a systemd.systemTimer resource is not one of
+                          # the profile's triggers, so it is never judged
+                          # as an activator.
+                          "activator-timer-resources-skipped",
+                          # the listener migration reads a socket's
+                          # Service= as written: an empty one resets it.
+                          "migration-service-as-written",
+                          # a floored service's systemd.systemTimer is not
+                          # a root of the system-state reach check.
+                          "reach-timer-resources-skipped",
                           # a listener's covering places are compared as
                           # spelled (/var/run is not /run, no link is
                           # resolved).
@@ -1541,6 +1570,12 @@ const
                           # re-assertion, so a reboot before recovery
                           # starts it with no hold.
                           "floored-not-after-reassert",
+                          # a floored unit ordered before the boot
+                          # re-assertion (or a unit it waits for) is
+                          # accepted in both halves: an ordering cycle at
+                          # every boot (spec §10.1, "A floored unit's own
+                          # ordering").
+                          "boot-ordering-cycles-allowed",
                           # decision 141's bound counts from the main
                           # process's start (ExecMainStartTimestamp).
                           "recreated-bound-from-main-start",
@@ -1548,6 +1583,36 @@ const
                           # through its observation instance, its
                           # specifiers resolved for that instance.
                           "writable-specifier-resolved",
+                          # a writable place whose first component is a
+                          # specifier (%t/a9q/%i) is dropped, not counted
+                          # as /.
+                          "writable-leading-specifier-dropped",
+                          # decision 156's bound ignores an automatic
+                          # restart's delay: InactiveExitTimestamp alone.
+                          "recreated-bound-from-inactive-exit-only",
+                          # a revert leaves a held unit that runs running.
+                          "revert-held-left-running",
+                          # an activator gets no start hold and no boot
+                          # hold.
+                          "activators-unheld",
+                          # the switch records a unit's directories as
+                          # soon as its start returns, not once they
+                          # exist.
+                          "record-without-waiting",
+                          # the boot-hold unit is ordered after
+                          # sysinit.target, so activators start beside it.
+                          "boot-hold-after-sysinit",
+                          # a host bootstrapped by an earlier engine never
+                          # gets generation 0's new objects.
+                          "gen0-not-upgraded",
+                          # a switch does not record its start holds for
+                          # the boot-hold unit.
+                          "boot-holds-unrecorded",
+                          # a listener the switch's restart of its
+                          # activator makes again keeps its stale record.
+                          "restarted-listener-not-rerecorded",
+                          # a start hold is the add-on's by its name alone.
+                          "start-hold-any-content",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1661,6 +1726,8 @@ const
                           "triggers-of-running-units-stopped",
                           # §13 decision 160.
                           "trigger-restart-failure-ignored",
+                          "revert-starts-unstartable-trigger",
+                          "recover-skips-triggers-after-marker",
                           "fired-from-driver-starts-only",
                           "fired-instance-unmapped",
                           "requirers-of-refused-released",
@@ -1817,6 +1884,8 @@ const
                           "ship-ok-without-sink-configuration",
                           "sink-config-removed-in-step-4",
                           "ledger-copy-removed-with-the-rest",
+                          "empty-state-root-reported-vaguely",
+                          "empty-state-root-left-unfinished",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",

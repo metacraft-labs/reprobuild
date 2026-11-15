@@ -100,7 +100,8 @@
 ## the engines of those versions stored, byte for byte.
 
 import std/[algorithm, sequtils, strutils, tables]
-from std/posix import realpath
+when defined(posix):
+  from std/posix import realpath
 
 const FloorMutation {.strdefine: "reproAddonMutation".} = ""
   ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
@@ -152,11 +153,34 @@ const
     ## ``service_floor_v3``. Version 4 is this module's floor lines without
     ## the boot ordering version 5 adds to ``[Unit]``
     ## (``FloorBootOrdering``; §13 decision 144).
-  FloorBootOrdering* = "After=repro-addon-reassert.service"
+  FloorReassertUnit* = "repro-addon-reassert.service"
+    ## The add-on's boot re-assertion (``repro_addon/generation0``'s
+    ## ``ReassertUnit``), named here so the floor can order after it.
+  FloorBootOrdering* = "After=" & FloorReassertUnit
     ## §13 decision 144: every floored unit (from floor version 5) starts
     ## only after the add-on's boot re-assertion, which replays a pending
     ## revert -- putting its start holds back -- before any floored unit
     ## can start (systemd.unit(5), After=).
+  ReassertWaitsFor* = ["sysinit.target", "basic.target", "sockets.target",
+    "paths.target", "timers.target", "slices.target", "local-fs.target",
+    "local-fs-pre.target", "swap.target", "cryptsetup.target",
+    "-.slice", "system.slice", "repro-store.mount",
+    "repro-addon-secrets.service", "repro-addon-egress.service",
+    "system-reproagent.slice"]
+    ## Units the boot re-assertion is ordered after on every base, which
+    ## the parse-time half can name without the host (spec §10.1, "A
+    ## floored unit's own ordering"): the boot targets its default
+    ## dependencies order it after
+    ## (systemd.special(7), bootup(7): ``After=basic.target``, which is
+    ## after ``sysinit.target``, ``sockets.target``, ``paths.target``,
+    ## ``timers.target`` and ``slices.target``; ``sysinit.target`` after
+    ## ``local-fs.target``, ``swap.target`` and ``cryptsetup.target``), its
+    ## slice, and the add-on's own units ordered before it: the store
+    ## mount and the secrets unit (its ``After=``), the egress observer
+    ## (``Before=`` it) and the egress observer's slice (its ``After=``).
+    ## ``repro_addon``'s ``t_addon_floor_boot_ordering_cycle`` holds this
+    ## list to the order generation 0 writes, followed transitively. The
+    ## effective half reads the whole order from systemd.
   ServiceFloorHardening* = "serviceFloor"
     ## The one value of the ``hardening`` field.
   WholeFloorException* = "serviceFloor"
@@ -989,6 +1013,62 @@ proc systemStateRoute*(roots: openArray[string];
     c = parents.getOrDefault(c, "")
   chain
 
+proc bootOrderingCycleRoute*(root: string;
+                             beforeOf: proc (u: string): seq[string] {.closure.};
+                             waitedFor: openArray[string] = [];
+                             limit = RouteLimit): seq[string] =
+  ## Spec §10.1, "A floored unit's own ordering": the chain of units
+  ## from the floored unit ``root``, by ``Before=`` (``beforeOf``: the
+  ## units ``u`` is ordered before, as the caller reads them -- the
+  ## profile's files at parse time, systemd's report in the effective
+  ## check), to the boot re-assertion
+  ## (``FloorReassertUnit``) or to a unit it waits for (``waitedFor``), or
+  ## ``@[]`` when there is none. The floor orders ``root`` after the
+  ## re-assertion (``FloorBootOrdering``), so such a chain is an ordering
+  ## cycle: at every boot systemd deletes one of its jobs to break it, by
+  ## its own heuristic, and either the floored unit never starts or the
+  ## re-assertion does not run (systemd.unit(5), ``Before=``/``After=``).
+  ## The walk is the floor's one reach (``walkReach``) over ordering
+  ## instead of starting dependencies. A closure of more than ``limit``
+  ## units returns ``@["(more than <limit> units)"]``: not judged, so
+  ## refused.
+  when FloorMutation == "boot-ordering-cycles-allowed":
+    # Falsifying build: decision 144's ordering without the cycle's
+    # refusal, in both halves.
+    return @[]
+  let waited = @waitedFor
+  var parents = initTable[string, string]()
+  parents[root] = ""
+  var found = ""
+  let complete = walkReach([root], beforeOf,
+    proc (u, parent: string): bool =
+      parents[u] = parent
+      if u == FloorReassertUnit or u in waited:
+        found = u
+        return false
+      true, limit)
+  if not complete: return @["(more than " & $limit & " units)"]
+  if found.len == 0: return @[]
+  var chain = @[found]
+  var c = parents[found]
+  while c.len > 0:
+    chain.insert(c, 0)
+    c = parents.getOrDefault(c, "")
+  chain
+
+proc bootOrderingCycleReason*(route: seq[string]): string =
+  ## The refusal's text for a ``bootOrderingCycleRoute``.
+  let last = route[^1]
+  let what = if last == FloorReassertUnit: "the boot re-assertion"
+             elif last.startsWith("("): "too many units to judge"
+             else: last & ", which the boot re-assertion (" &
+                   FloorReassertUnit & ") waits for"
+  "is ordered before " & what & " (" & route.join(" -> ") & "), and the " &
+    "floor orders it after the re-assertion (" & FloorBootOrdering &
+    "): an ordering cycle, in which systemd deletes a job at every boot, " &
+    "so the unit or the re-assertion does not start. Drop that Before= " &
+    "(or After= naming it), or name the exception \"serviceFloor: <why>\""
+
 proc unitStem*(unitName: string): string =
   ## ``a.socket`` -> ``a``; ``a@.socket`` and ``a@x.socket`` -> ``a``.
   let dot = unitName.rfind('.')
@@ -1414,31 +1494,59 @@ proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
   ## normalised paths: ``ReadWritePaths=``, each writable bind's
   ## destination, each tmpfs, each ``*Directory=`` under its root. A place
   ## spelled with a specifier counts by its literal prefix
-  ## (``literalPrefix``; §13 decision 146).
+  ## (``literalPrefix``; §13 decision 146), and one whose literal prefix is
+  ## empty or not absolute -- ``%t/a9q/%i``, whose first component is a
+  ## specifier -- counts as ``/``: it may resolve anywhere, so it covers
+  ## everything. A consumer therefore compares with ``placeCovers``, which
+  ## lets ``/`` cover every path.
   const roots = [("StateDirectory", "/var/lib"), ("RuntimeDirectory", "/run"),
                  ("CacheDirectory", "/var/cache"), ("LogsDirectory", "/var/log"),
                  ("ConfigurationDirectory", "/etc")]
+  proc place(spelled: string): string =
+    # The literal prefix is taken before the absolute-path test: a value
+    # starting with a specifier is not absolute as spelled, yet systemd
+    # resolves it to an absolute place (A9 round 15; reprobuild-pm issue
+    # 2026-11-15-floor-a-place-whose-first-component-is-a-specifier-is-
+    # dropped-not-counted).
+    when FloorMutation == "writable-leading-specifier-dropped":
+      # Falsifying build: the round-14 order, which dropped such a place.
+      if not spelled.startsWith("/"): return ""
+    let p = literalPrefix(spelled)
+    if p.startsWith("/"): normalisedPath(p) else: "/"
   for (k, v) in directives:
     case k
     of "ReadWritePaths":
       for t in v.splitWhitespace():
         let q = t.strip(leading = true, trailing = false, chars = {'-', '+'})
-        if q.startsWith("/"): result.add(literalPrefix(normalisedPath(q)))
+        if q.len > 0:
+          let p = place(q)
+          if p.len > 0: result.add(p)
     of "BindPaths":
       for t in v.splitWhitespace():
         let parts = t.strip(leading = true, trailing = false,
                             chars = {'-', '+'}).split(':')
         let d = if parts.len >= 2: parts[1] else: parts[0]
-        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
+        if d.len > 0:
+          let p = place(d)
+          if p.len > 0: result.add(p)
     of "TemporaryFileSystem":
       for t in v.splitWhitespace():
         let d = t.split(':')[0]
-        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
+        if d.len > 0:
+          let p = place(d)
+          if p.len > 0: result.add(p)
     else:
       for (dk, root) in roots:
         if k == dk:
           for t in v.splitWhitespace():
             result.add(literalPrefix(normalisedPath(root & "/" & t.split(':')[0])))
+
+proc placeCovers*(place, path: string): bool =
+  ## Whether the writable ``place`` (an entry of ``floorWritablePlaces``)
+  ## covers the normalised absolute ``path``: the place itself or anything
+  ## below it. ``/`` covers every path, which ``path.startsWith(place &
+  ## "/")`` alone would miss.
+  place == "/" or path == place or path.startsWith(place & "/")
 
 type SocketOptionRule* = enum
   ## How the floor judges one ``[Socket]`` option of a unit that activates
@@ -1552,21 +1660,26 @@ proc canonicalPlace*(path: string; resolveLinks = false): string =
     return
   if result == "/var/run" or result.startsWith("/var/run/"):
     result = "/run" & result["/var/run".len .. ^1]
-  if resolveLinks and result.startsWith("/"):
-    var head = result
-    var tail = ""
-    while head.len > 1:
-      var buf: array[4097, char]
-      let r = realpath(head.cstring, cast[cstring](addr buf[0]))
-      if r != nil:
-        let resolved = $cast[cstring](addr buf[0])
-        result = normalisedPath(resolved & tail)
-        if result == "/var/run" or result.startsWith("/var/run/"):
-          result = "/run" & result["/var/run".len .. ^1]
-        return
-      let slash = head.rfind('/')
-      tail = head[slash .. ^1] & tail
-      head = if slash <= 0: "/" else: head[0 ..< slash]
+  # Links are resolved where the effective half runs, on the Linux host;
+  # the add-on has no Windows host, and std/posix's realpath does not exist
+  # there (reprobuild-pm issue
+  # 2026-11-15-windows-repro-engine-does-not-compile-service-floor-calls-posix-realpath).
+  when defined(posix):
+    if resolveLinks and result.startsWith("/"):
+      var head = result
+      var tail = ""
+      while head.len > 1:
+        var buf: array[4097, char]
+        let r = realpath(head.cstring, cast[cstring](addr buf[0]))
+        if r != nil:
+          let resolved = $cast[cstring](addr buf[0])
+          result = normalisedPath(resolved & tail)
+          if result == "/var/run" or result.startsWith("/var/run/"):
+            result = "/run" & result["/var/run".len .. ^1]
+          return
+        let slash = head.rfind('/')
+        tail = head[slash .. ^1] & tail
+        head = if slash <= 0: "/" else: head[0 ..< slash]
 
 proc listenerRefusal*(unitName, value: string; service = "";
                       serviceWritable: openArray[string] = []): string =

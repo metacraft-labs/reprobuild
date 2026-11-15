@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams, strtabs, strutils, tables, tempfiles, times, net, jsonutils]
 from std/sysrand import urandom
 
@@ -46,6 +47,12 @@ import repro_interface_artifacts/provisioning_pins
 # text (Provisioning-Contributions.md §"Conformance And Trust").
 import repro_tool_profiles/declared_executable
 export declared_executable
+# The Scoop removal policy (opt-in, install provenance, app-wide hold) that
+# `repro home apply` / `rollback` apply to a dropped Scoop package
+# (Scoop-Catalog-Adapter.md § Removal, Store Roots, and Two-Stage Migration).
+import repro_tool_profiles/scoop_removal
+export scoop_removal
+from repro_tool_profiles/junction_aware_remove import removeJunctionAware
 import repro_local_store
 # Binary-cache substitution for realized tool prefixes. Adding these imports
 # is what closes the gap where a package realized by URL+digest never
@@ -1660,6 +1667,10 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     receiptText[i] = char(b)
   createDir(extendedPath(absoluteRealizedPath))
   writeFile(extendedPath(absoluteRealizedPath / ".repro-receipt"), receiptText)
+  # The adapter renamed the prefix into place itself; make its data and
+  # names durable before the row naming it commits (Local-Content-
+  # Addressed-Store §"Write Protocol" steps 4a and 5a).
+  syncPlacedPrefixDurably(absoluteRealizedPath)
 
   let row = PrefixRow(
     prefixId: prefixId,
@@ -2966,7 +2977,7 @@ proc downloadUrlToFile(url, destination: string) =
       options = {poUsePath, poStdErrToStdOut})
     var diagnostic = ""
     try:
-      diagnostic = process.outputStream().readAll().strip()
+      diagnostic = drainStream(process.outputStream()).strip()
     except CatchableError:
       discard
     let exitCode = waitForExit(process)
@@ -7721,12 +7732,19 @@ proc parseScoopProvenance*(provenance: string): tuple[
   let version = if at + 1 < rest.len: rest[at + 1 .. ^1] else: ""
   result = (true, bucket, app, version)
 
+proc resolveScoopRootFor*(scoopOverride = ""): string =
+  ## The Scoop root a removal plan is computed against: the same root
+  ## `uninstallScoopApp` would act on.
+  resolveScoopRoot(resolveScoopExecutable(scoopOverride))
+
 proc uninstallScoopApp*(app: string; scoopOverride = "") =
-  ## Uninstall a Scoop-managed application when a generation transition
-  ## (apply or rollback) removes it from the active home profile or switches
-  ## its realization away from the Scoop adapter (Scoop-Catalog-Adapter.md
-  ## § Removal). Invokes `scoop uninstall <app>` when the Scoop CLI is
-  ## reachable, and ensures `<scoopRoot>/apps/<app>` is cleaned up.
+  ## Uninstall a whole Scoop application (`scoop uninstall <app>`, which
+  ## removes EVERY version) and ensure `<scoopRoot>/apps/<app>` is gone.
+  ## Called only for an `sraUninstallApp` removal plan
+  ## (`scoop_removal.planScoopAppRemoval`): the transition was given
+  ## `--uninstall-from-scoop`, every installed version is one Reprobuild
+  ## installed, and no non-profile root holds any prefix of the app
+  ## (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed by Store GC Roots).
   if app.len == 0:
     return
   let scoopExe = resolveScoopExecutable(scoopOverride)
@@ -7748,11 +7766,11 @@ proc uninstallScoopApp*(app: string; scoopOverride = "") =
     putEnv("SCOOP", scoopRoot)
     discard execCmdEx(command)
   if dirExists(extendedPath(appsDir)):
-    deleteJunctionDir(appsDir / "current")
-    try:
-      removeDir(extendedPath(appsDir))
-    except OSError:
-      discard
+    # `scoop uninstall` was unavailable or left the tree behind. Remove it
+    # junction-aware: a version directory links `<scoopRoot>/persist/<app>`
+    # by junction, and `os.removeDir` would follow it into the user's
+    # persisted data.
+    removeJunctionAware(appsDir)
 
 proc determinePracticalHardening(plan: ScoopAcquisitionPlan;
                                  executionProfileCaptured: bool):
@@ -7874,6 +7892,12 @@ proc realizeScoopTool(useDef: InterfaceToolUse; storeRoot: string;
     if not dirExists(extendedPath(versionDir)):
       raise newException(EScoopInstallFailed,
         "EScoopInstallFailed: post-install directory missing: " & versionDir)
+    # Install provenance (Scoop-Catalog-Adapter.md § Install Provenance):
+    # only a version Reprobuild installed may later be removed by
+    # `--uninstall-from-scoop`. A version found already on disk (the
+    # cache-hit branch above) is adopted and never recorded here.
+    recordScoopInstall(storeRoot, scoopRoot, plan.bucket, plan.app,
+      resolvedVersion)
 
   # Compute the canonical M56 prefix path. The realization hash is
   # derived from (bucket, app, resolvedVersion, manifestChecksum) so

@@ -380,3 +380,26 @@ suite "test home fence: registry writes":
           check not readRegistryValue(subkey, name).present
         check scratchKeyStatus(subkey) == TestErrorFileNotFound
         check realUserPathSnapshot() == pathBefore
+
+suite "user-defaults fence (REPRO_TEST_HOME_FENCE)":
+  # Pure decision functions: no mock, nothing is written.
+  test "scratch namespace is accepted, anything else refused while fenced":
+    check not testUserDefaultFenceRefuses("com.reprobuild.test.m68-gate3-1-2", "/home/x")
+    check testUserDefaultFenceRefuses("com.apple.dock", "/home/x")
+    check testUserDefaultFenceRefuses("com.reprobuild.m68-gate3-1-2", "/home/x")
+    check testUserDefaultFenceRefuses("com.reprobuild.test.", "/home/x")
+    check testUserDefaultFenceRefuses("com.reprobuild.test.a/../b", "/home/x")
+    check testUserDefaultFenceRefuses("com.reprobuild.test.a b", "/home/x")
+    check testUserDefaultFenceRefuses("com.reprobuild.test.a..b", "/home/x")
+    check testUserDefaultFenceRefuses("COM.REPROBUILD.TEST.x", "/home/x")
+
+  test "an inactive fence refuses nothing":
+    check not testUserDefaultFenceRefuses("com.apple.dock", "")
+    check not testUserDefaultFenceRefuses("com.apple.dock", "  ")
+
+  test "enforce raises TestHomeFenceError before any side effect":
+    putEnv(TestHomeFenceEnvVar, getHomeDir())
+    defer: delEnv(TestHomeFenceEnvVar)
+    expect TestHomeFenceError:
+      enforceTestUserDefaultFence("com.apple.dock", "test")
+    enforceTestUserDefaultFence("com.reprobuild.test.ok", "test")

@@ -111,6 +111,7 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
 import repro_core/nix_store_roots
+import repro_core/nix_configuration_env
 from repro_core/process_streams import drainStream
 # ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
 # second time on POSIX. This scheduler thread is not alone once the worker
@@ -16927,7 +16928,8 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     id: id,
     launched: true,
     runQuotaBackend: "runquota-helper")
-  # N51 triage: LEFT AS `readAll` DELIBERATELY. This IS short-read-prone on
+  # N51 triage: LEFT AS `readAll` DELIBERATELY (a declared waiver of
+  # scripts/check_process_stream_readall.py). This IS short-read-prone on
   # Windows, but the child is the RunQuota helper — a process supervisor
   # (`repro __repro-runquota-helper`) whose own children are the build actions
   # it launched. Draining to EOF here means waiting for every descendant that
@@ -16954,7 +16956,7 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
   let helperExit = process.waitForExit()
   var helperOutput = ""
   if process.outputStream != nil:
-    helperOutput = process.outputStream.readAll()
+    helperOutput = process.outputStream.readAll() # readall-ok: see N51 note above; EOF could outlast a descendant
   if not fileExists(extendedPath(resultPath)):
     result.status = asFailed
     result.exitCode = if helperExit == 0: 1 else: helperExit
@@ -17920,7 +17922,7 @@ when not defined(windows):
             # merged) is the only first-hand account of why it did not bind.
             try:
               if helper.outputStream != nil:
-                let printed = helper.outputStream.readAll().strip()
+                let printed = drainStream(helper.outputStream).strip()
                 if printed.len > 0:
                   lastOutput = printed
             except CatchableError:
@@ -18007,6 +18009,19 @@ when not defined(windows):
         result.connected = false
         result.diagnostic = diagnostic
         return
+      # THE REQUEST CARRIES THIS PROCESS'S NIX CONFIGURATION, credentials
+      # included (``requestNixDaemon``), and the socket sits at a
+      # predictable path in a shared directory. A socket bound there by
+      # another user must not receive it, so the peer's user is checked
+      # before anything is sent.
+      if not nixHelperPeerIsThisUser(sock.getFd()):
+        sock.close()
+        result.connected = false
+        result.diagnostic = "the process listening at " & socketPath &
+          " does not run as this user (or its user could not be " &
+          "determined); the request, which carries this process's Nix " &
+          "configuration, was not sent"
+        return
       result.connected = true
       var line = ""
       try:
@@ -18048,10 +18063,22 @@ when not defined(windows):
       envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
     let socketPath = nixDaemonSocketPath(nixDaemonHelperKey(daemonExe))
     createDir(socketPath.parentDir)
+    # THE HELPER IS SHARED, SO EACH REQUEST NAMES ITS OWN NIX CONFIGURATION
+    # (``repro_core/nix_configuration_env``). The helper runs the request's
+    # Nix commands with exactly these values, so the credential a fetch
+    # presents is the one this process holds now -- not the one held by
+    # whichever process started the helper, possibly a job that has since
+    # ended. Inside the user daemon's build worker this process's
+    # environment is the requesting client's (``applyDaemonRequestEnvironment``).
+    let sent = withNixHelperRequestEnvironment(request)
+    # Nor is the configuration of the process that starts the helper left in
+    # the helper's own environment for its lifetime.
+    let helperEnv = environmentWithoutNixConfiguration()
     proc spawnDaemon(): Process =
       startProcess(daemonExe, args = ["--idle-exit-ms=300000",
-        "--socket-path=" & socketPath], options = {poDaemon, poUsePath})
-    let exchange = exchangeWithNixDaemon(socketPath, request, spawnDaemon)
+        "--socket-path=" & socketPath], env = helperEnv,
+        options = {poDaemon, poUsePath})
+    let exchange = exchangeWithNixDaemon(socketPath, sent, spawnDaemon)
     (socketPath: socketPath, connected: exchange.connected,
      response: exchange.response, attempts: exchange.attempts,
      diagnostic: exchange.diagnostic)
