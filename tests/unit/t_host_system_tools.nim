@@ -82,7 +82,7 @@ suite "host system tool provisioning":
       "head": "8.32", "tail": "8.32", "cat": "8.32", "ls": "8.32",
       "od": "8.32", "tr": "8.32", "wc": "8.32", "cut": "8.32",
       "uname": "8.32", "ln": "8.32", "sort": "8.32", "tee": "8.32",
-      "grep": "3.0"}
+      "mktemp": "8.32", "grep": "3.0", "cmp": "3.12", "diff": "3.12"}
     for (tool, wanted) in expected:
       checkpoint tool
       let pkg = findPackage(tool)
