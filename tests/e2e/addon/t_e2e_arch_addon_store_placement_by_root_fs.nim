@@ -73,6 +73,22 @@ proc comparableLedger*(ledger: string): string =
     result.add(f[0] & "\t" & f[1] & "\t" & f[4] & "\t" & f[5] &
       (if declared: "\t" & f[3] else: "") & "\n")
 
+proc reproIsAPlainDirectoryInTheSnapshot(record: JsonNode): bool =
+  ## The mutation's own effect: ``/repro`` is not a subvolume (its inode is
+  ## not 256), and the snapshot of ``/`` carries its ``store``.
+  let inode = record{"reproInode"}.getStr()
+  inode.len > 0 and inode != "256" and
+    "store" in record{"snapshotRepro"}.getStr().splitLines()
+
+block:
+  doAssert reproIsAPlainDirectoryInTheSnapshot(%*{"reproInode": "49719",
+    "snapshotRepro": "store\ncas\ngc\n"})
+  doAssert not reproIsAPlainDirectoryInTheSnapshot(%*{"reproInode": "256",
+    "snapshotRepro": "store\n"})
+  doAssert not reproIsAPlainDirectoryInTheSnapshot(%*{"reproInode": "49719",
+    "snapshotRepro": ""})
+  doAssert not reproIsAPlainDirectoryInTheSnapshot(%*{})
+
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
   ## Each falsifier's expected red (``falsifierVerdict``): on a btrfs root
   ## ``/repro`` is a plain directory and snapper's snapshot carries the
@@ -86,6 +102,9 @@ proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
     if rootIsBtrfs(b):
       Falsifier(required: @["/repro is a btrfs subvolume",
         "the snapper snapshot of / contains none of /repro/store"],
+        recordChecks: @[(name: "/repro is a plain directory and the " &
+                           "snapshot carries its store",
+                         check: reproIsAPlainDirectoryInTheSnapshot)],
         mustRunGreen: common & @["snapper has the configuration root of /",
           "snapper takes a snapshot of /",
           "vacuity guard: the snapshot holds / as of generation 1 (the " &

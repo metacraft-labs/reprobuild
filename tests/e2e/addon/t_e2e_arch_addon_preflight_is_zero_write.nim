@@ -64,7 +64,7 @@
 ##
 ## *Mocking.* None.
 
-import std/[json, os, strutils, unittest]
+import std/[algorithm, json, os, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -98,6 +98,29 @@ proc newerThanMarker(g: Guest; repro: string): ExecOut =
     "-o -path /tmp -o -path /var/log -o -path /var/lib/systemd/timesync " &
     "\\) -prune -o -newer /run/addon-marker -print")
 
+const PreflightWritesMarker* = ["/var/lib",
+  "/var/lib/repro-addon-preflight-was-here"]
+  ## What the ``preflight-writes`` build writes and nothing else: its marker
+  ## file and the directory holding it (``repro_addon/mutations``).
+
+proc wroteExactlyTheMarker(record: JsonNode): bool =
+  ## The marker leg's list is exactly the mutation's write: a preflight
+  ## that wrote anything else, or nothing, is not the expected red.
+  var got: seq[string]
+  for p in record{"newerThanMarker"}.getElems(): got.add(p.getStr())
+  got.sort()
+  got == @PreflightWritesMarker
+
+block:
+  # The record check's own controls.
+  doAssert wroteExactlyTheMarker(%*{"newerThanMarker":
+    ["/var/lib/repro-addon-preflight-was-here", "/var/lib"]})
+  doAssert not wroteExactlyTheMarker(%*{"newerThanMarker": ["/var/lib"]})
+  doAssert not wroteExactlyTheMarker(%*{"newerThanMarker":
+    ["/var/lib", "/var/lib/repro-addon-preflight-was-here", "/etc/x"]})
+  doAssert not wroteExactlyTheMarker(%*{"newerThanMarker": []})
+  doAssert not wroteExactlyTheMarker(%*{})
+
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
   ## Each falsifier's expected red (``arch_gate_support.falsifierVerdict``):
   ## the marker leg alone; the read-only leg (which the mutation swallows)
@@ -107,6 +130,9 @@ proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
   of "preflight-writes":
     let belowMatrix = not isOmarchyBase(b) and archVariantOf(b) == avOldSystemd
     Falsifier(required: @["the preflight modified no file on the root filesystem"],
+      recordChecks: @[(name: "the root filesystem's new files are exactly " &
+                         "the marker and its directory",
+                       check: wroteExactlyTheMarker)],
       mustRunGreen: (if belowMatrix:
           @["the preflight refuses a base whose systemd is below the matrix",
             "qcow2 byte-identical after the read-only preflight"]
@@ -161,6 +187,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
 
     g.boot()
     let newer = g.newerThanMarker(repro)
+    var newerPaths: seq[string]
+    for l in newer.stdout.splitLines():
+      if l.strip().len > 0: newerPaths.add(l.strip())
+    record["newerThanMarker"] = %newerPaths
     step("the preflight modified no file on the root filesystem",
          newer.exitCode == 0 and newer.stdout.strip().len == 0,
          if newer.stdout.strip().len == 0: "(nothing newer than the marker)"

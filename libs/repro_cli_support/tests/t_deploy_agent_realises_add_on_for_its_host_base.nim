@@ -41,6 +41,13 @@
 ##    `os-release` is unreadable and on a Debian host, and a retry reporting
 ##    the pinned revision -- the call site refuses or accepts as decided,
 ##    and on a refusal nothing of the compile is staged or handed back.
+## 6b. The production wrappers (`agent_split.compileProfileVia`, behind
+##    the fetch unit's `compileProfile`, and `verified_compile.
+##    unprivilegedCompileVia`, behind `unprivilegedCompile`) decide with
+##    the RUNNING host's observation: driven with an old stand-in compiler
+##    their decision is the one `observeHostBase` gives here (refused on
+##    this build host unless it is Debian-family), never a Debian
+##    observation of their own. An observation that raises fails closed.
 ## 7. The command itself: `compile-profile --system-base bogus`, and
 ##    `this-host` on a host whose `os-release` is unreadable, exit 3 and
 ##    write nothing; unreadable `--stdio` input exits 1. None of them is the
@@ -59,6 +66,13 @@
 ## real command uses `observeHostBase`, which returns exactly that value in
 ## that case; 6 and 7 pass it, and an Arch or Debian observation, through
 ## the call sites' and the command's `observe` parameter the same way.
+## In 6b the observation is NOT a stand-in: the wrappers fix
+## `observeHostBase`, and the expectation is derived from the same
+## observation of this build host (a wrapper that substituted its own would
+## decide differently here unless the build host is Debian-family). An
+## observation that raises is a closure that raises, the one way to reach
+## the fail-closed branch, since `observeHostBase` reports an unreadable
+## file without raising.
 ## (c) In 7 the `--stdio` request is given through the command's
 ## `readInput` parameter, because the test process's own stdin is not a
 ## request. `compileProfileWith` sets `HOME` and the XDG variables of this
@@ -414,3 +428,56 @@ suite "compile-profile's exit codes are the ones the agent's retry reads":
       verified_compile.CompileProfileUsageExit
 
   removeDir(work)
+
+# ---------------------------------------------------------------------------
+# 6b. The production wrappers use the running host's observation.
+# ---------------------------------------------------------------------------
+
+proc raisingObservation(): HostBase =
+  raise newException(OSError, "the observation failed")
+
+suite "the production wrappers decide with the running host's base":
+  let hostIsDebian = agentHostIsDebianFamily(observeHostBase)
+  checkpoint "this build host is " & (if hostIsDebian: "" else: "not ") &
+    "Debian-family (observeHostBase); the wrappers must decide accordingly"
+
+  test "the fetch unit's compileProfileVia uses observeHostBase":
+    let calls = new seq[seq[string]]
+    let work = getTempDir() / ("t-r4-fetch-" & $getCurrentProcessId())
+    removeDir(work)
+    createDir(work / "staging")
+    defer: removeDir(work)
+    let why = compileProfileVia(AgentConf(profileCompiler: "/stand-in/compiler"),
+      sourceManifest(), work / "staging", work / "scratch",
+      standInCompiler(calls, "0ld0ld0ld0"))
+    check calls[].len == 2
+    check (why.len == 0) == hostIsDebian
+    check fileExists(work / "staging" / StagedCanonicalName) == hostIsDebian
+    if not hostIsDebian: check CompilerRevisionMismatch in why
+
+  test "the switch's unprivilegedCompileVia uses observeHostBase":
+    let calls = new seq[seq[string]]
+    let compiler = standInCompiler(calls, "0ld0ld0ld0")
+    let m = sourceManifest()
+    let r = unprivilegedCompileVia(@["/stand-in/systemd-run", "--wait",
+      "/stand-in/reprobuild", "deploy-agent", "compile-profile", "--stdio"] &
+      compileFactArgs(m), m,
+      proc(a: seq[string]; input: string): HostToolResult = compiler(a))
+    check calls[].len == 2
+    check r.ok == hostIsDebian
+    if not hostIsDebian: check CompilerRevisionMismatch in r.error
+
+  test "an observation that raises fails closed":
+    check not agentHostIsDebianFamily(raisingObservation)
+    for site in ["fetch unit", "unprivileged compile"]:
+      let calls = new seq[seq[string]]
+      let r =
+        if site == "fetch unit":
+          viaFetchUnit(standInCompiler(calls, "0ld0ld0ld0"), calls,
+                       raisingObservation)
+        else:
+          viaUnprivilegedCompile(standInCompiler(calls, "0ld0ld0ld0"), calls,
+                                 raisingObservation)
+      check not r.accepted
+      check not r.staged
+      check CompilerRevisionMismatch in r.why

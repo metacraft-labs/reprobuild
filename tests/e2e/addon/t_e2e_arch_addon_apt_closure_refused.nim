@@ -40,13 +40,16 @@
 ## Falsifying mutations (``REPRO_ADDON_MUTATION``):
 ##
 ## * ``arch-realisation-accepts-deb-closure``: an engine whose
-##   ``add-on-arch`` keeps ``aptClosureLock``. The red run's
-##   ``REPRO_ADDON_ENGINE_CLOSURE`` is the engine built with it:
-##   ``nix build --no-link --print-out-paths --impure --expr
-##   '((builtins.getFlake (toString ./.)).packages.${builtins.currentSystem}
-##   .reprobuild).overrideAttrs (_: { REPRO_ADDON_MUTATION =
-##   "arch-realisation-accepts-deb-closure"; })'`` (``scripts/build_apps.sh``
-##   compiles the variable in). The realisation legs go red.
+##   ``add-on-arch`` keeps ``aptClosureLock``. The realisation legs go red.
+##   The red run's ``REPRO_ADDON_ENGINE_CLOSURE`` is the engine built with
+##   it, from a clean checkout of the commit under test:
+##   ``REPRO_ADDON_ENGINE_CLOSURE=$(bash scripts/build_addon_engine_closure.sh
+##   --mutation arch-realisation-accepts-deb-closure)``; the green and the
+##   other runs take ``$(bash scripts/build_addon_engine_closure.sh)``. The
+##   script builds the Nix package from ``git+file://<repository>?rev=<HEAD>``,
+##   so the engine reports the commit's revision, which the gate checks; a
+##   path flake (``builtins.getFlake (toString ./.)``) reports none, and
+##   the gate refuses such an engine.
 ## * ``arch-apply-skips-deb-closure-check``: a static binary without the
 ##   apply-side refusal. The realisation legs stay green -- the realisation
 ##   alone refuses every profile that is compiled -- and the apply-side
@@ -73,7 +76,8 @@
 ## ``red`` in its record; the judgement is the record's ``falsifier``.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_ADDON_ENGINE_CLOSURE``
-## (``just e2e_arch_addon_apt_closure_refused``).
+## (``REPRO_ADDON_ENGINE_CLOSURE=$(bash scripts/build_addon_engine_closure.sh)
+## just e2e_arch_addon_apt_closure_refused``).
 ## Bases: ``REPRO_ADDON_BASES`` (default ``arch-btrfs-amd64,arch-ext4-amd64``).
 ##
 ## *Mocking.* None: real Arch guests, the real engine and static binary.
@@ -206,6 +210,47 @@ const
     "[apply side] control: the same unit as a store package applies",
     "uninstall"]
 
+proc realisationAccepted(record: JsonNode): bool =
+  ## Mutation B's own effect: the engine planned the ``.deb`` closure (exit
+  ## 0 with a plan id) and the agent's compile compiled it (exit 0 with the
+  ## result line) -- not a failure for some other reason.
+  record{"enginePlanDebExit"}.getInt(-1) == 0 and
+    "apply with: repro infra apply --plan " in record{"enginePlanDeb"}.getStr() and
+    record{"agentCompileDebExit"}.getInt(-1) == 0 and
+    "REPRO-COMPILED-PROFILE " in record{"agentCompileDeb"}.getStr()
+
+proc applySideProceeded(record: JsonNode): bool =
+  ## Mutation A's own effect: the static binary planned and applied the
+  ## closure (both exit 0), so the red is the missing refusal, not a plan
+  ## or apply that failed for another reason.
+  record{"applySideplanExit"}.getInt(-1) == 0 and
+    record{"applySideapplyExit"}.getInt(-1) == 0 and
+    "EAddOnOutOfScope" notin record{"applySideplan"}.getStr() &
+      record{"applySideapply"}.getStr()
+
+block:
+  doAssert realisationAccepted(%*{"enginePlanDebExit": 0,
+    "enginePlanDeb": "  apply with: repro infra apply --plan ad85\n",
+    "agentCompileDebExit": 0, "agentCompileDeb": "REPRO-COMPILED-PROFILE eyJ"})
+  doAssert not realisationAccepted(%*{"enginePlanDebExit": 1,
+    "enginePlanDeb": "EAddOnOutOfScope", "agentCompileDebExit": 0,
+    "agentCompileDeb": "REPRO-COMPILED-PROFILE eyJ"})
+  doAssert not realisationAccepted(%*{"enginePlanDebExit": 0,
+    "enginePlanDeb": "  apply with: repro infra apply --plan ad85\n",
+    "agentCompileDebExit": 2, "agentCompileDeb": "unknown option"})
+  doAssert not realisationAccepted(%*{"enginePlanDebExit": 0,
+    "enginePlanDeb": "error before the plan", "agentCompileDebExit": 0,
+    "agentCompileDeb": "REPRO-COMPILED-PROFILE eyJ"})
+  doAssert not realisationAccepted(%*{})
+  doAssert applySideProceeded(%*{"applySideplanExit": 0, "applySideapplyExit": 0,
+    "applySideplan": "ledger diff", "applySideapply": "applied"})
+  doAssert not applySideProceeded(%*{"applySideplanExit": 0,
+    "applySideapplyExit": 1, "applySideplan": "", "applySideapply": "boom"})
+  doAssert not applySideProceeded(%*{"applySideplanExit": 0,
+    "applySideapplyExit": 0, "applySideplan": "EAddOnOutOfScope",
+    "applySideapply": ""})
+  doAssert not applySideProceeded(%*{})
+
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
   ## Each falsifier's expected red (``falsifierVerdict``), group by group:
   ## the other group's refusals and every control stay green.
@@ -216,10 +261,15 @@ proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
     Falsifier(required: ApplySideRefusals & @[
       "[apply side] the refused apply wrote nothing (fingerprint)",
       "[apply side] the refused apply realised and committed nothing"],
-      mustRunGreen: AptRunsGreen & RealisationRefusals)
+      mustRunGreen: AptRunsGreen & RealisationRefusals,
+      recordChecks: @[(name: "the static binary planned and applied the " &
+                         "closure (both exit 0)", check: applySideProceeded)])
   of "arch-realisation-accepts-deb-closure":
     Falsifier(required: RealisationRefusals,
-      mustRunGreen: AptRunsGreen & ApplySideRefusals)
+      mustRunGreen: AptRunsGreen & ApplySideRefusals,
+      recordChecks: @[(name: "the engine planned the closure (exit 0, a plan " &
+                         "id) and the agent's compile compiled it (exit 0, " &
+                         "the result line)", check: realisationAccepted)])
   else: raise unknownMutation("e2e_arch_addon_apt_closure_refused", mut)
 
 proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
@@ -278,6 +328,7 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
         module & " --host " & EngineHost, timeoutSec = 1800)
     let ep = enginePlan("deb.nim")
     record["enginePlanDeb"] = %(ep.stdout & ep.stderr)
+    record["enginePlanDebExit"] = %ep.exitCode
     realisationStep("infra plan of a .nim profile with an aptClosureLock, " &
       "through a `system: addOn` registry entry, is refused",
       ep.exitCode == 1 and refusedForArch(ep.stderr) and
@@ -299,6 +350,7 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
         EngineDir & "/" & name & ".json", timeoutSec = 1800)
     let ac = agentCompile("deb-stdio", debNim())
     record["agentCompileDeb"] = %(ac.stdout & ac.stderr)
+    record["agentCompileDebExit"] = %ac.exitCode
     realisationStep("the agent's compile (--system-base this-host) of the " &
       "aptClosureLock profile is refused", ac.exitCode == 1 and
         refusedForArch(ac.stderr) and "REPRO-COMPILED-PROFILE" notin ac.stdout,
@@ -323,6 +375,8 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
         if verb == "plan": g.planProfile(repro, "deb-" & verb, closureProfile(lockText))
         else: g.applyProfile(repro, "deb-" & verb, closureProfile(lockText))
       let said = r.stdout & r.stderr
+      record["applySide" & verb & "Exit"] = %r.exitCode
+      record["applySide" & verb] = %said
       applySideStep(verb & " of an aptClosureLock unit is refused with " &
         "EAddOnOutOfScope", r.exitCode != 0 and refusedForArch(said),
         "exit " & $r.exitCode & "\n" & said)

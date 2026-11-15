@@ -148,7 +148,12 @@ suite "e2e_arch_testbed_is_pinned":
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just " &
            "e2e_arch_testbed_is_pinned)")
     elif useIncus():
-      skip("the Arch test bed boots disk images; QEMU only")
+      # Not a skip: a green exit would claim the pins were checked. The
+      # Arch test bed boots disk images and runs on QEMU only, as every
+      # other Arch gate refuses the Incus backend (newArchGuest).
+      echo "FAIL: the Arch test bed boots disk images and runs on QEMU " &
+        "only; REPRO_ADDON_BACKEND=incus cannot run this gate"
+      check false
     else:
       let record = archRecordBase()
       record["gate"] = %"e2e_arch_testbed_is_pinned"

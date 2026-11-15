@@ -201,7 +201,7 @@ proc runProfileCompiler*(argv: openArray[string];
 proc compileProfileWith*(conf: AgentConf; m: DeployManifest;
     dir, workspace: string;
     run: proc(argv: seq[string]): HostToolResult;
-    observe: HostBaseObservation = observeHostBase): string =
+    observe: HostBaseObservation): string =
   ## Run the configured profile compiler over the staged source as this
   ## (unprivileged) process; "" when it produced ``profile.canonical`` and
   ## ``actions.json``, else why not. Refused outright as root: compiling
@@ -246,11 +246,19 @@ proc compileProfileWith*(conf: AgentConf; m: DeployManifest;
       return why
   ""
 
+proc compileProfileVia*(conf: AgentConf; m: DeployManifest;
+    dir, workspace: string;
+    run: proc(argv: seq[string]): HostToolResult): string =
+  ## ``compileProfile`` with only the process runner open: the RUNNING
+  ## host's base (``observeHostBase``) is fixed here, so a test that drives
+  ## this with a stand-in runner checks the observation production uses.
+  compileProfileWith(conf, m, dir, workspace, run, observeHostBase)
+
 proc compileProfile(conf: AgentConf; m: DeployManifest;
                     dir, workspace: string): string =
   ## ``compileProfileWith`` as the fetch unit runs it: the configured
   ## compiler, on the running host's base.
-  compileProfileWith(conf, m, dir, workspace,
+  compileProfileVia(conf, m, dir, workspace,
     proc(a: seq[string]): HostToolResult = runProfileCompiler(a))
 
 proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];

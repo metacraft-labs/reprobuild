@@ -121,8 +121,12 @@ type
 proc agentHostIsDebianFamily*(observe: HostBaseObservation = observeHostBase):
     bool =
   ## The host's ``os-release`` names the Debian family. False on any other
-  ## base, and when it cannot be read: the one base a compile made without
-  ## ``--system-base`` (the ``add-on-debian`` realisation) can be right for.
+  ## base, when it cannot be read, and when the observation itself fails
+  ## (raises): the one base a compile made without ``--system-base`` (the
+  ## ``add-on-debian`` realisation) can be right for, so anything short of
+  ## a Debian-family observation fails closed. ``observeHostBase`` reports
+  ## an unreadable file as an unclassified base rather than raising; the
+  ## ``except`` is for an observation that does raise.
   try:
     observe().isDebianFamily
   except CatchableError:
@@ -252,7 +256,7 @@ proc parseCompileOutput*(output: string):
 
 proc verifiedCompileWith*(argv: seq[string]; m: DeployManifest;
     run: proc(argv: seq[string]): HostToolResult;
-    observe: HostBaseObservation = observeHostBase):
+    observe: HostBaseObservation):
     tuple[ok: bool; canonical, actionsJson, revision, error: string] =
   ## The agent's ``compile-profile --stdio`` run (``argv``, through ``run``)
   ## with the decision of spec §13 decision 134 applied: the retry without
@@ -275,13 +279,23 @@ proc verifiedCompileWith*(argv: seq[string]; m: DeployManifest;
       # Nothing of the refused compile is handed back.
       return (false, "", "", "", why)
 
+proc unprivilegedCompileVia*(argv: seq[string]; m: DeployManifest;
+    run: proc(argv: seq[string]; input: string): HostToolResult):
+    tuple[ok: bool; canonical, actionsJson, revision, error: string] =
+  ## ``unprivilegedCompile`` with the command line and the process runner
+  ## open and the RUNNING host's base (``observeHostBase``) fixed here: a
+  ## test that drives this with a stand-in runner checks the observation
+  ## production uses. ``m``'s request is the runner's input.
+  let input = compileInput(m)
+  verifiedCompileWith(argv, m,
+    proc(a: seq[string]): HostToolResult = run(a, input), observeHostBase)
+
 proc unprivilegedCompile*(engineExe: string; m: DeployManifest):
     tuple[ok: bool; canonical, actionsJson, revision, error: string] =
   ## Compile ``m``'s source profile with ``engineExe`` as a dynamic user
   ## (``unprivilegedCompileArgv``) and return what it emitted. The result is
   ## untrusted: the caller compares it with the signed pin
   ## (``compiledProfileRefusal``) before using it.
-  let input = compileInput(m)
-  verifiedCompileWith(unprivilegedCompileArgv(engineExe, m), m,
-    proc(a: seq[string]): HostToolResult =
+  unprivilegedCompileVia(unprivilegedCompileArgv(engineExe, m), m,
+    proc(a: seq[string]; input: string): HostToolResult =
       runHostTool(a, mergeStderr = false, input = input))

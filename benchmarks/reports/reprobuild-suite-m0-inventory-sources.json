@@ -13293,8 +13293,8 @@
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_deploy_agent_realises_add_on_for_its_host_base.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 21,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
