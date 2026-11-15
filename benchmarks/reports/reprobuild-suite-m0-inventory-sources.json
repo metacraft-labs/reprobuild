@@ -48621,7 +48621,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_recipe_lock_consistency_refuses.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58357,8 +58357,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_recipe_lock_consistency_check.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 35,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

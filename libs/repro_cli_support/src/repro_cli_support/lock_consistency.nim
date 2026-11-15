@@ -39,10 +39,16 @@
 ##
 ## * only ROOT inputs of a `flake.lock` (an input of an input is the upstream
 ##   flake's own business, and its constraint is not in this recipe);
-## * only `uses:` entries written as string literals and not under a `when` /
-##   `if` / `case` arm (`scanReproUsesDeclarations`); a `const` or a
-##   conditional entry is listed in `notChecked` instead. The recipe is not
+## * only `uses:` entries written as string literals
+##   (`scanReproUsesDeclarations`); a `const` is not seen. The recipe is not
 ##   compiled at hook time, so its extracted interface is not available;
+## * an entry under a `when` / `if` / `case` arm is checked when its arms
+##   apply to the lock — the lock records the platform it was resolved for
+##   and the variant values the solve chose, and `recipe_conditions` decides
+##   each arm from those two facts the way the compiler and the DSL do — and
+##   is skipped when they do not. An arm those facts cannot decide (a `-d:`
+##   define, a `const`, a variant the lock records no value for) is listed in
+##   `notChecked`, never passed or refused;
 ## * a `uses:` entry is related to a `repro.lock` package and dependency by
 ##   the selector NAME the recipe wrote, because that name is the only link a
 ##   `uses:` entry has to its resolution: a `packages` entry carries no URL
@@ -65,14 +71,19 @@ import std/[json, os, sequtils, strutils, tables]
 
 import repro_lock
 import repro_cli_support/recipe_constraints
+import repro_cli_support/recipe_conditions
 
-export recipe_constraints
+export recipe_constraints, recipe_conditions
 
 const
   H1Property* = "recipe_lock_constraint_violated"
     ## The pre-push gate property for an H1 violation.
   H2Property* = "cross_lock_revision_disagreement"
     ## The pre-push gate property for an H2 violation.
+  ConsistencyNotCheckedNotice* = "recipe/lock consistency not checked: "
+    ## The prefix of the pre-push gate's notice for each ``notChecked``
+    ## entry. The gate's verdict line counts these, so an `OK` never reads as
+    ## though they had been checked.
 
 type
   ConsistencyRule* = enum
@@ -336,6 +347,27 @@ proc checkFlakeH1(inputs: ConsistencyInputs;
 # H1 for a repro.lock
 # ---------------------------------------------------------------------------
 
+proc armFactsOf*(ld: LockedDependencies): LockArmFacts =
+  ## The facts a parsed `repro.lock` records that decide a `when` / `if` /
+  ## `case` arm: the platform it was resolved for and its variant values.
+  var variants: seq[tuple[name, value: string]]
+  for v in ld.variants: variants.add((v.name, v.value))
+  lockArmFacts(ld.platform, variants)
+
+proc armFactsOf*(inputs: ConsistencyInputs): LockArmFacts =
+  ## The same facts read from ``inputs.reproLock``; empty (every `when` and
+  ## gate undecidable) when there is no lock or it does not parse.
+  if not inputs.reproLock.present: return
+  try:
+    result = armFactsOf(parseLockedDependencies(inputs.reproLock.text))
+  except CatchableError:
+    result = LockArmFacts()
+
+proc notDecidedNote(where, raw, reason, purpose: string): string =
+  ## THE note for an entry whose arm the lock's facts cannot decide.
+  where & ": '" & raw & "' — " & reason & ", so whether it " & purpose &
+    " is not decidable without compiling the recipe"
+
 type
   ExactSourceRevision = object
     found: bool
@@ -414,15 +446,25 @@ proc checkReproH1(inputs: ConsistencyInputs;
   for d in ld.deps:
     if not isSelfLockedDep(d) and d.coordinates.kind == ckVcs:
       depsByName[d.name] = d
+  let facts = armFactsOf(ld)
   for decl in decls:
     let c = decl.constraint
     let where = c.file & ":" & $c.line
     if decl.conditional:
-      if c.kind in {uckRange, uckExact}:
-        report.notChecked.add(where & ": '" & decl.rawConstraint &
-          "' — under a when/if/case arm, so whether it applies to this " &
-          "lock is not decidable without compiling the recipe")
-      continue
+      # The lock records the platform and the variant values it was resolved
+      # for, so the arms that apply to it are decided here, as the compiler
+      # and the DSL decide them when the lock is resolved.
+      let arm = armApplicability(decl, facts)
+      case arm.applicability
+      of aaApplies:
+        discard
+      of aaExcluded:
+        continue
+      of aaUndecidable:
+        if c.kind in {uckRange, uckExact}:
+          report.notChecked.add(notDecidedNote(where, decl.rawConstraint,
+            arm.reason, "applies to this lock"))
+        continue
     case c.kind
     of uckUnconstrained:
       continue
@@ -517,10 +559,14 @@ proc checkH2(inputs: ConsistencyInputs; constraints: FlakeRecipeConstraints;
   var constraintOf = initTable[string, FlakeInputConstraint]()
   for c in constraints.inputs: constraintOf[c.input] = c
   # The exact `uses:` version of each dependency name, for the constraint
-  # comparison. Only unconditional, exact entries can state a revision.
+  # comparison: every exact entry whose arms apply to this lock (an
+  # unconditional one always does). One whose arms are undecidable is listed
+  # by H1, which consults the same entry.
+  let facts = armFactsOf(ld)
   var exactUses = initTable[string, ReproUsesDeclaration]()
   for d in decls:
-    if not d.conditional and d.constraint.kind == uckExact:
+    if d.constraint.kind == uckExact and
+        armApplicability(d, facts).applicability == aaApplies:
       exactUses[d.constraint.selector] = d
   for dep in ld.deps:
     if isSelfLockedDep(dep) or dep.coordinates.kind != ckVcs: continue
@@ -806,7 +852,8 @@ type
     ## observed revision.
     exclusions*: seq[RepinConstraintExclusion]
     exactPin*: string
-      ## The revision an unconditional exact `uses:` version maps it to, or "".
+      ## The revision an exact `uses:` version that applies to the lock (an
+      ## unconditional one, or one whose arms apply) maps it to, or "".
     exactPinFile*: string
     exactPinLine*: int
     notChecked*: seq[string]
@@ -873,24 +920,33 @@ proc reproRepinVerdict*(inputs: ConsistencyInputs; dependency, depAbs,
   ## * An unconditional range excludes ``observed`` when the producer's
   ##   `versions:` table maps ``observed`` to a version the range does not
   ##   admit. When no entry maps to it, the range is listed in ``notChecked``.
-  ## * A conditional entry is listed in ``notChecked``, as H1 lists it.
+  ## * A conditional entry is decided against the lock in
+  ##   ``inputs.reproLock`` (its platform and variant values), as H1 decides
+  ##   it: applied when its arms apply, skipped when they do not, and listed
+  ##   in ``notChecked`` when that lock cannot decide them.
   if not inputs.reproNim.present: return
   let decls = scanReproUsesDeclarations(inputs.reproNim.text,
     inputs.reproNim.path)
   var report: ConsistencyReport
   let dep = LockedDep(name: dependency, path: depAbs,
     coordinates: Coordinates(kind: ckVcs, url: depUrl))
+  let facts = armFactsOf(inputs)
   for decl in decls:
     let c = decl.constraint
     if c.selector != dependency: continue
     if c.kind notin {uckRange, uckExact}: continue
     let where = c.file & ":" & $c.line
     if decl.conditional:
-      report.notChecked.add(where & ": '" & decl.rawConstraint &
-        "' — under a when/if/case arm, so whether it constrains the re-pin " &
-        "of '" & dependency & "' is not decidable without compiling the " &
-        "recipe")
-      continue
+      let arm = armApplicability(decl, facts)
+      case arm.applicability
+      of aaApplies:
+        discard
+      of aaExcluded:
+        continue
+      of aaUndecidable:
+        report.notChecked.add(notDecidedNote(where, decl.rawConstraint,
+          arm.reason, "constrains the re-pin of '" & dependency & "'"))
+        continue
     if c.kind == uckExact:
       let mapped = exactRevisionOf(inputs, c, dep, report)
       if not mapped.found: continue
