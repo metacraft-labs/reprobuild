@@ -656,6 +656,22 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
                               overrideDir = logOf(s)).overrideRecord.len == 0
       check verifyExit(s, i1) == 3
 
+  test "23: a run that completes an earlier intent says how to verify it":
+    # §13 decision 162 (A11 round 15, F4): the resumed-intent output ends
+    # with the same verify-discard-record hint a run that authorised the
+    # discard prints, whether the completion was written or not.
+    let hint = "check it with `repro system addon verify-discard-record " &
+               "/var/log/repro-addon/x-discard.json --key <enrolled key>`\n"
+    for completed in [true, false]:
+      let r = UninstallResult(overrideRecord: "/var/log/repro-addon/x-discard.json",
+        resumedIntent: true, completionRecord:
+          (if completed: "/var/log/repro-addon/x-done.json" else: ""))
+      let text = discardReport(r)
+      checkpoint text
+      check text.startsWith("completing the discard an earlier uninstall")
+      check text.endsWith(hint)
+      check "was authorised;" notin text
+
 suite "A11 code review round 12: §13 decision 56, amended":
   test "18: records no run can ship are never waited for":
     # The refusal names the override, never "run uninstall again once it

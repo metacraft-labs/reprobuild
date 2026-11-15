@@ -1044,6 +1044,17 @@
 ##                                            /var/lib/repro and no ledger
 ##                                            stops on the missing ledger
 ##                                            (decision 161)
+## ``state-removal-rerun-unwired``           uninstall never calls the
+##                                            re-run that finishes the
+##                                            state removal (decision 163)
+## ``state-removal-token-not-required``       a re-run removes any tree of
+##                                            empty directories under the
+##                                            state, token or not
+##                                            (decision 163 (a))
+## ``pre-bootstrap-root-rmdir``               the state removal and its
+##                                            re-run rmdir a directory that
+##                                            was a pre-bootstrap root
+##                                            (decision 163 (b))
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1592,6 +1603,27 @@ const
                           # specifier (%t/a9q/%i) is dropped, not counted
                           # as /.
                           "writable-leading-specifier-dropped",
+                          # decision 156's bound ignores an automatic
+                          # restart's delay: InactiveExitTimestamp alone.
+                          "recreated-bound-from-inactive-exit-only",
+                          # a revert leaves a held unit that runs running.
+                          "revert-held-left-running",
+                          # an activator gets no start hold and no boot
+                          # hold.
+                          "activators-unheld",
+                          # the switch records a unit's directories as
+                          # soon as its start returns, not once they
+                          # exist.
+                          "record-without-waiting",
+                          # the boot-hold unit is ordered after
+                          # sysinit.target, so activators start beside it.
+                          "boot-hold-after-sysinit",
+                          # a host bootstrapped by an earlier engine never
+                          # gets generation 0's new objects.
+                          "gen0-not-upgraded",
+                          # a switch does not record its start holds for
+                          # the boot-hold unit.
+                          "boot-holds-unrecorded",
                           # a listener the switch's restart of its
                           # activator makes again keeps its stale record.
                           "restarted-listener-not-rerecorded",
@@ -1870,6 +1902,9 @@ const
                           "ledger-copy-removed-with-the-rest",
                           "empty-state-root-reported-vaguely",
                           "empty-state-root-left-unfinished",
+                          "state-removal-rerun-unwired",
+                          "state-removal-token-not-required",
+                          "pre-bootstrap-root-rmdir",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
