@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2816,
+    "nimTestBinaries": 2817,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
-    "staticallyDetectedRuntimeCompilerFlowTests": 142,
-    "testEntries": 2863
+    "staticallyDetectedRuntimeCompilerFlowTests": 143,
+    "testEntries": 2864
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,7 +1620,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1553,
+      "integration": 1554,
       "platform/destructive": 180,
       "pure unit": 766,
       "unclassified": 341
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2816,
+    "nimTestBinaryCount": 2817,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2863
+    "testEntryCount": 2864
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7195,6 +7195,44 @@
         }
       ],
       "source": "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "buildProvider",
+          "executedVariables": [],
+          "line": 202,
+          "path": "tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let artifact = extractInterfaceFromModule(modulePath,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "buildProvider",
+          "executedVariables": [],
+          "line": 208,
+          "path": "tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let compiled = compileProviderBinary(modulePath, binPath,"
+        }
+      ],
+      "source": "tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim"
     },
     {
       "class": "integration",
@@ -48507,6 +48545,27 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provider_session_protocol_is_isolated_from_recipe_output",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

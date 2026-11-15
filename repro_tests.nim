@@ -24280,6 +24280,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "program-wide pragma {.passL"),
   TestSpec(
+    source: "tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim",
+    binary: "build/test-bin/t_provider_session_protocol_is_isolated_from_recipe_output",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: registerCodecs()"),
+  TestSpec(
     source: "tests/integration/t_provision_binding.nim",
     binary: "build/test-bin/t_provision_binding",
     defines: @[],
