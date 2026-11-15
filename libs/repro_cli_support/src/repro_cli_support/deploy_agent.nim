@@ -201,8 +201,8 @@ const
     ## an agent takes as "this compiler predates ``--system-base``" and
     ## retries without it: a target refusal must never be retried, because
     ## the retry would compile for the Debian realisation on a host that is
-    ## not Debian (ReproOS-Add-On-Mode §13 decision 134, as amended at AR1
-    ## review round 2). Mirrored by ``repro_addon/verified_compile``.
+    ## not Debian (ReproOS-Add-On-Mode §13 decision 134). Mirrored by
+    ## ``repro_addon/verified_compile``.
 
 proc compileTargetFor*(host, platform, arch: string; systemMode = "";
                        systemActivities: seq[string] = @[];

@@ -42,6 +42,7 @@ import std/[os, posix, sets, strutils, tables]
 
 import repro_elevation
 import repro_infra/addon_diagnostics
+import repro_infra/host_base
 import repro_infra/profile
 
 import ./etc_write
@@ -500,22 +501,12 @@ proc newPacmanDriver*(root = "/"; unitProvision: proc(unit: string):
 
 proc distributionFamily(root: string): string =
   ## ``arch``, ``debian`` or "" from ``root``'s os-release(5) ``ID`` and
-  ## ``ID_LIKE`` (Omarchy is ``ID=omarchy``, ``ID_LIKE=arch``).
-  for p in ["/etc/os-release", "/usr/lib/os-release"]:
-    let f = root / p
-    if not fileExists(f): continue
-    var ids: seq[string]
-    for raw in readFile(f).splitLines():
-      let line = raw.strip()
-      for key in ["ID=", "ID_LIKE="]:
-        if line.startsWith(key):
-          for w in line[key.len .. ^1].strip(chars = {'"', '\''}).splitWhitespace():
-            ids.add(w.toLowerAscii())
-    if "arch" in ids: return "arch"
-    for w in ["debian", "ubuntu", "raspbian"]:
-      if w in ids: return "debian"
-    return ""
-  ""
+  ## ``ID_LIKE`` (Omarchy is ``ID=omarchy``, ``ID_LIKE=arch``), read by
+  ## ``repro_infra/host_base`` as ``pacman_db.isArchFamilyRoot`` reads it.
+  let b = observeHostBaseAt(root)
+  if b.isArchFamily(): "arch"
+  elif b.isDebianFamily(): "debian"
+  else: ""
 
 proc detectCollisionDriver*(root = "/"): CollisionDriver =
   ## The driver for the host's distribution: pacman on an Arch-family base

@@ -19,6 +19,8 @@
 
 import std/[algorithm, os, strutils, tables]
 
+import repro_infra/host_base
+
 const
   PacmanLocalDir* = "/var/lib/pacman/local"
     ## The local database directory.
@@ -121,15 +123,6 @@ proc isArchFamilyRoot*(root = "/"): bool =
   ## ``root``'s os-release(5) (``/etc/os-release``, else
   ## ``/usr/lib/os-release``) names the Arch family: ``ID=arch``, or ``arch``
   ## among the words of ``ID_LIKE`` (Omarchy). False when neither file is
-  ## readable.
-  for p in ["/etc/os-release", "/usr/lib/os-release"]:
-    let f = if root == "/" or root.len == 0: p else: root & p
-    if not fileExists(f): continue
-    for raw in readFile(f).splitLines():
-      let line = raw.strip()
-      for key in ["ID=", "ID_LIKE="]:
-        if line.startsWith(key):
-          for w in line[key.len .. ^1].strip(chars = {'"', '\''}).splitWhitespace():
-            if w.toLowerAscii() == "arch": return true
-    return false
-  false
+  ## readable. Read by ``repro_infra/host_base``'s parser, the one every
+  ## other reader of the base's family uses.
+  observeHostBaseAt(root).isArchFamily()

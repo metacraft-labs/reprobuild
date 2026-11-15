@@ -95,7 +95,7 @@ proc runCompileForAnyRevision*(argv: seq[string];
   ## Run an agent's ``compile-profile`` (``run``), and when the compiler
   ## rejected ``--system-base`` as an unknown option -- the usage exit
   ## (``CompileProfileUsageExit``) and nothing else -- run it again without
-  ## it (spec §13 decision 134, amended at AR1 review round 2). The retry
+  ## it (spec §13 decision 134). The retry
   ## exists only so that the compiler's own revision reaches the agent,
   ## which then refuses it as a revision mismatch instead of failing on a
   ## usage error; ``retriedCompileRefusal`` decides what a retried compile
@@ -135,8 +135,8 @@ proc agentHostIsDebianFamily*(observe: HostBaseObservation = observeHostBase):
 proc retriedCompileRefusal*(retriedWithoutBase: bool;
     compilerRevision, pinnedRevision: string; hostIsDebianFamily: bool): string =
   ## Why a compile retried without ``--system-base`` must not be used, or
-  ## "" when the pin check that follows may decide (spec §13 decision 134,
-  ## as amended at AR1 review round 2):
+  ## "" when the pin check that follows may decide (spec §13 decision
+  ## 134):
   ##
   ## * a compiler that reports the PINNED revision knows the option, so its
   ##   usage exit was not the old-compiler case, and its compile is refused;

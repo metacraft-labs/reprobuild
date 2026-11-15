@@ -89,7 +89,7 @@ e2e_addon_anywhere_remote_bootstrap_converges_clean_guest:
 e2e_addon_preflight_is_zero_write:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_preflight_is_zero_write
 
-# The Arch add-on gates (AR1), on the Arch test bed's btrfs and ext4 guests.
+# The Arch add-on gates, on the Arch test bed's btrfs and ext4 guests.
 # The pending-switch gate stops a switch at a seam, so it runs the seam build.
 e2e_arch_addon_apt_closure_refused:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_apt_closure_refused
@@ -104,7 +104,7 @@ e2e_arch_addon_preflight_is_zero_write:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_preflight_is_zero_write
 
 e2e_arch_addon_store_placement_by_root_fs:
-    REPRO_ADDON_BASES="arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_store_placement_by_root_fs
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_store_placement_by_root_fs
 
 e2e_addon_bootstrap_changes_nothing_preexisting:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
@@ -115,7 +115,7 @@ e2e_addon_bootstrap_installs_anchors_and_private_recipient_key:
 e2e_addon_store_roots_and_btrfs:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_store_roots_and_btrfs
 
-# The Arch test bed (AR1; tests/e2e/addon/arch_testbed.nim): two independent
+# The Arch test bed (tests/e2e/addon/arch_testbed.nim): two independent
 # builds of every Arch guest and of the Omarchy VM from their pins agree,
 # `pacman -Syu` on a fresh guest is a no-op, and a guest whose pacman names
 # anything but its pin (an Arch Linux Archive date, or the Omarchy capture

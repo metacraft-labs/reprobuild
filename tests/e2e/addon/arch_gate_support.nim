@@ -1,10 +1,10 @@
 ## Steps the Arch add-on gates share (spec ReproOS-Add-On-Mode §12.5
-## condition 1): the A2 sequence's profiles in their Arch form, the
+## condition 1): the Debian byte-identity sequence's profiles in their Arch form, the
 ## fingerprint with the Arch components, and the preflight and bootstrap of an
 ## Arch guest.
 ##
 ## The guests are the Arch test bed's (``arch_testbed.nim``); everything
-## else is the A2 test bed's (``addon_testbed.nim``). Nothing here starts or
+## else is the Debian test bed's (``addon_testbed.nim``). Nothing here starts or
 ## stops a process on the host or in a guest except through those.
 ##
 ## *The fixture service.* On Arch a service is a Reprobuild store package,
@@ -63,13 +63,13 @@ proc addOnStanza*(omarchyAccount = ""): string =
      else: "") & "}\n\n"
 
 proc gen1Profile*(reproExe: string; omarchyAccount = ""): string =
-  ## A2's generation 1 on Arch: a unit and an ``/etc`` file (no diversion:
+  ## The Debian sequence's generation 1 on Arch: a unit and an ``/etc`` file (no diversion:
   ## pacman has none, spec §4.3.1).
   addOnStanza(omarchyAccount) & fixtureUnit(reproExe) & "\n" &
     fixtureFile("fixture = 1\n")
 
 proc gen2Profile*(omarchyAccount = ""): string =
-  ## A2's generation 2: the unit removed, the file changed.
+  ## The Debian sequence's generation 2: the unit removed, the file changed.
   addOnStanza(omarchyAccount) & fixtureFile("fixture = 2\n")
 
 const SettleBaselineCommand* = "udevadm settle && systemctl daemon-reload && " &
@@ -165,7 +165,7 @@ proc bootstrapArch*(g: Guest; repro: string; step: StepFn;
   result.ok = boot.exitCode == 0
 
 proc archGateRecord*(gate: string): JsonNode =
-  ## The record every Arch gate writes: the A2 fields plus the Arch pins.
+  ## The record every Arch gate writes: the Debian gates' fields plus the Arch pins.
   result = archRecordBase()
   result["gate"] = %gate
   result["reprobuild"] = %gitHead()
@@ -183,8 +183,7 @@ type
     ## marker having run to its end), named for the record.
 
   Falsifier* = object
-    ## What a gate's falsifying build must do to one base (AR1 review
-    ## rounds 2 and 3). The judgement is an allow-list: a step may be red
+    ## What a gate's falsifying build must do to one base. The judgement is an allow-list: a step may be red
     ## only when it is ``required`` (the mutation's own failure) or listed
     ## in ``mayBeRed`` (a stated consequence of it); every other step the
     ## run recorded must be green. ``mustRunGreen`` names steps that must

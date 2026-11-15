@@ -19,7 +19,7 @@
 ##    both, so the producer's pin digest still reproduces on an Arch host.
 ##
 ## 5. An agent whose compiler predates `--system-base` (spec §13 decision
-##    134, as amended at AR1 review round 2): it retries without the option
+##    134): it retries without the option
 ##    only on the usage exit (2); a target the compiler refuses -- an
 ##    unreadable `os-release` among them -- exits 3 and is never retried; a
 ##    retried compile is refused when it reports the pinned revision, and

@@ -144,19 +144,26 @@ proc describeHostBase*(b: HostBase): string =
     b.id & (if b.versionId.len > 0: " " & b.versionId else: "") &
       " (" & b.source & ")"
 
+proc observeHostBaseAt*(root: string; isLinux = defined(linux)): HostBase =
+  ## The base whose `os-release` lies under `root`: the first readable file
+  ## of `OsReleasePaths` relocated below `root` ("/" or "" is the running
+  ## host). For readers that look at a tree other than `/` -- a package
+  ## database's fixture root, an image being assembled -- and for
+  ## `observeHostBase`, so every reader classifies a base the same way.
+  for p in OsReleasePaths:
+    let f = if root.len == 0 or root == "/": p else: root & p
+    if fileExists(f):
+      try:
+        return classifyHostBase(parseOsRelease(readFile(f)), f, isLinux)
+      except IOError, OSError:
+        discard
+  classifyHostBase(initTable[string, string](), "", isLinux)
+
 proc observeHostBase*(): HostBase =
   ## Observe the running host's base: the first readable `os-release` of
   ## `OsReleasePaths`. Only the real files are read; no variable redirects
   ## it (`RetiredOsReleaseEnvVar`).
-  let isLinux = defined(linux)
-  var candidates: seq[string]
   when defined(linux) or defined(macosx):
-    for p in OsReleasePaths:
-      candidates.add p
-  for p in candidates:
-    if fileExists(p):
-      try:
-        return classifyHostBase(parseOsRelease(readFile(p)), p, isLinux)
-      except IOError, OSError:
-        discard
-  classifyHostBase(initTable[string, string](), "", isLinux)
+    observeHostBaseAt("/")
+  else:
+    classifyHostBase(initTable[string, string](), "", false)
