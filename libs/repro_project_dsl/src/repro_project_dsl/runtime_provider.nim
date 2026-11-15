@@ -1091,32 +1091,72 @@ when defined(reproProviderMode):
                             foreachDispatch: proc (
                               request: ProviderGraphRequest): GraphFragment;
                             devEnvProc: proc ()): int =
-    ## RP2 stdio serve loop (v1 §2-4). Reads EngineHello, replies with the
+    ## RP2 serve loop (v1 §2-4). Reads EngineHello, replies with the
     ## ProviderManifest, then services InvokeEntryPoint frames against the
     ## existing entry-point machinery until the engine closes the pipe (EOF).
-    let toEngine = newFileStream(stdout)
-    let fromEngine = newFileStream(stdin)
-    # Handshake: EngineHello -> ProviderManifest.
-    let helloFrame = fromEngine.readFrame()
+    ##
+    ## The frames travel on the private descriptors ``protocol_channel``
+    ## set up before any recipe code ran, never on ``stdout`` / ``stdin``,
+    ## which recipe code owns (Low-Level-Provider-Protocol.md §2.2). Without
+    ## that channel the provider refuses to serve.
+    var channel: tuple[fromEngine, toEngine: Stream]
+    try:
+      channel = openProviderProtocolStreams()
+    except IOError as err:
+      stderr.writeLine("repro provider serve: " & err.msg)
+      return 2
+    let toEngine = channel.toEngine
+    let fromEngine = channel.fromEngine
+    # Handshake: EngineHello -> ProviderManifest. Nothing is negotiated yet,
+    # so the hello is read under its own fixed bound.
+    let helloFrame = fromEngine.readFrame(ProviderSessionHelloFrameLength)
     if helloFrame.messageType != smtEngineHello:
       stderr.writeLine("repro provider serve: expected EngineHello, got " &
         $ord(helloFrame.messageType))
       return 2
     let hello = decodeEngineHello(helloFrame.payload)
+    if hello.maxFrameLength < ProviderSessionMinFrameLength:
+      stderr.writeLine("repro provider serve: engine frame bound " &
+        $hello.maxFrameLength & " is below the minimum " &
+        $ProviderSessionMinFrameLength)
+      return 2
+    # The bound for the rest of the session, both directions (§2.1).
+    let maxFrame = min(hello.maxFrameLength, ProviderSessionMaxFrameLength)
+    proc sendResult(res: EntryPointResult) =
+      ## A result the engine would refuse as oversized is replaced by a
+      ## failure naming the size, which always fits (§2.1).
+      let payload = encodeEntryPointResult(res)
+      if payload.len + 2 > int(maxFrame):
+        toEngine.writeFrame(smtEntryPointResult, encodeEntryPointResult(
+          EntryPointResult(ok: false, hasValue: false,
+            diagnostics: @[SessionDiagnostic(severity: "error",
+              message: "entry point result of " & $(payload.len + 2) &
+                " bytes exceeds the negotiated frame maximum of " &
+                $maxFrame & " bytes")])), maxFrame)
+      else:
+        toEngine.writeFrame(smtEntryPointResult, payload, maxFrame)
     # The manifest's providerArtifactId is the identity the engine reconciles
     # against its expected RP1 ProviderArtifactId; the EngineHello does not
     # carry one, so v1 keeps the manifest self-reported id (see the RP2
     # fingerprint-reconciliation note in the milestone). ``lockSliceId`` from
     # the hello flows into each request below.
     let manifest = providerManifest(pkg, "", foreachDefs)
-    toEngine.writeFrame(smtProviderManifest, encodeProviderManifestMsg(manifest))
+    var wireManifest = manifest
+    wireManifest.maxFrameLength = maxFrame
+    toEngine.writeFrame(smtProviderManifest,
+      encodeProviderManifestMsg(wireManifest), maxFrame)
     while true:
       var frame: tuple[messageType: SessionMessageType; payload: seq[byte]]
       try:
-        frame = fromEngine.readFrame()
-      except ProviderSessionError:
-        # Clean EOF at a frame boundary = engine tore the session down.
+        frame = fromEngine.readFrame(maxFrame)
+      except ProviderSessionClosed:
+        # EOF at a frame boundary = the engine tore the session down.
         break
+      except ProviderSessionError as err:
+        # Any other framing error leaves the stream position unknown, so the
+        # provider stops serving and says why (§2.6).
+        stderr.writeLine("repro provider serve: " & err.msg)
+        return 2
       if frame.messageType == smtBindDependencies:
         # RP3 (v1 §4): the engine wires dependency handles into this session.
         # Store them for the build body to reach via ``boundDependencyResult``,
@@ -1124,7 +1164,7 @@ when defined(reproProviderMode):
         # invokes an entry point that needs a dependency.
         let bindMsg = decodeBindDependencies(frame.payload)
         setProviderDependencyBindings(bindMsg.bindings)
-        toEngine.writeFrame(smtBindDependenciesAck, @[])
+        toEngine.writeFrame(smtBindDependenciesAck, @[], maxFrame)
         continue
       if frame.messageType != smtInvokeEntryPoint:
         stderr.writeLine("repro provider serve: expected InvokeEntryPoint, got " &
@@ -1146,8 +1186,7 @@ when defined(reproProviderMode):
           resResult = EntryPointResult(ok: false, hasValue: false,
             diagnostics: @[SessionDiagnostic(severity: "error",
               message: err.msg)])
-        toEngine.writeFrame(smtEntryPointResult,
-          encodeEntryPointResult(resResult))
+        sendResult(resResult)
         continue
       var result = EntryPointResult(ok: false)
       try:
@@ -1174,7 +1213,7 @@ when defined(reproProviderMode):
         result.hasValue = false
         result.diagnostics = @[SessionDiagnostic(severity: "error",
           message: err.msg)]
-      toEngine.writeFrame(smtEntryPointResult, encodeEntryPointResult(result))
+      sendResult(result)
     0
 
   proc runPackageProvider*(pkg: PackageDef; buildProc: proc ();

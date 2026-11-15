@@ -2132,6 +2132,7 @@ tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1
 tests/integration/t_orphaned_lock_draft_is_swept_never_published.nim	nim	4
 tests/integration/t_output_cleanup_executor.nim	nim	16
 tests/integration/t_own_flake_ref_survives_an_uninitialised_submodule.nim	nim	2
+tests/integration/t_package_build_openssl_selection.nim	nim	6
 tests/integration/t_path_tool_rewrite_detected.nim	nim	11
 tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
 tests/integration/t_personal_workspace_restores_on_fresh_machine_from_pushed_lock_and_dotfiles.nim	nim	1
@@ -2213,6 +2214,7 @@ tests/integration/t_provider_library_c_abi_memory_ownership.nim	nim	3
 tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
+tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
 tests/integration/t_provision_roundtrip.nim	nim	8

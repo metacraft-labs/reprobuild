@@ -58,12 +58,26 @@
 ## -------------------------------
 ## Nim's debug-mode C output embeds the absolute path of every Nim module it
 ## compiled (stack-frame file names), and `profile-build.json` records the
-## compile's working directory and its `{.compile.}` C sources. The test reads
-## them: the compile ran in the bundle's `share\repro\source`, used modules
-## from its `share\repro\source\libs` AND from `share\repro\src` (the profile
-## imports `repro_test_adapters/test_runner`, which exists only in
-## `share\repro\src\reprobuild-test-adapters`), and nothing under the
+## compile's working directory and its C compile commands. The test reads
+## them: the compile included the bundle's `share\repro\source\config.nims`,
+## used modules from its `share\repro\source\libs` AND from `share\repro\src`
+## (the profile imports `repro_test_adapters/test_runner`, which exists only
+## in `share\repro\src\reprobuild-test-adapters`), and nothing under the
 ## workspace root -- neither this checkout nor its sibling repositories.
+##
+## Which `config.nims` was included is read from the C commands: it anchors
+## the vendored hash headers' `-I` on its own location (`reproRepoRoot`), so
+## `-I...\share\repro\source\libs\blake3\src\blake3\vendor` names the
+## source root whose `config.nims` the compile ran. The working directory is
+## NOT that root: since `478890f088` the compile runs nim in its own nimcache,
+## because nim writes its linker response file into its working directory and
+## a shared one raced (reprobuild-pm issue
+## 2026-10-20-concurrent-profile-compiles-race-on-the-nim-linker-response-file-in-the-source-root).
+## The test asserts that too: the recorded `currentDir` is the profile's
+## private nimcache, the directory holding `profile-build.json`. Before
+## `478890f088` this gate read the source root from `currentDir`
+## (reprobuild-pm issue
+## 2026-11-15-windows-bundle-gate-still-expects-the-profile-compile-to-run-in-the-source-root).
 ##
 ## Vacuity guard: the plan names the profile's one `fs.userFile` resource,
 ## exactly one `.rbpi` is published under the state directory, and the planned
@@ -329,8 +343,25 @@ else:
       if nimcache.len > 0:
         let buildJson = readFile(nimcache / "profile-build.json")
         let doc = parseJson(buildJson)
-        # The compile ran in the bundle's source root ...
-        check lower(doc["currentDir"].getStr()) == lower(bundleSource)
+        # The compile ran nim in its own nimcache (`478890f088`), not in a
+        # source root and not in the workspace ...
+        check lower(doc["currentDir"].getStr()) == lower(nimcache)
+        # ... with the bundle's config.nims: the vendored hash headers' `-I`,
+        # which config.nims anchors on its own directory, names the bundle's
+        # source root. Every C command carries config.nims's `passC`, so one
+        # missing it would mean a compile that did not include it at all.
+        let vendorInclude = lower(bundleSource / "libs" / "blake3" / "src" /
+          "blake3" / "vendor")
+        var commands, withBundleVendor: int
+        for entry in doc["compile"]:
+          inc commands
+          if vendorInclude in lower(entry[1].getStr()):
+            inc withBundleVendor
+        # Printed, like the module counts below, so a passing run records them.
+        echo "    C commands: ", commands, "; with the bundle's vendored -I: ",
+          withBundleVendor
+        check commands > 0
+        check withBundleVendor == commands
         # ... and nothing it recorded (its `{.compile.}` C sources, the
         # include flags config.nims passed) lies in the workspace.
         check not lower(buildJson.replace("\\\\", "\\")).contains(
