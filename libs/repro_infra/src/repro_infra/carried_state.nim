@@ -999,31 +999,11 @@ proc dropInDirApplies(d, unit: string; dirSuffix = ".d"): bool =
   ## Whether systemd reads directory ``d`` (``<name><dirSuffix>``: ``.d``
   ## for drop-ins, ``.wants``/``.requires``/``.upholds`` for dependency
   ## links) for ``unit``, or -- ``unit`` a template ``foo@.service`` -- for
-  ## any of its instances: the unit's own name, an instance's, the
-  ## template's, a dashed prefix (``foo-.service``) and the type-wide
-  ## ``service.d`` (systemd.unit(5), "Description"; ``unit_file_find_dirs()``
-  ## and ``unit_file_find_dropin_paths()`` in ``src/shared/dropin.c``,
-  ## https://github.com/systemd/systemd/blob/v257/src/shared/dropin.c, the
-  ## same for every suffix).
+  ## any of its instances (``profile.systemdReadsDropInDir``: systemd v257's
+  ## ``unit_file_find_dirs()``, the same list for every suffix; an
+  ## instance's dashed prefix keeps the instance, ``foo-@x.service``).
   if not d.endsWith(dirSuffix): return false
-  let n = d[0 ..< d.len - dirSuffix.len]
-  let dot = unit.rfind('.')
-  if dot <= 0: return false
-  let typ = unit[dot + 1 .. ^1]
-  if n == unit or n == typ: return true
-  if not n.endsWith("." & typ): return false
-  let nstem = n[0 ..< n.len - typ.len - 1]
-  let ustem = unit[0 ..< dot]
-  let at = ustem.find('@')
-  let prefix = if at >= 0: ustem[0 ..< at] else: ustem
-  if at >= 0:
-    # The template's directory, and for a template any instance's.
-    if nstem == prefix & "@": return true
-    if ustem.len == at + 1 and nstem.startsWith(prefix & "@"): return true
-  # Dashed prefixes: "a-b-c" reads "a-b-" and "a-".
-  if nstem.endsWith("-") and nstem.len > 1 and prefix.startsWith(nstem):
-    return true
-  false
+  systemdReadsDropInDir(d[0 ..< d.len - dirSuffix.len], unit)
 
 const AliasFollowMax = 32
   ## systemd's ``FOLLOW_MAX``: how deep ``unit_ids_map_get()`` follows an

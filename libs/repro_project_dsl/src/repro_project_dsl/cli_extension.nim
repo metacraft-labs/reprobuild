@@ -10,7 +10,8 @@
 ## ``types.nim``):
 ##
 ## * ``role = input|output`` on a parameter;
-## * ``dependencyPolicy`` and ``nonDeterminism`` on a scope;
+## * ``dependencyPolicy``, ``nonDeterminism`` and ``inputCheckPolicy`` on a
+##   scope;
 ## * ``outputs``, ``optionalOutputs`` and ``removeBeforeRun``, which name
 ##   parameters visible in the scope;
 ## * ``subTools``, once, directly under ``cli:`` (optionally per platform in a
@@ -211,6 +212,25 @@ proc parseNonDeterminismDecl(node: NimNode;
       "the tool's output. An unjustified blessing silently restores cache " &
       "publication for a tool whose results may not be reproducible.", node)
 
+proc parseInputCheckPolicyDecl(node: NimNode): ActionCacheFingerprintPolicy =
+  ## Caching-Architecture D2 -- ``inputCheckPolicy hybrid`` (or ``checksum``,
+  ## ``timestamp``) in a ``cli:`` block: the policy an edge that runs this
+  ## tool takes when it states none. An unrecognised word is a compile
+  ## error rather than a fallback, for the reason ``nonDeterminism`` gives:
+  ## a misspelt declaration that silently fell back would read as a
+  ## declaration that did not take.
+  if node.len != 2:
+    error("inputCheckPolicy expects one policy name " &
+      "(hybrid, checksum or timestamp)", node)
+  case identText(node[1]).normalize
+  of "hybrid": acfpHybrid
+  of "checksum": acfpChecksum
+  of "timestamp": acfpTimestamp
+  else:
+    error("inputCheckPolicy expects hybrid, checksum or timestamp, got: " &
+      identText(node[1]), node)
+    acfpUnstated
+
 proc collectOutputsOperands(node: NimNode; sink: var seq[NimNode]) =
   ## Flatten the operand list of an ``outputs`` statement into a sequence
   ## of identifier (or AccQuoted) nodes.
@@ -400,6 +420,10 @@ proc parseCliCommandExtension(cmd: var CliCommandDef; stmt: NimNode;
   of "dependencypolicy":
     cmd.ext.dependencyPolicy = parseCommandDependencyPolicy(stmt,
       cmd.ext.dependencyPolicy)
+  of "inputcheckpolicy":
+    # Caching-Architecture D2: the input-check policy this tool declares for
+    # its edges, inherited by nested scopes like ``dependencyPolicy``.
+    cmd.ext.inputCheckPolicy = parseInputCheckPolicyDecl(stmt)
   of "nondeterminism":
     # M6: the blessing is inherited from the enclosing ``cli:`` scope exactly
     # the way ``dependencyPolicy`` is, which is what makes it a property of
@@ -540,7 +564,7 @@ proc parseReproCliBlock(packageName, executableName: string;
     # M6: every tool starts UNBLESSED. A tool is blessed only where its own
     # spec says so, in writing, with a reason.
     ReproCliCommandExt(dependencyPolicy: defaultDependencyPolicy(),
-      nonDeterminism: ndpUnblessed))
+      nonDeterminism: ndpUnblessed, inputCheckPolicy: acfpUnstated))
   # ``subTools "a", "b"`` — the bare-name tools this tool shells out to
   # (cargo -> rustc and the C linker). A tool-level property, so it is read
   # from the root scope only and copied onto every command.

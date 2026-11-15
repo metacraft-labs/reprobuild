@@ -189,6 +189,18 @@ package gcc:
       dependencyPolicy automaticMonitor,
         captureBreadth = fullCapture
 
+      # Caching-Architecture.md D2 -- THE INPUT-CHECK POLICY this tool's edges
+      # take when they state none: ``hybrid``. A typed call gets it as the
+      # default of its ``actionCachePolicy``; an edge that names the tool only
+      # in ``toolIdentityRefs`` gets it through
+      # ``repro_core/tool_input_check_policies``, which
+      # ``t_tool_input_check_policies`` checks against this line. ``hybrid``
+      # records a content hash for every input, so a record of the edge can
+      # be shared across checkouts (Edge-Derived-Identities.md §3.3a), and
+      # still hashes only an input whose metadata moved. An edge that states
+      # ``timestamp`` keeps it.
+      inputCheckPolicy hybrid
+
       # DSL-port M9.R.2 audit: extended the gcc driver call to cover the
       # common compile / link / preprocess / make-dep flag families.
       # Driver invocations the recipe layer now expresses typed-style:

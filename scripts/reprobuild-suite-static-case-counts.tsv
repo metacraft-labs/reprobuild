@@ -36,7 +36,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	14
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	126
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	128
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
@@ -96,7 +96,7 @@ libs/repro_addon/tests/t_addon_review_round8.nim	nim	31
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
-libs/repro_addon/tests/t_addon_service_floor.nim	nim	32
+libs/repro_addon/tests/t_addon_service_floor.nim	nim	33
 libs/repro_addon/tests/t_addon_state_sets.nim	nim	17
 libs/repro_addon/tests/t_addon_store_custody.nim	nim	7
 libs/repro_addon/tests/t_addon_store_verify.nim	nim	9
@@ -150,6 +150,7 @@ libs/repro_binary_cache_server/tests/t_start_binds_before_it_returns.nim	nim	2
 libs/repro_binary_cache_server/tests/t_store_manifest_replaces_atomically.nim	nim	4
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	14
 libs/repro_build_engine/tests/t_an_input_kept_under_dev_shm_is_never_left_out_of_a_portable_key.nim	nim	2
+libs/repro_build_engine/tests/t_an_output_that_embeds_a_checkout_path_is_found_through_compression.nim	nim	10
 libs/repro_build_engine/tests/t_annotation_perturbs_no_fingerprint.nim	nim	5
 libs/repro_build_engine/tests/t_builtin_kinds_with_undeclared_reads_do_not_publish.nim	nim	5
 libs/repro_build_engine/tests/t_cache_hit_evidence_paths_are_built_on_demand.nim	nim	4
@@ -499,6 +500,7 @@ libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim	nim	14
 libs/repro_dsl_stdlib/tests/t_target_refuses_a_constructor_that_does_not_thread_it.nim	nim	23
+libs/repro_dsl_stdlib/tests/t_tool_input_check_policies.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_undeclared_lock_file_is_compile_error.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_windows_monitor_artifacts.nim	nim	9
@@ -623,12 +625,13 @@ libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim	n
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	12
 libs/repro_local_store/tests/t_input_access_sidecar.nim	nim	3
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
+libs/repro_local_store/tests/t_multi_output_realization_id_covers_modes_and_links.nim	nim	2
 libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	22
 libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim	nim	1
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4
 libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim	nim	7
 libs/repro_local_store/tests/t_per_computation_output_dirs.nim	nim	5
-libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	18
+libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	19
 libs/repro_local_store/tests/t_portable_memo.nim	nim	8
 libs/repro_local_store/tests/t_prefix_owning_path.nim	nim	4
 libs/repro_local_store/tests/t_published_trace_record.nim	nim	9
@@ -1600,6 +1603,7 @@ tests/integration/t_a_backward_flake_pin_refuses_the_commit.nim	nim	6
 tests/integration/t_a_behind_only_refusal_names_a_pasteable_command.nim	nim	1
 tests/integration/t_a_behind_pin_sibling_is_not_recorded_as_the_new_pin.nim	nim	1
 tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim	nim	1
+tests/integration/t_a_changed_library_source_or_flag_is_never_a_hit.nim	nim	2
 tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim	nim	1
 tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim	nim	1
 tests/integration/t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch.nim	nim	1
@@ -2206,7 +2210,7 @@ tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim	nim	5
 tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	nim	4
 tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim	nim	1
 tests/integration/t_production_policy_rejects_all_software_roots.nim	nim	8
-tests/integration/t_project_dsl_build_action_payload.nim	nim	13
+tests/integration/t_project_dsl_build_action_payload.nim	nim	14
 tests/integration/t_project_extension_adds_edges_to_original_when_present.nim	nim	1
 tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim	nim	1
 tests/integration/t_project_extension_target_rehomed_and_toggles_without_force_rebuild.nim	nim	1
@@ -2236,7 +2240,7 @@ tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
 tests/integration/t_recipe_compile_per_computation_dirs.nim	nim	1
-tests/integration/t_recipe_lock_consistency_refuses.nim	nim	3
+tests/integration/t_recipe_lock_consistency_refuses.nim	nim	4
 tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim	nim	4
 tests/integration/t_records_url_locates_the_lock_record_store.nim	nim	3
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
@@ -2379,7 +2383,7 @@ tests/integration/t_spec_example_fixtures_compile.nim	nim	2
 tests/integration/t_spec_example_fixtures_present.nim	nim	16
 tests/integration/t_spi_leaf_detector_messages.nim	nim	7
 tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim	nim	9
-tests/integration/t_spi_leaf_refetches_through_pool.nim	nim	24
+tests/integration/t_spi_leaf_refetches_through_pool.nim	nim	26
 tests/integration/t_spi_migrates_existing_pool_and_leaves.nim	nim	1
 tests/integration/t_spi_pool_retains_registered_leaf_objects.nim	nim	26
 tests/integration/t_ssl_edges_carry_openssl_link_path.nim	nim	2
@@ -2666,6 +2670,7 @@ tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	7
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_install_mirror_optional_version.nim	nim	3
+tests/unit/t_install_mirror_realization_id_covers_modes_and_links.nim	nim	4
 tests/unit/t_install_mirror_rebuild_after_hashed_publish.nim	nim	3
 tests/unit/t_install_mirror_relocation.nim	nim	30
 tests/unit/t_install_mirror_shell_tools.nim	nim	2
@@ -2785,7 +2790,7 @@ tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	6
 tests/unit/t_recipe_constraint_reader.nim	nim	34
-tests/unit/t_recipe_lock_consistency_check.nim	nim	23
+tests/unit/t_recipe_lock_consistency_check.nim	nim	35
 tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim	nim	3
 tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	6

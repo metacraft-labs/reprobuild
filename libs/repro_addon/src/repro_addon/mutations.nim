@@ -1046,15 +1046,15 @@
 ##                                            (decision 161)
 ## ``state-removal-rerun-unwired``           uninstall never calls the
 ##                                            re-run that finishes the
-##                                            state removal (decision 163)
+##                                            state removal (decision 165)
 ## ``state-removal-token-not-required``       a re-run removes any tree of
 ##                                            empty directories under the
 ##                                            state, token or not
-##                                            (decision 163 (a))
+##                                            (decision 165 (a))
 ## ``pre-bootstrap-root-rmdir``               the state removal and its
 ##                                            re-run rmdir a directory that
 ##                                            was a pre-bootstrap root
-##                                            (decision 163 (b))
+##                                            (decision 165 (b))
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1286,6 +1286,11 @@ const
                           "floor-paths-unnormalised",
                           "floor-allows-images",
                           "floor-ignores-prefix-dropins",
+                          # the dashed prefix of an instance built
+                          # without its instance (foo-.service, never
+                          # foo-@x.service, for foo-bar@x.service), at
+                          # parse time and in the scan of foreign drop-ins.
+                          "dropins-skip-instance-prefix",
                           "stored-floor-unversioned",
                           "floor-change-by-ledger-bytes",
                           "replay-forgets-stored-target",
