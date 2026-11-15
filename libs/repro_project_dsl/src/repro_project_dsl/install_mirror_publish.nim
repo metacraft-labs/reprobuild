@@ -16,35 +16,9 @@
 
 import std/[algorithm, os, strutils]
 
-import blake3
 import repro_local_store
 
 import ./install_mirror_resolver
-
-proc installMirrorTreeDigest(sourceDir: string): string =
-  if not dirExists(sourceDir):
-    return ""
-  var entries: seq[tuple[path: string; size: int64; digest: PrefixIdBytes]] =
-    @[]
-  for entry in walkDirRec(sourceDir, yieldFilter = {pcFile, pcLinkToFile},
-                          relative = true):
-    let abs = sourceDir / entry
-    let raw = readFile(abs)
-    let digest = blake3.digest(raw)
-    entries.add((path: entry.replace("\\", "/"),
-      size: getFileSize(abs), digest: digest))
-  entries.sort(proc (a, b: tuple[path: string; size: int64;
-                                 digest: PrefixIdBytes]): int =
-    cmp(a.path, b.path))
-  var manifest = "reprobuild.install-mirror-tree.v1\n"
-  for e in entries:
-    manifest.add(e.path)
-    manifest.add("\t")
-    manifest.add($e.size)
-    manifest.add("\t")
-    manifest.add(prefixIdHex(e.digest))
-    manifest.add("\n")
-  prefixIdHex(blake3.digest(manifest))
 
 type
   InstallMirrorPublishResult* = object
@@ -91,7 +65,19 @@ proc publishInstallMirrorToStore*(recipesRoot, depName, version,
     raise newException(ValueError, "package version is required")
   if sourceDir.len == 0 or not dirExists(sourceDir):
     raise newException(ValueError, "install mirror source directory is missing")
-  let treeDigest = installMirrorTreeDigest(sourceDir)
+  # The realization id is keyed on the store's canonical tree digest
+  # (``storeTreeDigest``, ``tree-v2:``): every file by content AND
+  # executable bit, every symlink by its target text, every directory by
+  # its presence. A digest of regular-file bytes alone gave two mirrors of
+  # one package+version that differed only in a mode, a link target (a
+  # ``libfoo.so`` re-pointed, or a link into a different runtime
+  # dependency's prefix whose file is byte-identical) or a directory ONE
+  # id, and the store's pre-flight then served the first tree for the
+  # second (reprobuild-pm issue 2026-11-12, "the realization-hash envelope
+  # omits the recipe itself, runtimeDeps, and environment values"). The
+  # value carries its own ``tree-v2:`` scheme tag, so the ``tree:`` frame
+  # below stays self-describing.
+  let treeDigest = storeTreeDigest(sourceDir)
   var store = openStore(storeRoot)
   defer: store.close()
   let hint = StoreReceiptHint(

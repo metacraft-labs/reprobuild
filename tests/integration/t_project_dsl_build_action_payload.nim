@@ -139,7 +139,9 @@ suite "project DSL build action payload":
     check automatic.call.arguments[3].repeated
     check automatic.dependencyPolicy.kind == bdpAutomaticMonitor
     check automatic.dependencyPolicy.depfiles.len == 0
-    check automatic.actionCachePolicy == acfpTimestamp
+    # The sample states no policy; since payload v34 that is its own value
+    # (`acfpUnstated`), resolved at lowering (Caching-Architecture.md D2).
+    check automatic.actionCachePolicy == acfpUnstated
 
     let makeDepfile = decodeBuildActionPayload(encodeBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d"),
@@ -312,6 +314,54 @@ suite "project DSL build action payload":
     # that SOME payload error was raised, which is how it went on passing
     # long after the byte it corrupted had stopped being the cache policy.
     check decodeFailure(encoded) ==
+      "invalid action cache policy in build action payload"
+
+  test "a v33 policy byte decodes as the policy it named, a v34 one as itself":
+    # v34 inserted `acfpUnstated` as ordinal 0, so every stated policy moved
+    # up by one. A v9..v33 payload wrote the old ordinals (0 timestamp,
+    # 1 checksum, 2 hybrid -- the bytes the v33 encoder wrote, pinned here as
+    # raw values so a writer and reader that drifted together cannot pass),
+    # and a cached one must decode as the policy it named: a v33 `checksum`
+    # read as the new ordinal 1 would silently become `timestamp`.
+    proc policyByte(version: uint16;
+                    policy: ActionCacheFingerprintPolicy): byte =
+      let a = encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = acfpChecksum), version)
+      let b = encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = acfpHybrid), version)
+      let offset = singleDifferingByte(a, b)
+      doAssert offset >= 0
+      encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = policy), version)[offset]
+    check policyByte(33'u16, acfpTimestamp) == 0'u8
+    check policyByte(33'u16, acfpChecksum) == 1'u8
+    check policyByte(33'u16, acfpHybrid) == 2'u8
+    # An unstated policy has no v33 spelling: it was the resolved default.
+    check policyByte(33'u16, acfpUnstated) == 0'u8
+    for (stated, expected) in [(acfpUnstated, acfpTimestamp),
+                               (acfpTimestamp, acfpTimestamp),
+                               (acfpChecksum, acfpChecksum),
+                               (acfpHybrid, acfpHybrid)]:
+      check decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = stated), 33'u16)).actionCachePolicy ==
+        expected
+    # v34 keeps every value, `acfpUnstated` included, as its own ordinal.
+    check policyByte(34'u16, acfpUnstated) == 0'u8
+    check policyByte(34'u16, acfpTimestamp) == 1'u8
+    check policyByte(34'u16, acfpChecksum) == 2'u8
+    check policyByte(34'u16, acfpHybrid) == 3'u8
+    for policy in ActionCacheFingerprintPolicy:
+      check decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = policy), 34'u16)).actionCachePolicy ==
+        policy
+    # A byte past the v33 range is refused there, not read as a v34 value.
+    var v33 = encodeBuildActionPayloadAtVersion(
+      sampleAction(actionCachePolicy = acfpTimestamp), 33'u16)
+    let at33 = singleDifferingByte(v33, encodeBuildActionPayloadAtVersion(
+      sampleAction(actionCachePolicy = acfpChecksum), 33'u16))
+    check at33 >= 0
+    v33[at33] = 3'u8
+    check decodeFailure(v33) ==
       "invalid action cache policy in build action payload"
 
   test "a corrupted element count fails closed without allocating for it":
