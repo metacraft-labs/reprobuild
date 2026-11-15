@@ -433,6 +433,25 @@ proc resolveExistingTraversal*(path: string): PathResolution =
           candidate = prefix.value
       else:
         candidate = prefix.value / component
+  else:
+    # `realpath(3)` is not a sufficient judge of `X/..`. glibc fails with
+    # ENOTDIR when `X` is not a directory, but Darwin's `realpath` removes
+    # `file/..` without checking, while the kernel refuses the same path
+    # (`stat` -> ENOTDIR). Accepting it would pop a component lexically, which
+    # is exactly what this proc exists to prevent. So require every prefix
+    # that a `..` applies to to be an existing directory, judged by the kernel
+    # (`stat` follows symlinks and applies earlier `..` to their targets).
+    let components = path.split('/')
+    for index in 1 ..< components.len:
+      if components[index] != "..":
+        continue
+      let prefix = components[0 ..< index].join("/")
+      # An empty prefix is the root of an absolute path ("/..").
+      let probe = if prefix.len == 0: "/" else: prefix
+      var st: Stat
+      if stat(probe.cstring, st) != 0 or not S_ISDIR(st.st_mode):
+        return failedResolution(path,
+          "path prefix '" & probe & "' is not an existing directory")
   let resolved = rawResolve(candidate)
   if resolved.kind != rrkResolved:
     return failedResolution(path, "path cannot be resolved: " & resolved.reason)
