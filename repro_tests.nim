@@ -23367,6 +23367,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_package_build_openssl_selection.nim",
+    binary: "build/test-bin/t_package_build_openssl_selection",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let repoRoot = getCurrentDir()"),
+  TestSpec(
     source: "tests/integration/t_path_tool_rewrite_detected.nim",
     binary: "build/test-bin/t_path_tool_rewrite_detected",
     defines: @[],
