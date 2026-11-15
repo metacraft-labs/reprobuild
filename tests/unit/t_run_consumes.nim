@@ -206,12 +206,16 @@ suite "N2: leased-consumes bridge (hermetic)":
     # With NO daemon, a consuming run materializes + (would) run.
     let consumes = @[RunEdgeLease(address: "topology",
       consumerId: "topology", policyKind: relDelayed, ttlSeconds: 30 * 60)]
-    let outcome = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
+    var outcome = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
       resources, groups, store, noArtifacts, endpoint = NoDaemon, now = t0)
     check outcome.renewedGroups == @["topology"]
     check outcome.daemonSent.len == 0             # no daemon reached
     for m in @["net", "a", "b"]:
       check hasStateRecord(store, m)
+    # The run-edge's command finishes at once; the consume ends there
+    # (Ephemeral-State-Leases.md §2.3), releasing its in-use hold (§4.6).
+    check finishConsumedStateGroups(outcome, endpoint = NoDaemon,
+      now = t0).len == 0
 
     # AFTER the deadline, the opportunistic reconcile-start reap (equivalently
     # ``repro reap``) tears the group down — correctness independent of any
@@ -409,10 +413,14 @@ suite "N2: leased-consumes bridge (hermetic)":
     let consumes = @[RunEdgeLease(address: "topology",
       consumerId: "topology", policyKind: relDelayed, ttlSeconds: 30 * 60)]
 
-    let first = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
+    var first = reconcileConsumedStateGroups(consumes, "topology-lease-smoke",
       resources, groups, store, noArtifacts, endpoint = NoDaemon, now = t0)
     check first.startReaped.len == 0               # nothing to reap on run one
     check applyLog == @["net", "a", "b"]
+    # Run one's command finishes at once: its consume ends at t0 (§2.3) and
+    # its in-use hold is released (§4.6), as `repro run` does on exit.
+    check finishConsumedStateGroups(first, endpoint = NoDaemon,
+      now = t0).len == 0
     let firstDeadline = readStateRecord(store, "net").effectiveDeadline
     check firstDeadline == some(t0 + initDuration(minutes = 30))
     applyLog = @[]

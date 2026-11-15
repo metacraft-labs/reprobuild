@@ -168,11 +168,13 @@
 152 The triggers to fire again come from each held unit | trigger, fire again, held unit, template, instance
 153 A unit that requires a refused unit stays held | requires, refused unit, stays held
 154 Decision 137's missing spellings are defects
-155 Activators are held like the services they start
-156 A `Restart=` restart's run begins after its delay
+155 Activators are held like the services they start | activator, socket, held, hold
+156 A `Restart=` restart's run begins after its delay | restart, delay
 157 The boot replay confirms from a unit ordered after the re-assertion
 158 An ordering that cycles with the re-assertion is refused
-159 A boot-hold unit, and generation 0's upgrade path
+159 A boot-hold unit, and generation 0's upgrade path | boot-hold, boot, upgrade, hold, generation 0
 160 A trigger that does not restart fails the switch; its revert leaves the host pending | trigger, restart, pending, recover
 161 The empty state directory is the only step after the ledger copy | empty, ledger copy, rmdir, re-run
 162 The store-custody gate forges the markers it cites, and two smaller points of round 14 | marker, forge, discard-markers, verify
+163 A re-run finishes only the add-on's own directories, and only with a token | token, re-run, pre-bootstrap, rmdir, chain, ledger copy
+164 The pre-bootstrap inputs are left in place | pre-bootstrap input, left in place

@@ -263,3 +263,140 @@ suite "project clean (repro clean)":
     let res = applyProjectClean(newSeq[ProviderGraphSnapshot](), root)
     check res.actions.len == 0
     check fileExists(mine)
+
+suite "project clean of container directory outputs":
+  # An ``oekDirectory`` claim is a CONTAINER: a directory its action declares
+  # only to say that it exists, while other writers fill it
+  # (Incremental-Invalidation.md §"Non-regular outputs", "Container directory
+  # outputs"). ``repro clean`` classifies ``fs.ensureDir`` and a
+  # ``fs.preserveTree`` root this way. Unlike an opaque directory output (the
+  # ``oekFile`` case above), it is never removed with its tree.
+
+  test "a container that still holds an unclaimed file is kept":
+    let root = createTempDir("rb-clean-", "-container-kept")
+    defer: removeDir(root)
+    let member = touchUnder(root, "build/c/main.o")
+    let mine = touchUnder(root, "build/c/notes.txt")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build/c", kind = oekDirectory),
+      fileClaim("build/c/main.o")])], root)
+    check outcomeOf(res, "build/c/main.o") == ocoDeleted
+    check outcomeOf(res, "build/c") == ocoSkippedNotEmpty
+    check not fileExists(member)
+    check fileExists(mine)
+    check res.failed == 0
+
+  test "a container whose members were its only entries is removed":
+    let root = createTempDir("rb-clean-", "-container-empty")
+    defer: removeDir(root)
+    discard touchUnder(root, "build/pub/top.txt")
+    discard touchUnder(root, "build/pub/nested/deep/leaf.txt")
+    let mine = touchUnder(root, "build/README.txt")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build/pub", kind = oekDirectory),
+      fileClaim("build/pub/top.txt"),
+      fileClaim("build/pub/nested/deep/leaf.txt")])], root)
+    check outcomeOf(res, "build/pub") == ocoDeleted
+    check not dirExists(root / "build/pub")
+    # The directory that holds the container is not the container's.
+    check dirExists(root / "build")
+    check fileExists(mine)
+
+  test "emptied directories are pruned only below the container":
+    let root = createTempDir("rb-clean-", "-container-prune")
+    defer: removeDir(root)
+    discard touchUnder(root, "build/pub/a/b/leaf.txt")
+    let sibling = touchUnder(root, "build/pub/a/keep.txt")
+    # An empty directory beside the members, which nothing removed, stays.
+    createDir(root / "build/pub/empty-of-mine")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build/pub", kind = oekDirectory),
+      fileClaim("build/pub/a/b/leaf.txt")])], root)
+    check outcomeOf(res, "build/pub/a/b/leaf.txt") == ocoDeleted
+    check not dirExists(root / "build/pub/a/b")
+    check fileExists(sibling)
+    check dirExists(root / "build/pub/empty-of-mine")
+    check outcomeOf(res, "build/pub") == ocoSkippedNotEmpty
+
+  test "a member outside every container prunes nothing":
+    let root = createTempDir("rb-clean-", "-no-container")
+    defer: removeDir(root)
+    discard touchUnder(root, "out/x/y.o")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("out/x/y.o")])], root)
+    check outcomeOf(res, "out/x/y.o") == ocoDeleted
+    check dirExists(root / "out/x")
+
+  test "a container that is a symlink is unlinked, not followed":
+    let root = createTempDir("rb-clean-", "-container-link")
+    defer: removeDir(root)
+    let outside = createTempDir("rb-clean-", "-container-outside")
+    defer: removeDir(outside)
+    writeFile(outside / "precious.txt", "must survive")
+    createDir(root / "build")
+    createSymlink(outside, root / "build/c")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build/c", kind = oekDirectory)])], root)
+    check outcomeOf(res, "build/c") == ocoDeleted
+    check not symlinkExists(root / "build/c")
+    check fileExists(outside / "precious.txt")
+
+  test "a container is kept under a dry run":
+    let root = createTempDir("rb-clean-", "-container-dry")
+    defer: removeDir(root)
+    let member = touchUnder(root, "build/c/main.o")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build/c", kind = oekDirectory),
+      fileClaim("build/c/main.o")])], root, dryRun = true)
+    check res.wouldDelete == 2
+    check fileExists(member)
+
+  test "a nested container leaves no emptied directories to its container":
+    # ``fs.ensureDir("build/a/b")`` inside ``fs.ensureDir("build")``: the
+    # inner container's removal takes ``build/a``, which it left empty, so
+    # the outer container is empty in its turn and is removed too.
+    let root = createTempDir("rb-clean-", "-container-nested")
+    defer: removeDir(root)
+    discard touchUnder(root, "build/a/b/x.o")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build", kind = oekDirectory),
+      fileClaim("build/a/b", kind = oekDirectory),
+      fileClaim("build/a/b/x.o")])], root)
+    check outcomeOf(res, "build/a/b/x.o") == ocoDeleted
+    check outcomeOf(res, "build/a/b") == ocoDeleted
+    check outcomeOf(res, "build") == ocoDeleted
+    check not dirExists(root / "build")
+    check res.failed == 0
+
+  test "a directory a kept claim names is not pruned":
+    let root = createTempDir("rb-clean-", "-container-kept-claim")
+    defer: removeDir(root)
+    discard touchUnder(root, "build/pub/keep/x.txt")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build/pub", kind = oekDirectory),
+      fileClaim("build/pub/keep", cplNeverDeleteAutomatically,
+        kind = oekDirectory),
+      fileClaim("build/pub/keep/x.txt")])], root)
+    check outcomeOf(res, "build/pub/keep/x.txt") == ocoDeleted
+    check outcomeOf(res, "build/pub/keep") == ocoSkippedPolicy
+    check dirExists(root / "build/pub/keep")
+    check outcomeOf(res, "build/pub") == ocoSkippedNotEmpty
+
+  test "pruning does not follow a symlinked directory inside a container":
+    # ``build/pub/link`` points outside the project. Removing the member
+    # through it must not go on to remove the directory it emptied there.
+    let root = createTempDir("rb-clean-", "-container-prune-link")
+    defer: removeDir(root)
+    let outside = createTempDir("rb-clean-", "-container-prune-outside")
+    defer: removeDir(outside)
+    createDir(outside / "sub")
+    writeFile(outside / "sub" / "x.txt", "member")
+    createDir(root / "build/pub")
+    createSymlink(outside, root / "build/pub/link")
+    let res = applyProjectClean(@[snapshotClaiming(@[
+      fileClaim("build/pub", kind = oekDirectory),
+      fileClaim("build/pub/link/sub/x.txt")])], root)
+    check outcomeOf(res, "build/pub/link/sub/x.txt") == ocoDeleted
+    check dirExists(outside / "sub")
+    check symlinkExists(root / "build/pub/link")
+    check outcomeOf(res, "build/pub") == ocoSkippedNotEmpty

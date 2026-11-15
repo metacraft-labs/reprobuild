@@ -29,6 +29,14 @@ export gzip
 # `repro test` on a Windows runner, "dirname requested by uses \"dirname\"
 # was not found in PATH"). Versions were read with `--version` from this
 # archive's own binaries, run under Wine on Linux.
+#
+# `mktemp` (coreutils 8.32), `cmp` and `diff` (GNU diffutils 3.12) came
+# later, for the same failure ("mktemp requested by uses \"mktemp\" was not
+# found in PATH", codetracer-cardano-recorder on a Windows runner). Their
+# versions were read without running them: the archive's
+# `etc/package-versions.txt` lists `coreutils 8.32-5` and `diffutils 3.12-1`,
+# and each binary embeds that version beside its `GNU coreutils` /
+# `GNU diffutils` package string.
 
 package xz:
   provisioning:
@@ -199,12 +207,44 @@ package `cmp`:
     nixPackage "nixpkgs#diffutils", executablePath = "bin/cmp",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/cmp.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/cmp.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/cmp.exe",
+      version = "3.12",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `diff`:
   provisioning:
     nixPackage "nixpkgs#diffutils", executablePath = "bin/diff",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/diff.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/diff.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/diff.exe",
+      version = "3.12",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `getent`:
   ## systemd's meson setup runs `getent passwd 65534` to warn about a
@@ -373,6 +413,22 @@ package mktemp:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/mktemp",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/mktemp.exe`. Same
+    # two channels as `sh` -- Scoop's `main/git` and the pinned
+    # PortableGit archive (one download, deduped by the store; only the
+    # `executablePath` view differs). Precedent: sh.nim, tar.nim, gzip.nim.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/mktemp.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/mktemp.exe",
+      version = "8.32",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
 package `ln`:
   provisioning:

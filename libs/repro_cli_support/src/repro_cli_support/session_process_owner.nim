@@ -1,7 +1,9 @@
 ## Kernel-owned session exclusion and a handle to the helper's supervisor.
 ## Lock files remain in place: unlinking a held lock permits two owners.
-import std/[atomics, json, os]
+import std/[atomics, json, os, strutils]
 from repro_core import extendedPath
+from repro_cli_support/dev_session_access import UnixBindPrefix,
+  ControlTokenName, ControlSocketName, removeControlEndpointFiles
 
 when defined(windows):
   type NativeHandle = pointer
@@ -100,13 +102,40 @@ proc close*(parent: SessionParent) =
   when defined(windows):
     discard closeHandle(parent.handle)
 
-proc removeOwnedReady*(sessionDir: string) =
+proc removeReadyOwnedBy*(sessionDir: string; pid: int) =
+  ## Withdraw the control API that ``pid`` published for ``sessionDir``: its
+  ## token file and AF_UNIX socket first, then ``http-ready.json``. Nothing
+  ## is touched unless the published record names ``pid``, so a newer
+  ## listener's endpoint is never removed by an older one. Best effort: a
+  ## leftover token is replaced by the next listener, never reused.
   let path = extendedPath(sessionDir / "http-ready.json")
   try:
-    if parseJson(readFile(path)){"pid"}.getInt() == getCurrentProcessId():
-      removeFile(path)
+    let published = parseJson(readFile(path))
+    if published{"pid"}.getInt() != pid:
+      return
+    let bindValue = published{"httpBind"}.getStr()
+    # The record lives in the session directory, whose permissions nothing
+    # guarantees, so its paths are trusted only as far as their NAMES: a
+    # path that is not a control token or control socket is left alone,
+    # rather than letting a planted record turn this cleanup into a delete
+    # of an arbitrary file of the session's user.
+    var tokenPath = published{"httpTokenPath"}.getStr()
+    if tokenPath.extractFilename != ControlTokenName:
+      tokenPath = ""
+    var socketPath =
+      if bindValue.startsWith(UnixBindPrefix):
+        bindValue[UnixBindPrefix.len .. ^1]
+      else: ""
+    if socketPath.extractFilename != ControlSocketName:
+      socketPath = ""
+    removeControlEndpointFiles(tokenPath, socketPath)
+    removeFile(path)
   except CatchableError:
     discard
+
+proc removeOwnedReady*(sessionDir: string) =
+  ## ``removeReadyOwnedBy`` for the calling listener itself.
+  removeReadyOwnedBy(sessionDir, getCurrentProcessId())
 
 type SessionWatchdogArgs* = tuple[parent: SessionParent, dir: string,
                                   stopped: ptr Atomic[bool]]

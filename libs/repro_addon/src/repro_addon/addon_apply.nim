@@ -87,6 +87,7 @@ import repro_local_store/store
 import ./agent_record
 import ./collision
 import ./own_profile
+import ./boot_holds
 import ./contain_marker
 import ./tmpfiles_scope
 import ./addon_secrets
@@ -371,6 +372,16 @@ const
 proc addonDir*(stateDir: string): string = stateDir / "addon"
 proc ledgerCopyPath*(stateDir: string): string = stateDir / "addon-ledger"
 proc ownProfilePath*(stateDir: string): string = addonDir(stateDir) / "own.profile"
+
+proc ownPathProbe*(path: string): tuple[present: bool; sha256: string] =
+  ## ``own_profile.PathProbe`` on the live file system: a link is present
+  ## and is not a regular file (its target is never read).
+  if symlinkExists(path): return (true, "")
+  if fileExists(path):
+    try: return (true, sha256Hex(readFile(path)))
+    except IOError, OSError: return (true, "")
+  if dirExists(path): return (true, "")
+  (false, "")
 proc userProfilePath*(stateDir: string): string = addonDir(stateDir) / "user.profile"
 proc generationLedgerPath*(stateDir, generationId: string): string =
   stateDir / "generations" / generationId / "addon-ledger"
@@ -1423,6 +1434,62 @@ proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
         effectiveFloor(r).len > 0:
       result.add(r.suName)
 
+proc activatorOf(r: SystemResource): tuple[name, content: string] =
+  ## The socket, timer or path unit ``r`` installs -- a
+  ## ``systemd.systemUnit`` of such a type, or a ``systemd.systemTimer`` --
+  ## and its file's bytes; ("", "") for any other resource.
+  case r.kind
+  of srkSystemdSystemUnit:
+    if r.suCollision != "dropIn" and (r.suName.endsWith(".socket") or
+        r.suName.endsWith(".timer") or r.suName.endsWith(".path")):
+      return (r.suName, r.suContent)
+  of srkSystemdSystemTimer:
+    return (r.stName, r.stContent)
+  else: discard
+  ("", "")
+
+proc activatorTargets(resources: openArray[SystemResource];
+                      name, content: string): seq[string] =
+  ## The units the socket, timer or path unit ``name`` of the generation
+  ## triggers, read as systemd reads ``Service=`` / ``Unit=``: from its own
+  ## file and the generation's drop-ins onto it (``triggeredUnits``,
+  ## ``profileDropInsOf``); the template for an ``Accept=yes`` socket.
+  var p = SystemProfile()
+  for x in resources: p.resources.add(x)
+  triggeredUnits(name, @[content] & profileDropInsOf(p, name))
+
+proc flooredActivatorNames*(resources: openArray[SystemResource]): seq[string] =
+  ## The socket, timer and path units of the generation that activate one of
+  ## its floored services (a template's, for an instance or ``Accept=yes``):
+  ## a hold must reach them as it reaches the services, or a held socket
+  ## keeps listening and starts at boot (§13 decision 155; A9 review round
+  ## 15).
+  var floored = initHashSet[string]()
+  for u in flooredUnitNames(resources): floored.incl(u)
+  for r in resources:
+    let (name, content) = activatorOf(r)
+    if name.len == 0: continue
+    for svc in activatorTargets(resources, name, content):
+      let tpl = floorTemplateOf(svc)
+      if svc in floored or (tpl.len > 0 and tpl in floored):
+        if name notin result: result.add(name)
+
+proc activatorsOf*(resources: openArray[SystemResource];
+                   units: openArray[string]): seq[string] =
+  ## The generation's socket, timer and path units that activate one of
+  ## ``units`` (or an instance of a template among them): a revert that
+  ## holds a service holds them with it, persistently too (§13 decision
+  ## 155), or a reboot starts them and they fire at the held service.
+  var wanted = initHashSet[string]()
+  for u in units: wanted.incl(u)
+  for r in resources:
+    let (name, content) = activatorOf(r)
+    if name.len == 0: continue
+    for svc in activatorTargets(resources, name, content):
+      let tpl = floorTemplateOf(svc)
+      if svc in wanted or (tpl.len > 0 and tpl in wanted):
+        if name notin result and name notin wanted: result.add(name)
+
 proc writeStartHolds*(resources: openArray[SystemResource];
                       extra: openArray[string] = []): seq[string] =
   ## A start hold for every floored unit of the generation, and for each
@@ -1432,6 +1499,9 @@ proc writeStartHolds*(resources: openArray[SystemResource];
   when mutated("floor-start-unheld"):
     return
   var units = flooredUnitNames(resources)
+  when not mutated("activators-unheld"):
+    for a in flooredActivatorNames(resources):
+      if a notin units: units.add(a)
   for u in extra:
     if u notin units: units.add(u)
   writeHolds(units, StartHoldName, StartHoldText)
@@ -2065,6 +2135,13 @@ type UnitRun* = object
   mainStart*: int64
     ## ``ExecMainStartTimestamp``: when the run's main process started
     ## (§13 decision 141)
+  nRestarts*: int
+    ## ``NRestarts``: automatic restarts since the unit was last started
+    ## explicitly (§13 decision 156's bound)
+  restartDelay*: int64
+    ## the ``Restart=`` delay, nanoseconds: ``RestartUSecNext`` where systemd
+    ## reports it (systemd 254 and later, with ``RestartSteps=``), else
+    ## ``RestartUSec``
   running*: bool
 
 proc parseUtcStamp(v: string): int64 =
@@ -2080,10 +2157,35 @@ proc parseUtcStamp(v: string): int64 =
     except ValueError, TimeParseError: discard
   0
 
+proc parseTimespanNs*(v: string): int64 =
+  ## A systemd time span as ``systemctl show`` prints it (``3s``,
+  ## ``100ms``, ``1min 30s``, ``0``; systemd.time(7)) in nanoseconds; -1
+  ## for ``infinity`` or anything else it cannot read.
+  let t = v.strip()
+  if t.len == 0 or t == "0": return 0
+  if t == "infinity": return -1
+  for w in t.splitWhitespace():
+    var i = 0
+    while i < w.len and w[i] in {'0'..'9', '.'}: inc i
+    if i == 0: return -1
+    var n = 0.0
+    try: n = parseFloat(w[0 ..< i])
+    except ValueError: return -1
+    let unitNs = case w[i .. ^1]
+      of "us", "usec": 1_000.0
+      of "ms", "msec": 1_000_000.0
+      of "", "s", "sec": 1_000_000_000.0
+      of "min", "m": 60_000_000_000.0
+      of "h", "hr": 3_600_000_000_000.0
+      else: -1.0
+    if unitNs < 0: return -1
+    result += int64(n * unitNs)
+
 proc parseUnitRun*(output: string): UnitRun =
   ## ``UnitRun`` from the output of ``systemctl show --timestamp=us+utc -p
   ## InvocationID -p InactiveExitTimestamp -p InactiveEnterTimestamp -p
-  ## ActiveState``.
+  ## ActiveState`` (and ``NRestarts``, ``RestartUSec``, ``RestartUSecNext``).
+  var nextSeen = false
   for l in output.splitLines():
     let eq = l.find('=')
     if eq <= 0: continue
@@ -2094,6 +2196,15 @@ proc parseUnitRun*(output: string): UnitRun =
     of "InactiveExitTimestamp": result.start = parseUtcStamp(v)
     of "InactiveEnterTimestamp": result.stop = parseUtcStamp(v)
     of "ExecMainStartTimestamp": result.mainStart = parseUtcStamp(v)
+    of "NRestarts":
+      try: result.nRestarts = parseInt(v) except ValueError: discard
+    of "RestartUSec":
+      if not nextSeen: result.restartDelay = parseTimespanNs(v)
+    of "RestartUSecNext":
+      let d = parseTimespanNs(v)
+      if d >= 0:
+        result.restartDelay = d
+        nextSeen = true
     of "ActiveState": result.running = v in ["active", "activating", "reloading"]
     else: discard
 
@@ -2104,7 +2215,8 @@ proc unitRun*(unit: string;
   ## systemctl in tests); empty when systemd does not say.
   let args = @["show", "--no-pager", "--timestamp=us+utc", "-p", "InvocationID",
                "-p", "InactiveExitTimestamp", "-p", "InactiveEnterTimestamp",
-               "-p", "ExecMainStartTimestamp",
+               "-p", "ExecMainStartTimestamp", "-p", "NRestarts",
+               "-p", "RestartUSec", "-p", "RestartUSecNext",
                "-p", "ActiveState", "--", unit]
   try:
     let r = (if show != nil: show(args)
@@ -2112,6 +2224,48 @@ proc unitRun*(unit: string;
     if r.exitCode != 0: return
     result = parseUnitRun(r.output)
   except CatchableError: discard
+
+proc waitForPendingPaths*(unit: string; pending: openArray[tuple[path, unit: string]];
+                          timeoutMs = 10_000;
+                          exists: proc (p: string): bool = nil;
+                          stillStarting: proc (u: string): bool = nil) =
+  ## Wait, bounded, until every path pending for ``unit`` exists, or the
+  ## unit is no longer starting or running (A9 review round 14, finding 2).
+  ## ``systemctl start`` of a ``Type=simple`` unit returns once the main
+  ## process is forked; systemd 257 makes the unit's directories in
+  ## ``systemd-executor`` after that, so a record taken at once finds them
+  ## absent and the next apply refuses them. Past the bound nothing more is
+  ## waited for, and what is still absent stays unrecorded: fail closed.
+  let ex = if exists != nil: exists else: (proc (p: string): bool = dirExists(p) or fileExists(p) or symlinkExists(p))
+  let alive = if stillStarting != nil: stillStarting
+              else: (proc (u: string): bool = unitRun(u).running)
+  var waitFor: seq[string]
+  for (p, u) in pending:
+    if u == unit: waitFor.add(p)
+  if waitFor.len == 0: return
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  while true:
+    var missing = false
+    for p in waitFor:
+      if not ex(p): missing = true
+    if not missing or not alive(unit) or getMonoTime() >= deadline: return
+    sleep(50)
+
+proc recordAfterStart*(unit: string; pending: openArray[tuple[path, unit: string]];
+                       record: proc (u: string);
+                       wait: proc (u: string) = nil) =
+  ## The start step's record of the directories named for ``unit`` that
+  ## its start made (§13 decisions 57 and 68), taken once its pending paths
+  ## exist (``waitForPendingPaths``,
+  ## or ``wait`` when given). The end-of-step pass (``recordStartedSince``)
+  ## does not make the wait redundant: it runs straight after the last
+  ## unit's start returns, so for that unit it reads the directories at the
+  ## same instant this record would without the wait, and a ``Type=simple``
+  ## unit's directories may not exist yet (A9 review round 15, finding 2).
+  when not mutated("record-without-waiting"):
+    if wait != nil: wait(unit)
+    else: waitForPendingPaths(unit, pending)
+  record(unit)
 
 proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
   ## The unit's current ``InvocationID`` and when that invocation began
@@ -2179,6 +2333,8 @@ proc hostSystemdView*(path, unit: string; show: ShowProps;
     result.invocationStart = a.start
     result.lastStop = a.stop
     result.mainStart = a.mainStart
+    result.nRestarts = a.nRestarts
+    result.restartDelay = a.restartDelay
     result.stopped = not b.running
   else:
     let run = unitRun(unit, systemctlShow)
@@ -2186,6 +2342,8 @@ proc hostSystemdView*(path, unit: string; show: ShowProps;
     result.invocationStart = run.start
     result.lastStop = run.stop
     result.mainStart = run.mainStart
+    result.nRestarts = run.nRestarts
+    result.restartDelay = run.restartDelay
     result.stopped = not run.running
 
 proc refusalLine*(subject, code, key, msg: string): string =
@@ -2287,6 +2445,7 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
   for d in resources:
     if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
   for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
+  for a in flooredActivatorNames(resources): own.incl(startHoldPath(a))
   # A revert's persistent holds are the add-on's own (§13 decision 133):
   # only a file holding exactly the hold's text, on a unit the generation
   # installs (A9 review round 13); any other file of that name is judged.
@@ -4628,17 +4787,35 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # by every switch (A11 review findings 2 and 8: a host bootstrapped
   # before a fix gets it with its next switch; ``own_profile``). A replay
   # applies exactly what the interrupted switch planned.
-  let ownText =
+  let previous =
+    if replaying: parseLedger(replayPlan.fromLedgerText)
+    elif fileExists(ledgerCopyPath(stateDir)): readLedger(ledgerCopyPath(stateDir))
+    else: Ledger()
+  let migratedOwn =
     if replaying: replayPlan.targetOwnText
     elif opts.ownProfileText.len > 0: migrateOwnProfile(opts.ownProfileText)
     elif fileExists(ownProfilePath(stateDir)):
       migrateOwnProfile(readFile(ownProfilePath(stateDir)))
     else: raise newException(AddonApplyError,
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
-  let previous =
-    if replaying: parseLedger(replayPlan.fromLedgerText)
-    elif fileExists(ledgerCopyPath(stateDir)): readLedger(ledgerCopyPath(stateDir))
-    else: Ledger()
+  # The objects this build added to generation 0 are installed by every
+  # switch that finds them missing (§13 decision 159: a host bootstrapped
+  # by an earlier engine gets the boot-hold unit at its next apply). Here,
+  # under the host apply lock and before anything is written, so a path in
+  # the way stops the apply before any generation change.
+  let ownText =
+    if replaying: migratedOwn
+    else:
+      try:
+        addMissingGeneration0(migratedOwn, missingGeneration0Objects(migratedOwn),
+          probe = ownPathProbe,
+          recorded = proc (path: string): string =
+            for e in previous.entries:
+              if e.path == path: return e.sha256
+            "")
+      except ValueError as e:
+        raise newException(AddonApplyError, "generation 0 cannot be " &
+          "upgraded: " & e.msg)
   result.previousLedger = previous
   # The generation `current` names, not the ledger copy's: a switch that
   # failed after its writes leaves the copy describing the host under the
@@ -6508,6 +6685,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           startHolds = writeStartHolds(composed.resources, liveUnits)
           holdTriggers()
           if startHolds.len > 0: daemonReload()
+      # The record of the start holds goes in before the marker (§13
+      # decision 159): a reboot while this switch is pending puts them back
+      # before sysinit.target (``boot_holds``). A record that cannot be
+      # written stops the switch here, before its marker.
+      when not mutated("boot-holds-unrecorded"):
+        writeBootHoldRecord(stateDir, startHolds)
       marker.planId = planId
       writePendingMarker(stateDir, marker)
       for u in runningManagedUnits(previous):
@@ -6650,6 +6833,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # A trigger the drivers' writes loaded only now (a host unit
             # linked to a held one) is stopped and held too.
             holdTriggers()
+            when not mutated("boot-holds-unrecorded"):
+              writeBootHoldRecord(stateDir, startHolds)
           daemonReload()
           # From here on every start runs the generation's definitions:
           # step 7 accepts an exclusive instance started after this point
@@ -6871,8 +7056,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             for r in composed.resources:
               if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
                 genUnits.incl(r.suName)
-            let held = revertHeldUnits(notHeld, genUnits,
-                                       flooredUnitNames(composed.resources))
+            var held = revertHeldUnits(notHeld, genUnits,
+              flooredUnitNames(composed.resources) &
+                (when mutated("activators-unheld"): newSeq[string]()
+                 else: flooredActivatorNames(composed.resources)))
+            # §13 decision 155: a held service's activators are held with
+            # it, by the same persistent hold.
+            when not mutated("activators-unheld"):
+              for a in activatorsOf(composed.resources, held): held.add(a)
             proc isHeld(u: string): bool =
               u in held or floorTemplateOf(u) in held
             # A trigger of a held unit stays down with it (§13 decision
@@ -6962,6 +7153,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 discard clearStaleStartHolds()
                 removeStartHolds(startHolds)
                 startHolds.setLen(0)
+                # The persistent holds stand in for them across a reboot
+                # (§13 decision 159).
+                clearBootHoldRecord(stateDir)
                 try: daemonReload()
                 except CatchableError as ex: problems.add(ex.msg)
               else:
@@ -6974,10 +7168,28 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                   "start holds back before any unit rendered with floor " &
                   "version 5 or later starts (§13 decision 144)")
             heldAtRevert = notHeld
+            # §13 decision 155: a hold keeps a unit from starting, not from
+            # running, so a held unit that runs -- an activator listening,
+            # a service its socket started -- is stopped now (A9 review
+            # round 15). A template's instances are stopped by
+            # pattern. A stop that fails keeps the revert from committing.
+            when not mutated("revert-held-left-running"):
+              for u in held:
+                let at = u.find('@')
+                let target =
+                  if at > 0 and u.find('.', at) == at + 1:
+                    u[0 .. at] & "*" & u[at + 1 .. ^1]
+                  else: u
+                if target == u and not unitIsActive(u): continue
+                try: stopUnit(target)
+                except CatchableError as ex:
+                  problems.add("the revert could not stop " & target &
+                    ", which it holds: " & ex.msg)
             # Once the start holds are gone, the triggers they stopped come
             # back, but those of a held unit (§13 decision 151).
             if startHolds.len == 0:
-              for pr in restartHeldTriggers(triggersHeld): problems.add(pr)
+              for pr in restartHeldTriggers(proc (t: string): bool =
+                  isHeld(t) or triggersHeld(t)): problems.add(pr)
             stderr.writeLine("repro-addon: the revert keeps " & held.join(", ") &
               " on hold, not started: its floor check refused them:\n  " &
               notHeld.join("\n  "))
@@ -7002,6 +7214,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # definitions.
             let stale = clearStaleStartHolds()
             removeStartHolds(startHolds)
+            # Nothing is held any more: a reboot before the commit puts
+            # nothing back (§13 decision 159).
+            clearBootHoldRecord(stateDir)
             # A revert's holds go once a switch's check passes (§13
             # decision 133), wherever a build wrote them.
             # Only the add-on's own: exactly the hold's text, on a unit the
@@ -7060,9 +7275,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               (proc (u: string) {.closure.})(nil)
             else:
               proc (u: string) =
-                try: recordCreatedDirs(stateDir, u, createdPending,
-                                       invocation = unitInvocation(u).id)
-                except IOError, OSError: discard
+                recordAfterStart(u, createdPending, proc (v: string) =
+                  try: recordCreatedDirs(stateDir, v, createdPending,
+                                         invocation = unitInvocation(v).id)
+                  except IOError, OSError: discard)
           # A revert leaves out what its record of triggers to restart owns
           # (§13 decision 160): one filter for every start of step 7.
           block:

@@ -941,4 +941,24 @@ unsigned int repro_hcr_lx_probe_site_retained_body_count(
   return site == NULL ? 0u : (unsigned int)site->retained_body_count;
 }
 
+/* Whether the site table still records this provider as holding the window's
+ * cross-patcher claim (§10.1: taken at the first publication, retained across
+ * generations). -1 when there is no live site, so "retired" and "live but
+ * unclaimed" are different answers. This is the provider's half of the claim;
+ * the claim MAP's half is the recorder's (see `m3_fixture.nim`). */
+int repro_hcr_lx_probe_site_claimed(unsigned long long entry_address) {
+  repro_hcr_lx_site *site = repro_hcr_lx_find_site((uint64_t)entry_address);
+  return site == NULL ? -1 : site->claimed;
+}
+
+/* The word the site table believes is published in the window. A rollback
+ * that restored a different word than the table records would make the next
+ * re-patch refuse `entry-modified-externally`; the gates compare this against
+ * the window's live bytes. */
+unsigned long long repro_hcr_lx_probe_site_published_word(
+    unsigned long long entry_address) {
+  repro_hcr_lx_site *site = repro_hcr_lx_find_site((uint64_t)entry_address);
+  return site == NULL ? 0ull : (unsigned long long)site->published_word;
+}
+
 #endif /* __linux__ && __x86_64__ */
