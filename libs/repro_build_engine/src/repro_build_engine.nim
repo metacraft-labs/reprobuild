@@ -17396,12 +17396,27 @@ proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
   if parts.len > 0:
     result = " (" & parts.join(", ") & ")"
 
+proc withWidthPlaceholders(action: BuildAction): BuildAction
+
+proc bypassWidthMilli*(hostCores, maxParallelism: int): uint32 =
+  ## The width a sized action runs at when no RunQuota lease is taken: an
+  ## equal share of the host's cores among the actions the engine runs at
+  ## once, and at least one slot. Left as declared, a Nim compile has no
+  ## ``--parallelBuild`` and starts one C compiler per core, so twelve
+  ## concurrent test-binary compiles on a 32-core host ran ~250 ``cc1``
+  ## (full run 53, 2026-11-15) where the host has 32 cores for everyone.
+  let share = max(1, hostCores) div max(1, maxParallelism)
+  uint32(max(1, share)) * 1000'u32
+
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
     ReproDirectRunningProcess =
   ## Use RunQuota's native process backend without acquiring a lease. On
   ## Windows this preserves argument boundaries instead of expanding valid
   ## percent signs, carets, quotes, and backslashes through ``cmd.exe``.
+  ##
+  ## A sized action still gets its width flag: ``bypassWidthMilli``, filled
+  ## in as a grant of that size would be.
   if action.argv.len == 0:
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   createDir(extendedPath(bypassActionLogDir(config.cacheRoot)))
@@ -17412,14 +17427,20 @@ proc startBypassRunQuotaProcess(action: BuildAction;
       writeFile(extendedPath(path), "")
     except CatchableError:
       discard
-  return startDirect(preparedRunQuotaCommand(action, config))
+  if action.widthFlag.len == 0:
+    return startDirect(preparedRunQuotaCommand(action, config))
+  var command = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
+  command.widthFlag = action.widthFlag
+  let width = bypassWidthMilli(countProcessors(),
+    int(max(1'u32, config.maxParallelism)))
+  return startDirect(command.applyGrantedWidth(width))
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction =
   ## The action with a placeholder where its width flag's value goes, before
   ## the launch wrappers re-quote its argv; RunQuota's launch fills it with
   ## the grant (``repro_runquota.applyGrantedWidth``). Only the RunQuota
-  ## launch paths use it: under the bypass there is no grant, and the
-  ## command line is left as declared.
+  ## launch paths and the bypass use it; the bypass fills it with
+  ## ``bypassWidthMilli``.
   ##
   ## The flag is placed in the command the action EXECUTES: on the wrapped
   ## monitor path its argv is ``<repro> internal io monitor … -- <argv>``,
