@@ -792,7 +792,8 @@ proc widthPlaceholderArgv*(argv: openArray[string]; flag: string):
   ## whole number from 1 to the grant (the author asked for less), and
   ## replaced by the grant otherwise (more, 0, or not a number). With no such
   ## flag it goes before the first `--` (which passes the rest of the line
-  ## on to something else), or at the end. argv[0] is never touched. A flag
+  ## on to something else), or at the end (a joined flag goes ahead of a
+  ## trailing positional word instead). argv[0] is never touched. A flag
   ## ending in `=` or `:` takes the value joined to it.
   result = @argv
   if flag.len == 0 or argv.len == 0:
@@ -829,6 +830,14 @@ proc widthPlaceholderArgv*(argv: openArray[string]; flag: string):
         return
     inc i
   if joined:
+    # A joined flag is an option. Tools that read everything after their first
+    # positional word as the program's own arguments (``nim c x.nim``: nim
+    # answers "arguments can only be given if the '--run' option is selected")
+    # must see it BEFORE a trailing positional, so it goes ahead of the last
+    # word when that is not itself an option. argv[0] and the subcommand
+    # (index 1 of a three-word line) stay where they are.
+    if i >= 3 and i == result.len and not result[i - 1].startsWith("-"):
+      dec i
     result.insert(flag & widthPlaceholder(0), i)
   else:
     result.insert(widthPlaceholder(0), i)
