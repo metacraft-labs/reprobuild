@@ -535,6 +535,13 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
     if store.isSome: collectLeaseHolders(desired)
     else: initTable[string, seq[LeasedDep]]()
 
+  # The in-use holds the reuse decisions below take (Ephemeral-State-Leases.md
+  # §4.6, as in `reconcileResources`), released when this reconcile returns.
+  var inUseHolds: seq[ReproFileLock] = @[]
+  defer:
+    for lock in inUseHolds.mitems:
+      releaseStateLock(lock)
+
   for inst in topoOrder(desired):
     let prior =
       if recordedByAddr.hasKey(inst.address): some(recordedByAddr[inst.address])
@@ -549,11 +556,15 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
     # L2 cross-run reuse: a leased state with a PRESENT, digest-matching store
     # record is already up + current — reuse it WITHOUT observing or re-applying
     # over the wire (the store record is the reuse index).
+    # Decided under an in-use hold, so a reap in progress is waited out and
+    # none can start before the renewal below (§4.6).
     var reuseRec = none(ResourceStateRecord)
-    if isLeasedState and store.isSome and hasStateRecord(store.get, inst.address):
-      let rec = readStateRecord(store.get, inst.address)
-      if rec.present and rec.digest == desiredDigest:
-        reuseRec = some(rec)
+    if isLeasedState and store.isSome:
+      inUseHolds.add(holdStateInUse(store.get, inst.address))
+      if hasStateRecord(store.get, inst.address):
+        let rec = readStateRecord(store.get, inst.address)
+        if rec.present and rec.digest == desiredDigest:
+          reuseRec = some(rec)
 
     var effective = none(ResourceBinding)
     var action: ResourceActionKind
@@ -615,21 +626,11 @@ proc reconcileResourcesViaSession*(desired: seq[ResourceInstance];
           none(ResourceProviderArtifactRef)
       if isLeasedState:
         # The whole existing holder state, keep holders included, so a keep
-        # pin from an earlier run survives this run's dated renewals (same
-        # merge as `reconcileResources`).
-        let existing =
-          if hasStateRecord(store.get, inst.address):
-            some(readStateRecord(store.get, inst.address))
-          else:
-            none(ResourceStateRecord)
-        let merged = mergeHolderDeadlines(existing, renewals, now)
-        writeStateRecord(store.get, inst, effective.get,
-          holders = merged.holders,
-          effectiveDeadline = merged.effective,
-          lastRenewed = now,
-          keepHolders = merged.keepHolders,
-          keepHoldersKnown = merged.keepHoldersKnown,
-          providerArtifact = carriedProviderArtifact(existing, thisRunArtifact))
+        # pin from an earlier run survives this run's dated renewals — read
+        # and rewritten under the record lock (same write as
+        # `reconcileResources`).
+        writeRenewedStateRecord(store.get, inst, effective.get, renewals, now,
+          providerArtifact = thisRunArtifact)
       else:
         # Not consumed this run: carry any existing lease forward untouched
         # (the same helper as `reconcileResources`).

@@ -29197,6 +29197,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_lease_records_are_concurrency_safe.nim",
+    binary: "build/test-bin/t_lease_records_are_concurrency_safe",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/unit/t_libclang_package.nim",
     binary: "build/test-bin/t_libclang_package",
     defines: @[],

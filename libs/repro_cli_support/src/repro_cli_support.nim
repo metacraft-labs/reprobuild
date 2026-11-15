@@ -17010,6 +17010,18 @@ type
       ## leases, and failing the run over it would make an unrelated stale
       ## record block a command that was going to materialize its own state
       ## anyway. It must still be PRINTED — see ``runReproRunCommand``.
+    holds*: seq[StateConsumeHold]
+      ## Ephemeral-State-Leases.md §2.3 / §4.6: the IN-USE holds this consume
+      ## took on each group's states, one per consumed group, taken before
+      ## the group's reuse decision. They are STILL HELD when the bridge
+      ## returns: the consume is the run-edge's whole command, not this
+      ## reconcile, and the reaper must not destroy a state while it runs.
+      ## ``finishConsumedStateGroups`` ends the consume — renews at the end
+      ## and releases — and every caller must call it, however the command
+      ## ended.
+    consumedDesired*: seq[seq[ResourceInstance]]
+      ## The desired graph of each held group, in ``holds`` order, for the
+      ## end-of-consume daemon renew.
 
 proc buildStateGroupDesired*(lease: RunEdgeLease;
                              runEdgeName: string;
@@ -17087,6 +17099,57 @@ proc anyMemberUnlinked(desired: seq[ResourceInstance]): bool =
       return true
   false
 
+proc reconcileConsumedGroup(bridge: var RunConsumesBridgeResult;
+                            lease: RunEdgeLease;
+                            desired: seq[ResourceInstance];
+                            store: StateStore;
+                            providerArtifacts: openArray[
+                              tuple[typeId: string;
+                                    artifact: ResourceProviderArtifactRef]];
+                            scope: DaemonLeaseScope;
+                            endpoint: string;
+                            now: Time;
+                            sessionResolver: ResourceSessionResolver) =
+  ## One consumed group of ``reconcileConsumedStateGroups``, already held.
+  block:
+    # Materialize-or-reuse against the L1 store (the correctness source of
+    # truth — L2 reuse-on-digest-match / renew), then forward a best-effort
+    # daemon renew (L4). We drive the two steps ourselves rather than
+    # ``reconcileLeasedResources`` so we can observe whether the renew reached a
+    # daemon (``sent``) without a second redundant renew.
+    let outcome =
+      if anyMemberUnlinked(desired):
+        # OUT-OF-TREE members: reconcile over the provider session WITH the
+        # store, routing the always-linked synthetic consumer in-process.
+        if sessionResolver == nil:
+          raise newException(ValueError,
+            "required leased state group '" & lease.address &
+            "' has no provider session for its out-of-tree resources")
+        reconcileResourcesViaSession(desired, sessionResolver,
+          store = some(store), now = now,
+          # The harvested refs are PERSISTED with each record written for a
+          # type they name, so the reaper can reach that provider from the
+          # store alone (§4.2). The synthetic consumer, routed in-process
+          # below, is not in this set and so records no artifact.
+          providerArtifacts = providerArtifacts,
+          inProcess = proc (typeId: string): bool =
+            # Hybrid routing (spec §3.2): the always-linked synthetic run-edge
+            # consumer (registered in THIS process, no provider binary) runs
+            # in-process; the out-of-tree member types the CLI does not link go
+            # over the session. This is the ``isResourceProviderRegistered``
+            # gate the reconcile doc describes — and it lets the production
+            # ``sessionResolver`` map ONLY the real out-of-tree typeIds (the
+            # provider-artifact refs the resource-graph carries), never the
+            # synthetic consumer.
+            isResourceProviderRegistered(typeId))
+      else:
+        reconcileResources(desired, store = some(store), now = now)
+    bridge.reconciled.add(outcome)
+    bridge.renewedGroups.add(lease.address)
+    for edge in renewLeasesForConsumed(desired, scope, endpoint):
+      if edge.sent and lease.address notin bridge.daemonSent:
+        bridge.daemonSent.add(lease.address)
+
 proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
                                    runEdgeName: string;
                                    resources: seq[ResourceInstance];
@@ -17110,6 +17173,16 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
   ## ``keep`` are honored verbatim by the landed reference-counted MAX /
   ## keep-dominates fold — this bridge only assembles the desired graph and
   ## delegates.
+  ##
+  ## THE CONSUME OUTLIVES THIS CALL (Ephemeral-State-Leases.md §2.3 / §4.6).
+  ## Each group's states are held IN USE from before the group's reuse decision,
+  ## and the holds are returned still taken in ``holds``: the consume is the
+  ## run-edge's command, which runs after this returns, and the reaper must not
+  ## destroy a state while it does. The caller ends the consume with
+  ## ``finishConsumedStateGroups`` once the command has exited — on every path,
+  ## failures included — which renews at the end and releases. A caller that
+  ## never calls it holds the states until its process exits. On a raise, the
+  ## holds taken so far are released here, since nothing will use the states.
   ##
   ## Reaping is NOT done here — the L4 daemon wall-clock tick / L5 provider
   ## session (or ``repro reap`` / the reconcile-start opportunistic reap)
@@ -17204,48 +17277,60 @@ proc reconcileConsumedStateGroups*(consumes: seq[RunEdgeLease];
     if reapPool != nil:
       try: reapPool.closeAll() except CatchableError: discard
 
-  for lease in consumes:
-    let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
-    if desired.len == 0:
-      result.missingGroups.add(lease.address)
+  # Ephemeral-State-Leases.md §4.6: each group's states are held IN USE from
+  # before its reuse decision until the caller ends the consume
+  # (``finishConsumedStateGroups``), so no reaper destroys them while the
+  # run-edge's command uses them. Taken AFTER the start sweep above, which
+  # must stay able to reap this run's own lapsed group. If this reconcile
+  # fails, nothing will use the states, so the holds are dropped here.
+  try:
+    for lease in consumes:
+      let desired = buildStateGroupDesired(lease, runEdgeName, resources, groups)
+      if desired.len == 0:
+        result.missingGroups.add(lease.address)
+        continue
+      result.holds.add(holdConsumedStates(store, desired,
+        onBusy = proc (address: string) =
+          stderr.writeLine("repro run: waiting for a reap of `" & address &
+            "` to finish before consuming it")))
+      result.consumedDesired.add(desired)
+      reconcileConsumedGroup(result, lease, desired, store, providerArtifacts,
+        scope, endpoint, now, sessionResolver)
+  except CatchableError:
+    for hold in result.holds.mitems:
+      releaseConsumeHold(hold)
+    raise
+
+proc finishConsumedStateGroups*(bridge: var RunConsumesBridgeResult;
+                                scope: DaemonLeaseScope = dlsUser;
+                                endpoint = defaultUserDaemonEndpoint();
+                                now: Time = getTime()): seq[string] =
+  ## End the consume ``reconcileConsumedStateGroups`` began
+  ## (Ephemeral-State-Leases.md §2.3 / §4.6): renew every held group's leases
+  ## at ``now`` — the moment the run-edge's command finished — in the store
+  ## (under each record's lock) and, best-effort, to the daemon; then release
+  ## the in-use holds. So ``delayed(ttl)`` keeps the state ``ttl`` past the
+  ## END of its use, and ``immediate`` makes it reapable from here.
+  ##
+  ## Call it however the command ended, failures included: the consume is
+  ## over either way. Idempotent — a second call finds nothing held. A renewal
+  ## that fails is returned as a message rather than raised, because the
+  ## holds must be released regardless and the command's own outcome is the
+  ## run's result; the record then keeps the deadline stamped when the consume
+  ## began, which is the crash outcome and is safe.
+  for i in 0 ..< bridge.holds.len:
+    if not bridge.holds[i].isHeld:
       continue
-    # Materialize-or-reuse against the L1 store (the correctness source of
-    # truth — L2 reuse-on-digest-match / renew), then forward a best-effort
-    # daemon renew (L4). We drive the two steps ourselves rather than
-    # ``reconcileLeasedResources`` so we can observe whether the renew reached a
-    # daemon (``sent``) without a second redundant renew.
-    let outcome =
-      if anyMemberUnlinked(desired):
-        # OUT-OF-TREE members: reconcile over the provider session WITH the
-        # store, routing the always-linked synthetic consumer in-process.
-        if sessionResolver == nil:
-          raise newException(ValueError,
-            "required leased state group '" & lease.address &
-            "' has no provider session for its out-of-tree resources")
-        reconcileResourcesViaSession(desired, sessionResolver,
-          store = some(store), now = now,
-          # The harvested refs are PERSISTED with each record written for a
-          # type they name, so the reaper can reach that provider from the
-          # store alone (§4.2). The synthetic consumer, routed in-process
-          # below, is not in this set and so records no artifact.
-          providerArtifacts = providerArtifacts,
-          inProcess = proc (typeId: string): bool =
-            # Hybrid routing (spec §3.2): the always-linked synthetic run-edge
-            # consumer (registered in THIS process, no provider binary) runs
-            # in-process; the out-of-tree member types the CLI does not link go
-            # over the session. This is the ``isResourceProviderRegistered``
-            # gate the reconcile doc describes — and it lets the production
-            # ``sessionResolver`` map ONLY the real out-of-tree typeIds (the
-            # provider-artifact refs the resource-graph carries), never the
-            # synthetic consumer.
-            isResourceProviderRegistered(typeId))
-      else:
-        reconcileResources(desired, store = some(store), now = now)
-    result.reconciled.add(outcome)
-    result.renewedGroups.add(lease.address)
-    for edge in renewLeasesForConsumed(desired, scope, endpoint):
-      if edge.sent and lease.address notin result.daemonSent:
-        result.daemonSent.add(lease.address)
+    try:
+      renewConsumedStatesAtEnd(bridge.holds[i], now)
+      if i < bridge.consumedDesired.len:
+        discard renewLeasesForConsumed(bridge.consumedDesired[i], scope,
+                                       endpoint)
+    except CatchableError as err:
+      result.add("renewing " & bridge.holds[i].addresses.join(", ") &
+        " at the end of the consume failed: " & err.msg)
+    finally:
+      releaseConsumeHold(bridge.holds[i])
 
 # ---------------------------------------------------------------------------
 # Named-Runnable-Edges N3b — auto-build the out-of-tree session resolver.
@@ -17400,6 +17485,17 @@ proc runReproRunCommand(args: openArray[string];
       # exactly as N1. The reconcile NEVER blocks the run on a daemon: the store
       # write is the correctness source of truth (L2), the daemon renew is a
       # best-effort notification (L4), and idle reaping is the daemon's job.
+      #
+      # The consume does not end when the reconcile returns: the states are
+      # held IN USE (Ephemeral-State-Leases.md §4.6) until the run-edge's
+      # command below has exited, and only then renewed and released, so the
+      # deadline counts from the end of the use and nothing reaps the state
+      # while the command runs. The ``defer`` ends it on every path out of this
+      # branch — the command's exit, an early refusal, an exception.
+      var consumeBridge: RunConsumesBridgeResult
+      defer:
+        for problem in finishConsumedStateGroups(consumeBridge):
+          stderr.writeLine("repro run: lease renew: " & problem)
       if resolution.hasEntry and resolution.entry.kind == tekRunEdge and
           resolution.entry.consumes.len > 0:
         try:
@@ -17444,11 +17540,12 @@ proc runReproRunCommand(args: openArray[string];
             discard registerLeaseReapProvidersBestEffort(
               DaemonLeaseReapProvidersRequest(scope: dlsUser,
                 providers: providers))
-          let bridge = reconcileConsumedStateGroups(
+          consumeBridge = reconcileConsumedStateGroups(
             resolution.entry.consumes, resolution.entry.name,
             resolution.resources, resolution.groups, store,
             resolution.providerArtifacts,
             sessionResolver = sessionResolver)
+          template bridge: untyped = consumeBridge
           # §4.3 (a)/§4.4: what the start-of-reconcile sweep could not do.
           # NON-FATAL — it swept state belonging to LAPSED leases, none of
           # which this run asked for, so a stale record someone else left must
