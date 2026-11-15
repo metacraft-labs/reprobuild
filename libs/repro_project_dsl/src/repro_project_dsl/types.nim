@@ -156,6 +156,15 @@ type
       ## gets none of a ref's other channels: no run-time library path,
       ## ``PKG_CONFIG_PATH``, ``CMAKE_PREFIX_PATH`` or provisioning
       ## receipt.
+    inputCheckPolicy*: ActionCacheFingerprintPolicy
+      ## Caching-Architecture.md D2 -- the input-check policy this tool
+      ## declares for the edges that run it, with ``inputCheckPolicy hybrid``
+      ## (or ``checksum`` / ``timestamp``) in the ``cli:`` block, inherited by
+      ## nested scopes like ``dependencyPolicy``. ``acfpUnstated`` (the
+      ## default) declares nothing. A typed call that states no policy takes
+      ## it; an edge that names the tool only in ``toolIdentityRefs`` takes it
+      ## through ``repro_core/tool_input_check_policies``, whose entries
+      ## ``t_tool_input_check_policies`` checks against these declarations.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -1548,6 +1557,16 @@ type
       ## honoured.
 
   ActionCacheFingerprintPolicy* = enum
+    acfpUnstated
+      ## The edge states no input-check policy (Caching-Architecture.md D2).
+      ## It is what ``defaultActionCachePolicy()`` returns, so an edge that
+      ## says nothing can be told apart from one that says ``timestamp``.
+      ## Lowering resolves it: to the policy the edge's tools declare
+      ## (``repro_core/tool_input_check_policies``), else to ``timestamp``,
+      ## the owner-decided default of 2026-09-04. FIRST, so it is the zero
+      ## value: an object built without naming the field (a hand-built
+      ## ``BuildActionDef``, a ``ReproCliCommandExt``) states nothing rather
+      ## than silently stating ``timestamp``.
     acfpTimestamp
     acfpChecksum
     acfpHybrid

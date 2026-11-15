@@ -31,12 +31,14 @@
 ## ## Configurables
 ##
 ## * ``snapshot`` — the snapshot pin
-##   (``"ubuntu/jammy/YYYYMMDDTHHMMSSZ"``). Part of every install
-##   fingerprint per spec §3; bumping it produces a fresh store path
-##   and (downstream) a fresh generation.
+##   (``"ubuntu/jammy/YYYYMMDDTHHMMSSZ"``). Provenance only: it names no
+##   digest, so it is NOT part of any store identity. Store paths are keyed
+##   by the bytes — the resolved ``(name, version, sha256)`` set (spec §3)
+##   — so bumping the pin produces a fresh store path exactly for the
+##   packages whose bytes changed.
 ## * ``adapterVersion`` — the implementation's revision string. Part of
-##   the spec §3 fingerprint so an adapter bugfix invalidates downstream
-##   packages atomically.
+##   every spec §2/§3 fingerprint so an adapter bugfix invalidates
+##   downstream packages atomically.
 ## * ``cacheDir`` — host-side cache for pre-fetched .debs the
 ##   ``installAptDeb`` path consults before falling through to a future
 ##   live-fetch implementation (spec §6).
@@ -49,9 +51,9 @@
 ## against PRE-FETCHED .deb fixtures. The spec §6 four-link content
 ## chain (snapshot string → InRelease → Packages index → live .deb
 ## fetch) is DEFERRED. Consumers supply ``(name, version, debPath,
-## sha256)`` triples; the snapshot string is plumbed into the fingerprint
-## so a future live-fetch implementation lands without breaking
-## already-cached store paths.
+## sha256)`` triples, and the store path is keyed by those triples alone,
+## so a future live-fetch implementation (which resolves the snapshot to
+## the same triples) lands without breaking already-cached store paths.
 
 import repro_project_dsl
 
@@ -76,25 +78,28 @@ package aptJammy:
   defaultToolProvisioning "path"
 
   versions:
-    ## Adapter implementation revision. Part of the spec §3 fingerprint
-    ## (sha256("apt.extract" || adapterVersion || sha256(deb))) so a
-    ## bugfix in the stdlib module invalidates every downstream cached
-    ## store path atomically. Keep the version string in sync with
+    ## Adapter implementation revision. Part of every spec §2/§3
+    ## fingerprint (e.g. the full SHA-256 of the length-prefixed fields
+    ## "apt.extract", adapterVersion, sha256(deb)) so a bugfix in the
+    ## stdlib module invalidates every downstream cached store path
+    ## atomically. 0.2.0 made the identities byte-keyed, framed and
+    ## untruncated. Keep the version string in sync with
     ## ``AptJammyAdapterVersion`` in the stdlib module
     ## (``libs/repro_dsl_stdlib/.../apt_jammy.nim``). The snapshot pin
     ## that anchors the four-link chain (spec §6) lives below in
     ## ``config.snapshot``; the ``sourceUrl`` here records the upstream
     ## snapshot mirror so a future live-fetch implementation has a pin
     ## resolvable from the version registry alone.
-    "0.1.0":
+    "0.2.0":
       sourceRevision = "ubuntu/jammy/20260615T000000Z"
       sourceUrl = "https://snapshot.ubuntu.com/ubuntu/20260615T000000Z"
       sourceRepository = "https://snapshot.ubuntu.com/ubuntu"
 
   config:
     ## The snapshot pin. Format: ``ubuntu/jammy/YYYYMMDDTHHMMSSZ``.
-    ## Per the spec §6 normalisation, this is opaque to v1 (informational
-    ## for fingerprinting) and the four-link chain is a deferred milestone.
+    ## Provenance only: it is not part of any store identity (spec §3,
+    ## §6 — the string names no digest), and the four-link chain that
+    ## would resolve it is a deferred milestone.
     snapshot: string = "ubuntu/jammy/20260615T000000Z"
 
     ## Host cache directory for pre-fetched .debs. Consumers that
@@ -105,7 +110,8 @@ package aptJammy:
     ## not consult it; recorded for forward-compat.
     defaultMirror: string = "http://archive.ubuntu.com/ubuntu"
 
-    ## Adapter implementation revision. Part of the spec §3 fingerprint
-    ## so a bugfix here invalidates every downstream cached store path.
-    ## Keep in sync with ``AptJammyAdapterVersion`` in the stdlib module.
-    adapterVersion: string = "0.1.0"
+    ## Adapter implementation revision. Part of every spec §2/§3
+    ## fingerprint so a bugfix here invalidates every downstream cached
+    ## store path. Keep in sync with ``AptJammyAdapterVersion`` in the
+    ## stdlib module.
+    adapterVersion: string = "0.2.0"

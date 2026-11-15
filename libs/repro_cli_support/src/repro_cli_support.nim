@@ -55,6 +55,7 @@ import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
+import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
@@ -2524,6 +2525,57 @@ proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
   lines.sort()
   lines.join("\n")
 
+proc toolDeclaredInputCheckPolicyForRefs*(
+    profiles: Table[string, PathOnlyToolProfile];
+    refs: openArray[string]): Option[FileFingerprintPolicy] =
+  ## Caching-Architecture D2: the input-check policy an edge that states
+  ## none takes from the tools it names. Only a ref that RESOLVES to a tool
+  ## profile here counts -- by executable name, by bare package selector, or
+  ## (when neither matches, as ``mkToolIdentityResolver`` does) as an
+  ## executable a profile's realization exports -- so the declaration
+  ## travels with the resolved tool identity: a ref that resolves to nothing
+  ## (the C convention dispatched under ``--tool-provisioning=path`` sees no
+  ## profiles at all) leaves the edge on ``timestamp``. Each resolved ref is
+  ## looked up by the bare package name of its profile, then by its own
+  ## name (``repro_core/tool_input_check_policies``); with several declaring
+  ## tools the strongest policy wins. `none` when no resolved tool declares
+  ## one.
+  for refName in refs:
+    if refName.len == 0:
+      continue
+    var resolvedPackages: seq[string] = @[]
+    for profile in profiles.values:
+      let bare = bareToolSelector(profile.packageSelector)
+      if profile.executableName == refName or bare == refName:
+        resolvedPackages.add(bare)
+    if resolvedPackages.len == 0:
+      for profile in profiles.values:
+        for exported in profile.exportedExecutables:
+          let file = extractFilename(exported)
+          if file == refName or file == addFileExt(refName, ExeExt):
+            resolvedPackages.add(bareToolSelector(profile.packageSelector))
+            break
+    if resolvedPackages.len == 0:
+      continue
+    for key in resolvedPackages & @[refName]:
+      let declared = toolDeclaredInputCheckPolicy(key)
+      if declared.isSome:
+        result = some(if result.isSome:
+            strongestInputCheckPolicy(result.get(), declared.get())
+          else: declared.get())
+
+proc keyedOnToolDeclaredInputCheckPolicy*(weak: ContentDigest;
+                                          policy: FileFingerprintPolicy):
+    ContentDigest =
+  ## Mix a policy an edge took from its tools' declaration into its weak
+  ## fingerprint. The payload says "unstated" either way, so without this the
+  ## same edge would key identically whether it resolved to ``hybrid`` (a
+  ## tarball-provisioned ``gcc``) or to ``timestamp`` (no resolved profile).
+  var text = "reprobuild.toolDeclaredInputCheckPolicy.v1\n" & $policy & "\n"
+  for b in weak.bytes:
+    text.add(toHex(b, 2))
+  weakFingerprintFromText(text)
+
 proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
     seq[string] =
   ## The sub-tools that reach the engine as
@@ -3242,14 +3294,29 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.removeBeforeRun = payload.removeBeforeRun
     result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
+  # Caching-Architecture D2: an edge that states no policy takes the one its
+  # resolved tools declare, else the owner-decided default, timestamp.
+  var policyFromTools = false
   let actionCachePolicy =
     case payload.actionCachePolicy
+    of acfpUnstated:
+      let declared = toolDeclaredInputCheckPolicyForRefs(profiles,
+        payload.toolIdentityRefs)
+      if declared.isSome and declared.get() != ffpTimestamp:
+        policyFromTools = true
+        declared.get()
+      else:
+        ffpTimestamp
     of acfpTimestamp:
       ffpTimestamp
     of acfpChecksum:
       ffpChecksum
     of acfpHybrid:
       ffpHybrid
+  defer:
+    if policyFromTools:
+      result.weakFingerprint = keyedOnToolDeclaredInputCheckPolicy(
+        result.weakFingerprint, actionCachePolicy)
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
@@ -60759,13 +60826,15 @@ proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
         " could not be read (" & err.msg & ")")
 
 proc reproNimDeclaresExactUses(root: string): bool =
-  ## Does ``<root>/repro.nim`` state any unconditional exact `uses:` version?
-  ## The cheap question asked before anything resolves a workspace.
+  ## Does ``<root>/repro.nim`` state any exact `uses:` version? The cheap
+  ## question asked before anything resolves a workspace, so it does not ask
+  ## whether a conditional one applies to the lock: ``reproRepinVerdict``
+  ## decides that, per dependency, against the lock (§16.3 H1).
   let path = root / "repro.nim"
   if not fileExists(extendedPath(path)): return false
   try:
     for d in scanReproUsesDeclarations(readFile(extendedPath(path)), path):
-      if not d.conditional and d.constraint.kind == uckExact: return true
+      if d.constraint.kind == uckExact: return true
   except CatchableError:
     discard
   false
@@ -62776,11 +62845,13 @@ proc preCommitConsistencyOutsideWorkspace(repoRoot: string): int =
     return 0
   for d in consistency.diagnostics:
     stderr.writeLine("repro pre-commit: note: " & d)
-  if not consistency.hasViolations:
-    return 0
+  # Listed whatever the verdict: a constraint the check could not evaluate is
+  # neither a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3).
   for n in consistency.notChecked:
     stderr.writeLine("repro pre-commit: note: recipe/lock consistency not " &
       "checked: " & n)
+  if not consistency.hasViolations:
+    return 0
   stderr.writeLine("repro pre-commit: commit REFUSED: the recipe and the " &
     "locks this commit carries are inconsistent; nothing was written or " &
     "staged.")
@@ -63897,7 +63968,19 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     result.add("repro check: lock update FAILED: " &
       report.lockUpdate.diagnostic)
   if report.exitCode == 0 and report.failures.len == 0:
-    result.add("repro check: OK")
+    # A recipe constraint the consistency check could not evaluate is neither
+    # a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3), so the
+    # verdict line must not read as if every constraint had been checked.
+    var notChecked = 0
+    for notice in report.notices:
+      if notice.startsWith(ConsistencyNotCheckedNotice): inc notChecked
+    if notChecked == 0:
+      result.add("repro check: OK")
+    else:
+      result.add("repro check: OK, except that " & $notChecked &
+        " recipe constraint" & (if notChecked == 1: " was" else: "s were") &
+        " not checked against the lock (listed above as `" &
+        ConsistencyNotCheckedNotice.strip() & "`)")
 
 type
   CheckArgs* = object
@@ -71630,7 +71713,7 @@ proc executeCheckPrePush(parsed: CheckArgs;
     for d in consistency.diagnostics: result.notices.add(d)
     # What the check could not evaluate is named, not left to read as a pass.
     for n in consistency.notChecked:
-      result.notices.add("recipe/lock consistency not checked: " & n)
+      result.notices.add(ConsistencyNotCheckedNotice & n)
     # §16.6 — wording only; the verdict below is already fixed by the check.
     if consistency.hasViolations:
       annotateSiblingGuidance(parsed.currentRepo, consistency.violations)
@@ -101553,6 +101636,11 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       var depOf = initTable[string, LockedDep]()
       for i in reproOfRepo: depOf[ld.deps[i].name] = ld.deps[i]
       var edits: seq[tuple[line: int; raw, exact, version: string]]
+      # The arms that apply to this lock are decided from what it records
+      # (its platform and variant values), as H1 decides them: an entry
+      # whose arms apply constrains the move like an unconditional one, so
+      # an exact pin under it is rewritten too, and H1 then passes.
+      let armFacts = armFactsOf(ld)
       for decl in scanReproUsesDeclarations(inputs.reproNim.text,
           reproNimPath):
         let c = decl.constraint
@@ -101560,10 +101648,20 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         if c.kind notin {uckRange, uckExact}: continue
         let where = reproNimPath & ":" & $c.line
         if decl.conditional:
-          result.notes.add(where & ": '" & decl.rawConstraint & "' is under " &
-            "a when/if/case arm, so whether it constrains '" & c.selector &
-            "' is not decidable without compiling the recipe; left alone")
-          continue
+          let arm = armApplicability(decl, armFacts)
+          case arm.applicability
+          of aaApplies:
+            discard
+          of aaExcluded:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so it does not constrain '" & c.selector &
+              "' in this lock; left alone")
+            continue
+          of aaUndecidable:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so whether it constrains '" & c.selector &
+              "' is not decidable without compiling the recipe; left alone")
+            continue
         let dep = depOf[c.selector]
         let depAbs = os.normalizedPath(absolutePath(pathBase / dep.path))
         let at = versionMappedTo(inputs, c, depAbs, dep.coordinates.url,

@@ -79,10 +79,11 @@ proc dep(name, path, url, rev: string): string =
     "visibility = \"public\", participation = \"\", depends = \"\", " &
     "tags = \"\" }"
 
-proc reproLock(deps: openArray[string]; packages = ""): string =
+proc reproLock(deps: openArray[string]; packages = "";
+    platform = "amd64-linux"; variants = ""): string =
   "schema = \"reprobuild.solved-graph-lock.v2\"\n\n[lock]\n" &
-    "platform = \"amd64-linux\"\noptimal = false\n" &
-    "inputs_digest = \"fnv1a64:0\"\nvariants = []\n" &
+    "platform = \"" & platform & "\"\noptimal = false\n" &
+    "inputs_digest = \"fnv1a64:0\"\nvariants = [" & variants & "]\n" &
     "packages = [" & packages & "]\n" &
     "deps = [" & @deps.join(", ") & "]\n"
 
@@ -284,10 +285,10 @@ suite "H1: a repro.lock satisfies repro.nim":
         "that range does not admit"
       check "From /w/app run: `repro lock refresh`" in
         renderConsistencyViolation(h1[0])
-    # The `when` arm is not checked, and the report says so.
-    check r.notChecked == @["/w/app/repro.nim:8: 'clang >=99' — under a " &
-      "when/if/case arm, so whether it applies to this lock is not " &
-      "decidable without compiling the recipe"]
+    # The `when defined(macosx)` arm does not apply to this amd64-linux lock,
+    # so its `clang >=99` is not held against clang 1.0.0 (the one violation
+    # above is nim's) — decided, so nothing is left unchecked either.
+    check r.notChecked.len == 0
 
   test "resolutions inside their ranges pass":
     let r = checkRecipeLockConsistency(reproInputs(
@@ -389,6 +390,179 @@ suite "H1: a repro.lock satisfies repro.nim":
       check "no single revision satisfies both recipes" in h2[0].summary
       check "kind=constraint-conflict" in h2[0].evidence
     check r.violationsOf(crH1).len == 1
+
+suite "H1: constraints under when / if / case arms (the issue of 2026-11-15)":
+  # A lock is resolved for ONE platform and one variant assignment, and it
+  # records both (`platform`, `variants`). The arm a `uses:` entry sits under
+  # is therefore decided for that lock, and H1 holds the lock to every
+  # constraint whose arm applies to it — the usual way to state a toolchain
+  # floor is per platform.
+
+  const PerPlatformFloor = "import repro_project_dsl\n\npackage app:\n" &
+    "  uses:\n" &
+    "    when defined(macosx):\n" &
+    "      \"clang\"\n" &
+    "    else:\n" &
+    "      \"gcc >=12\"\n"
+
+  proc armInputs(recipe, packages: string; platform = "amd64-linux";
+      variants = ""): ConsistencyInputs =
+    result.repoRoot = "/w/app"
+    result.lockPathBase = "/w/app"
+    result.reproNim = text("/w/app/repro.nim", recipe)
+    result.reproLock = text("/w/app/repro.lock", reproLock([
+      dep("app", ".", "https://example.invalid/app", ShaA)], packages,
+      platform, variants))
+
+  test "a per-platform floor the Linux lock breaks is H1, not a note":
+    # The shape the issue observed: gcc 11 on Linux under `gcc >=12`.
+    let r = checkRecipeLockConsistency(armInputs(PerPlatformFloor,
+      pkg("gcc", "11.0.0")))
+    let h1 = r.violationsOf(crH1)
+    check h1.len == 1
+    if h1.len == 1:
+      check h1[0].summary == "H1 (the lock satisfies the recipe): " &
+        "/w/app/repro.nim:8 requires 'gcc >=12' (uses:), but " &
+        "/w/app/repro.lock resolves package 'gcc' at version 11.0.0, which " &
+        "that range does not admit"
+    check r.notChecked.len == 0
+
+  test "the same floor satisfied passes, with nothing left unchecked":
+    let r = checkRecipeLockConsistency(armInputs(PerPlatformFloor,
+      pkg("gcc", "12.0.0")))
+    check r.violations.len == 0
+    check r.notChecked.len == 0
+
+  test "an arm that does not apply to the lock's platform is not held to it":
+    # A macOS lock is resolved without the `else:` arm.
+    let r = checkRecipeLockConsistency(armInputs(PerPlatformFloor,
+      pkg("gcc", "11.0.0") & ", " & pkg("clang", "15.0.0"), "arm64-macosx"))
+    check r.violations.len == 0
+    check r.notChecked.len == 0
+
+  test "an arm the lock cannot decide is listed, naming the arm and why":
+    let recipe = "package app:\n  uses:\n" &
+      "    when defined(reproExperimental):\n" &
+      "      \"gcc >=13\"\n" &
+      "    when defined(linux) or defined(reproExperimental):\n" &
+      "      \"nim >=2.2\"\n" &
+      "    when defined(macosx) and defined(reproExperimental):\n" &
+      "      \"clang >=99\"\n"
+    let r = checkRecipeLockConsistency(armInputs(recipe,
+      pkg("gcc", "12.0.0") & ", " & pkg("nim", "2.0.0") & ", " &
+      pkg("clang", "1.0.0")))
+    # `defined(linux) or …` is true on Linux whatever the define says, so the
+    # nim floor is checked; `defined(macosx) and …` is false there, so the
+    # clang floor does not apply. Only the define alone is undecidable.
+    let h1 = r.violationsOf(crH1)
+    check h1.len == 1
+    if h1.len == 1: check h1[0].dependency == "nim"
+    check r.notChecked == @["/w/app/repro.nim:4: 'gcc >=13' — under " &
+      "`when defined(reproExperimental)` (line 3), a `when` whose " &
+      "conditions do not depend only on the lock's platform (amd64-linux), " &
+      "so whether it applies to this lock is not decidable without " &
+      "compiling the recipe"]
+
+  test "elif and else arms apply only when every earlier arm does not":
+    let recipe = "package app:\n  uses:\n" &
+      "    when defined(windows):\n" &
+      "      \"msvc >=19\"\n" &
+      "    elif defined(posix) and not defined(macosx):\n" &
+      "      \"gcc >=12\"\n" &
+      "    else:\n" &
+      "      \"clang >=15\"\n"
+    let packages = pkg("msvc", "1.0.0") & ", " & pkg("gcc", "11.0.0") &
+      ", " & pkg("clang", "14.0.0")
+    proc violated(platform: string): seq[string] =
+      let r = checkRecipeLockConsistency(armInputs(recipe, packages,
+        platform))
+      check r.notChecked.len == 0
+      for v in r.violationsOf(crH1): result.add(v.dependency)
+    check violated("amd64-linux") == @["gcc"]
+    check violated("arm64-macosx") == @["clang"]
+    check violated("amd64-windows") == @["msvc"]
+    check violated("amd64-freebsd") == @["gcc"]
+
+  test "an arm written on one line with its entry is scanned and decided":
+    let recipe = "package app:\n  uses:\n" &
+      "    when defined(macosx): \"clang\"\n" &
+      "    else: \"gcc >=12\"\n"
+    let r = checkRecipeLockConsistency(armInputs(recipe,
+      pkg("gcc", "11.0.0")))
+    let h1 = r.violationsOf(crH1)
+    check h1.len == 1
+    if h1.len == 1: check h1[0].recipeLine == 4
+    check r.notChecked.len == 0
+
+  test "an if variant gate applies by the value the lock records":
+    let recipe = "package app:\n  uses:\n" &
+      "    if tls.value:\n" &
+      "      \"openssl >=3\"\n" &
+      "    else:\n" &
+      "      \"libressl >=4\"\n"
+    let packages = pkg("openssl", "1.1.0") & ", " & pkg("libressl", "3.0.0")
+    proc violated(variants: string): seq[string] =
+      let r = checkRecipeLockConsistency(armInputs(recipe, packages,
+        variants = variants))
+      for v in r.violationsOf(crH1): result.add(v.dependency)
+    check violated("{ name = \"tls\", value = \"true\" }") == @["openssl"]
+    check violated("{ name = \"tls\", value = \"false\" }") ==
+      @["libressl"]
+    # No value recorded: listed, never passed or refused.
+    let r = checkRecipeLockConsistency(armInputs(recipe, packages))
+    check r.violations.len == 0
+    check r.notChecked.len == 2
+    if r.notChecked.len == 2:
+      check "a gate on variant 'tls', for which the lock records no value" in
+        r.notChecked[0]
+
+  test "a case variant gate, and the arms the DSL lowers ungated":
+    let recipe = "package app:\n  uses:\n" &
+      "    case compiler.value\n" &
+      "    of \"gcc\":\n" &
+      "      \"gcc >=12\"\n" &
+      "      if lto.value:\n" &
+      "        \"lld >=15\"\n" &
+      "    of \"clang\":\n" &
+      "      \"clang >=15\"\n" &
+      "    of \"a\", \"b\":\n" &
+      "      \"make >=4\"\n" &
+      "    else:\n" &
+      "      \"cmake >=3\"\n"
+    let packages = pkg("gcc", "11.0.0") & ", " & pkg("clang", "14.0.0") &
+      ", " & pkg("lld", "1.0.0") & ", " & pkg("make", "3.0.0") & ", " &
+      pkg("cmake", "2.0.0")
+    let r = checkRecipeLockConsistency(armInputs(recipe, packages,
+      variants = "{ name = \"compiler\", value = \"gcc\" }"))
+    var violated: seq[string]
+    for v in r.violationsOf(crH1): violated.add(v.dependency)
+    # gcc: its arm is selected. lld: an `if` nested in a gated arm is lowered
+    # under the outer gate, so it applies with it (no `lto` value needed).
+    # make, cmake: a multi-label `of` and a case `else` are lowered ungated.
+    # clang: its arm is not selected.
+    check violated == @["gcc", "lld", "make", "cmake"]
+    check r.notChecked.len == 0
+
+  test "an exact pin under an arm that applies is compared by H2":
+    let recipe = "package app:\n  uses:\n" &
+      "    when defined(linux):\n" &
+      "      \"lib ==1.4.0\"\n"
+    var inputs = armInputs(recipe, "")
+    inputs.reproLock = text("/w/app/repro.lock", reproLock([
+      dep("app", ".", "https://example.invalid/app", ShaA),
+      dep("lib", "../lib", "https://example.invalid/lib", ShaB)]))
+    inputs.producerVersions = proc (depName, depAbs: string):
+        tuple[found: bool; file: string; entries: seq[ReproVersionEntry]] =
+      (true, "/w/lib/repro.nim", reproRecipeVersions(
+        "package lib:\n  versions:\n    \"1.4.0\":\n" &
+        "      sourceRevision = \"" & ShaC & "\"\n"))
+    let r = checkRecipeLockConsistency(inputs)
+    let h1 = r.violationsOf(crH1)
+    check h1.len == 1
+    if h1.len == 1:
+      check h1[0].pinnedInReproNim
+      check h1[0].recipeLine == 4
+    check r.notChecked.len == 0
 
 suite "the commit-time re-pin verdict (H3, §16.4)":
 
@@ -498,13 +672,29 @@ suite "the commit-time re-pin verdict (H3, §16.4)":
         "is, or check the sibling out at the pinned revision: `git -C " &
         "/w/lib checkout " & ShaA & "`; then commit again") in
         repinExclusionViolation(e).remedies[1]
-    # A conditional entry is listed, never applied.
-    let cond = reproRepinVerdict(repinInputs("package app:\n  uses:\n" &
-      "    when defined(macosx):\n      \"lib ==1.0.0\"\n", tags), "lib",
+    # A conditional entry with no lock to decide its arm is listed, never
+    # applied.
+    let condRecipe = "package app:\n  uses:\n" &
+      "    when defined(macosx):\n      \"lib ==1.0.0\"\n"
+    let cond = reproRepinVerdict(repinInputs(condRecipe, tags), "lib",
       "/w/lib", "https://example.invalid/lib", ShaB)
     check cond.exclusions.len == 0
     check cond.exactPin == ""
     check cond.notChecked.len == 1
+    # With the lock, its arm is decided: on a macOS lock the pin applies and
+    # excludes every other revision; on a Linux lock it does not apply.
+    for (platform, applies) in [("arm64-macosx", true),
+        ("amd64-linux", false)]:
+      var inputs = repinInputs(condRecipe, tags)
+      inputs.reproLock = text("/w/app/repro.lock", reproLock([
+        dep("app", ".", "https://example.invalid/app", ShaA)], "",
+        platform))
+      let v = reproRepinVerdict(inputs, "lib", "/w/lib",
+        "https://example.invalid/lib", ShaB)
+      checkpoint(platform)
+      check v.notChecked.len == 0
+      check v.exclusions.len == (if applies: 1 else: 0)
+      check v.exactPin == (if applies: ShaA else: "")
 
 suite "the uses: text scan":
 
@@ -535,6 +725,98 @@ suite "the uses: text scan":
     check got == @["9:a >=1:uses", "11:b ^2.1:uses",
       "14:c ==3.0.0:uses:cond", "15:d:uses", "16:e >=4:nativeBuildDeps",
       "18:f >=5:uses:cond"]
+
+  test "each conditional entry carries the arms it is under":
+    let src = "package p:\n" &
+      "  uses:\n" &
+      "    when defined(windows):\n" &
+      "      \"a\"\n" &
+      "    elif defined(linux):\n" &
+      "      case cc.value\n" &
+      "      of \"gcc\": \"b >=1\"\n" &
+      "      else:\n" &
+      "        \"c\"\n" &
+      "    else: \"d\"\n" &
+      "    \"e\"\n"
+    let decls = scanReproUsesDeclarations(src, "r.nim")
+    check decls.len == 5
+    if decls.len == 5:
+      check decls[0].guards.len == 1
+      check decls[0].guards[0].kind == rgkWhen
+      check decls[0].guards[0].arm == 0
+      check decls[0].guards[0].conditions ==
+        @["defined(windows)", "defined(linux)", ""]
+      check decls[1].guards.len == 2
+      check decls[1].guards[0].arm == 1
+      check decls[1].guards[1].kind == rgkCase
+      check decls[1].guards[1].subject == "cc.value"
+      check decls[1].guards[1].keywords == @["of", "else"]
+      check decls[1].guards[1].conditions == @["\"gcc\"", ""]
+      check decls[1].guards[1].insideBlock
+      check decls[2].guards[1].arm == 1
+      check decls[3].guards[0].arm == 2
+      check decls[3].guards[0].line == 10
+      check not decls[4].conditional
+      check decls[4].guards.len == 0
+
+  test "a colon inside a character literal does not end the condition":
+    # `':'` in the condition used to be read as the arm's colon, which left
+    # the arm's entry outside any arm and checked it unconditionally.
+    let src = "package p:\n" &
+      "  uses:\n" &
+      "    when defined(linux) and c == ':' and 1'u8 > 0:\n" &
+      "      \"a >=1\"\n" &
+      "    else:\n" &
+      "      \"b >=1\"\n"
+    let decls = scanReproUsesDeclarations(src, "r.nim")
+    check decls.len == 2
+    if decls.len == 2:
+      check decls[0].conditional
+      check decls[0].guards.len == 1
+      if decls[0].guards.len == 1:
+        check decls[0].guards[0].kind == rgkWhen
+        check decls[0].guards[0].arm == 0
+        check decls[0].guards[0].conditions ==
+          @["defined(linux) and c == ':' and 1'u8 > 0", ""]
+      check decls[1].guards.len == 1
+      if decls[1].guards.len == 1:
+        check decls[1].guards[0].arm == 1
+
+  test "a when condition is decided as Nim decides it for the target":
+    proc at(cond, platform: string): Tri =
+      evalWhenCondition(cond, lockArmFacts(platform, []))
+    check at("defined(linux)", "amd64-linux") == triTrue
+    check at("defined(macosx)", "amd64-linux") == triFalse
+    check at("defined(macosx)", "arm64-macosx") == triTrue
+    check at("defined(osx)", "arm64-macosx") == triTrue
+    # `macos` is classic Mac OS to Nim: false on macOS X.
+    check at("defined(macos)", "arm64-macosx") == triFalse
+    check at("defined(posix)", "arm64-macosx") == triTrue
+    check at("defined(posix)", "amd64-windows") == triFalse
+    check at("defined(windows)", "amd64-windows") == triTrue
+    check at("defined(x86_64)", "amd64-linux") == triTrue
+    check at("defined(amd64) or defined(arm64)", "arm64-macosx") == triTrue
+    check at("not (defined(linux) and defined(amd64))", "amd64-linux") ==
+      triFalse
+    check at("not defined(macosx) and not defined(windows)",
+      "amd64-linux") == triTrue
+    check at("defined(macosx) or (defined(windows) and defined(arm64))",
+      "arm64-windows") == triTrue
+    check at("defined(cpu64) and defined(littleEndian)", "amd64-linux") ==
+      triTrue
+    check at("hostOS == \"linux\"", "amd64-linux") == triTrue
+    check at("\"windows\" != hostOS", "amd64-linux") == triTrue
+    # Not a platform symbol: a `-d:` define the lock does not record.
+    check at("defined(aarch64)", "arm64-linux") == triUnknown
+    check at("defined(release)", "amd64-linux") == triUnknown
+    check at("defined(release) or defined(linux)", "amd64-linux") == triTrue
+    check at("defined(release) and defined(macosx)", "amd64-linux") ==
+      triFalse
+    # Text outside the grammar, and a lock with no (or an unknown) platform.
+    check at("hostIsMacos", "arm64-macosx") == triUnknown
+    check at("defined(linux) and", "amd64-linux") == triUnknown
+    check at("defined(linux)", "") == triUnknown
+    check at("defined(linux)", "amd64-plan9") == triUnknown
 
 suite "the sibling guidance line (Unified-Locking-And-Hooks.md §16.6)":
 
