@@ -8644,14 +8644,16 @@ proc providerFingerprintFor*(inputSources: openArray[string];
 # split private-impl edits out of ``projectSourceSemanticIdentity``.
 
 const
-  ProviderProtocolVersionV1* = 1'u32
+  ProviderProtocolVersionMirror* = 2'u32
     ## Mirrors ``repro_provider_runtime/types.nim``'s
     ## ``ProviderProtocolVersion``. Held as a local const so the identity
     ## layer does not take a build-graph dependency on the runtime library
     ## (which would form a cycle once RP2 wires the session launcher). Kept
-    ## in sync manually; a divergence would only change every
-    ## ProviderArtifactId uniformly (a full cache miss, never a correctness
-    ## bug).
+    ## in sync by hand and checked by
+    ## ``tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim``.
+    ## It MUST move with the wire version: ProviderArtifactId hashes it, and
+    ## a stale value would let an engine reuse a cached provider that speaks
+    ## the previous wire, which then fails every handshake.
 
 var cachedNimCompilerIdentity = ""
 var cachedNimCompilerIdentityPath = ""
@@ -9062,7 +9064,7 @@ proc computeProviderArtifactId*(
   ## compute the same id, hence bind the same cached artifact.
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.providerArtifactId.v1")
-  payload.writeU32Le(ProviderProtocolVersionV1)
+  payload.writeU32Le(ProviderProtocolVersionMirror)
   payload.writeString(
     if frontendIdentity.len > 0: frontendIdentity
     else: frontendRuntimeIdentity(workDir))
