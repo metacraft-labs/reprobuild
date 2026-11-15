@@ -900,8 +900,14 @@
     # bits (wasm32, i386, JS) instead of raising a RangeDefect. 259a2595
     # rides along: `std/osproc` applies `workingDir` in the child process
     # instead of changing the parent's directory around the spawn.
+    #
+    # Advanced from 8384ff3f to bb0e8943: `std/osproc` creates the child's
+    # pipes close-on-exec, so a child started with `startProcess` holds the
+    # pipes only on fd 0, 1 and 2 and its own children inherit no further
+    # copies; a grandchild that outlives the child no longer delays the
+    # parent's end-of-file.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=8384ff3fecfdbd8772d46c79054967769915d6fd";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654";
       flake = false;
     };
     nim-csources-src = {
