@@ -214,7 +214,7 @@ credgen1 credgen2 creddir credonly credprofile credsecret credsvc credunit
 csince ctokens1 ctokens2 ctokensput cuids1 cuids2 cuntil extractfilename put1
 put2 q secretafter secretbefore token1 token2 unitfilesafter unitfilesbefore
 unitfilescmd
-find managerduring max min needreload0 since2 until2 tp tplprofile tplunit tpout uida uidb tpljudged injudged l tplobserve tpljudgedok after4 after5 replace t0 t1 t1ok t1state t2 t2notfailed t2out t2state t3 t3ok t3state trigagitate trigcalm trigcheck trigprofile trigwaiver trigreset blocked count pendingfile rc rcout runafter runbefore t1r t1rok t4 t4after t4ok t4out
+find managerduring max min needreload0 since2 until2 tp tplprofile tplunit tpout uida uidb tpljudged injudged l tplobserve tpljudgedok after4 after5 replace t0 t1 t1ok t1state t2 t2notfailed t2out t2state t3 t3ok t3state trigagitate trigcalm trigcheck trigprofile trigwaiver trigreset blocked count pendingfile rc rcout runafter runbefore t1r t1rok t4 t4after t4ok t4out t5 t5ok t5pending
 != >= $ % %* & + .. ..< / == > @ Amdropindir Amstate Closurefixture Guest
 Mutationstop Vwstate ^ a a0am a0vw ad add address admintoken adopted
 adoptresource after after2 all amaddress ambind amclosure and
@@ -401,7 +401,7 @@ suite "gate source":
   SourceStart = "## Gate ``e2e_addon_adopt_hand_configured_service``"
     ## How the file begins.
   GateDigest =
-    "6e45f935cab6f30c7543468d50535df035fa62b24ab669aca479aa535cef09ae"
+    "f8bd6a7b9d4d1197ebd698011329d2b99f2c98654c15edcf6d6f2f9cc6e3a3e9"
     ## ``codeDigest`` of the gate as reviewed. The structural checks above
     ## are each a freeze of one part of the gate, and seven reviews of
     ## 2026-11-12 each found a part left open: a helper of the gate that

@@ -1613,6 +1613,10 @@ type
     startsOf*: proc (unit: string): seq[string]
       ## what another unit starts, as systemd reports it (``nil``: only the
       ## unit's own dependencies are followed)
+    orderedBeforeOf*: proc (unit: string): seq[string]
+      ## the units another unit is ordered before (its ``Before=``), as
+      ## systemd reports it (``nil``: only the unit's own ``Before=`` is
+      ## followed)
     inspectPath*: proc (path: string; uid: int; dynamic: bool): string
       ## why the manager may not create ``path`` for the unit, as it is on
       ## the host now (``managerPathProblem``)
@@ -2141,6 +2145,21 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         problem2("system-state", StartingDependencyKeys.join(","), "starts " &
                  route[^1] & " (" & route.join(" -> ") &
                  "), which changes the whole system's state")
+    # Spec §10.1, "A floored unit's own ordering": a unit systemd orders
+    # after the boot re-assertion (the floor's ``FloorBootOrdering``) must
+    # not also be ordered before it, by any chain of ``Before=`` systemd
+    # reports (its own and every other unit's, implicit ones included):
+    # that is an ordering cycle, broken at every boot by deleting a job of
+    # systemd's choosing.
+    if FloorReassertUnit in words(show.getOrDefault("After")):
+      let orderedBeforeOf = e.orderedBeforeOf
+      let route = bootOrderingCycleRoute(unit,
+        proc (u: string): seq[string] =
+          if u == unit: words(show.getOrDefault("Before"))
+          elif orderedBeforeOf != nil: orderedBeforeOf(u)
+          else: @[])
+      if route.len > 0:
+        problem2("boot-ordering", "Before", bootOrderingCycleReason(route))
     result.add(conflictsProblems(unit, show, e.ownUnits))
     # Every unit of the generation the unit reaches is held to decision 55:
     # starting it stops what its Conflicts= names.

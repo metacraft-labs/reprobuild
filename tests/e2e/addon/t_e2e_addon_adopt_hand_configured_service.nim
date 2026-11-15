@@ -991,8 +991,8 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "[ -s /var/lib/a13r10p/path.ran ] && break; sleep 1; done; " &
       "systemctl show -p ActiveState -p Result a13r10.socket | tr '\\n' ' '; echo; " &
       "systemctl show -p ActiveState -p Result a13r10.path | tr '\\n' ' '; echo; " &
-      "cat /var/lib/a13r10/sock.ran 2>/dev/null; echo; " &
-      "cat /var/lib/a13r10p/path.ran 2>/dev/null; echo"
+      "cat /var/lib/a13r10/sock.ran 2>/dev/null | tr -d '\\n'; echo; " &
+      "cat /var/lib/a13r10p/path.ran 2>/dev/null | tr -d '\\n'; echo"
     discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
       "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
       "\"repro-state-set/1\", \"host\": \"a13r10\", \"createdAt\": " &
@@ -1105,11 +1105,15 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let t4After = g.exec("systemctl show -p ActiveState -p Result " &
       "a13r10.socket | tr '\\n' ' '; test -e /var/lib/repro/system/" &
       "triggers-to-restart && echo still-pending; true").stdout.strip()
+    # The revert committed with the trigger on record (§13 decision 160),
+    # not failed on starting it again at its own step 7.
     let t4Ok = t4.exitCode != 0 and blocked == "active" and
+      "could not be rolled back" notin t4Out and
       "a13r10.socket" in pendingFile and rc.exitCode == 0 and
       "trigger a13r10.socket started again" in rcOut and
       "ActiveState=active" in t4After and "still-pending" notin t4After
     record["decision160"] = %*{"exit": t4.exitCode, "blocked": blocked,
+      "revertFailed": "could not be rolled back" in t4Out,
       "pending": pendingFile, "recoverExit": rc.exitCode, "recover": rcOut,
       "after": t4After, "ok": t4Ok}
     step("decision 160: a trigger that cannot start again fails the switch, " &
@@ -1117,6 +1121,16 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          "once the cause is cleared", t4Ok, t4Out & "\npending: " &
          pendingFile & "\nblocker: " & blocked & "\nrecover: " & rcOut &
          "\nafter: " & t4After)
+    # And the host is not pending any more: the next switch applies.
+    let t5 = g.applyProfile(repro, "trig5", trigProfile.replace("@GEN@", "5"))
+    let t5Pending = g.exec("test -e /var/lib/repro/system/triggers-to-restart " &
+      "&& echo still-pending; test -e /var/lib/repro/system/addon/pending " &
+      "&& echo marker; true").stdout.strip()
+    let t5Ok = t5.exitCode == 0 and t5Pending.len == 0
+    record["decision160Done"] = %*{"exit": t5.exitCode, "pending": t5Pending,
+      "ok": t5Ok}
+    step("decision 160: after recover the host is not pending, and the next " &
+         "switch applies", t5Ok, t5.stdout & t5.stderr & "\n" & t5Pending)
     record["decision151Recovered"] = %*{"exit": t3.exitCode, "state": t3State,
       "ok": t3Ok}
     step("decision 151, add-on switch after the refusal: once the generator " &

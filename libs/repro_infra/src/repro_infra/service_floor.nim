@@ -153,11 +153,34 @@ const
     ## ``service_floor_v3``. Version 4 is this module's floor lines without
     ## the boot ordering version 5 adds to ``[Unit]``
     ## (``FloorBootOrdering``; §13 decision 144).
-  FloorBootOrdering* = "After=repro-addon-reassert.service"
+  FloorReassertUnit* = "repro-addon-reassert.service"
+    ## The add-on's boot re-assertion (``repro_addon/generation0``'s
+    ## ``ReassertUnit``), named here so the floor can order after it.
+  FloorBootOrdering* = "After=" & FloorReassertUnit
     ## §13 decision 144: every floored unit (from floor version 5) starts
     ## only after the add-on's boot re-assertion, which replays a pending
     ## revert -- putting its start holds back -- before any floored unit
     ## can start (systemd.unit(5), After=).
+  ReassertWaitsFor* = ["sysinit.target", "basic.target", "sockets.target",
+    "paths.target", "timers.target", "slices.target", "local-fs.target",
+    "local-fs-pre.target", "swap.target", "cryptsetup.target",
+    "-.slice", "system.slice", "repro-store.mount",
+    "repro-addon-secrets.service", "repro-addon-egress.service",
+    "system-reproagent.slice"]
+    ## Units the boot re-assertion is ordered after on every base, which
+    ## the parse-time half can name without the host (spec §10.1, "A
+    ## floored unit's own ordering"): the boot targets its default
+    ## dependencies order it after
+    ## (systemd.special(7), bootup(7): ``After=basic.target``, which is
+    ## after ``sysinit.target``, ``sockets.target``, ``paths.target``,
+    ## ``timers.target`` and ``slices.target``; ``sysinit.target`` after
+    ## ``local-fs.target``, ``swap.target`` and ``cryptsetup.target``), its
+    ## slice, and the add-on's own units ordered before it: the store
+    ## mount and the secrets unit (its ``After=``), the egress observer
+    ## (``Before=`` it) and the egress observer's slice (its ``After=``).
+    ## ``repro_addon``'s ``t_addon_floor_boot_ordering_cycle`` holds this
+    ## list to the order generation 0 writes, followed transitively. The
+    ## effective half reads the whole order from systemd.
   ServiceFloorHardening* = "serviceFloor"
     ## The one value of the ``hardening`` field.
   WholeFloorException* = "serviceFloor"
@@ -989,6 +1012,62 @@ proc systemStateRoute*(roots: openArray[string];
     chain.insert(c, 0)
     c = parents.getOrDefault(c, "")
   chain
+
+proc bootOrderingCycleRoute*(root: string;
+                             beforeOf: proc (u: string): seq[string] {.closure.};
+                             waitedFor: openArray[string] = [];
+                             limit = RouteLimit): seq[string] =
+  ## Spec §10.1, "A floored unit's own ordering": the chain of units
+  ## from the floored unit ``root``, by ``Before=`` (``beforeOf``: the
+  ## units ``u`` is ordered before, as the caller reads them -- the
+  ## profile's files at parse time, systemd's report in the effective
+  ## check), to the boot re-assertion
+  ## (``FloorReassertUnit``) or to a unit it waits for (``waitedFor``), or
+  ## ``@[]`` when there is none. The floor orders ``root`` after the
+  ## re-assertion (``FloorBootOrdering``), so such a chain is an ordering
+  ## cycle: at every boot systemd deletes one of its jobs to break it, by
+  ## its own heuristic, and either the floored unit never starts or the
+  ## re-assertion does not run (systemd.unit(5), ``Before=``/``After=``).
+  ## The walk is the floor's one reach (``walkReach``) over ordering
+  ## instead of starting dependencies. A closure of more than ``limit``
+  ## units returns ``@["(more than <limit> units)"]``: not judged, so
+  ## refused.
+  when FloorMutation == "boot-ordering-cycles-allowed":
+    # Falsifying build: decision 144's ordering without the cycle's
+    # refusal, in both halves.
+    return @[]
+  let waited = @waitedFor
+  var parents = initTable[string, string]()
+  parents[root] = ""
+  var found = ""
+  let complete = walkReach([root], beforeOf,
+    proc (u, parent: string): bool =
+      parents[u] = parent
+      if u == FloorReassertUnit or u in waited:
+        found = u
+        return false
+      true, limit)
+  if not complete: return @["(more than " & $limit & " units)"]
+  if found.len == 0: return @[]
+  var chain = @[found]
+  var c = parents[found]
+  while c.len > 0:
+    chain.insert(c, 0)
+    c = parents.getOrDefault(c, "")
+  chain
+
+proc bootOrderingCycleReason*(route: seq[string]): string =
+  ## The refusal's text for a ``bootOrderingCycleRoute``.
+  let last = route[^1]
+  let what = if last == FloorReassertUnit: "the boot re-assertion"
+             elif last.startsWith("("): "too many units to judge"
+             else: last & ", which the boot re-assertion (" &
+                   FloorReassertUnit & ") waits for"
+  "is ordered before " & what & " (" & route.join(" -> ") & "), and the " &
+    "floor orders it after the re-assertion (" & FloorBootOrdering &
+    "): an ordering cycle, in which systemd deletes a job at every boot, " &
+    "so the unit or the re-assertion does not start. Drop that Before= " &
+    "(or After= naming it), or name the exception \"serviceFloor: <why>\""
 
 proc unitStem*(unitName: string): string =
   ## ``a.socket`` -> ``a``; ``a@.socket`` and ``a@x.socket`` -> ``a``.
