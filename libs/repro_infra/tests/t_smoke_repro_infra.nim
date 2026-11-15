@@ -2165,6 +2165,238 @@ ExecStart=/bin/true
     check order.find(2) < order.find(0)
     check order.find(3) < order.find(1)
 
+  # The trigger's target is read as systemd reads the unit (A13 review
+  # round 9; reprobuild-pm issue 2026-11-15-planner-trigger-edges-miss-a-
+  # spaced-service-key-accept-yes-and-a-template-instance): blanks around
+  # `=` (systemd.syntax(7)), `Accept=yes` naming the template
+  # `<stem>@.service` (systemd.socket(5)), and a `Unit=` naming an
+  # instance whose template the profile defines (systemd.timer(5)). In
+  # each case the trigger is declared first and must be applied second.
+
+  test "a socket's Service = with blanks around = orders the service first":
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "a.socket" content = "[Socket]
+ListenStream=/run/a
+Service = b.service
+" }
+systemd.systemUnit { name = "b.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    check topologicallyOrder(profile, buildDependencyGraph(profile)) == @[1, 0]
+
+  test "an Accept=yes socket follows its template service":
+    for accept in ["Accept=yes", "Accept = true", "Accept=on", "Accept=1"]:
+      let profile = parseSystemProfile("""
+systemd.systemUnit { name = "e.socket" content = "[Socket]
+ListenStream=/run/e
+""" & accept & """
+
+" }
+systemd.systemUnit { name = "e@.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+      checkpoint accept
+      check topologicallyOrder(profile, buildDependencyGraph(profile)) == @[1, 0]
+
+  test "an Accept=no socket follows its namesake, not a template":
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "e.socket" content = "[Socket]
+ListenStream=/run/e
+Accept=yes
+Accept=no
+" }
+systemd.systemUnit { name = "e@.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "e.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    let graph = buildDependencyGraph(profile)
+    check graph.edges.len == 1
+    check graph.edges[0].fromIdx == 2
+    check graph.edges[0].toIdx == 0
+
+  test "a timer naming a template instance follows the template":
+    let profile = parseSystemProfile("""
+systemd.systemTimer { name = "bk.timer" content = "[Timer]
+OnCalendar=daily
+Unit=bk@daily.service
+" }
+systemd.systemUnit { name = "bk@.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    check topologicallyOrder(profile, buildDependencyGraph(profile)) == @[1, 0]
+
+  test "a path unit's spaced Unit = naming an instance follows the instance's own unit":
+    # The profile defines the instance itself as well as its template:
+    # systemd loads the instance's own file, so that is the unit to order.
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "p.path" content = "[Path]
+PathChanged=/x
+Unit = w@one.service
+" }
+systemd.systemUnit { name = "w@.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "w@one.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    let graph = buildDependencyGraph(profile)
+    check graph.edges.len == 1
+    check graph.edges[0].fromIdx == 2
+    check graph.edges[0].toIdx == 0
+
+  test "a socket's Service= is its last valid assignment, continuations joined":
+    # config_parse_socket_service: an empty value or one that is not a
+    # .service is ignored, not a reset; a comment and another section's
+    # Service= are not the socket's. The first valid value (t.service),
+    # the namesake a reset would restore (s.service) and the last valid
+    # value (c.service) are three different units, so each misreading
+    # gives a different edge.
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "s.socket" content = "[Socket]
+ListenStream=/run/s
+Service=t.service
+Service=c.service
+Service=
+Service=x.socket
+#Service=s.service
+[Install]
+Service=s.service
+" }
+systemd.systemUnit { name = "t.socket" content = "[Socket]
+ListenStream=/run/t
+Service=\
+  c.service
+" }
+systemd.systemUnit { name = "c.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "s.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "t.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    let graph = buildDependencyGraph(profile)
+    var pairs: seq[(int, int)]
+    for e in graph.edges: pairs.add((e.fromIdx, e.toIdx))
+    check pairs.len == 2
+    check (2, 0) in pairs        # s.socket -> c.service
+    check (2, 1) in pairs        # the continuation: t.socket -> c.service
+
+  test "a timer's Unit= is its first assignment naming a loadable unit":
+    # config_parse_trigger_unit: "Multiple units to trigger specified,
+    # ignoring"; an invalid name or a template is skipped first.
+    let profile = parseSystemProfile("""
+systemd.systemTimer { name = "j.timer" content = "[Timer]
+OnCalendar=daily
+Unit=
+Unit=tmpl@.service
+Unit = first.service
+Unit=second.service
+" }
+systemd.systemUnit { name = "first.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "second.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "j.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    let graph = buildDependencyGraph(profile)
+    check graph.edges.len == 1
+    check graph.edges[0].fromIdx == 1
+    check graph.edges[0].toIdx == 0
+
+  test "a timer's %p and %i specifiers name the unit it triggers":
+    let profile = parseSystemProfile("""
+systemd.systemTimer { name = "sp@nightly.timer" content = "[Timer]
+OnCalendar=daily
+Unit=%p-run@%i.service
+" }
+systemd.systemUnit { name = "sp-run@.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    check topologicallyOrder(profile, buildDependencyGraph(profile)) == @[1, 0]
+
+  test "an Accept=yes socket with a datagram listener also follows its namesake":
+    # systemd refuses to load this socket (socket_verify: "sockets are
+    # non-accepting"), but socket_add_extras records the namesake as
+    # triggered first; the edge to it is kept, and costs nothing.
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "m.socket" content = "[Socket]
+ListenStream=/run/m
+ListenDatagram=/run/m.dgram
+Accept=yes
+" }
+systemd.systemUnit { name = "m@.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "m.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    var pairs: seq[(int, int)]
+    for e in buildDependencyGraph(profile).edges: pairs.add((e.fromIdx, e.toIdx))
+    check pairs.len == 2
+    check (1, 0) in pairs
+    check (2, 0) in pairs
+
+  test "a profile drop-in's Service= over a socket decides its service":
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "d.socket" content = "[Socket]
+ListenStream=/run/d
+" }
+systemd.systemDropIn { unit = "d.socket" name = "svc" content = "[Socket]
+Service = real.service
+" }
+systemd.systemUnit { name = "real.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "d.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    let order = topologicallyOrder(profile, buildDependencyGraph(profile))
+    check order.find(2) < order.find(0)
+    check order == @[1, 2, 0, 3]
+
+  test "the profile's drop-ins over a socket are read in file-name order":
+    # systemd.unit(5): drop-ins are parsed in the lexicographic order of
+    # their file names (50-repro-<name>.conf), not in the profile's order,
+    # so the later-named drop-in's Service= is the socket's.
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "o.socket" content = "[Socket]
+ListenStream=/run/o
+" }
+systemd.systemDropIn { unit = "o.socket" name = "zz" content = "[Socket]
+Service=late.service
+" }
+systemd.systemDropIn { unit = "o.socket" name = "aa" content = "[Socket]
+Service=early.service
+" }
+systemd.systemUnit { name = "early.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "late.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    var pairs: seq[(int, int)]
+    for e in buildDependencyGraph(profile).edges: pairs.add((e.fromIdx, e.toIdx))
+    check (4, 0) in pairs        # late.service (drop-in "zz") -> o.socket
+    check (3, 0) notin pairs     # not early.service (drop-in "aa")
+
   test "a socket whose service depends_on it is not made cyclic":
     let profile = parseSystemProfile("""
 systemd.systemUnit { name = "x.socket" content = "[Socket]

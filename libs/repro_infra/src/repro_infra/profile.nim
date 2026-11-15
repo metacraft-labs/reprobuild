@@ -26,13 +26,14 @@
 ## `macos.systemDefault` are deferred — the parser rejects them with a
 ## clear "deferred to a later phase" diagnostic.
 
-import std/[sets, strutils, tables]
+import std/[algorithm, sets, strutils, tables]
 
 import repro_elevation
 import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
 import ./service_floor
+import ./systemd_syntax
 from ./service_floor_v1 as floorV1 import nil
 from ./service_floor_v2 as floorV2 import nil
 from ./service_floor_v3 as floorV3 import nil
@@ -1154,21 +1155,167 @@ proc floorWaivedWhole*(r: SystemResource): bool =
   for e in r.suFloorExceptions:
     if e.strip().startsWith(WholeFloorException & ":"): return true
 
-proc activatedService(name, content: string): string =
-  ## The service a socket, timer or path unit starts: its ``Service=`` /
-  ## ``Unit=``, else the unit of the same name (``foo@.service`` for a
-  ## socket with ``Accept=yes``).
+const
+  NonAcceptListenKeys = ["ListenDatagram", "ListenNetlink", "ListenFIFO",
+    "ListenSpecial", "ListenMessageQueue", "ListenUSBFunction"]
+    ## The ``[Socket]`` listeners ``Accept=yes`` cannot serve per
+    ## connection: a datagram or raw socket (``socket_address_can_accept``
+    ## takes only ``SOCK_STREAM`` and ``SOCK_SEQPACKET``) or no socket at
+    ## all (``have_non_accept_socket()`` in ``src/core/socket.c``). With
+    ## one of them ``socket_add_extras`` records the plain service as
+    ## triggered as well, but ``socket_verify`` then refuses to load an
+    ## ``Accept=yes`` socket ("sockets are non-accepting"); ordering after
+    ## both units is harmless for a unit that cannot start either way.
+  AcceptListenKeys = ["ListenStream", "ListenSequentialPacket"]
+
+proc systemdBoolean(v: string): int =
+  ## ``parse_boolean()`` (``src/basic/parse-util.c``): 1, 0, or -1 for a
+  ## value it refuses (the assignment is then ignored).
+  case v.toLowerAscii()
+  of "1", "yes", "y", "true", "t", "on": 1
+  of "0", "no", "n", "false", "f", "off": 0
+  else: -1
+
+proc unitNamePrintf(value, unit: string; ok: var bool): string =
+  ## ``unit_name_printf()`` (``src/core/unit-printf.c``) for the specifiers
+  ## the unit's own name determines: ``%n`` (the name), ``%N`` (without
+  ## the suffix), ``%p`` (the prefix), ``%i`` (the instance), ``%j`` (the
+  ## prefix's last dash component) and ``%%``. Every other specifier it
+  ## takes is the host's or the manager's (``%H``, ``%m``, ``%u``, ...), not
+  ## the profile's, so ``ok`` turns false and the caller treats the target
+  ## as unknown.
+  ok = true
+  let dot = unit.rfind('.')
+  let n = if dot > 0: unit[0 ..< dot] else: unit
+  let at = n.find('@')
+  let prefix = if at >= 0: n[0 ..< at] else: n
+  let instance = if at >= 0: n[at + 1 .. ^1] else: ""
+  let dash = prefix.rfind('-')
+  let last = if dash >= 0: prefix[dash + 1 .. ^1] else: prefix
+  var i = 0
+  while i < value.len:
+    if value[i] != '%':
+      result.add(value[i])
+      inc i
+      continue
+    if i + 1 >= value.len:
+      ok = false
+      return
+    case value[i + 1]
+    of 'n': result.add(unit)
+    of 'N': result.add(n)
+    of 'p': result.add(prefix)
+    of 'i': result.add(instance)
+    of 'j': result.add(last)
+    of '%': result.add('%')
+    else:
+      ok = false
+      return
+    i += 2
+
+proc validTriggerTarget(name: string; serviceOnly: bool): bool =
+  ## A name the manager loads as a unit: a known unit type, not a template
+  ## (``manager_load_unit`` refuses one), and for a socket's ``Service=`` a
+  ## ``.service`` (``config_parse_socket_service``).
+  # systemd's `\xNN` escapes are valid in a unit name, which
+  # `isSafeUnitName` (the profile's own, stricter, names) refuses.
+  if name.len == 0 or not isSafeUnitName(name.replace('\\', '_')) or
+      isTemplateUnit(name):
+    return false
+  if serviceOnly: name.endsWith(".service")
+  else: hasKnownUnitSuffix(name)
+
+proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
+  ## The units a ``.socket`` / ``.timer`` / ``.path`` unit ``name``
+  ## triggers, read as systemd reads it: ``texts`` are its unit file and
+  ## then its drop-ins in the order systemd parses them. Empty when
+  ## ``name`` is not a trigger unit. An entry is "" when the target names a
+  ## specifier only the host resolves.
+  ##
+  ## Lines are ``config_parse``'s (``systemd_syntax.systemdLogicalLines``:
+  ## comments, continuations) split as ``parse_line`` splits them, blanks
+  ## around ``=`` stripped (systemd.syntax(7)). Sources (systemd v257,
+  ## https://github.com/systemd/systemd/blob/v257/src/core/load-fragment.c
+  ## and ``src/core/socket.c``):
+  ##
+  ## - a socket: ``Service=`` (``config_parse_socket_service``) -- the last
+  ##   assignment that names a loadable ``.service`` wins; an empty or other
+  ##   value is ignored, not a reset. Without one it triggers its namesake
+  ##   ``<stem>.service``. With ``Accept=yes`` (systemd.socket(5);
+  ##   ``config_parse_bool``, the last valid value) it triggers the template
+  ##   ``<prefix>@.service`` instead, and its namesake as well when a
+  ##   listener cannot accept (``NonAcceptListenKeys``; an empty
+  ##   ``Listen*=`` clears the listeners) -- the dependency
+  ##   ``socket_add_extras`` records, on a socket ``socket_verify`` then
+  ##   refuses. systemd also refuses an ``Accept=yes`` socket with an
+  ##   explicit ``Service=``; the explicit service is reported then.
+  ## - a timer or a path unit: ``Unit=`` (``config_parse_trigger_unit``) --
+  ##   the FIRST assignment naming a loadable unit other than itself wins
+  ##   ("Multiple units to trigger specified, ignoring"); without one the
+  ##   namesake ``<stem>.service``.
   let dot = name.rfind('.')
-  if dot <= 0: return ""
+  if dot <= 0: return
+  let (section, key) =
+    case name[dot + 1 .. ^1]
+    of "socket": ("Socket", "Service")
+    of "timer": ("Timer", "Unit")
+    of "path": ("Path", "Unit")
+    else: return
+  let isSocket = section == "Socket"
+  var explicit = ""
+  var explicitSet = false
+  var accept = false
+  var nonAccept = false
+  var listeners: seq[string]
+  for text in texts:
+    var current = ""
+    for line in systemdLogicalLines(text):
+      let t = line.strip()
+      if t.len == 0 or t[0] in {'#', ';'}: continue
+      if t[0] == '[':
+        current = if t.endsWith("]"): t[1 ..< t.len - 1] else: ""
+        continue
+      if current != section: continue
+      let eq = t.find('=')
+      if eq <= 0: continue
+      let k = t[0 ..< eq].strip()
+      let v = t[eq + 1 .. ^1].strip()
+      if k == key:
+        if explicitSet and not isSocket: continue
+        var ok = true
+        let target = unitNamePrintf(v, name, ok)
+        if not ok:
+          explicit = ""
+          explicitSet = true
+        elif validTriggerTarget(target, serviceOnly = isSocket) and
+            target != name:
+          explicit = target
+          explicitSet = true
+      elif isSocket and k == "Accept":
+        let b = systemdBoolean(v)
+        if b >= 0: accept = b == 1
+      elif isSocket and k.startsWith("Listen"):
+        if v.len == 0: listeners.setLen(0)
+        elif k in NonAcceptListenKeys or k in AcceptListenKeys:
+          listeners.add(k)
+  for l in listeners:
+    if l in NonAcceptListenKeys: nonAccept = true
   let stem = name[0 ..< dot]
-  var explicit, accept = ""
-  for d in sectionDirectives(content):
-    if d.key in ["Service", "Unit"] and d.section in ["Socket", "Timer", "Path"]:
-      explicit = d.value.strip()
-    if d.key == "Accept" and d.section == "Socket": accept = d.value.strip()
-  if explicit.len > 0: return explicit
-  if accept.toLowerAscii() in ["yes", "true", "1", "on"]: return stem & "@.service"
-  stem & ".service"
+  if explicitSet:
+    return @[explicit]
+  if isSocket and accept:
+    let at = stem.find('@')
+    result.add((if at >= 0: stem[0 ..< at] else: stem) & "@.service")
+    if nonAccept: result.add(stem & ".service")
+    return
+  @[stem & ".service"]
+
+proc activatedService(name, content: string): string =
+  ## The service a socket, timer or path unit starts, as far as its own
+  ## file says (``triggeredUnits``): the first unit it triggers, the
+  ## template for an ``Accept=yes`` socket.
+  let units = triggeredUnits(name, [content])
+  if units.len > 0: units[0] else: ""
 
 proc checkFloorActivators*(p: SystemProfile) =
   ## The units that activate a floored service, and the drop-ins onto them,
@@ -1320,17 +1467,32 @@ proc profileUnitOf(p: SystemProfile; name: string): int =
           r.suName == tmpl: return i
   -1
 
-proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
-  ## The profile's bytes systemd reads for ``name``: its unit and every
-  ## drop-in of the profile that applies to it.
-  let i = profileUnitOf(p, name)
-  if i >= 0: result.add(p.resources[i].suContent)
-  for d in p.resources:
+proc profileDropInsOf*(p: SystemProfile; name: string): seq[string] =
+  ## The contents of the profile's drop-ins that apply to unit ``name``
+  ## (``dropInApplies``): each ``systemd.systemDropIn``, and each
+  ## ``systemUnit`` with ``collision = "dropIn"``, in the order systemd
+  ## parses them -- by file name (``50-repro-<name>.conf``), across all the
+  ## directories that apply (systemd.unit(5), "Description"). Ties keep the
+  ## profile's order.
+  var named: seq[(string, int, string)]
+  for i, d in p.resources:
     if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
-      result.add(d.diContent)
+      named.add((AddOnDropInPrefix & d.diName & ".conf", i, d.diContent))
     elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
         dropInApplies(d.suName, name):
-      result.add(d.suContent)
+      let n = if d.suDropInName.len > 0: d.suDropInName else: "addon"
+      named.add((AddOnDropInPrefix & n & ".conf", i, d.suContent))
+  named.sort(proc (a, b: (string, int, string)): int =
+    result = cmp(a[0], b[0])
+    if result == 0: result = cmp(a[1], b[1]))
+  for (_, _, c) in named: result.add(c)
+
+proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
+  ## The profile's bytes systemd reads for ``name``: its unit and every
+  ## drop-in of the profile that applies to it, in parse order.
+  let i = profileUnitOf(p, name)
+  if i >= 0: result.add(p.resources[i].suContent)
+  result.add(profileDropInsOf(p, name))
 
 proc profileStartsOf*(p: SystemProfile; name: string): seq[string] =
   ## The units starting ``name`` starts, as far as the profile says: its
@@ -1354,7 +1516,8 @@ proc profileStartsOf*(p: SystemProfile; name: string): seq[string] =
         result.add(r.suName)
   if files.len > 0 and (name.endsWith(".socket") or name.endsWith(".timer") or
                         name.endsWith(".path")):
-    result.add(activatedService(name, files[0]))
+    for u in triggeredUnits(name, files):
+      if u.len > 0: result.add(u)
 
 proc checkFloorReach*(p: SystemProfile) =
   ## No floored unit, and no unit that activates one, reaches a system-state
