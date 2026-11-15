@@ -32,10 +32,18 @@
 ##   * `t_h1_repro_lock_outside_uses_range_refuses` — a `repro.lock` package
 ##     outside the `uses:` range the recipe states is refused at commit and at
 ##     push, naming the recipe line, the range and the version. An entry under
-##     a `when` arm is NOT checked (the hook does not compile the recipe) and
-##     says so in the log. An exact `uses:` version whose producer maps it to
+##     a `when` arm the lock's platform does not satisfy is not held to it; one
+##     under an arm the lock cannot decide (a `-d:` define) is NOT checked and
+##     says so in the log, in the gate's notices and in the gate's verdict
+##     line. An exact `uses:` version whose producer maps it to
 ##     another revision than the lock's is refused; one mapped through a tag
 ##     that resolves to the locked revision passes.
+##   * `t_h1_repro_lock_breaking_a_per_platform_floor_refuses` — the
+##     toolchain floor stated per platform (`when defined(macosx): "clang"`,
+##     `else: "gcc >=12"`) is held against a Linux lock: gcc 11 there is
+##     refused at commit and at push as H1, naming the `else:` arm's line.
+##     The Linux lock inside the floor, and a macOS lock at gcc 11 (the arm
+##     does not apply to it), commit and push.
 ##   * `t_h2_two_locks_disagreeing_on_one_repository_refuses` — `repro.lock`
 ##     resolves `beta`'s origin under the name `hooks-lib`, `flake.lock`
 ##     resolves it as `beta-src`. Agreeing, both pass. At different revisions,
@@ -58,9 +66,12 @@
 ##
 ## Falsifiability: against the tree before this change, the first case's
 ## inconsistent commit SUCCEEDS (exit 0) and its push passes, because the
-## exactly pinned input is no longer compared with anything; the second and
-## third cases' inconsistent commits succeed and their pushes report no
-## failure at all.
+## exactly pinned input is no longer compared with anything; the
+## out-of-range and H2 cases' inconsistent commits succeed and their pushes
+## report no failure at all. Against reprobuild `b1b23f4d5` (before conditional arms
+## were decided against the lock), the per-platform floor's inconsistent
+## commit SUCCEEDS and its push prints `repro check: OK` after a "not
+## checked" notice for the floor.
 ##
 ## Test-double policy: NO mocks, doubles or fakes. Real bare origins, real
 ## clones, real `flake.lock` / `repro.lock` documents in their on-disk shapes,
@@ -229,31 +240,46 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
         "    \"libfoo " & range & "\"\n" &
         (if exact.len > 0: "    \"beta " & exact & "\"\n" else: "") &
         "    when defined(macosx):\n" &
-        "      \"libfoo >=9\"\n"
+        "      \"libfoo >=9\"\n" &
+        "    when defined(reproNoSuchDefine):\n" &
+        "      \"libfoo >=8\"\n"
       let deltaHead = headOf(fx, fx.app)
       writeFile(recipePath, recipe(">=1.0 <2"))
       writeFile(fx.app / "repro.lock", reproLockText(fx, "delta", deltaHead,
-        [], packageEntry("libfoo", "1.4.0")))
+        [], packageEntry("libfoo", "1.4.0"), platform = "amd64-linux"))
       installPreCommitDispatch(fx)
 
       # ---- positive control: the resolution is inside the range. The
-      # conditional `libfoo >=9` is NOT checked, and the log says so. -------
+      # `when defined(macosx)` arm does not apply to this amd64-linux lock,
+      # so its `libfoo >=9` is not held to it and not listed. A `-d:` define
+      # is not a fact the lock records: `libfoo >=8` is NOT checked, and the
+      # log says so. ------------------------------------------------------
       let ok = tryCommitInApp(fx, "consistent range")
       checkpoint(ok.output)
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
       check ok.code == 0
-      check ("lock-consistency not checked: " & recipePath & ":8: " &
-        "'libfoo >=9' — under a when/if/case arm") in preCommitLog(fx)
+      check ("lock-consistency not checked: " & recipePath & ":10: " &
+        "'libfoo >=8' — under `when defined(reproNoSuchDefine)` (line 9), " &
+        "a `when` whose conditions do not depend only on the lock's " &
+        "platform (amd64-linux)") in preCommitLog(fx)
+      check "'libfoo >=9'" notin preCommitLog(fx)
       publishRepo(fx, fx.app)
       let okGate = gatePrePushIn(base, fx.app)
+      checkpoint("gate output:\n" & okGate.output)
       checkNoConsistencyFailure(okGate)
       # The push gate names the unchecked entry too: silence is not a pass.
       var notices: seq[string]
       if okGate.report.kind == JObject and okGate.report.hasKey("notices"):
         for n in okGate.report["notices"]: notices.add(n.getStr())
       checkpoint("gate notices:\n" & notices.join("\n"))
-      check ("recipe/lock consistency not checked: " & recipePath & ":8: " &
-        "'libfoo >=9' — under a when/if/case arm") in notices.join("\n")
+      check ("recipe/lock consistency not checked: " & recipePath & ":10: " &
+        "'libfoo >=8' — under `when defined(reproNoSuchDefine)` (line 9)") in
+        notices.join("\n")
+      check "'libfoo >=9'" notin notices.join("\n")
+      # ...and its verdict line does not read as though it had been checked.
+      check okGate.code == 0
+      check ("repro check: OK, except that 1 recipe constraint was not " &
+        "checked against the lock") in okGate.output
 
       # ---- the recipe tightens its range; the lock is not re-solved. ------
       writeFile(recipePath, recipe(">=2.0 <3"))
@@ -331,6 +357,85 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       checkpoint("pre-commit log:\n" & preCommitLog(fx))
       check e2.code == 0
       check "H1 (" notin e2.output
+
+  test "t_h1_repro_lock_breaking_a_per_platform_floor_refuses":
+    if not nf3Prerequisites(
+        "t_h1_repro_lock_breaking_a_per_platform_floor_refuses"):
+      skip("needs git on PATH and a built ./build/bin/repro (named above)")
+    else:
+      # The shape of reprobuild-pm issue 2026-11-15: a toolchain floor stated
+      # per platform, `when defined(macosx): "clang"` / `else: "gcc >=12"`,
+      # and a Linux lock that resolves gcc 11. Before the fix both hooks
+      # listed the floor as "not checked" and passed.
+      let base = setupNf2Fixture("h1-arm")
+      defer: removeDir(base.scratch)
+      isolateNf2Config(base)
+      defer: releaseNf2Config()
+      var fx = base
+      fx.app = base.ws / "delta"
+      publishAll(base)
+      let recipePath = fx.app / "repro.nim"
+      writeFile(recipePath, "import repro_project_dsl\n\n" &
+        "package delta:\n" &
+        "  uses:\n" &
+        "    when defined(macosx):\n" &
+        "      \"clang\"\n" &
+        "    else:\n" &
+        "      \"gcc >=12\"\n")
+      let floorLine = lineNumberOf(readFile(recipePath), "\"gcc >=12\"")
+      check floorLine == 8
+      let deltaHead = headOf(fx, fx.app)
+      proc lockAt(gcc, platform: string): string =
+        reproLockText(fx, "delta", deltaHead, [],
+          packageEntry("gcc", gcc) & ", " & packageEntry("clang", "15.0.0"),
+          platform = platform)
+      installPreCommitDispatch(fx)
+
+      # ---- positive controls: the Linux lock inside the floor, and a macOS
+      # lock the `else:` arm does not apply to, both commit and push. -------
+      writeFile(fx.app / "repro.lock", lockAt("12.0.0", "amd64-linux"))
+      let ok = tryCommitInApp(fx, "linux lock inside the floor")
+      checkpoint(ok.output)
+      check ok.code == 0
+      check "H1 (" notin ok.output
+      writeFile(fx.app / "repro.lock", lockAt("11.0.0", "arm64-macosx"))
+      let mac = tryCommitInApp(fx, "macos lock, the floor does not apply")
+      checkpoint(mac.output)
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      check mac.code == 0
+      check "H1 (" notin mac.output
+      check "'gcc >=12'" notin preCommitLog(fx)
+      publishRepo(fx, fx.app)
+      let macGate = gatePrePushIn(base, fx.app)
+      checkNoConsistencyFailure(macGate)
+      check "'gcc >=12'" notin macGate.output
+      check "repro check: OK" in macGate.output
+      check "not checked against the lock" notin macGate.output
+
+      # ---- the Linux lock below the floor: the commit is refused as H1. ---
+      writeFile(fx.app / "repro.lock", lockAt("11.0.0", "amd64-linux"))
+      let headBefore = headOf(fx, fx.app)
+      let c = tryCommitInApp(fx, "linux lock below the floor")
+      checkpoint(c.output)
+      check c.code != 0
+      check c.head == headBefore
+      check ("H1 (the lock satisfies the recipe): " & recipePath & ":" &
+        $floorLine & " requires 'gcc >=12' (uses:), but " &
+        fx.app / "repro.lock" & " resolves package 'gcc' at version " &
+        "11.0.0, which that range does not admit") in c.output
+      check "not checked" notin c.output
+      discard gitIn(fx, fx.app, "reset -q")
+
+      # ---- the same state, pushed past the hook, is refused as H1. --------
+      commitWithoutHook(fx, "bypass the hook")
+      let gate = gatePrePushIn(base, fx.app)
+      checkpoint("gate output:\n" & gate.output)
+      check gate.code == 2
+      check hasGateFailure(gate.report, H1)
+      let text = failureText(gate.report, H1)
+      check (recipePath & ":" & $floorLine & " requires 'gcc >=12'") in text
+      check "resolves package 'gcc' at version 11.0.0" in text
+      check "repro check: OK" notin gate.output
 
   test "t_h2_two_locks_disagreeing_on_one_repository_refuses":
     if not nf3Prerequisites(

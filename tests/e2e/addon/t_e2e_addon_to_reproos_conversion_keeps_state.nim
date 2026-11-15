@@ -1366,9 +1366,44 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
             else: ""), judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") &
            detail)
+    # The premise of decision 153 for units outside the judged set (A13
+    # review round 10, finding 8), measured on this host's systemd with
+    # units of the gate's own and no repro in the loop: a unit that
+    # Requires= a unit whose start a condition hold skips (the full apply's
+    # hold, ConditionPathExists=!/) starts and runs, the skipped start
+    # counting as satisfied (systemd.unit(5), "Conditions and Asserts").
+    block:
+      discard nw.run("mkdir -p /run/systemd/system/a13m-held.service.d && " &
+        "printf '[Unit]\\nDescription=A13 decision-153 premise: held\\n\\n" &
+        "[Service]\\nType=oneshot\\nRemainAfterExit=yes\\nExecStart=/bin/true\\n' " &
+        "> /run/systemd/system/a13m-held.service && printf '[Unit]\\n" &
+        "ConditionPathExists=!/\\n' > /run/systemd/system/a13m-held.service.d/" &
+        "zz-hold.conf && printf '[Unit]\\nDescription=A13 decision-153 premise: " &
+        "requires the held unit\\nRequires=a13m-held.service\\nAfter=" &
+        "a13m-held.service\\n\\n[Service]\\nType=oneshot\\nRemainAfterExit=yes\\n" &
+        "ExecStart=/bin/true\\n' > /run/systemd/system/a13m-req.service && " &
+        "systemctl daemon-reload")
+      let st = nw.exec("systemctl start a13m-req.service")
+      let show = nw.exec("systemctl show -p ActiveState -p Result a13m-req.service " &
+        "| tr '\\n' ' '; echo; systemctl show -p ActiveState -p ConditionResult " &
+        "a13m-held.service | tr '\\n' ' '").stdout
+      let lines = show.splitLines()
+      let reqRan = st.exitCode == 0 and lines.len > 0 and
+        "ActiveState=active" in lines[0]
+      let heldSkipped = "ConditionResult=no" in show
+      discard nw.run("systemctl stop a13m-req.service a13m-held.service; rm -rf " &
+        "/run/systemd/system/a13m-held.service /run/systemd/system/a13m-held.service.d " &
+        "/run/systemd/system/a13m-req.service; systemctl daemon-reload")
+      record["decision153Premise"] = %*{"startExit": st.exitCode, "show": show,
+        "requirerRan": reqRan, "heldSkipped": heldSkipped}
+      step("decision 153's premise: on this systemd a unit that requires a " &
+           "condition-held unit starts, the held unit's start skipped",
+           reqRan and heldSkipped, show & "\n" & st.stdout & st.stderr)
     # Owner decision 153 (decided 2026-11-15): on a partial refusal, a unit
     # that Requires= a refused unit stays held with it, and the apply says
-    # so. eth-r10-gen.service is refused by the live check (a generator
+    # so. As decided again in A13 review round 10, every unit of the
+    # generation that requires it, judged or not: eth-r10-ureq.target is
+    # not a service, so the live check does not judge it. eth-r10-gen.service is refused by the live check (a generator
     # makes it root at the apply's reload, as round 6's live probe);
     # eth-r10-req.service is confined, enabled and Requires= it. Without
     # the rule it is released and started, and systemd counts its
@@ -1388,9 +1423,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "ReadWritePaths=/var/lib/a13-r5\\nExecStart=/bin/sh -c 'id -u > " &
         ProbeMarkerDir & "/eth-r10-req.service.ran'\\n\\n[Install]\\n" &
         "WantedBy=multi-user.target\\n\",\n        address = \"r10Req\")\n"
+      let ureq = "      systemdSystemUnit(name = \"eth-r10-ureq.target\",\n" &
+        "        content = \"[Unit]\\nDescription=A13 decision-153 probe: an " &
+        "unjudged unit that requires a refused unit\\nRequires=eth-r10-gen.service\\n" &
+        "After=eth-r10-gen.service\\n\\n[Install]\\nWantedBy=multi-user.target\\n\",\n" &
+        "        address = \"r10Ureq\")\n"
       let pf = probeFile("r10req")
       writeFile(work / pf, probeProfile("r10req",
-        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req))
+        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req & ureq))
       nw.copyTo(work / pf, RefDir / pf)
       let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
         pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
@@ -1406,12 +1446,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # Decision 153: a unit that requires a refused unit stays held.
       record["decision153"] = %*{"exit": r.exitCode, "reported": reported,
         "heldInEtc": heldReq, "started": started, "judged": judged(o)}
+      let ureqReported = "eth-r10-ureq.target requires eth-r10-gen.service" in o
+      let ureqHeld = nw.exec("test -f /etc/systemd/system/eth-r10-ureq.target.d/" &
+        "zz-repro-carried-check-hold.conf").exitCode == 0
+      let ureqActive = nw.exec("systemctl is-active eth-r10-ureq.target").stdout.strip()
       discard nw.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
         "/etc/systemd/system/eth-r10-gen.service.d && systemctl daemon-reload")
       step("decision 153: a unit that requires a unit the live check refuses " &
            "stays held with it, never started, and the apply says why",
            r.exitCode != 0 and reported and heldReq and not started,
            o & "\n" & journal & "\nheld: " & $heldReq & " ran: " & $ran)
+      record["decision153Unjudged"] = %*{"reported": ureqReported,
+        "heldInEtc": ureqHeld, "active": ureqActive}
+      step("decision 153: a unit the live check does not judge that requires " &
+           "a refused unit stays held with it, not active, and the apply " &
+           "says why", ureqReported and ureqHeld and ureqActive != "active",
+           o & "\nheld: " & $ureqHeld & " active: " & ureqActive)
     # A stored plan made now, before install-unit: no requirement is due
     # yet, so the plan has none (finding 4; applied after the restore).
     let planFile = probeFile("r5plan")

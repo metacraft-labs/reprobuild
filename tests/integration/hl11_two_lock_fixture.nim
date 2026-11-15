@@ -52,13 +52,19 @@ proc lockDepEntry*(fx: Nf2Fixture; name, path, origin, rev: string): string =
   ", depends = \"\", groups = \"\" }"
 
 proc reproLockText*(fx: Nf2Fixture; owner, ownerRev: string;
-    deps: openArray[string]; packages = ""): string =
+    deps: openArray[string]; packages = "";
+    platform = "x86_64-linux"): string =
   ## A committed `repro.lock` in the shipped `reprobuild.solved-graph-lock.v2`
   ## shape: the owner's root entry plus ``deps``.
+  ##
+  ## ``platform`` is the `[lock] platform` fact. The default is not a target a
+  ## writer records (`currentPlatformId` writes Nim's `hostCPU-hostOS`, e.g.
+  ## `amd64-linux`), so it decides no `when` arm; a case about arms passes
+  ## the spelling a real lock carries.
   var all = @[lockDepEntry(fx, owner, ".", owner, ownerRev)]
   for d in deps: all.add(d)
   "schema = \"reprobuild.solved-graph-lock.v2\"\n\n[lock]\n" &
-  "platform = \"x86_64-linux\"\noptimal = true\n" &
+  "platform = \"" & platform & "\"\noptimal = true\n" &
   "inputs_digest = \"h1-h2-fixture\"\nvariants = []\n" &
   "packages = [" & packages & "]\n" &
   "deps = [" & all.join(", ") & "]\n"

@@ -172,8 +172,13 @@ def green(kind, base="debian-13"):
         rec["decision151Refused"] = {"exit": 1, "notFailed": True,
                                      "refusedForReason": True}
         rec["decision151Recovered"] = {"exit": 0, "ok": True}
-        rec["decision160"] = {"exit": 1, "blocked": "active",
-                              "revertFailed": False, "ok": True}
+        rec["decision160Revert"] = {"exit": 1, "blocked": "active",
+                                    "revertFailed": False,
+                                    "dependantRecorded": True,
+                                    "dependantInOutput": True, "ok": True}
+        rec["decision160Guard"] = {"exit": 1, "after": "a13r10.socket\n",
+                                   "ok": True}
+        rec["decision160"] = {"recoverExit": 0, "ok": True}
         rec["decision160Done"] = {"exit": 0, "pending": "", "ok": True}
     elif kind in ("conv", "convseam"):
         rec = base_record(CONV, base, engine=ENGINE,
@@ -204,6 +209,10 @@ def green(kind, base="debian-13"):
             rec["decision153"] = {"exit": 1, "reported": True,
                                   "heldInEtc": True, "started": False,
                                   "judged": True}
+            rec["decision153Unjudged"] = {"reported": True, "heldInEtc": True,
+                                          "active": "inactive"}
+            rec["decision153Premise"] = {"startExit": 0, "requirerRan": True,
+                                         "heldSkipped": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -370,22 +379,61 @@ def red_record(kind, base="debian-13"):
                         ok(HELD_D151)]
     elif kind == "mutrevertstarts":
         rec = base_record(ADOPT, base, mutation="revert-starts-unstartable-trigger")
-        rec["decision160"] = {"exit": 1, "blocked": "active",
-                              "revertFailed": True, "ok": False}
+        rec["decision160Revert"] = {"exit": 1, "blocked": "active",
+                                    "revertFailed": True, "ok": False}
         rec["steps"] = [ok("bootstrap"),
                         red("decision 160: a trigger that cannot start again "
-                            "fails the switch, the revert commits with the "
-                            "host pending, and recover starts it once the "
-                            "cause is cleared"),
+                            "fails the switch, and its revert commits with "
+                            "the trigger, and the unit that requires it, on "
+                            "record"),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "mutunjudgedreq":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="unjudged-requirers-released")
+        rec["decision153"] = {"exit": 1, "reported": True, "heldInEtc": True,
+                              "started": False, "judged": True}
+        rec["decision153Unjudged"] = {"reported": False, "heldInEtc": False,
+                                      "active": "active"}
+        rec["decision153Premise"] = {"startExit": 0, "requirerRan": True,
+                                     "heldSkipped": True}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 153: a unit the live check does not judge "
+                            "that requires a refused unit stays held with it, "
+                            "not active, and the apply says why")]
+    elif kind == "mutdependants":
+        rec = base_record(ADOPT, base, mutation="dependants-started")
+        rec["decision160Revert"] = {"exit": 1, "blocked": "active",
+                                    "revertFailed": True,
+                                    "dependantRecorded": False,
+                                    "dependantInOutput": True, "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 160: a trigger that cannot start again "
+                            "fails the switch, and its revert commits with "
+                            "the trigger, and the unit that requires it, on "
+                            "record"),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "mutswitchrecord":
+        rec = base_record(ADOPT, base, mutation="switch-ignores-restart-record")
+        rec["decision160Guard"] = {"exit": 0, "after": "a13r10.socket\n"
+                                   "Description=A13 decision-151 probe: generation 4b\n",
+                                   "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        ok("decision 160: a trigger that cannot start again "
+                           "fails the switch, and its revert commits with the "
+                           "trigger, and the unit that requires it, on record"),
+                        red("decision 160: while a trigger is on record, an "
+                            "add-on switch that leaves it and its unit as "
+                            "they are is refused before it writes anything"),
                         red("stopped at the first red step under the mutation")]
     elif kind == "mutrestartignored":
         rec = base_record(ADOPT, base, mutation="trigger-restart-failure-ignored")
-        rec["decision160"] = {"exit": 0, "blocked": "active", "ok": False}
+        rec["decision160Revert"] = {"exit": 0, "blocked": "active",
+                                    "pending": "", "ok": False}
         rec["steps"] = [ok("bootstrap"),
                         red("decision 160: a trigger that cannot start again "
-                            "fails the switch, the revert commits with the "
-                            "host pending, and recover starts it once the "
-                            "cause is cleared"),
+                            "fails the switch, and its revert commits with "
+                            "the trigger, and the unit that requires it, on "
+                            "record"),
                         red("stopped at the first red step under the mutation")]
     elif kind == "mutnoedges":
         rec = base_record(CONV, base, engine=ENGINE,
@@ -462,6 +510,7 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutreceipt", "mutliveset", "mutcallsite", "muttplconv", "muttpladopt",
              "mutholdwin", "mutnoedges", "mutreissuetgt", "mutreissuesock",
              "muttrigconv", "muttrigheld", "mutrestartignored",
+             "mutdependants", "mutswitchrecord", "mutunjudgedreq",
              "mutrevertstarts"]
 
 
@@ -942,6 +991,8 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
                            ("decision151Refused", "notFailed"),
                            ("decision151Refused", "refusedForReason"),
                            ("decision151Recovered", "ok"),
+                           ("decision160Revert", "ok"),
+                           ("decision160Guard", "ok"),
                            ("decision160", "ok"), ("decision160Done", "ok")):
             with self.subTest(key=key, field=field):
                 rec = green("adopt")
@@ -959,14 +1010,80 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
                     "ActiveState=inactive Result=success"
                 self.assertRejected("muttrigconv-debian-13", rec)
         rec = red_record("mutrevertstarts")
-        rec["decision160"]["revertFailed"] = False
+        rec["decision160Revert"]["revertFailed"] = False
         self.assertRejected("mutrevertstarts-debian-13", rec)
         rec = red_record("mutrestartignored")
-        rec["decision160"]["exit"] = 1
+        rec["decision160Revert"]["exit"] = 1
         self.assertRejected("mutrestartignored-debian-13", rec)
         rec = red_record("mutrestartignored")
-        rec["decision160"]["blocked"] = "inactive"
+        rec["decision160Revert"]["blocked"] = "inactive"
         self.assertRejected("mutrestartignored-debian-13", rec)
+        # A13 review round 10: the second shape of trigger-restart-failure-
+        # ignored -- the switch goes on and fails on the dependant whose
+        # dependency job starts the socket the blocker holds -- and a near
+        # miss, another failure with the record empty.
+        rec = red_record("mutrestartignored")
+        rec["decision160Revert"].update({"exit": 1, "revertFailed": True,
+            "dependantJobFailed": True, "socketBindFailed": True})
+        ok_, _, why = cls.classify("mutrestartignored-debian-13", rec)
+        self.assertTrue(ok_, why)
+        for field in ("dependantJobFailed", "socketBindFailed"):
+            rec = red_record("mutrestartignored")
+            rec["decision160Revert"].update({"exit": 1, "revertFailed": True,
+                "dependantJobFailed": True, "socketBindFailed": True})
+            rec["decision160Revert"][field] = False
+            self.assertRejected("mutrestartignored-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        rec["decision160Revert"].update({"exit": 1, "pending": "",
+            "dependantJobFailed": False, "socketBindFailed": False})
+        self.assertRejected("mutrestartignored-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        rec["decision160Revert"]["pending"] = "a13r10.socket\trendered=x"
+        self.assertRejected("mutrestartignored-debian-13", rec)
+        rec = red_record("mutrestartignored")
+        del rec["decision160Revert"]["pending"]
+        self.assertRejected("mutrestartignored-debian-13", rec)
+        # §13 decision 153 extended: red because the unjudged requirer was
+        # released, with the judged one held and the premise measured.
+        rec = red_record("mutunjudgedreq")
+        rec["decision153Unjudged"] = {"reported": True, "heldInEtc": True,
+                                      "active": "inactive"}
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
+        rec = red_record("mutunjudgedreq")
+        rec["decision153"]["heldInEtc"] = False
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
+        rec = red_record("mutunjudgedreq")
+        rec["decision153Premise"]["requirerRan"] = False
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
+        for key in ("decision153Unjudged", "decision153Premise"):
+            rec = green("conv")
+            del rec[key]
+            self.assertRejected("conv-debian-13", rec)
+        # The owner decision "leave dependants out": red because the revert
+        # failed on the dependant it started, not on the trigger.
+        rec = red_record("mutdependants")
+        rec["decision160Revert"]["dependantRecorded"] = True
+        self.assertRejected("mutdependants-debian-13", rec)
+        rec = red_record("mutdependants")
+        rec["decision160Revert"]["dependantInOutput"] = False
+        self.assertRejected("mutdependants-debian-13", rec)
+        rec = red_record("mutdependants")
+        rec["decision160Revert"]["revertFailed"] = False
+        self.assertRejected("mutdependants-debian-13", rec)
+        # Finding 1: red because the switch went through with the record
+        # pending, not because a marker was pending.
+        rec = red_record("mutswitchrecord")
+        rec["decision160Guard"]["exit"] = 1
+        self.assertRejected("mutswitchrecord-debian-13", rec)
+        rec = red_record("mutswitchrecord")
+        rec["decision160Guard"]["after"] += "marker\n"
+        self.assertRejected("mutswitchrecord-debian-13", rec)
+        rec = red_record("mutswitchrecord")
+        rec["decision160Guard"]["after"] = ""
+        self.assertRejected("mutswitchrecord-debian-13", rec)
+        rec = red_record("mutswitchrecord")
+        rec["mutation"] = ""
+        self.assertRejected("mutswitchrecord-debian-13", rec)
         # §13 decision 151, add-on half: red at the window step because
         # each trigger fired at its held unit, by its own observable, in a
         # switch that paused and applied.

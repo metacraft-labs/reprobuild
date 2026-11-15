@@ -76,6 +76,21 @@ suite "Generated-config smoke":
     check "alpha" in c2
     removeFile(extendedPath(tmp))
 
+  test "managed-block remove deletes a host file it leaves empty":
+    # Generated-Configuration-Files.md §"Deletion semantics": a file that
+    # held only the block is deleted, not left as a zero-byte file; one
+    # byte of the user's (here a blank line) keeps it.
+    let tmp = getTempDir() / "repro-mb-smoke-empty.txt"
+    if fileExists(extendedPath(tmp)): removeFile(extendedPath(tmp))
+    discard updateManagedBlock(tmp, "demo", "managed line")
+    check removeManagedBlock(tmp, "demo")
+    check not fileExists(extendedPath(tmp))
+    writeFile(extendedPath(tmp), "\n")
+    discard updateManagedBlock(tmp, "demo", "managed line")
+    check removeManagedBlock(tmp, "demo")
+    check readFile(extendedPath(tmp)) == "\n"
+    removeFile(extendedPath(tmp))
+
   test "renderBuiltinTemplate: {{name}} + {{#if}} on typed values":
     var values = initTable[string, TplValue]()
     values["who"] = tplString("world")

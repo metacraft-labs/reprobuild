@@ -178,10 +178,18 @@ proc recoverMarker(stateDir: string; atBoot: bool;
   ## An interrupted switch's own recovery: finish it or revert it; with no
   ## marker, start again the triggers a revert could not (§13 decision 160).
   if not hasPendingMarker(stateDir):
+    # A full apply that died between its hold and its release left the
+    # triggers it stopped on record (§13 decision 151): started first.
+    var lines: seq[string]
+    if fileExists(stateDir / LiveCheckTriggersFile):
+      let failed = restartRecordedLiveCheckTriggers(stateDir, addonLiveHost())
+      if failed.len > 0:
+        return RecoveryOutcome(resolved: false, lines: failed)
+      lines.add("the triggers an interrupted full apply stopped started again")
     if hasTriggersToRestart(stateDir):
       let r = retryTriggerRestarts(stateDir)
-      return RecoveryOutcome(resolved: r.ok, lines: r.lines)
-    return RecoveryOutcome(resolved: true)
+      return RecoveryOutcome(resolved: r.ok, lines: lines & r.lines)
+    return RecoveryOutcome(resolved: true, lines: lines)
   when mutated("reassert-skips-recovery"):
     # The negative control: an interrupted switch is left as it is found.
     return RecoveryOutcome(resolved: true,
@@ -464,7 +472,8 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
                            pid = getCurrentProcessId();
                            bootId = currentBootId();
                            pointer = AddonStateDirPointer;
-                           pointerOwner = 0):
+                           pointerOwner = 0;
+                           target = SystemProfile(); hasTarget = false):
     tuple[ok: bool; why: string] =
   ## The apply-side check (§7.7), run with the host apply lock held. For
   ## each pending marker: one written by this process, in this boot, is
@@ -481,6 +490,12 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
       if hasTriggersToRestart(dir):
         let rec = recover(dir)
         if not rec.resolved:
+          # Unless the apply's generation changes or removes every trigger
+          # still on record (the owner decision "allow the fixing apply"):
+          # its commit clears them (``pendingSwitchCommitted``).
+          if hasTarget and hasTriggersToRestart(dir) and
+              unresolvedRestartEntries(dir, target).len == 0:
+            continue
           return (false, dir & ": " & rec.lines.join("; "))
       continue
     var m = PendingMarker()
@@ -512,11 +527,18 @@ proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
     r = proc (dir: string): RecoveryOutcome {.closure, gcsafe.} =
       {.cast(gcsafe).}:
         recoverPendingSwitch(dir, atBoot = false)
-  pendingSwitchGuard = proc (applyStateDir: string):
+  pendingSwitchGuard = proc (applyStateDir: string; target: SystemProfile;
+                            hasTarget: bool):
       tuple[ok: bool; why: string] {.closure, gcsafe.} =
     {.cast(gcsafe).}:
       checkPendingSwitches(applyStateDir, r, pointer = pointer,
-        pointerOwner = pointerOwner)
+        pointerOwner = pointerOwner, target = target, hasTarget = hasTarget)
+  pendingSwitchCommitted = proc (applyStateDir: string; target: SystemProfile)
+      {.closure, gcsafe.} =
+    {.cast(gcsafe).}:
+      for dir in guardStateDirs(applyStateDir, pointer, pointerOwner):
+        try: discard clearResolvedRestartEntries(dir, target)
+        except CatchableError: discard
 
 installPendingSwitchGuard()
 

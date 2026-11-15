@@ -601,15 +601,26 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
       inc result.locallyBuiltActionCount
 
 type
-  PendingSwitchGuard* = proc (applyStateDir: string):
+  PendingSwitchGuard* = proc (applyStateDir: string; target: SystemProfile;
+                              hasTarget: bool):
     tuple[ok: bool; why: string] {.closure, gcsafe.}
+  PendingSwitchCommitted* = proc (applyStateDir: string; target: SystemProfile)
+    {.closure, gcsafe.}
 
 var pendingSwitchGuard*: PendingSwitchGuard = nil
   ## Installed by the add-on layer (`repro_addon/reassert`), which owns the
   ## switch and its pending marker; nil where that layer is not linked.
   ## `runInfraApply` calls it with the host apply lock held: ok when no
   ## interrupted switch is pending (or it was just recovered), otherwise
-  ## why not.
+  ## why not. ``target`` is the generation the apply realises
+  ## (``hasTarget``): an apply whose generation removes or changes every
+  ## trigger a revert left on record goes through (§13 decision 160 as
+  ## amended by the round-10 owner decision "allow the fixing apply").
+
+var pendingSwitchCommitted*: PendingSwitchCommitted = nil
+  ## Installed with the guard: called once a full apply has committed its
+  ## generation, so the entries of the record of triggers to restart that
+  ## generation resolves are cleared (the same decision).
 
 proc driverStartJobs*(planned: openArray[PlannedOperation];
                       isActive: proc (unit: string): bool): seq[string] =
@@ -842,7 +853,9 @@ proc profileTriggersOf*(p: SystemProfile; units: openArray[string]): seq[string]
     if heldBy(target, units) and trigger notin result: result.add(trigger)
 
 proc triggersToStop*(triggers, stopping: openArray[string];
-                     host: LiveHost): seq[string] =
+                     host: LiveHost;
+                     profileTargets: openArray[tuple[trigger, target: string]] = []):
+    seq[string] =
   ## Of the active ``triggers``, those that could fire at a held unit
   ## during the hold (§13 decision 151), which are stopped for it: a trigger
   ## whose units are all running cannot -- an active service serves its own
@@ -850,11 +863,19 @@ proc triggersToStop*(triggers, stopping: openArray[string];
   ## stop and start of the socket would fail to bind again), and a path or
   ## timer start of an active unit adds no job -- unless one of them is
   ## among ``stopping``, the running units the hold's apply restarts.
+  ## A trigger's units are those systemd reports now and those the
+  ## generation points it at (``profileTargets``, ``planner.triggerTargets``:
+  ## a profile drop-in that re-points a running socket at a held unit makes
+  ## it fire at that unit after the drivers' reload; A13 review round 10).
   for t in triggers:
     if not host.isActive(t): continue
     var targets: seq[string]
     try: targets = triggeredUnits(host.show(t))
     except CatchableError: discard
+    when ApplyMutation != "trigger-repointing-ignored":
+      # FALSIFYING MUTATION (when absent): only the live Triggers= is read.
+      for (pt, target) in profileTargets:
+        if pt == t and target notin targets: targets.add(target)
     var canFire = targets.len == 0
     for u in targets:
       if u in stopping or not host.isActive(u): canFire = true
@@ -862,6 +883,96 @@ proc triggersToStop*(triggers, stopping: openArray[string];
       # FALSIFYING MUTATION: every active trigger is stopped.
       canFire = true
     if canFire and t notin result: result.add(t)
+
+proc rememberedTriggers*(triggers: openArray[string]; host: LiveHost):
+    seq[string] =
+  ## Every active trigger of a held unit (§13 decision 151): those the hold
+  ## stops, and those it leaves alone because their units run. A trigger
+  ## left alone is down by the release when its service stopped during the
+  ## hold and it then fired at the held unit (or failed with it); the
+  ## release starts every remembered trigger that is not active (A13 review
+  ## round 10, finding 2).
+  for t in triggers:
+    if host.isActive(t) and t notin result: result.add(t)
+
+proc triggersToRelease*(remembered, stopped, driverStarts,
+                        triggers: openArray[string]): seq[string] =
+  ## The triggers the release starts again (§13 decision 151): every one
+  ## remembered as active before the hold, and every one the drivers
+  ## started under it (an enabled trigger's ``enable --now``, skipped by its
+  ## hold), of the hold's own triggers. ``triggerRestarts`` starts those
+  ## that are not active.
+  when ApplyMutation == "left-alone-triggers-forgotten":
+    # FALSIFYING MUTATION: only the triggers the hold stopped come back.
+    for t in @stopped & @driverStarts:
+      if t in triggers and t notin result: result.add(t)
+    return
+  for t in @remembered & @stopped & @driverStarts:
+    if t in triggers and t notin result: result.add(t)
+
+proc templateTriggerInstances*(p: SystemProfile; units: openArray[string];
+                               list: proc (pattern: string): seq[string]):
+    seq[string] =
+  ## The loaded instances of the trigger templates of the held templates
+  ## (§13 decision 152): ``tpl@daily.timer`` of the profile's
+  ## ``tpl@.timer`` triggering a held ``tpl@.service``, found by asking
+  ## systemd (``list``: ``systemctl list-units --all`` over a pattern), not
+  ## from what runs or what the generation names -- an idle instance timer
+  ## of a template is neither (A13 review round 10, finding 3). Patterns:
+  ## the held template's own stem with each trigger suffix, and each
+  ## profile trigger template whose target is the held template.
+  when ApplyMutation == "template-trigger-instances-unlisted":
+    # FALSIFYING MUTATION: no instance trigger is looked for.
+    return
+  var patterns: seq[string]
+  for u in units:
+    if not isTemplateUnit(u): continue
+    let stem = u[0 .. u.find('@')]
+    for sfx in TriggerSuffixes:
+      let pat = stem & "*" & sfx
+      if pat notin patterns: patterns.add(pat)
+  for (trigger, target) in triggerTargets(p):
+    if isTemplateUnit(trigger) and heldBy(target, units):
+      let pat = trigger[0 .. trigger.find('@')] & "*" & trigger[trigger.rfind('.') .. ^1]
+      if pat notin patterns: patterns.add(pat)
+  for pat in patterns:
+    var names: seq[string]
+    try: names = list(pat)
+    except CatchableError: continue
+    let stem = pat[0 ..< pat.find('*')]
+    for n in names:
+      if n.startsWith(stem) and not isTemplateUnit(n) and isTriggerUnit(n) and
+          n notin result:
+        result.add(n)
+
+const LiveCheckTriggersFile* = "live-check-triggers"
+  ## §13 decision 151 on the full apply (A13 review round 10, finding 5):
+  ## the triggers a full apply's hold stopped or left alone, one per line,
+  ## in its state directory, written before any is stopped and removed once
+  ## the release has started them. An apply that dies between the two
+  ## leaves it; the next apply, and `repro system addon recover`, start
+  ## them again (``restartRecordedLiveCheckTriggers``).
+
+proc recordLiveCheckTriggers*(stateDir: string; triggers: openArray[string]) =
+  ## Record ``triggers`` (durably), or remove the record when none.
+  let p = stateDir / LiveCheckTriggersFile
+  when ApplyMutation == "live-check-triggers-in-memory":
+    # FALSIFYING MUTATION: the full apply keeps them in memory only.
+    return
+  if triggers.len == 0:
+    if fileExists(p): removeFile(p)
+    return
+  createDir(stateDir)
+  let tmp = p & ".tmp"
+  writeFile(tmp, triggers.join("\n") & "\n")
+  moveFile(tmp, p)
+
+proc readLiveCheckTriggers*(stateDir: string): seq[string] =
+  let p = stateDir / LiveCheckTriggersFile
+  if not fileExists(p): return
+  for l in readFile(p).splitLines():
+    let t = l.strip()
+    if t.len > 0 and t notin result: result.add(t)
 
 proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
                       host: LiveHost): seq[string] =
@@ -872,6 +983,9 @@ proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
   ## Returns the problems.
   for t in triggers:
     if t in refusedTriggers: continue
+    # One already up -- a trigger the hold left alone that still runs --
+    # needs nothing.
+    if host.isActive != nil and host.isActive(t): continue
     var props: Table[string, string]
     try: props = host.show(t)
     except CatchableError: continue
@@ -882,12 +996,82 @@ proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
       result.add("systemctl start " & t & " (a trigger stopped for the " &
         "carried-state check's hold, §13 decision 151): " & s.output.strip())
 
-proc requiringRefused*(passed, refused: openArray[string]; host: LiveHost):
+proc unitRequirements*(texts: openArray[string]): seq[string] =
+  ## The units a unit's ``[Unit]`` section ``Requires=`` or ``BindsTo=``,
+  ## read from its file and then its drop-ins as systemd reads them
+  ## (``systemd_syntax.systemdLogicalLines``; an empty assignment resets
+  ## the list, systemd.unit(5)).
+  for text in texts:
+    var section = ""
+    for line in systemdLogicalLines(text):
+      let t = line.strip()
+      if t.len == 0 or t[0] in {'#', ';'}: continue
+      if t[0] == '[':
+        section = if t.endsWith("]"): t[1 ..< t.len - 1] else: ""
+        continue
+      if section != "Unit": continue
+      let eq = t.find('=')
+      if eq <= 0: continue
+      let k = t[0 ..< eq].strip()
+      if k notin ["Requires", "BindsTo"]: continue
+      let v = t[eq + 1 .. ^1].strip()
+      if v.len == 0:
+        result.setLen(0)
+        continue
+      for u in v.splitWhitespace():
+        if u notin result: result.add(u)
+
+proc profileRequirersOf*(p: SystemProfile; units: openArray[string]): seq[string] =
+  ## The units of the generation ``p``, outside ``units`` (the judged ones),
+  ## that ``Requires=`` or ``BindsTo=`` one of ``units``, directly or
+  ## through another such unit (§13 decision 153 as the owner decided it
+  ## in A13 review round 10, every requirer): a refused unit's start is
+  ## skipped by its condition hold, which systemd counts as satisfied, so
+  ## such a unit would start without it. The full apply holds them with
+  ## the judged units and keeps held those that require a refused one.
+  when ApplyMutation == "unjudged-requirers-released":
+    # FALSIFYING MUTATION: only judged units are held as requirers.
+    return
+  var reached = @units
+  var changed = true
+  while changed:
+    changed = false
+    for r in p.resources:
+      if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+      let n = r.suName
+      if isTemplateUnit(n) or heldBy(n, reached): continue
+      for d in unitRequirements(@[renderedSystemUnitContent(r)] &
+                                profileDropInsOf(p, n)):
+        if heldBy(d, reached):
+          reached.add(n)
+          result.add(n)
+          changed = true
+          break
+
+proc restartRecordedLiveCheckTriggers*(stateDir: string; host: LiveHost):
+    seq[string] =
+  ## Start again the triggers an earlier full apply recorded and never
+  ## released (``LiveCheckTriggersFile``): those that do not start stay on
+  ## record and are returned as problems.
+  var left: seq[string]
+  for t in readLiveCheckTriggers(stateDir):
+    let failed = triggerRestarts([t], [], host)
+    if failed.len > 0:
+      left.add(t)
+      result.add(failed)
+  recordLiveCheckTriggers(stateDir, left)
+
+proc requiringRefused*(passed, refused: openArray[string]; host: LiveHost;
+                       instancesOf: proc (tmpl: string): seq[string] = nil):
     seq[tuple[unit, because: string]] =
   ## The passed units that ``Requires=`` or ``BindsTo=`` a refused unit,
   ## directly or through another such unit (§13 decision 153): each stays
   ## held with the unit it requires, which the apply reports. A refused
-  ## template refuses the instances it holds.
+  ## template refuses the instances it holds. A passed template is read
+  ## through its instances (``instancesOf``: its observation instance and
+  ## those systemd runs), never by its own name, which systemd refuses to
+  ## show (A13 review round 10, finding 8): one instance that requires a
+  ## refused unit keeps the template held.
   when ApplyMutation == "requirers-of-refused-released":
     # FALSIFYING MUTATION: a unit that requires a refused one is released.
     return
@@ -897,18 +1081,28 @@ proc requiringRefused*(passed, refused: openArray[string]; host: LiveHost):
     changed = false
     for u in passed:
       if heldBy(u, held): continue
-      var props: Table[string, string]
-      try: props = host.show(u)
-      except CatchableError: continue
-      for key in ["Requires", "BindsTo"]:
-        var hit = ""
-        for d in props.getOrDefault(key).splitWhitespace():
-          if heldBy(d, held): hit = d
-        if hit.len > 0:
-          result.add((unit: u, because: hit))
-          held.add(u)
-          changed = true
-          break
+      var names = @[u]
+      when ApplyMutation != "template-requirer-shown-by-name" and
+          defined(posix):
+        # FALSIFYING MUTATION (when absent): a template is shown by name.
+        if isTemplateUnit(u):
+          names = @[observationInstanceOf(u)]
+          if instancesOf != nil:
+            for i in instancesOf(u):
+              if i notin names: names.add(i)
+      var hit = ""
+      for n in names:
+        var props: Table[string, string]
+        try: props = host.show(n)
+        except CatchableError: continue
+        for key in ["Requires", "BindsTo"]:
+          for d in props.getOrDefault(key).splitWhitespace():
+            if heldBy(d, held): hit = d
+        if hit.len > 0: break
+      if hit.len > 0:
+        result.add((unit: u, because: hit))
+        held.add(u)
+        changed = true
 
 when defined(posix):
   proc liftableHolds*(passed, refused: openArray[string]; name: string;
@@ -941,7 +1135,14 @@ when defined(posix):
       ## The socket, path and timer units of the held units, held with
       ## them (§13 decision 151): none fires while its unit is held.
     triggersActive: seq[string]
-      ## Those that were active before the hold, stopped for it.
+      ## Those the hold stopped (``triggersToStop``).
+    requirers: seq[string]
+      ## The generation's units outside ``units`` that require one of them
+      ## (``profileRequirersOf``), held with them (§13 decision 153 as extended in A13 review round 10).
+    remembered: seq[string]
+      ## Every one active before the hold, stopped or left alone
+      ## (``rememberedTriggers``), on record in ``stateDir`` until released.
+    stateDir: string
 
   proc liveHost(): LiveHost =
     LiveHost(
@@ -957,15 +1158,22 @@ when defined(posix):
       resetFailed: proc (u: string) =
         discard runSystemctlArgs(["reset-failed", "--", u]))
 
-  proc stopTriggers(triggers, stopping: openArray[string]; host: LiveHost;
-                    stopped: var seq[string]) =
-    ## Stop each trigger that could fire at a held unit and remember it
-    ## (§13 decision 151; ``triggersToStop``): a socket with a pending
-    ## connection, or a path unit whose path exists, would otherwise fire at
-    ## a held unit until systemd's trigger rate limit fails it for good.
-    for t in triggersToStop(triggers, stopping, host):
-      if t in stopped: continue
-      stopped.add(t)
+  proc stopTriggers(c: var LiveCheck; triggers, stopping: openArray[string];
+                    host: LiveHost; p: SystemProfile) =
+    ## Remember every active trigger of a held unit, on record before any is
+    ## stopped, and stop each that could fire at a held unit (§13 decision
+    ## 151; ``rememberedTriggers``, ``triggersToStop``): a socket with a
+    ## pending connection, or a path unit whose path exists, would otherwise
+    ## fire at a held unit until systemd's trigger rate limit fails it for
+    ## good.
+    for t in rememberedTriggers(triggers, host):
+      if t notin c.remembered: c.remembered.add(t)
+    if c.stateDir.len > 0:
+      recordLiveCheckTriggers(c.stateDir,
+        readLiveCheckTriggers(c.stateDir) & c.remembered)
+    for t in triggersToStop(triggers, stopping, host, triggerTargets(p)):
+      if t in c.triggersActive: continue
+      c.triggersActive.add(t)
       discard host.stop(t)
 
   proc liveCheckHoldText(): string =
@@ -978,7 +1186,17 @@ when defined(posix):
     let r = runSystemctlArgs(runningInstancesArgs(tmpl))
     if r.exitCode == 0: result = parseRunningInstances(tmpl, r.output)
 
-  proc beginLiveCheck(p: SystemProfile; dir, root: string;
+  proc hostLoadedInstances*(pattern: string): seq[string] =
+    ## The units systemd has loaded, of any state, whose names match
+    ## ``pattern`` (``systemctl list-units --all``).
+    let r = runSystemctlArgs(["list-units", "--all", "--plain", "--no-legend",
+                              "--no-pager", "--", pattern])
+    if r.exitCode != 0: return
+    for l in r.output.splitLines():
+      let w = l.splitWhitespace()
+      if w.len > 0 and w[0] notin result: result.add(w[0])
+
+  proc beginLiveCheck(p: SystemProfile; dir, root, stateDir: string;
                       planned: openArray[PlannedOperation]): LiveCheck =
     ## Hold every unit ``liveReachUnits`` names before the drivers write
     ## and start anything: under the hold their ``enable --now`` and
@@ -987,8 +1205,13 @@ when defined(posix):
     ## until this check passes for it.
     try: discard clearStaleHolds(CarriedCheckHoldName)
     except OSError: discard          # not root: nothing of ours to clear
+    result.stateDir = stateDir
     result.units = liveReachUnits(p, dir, root)
     if result.units.len == 0: return
+    result.requirers = profileRequirersOf(p, result.units)
+    for u in result.requirers:
+      if runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0:
+        result.wasActive.add(u)
     for u in result.units:
       if isTemplateUnit(u):
         # A template never runs; its running instances do (§13 decision
@@ -1013,14 +1236,18 @@ when defined(posix):
       result.triggers = profileTriggersOf(p, result.units)
       for t in loadedTriggersOf(names, host):
         if t notin result.triggers: result.triggers.add(t)
+      # A held template's loaded instance triggers, idle ones included
+      # (§13 decision 152; ``templateTriggerInstances``).
+      for t in templateTriggerInstances(p, result.units, hostLoadedInstances):
+        if t notin result.triggers: result.triggers.add(t)
       # The running units this apply restarts under the hold: their
       # triggers could fire once the restart's stop half has run.
       var stopping: seq[string]
       for u in result.driverStarts:
         if host.isActive(u): stopping.add(u)
-      stopTriggers(result.triggers, stopping, host, result.triggersActive)
+      stopTriggers(result, result.triggers, stopping, host, p)
     result.holdStampUsec = getMonoTime().ticks div 1000
-    result.holds = writeHolds(result.units & result.triggers,
+    result.holds = writeHolds(result.units & result.requirers & result.triggers,
                               CarriedCheckHoldName, liveCheckHoldText())
     systemctlOrRaise(["daemon-reload"])
 
@@ -1044,7 +1271,7 @@ when defined(posix):
       for t in loadedTriggersOf(names, host):
         if t notin c.triggers:
           c.triggers.add(t)
-          stopTriggers([t], [], host, c.triggersActive)
+          stopTriggers(c, [t], [], host, p)
     var problems: seq[string]
     when not LiveCheckSkipped:
       # One reading of each template's running instances serves both the
@@ -1066,10 +1293,15 @@ when defined(posix):
     var passed: seq[string]
     for u in c.units:
       if u notin refused: passed.add(u)
+    # The generation's units that require a judged one were held with them
+    # (§13 decision 153 as extended in A13 review round 10): they go with the units they require.
+    for u in c.requirers:
+      if u notin passed: passed.add(u)
     # §13 decision 153: a passed unit that requires a refused one stays
     # held with it, and is reported so.
     if refused.len > 0:
-      for (u, because) in requiringRefused(passed, refused, host):
+      for (u, because) in requiringRefused(passed, refused, host,
+          proc (t: string): seq[string] = hostRunningInstances(t)):
         refused.add(u)
         problems.add("ECarriedStatePending: " & u & " requires " & because &
           ", which the carried-state check refused; held because of it")
@@ -1123,10 +1355,23 @@ when defined(posix):
     # those stopped for the hold, and those the drivers started (an enabled
     # trigger's ``enable --now``, skipped by its hold) -- before the units
     # start, so a socket-activated service is handed its socket.
-    var restart: seq[string]
-    for t in c.triggersActive & c.driverStarts:
-      if t in c.triggers and t notin restart: restart.add(t)
-    result.add(triggerRestarts(restart, refusedTriggers, host))
+    # Every trigger remembered as active, a trigger left alone that went
+    # down during the hold included, and each that does not start again
+    # stays on record for the next apply or `recover` (finding 5).
+    let restart = triggersToRelease(c.remembered, c.triggersActive,
+                                    c.driverStarts, c.triggers)
+    var unstarted: seq[string]
+    for t in restart:
+      let failed = triggerRestarts([t], refusedTriggers, host)
+      if failed.len > 0:
+        unstarted.add(t)
+        result.add(failed)
+    if c.stateDir.len > 0:
+      var left: seq[string]
+      for t in readLiveCheckTriggers(c.stateDir):
+        if t in unstarted or t notin c.remembered:
+          left.add(t)
+      recordLiveCheckTriggers(c.stateDir, left)
     result.add(releaseStarts(p, c.units, passed, refused, c.wasActive,
                              c.driverStarts, fired, host))
     for t in refusedTriggers:
@@ -1175,7 +1420,8 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # Applying on top of a half switch would bury it; the deploy agent would
   # otherwise keep doing exactly that until the next boot.
   if pendingSwitchGuard != nil:
-    let g = pendingSwitchGuard(opts.stateDir)
+    let g = pendingSwitchGuard(opts.stateDir, parseSystemProfile(profileText),
+                               not opts.carriedStateChecked)
     if not g.ok:
       raise newException(EPendingSwitch, "an interrupted add-on switch " &
         "is pending on this host and recovery did not resolve it; " &
@@ -1327,6 +1573,14 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     let liveRoot = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot
                    else: "/"
     var liveCheck: LiveCheck
+    # The triggers an earlier full apply stopped or left alone for its hold
+    # and never released -- it died between the two -- come back first
+    # (§13 decision 151; ``LiveCheckTriggersFile``).
+    if opts.elevationMode != emNoElevate and liveRoot == "/" and
+        fileExists(opts.stateDir / LiveCheckTriggersFile) and
+        isProcessElevated():
+      for pr in restartRecordedLiveCheckTriggers(opts.stateDir, liveHost()):
+        result.diagnostics.add(pr)
     # Only on the live host: a scratch root (a library test) has no systemd
     # of its own to ask.
     if not opts.carriedStateChecked and opts.elevationMode != emNoElevate and
@@ -1338,7 +1592,8 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
           "carried state is on this host, so the units that can reach it " &
           "are held and checked as systemd loads them before they start " &
           "(spec §11.1); that needs the apply itself to run as root")
-      liveCheck = beginLiveCheck(pLive, liveDir, liveRoot, planned)
+      liveCheck = beginLiveCheck(pLive, liveDir, liveRoot, opts.stateDir,
+                                 planned)
 
   # --- 3. Apply the privileged set. ---
   # The privileged set is the longest unbounded stretch of the apply: a
@@ -1473,3 +1728,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
                else: nil))
   result.committed = true
   discard refreshApplyLock(opts.stateDir)
+  # An add-on switch clears what it resolves at its own commit; any other
+  # committed apply here.
+  if pendingSwitchCommitted != nil and not opts.carriedStateChecked:
+    pendingSwitchCommitted(opts.stateDir, parseSystemProfile(profileText))

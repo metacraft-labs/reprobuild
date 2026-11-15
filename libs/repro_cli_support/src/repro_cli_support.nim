@@ -5474,9 +5474,15 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     for a in args:
       cmd.add(" ")
       cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd,
-      env = scrubbedGitRepositoryEnv())
-    (code: r.exitCode, output: r.output)
+    # ``poStdErrToStdOut`` is what puts git's reason in ``output``: every
+    # failure below quotes it, and git reports a failure only on stderr
+    # (``--quiet`` silences the rest). ``execCmdEx``'s default carries it;
+    # an explicit option set without it discards stderr, and a CI fetch
+    # failure then read "fetch failed from <url> at pinned revision <rev>: "
+    # with no cause at all.
+    let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      workingDir = cwd, env = scrubbedGitRepositoryEnv())
+    (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
 
   proc verifyRevisionIntegrity() =
     verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
@@ -5534,12 +5540,16 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # back to fetching every branch and tag, then checking out the pinned
     # revision. A bare ``fetch <url>`` takes only the remote's HEAD, which
     # misses a pin that only a non-default branch reaches.
+    let byRevision = step.output.strip()
     step = git(["-C", checkoutRoot, "fetch", "--quiet", url,
       "+refs/heads/*:refs/remotes/pinned-source/*",
       "+refs/tags/*:refs/tags/*"])
     if step.code != 0:
+      # Both attempts' reasons: the by-revision fetch is the one expected
+      # to work, and its failure is usually the one that explains this.
       fail("fetch failed from " & url & " at pinned revision " & revision &
-        ": " & step.output.strip())
+        ": by revision: " & byRevision & "; all branches and tags: " &
+        step.output.strip())
   step = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
     "--end-of-options", revision & "^{commit}"])
   if step.code != 0:
@@ -26027,14 +26037,25 @@ const
     "REPROBUILD_SOURCE_ROOT"
   ]
 
-  ## Well-known toolchain env vars that must also be forwarded to the daemon
-  ## when present in the user's shell. On Nix systems (especially macOS where
-  ## ``-liconv`` must resolve to ``libiconv`` from the Nix store) the cc-wrapper
-  ## consumes these to inject the correct ``-L``/``-isystem`` paths into clang/
-  ## ld invocations driven by cargo/rustc. Without forwarding, a daemon spawned
-  ## by launchd has none of them and cargo actions like
-  ## ``db-replay-server-cargo`` fail at the rustc link step. Values are NEVER
-  ## hardcoded; they are read live from the launching shell's environment.
+  ## The compiler-toolchain environment: variables that change what the
+  ## tools an action runs produce, and that a build REQUEST is therefore
+  ## authoritative over (``daemonWorkerEnvUnsets``). On Nix systems the
+  ## cc-wrapper consumes them to add ``-L``/``-isystem`` paths, rpaths and its
+  ## hardening flags to every clang/gcc/ld invocation (``NIX_HARDENING_ENABLE``
+  ## alone decides whether it adds ``-O2`` and ``_FORTIFY_SOURCE``).
+  ##
+  ## The request carries the caller's whole environment
+  ## (``daemonCarriedEnvironment``), so a value the caller has always reaches
+  ## the hosted build. What this list adds is the other direction: a value the
+  ## DAEMON was started with and the caller does not have is unset for the
+  ## build, so a daemon started from a ``nix develop`` shell does not compile
+  ## a later plain-shell caller's code with that shell's hardening, which
+  ## ``--daemon=off`` from the same shell would not.
+  ##
+  ## Every client before v0.2.0 forwarded exactly this list (plus
+  ## ``DaemonNixToolchainEnvPrefixes``) whenever the caller had a value, so
+  ## "absent from the request" means "absent from the caller" for clients of
+  ## every version, which is what makes the unset safe.
   DaemonNixToolchainEnvVars* = [
     # Nix cc-wrapper inputs — consumed by the wrapper to extend the underlying
     # clang/ld invocation with the correct -L/-isystem paths.
@@ -26076,12 +26097,15 @@ const
     "CARGO_NET_OFFLINE"
   ]
 
-  ## Env-var name prefixes forwarded wholesale. The cc-wrapper synthesizes
-  ## per-tuple variables of the form
-  ## ``NIX_LDFLAGS_<HOST>_<TARGET>``/``NIX_CFLAGS_COMPILE_<HOST>_<TARGET>`` /
-  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>`` whose suffixes vary by host
-  ## triple (e.g. ``aarch64_apple_darwin``). Forwarding them by prefix avoids
-  ## host-specific allowlist drift.
+  ## Name prefixes of the same toolchain environment. The cc-wrapper reads
+  ## per-target variables of the form ``NIX_CFLAGS_COMPILE_<triple>`` and
+  ## activates its roles through ``NIX_CC_WRAPPER_TARGET_HOST_<triple>`` /
+  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>``, whose suffixes vary by
+  ## host triple (e.g. ``aarch64_apple_darwin``). Matching them by prefix
+  ## avoids host-specific list drift. ``NIX_HARDENING_ENABLE_<triple>`` is
+  ## not matched: the wrapper derives it from ``NIX_HARDENING_ENABLE`` (in
+  ## ``DaemonNixToolchainEnvVars``) inside its own process, and a stdenv
+  ## shell exports only the unsuffixed name.
   DaemonNixToolchainEnvPrefixes* = [
     "NIX_LDFLAGS_",
     "NIX_CFLAGS_",
@@ -26142,10 +26166,12 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
                             currentEnv: openArray[string]): seq[string] =
   ## Variables the daemon process carries that the REQUEST does not, limited
   ## to reprobuild's own control namespace
-  ## (``DaemonRequestAuthoritativeEnvPrefixes``) plus the few variables
-  ## outside it that reprobuild reads to pick a default
-  ## (``DaemonRequestAuthoritativeEnvNames``). The worker must unset these
-  ## before running a hosted build.
+  ## (``DaemonRequestAuthoritativeEnvPrefixes``), the few variables outside
+  ## it that reprobuild reads to pick a default
+  ## (``DaemonRequestAuthoritativeEnvNames``), and the compiler-toolchain
+  ## environment (``DaemonNixToolchainEnvVars`` /
+  ## ``DaemonNixToolchainEnvPrefixes``). The worker must unset these before
+  ## running a hosted build.
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -26158,10 +26184,19 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
   ## a dependency chain; the same hole reaches action fingerprints and cache
   ## inputs, so the consequence is not only latency.
   ##
-  ## Scoped to the prefixes rather than the whole environment because a
-  ## request cannot distinguish "the client had no PATH" from "PATH was not
+  ## The toolchain environment is in scope because it decides what an action
+  ## COMPILES, not just how the build is run: a daemon started from a
+  ## ``nix develop`` shell kept that shell's ``NIX_HARDENING_ENABLE``, so the
+  ## cc-wrapper added ``-O2`` and ``_FORTIFY_SOURCE`` to a later plain-shell
+  ## caller's daemon-hosted compiles while ``--daemon=off`` from the same
+  ## shell compiled at ``-O0``.
+  ##
+  ## Scoped to these names rather than the whole environment because a
+  ## request from a client before v0.2.0 carried only a curated list, so it
+  ## cannot distinguish "the client had no PATH" from "PATH was not
   ## forwarded", and clearing the ambient environment of a build is a much
-  ## larger claim than making reprobuild's own knobs request-scoped.
+  ## larger claim than making reprobuild's own knobs request-scoped. Every
+  ## name added here was on that curated list.
   var carried = initHashSet[string]()
   for item in requestEnv:
     let split = item.find('=')
@@ -26175,13 +26210,11 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
     let key = item[0 ..< split]
     if carried.contains(key):
       continue
-    if key in DaemonRequestAuthoritativeEnvNames:
+    if key in DaemonRequestAuthoritativeEnvNames or
+        key in DaemonNixToolchainEnvVars or
+        DaemonRequestAuthoritativeEnvPrefixes.anyIt(key.startsWith(it)) or
+        DaemonNixToolchainEnvPrefixes.anyIt(key.startsWith(it)):
       result.add(key)
-      continue
-    for prefix in DaemonRequestAuthoritativeEnvPrefixes:
-      if key.startsWith(prefix):
-        result.add(key)
-        break
 
 proc currentEnvironmentPairs*(): seq[string] =
   for key, value in envPairs():
@@ -60803,13 +60836,15 @@ proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
         " could not be read (" & err.msg & ")")
 
 proc reproNimDeclaresExactUses(root: string): bool =
-  ## Does ``<root>/repro.nim`` state any unconditional exact `uses:` version?
-  ## The cheap question asked before anything resolves a workspace.
+  ## Does ``<root>/repro.nim`` state any exact `uses:` version? The cheap
+  ## question asked before anything resolves a workspace, so it does not ask
+  ## whether a conditional one applies to the lock: ``reproRepinVerdict``
+  ## decides that, per dependency, against the lock (§16.3 H1).
   let path = root / "repro.nim"
   if not fileExists(extendedPath(path)): return false
   try:
     for d in scanReproUsesDeclarations(readFile(extendedPath(path)), path):
-      if not d.conditional and d.constraint.kind == uckExact: return true
+      if d.constraint.kind == uckExact: return true
   except CatchableError:
     discard
   false
@@ -62820,11 +62855,13 @@ proc preCommitConsistencyOutsideWorkspace(repoRoot: string): int =
     return 0
   for d in consistency.diagnostics:
     stderr.writeLine("repro pre-commit: note: " & d)
-  if not consistency.hasViolations:
-    return 0
+  # Listed whatever the verdict: a constraint the check could not evaluate is
+  # neither a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3).
   for n in consistency.notChecked:
     stderr.writeLine("repro pre-commit: note: recipe/lock consistency not " &
       "checked: " & n)
+  if not consistency.hasViolations:
+    return 0
   stderr.writeLine("repro pre-commit: commit REFUSED: the recipe and the " &
     "locks this commit carries are inconsistent; nothing was written or " &
     "staged.")
@@ -63941,7 +63978,19 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     result.add("repro check: lock update FAILED: " &
       report.lockUpdate.diagnostic)
   if report.exitCode == 0 and report.failures.len == 0:
-    result.add("repro check: OK")
+    # A recipe constraint the consistency check could not evaluate is neither
+    # a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3), so the
+    # verdict line must not read as if every constraint had been checked.
+    var notChecked = 0
+    for notice in report.notices:
+      if notice.startsWith(ConsistencyNotCheckedNotice): inc notChecked
+    if notChecked == 0:
+      result.add("repro check: OK")
+    else:
+      result.add("repro check: OK, except that " & $notChecked &
+        " recipe constraint" & (if notChecked == 1: " was" else: "s were") &
+        " not checked against the lock (listed above as `" &
+        ConsistencyNotCheckedNotice.strip() & "`)")
 
 type
   CheckArgs* = object
@@ -71674,7 +71723,7 @@ proc executeCheckPrePush(parsed: CheckArgs;
     for d in consistency.diagnostics: result.notices.add(d)
     # What the check could not evaluate is named, not left to read as a pass.
     for n in consistency.notChecked:
-      result.notices.add("recipe/lock consistency not checked: " & n)
+      result.notices.add(ConsistencyNotCheckedNotice & n)
     # §16.6 — wording only; the verdict below is already fixed by the check.
     if consistency.hasViolations:
       annotateSiblingGuidance(parsed.currentRepo, consistency.violations)
@@ -101597,6 +101646,11 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       var depOf = initTable[string, LockedDep]()
       for i in reproOfRepo: depOf[ld.deps[i].name] = ld.deps[i]
       var edits: seq[tuple[line: int; raw, exact, version: string]]
+      # The arms that apply to this lock are decided from what it records
+      # (its platform and variant values), as H1 decides them: an entry
+      # whose arms apply constrains the move like an unconditional one, so
+      # an exact pin under it is rewritten too, and H1 then passes.
+      let armFacts = armFactsOf(ld)
       for decl in scanReproUsesDeclarations(inputs.reproNim.text,
           reproNimPath):
         let c = decl.constraint
@@ -101604,10 +101658,20 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         if c.kind notin {uckRange, uckExact}: continue
         let where = reproNimPath & ":" & $c.line
         if decl.conditional:
-          result.notes.add(where & ": '" & decl.rawConstraint & "' is under " &
-            "a when/if/case arm, so whether it constrains '" & c.selector &
-            "' is not decidable without compiling the recipe; left alone")
-          continue
+          let arm = armApplicability(decl, armFacts)
+          case arm.applicability
+          of aaApplies:
+            discard
+          of aaExcluded:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so it does not constrain '" & c.selector &
+              "' in this lock; left alone")
+            continue
+          of aaUndecidable:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so whether it constrains '" & c.selector &
+              "' is not decidable without compiling the recipe; left alone")
+            continue
         let dep = depOf[c.selector]
         let depAbs = os.normalizedPath(absolutePath(pathBase / dep.path))
         let at = versionMappedTo(inputs, c, depAbs, dep.coordinates.url,
