@@ -7254,9 +7254,12 @@ compileProfileBinary()
             "NDE0-A apt-jammy adapter::"
             "fingerprint composition: install hash is order-independent",
             "NDE0-A apt-jammy adapter::"
-            "fingerprint composition: install hash changes when snapshot changes",
+            "fingerprint composition: install hash changes when a .deb's "
+            "sha256 changes",
             "NDE0-A apt-jammy adapter::"
             "extractFingerprint: changes with sha256, stable with same sha256",
+            "NDE0-A apt-jammy adapter::"
+            "malformed input is refused before any store path is named",
         }
         expected_names = dsl_names | linux_names if sys.platform.startswith(
             "linux"
@@ -7264,7 +7267,7 @@ compileProfileBinary()
 
         self.assertEqual(entry["countSource"], "catalog")
         self.assertEqual(entry["sourceSuiteCount"], 2)
-        self.assertEqual(entry["staticCaseCount"], 14)
+        self.assertEqual(entry["staticCaseCount"], 15)
         self.assertEqual(entry["sourceCaseCount"], len(expected_names))
         self.assertEqual(
             {case["name"] for case in entry["catalogCases"]}, expected_names
@@ -7459,11 +7462,13 @@ compileProfileBinary()
                     "NDE0-A apt-jammy adapter::extractFingerprint: changes "
                     "with sha256, stable with same sha256",
                     "NDE0-A apt-jammy adapter::fingerprint composition: "
-                    "install hash changes when snapshot changes",
+                    "install hash changes when a .deb's sha256 changes",
                     "NDE0-A apt-jammy adapter::fingerprint composition: "
                     "install hash is order-independent",
                     "NDE0-A apt-jammy adapter::installSystemdUnit: normalises "
                     "lib/systemd/system/ -> usr/lib/systemd/system/",
+                    "NDE0-A apt-jammy adapter::malformed input is refused "
+                    "before any store path is named",
                     "NDE0-A apt-jammy adapter::sha256 verification: matching "
                     "sha succeeds",
                     "NDE0-A apt-jammy adapter::sha256 verification: wrong sha "
