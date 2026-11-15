@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2808,
+    "nimTestBinaries": 2809,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2854
+    "testEntries": 2855
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,7 +1620,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1548,
+      "integration": 1549,
       "platform/destructive": 179,
       "pure unit": 766,
       "unclassified": 338
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2808,
+    "nimTestBinaryCount": 2809,
     "pythonTestFileCount": 46,
-    "testEntryCount": 2854
+    "testEntryCount": 2855
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2387,7 +2387,7 @@
             "wsA",
             "wsB"
           ],
-          "line": 211,
+          "line": 205,
           "path": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
           "patterns": [
             "cc"
@@ -4885,7 +4885,7 @@
             "repoRoot",
             "shimDylib"
           ],
-          "line": 177,
+          "line": 176,
           "path": "tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim",
           "patterns": [
             "cc"
@@ -5341,7 +5341,6 @@
             "daemon",
             "daemonBin",
             "declared",
-            "detail",
             "devEnvEngine",
             "devSession",
             "died",
@@ -5378,6 +5377,7 @@
             "interestRoot",
             "isIdent",
             "item",
+            "items",
             "keyword",
             "launchPathDrives",
             "lines",
@@ -5441,7 +5441,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1378,
+          "line": 1377,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -5463,7 +5463,7 @@
             "f",
             "workRoot"
           ],
-          "line": 211,
+          "line": 209,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -5479,7 +5479,7 @@
             "f",
             "workRoot"
           ],
-          "line": 212,
+          "line": 210,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -5495,7 +5495,7 @@
             "f",
             "workRoot"
           ],
-          "line": 272,
+          "line": 270,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -5511,7 +5511,7 @@
             "f",
             "workRoot"
           ],
-          "line": 273,
+          "line": 271,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6634,7 +6634,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 175,
+          "line": 172,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -6651,7 +6651,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 176,
+          "line": 173,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -6668,7 +6668,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 210,
+          "line": 207,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -6685,7 +6685,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 211,
+          "line": 208,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -8895,8 +8895,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 27,
-      "staticCaseCount": 114,
+      "sourceSuiteCount": 28,
+      "staticCaseCount": 120,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9890,7 +9890,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_round8.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 26,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42023,7 +42023,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -50150,6 +50150,25 @@
       "source": "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_runquota_close_refusal_names_the_leaked_lease",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_runquota_close_refusal_names_the_leaked_lease.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59198,7 +59217,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_addon_a13_classify.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 50,
+      "staticCaseCount": 56,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

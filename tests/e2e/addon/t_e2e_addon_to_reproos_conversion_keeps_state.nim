@@ -558,6 +558,48 @@ const
           "instances\nWants=eth-r9-tpl@a.service eth-r9-tpl@b.service\n\n" &
           "[Install]\nWantedBy=multi-user.target\n",
         address = "r9TemplateTarget")"""
+  R10MarkerDir = "/var/lib/a13-r10"
+    ## Where the decision-151 probes write their uid.
+  R10Port = 18710
+  R10Socket = "eth-r10-sock.socket"
+  R10SocketSvc = "eth-r10-sock.service"
+  R10Path = "eth-r10-path.path"
+  R10PathSvc = "eth-r10-path.service"
+  R10Job = "/var/lib/a13-r10/job"
+  R10Resources = """
+      # A13 owner decision 151: a socket (Accept=no) and a path unit whose
+      # confined services are held by the full apply's live check. While an
+      # apply holds them, a connection keeps arriving and the path exists;
+      # the triggers are stopped and held with their services, and both
+      # come back up and start their services once the check passes. Red
+      # under the engine build ``triggers-left-running``: each trigger
+      # fires at its held service until systemd's trigger rate limit fails
+      # it for good.
+      systemdSystemUnit(name = "eth-r10-sock.socket",
+        content = "[Unit]\nDescription=A13 decision-151 probe: a socket\n\n" &
+          "[Socket]\nListenStream=127.0.0.1:18710\n\n" &
+          "[Install]\nWantedBy=sockets.target\n",
+        address = "r10Socket")
+      systemdSystemUnit(name = "eth-r10-sock.service",
+        content = "[Unit]\nDescription=A13 decision-151 probe: socket-activated\n\n" &
+          "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r10\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r10/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r10SocketSvc")
+      systemdSystemUnit(name = "eth-r10-path.path",
+        content = "[Unit]\nDescription=A13 decision-151 probe: a path unit\n\n" &
+          "[Path]\nPathExists=/var/lib/a13-r10/job\n\n" &
+          "[Install]\nWantedBy=paths.target\n",
+        address = "r10Path")
+      systemdSystemUnit(name = "eth-r10-path.service",
+        content = "[Unit]\nDescription=A13 decision-151 probe: path-activated\n\n" &
+          "[Service]\nType=oneshot\nRemainAfterExit=yes\nProtectSystem=strict\n" &
+          "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/a13-r10\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r10/%n.ran'\n",
+        enabled = false,
+        address = "r10PathSvc")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -605,7 +647,7 @@ const
         address = "validatorShadow")"""
 
 const ProbeWritableDirs = ["/var/lib/a13-r4", "/var/lib/a13-r5", "/var/lib/a13-r6",
-                           "/var/lib/a13-r7", "/var/lib/a13-r9"]
+                           "/var/lib/a13-r7", "/var/lib/a13-r9", "/var/lib/a13-r10"]
   ## The writable directories the probe units name besides the carried one,
   ## created on the converted host before any probe is applied. systemd
   ## refuses to start a unit whose ``ReadWritePaths=`` names a missing path
@@ -633,7 +675,7 @@ static:
   # Every probe unit's writable path is one the gate creates, or the carried
   # directory itself: checked when the gate compiles.
   var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &
-    R7Resources & R9Resources & ShadowResource
+    R7Resources & R9Resources & R10Resources & ShadowResource
   for (_, _, res, _, _) in R4Probes: all.add(res)
   for (_, _, res, _, _, _) in R5Probes: all.add(res)
   for (_, res, _, _, _) in R6Probes: all.add(res)
@@ -641,6 +683,40 @@ static:
     doAssert p in ProbeWritableDirs or p == "/var/lib/ethereum/validator",
       "a probe unit's ReadWritePaths= names " & p & ", which the gate does " &
       "not create (add it to ProbeWritableDirs)"
+
+proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode)
+
+proc startAgitator(g: Guest) =
+  ## While a full apply runs (§13 decision 151): keep connecting to the
+  ## decision-151 socket and keep its path unit's path in place, so either
+  ## trigger fires at once if anything leaves it running under the hold.
+  discard g.exec("rm -f /run/a13r10-stop; touch " & R10Job & "; " &
+    "nohup bash -c 'while [ ! -e /run/a13r10-stop ]; do " &
+    "timeout 1 bash -c \"exec 3<>/dev/tcp/127.0.0.1/" & $R10Port & "\" " &
+    "2>/dev/null; touch " & R10Job & "; sleep 0.3; done' >/dev/null 2>&1 &")
+
+proc stopAgitator(g: Guest) =
+  discard g.exec("touch /run/a13r10-stop; sleep 1; true")
+
+proc triggerCase(g: Guest): (bool, JsonNode) =
+  ## After a full apply: each decision-151 trigger is active (not failed by
+  ## its rate limit) and its service ran, the socket's on a connection made
+  ## now. Waits for the markers a little.
+  var ev = newJObject()
+  var ok = true
+  discard g.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" & $R10Port &
+    "' 2>/dev/null; true")
+  for (label, trig, svc) in [("socket", R10Socket, R10SocketSvc),
+                             ("path", R10Path, R10PathSvc)]:
+    let show = g.exec("systemctl show -p ActiveState -p Result " & trig).stdout
+    let active = "ActiveState=active" in show
+    let (ran, e) = g.unitRan(svc, R10MarkerDir & "/" & svc & ".ran")
+    e["trigger"] = %show.strip()
+    e["triggerActive"] = %active
+    e["ran"] = %ran
+    ev[label] = e
+    ok = ok and active and ran and e["markerContent"].getStr != "0"
+  (ok, ev)
 
 proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode) =
   ## Whether ``unit`` really ran: the file its command writes when it runs
@@ -940,10 +1016,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       raise newException(CatchableError, "the reference profile's " &
         "validator account is not where the gate adds the shadow unit")
     writeFile(work / "system.nim", src0.replace(anchor, anchor & ShadowResource &
-      R5Resources & R6Resources & R7Resources & R9Resources & R5TuneResource))
+      R5Resources & R6Resources & R7Resources & R9Resources & R10Resources &
+      R5TuneResource))
     # The next generation: the same, without the tune drop-in (finding 3).
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
-      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources))
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
@@ -1237,6 +1315,51 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
             else: ""), judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") &
            detail)
+    # Owner decision 153 (decided 2026-11-15): on a partial refusal, a unit
+    # that Requires= a refused unit stays held with it, and the apply says
+    # so. eth-r10-gen.service is refused by the live check (a generator
+    # makes it root at the apply's reload, as round 6's live probe);
+    # eth-r10-req.service is confined, enabled and Requires= it. Without
+    # the rule it is released and started, and systemd counts its
+    # requirement's condition-skipped start as satisfied.
+    block:
+      discard nw.run("rm -f " & ProbeMarkerDir & "/*.ran")
+      discard nw.run("mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
+        "mkdir -p \"$1/eth-r10-gen.service.d\"\\nprintf \"[Service]\\\\nUser=root\\\\n\" " &
+        "> \"$1/eth-r10-gen.service.d/10-root.conf\"\\n' > " &
+        "/etc/systemd/system-generators/a13r10-gen && chmod 755 " &
+        "/etc/systemd/system-generators/a13r10-gen")
+      let req = "      systemdSystemUnit(name = \"eth-r10-req.service\",\n" &
+        "        content = \"[Unit]\\nDescription=A13 decision-153 probe: " &
+        "requires a refused unit\\nRequires=eth-r10-gen.service\\n" &
+        "After=eth-r10-gen.service\\n\\n[Service]\\n" &
+        R6Confined.replace("\n", "\\n") &
+        "ReadWritePaths=/var/lib/a13-r5\\nExecStart=/bin/sh -c 'id -u > " &
+        ProbeMarkerDir & "/eth-r10-req.service.ran'\\n\\n[Install]\\n" &
+        "WantedBy=multi-user.target\\n\",\n        address = \"r10Req\")\n"
+      let pf = probeFile("r10req")
+      writeFile(work / pf, probeProfile("r10req",
+        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req))
+      nw.copyTo(work / pf, RefDir / pf)
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
+        pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let reported = "eth-r10-req.service requires eth-r10-gen.service" in o
+      let heldReq = nw.exec("test -f /etc/systemd/system/eth-r10-req.service.d/" &
+        "zz-repro-carried-check-hold.conf").exitCode == 0
+      let journal = nw.exec("journalctl -b --no-pager -o short-monotonic " &
+        "-u eth-r10-req.service 2>&1").stdout
+      let ran = nw.exec("test -s " & ProbeMarkerDir &
+        "/eth-r10-req.service.ran").exitCode == 0
+      let started = journalStarted(journal, "eth-r10-req.service") or ran
+      record["decision153"] = %*{"exit": r.exitCode, "reported": reported,
+        "heldInEtc": heldReq, "started": started, "judged": judged(o)}
+      discard nw.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
+        "/etc/systemd/system/eth-r10-gen.service.d && systemctl daemon-reload")
+      step("decision 153: a unit that requires a unit the live check refuses " &
+           "stays held with it, never started, and the apply says why",
+           r.exitCode != 0 and reported and heldReq and not started,
+           o & "\n" & journal & "\nheld: " & $heldReq & " ran: " & $ran)
     # A stored plan made now, before install-unit: no requirement is due
     # yet, so the plan has none (finding 4; applied after the restore).
     let planFile = probeFile("r5plan")
@@ -1340,8 +1463,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "ln -sf /usr/lib/systemd/system/" & R6Dist7 &
       " /etc/systemd/system/eth-r6-linked.service.wants/" & R6Dist7)
     discard nw.run("systemctl daemon-reload")
-    # --- 4. The full realisation.
+    # --- 4. The full realisation, with the decision-151 triggers agitated
+    # throughout.
+    nw.startAgitator()
     let applied = nw.exec(applyCmd, timeoutSec = 3600)
+    nw.stopAgitator()
     record["applyOutput"] = %((applied.stdout & applied.stderr)[0 ..< min(
       4000, (applied.stdout & applied.stderr).len)])
     step("the reinstalled host realises the activities in full",
@@ -1428,6 +1554,17 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            active == "active" and ran and ev["markerContent"].getStr != "0",
            $ev & "\n" & nw.exec("systemctl status --no-pager " & svc &
              " 2>&1 | tail -15").stdout)
+    # Owner decision 151 (decided 2026-11-15): the triggers of the held
+    # units are stopped and held for the apply, so a connection or a path
+    # event during it fails neither; both are active after it, and their
+    # services run.
+    block:
+      let (ok, ev) = nw.triggerCase()
+      record["decision151"] = %*{"firstApply": ev}
+      step("decision 151, full apply (first realisation): a socket with " &
+           "connections arriving and a path unit whose path exists, held " &
+           "through the apply, are active after it and their services run",
+           ok, $ev)
     # Owner decision 137 (decided 2026-11-14): a trigger declared before the
     # unit it triggers -- the socket and the timer above -- is applied after
     # it, so systemd does not refuse its start, and the unit it triggers
@@ -1507,9 +1644,23 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # a host realised in full removes it (and keeps the requirement). Red
     # under the engine build ``full-apply-keeps-undeclared-dropins``.
     let tuneBefore = nw.exec("test -f " & R5TuneDropIn).exitCode == 0
+    # Decision 151 again, with both triggers active before the apply: their
+    # services stopped, the socket's backlog flushed and the path gone, so
+    # each fires as soon as anything lets it while the apply holds them.
+    discard nw.exec("systemctl stop " & R10Socket & " " & R10SocketSvc & " " &
+      R10Path & " " & R10PathSvc & "; rm -f " & R10Job & " " & R10MarkerDir &
+      "/*.ran; systemctl start " & R10Socket & " " & R10Path & "; true")
+    nw.startAgitator()
     let nextApply = nw.exec(env & eng & " infra apply --profile " & RefDir &
       "/system_next.nim --host " & AgentTarget & " --no-preview",
       timeoutSec = 3600)
+    nw.stopAgitator()
+    block:
+      let (ok, ev) = nw.triggerCase()
+      record["decision151"]["nextApply"] = ev
+      step("decision 151, full apply (next generation, triggers active " &
+           "before it): the socket and the path unit, held through the " &
+           "apply, are active after it and their services run", ok, $ev)
     step("round 5, undeclared: a drop-in the next generation no longer " &
          "declares is removed by the full apply, the requirement kept",
          tuneBefore and nextApply.exitCode == 0 and

@@ -38,10 +38,8 @@
 ## will not invalidate the action, because nothing recorded that anyone went
 ## looking there.
 ##
-## On macOS each real capture must fail closed with exactly the platform
-## tree-lifetime limitation. Only a separate subsystem view drops that exact
-## marker to check the scope fixture has no unrelated loss; raw captures and
-## every scope/record assertion keep their original evidence.
+## Every real capture of the scope fixture is complete on every platform
+## (io-mon proves tree quiescence on macOS too), so each is graded as read.
 ##
 ## MOCK POLICY — NO MOCKS ARE USED IN THIS FILE, AND NONE MAY BE ADDED. Every
 ## assertion drives the graph-built `repro` binary, the graph-built monitor
@@ -57,7 +55,6 @@ import std/[os, osproc, streams, strutils, tempfiles, unittest]
 import repro_build_engine
 import repro_core
 import repro_test_support
-import repro_test_support/descendant_guard_expectations
 import io_mon/[types, reader]
 
 const RepoRootMarker = "repro.nim"
@@ -182,8 +179,8 @@ suite "DA-1i the evidence scope reaches io-mon":
 
     let full = readMonitorDepFile(fullPath)
     let narrow = readMonitorDepFile(narrowPath)
-    check descendantSubsystemEvidence(full).completeness == mcComplete
-    check descendantSubsystemEvidence(narrow).completeness == mcComplete
+    check full.completeness == mcComplete
+    check narrow.completeness == mcComplete
     checkShellTree(full)
     checkShellTree(narrow)
 
@@ -311,7 +308,7 @@ suite "DA-1i the engine forwards the operator's scope":
       check depPath.len > 0
       check fileExists(depPath)
       let dep = readMonitorDepFile(depPath)
-      check descendantSubsystemEvidence(dep).completeness == mcComplete
+      check dep.completeness == mcComplete
       checkShellTree(dep)
       dep
 

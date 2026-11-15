@@ -546,6 +546,21 @@ proc triggerContent(r: SystemResource): (string, string) =
   of srkSystemdSystemTimer: (r.stName, r.stContent)
   else: ("", "")
 
+proc triggerTargets*(profile: SystemProfile):
+    seq[tuple[trigger, target: string]] =
+  ## Every socket, timer and path unit of the profile with each unit it
+  ## triggers, read as the trigger edges read it (``profile.triggeredUnits``
+  ## over the unit's file and the profile's drop-ins onto it): the full
+  ## apply holds these triggers with the unit they trigger (§13 decision
+  ## 151), before either is written. A target only the host can resolve
+  ## (a host specifier) is left out.
+  for r in profile.resources:
+    let (name, content) = triggerContent(r)
+    if name.len == 0: continue
+    for target in triggeredUnits(name, @[content] &
+                                       profileDropInsOf(profile, name)):
+      if target.len > 0: result.add((trigger: name, target: target))
+
 proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
   ## Resolve every explicit `depends_on` entry + every implicit
   ## producer / consumer fact into an edge set over the profile's

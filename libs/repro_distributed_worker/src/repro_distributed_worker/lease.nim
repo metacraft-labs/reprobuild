@@ -107,6 +107,8 @@ when defined(posix):
   import std/posix
 
 import repro_core/ambient_execution
+when defined(posix):
+  import repro_core/descriptor_inheritance
 
 # Every process this module starts is a fixed SYSTEM binary named by
 # absolute path (`/bin/sh`, `/usr/bin/sandbox-exec`, `/usr/bin/log`) or the
@@ -812,6 +814,49 @@ when defined(posix):
       copyMem(addr result[old], addr buf[0], n)
 
 when defined(posix):
+  proc startSeatbeltWrapper*(shell, sandboxExec, profilePath, stdoutPath,
+                             stderrPath: string; argv: seq[string];
+                             cwd: string; env: StringTableRef): Process =
+    ## Starts `argv` under `sandboxExec -f profilePath`, stdout/stderr to
+    ## files, stdin from /dev/null, through `shell -c`. Exported for
+    ## `runLeaseSeatbelt` and its tests (which substitute `shell` and a fake
+    ## `sandboxExec`, since Seatbelt exists only on macOS).
+    ##
+    ## stdout/stderr go to files (a pipe the daemon does not drain while the
+    ## action runs would stall it). The redirecting shell runs OUTSIDE the
+    ## sandbox; `exec` replaces it with sandbox-exec, which applies the profile
+    ## before the action's first instruction.
+    ##
+    ## No descriptor above stderr may reach the action: `startProcess` passes
+    ## on whatever the daemon holds without close-on-exec, and an inherited
+    ## socket (a peer connection, the control socket, a listener) is a channel
+    ## no Seatbelt network rule governs (review fix, 2026-10-19;
+    ## `t_execution_lease_confinement`, `BREACH-fd`). That is enforced from
+    ## THIS side, by marking them close-on-exec across the spawn
+    ## (`repro_core/descriptor_inheritance`), not by a close loop in the shell:
+    ## a POSIX shell's redirections name descriptors 0-9 only, and dash reads
+    ## `exec 12>&-` as "exec the command 12", which kills the wrapper.
+    ##
+    ## `poParentStreams`: without it `startProcess` creates three pipes AFTER
+    ## the descriptors are marked, and the action would inherit its own end of
+    ## each at a number above 2. Nothing here reads them; the shell redirects
+    ## 0, 1 and 2 itself before the exec.
+    ##
+    ## THE WINDOW IS PROCESS-WIDE (see `descriptor_inheritance`). It is held
+    ## across the synchronous `startProcess` only, with no `await` inside, and
+    ## the lease backend runs on one dispatcher thread, so no other spawn of
+    ## this process overlaps it.
+    let script = "p=$1; o=$2; e=$3; x=$4; shift 4; " &
+      "exec \"$x\" -f \"$p\" \"$@\" >\"$o\" 2>\"$e\" </dev/null"
+    let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+    try:
+      result = uncontrolledStartProcess(shell, args = @["-c", script, "sh",
+        profilePath, stdoutPath, stderrPath, sandboxExec] & argv,
+        workingDir = cwd, env = env, options = {poParentStreams})
+    finally:
+      restoreInheritableDescriptors(madeCloseOnExec)
+
+when defined(posix):
  proc runLeaseSeatbelt(spec: LeaseSpec;
                       onReport: ReportSink): Future[LeaseOutcome] {.async.} =
    var outcome = LeaseOutcome()
@@ -870,24 +915,9 @@ when defined(posix):
      env.add(("REPRO_DEVELOP_SIBLINGS", spec.siblingsDir))
    var envTable = newStringTable(modeCaseSensitive)
    for (k, v) in env: envTable[k] = v
-   # stdout/stderr go to files (a pipe the daemon does not drain while the
-   # action runs would stall it). The redirecting shell runs OUTSIDE the
-   # sandbox; `exec` replaces it with sandbox-exec, which applies the profile
-   # before the action's first instruction. Before that it closes every
-   # descriptor above stderr it inherited from the daemon: `startProcess`
-   # passes on whatever the daemon holds without close-on-exec, and an
-   # inherited socket (a peer connection, the control socket, a listener) is
-   # a channel no Seatbelt network rule governs (review fix, 2026-10-19;
-   # `t_execution_lease_confinement`, `BREACH-fd`).
-   let child = uncontrolledStartProcess("/bin/sh", args = @["-c",
-     "p=$1; o=$2; e=$3; shift 3; " &
-     "for f in /dev/fd/*; do n=${f##*/}; " &
-     "case $n in ''|*[!0-9]*) continue;; esac; " &
-     "[ \"$n\" -gt 2 ] && eval \"exec $n>&-\"; done 2>/dev/null; " &
-     "exec /usr/bin/sandbox-exec -f \"$p\" " &
-     "\"$@\" >\"$o\" 2>\"$e\" </dev/null", "sh", profilePath,
-     spec.metaDir / "stdout", spec.metaDir / "stderr"] & spec.argv,
-     workingDir = spec.cwd, env = envTable, options = {})
+   let child = startSeatbeltWrapper("/bin/sh", "/usr/bin/sandbox-exec",
+     profilePath, spec.metaDir / "stdout", spec.metaDir / "stderr",
+     spec.argv, spec.cwd, envTable)
    var waitedMs = 0
    while child.running:
      await sleepAsync(20)

@@ -95,11 +95,10 @@
 
 ## KEY CLASSIFICATION IS CHECKED ON EVERY HOST from cacheInputPaths over real
 ## evidence, including helper inclusion and content-addressed root elision.
-## On platforms with NoTreeLifetimeGuard every capture is incomplete by
-## io-mon docs/usage.md ("macOS limitation (normative)"). There
-## the publication/reuse half instead checks the exact tree-lifetime marker,
-## monitor-loss skip reason, no hot record, and conservative re-launches.
-## Linux and Windows retain the published-input and reuse checks. No evidence is filtered
+## Every capture is complete (io-mon proves tree quiescence on every platform;
+## docs/usage.md, "The macOS tree-lifetime guard (normative)"), so the
+## publication/reuse half checks the published-input and reuse gates. No
+## evidence is filtered
 ## or promoted. The fixture canonicalises /tmp on macOS to match F_GETPATH
 ## evidence and runs shell scripts via the monitor's non-SIP shebang route.
 
@@ -110,7 +109,6 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
-import repro_test_support/descendant_guard_expectations
 
 const RepoRootMarker = "repro.nim"
 
@@ -344,60 +342,29 @@ proc monitoredConfig(repoRoot, cacheRoot: string): BuildEngineConfig =
   result.monitorCliPath = tools.monitorCliPath
   result.monitorCliArgs = tools.monitorCliArgs
 
-proc checkFailsClosed(f: Fixture; edge: BuildAction; r: ActionResult) =
-  ## io-mon docs/usage.md requires incomplete captures on hosts without a
-  ## tree-lifetime guard; Failure-Semantics.md forbids publishing or reuse.
-  var markers = 0
-  for diagnostic in r.evidence.diagnostics:
-    const lead = "monitor loss: "
-    if diagnostic.startsWith(lead) and
-        diagnostic[lead.len .. ^1].isTreeLifetimeLimitation:
-      inc markers
-  checkpoint(edge.id & " diagnostics: " & $r.evidence.diagnostics &
-    " publish skipped: " & r.cachePublishSkipReason)
-  check r.status == asSucceeded
-  check r.launched
-  check r.cacheDecision notin ReuseDecisions
-  check markers == 1
-  check "monitor-loss" in r.cachePublishSkipReason
-  var cache = openActionCache(f.cacheRoot / "action-cache")
-  check not cache.readHotRecord(edge.weakFingerprint).found
-
 proc keyInputs(f: Fixture; edge: BuildAction; r: ActionResult): seq[string] =
-  ## Check the production classification on real evidence everywhere. Where
-  ## publication is allowed, also retain the published-record assertions by
-  ## proving that record contains exactly the classified input paths.
+  ## Check the production classification on real evidence, and that the
+  ## published record contains exactly the classified input paths.
   result = edge.cacheInputPaths(r.evidence)
-  if NoTreeLifetimeGuard:
-    f.checkFailsClosed(edge, r)
-  else:
-    var cache = openActionCache(f.cacheRoot / "action-cache")
-    let hot = cache.readHotRecord(edge.weakFingerprint)
-    check hot.found
-    if hot.found:
-      let recorded = hot.record.inputs.mapIt(it.path)
-      check recorded.len == result.len
-      for path in result:
-        check path in recorded
+  var cache = openActionCache(f.cacheRoot / "action-cache")
+  let hot = cache.readHotRecord(edge.weakFingerprint)
+  check hot.found
+  if hot.found:
+    let recorded = hot.record.inputs.mapIt(it.path)
+    check recorded.len == result.len
+    for path in result:
+      check path in recorded
 
 proc checkRepeat(f: Fixture; edge: BuildAction; r: ActionResult) =
-  ## Keep every Linux reuse gate. Incomplete platforms must instead prove a
-  ## successful re-launch, the explicit loss marker and absence of a record.
-  if NoTreeLifetimeGuard:
-    f.checkFailsClosed(edge, r)
-  else:
-    check r.cacheDecision in ReuseDecisions
-    check not r.launched
-
-proc expectedRuns(reusable, rebuilt: int): int =
-  if NoTreeLifetimeGuard: rebuilt else: reusable
+  ## The warm run must be reused without launching.
+  check r.cacheDecision in ReuseDecisions
+  check not r.launched
 
 proc exerciseShape(f: Fixture; repoRoot: string; edge: BuildAction;
                    name: string) =
   ## One shape, end to end: prove the helper is in the classified input set,
   ## then swap it for new bytes at a new mtime and execute the new generation.
-  ## Complete platforms must reuse both stable states; incomplete platforms
-  ## must fail closed and re-launch every time (see checkRepeat).
+  ## Both stable states must be reused (see checkRepeat).
   let g = graph([edge])
   let config = monitoredConfig(repoRoot, f.cacheRoot)
 
@@ -423,7 +390,7 @@ proc exerciseShape(f: Fixture; repoRoot: string; edge: BuildAction;
   let warm = runBuild(g, config)
   checkpoint(name & " warm: decision=" & $warm.byId(edge.id).cacheDecision)
   f.checkRepeat(edge, warm.byId(edge.id))
-  check f.runCount(name) == expectedRuns(1, 2)
+  check f.runCount(name) == 1
 
   f.compileHelper(2)
 
@@ -434,16 +401,14 @@ proc exerciseShape(f: Fixture; repoRoot: string; edge: BuildAction;
     " reason=" & r.reason)
   check r.cacheDecision notin ReuseDecisions
   check r.launched
-  if NoTreeLifetimeGuard:
-    f.checkFailsClosed(edge, r)
-  check f.runCount(name) == expectedRuns(2, 3)
+  check f.runCount(name) == 2
   check f.logPath(name).readFile.contains("gen=2")
 
   let settled = runBuild(g, config)
   checkpoint(name & " settled: decision=" &
     $settled.byId(edge.id).cacheDecision)
   f.checkRepeat(edge, settled.byId(edge.id))
-  check f.runCount(name) == expectedRuns(2, 4)
+  check f.runCount(name) == 2
 
 suite "the binary an action executes is a recorded input":
 
@@ -711,7 +676,7 @@ suite "a tool under a content-addressed root is in the cache key without being a
       let warm = runBuild(graph([edgeA]), config)
       checkpoint("A warm: decision=" & $warm.byId(edgeA.id).cacheDecision)
       f.checkRepeat(edgeA, warm.byId(edgeA.id))
-      check f.runCount("store-tool") == expectedRuns(1, 2)
+      check f.runCount("store-tool") == 1
 
       # THE SWAP. A different store path is what a content change to a
       # nix-built tool looks like; the store cannot mutate one in place.
@@ -721,24 +686,22 @@ suite "a tool under a content-addressed root is in the cache key without being a
         " launched=" & $r1.launched & " reason=" & r1.reason)
       check r1.cacheDecision notin ReuseDecisions
       check r1.launched
-      if NoTreeLifetimeGuard:
-        f.checkFailsClosed(edgeB, r1)
-      check f.runCount("store-tool") == expectedRuns(2, 3)
+      check f.runCount("store-tool") == 2
 
-      # Complete platforms must reuse the new state, proving this is a re-key
-      # rather than a permanent miss; incomplete platforms must rebuild again.
+      # The new state must be reused, proving this is a re-key rather than a
+      # permanent miss.
       let settled = runBuild(graph([edgeB]), config)
       checkpoint("B settled: decision=" & $settled.byId(edgeB.id).cacheDecision)
       f.checkRepeat(edgeB, settled.byId(edgeB.id))
-      check f.runCount("store-tool") == expectedRuns(2, 4)
+      check f.runCount("store-tool") == 2
 
-      # THE KEY DISTINGUISHES, IT DOES NOT MERELY MOVE. Where publication is
-      # allowed, going back to A serves A's own record without executing. That
-      # rejects blanket invalidation; incomplete platforms still rebuild.
+      # THE KEY DISTINGUISHES, IT DOES NOT MERELY MOVE. Going back to A
+      # serves A's own record without executing. That rejects blanket
+      # invalidation.
       let backToA = runBuild(graph([edgeA]), config)
       checkpoint("back to A: decision=" & $backToA.byId(edgeA.id).cacheDecision)
       f.checkRepeat(edgeA, backToA.byId(edgeA.id))
-      check f.runCount("store-tool") == expectedRuns(2, 5)
+      check f.runCount("store-tool") == 2
 
   test "a tool under REPROBUILD'S OWN store is in the key just like a Nix one":
     ## THE OTHER CONTENT-ADDRESSED ROOT, and it was the more dangerous of the
@@ -845,7 +808,7 @@ suite "a tool under a content-addressed root is in the cache key without being a
       let warm = runBuild(graph([edgeA]), config)
       checkpoint("A warm: decision=" & $warm.byId(edgeA.id).cacheDecision)
       f.checkRepeat(edgeA, warm.byId(edgeA.id))
-      check f.runCount("repro-store") == expectedRuns(1, 2)
+      check f.runCount("repro-store") == 1
 
       let swapped = runBuild(graph([edgeB]), config)
       let r1 = swapped.byId(edgeB.id)
@@ -853,17 +816,14 @@ suite "a tool under a content-addressed root is in the cache key without being a
         " launched=" & $r1.launched & " reason=" & r1.reason)
       check r1.cacheDecision notin ReuseDecisions
       check r1.launched
-      if NoTreeLifetimeGuard:
-        f.checkFailsClosed(edgeB, r1)
-      check f.runCount("repro-store") == expectedRuns(2, 3)
+      check f.runCount("repro-store") == 2
 
-      # Where publication is allowed, this must be a re-key, not a blanket
-      # invalidation. Otherwise the platform limitation still requires a run.
+      # This must be a re-key, not a blanket invalidation.
       let backToA = runBuild(graph([edgeA]), config)
       checkpoint("back to A: decision=" &
         $backToA.byId(edgeA.id).cacheDecision)
       f.checkRepeat(edgeA, backToA.byId(edgeA.id))
-      check f.runCount("repro-store") == expectedRuns(2, 4)
+      check f.runCount("repro-store") == 2
 
   test "a MUTABLE directory inside the store is neither elided nor keyed as content-addressed":
     ## THE PREDICATE, not the scope — rule 8 one level down.
@@ -1115,13 +1075,13 @@ suite "a tool under a content-addressed root is in the cache key without being a
         checkpoint(a.relDir & " warm: decision=" &
           $warm.byId(edge.id).cacheDecision)
         f.checkRepeat(edge, warm.byId(edge.id))
-        check f.runCount(name) == expectedRuns(1, 2)
+        check f.runCount(name) == 1
 
         # THE REPOINT — what makes an alias an alias. The SAME path comes to
         # name different bytes, which a content-addressed root cannot do and is
         # precisely why treating one as the other is unsound. The edge value is
         # unchanged, so its weak fingerprint is unchanged: the only thing that
-        # can catch this on a complete platform is the classified input above.
+        # can catch this is the classified input above.
         #
         # Unlink first: a store copy carries the store's read-only mode, so
         # writing THROUGH the old entry fails with EACCES. Replacing the entry
@@ -1135,17 +1095,14 @@ suite "a tool under a content-addressed root is in the cache key without being a
           " reason=" & r1.reason)
         check r1.cacheDecision notin ReuseDecisions
         check r1.launched
-        if NoTreeLifetimeGuard:
-          f.checkFailsClosed(edge, r1)
-        check f.runCount(name) == expectedRuns(2, 3)
+        check f.runCount(name) == 2
 
-        # Complete platforms must reuse the new state after revalidation;
-        # incomplete platforms must conservatively re-launch again.
+        # The new state must be reused after revalidation.
         let settled = runBuild(graph([edge]), config)
         checkpoint(a.relDir & " settled: decision=" &
           $settled.byId(edge.id).cacheDecision)
         f.checkRepeat(edge, settled.byId(edge.id))
-        check f.runCount(name) == expectedRuns(2, 4)
+        check f.runCount(name) == 2
 
   test "only the store root the resolver names exempts anything":
     ## THE THREE ARMS BETWEEN `$REPRO_STORE_ROOT` AND A RECOGNISED ROOT, none
@@ -1443,8 +1400,7 @@ suite "a tool under a content-addressed root is in the cache key without being a
       # returned the whole file.
       check not r1.stdout.contains("line-12")
 
-      # Where publication is allowed, going back to cat serves its own
-      # record, proving a re-key. Incomplete platforms must still rebuild.
+      # Going back to cat serves its own record, proving a re-key.
       let backToCat = runBuild(graph([edgeCat]), config)
       checkpoint("back to cat: decision=" &
         $backToCat.byId(edgeCat.id).cacheDecision)

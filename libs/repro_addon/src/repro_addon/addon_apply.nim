@@ -1436,6 +1436,66 @@ proc writeStartHolds*(resources: openArray[SystemResource];
     if u notin units: units.add(u)
   writeHolds(units, StartHoldName, StartHoldText)
 
+const HeldTriggersFile = "held-triggers"
+  ## The triggers a switch stopped for its holds (§13 decision 151), one
+  ## per line, in the state directory: written before any is stopped, so a
+  ## switch refused after its flip leaves them for the revert's switch to
+  ## start again, and a crash leaves them for the next switch.
+
+proc heldTriggersPath(stateDir: string): string = stateDir / HeldTriggersFile
+
+proc readHeldTriggers*(stateDir: string): seq[string] =
+  ## The triggers on record as stopped for a hold; empty when none is.
+  let p = heldTriggersPath(stateDir)
+  if not fileExists(p): return
+  for l in readFile(p).splitLines():
+    let t = l.strip()
+    if t.len > 0 and t notin result: result.add(t)
+
+proc writeHeldTriggers*(stateDir: string; triggers: openArray[string]) =
+  ## Record ``triggers`` as stopped for a hold (durably: a checked write,
+  ## renamed into place), or remove the record when there are none.
+  let p = heldTriggersPath(stateDir)
+  if triggers.len == 0:
+    if fileExists(p): removeFile(p)
+    return
+  writeHoldFile(p, triggers.join("\n") & "\n")
+
+proc addonLiveHost*(): LiveHost =
+  ## systemctl, as the full apply's release reads and drives it.
+  LiveHost(
+    isActive: proc (u: string): bool = unitIsActive(u),
+    show: proc (u: string): Table[string, string] = systemctlShow(u),
+    start: proc (u: string): tuple[ok: bool, output: string] =
+      let r = runSystemctlArgs(["start", "--", u])
+      (r.exitCode == 0, r.output),
+    stop: proc (u: string): tuple[ok: bool, output: string] =
+      let r = runSystemctlArgs(["stop", "--", u])
+      (r.exitCode == 0, r.output),
+    resetFailed: proc (u: string) =
+      discard runSystemctlArgs(["reset-failed", "--", u]))
+
+proc hostRunningInstances*(tmpl: string): seq[string]
+
+proc heldTriggersOf*(resources: openArray[SystemResource];
+                     held: openArray[string]; host: LiveHost): seq[string] =
+  ## The socket, path and timer units of the ``held`` units (§13 decision
+  ## 151): the generation's own, whatever their target, and every one
+  ## systemd has loaded that triggers a held unit, one of a held
+  ## template's instances or its observation instance.
+  var profile = SystemProfile()
+  for r in resources: profile.resources.add(r)
+  result = profileTriggersOf(profile, held)
+  var names: seq[string]
+  for u in held:
+    names.add(u)
+    if isTemplateUnit(u):
+      names.add(observationInstanceOf(u))
+      for i in floorInstancesOf(u, resources): names.add(i)
+      for i in hostRunningInstances(u): names.add(i)
+  for t in loadedTriggersOf(names, host):
+    if t notin result: result.add(t)
+
 proc removeStartHolds*(holds: openArray[string]) =
   ## Remove each hold file, and its directory only when the hold was the
   ## last thing in it (``start_holds.removeHolds``; A9 review round 5,
@@ -6204,15 +6264,56 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   var hookLiveJudged: seq[string]  # what step 6's live check read (§11.1)
   var liveUnits: seq[string]    # §11.1: the carried-state cross-check's
 
+  proc holdTriggers() =
+    ## Stop and hold the triggers of every unit the switch holds (§13
+    ## decision 151), recorded before any is stopped: a socket with a
+    ## pending connection or a path unit whose path exists would otherwise
+    ## fire at a held unit until systemd's trigger rate limit fails it for
+    ## good, and a step-3 ``enable --now`` of a trigger is skipped by its
+    ## hold. The triggers come back at the check's pass, the undo of a
+    ## refused switch, or the revert's own switch (``restartHeldTriggers``).
+    when not mutated("triggers-left-running") and
+        not mutated("floor-start-unheld"):
+      if opts.recordOnly: return
+      let host = addonLiveHost()
+      var held = flooredUnitNames(composed.resources)
+      for u in liveUnits:
+        if u notin held: held.add(u)
+      let triggers = heldTriggersOf(composed.resources, held, host)
+      var stopped = readHeldTriggers(stateDir)
+      var toStop: seq[string]
+      for t in triggers:
+        if t notin stopped and host.isActive(t): toStop.add(t)
+      if toStop.len > 0:
+        writeHeldTriggers(stateDir, stopped & toStop)
+        for t in toStop: discard host.stop(t)
+      for h in writeHolds(triggers, StartHoldName, StartHoldText):
+        if h notin startHolds: startHolds.add(h)
+
+  proc restartHeldTriggers(keepHeld: proc (t: string): bool = nil): seq[string] =
+    ## Start again every trigger on record as stopped for a hold, after a
+    ## ``reset-failed`` (§13 decision 151), but those ``keepHeld`` names:
+    ## the triggers of a unit a revert keeps held stay down with it, on
+    ## record for the switch that clears its hold. Returns the problems.
+    when not mutated("triggers-left-running"):
+      var keep, go: seq[string]
+      for t in readHeldTriggers(stateDir):
+        if keepHeld != nil and keepHeld(t): keep.add(t) else: go.add(t)
+      result = triggerRestarts(go, [], addonLiveHost())
+      writeHeldTriggers(stateDir, keep)
+
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the
     ## new generation was written, and the old one stands, so its units
-    ## may start again (step 2's undo restarts them).
+    ## may start again (step 2's undo restarts them), and so may the
+    ## triggers the holds stopped (§13 decision 151).
     if startHolds.len == 0: return
     removeStartHolds(startHolds)
     startHolds.setLen(0)
     try: daemonReload()
     except CatchableError: discard
+    for pr in restartHeldTriggers():
+      stderr.writeLine("repro-addon: " & pr)
 
   proc beforeSet(planId: string) {.gcsafe.} =
     ## Steps 2 and 3: pre-stop, then flip. A refusal here (an exclusive
@@ -6230,6 +6331,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         if step6.reload and not opts.recordOnly:
           liveUnits = step6.judged
           startHolds = writeStartHolds(composed.resources, liveUnits)
+          holdTriggers()
           if startHolds.len > 0: daemonReload()
       marker.planId = planId
       writePendingMarker(stateDir, marker)
@@ -6370,6 +6472,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               # drivers' reloads loaded the generation's definitions.
               liveUnits = step6.judged
               startHolds = writeStartHolds(composed.resources, liveUnits)
+            # A trigger the drivers' writes loaded only now (a host unit
+            # linked to a held one) is stopped and held too.
+            holdTriggers()
           daemonReload()
           # From here on every start runs the generation's definitions:
           # step 7 accepts an exclusive instance started after this point
@@ -6595,9 +6700,24 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                                        flooredUnitNames(composed.resources))
             proc isHeld(u: string): bool =
               u in held or floorTemplateOf(u) in held
+            # A trigger of a held unit stays down with it (§13 decision
+            # 151): started, it would fire at the hold until its rate limit.
+            let host = addonLiveHost()
+            proc triggersHeld(t: string): bool =
+              if not isTriggerUnit(t): return false
+              var targets: seq[string]
+              try: targets = triggeredUnits(host.show(t))
+              except CatchableError: discard
+              var profile = SystemProfile()
+              for r in composed.resources: profile.resources.add(r)
+              for (pt, target) in triggerTargets(profile):
+                if pt == t: targets.add(target)
+              for u in targets:
+                if isHeld(u): return true
             var kept: seq[Transition]
             for t in stepTransitions:
-              if t.verb in {tvStart, tvRestart, tvStopStart, tvReload} and isHeld(t.unit):
+              if t.verb in {tvStart, tvRestart, tvStopStart, tvReload} and
+                  (isHeld(t.unit) or triggersHeld(t.unit)):
                 continue
               kept.add(t)
             stepTransitions = kept
@@ -6679,6 +6799,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                   "start holds back before any unit rendered with floor " &
                   "version 5 or later starts (§13 decision 144)")
             heldAtRevert = notHeld
+            # Once the start holds are gone, the triggers they stopped come
+            # back, but those of a held unit (§13 decision 151).
+            if startHolds.len == 0:
+              for pr in restartHeldTriggers(triggersHeld): problems.add(pr)
             stderr.writeLine("repro-addon: the revert keeps " & held.join(", ") &
               " on hold, not started: its floor check refused them:\n  " &
               notHeld.join("\n  "))
@@ -6736,6 +6860,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
             startHolds.setLen(0)
+            # The triggers the holds stopped come back (§13 decision 151),
+            # this switch's and any a refused switch left on record.
+            for pr in restartHeldTriggers(): problems.add(pr)
       if startHolds.len > 0 and clean and problems.len == 0:
         # The check did not run (a record-only replay, a falsifying build):
         # the holds must not outlive the switch that wrote them.
@@ -6743,6 +6870,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         startHolds.setLen(0)
         try: daemonReload()
         except CatchableError as ex: problems.add(ex.msg)
+        for pr in restartHeldTriggers(): problems.add(pr)
       if clean and problems.len == 0:
         try:
           # What a floored unit's own start created is that unit's (§13

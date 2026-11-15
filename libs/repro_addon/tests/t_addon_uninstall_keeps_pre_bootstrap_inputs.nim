@@ -311,7 +311,7 @@ suite "a lost sink configuration does not acknowledge queued records":
     check "1 record(s) still queued" in r.why and "is gone" in r.why
 
 # ---------------------------------------------------------------------------
-# A11 code review round 13 (§13 decision 146): the state, /var/lib/repro, goes
+# A11 code review round 13 (§13 decision 150): the state, /var/lib/repro, goes
 # with its ledger copy last, so a removal that fails part-way leaves the one
 # file a re-run reads first. A directory without write permission stands for
 # an immutable file (the test runs without root); the real removal and the
