@@ -594,6 +594,12 @@
 ##                                           add-on switch stops or holds
 ##                                           the triggers of held units
 ##                                           (decision 151)
+## ``trigger-restart-failure-ignored``     a trigger that does not start
+##                                           again is dropped, and the
+##                                           switch goes on (decision 155)
+## ``triggers-of-running-units-stopped``   every active trigger of a held
+##                                           unit is stopped, also one whose
+##                                           unit runs (decision 151)
 ## ``fired-from-driver-starts-only``       the triggers to fire again are
 ##                                           taken from the drivers' starts
 ##                                           alone (decision 152)
@@ -1487,6 +1493,10 @@ const
                           # staged, so a later <unit>.d at that path is
                           # claimed.
                           "revert-hold-gone-dir-reclaimed",
+                          # a revert-hold directory record that exists
+                          # but cannot be read is taken as empty, and the
+                          # next step rewrites it with only that step.
+                          "revert-hold-record-unreadable-as-empty",
                           # uninstall removes only the holds a ledger
                           # names, not those of a revert that died before
                           # its ledger.
@@ -1651,6 +1661,9 @@ const
                           "trigger-edges-omitted",
                           # A13 review round 9, §13 decisions 151-153.
                           "triggers-left-running",
+                          "triggers-of-running-units-stopped",
+                          # §13 decision 155.
+                          "trigger-restart-failure-ignored",
                           "fired-from-driver-starts-only",
                           "fired-instance-unmapped",
                           "requirers-of-refused-released",

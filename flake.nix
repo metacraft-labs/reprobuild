@@ -371,7 +371,14 @@
       # another name (a `REPRO_MONITOR_SHIM_LIB` override) no longer patches
       # its own raw syscalls and kills every program with SIGTRAP. 77bf297f
       # runs an inline clone with a child stack outside the trap handler.
-      url = "github:metacraft-labs/io-mon/4212d138707f2e30c844344870db46b81e73a96c";
+      # Bumped 4212d138 -> 30d85793 (2026-11-15, io-mon `agents`): on macOS a
+      # monitored root whose own command is a SIP-protected binary (an action
+      # spelled `/bin/sh -c ...`) is spawned through its non-SIP drop-in, so
+      # its tree is captured instead of lost and the result can be published.
+      # The range also carries Linux fixes (wordexp/pidfd_spawn process starts,
+      # an uninjectable /bin/sh under system/popen reported as a loss, a
+      # refusal to build the shim against a non-glibc libc).
+      url = "github:metacraft-labs/io-mon/30d85793e891c1a80859d52a9eb197b42d56752c";
       flake = false;
     };
     nim-shm-gset-src = {

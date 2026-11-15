@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2809,
+    "nimTestBinaries": 2810,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 766,
+    "pureUnitTests": 765,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2855
+    "testEntries": 2856
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -34,7 +34,6 @@
         "libs/repro_addon/tests/t_addon_floor_round13.nim",
         "libs/repro_addon/tests/t_addon_floor_round8.nim",
         "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
-        "libs/repro_addon/tests/t_addon_revert_hold_ledger.nim",
         "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim"
       ],
       "targetOs": "soAny"
@@ -1620,10 +1619,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1549,
+      "integration": 1550,
       "platform/destructive": 179,
-      "pure unit": 766,
-      "unclassified": 338
+      "pure unit": 765,
+      "unclassified": 339
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1837,9 +1836,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2809,
+    "nimTestBinaryCount": 2810,
     "pythonTestFileCount": 46,
-    "testEntryCount": 2855
+    "testEntryCount": 2856
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8895,8 +8894,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 28,
-      "staticCaseCount": 120,
+      "sourceSuiteCount": 29,
+      "staticCaseCount": 124,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9765,8 +9764,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_revert_hold_ledger",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -9777,7 +9776,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_revert_hold_ledger.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34077,6 +34076,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/home-apply/t_e2e_home_apply_plan_unrealizable_package_is_not_drift.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_apply_refuses_unrealizable_packages_before_commit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-apply/t_e2e_home_apply_refuses_unrealizable_packages_before_commit.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -1661,6 +1661,34 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("decision 151, full apply (next generation, triggers active " &
            "before it): the socket and the path unit, held through the " &
            "apply, are active after it and their services run", ok, $ev)
+    # Decision 151 with the socket's service running and connections
+    # arriving during the apply (the common case): a trigger whose unit runs
+    # cannot fire at the hold and is left alone -- with Accept=no the
+    # service holds the listening socket, so a stopped socket could not be
+    # started again -- and the service stays reachable.
+    block:
+      discard nw.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+        $R10Port & "' 2>/dev/null; for i in $(seq 15); do [ -s " & R10MarkerDir &
+        "/" & R10SocketSvc & ".ran ] && break; sleep 1; done; true")
+      let before = nw.exec("systemctl show -p ActiveState " & R10SocketSvc).stdout.strip()
+      nw.startAgitator()
+      let runApply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      nw.stopAgitator()
+      let after = nw.exec("systemctl show -p ActiveState " & R10SocketSvc &
+        "; systemctl show -p ActiveState -p Result " & R10Socket &
+        "; timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" & $R10Port &
+        "' && echo reachable").stdout
+      let ok = runApply.exitCode == 0 and before == "ActiveState=active" and
+        after.count("ActiveState=active") == 2 and "reachable" in after
+      record["decision151"]["running"] = %*{"exit": runApply.exitCode,
+        "before": before, "after": after, "ok": ok}
+      step("decision 151, full apply (service running): a socket whose " &
+           "service runs with connections arriving stays active through the " &
+           "apply, and the service stays reachable", ok,
+           runApply.stdout & runApply.stderr & "\nbefore: " & before &
+           "\nafter: " & after)
     step("round 5, undeclared: a drop-in the next generation no longer " &
          "declares is removed by the full apply, the requirement kept",
          tuneBefore and nextApply.exitCode == 0 and

@@ -265,6 +265,10 @@ EXPECT.update({
                     "engine build triggers-left-running"),
     "muttrigadopt": ("e2e_addon_adopt_hand_configured_service", "red",
                      "add-on build triggers-left-running"),
+    # §13 decision 155: a trigger that does not start again is dropped and
+    # the switch passes.
+    "mutrestartignored": ("e2e_addon_adopt_hand_configured_service", "red",
+                          "add-on build trigger-restart-failure-ignored"),
     "mutnoedges": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                    "engine build trigger-edges-omitted"),
 })
@@ -274,6 +278,7 @@ TARGET.update({
     "mutnoedges": "decision 137, timer first:",
     "muttrigconv": "decision 151, full apply (first realisation):",
     "muttrigadopt": "decision 151, add-on switch: a socket with connections",
+    "mutrestartignored": "decision 155: a trigger that cannot start again fails the switch",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -355,8 +360,14 @@ def on_target_rec(kind, rec):
         return (on_target(kind, steps) and
                 all(limit_hit(first.get(l, {}).get("trigger", ""))
                     for l in ("socket", "path")))
+    if kind == "mutrestartignored":
+        # Red because the switch passed with the trigger down, not for
+        # another reason: the port was taken.
+        u = rec.get("decision155", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                u.get("blocked") == "active")
     if kind == "muttrigadopt":
-        st = rec.get("decision151AddOn", {}).get("pass", {}).get("state", [])
+        st = rec.get("decision151Pass", {}).get("state", [])
         return (on_target(kind, steps) and len(st) >= 2 and
                 limit_hit(st[0]) and limit_hit(st[1]))
     if kind in ("mutliveset", "mutcallsite"):
@@ -478,6 +489,8 @@ def triggers_up(d151):
     """§13 decision 151 in a conversion record: after the first realisation
     and after the next generation's apply, the socket and the path unit are
     active and their services ran."""
+    if d151.get("running", {}).get("ok") is not True:
+        return False
     for apply in ("firstApply", "nextApply"):
         a = d151.get(apply)
         if not isinstance(a, dict):
@@ -724,13 +737,15 @@ def green_incomplete(kind, rec):
         # §13 decision 151: the triggers held through a passing switch are up
         # after it; a refused switch leaves neither failed; the next switch
         # brings both back.
-        d151 = rec.get("decision151AddOn")
-        if (not isinstance(d151, dict) or
-                d151.get("pass", {}).get("ok") is not True or
-                d151.get("refused", {}).get("notFailed") is not True or
-                d151.get("refused", {}).get("refusedForReason") is not True or
-                d151.get("recovered", {}).get("ok") is not True):
-            return "decision151AddOn %r, expected the triggers up after each switch" % d151
+        # §13 decision 155: a trigger that cannot start again failed the
+        # switch, the revert left the host pending, recover started it.
+        for key, field in (("decision151Running", "ok"), ("decision151Pass", "ok"),
+                           ("decision151Refused", "notFailed"),
+                           ("decision151Refused", "refusedForReason"),
+                           ("decision151Recovered", "ok"), ("decision155", "ok")):
+            d = rec.get(key)
+            if not isinstance(d, dict) or d.get(field) is not True:
+                return "%s %r, expected %s" % (key, d, field)
         lc = rec.get("liveCrossCheck")
         if not isinstance(lc, dict):
             return "liveCrossCheck not recorded"

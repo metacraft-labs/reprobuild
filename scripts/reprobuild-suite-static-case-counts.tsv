@@ -35,7 +35,7 @@ libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	120
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	124
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
@@ -83,7 +83,7 @@ libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_restore_before_start.nim	nim	2
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
-libs/repro_addon/tests/t_addon_revert_hold_ledger.nim	nim	12
+libs/repro_addon/tests/t_addon_revert_hold_ledger.nim	nim	13
 libs/repro_addon/tests/t_addon_review_findings.nim	nim	16
 libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
@@ -1410,6 +1410,7 @@ tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	n
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	nim	1
 tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim	nim	1
 tests/e2e/home-apply/t_e2e_home_apply_plan_unrealizable_package_is_not_drift.nim	nim	2
+tests/e2e/home-apply/t_e2e_home_apply_refuses_unrealizable_packages_before_commit.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_add_remove_immediate.nim	nim	1
 tests/e2e/home-apply/t_e2e_repro_home_apply_fresh_install.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim	nim	2

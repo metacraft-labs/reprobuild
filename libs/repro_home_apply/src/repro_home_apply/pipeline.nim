@@ -2248,6 +2248,30 @@ proc refuseClassificationDisagreement(opts: ApplyOptions; plan: ApplyPlan;
       "realization; inspect the current catalog and use `--relock` to " &
       "replace a differing local pin, or give both concerns to the same side")
 
+proc unrealizablePackages(previews: seq[PackagePreview];
+                          owned: ConcernSet): seq[PackagePreview] =
+  ## The packages of an applied concern that have no realization on the
+  ## target, in plan order. The ONE decision `--plan`
+  ## (`PlanPreview.unrealizable`) and the apply (`refuseUnrealizablePackages`)
+  ## both read, from the same previews, so the two cannot disagree
+  ## (Core-Invariants.md §One Implementation Per Concern). A reference of a
+  ## concern the host does not apply is never realized, so it is not one.
+  for pp in previews:
+    if pp.kind == ppkMissing and packageConcern(pp) in owned:
+      result.add pp
+
+proc refuseUnrealizablePackages(previews: seq[PackagePreview];
+                                owned: ConcernSet) =
+  ## Refuse the apply, naming every unrealizable package with its reason.
+  ## Called before the commit marker: an unrealizable package is known at
+  ## planning time, so failing on it later would first realize every package
+  ## ordered ahead of it and leave a partial generation to recover
+  ## (CLI/home/apply.md §Concerns Applied On This Host).
+  let missing = unrealizablePackages(previews, owned)
+  if missing.len > 0:
+    raiseUnrealizablePackages(missing.mapIt(it.packageId),
+      missing.mapIt(it.detail))
+
 proc concernSeed(applied: AppliedConcerns): string =
   ## The generation-id contribution of a concern declaration: the applied
   ## set, so narrowing or widening it is a new generation. Empty without a
@@ -2531,11 +2555,10 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     case pp.kind
     of ppkRealize: item.action = piaRealize
     of ppkCacheHit: item.action = piaCacheHit
-    of ppkMissing:
-      item.action = piaMissing
-      if not item.notApplied:
-        result.unrealizable.add(pp.packageId)
+    of ppkMissing: item.action = piaMissing
     result.items.add(item)
+  result.unrealizable = unrealizablePackages(packagePreviews, owned).
+    mapIt(it.packageId)
 
   # ---- Application bundles (READ ONLY) ----------------------------------
   # GM4c: a resolved application is placed in ~/Applications by the apply.
@@ -3088,6 +3111,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # GM7: see `refuseClassificationDisagreement` (`runApplyPlan`).
       refuseClassificationDisagreement(opts, applyPlan, packagePreviews,
         applied, catalog)
+      # A package of an applied concern with no realization is refused HERE,
+      # before the no-op check, the marker, the generation directory and
+      # step 7 -- from the decision `--plan` reports -- so the apply changes
+      # nothing and names every such package, not only the first one step 7
+      # would reach.
+      refuseUnrealizablePackages(packagePreviews, owned)
       let candidateId = deriveGenerationId(applyPlan, snapshotDig,
         resourcesSeed, selectionSeedOf(packagePreviews))
       # GM7: the package references this apply realizes -- those whose

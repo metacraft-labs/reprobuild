@@ -1461,6 +1461,32 @@ proc writeHeldTriggers*(stateDir: string; triggers: openArray[string]) =
     return
   writeHoldFile(p, triggers.join("\n") & "\n")
 
+const TriggersToRestartFile = "triggers-to-restart"
+  ## §13 decision 155: the triggers a revert could not start again. While
+  ## the file names any, the host is pending: the next switch first retries
+  ## them (the pending-switch guard) and refuses while one still does not
+  ## start, and `repro system addon recover` retries them and says so.
+
+proc triggersToRestartPath(stateDir: string): string =
+  stateDir / TriggersToRestartFile
+
+proc readTriggersToRestart*(stateDir: string): seq[string] =
+  let p = triggersToRestartPath(stateDir)
+  if not fileExists(p): return
+  for l in readFile(p).splitLines():
+    let t = l.strip()
+    if t.len > 0 and t notin result: result.add(t)
+
+proc writeTriggersToRestart*(stateDir: string; triggers: openArray[string]) =
+  let p = triggersToRestartPath(stateDir)
+  if triggers.len == 0:
+    if fileExists(p): removeFile(p)
+    return
+  writeHoldFile(p, triggers.join("\n") & "\n")
+
+proc hasTriggersToRestart*(stateDir: string): bool =
+  readTriggersToRestart(stateDir).len > 0
+
 proc addonLiveHost*(): LiveHost =
   ## systemctl, as the full apply's release reads and drives it.
   LiveHost(
@@ -1474,6 +1500,26 @@ proc addonLiveHost*(): LiveHost =
       (r.exitCode == 0, r.output),
     resetFailed: proc (u: string) =
       discard runSystemctlArgs(["reset-failed", "--", u]))
+
+proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
+    tuple[ok: bool; lines: seq[string]] =
+  ## §13 decision 155: start again each trigger a revert could not, after a
+  ## ``reset-failed``; those that start leave the record, and each outcome
+  ## is a line of the report. ``ok`` when none is left. ``host0`` is
+  ## systemctl unless a caller (a test) gives another.
+  let host = if host0.start == nil: addonLiveHost() else: host0
+  var left: seq[string]
+  for t in readTriggersToRestart(stateDir):
+    let failed = triggerRestarts([t], [], host)
+    if failed.len == 0:
+      result.lines.add("trigger " & t & " started again")
+    else:
+      left.add(t)
+      for f in failed:
+        result.lines.add(f & " (still pending: run `repro system addon " &
+          "recover` once its cause is cleared)")
+  writeTriggersToRestart(stateDir, left)
+  result.ok = left.len == 0
 
 proc hostRunningInstances*(tmpl: string): seq[string]
 
@@ -2618,7 +2664,9 @@ proc readRevertHoldDirRecords*(stateDir: string;
   ## ``revertHoldDirsPath``, one entry per (directory, staging) pair, its
   ## last phase. Only a ``<unit>.d`` directly under ``root`` and a staging
   ## name ``validStaging`` accepts, so a damaged record names nothing else.
-  ## None when absent or unreadable.
+  ## None when absent or unreadable: a reader only claims less, and every
+  ## writer reads through ``revertHoldDirsForAppend``, which refuses an
+  ## unreadable record rather than rewrite it from nothing.
   var text = ""
   try: text = readFile(revertHoldDirsPath(stateDir))
   except IOError, OSError: return
@@ -2636,11 +2684,36 @@ proc readRevertHoldDirRecords*(stateDir: string;
         found = true
     if not found: result.add((d, st, ph))
 
+proc revertHoldDirsForAppend(stateDir: string): string =
+  ## The text of ``revertHoldDirsPath`` that the next step is appended to.
+  ## Only a record that does not exist (``lstat`` says ``ENOENT``) is
+  ## empty. One that exists and cannot be read (``EACCES``, ``EIO``, ...)
+  ## raises: the append rewrites the whole file, so taking it as empty
+  ## would drop every earlier ``intended`` and ``staged`` step, and the
+  ## directories they claim would be forgotten (spec §4.2; issue
+  ## 2026-11-15-floor-a-revert-hold-directory-record-is-rewritten-empty-
+  ## when-it-cannot-be-read). ``placeRevertHold`` then raises before it
+  ## takes a step, and the unit keeps its start hold.
+  let p = revertHoldDirsPath(stateDir)
+  try:
+    result = readFile(p)
+  except IOError, OSError:
+    when mutated("revert-hold-record-unreadable-as-empty"):
+      # Falsifying build: the engine before the fix, any read error taken
+      # as no record.
+      return ""
+    else:
+      var st: Stat
+      if lstat(p.cstring, st) != 0 and osLastError().int32 == ENOENT:
+        return ""
+      raise newException(IOError, p & ": the revert-hold directory " &
+        "record exists but cannot be read: " & getCurrentExceptionMsg())
+
 proc recordRevertHoldDir(stateDir: string; r: RevertHoldDirRecord) =
-  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises.
-  var text = ""
-  try: text = readFile(revertHoldDirsPath(stateDir))
-  except IOError, OSError: discard
+  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises,
+  ## also when the record exists and cannot be read
+  ## (``revertHoldDirsForAppend``).
+  let text = revertHoldDirsForAppend(stateDir)
   createDir(addonDir(stateDir))
   writeFileAtomic(revertHoldDirsPath(stateDir),
                   text & r.dir & "\t" & r.staging & "\t" & r.phase & "\n", 0o600)
@@ -6282,8 +6355,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       let triggers = heldTriggersOf(composed.resources, held, host)
       var stopped = readHeldTriggers(stateDir)
       var toStop: seq[string]
-      for t in triggers:
-        if t notin stopped and host.isActive(t): toStop.add(t)
+      # Only those that could fire at a held unit (``triggersToStop``): the
+      # switch stops a running unit itself only in step 2, which pauses
+      # its triggers already, and restarts the rest after its check.
+      for t in triggersToStop(triggers, [], host):
+        if t notin stopped: toStop.add(t)
       if toStop.len > 0:
         writeHeldTriggers(stateDir, stopped & toStop)
         for t in toStop: discard host.stop(t)
@@ -6294,13 +6370,39 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     ## Start again every trigger on record as stopped for a hold, after a
     ## ``reset-failed`` (§13 decision 151), but those ``keepHeld`` names:
     ## the triggers of a unit a revert keeps held stay down with it, on
-    ## record for the switch that clears its hold. Returns the problems.
+    ## record for the switch that clears its hold. A trigger that does not
+    ## start fails the switch (§13 decision 155): the problem is returned,
+    ## and the trigger stays on record for the revert's switch. A revert
+    ## that cannot start it either moves it to the record of triggers to
+    ## restart and commits: the host is then pending until `repro system
+    ## addon recover` starts it (``retryTriggerRestarts``).
     when not mutated("triggers-left-running"):
-      var keep, go: seq[string]
+      var keep, go, toRestart: seq[string]
+      let host = addonLiveHost()
+      let reverting = purpose == "revert" or
+        (replaying and opts.replayOf == "revert")
       for t in readHeldTriggers(stateDir):
         if keepHeld != nil and keepHeld(t): keep.add(t) else: go.add(t)
-      result = triggerRestarts(go, [], addonLiveHost())
+      for t in go:
+        let failed = triggerRestarts([t], [], host)
+        if failed.len == 0: continue
+        when mutated("trigger-restart-failure-ignored"):
+          # FALSIFYING MUTATION: a trigger that does not start again is
+          # dropped, and the switch goes on as if it had.
+          continue
+        if reverting:
+          toRestart.add(t)
+          for f in failed:
+            stderr.writeLine("repro-addon: " & f & "; the revert commits, " &
+              "and the host is pending until `repro system addon recover` " &
+              "starts it (§13 decision 155)")
+        else:
+          keep.add(t)
+          for f in failed: result.add(f)
       writeHeldTriggers(stateDir, keep)
+      if toRestart.len > 0:
+        writeTriggersToRestart(stateDir,
+          readTriggersToRestart(stateDir) & toRestart)
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the

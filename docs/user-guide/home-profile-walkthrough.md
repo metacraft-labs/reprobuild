@@ -217,6 +217,12 @@ removed in a milestone post-2026-11-30; until then both paths coexist.
   your platform under your selection policy; the message lists each
   kind's reason. A pinned version that no realization offers names the
   versions that are offered — drop or change the pin.
+- **`repro home apply` refuses with "N package(s) of an applied concern
+  have no realization on this host; nothing was changed"**: the apply
+  checks every package before it installs or writes anything, so no other
+  package was installed first. Each following line names one package and
+  its reason, as `--plan` reports them; fix or remove each one, or leave
+  its concern out of this host's `applies:`.
 - **The plan names a different realization than you expected**: check
   `adapterPreference:` (the selection policy) and `home.lock` (a recorded
   selection is kept until the policy changes or you pass `--relock`).
