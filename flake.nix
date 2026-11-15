@@ -2650,6 +2650,14 @@
             # would shadow the host's, which must match the running manager.
             REPRO_SYSTEMD_ANALYZE =
               pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.systemd}/bin/systemd-analyze";
+            # The MinGW-w64 gcc that scripts/check_portable_engine_closure.sh
+            # compiles the engine's generated Windows C with, syntax only, so a
+            # binding to a function Windows lacks (POSIX `realpath`, reprobuild-pm
+            # issue 2026-11-15-windows-repro-engine-does-not-compile-service-floor-calls-posix-realpath)
+            # fails `just lint` instead of the Windows build. A variable and not
+            # `packages`: on PATH its binutils and `cc` would shadow the host
+            # toolchain's.
+            REPRO_WINDOWS_CC = "${pkgs.pkgsCross.mingwW64.stdenv.cc}/bin/${pkgs.pkgsCross.mingwW64.stdenv.cc.targetPrefix}gcc";
             CODETRACER_PINNED_SRC = "${codetracer-src}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
