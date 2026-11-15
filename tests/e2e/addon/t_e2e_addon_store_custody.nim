@@ -93,10 +93,17 @@
 ## "discarding … was authorised"; and at the end EVERY intent record the
 ## runs wrote is verified: only that one is completed, every other stays
 ## "authorised, not completed" (falsifier ``resume-without-marker``: the
-## last plain run completes an earlier run's intent too). The marker's
-## binding, signature and timing are held at unit level
-## (``t_addon_review_round8`` cases 16 and 19-22), since no step here forges
-## a marker or fails a sync.
+## last plain run completes an earlier run's intent too). Before the last
+## run two markers are forged in the guest (reprobuild-pm issue
+## 2026-11-15-addon-store-custody-gate-cites-two-marker-falsifiers-its-end-
+## check-cannot-catch): the third run's own valid, signed marker is copied
+## to the place of the second run's (IE's), a replay onto another intent
+## (falsifier ``marker-not-bound-to-intent``), and a marker that binds the
+## first run's intent (I0) exactly is planted with a signature that is not
+## the host's (falsifier ``marker-signature-unchecked``). The last run
+## completes neither, and both intents stay "authorised, not completed".
+## The marker's timing (``marker-before-sync``) needs a sync that fails in
+## the guest and is held at unit level (``t_addon_review_round8`` case 16).
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -125,7 +132,7 @@
 ## through the deploy agent's own fetch, from the producer serving the
 ## lock's archive URL. The archive is the fixture's, not a Debian mirror.
 
-import std/[json, os, strutils, unittest]
+import std/[algorithm, json, os, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_dsl_stdlib/packages/apt_closure
@@ -559,6 +566,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                     "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
   let saidIE = unIE.stdout & unIE.stderr
   record["uninstallStopsWithIntent"] = %saidIE
+  var recordE = ""
+  if marker0 in saidIE:
+    recordE = saidIE[saidIE.find(marker0) + marker0.len .. ^1].splitLines()[0].split(' ')[0]
+    recordE.removeSuffix(":")
   step("a run that authorises the discard and stops with an evidence entry " &
        "on disk writes its intent and no completion (decision 148's IE)",
        immIE.exitCode == 0 and unIE.exitCode != 0 and
@@ -655,12 +666,78 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("that cause is cleared", unimmN.exitCode == 0,
        unimmN.stdout & unimmN.stderr)
 
+  # §13 decision 148, the marker's binding and signature (reprobuild-pm
+  # issue 2026-11-15-addon-store-custody-gate-cites-two-marker-falsifiers-
+  # its-end-check-cannot-catch). Every marker the runs above wrote is a
+  # genuine one, so without this step the end check is green under
+  # marker-not-bound-to-intent and marker-signature-unchecked. Two markers
+  # are forged where the last run looks for them:
+  # - IE's place gets I4's own marker and signature, valid and signed by
+  #   the host but binding I4: a replay onto another intent (falsifier
+  #   marker-not-bound-to-intent completes IE from it);
+  # - I0's place gets a marker that binds I0 exactly -- its file name, the
+  #   sha256 of its bytes, its objects, the host's key -- under a
+  #   well-formed signature that is not the host's (falsifier
+  #   marker-signature-unchecked completes I0 from it).
+  # The last run must complete neither; the end check then finds both
+  # still "authorised, not completed".
+  let markerSaid = "(its discard marker "
+  var marker4 = ""
+  if markerSaid in said3:
+    marker4 = said3[said3.find(markerSaid) + markerSaid.len .. ^1].split(' ')[0]
+  proc markerFor(intent: string): string =
+    ## The marker path the product reads for ``intent`` (uninstall.nim
+    ## ``discardMarkerPath``), beside I4's in the same directory.
+    var name = extractFilename(intent)
+    name.removeSuffix("-discard-intent.json")
+    parentDir(marker4) / (name & "-discard-removed.json")
+  var forged = ""
+  var forgeOk = marker4.len > 0 and record0.len > 0 and recordE.len > 0 and
+    record0 != recordE and recordPath notin [record0, recordE]
+  if forgeOk:
+    let markerE = markerFor(recordE)
+    let replay = g.exec("cp " & quoteShell(marker4) & " " &
+      quoteShell(markerE) & " && cp " & quoteShell(marker4 & ".sig") & " " &
+      quoteShell(markerE & ".sig"))
+    let doc4 = try: parseJson(g.exec("cat " & quoteShell(marker4)).stdout)
+               except CatchableError: newJNull()
+    let intent0 = try: parseJson(g.exec("cat " & quoteShell(record0)).stdout)
+                  except CatchableError: newJNull()
+    let sha0 = g.exec("sha256sum " & quoteShell(record0)).stdout.split(' ')[0]
+    if doc4.kind == JObject and intent0.kind == JObject and sha0.len == 64:
+      let m0 = doc4.copy()
+      m0["intent"] = %extractFilename(record0)
+      m0["intentSha256"] = %sha0
+      m0["removed"] = intent0{"objects"}
+      m0["keptWithTheStore"] = newJArray()
+      let markerI0 = markerFor(record0)
+      # An Ed25519 signature is 64 bytes, hex; these are not the host's.
+      let plant = g.exec("printf '%s' " & quoteShell(pretty(m0) & "\n") &
+        " > " & quoteShell(markerI0) & " && printf '%s\\n' " &
+        quoteShell(repeat("ab", 64)) & " > " & quoteShell(markerI0 & ".sig"))
+      forged = "replayed " & markerE & "\nplanted " & markerI0 & "\n" &
+        pretty(m0) & "\n" & replay.stderr & plant.stderr
+      forgeOk = replay.exitCode == 0 and plant.exitCode == 0 and
+        intent0{"objects"}.len > 0
+    else:
+      forgeOk = false
+  record["forgedMarkers"] = %forged
+  step("I4's valid marker is replayed onto IE's intent, and a marker binding " &
+       "I0 exactly is planted under a signature that is not the host's",
+       forgeOk, "marker4=" & marker4 & " record0=" & record0 & " recordE=" &
+         recordE & "\n" & forged)
+
   # The last run finishes: nothing is left to complete, and the state goes.
   let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
   record["uninstallLast"] = %(un.stdout & un.stderr)
   step("the last run finishes, and the state and /etc/repro go",
        un.exitCode == 0 and
          g.exec("test -e /var/lib/repro || test -e /etc/repro").exitCode != 0,
+       un.stdout & un.stderr)
+  step("the last run completes neither the replayed nor the forged marker's " &
+       "intent (decision 148)",
+       "completing the discard an earlier uninstall" notin
+         (un.stdout & un.stderr),
        un.stdout & un.stderr)
   let kept = g.exec("cat " & quoteShell(recordPath)).stdout
   # Decision 64: checked the way an operator checks it, with the command,
@@ -697,12 +774,20 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # Every other one, the runs that stopped before their objects were gone
   # (I0, the failed store removal; IE, the failed evidence removal), stays
   # "authorised, not completed" (exit 3) for good (falsifiers
-  # resume-without-marker, marker-not-bound-to-intent,
-  # marker-signature-unchecked).
-  let intents = g.exec("ls /var/log/repro-addon/*-discard-intent.json")
+  # resume-without-marker; and, with the markers forged above,
+  # marker-not-bound-to-intent for IE and marker-signature-unchecked for
+  # I0). The intents are pinned by name: exactly I0, IE and I4, so a run
+  # that wrote no intent where one was expected cannot hide behind an
+  # extra one written elsewhere.
+  var intents = g.exec("ls /var/log/repro-addon/*-discard-intent.json")
     .stdout.strip().splitLines()
-  var verdicts = ""
-  var allRight = intents.len >= 3 and recordPath in intents  # I0, IE, I4
+  var expectedIntents = @[record0, recordE, recordPath]
+  intents.sort()
+  expectedIntents.sort()
+  var verdicts = "expected: " & expectedIntents.join(" ") & "\n"
+  var allRight = intents == expectedIntents and
+    record0.len > 0 and recordE.len > 0 and recordPath.len > 0 and
+    record0 != recordE and recordPath notin [record0, recordE]
   for it in intents:
     let v = g.exec(repro & " system addon verify-discard-record " &
       quoteShell(it) & " --key " & quoteShell(bs.attestationKey))
