@@ -81,7 +81,7 @@ type
       ## The state root that holds ``stateDir`` ("" = ``/var/lib/repro``).
     logDir*: string
       ## Where the state-removal token goes ("" = ``/var/log/repro-addon``,
-      ## beside the discard records; §13 decision 163).
+      ## beside the discard records; §13 decision 165).
     discardStoreEvidence*: bool
       ## Remove the store evidence directory's entries with the state; an
       ## uninstall that would remove any refuses without it, naming them
@@ -1104,7 +1104,7 @@ proc rmdirHint(err: cint): string =
 
 const
   StateRemovalTokenName* = "uninstall-state-removal-pending.json"
-    ## §13 decision 163 (a): the state-removal token, beside the discard
+    ## §13 decision 165 (a): the state-removal token, beside the discard
     ## records, outside the state.
   StateRemovalTokenSchema* = "repro-addon-uninstall-state-removal/1"
 
@@ -1115,7 +1115,7 @@ proc stateDirChain*(root, ledgerCopy: string; preBootstrap: seq[string]):
     seq[string] =
   ## The add-on's own directories that hold the ledger copy, deepest first:
   ## from the ledger copy's directory up to ``root``. It stops below the
-  ## first pre-bootstrap root (§13 decision 163 (b)): that directory was
+  ## first pre-bootstrap root (§13 decision 165 (b)): that directory was
   ## the host's before the add-on, and it and everything above it stay.
   var d = parentDir(ledgerCopy)
   while d == root or d.startsWith(root & "/"):
@@ -1195,7 +1195,7 @@ proc removeChain(chain: seq[string]):
 proc reportEmptyDirsLeft(r: var UninstallResult; root, failed: string;
                          err: cint; chain: seq[string]) =
   ## The precise report of a failed rmdir after the ledger copy (§13
-  ## decisions 161 and 163). It says what is known: the ledger copy is
+  ## decisions 161 and 165). It says what is known: the ledger copy is
   ## gone and the token stands; it claims the rest is empty only when the
   ## rmdir did not find something in the directory.
   let left = chain[chain.find(failed) .. ^1]
@@ -1218,7 +1218,7 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
                       tokenPath = stateRemovalTokenPath()) =
   ## Removes the add-on's state, ``/var/lib/repro``, with its ledger copy
   ## last but for the rmdir of the add-on's own empty directories (§13
-  ## decisions 150, 161 and 163): everything but the ledger copy and the
+  ## decisions 150, 161 and 165): everything but the ledger copy and the
   ## directories on its way first, checked gone and synced; then the token
   ## (``writeStateRemovalToken``), outside the state, naming the directories
   ## left to remove; then the ledger copy; then those directories, each by
@@ -1263,7 +1263,7 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
 
 proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
                            tokenPath = stateRemovalTokenPath()): bool =
-  ## §13 decisions 161 and 163: a re-run after an uninstall that removed
+  ## §13 decisions 161 and 165: a re-run after an uninstall that removed
   ## the ledger copy and then could not rmdir one of the add-on's own
   ## directories. Only with the token that uninstall wrote (outside the
   ## state) and no ledger copy: it removes exactly the directories the token
@@ -1369,7 +1369,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # writing at the same moment (``repro_core/host_apply_lock``).
   var hostLock = acquireHostApplyLock("repro system addon uninstall")
   defer: hostLock.release()
-  # §13 decisions 161 and 163: an earlier run removed the ledger copy
+  # §13 decisions 161 and 165: an earlier run removed the ledger copy
   # and could not rmdir one of the add-on's own directories; its token says
   # which. Finish that. Without the token nothing is touched here.
   let stateRoot = if opts.stateRoot.len > 0: opts.stateRoot else: StateRoot
@@ -1706,7 +1706,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # they were removed, each checked gone, above. One that appeared since
   # is reported with the root, once the root is gone.
   # The state goes last, and within it the ledger copy (§13 decision 150).
-  # The pre-bootstrap roots under it stay (§13 decision 163 (b)): the
+  # The pre-bootstrap roots under it stay (§13 decision 165 (b)): the
   # captured list, which the token carries for a re-run.
   var preBootstrap: seq[string]
   for e in captured.roots:

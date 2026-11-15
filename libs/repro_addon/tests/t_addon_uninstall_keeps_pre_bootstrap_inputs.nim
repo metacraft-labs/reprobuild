@@ -361,7 +361,7 @@ suite "the ledger copy goes last":
     check st in again.removed and (st / "ev" & " (store evidence)") in again.removed
 
 # ---------------------------------------------------------------------------
-# A11 code review rounds 14 and 15 (§13 decisions 161 and 163, amending
+# A11 code review rounds 14 and 15 (§13 decisions 161 and 165, amending
 # 150): after the ledger copy only rmdir(2) of the add-on's own empty
 # directories runs. Before the ledger copy goes, a durable token outside the
 # state (beside the discard records) names them; a re-run with that token
