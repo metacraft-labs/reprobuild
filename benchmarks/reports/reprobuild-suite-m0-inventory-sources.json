@@ -14882,8 +14882,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_n51_drain_process_stream.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18080,6 +18080,7 @@
         "repro_home_apply",
         "repro_home_intent",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "libs/repro_home_apply",

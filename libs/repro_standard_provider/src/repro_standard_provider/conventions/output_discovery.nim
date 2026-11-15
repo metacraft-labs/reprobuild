@@ -18,6 +18,7 @@
 ##
 ## A convention never falls back to predicting a path: when the tool cannot
 ## answer, discovery fails and names the tool's own diagnostic.
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils]
 import blake3
 from repro_core/paths import extendedPath
@@ -173,16 +174,9 @@ proc queryEnvironment(overrides: openArray[(string, string)]): StringTableRef =
       result[key] = value
 
 proc readToEnd*(stream: Stream): string =
-  ## Everything `stream` yields until end of file. Not ``Stream.readAll``,
-  ## which stops at the first short read -- and a pipe returns short reads
-  ## mid-stream (measured on eli-pc: the JSON object
-  ## ``dotnet msbuild -getProperty`` writes was cut after 256 bytes).
-  var buffer = newString(4096)
-  while true:
-    let count = stream.readData(addr buffer[0], buffer.len)
-    if count <= 0:
-      break
-    result.add(buffer[0 ..< count])
+  ## Everything `stream` yields until end of file; `drainStream`, kept under
+  ## this name for the convention tests that import it.
+  drainStream(stream)
 
 proc runToolQueries*(cwd: string; queries: openArray[ToolQuery]): seq[string] =
   ## Runs `queries` concurrently and returns each one's output, in order.

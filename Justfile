@@ -792,6 +792,13 @@ lint:
     # neighbours.
     python3 ./scripts/check_pattern_kills.py --self-test 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_pattern_kills.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse `Stream.readAll` on a child's output or error stream in product
+    # code: it stops at the first short read, which on a Windows pipe is the
+    # writer pausing (`dotnet msbuild -getProperty` was cut after 256 bytes;
+    # reprobuild-pm issue 2026-10-27). Read with `drainStream`. Self-test
+    # first. Source scan, no compiler.
+    python3 ./scripts/check_process_stream_readall.py --self-test 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_process_stream_readall.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT

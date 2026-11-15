@@ -74,6 +74,7 @@
 ##
 ## On a host with no Nix store directory every operation here is a no-op.
 
+from ./process_streams import drainStream
 import std/[algorithm, monotimes, os, osproc, sets, streams, strtabs, strutils,
             tables, times]
 when defined(posix):
@@ -474,7 +475,7 @@ proc runNixStore(exe: string; args: openArray[string]):
   var p = uncontrolledStartProcess(exe, args = args,
     env = hostNixEnvironment(), options = {poStdErrToStdOut, poUsePath})
   try:
-    result.output = p.outputStream.readAll()
+    result.output = drainStream(p.outputStream)
     result.exitCode = p.waitForExit()
   finally:
     closeProcessOnce(p)

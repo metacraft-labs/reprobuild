@@ -55,6 +55,7 @@
 ##   `maxTreeBytes` (default `DefaultMaxBaseTreeBytes`, 4 GiB) refuses the
 ##   snapshot with the reason, before a byte of it is written to disk.
 
+from repro_core/process_streams import drainStream
 import std/[options, os, osproc, sets, streams, strutils, tables]
 when defined(posix):
   import std/posix
@@ -340,7 +341,7 @@ proc checkoutBaseTree*(repoCache, commit, dest: string;
       # cannot block.
       if p.running: p.terminate()
       discard p.waitForExit()
-      BaseCheckout(reason: what & ": " & p.errorStream.readAll().strip())
+      BaseCheckout(reason: what & ": " & drainStream(p.errorStream).strip())
     let input = p.inputStream
     let output = p.outputStream
     for e in entries.blobs:
@@ -383,7 +384,7 @@ proc checkoutBaseTree*(repoCache, commit, dest: string;
     let code = p.waitForExit()
     if code != 0:
       return BaseCheckout(reason: "git cat-file failed with exit code " &
-        $code & ": " & p.errorStream.readAll().strip())
+        $code & ": " & drainStream(p.errorStream).strip())
   result.gitlinks = entries.gitlinks
   result.ok = true
 

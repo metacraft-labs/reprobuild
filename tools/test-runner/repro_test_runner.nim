@@ -1310,9 +1310,9 @@ proc runListJson(binary: string): tuple[output: string; stderrOutput: string;
       # the live capture path.) An unbounded `drainStream` here would be the
       # one shape every one of those decisions rejected.
       if p.outputStream != nil:
-        stdoutFile.write(p.outputStream.readAll())
+        stdoutFile.write(p.outputStream.readAll()) # readall-ok: dead fallback, see the note above
       if p.errorStream != nil:
-        stderrFile.write(p.errorStream.readAll())
+        stderrFile.write(p.errorStream.readAll()) # readall-ok: dead fallback, see the note above
   finally:
     try: p.close()
     except CatchableError: discard
