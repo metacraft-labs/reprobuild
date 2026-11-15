@@ -204,6 +204,23 @@ suite "Add-On: systemd.unitState and linux.addOnTool":
       content = "[Service]\nExecStart=/usr/bin/true\n")
     check profileIntentToSystemProfile(intent).resources.len == 2
 
+  test "a systemd.systemTimer is an owned unit: no unitState, no second declaration":
+    # A systemd.systemTimer writes its unit file as a systemd.systemUnit
+    # does (reprobuild-pm issue 2026-11-15-floor-activator-checks-skip-a-
+    # systemd-system-timer-resource).
+    let timer = "systemd.systemTimer { name = \"t.timer\" content = \"[Timer]\nOnCalendar=daily\n\" }\n"
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("systemd.unitState { name = \"t.timer\" }\n" & timer)
+    try:
+      discard parseSystemProfile(timer &
+        "systemd.systemUnit { name = \"t.timer\" content = \"[Timer]\nOnCalendar=weekly\n\" }\n")
+      check false
+    except ESystemProfileInvalid as e:
+      check "declared both as systemd.systemTimer and as systemd.systemUnit" in e.msg
+    # A drop-in onto the timer is not a second declaration of it.
+    check parseSystemProfile(timer &
+      "systemd.systemDropIn { unit = \"t.timer\" name = \"x\" content = \"[Timer]\nPersistent=yes\n\" }\n").resources.len == 2
+
   test "linux.addOnTool: a missing launcher link is drift the plan repairs":
     let lock = parseAptClosureLock(LockText)
     let prefix = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)

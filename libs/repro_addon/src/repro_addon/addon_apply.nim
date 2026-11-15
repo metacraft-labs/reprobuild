@@ -1521,6 +1521,28 @@ proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
   writeTriggersToRestart(stateDir, left)
   result.ok = left.len == 0
 
+proc step7Inputs*(transitions: seq[Transition]; paused: seq[string];
+                  assumeActive: HashSet[string]; excluded: openArray[string]):
+    tuple[transitions: seq[Transition]; paused: seq[string];
+          assumeActive: HashSet[string]] =
+  ## Everything step 7 starts, with the ``excluded`` units left out: the
+  ## plan's transitions, the triggers step 2 paused, and the units a revert
+  ## or replay plans as running that are down. The one place a revert's
+  ## step 7 is kept from starting a trigger its record of triggers to
+  ## restart owns (§13 decision 160), whatever list would start it.
+  result = (transitions: transitions, paused: paused, assumeActive: assumeActive)
+  when mutated("revert-starts-unstartable-trigger"):
+    # FALSIFYING MUTATION: step 7 starts it again.
+    return
+  if excluded.len == 0: return
+  result.transitions = @[]
+  for tr in transitions:
+    if tr.unit notin excluded: result.transitions.add(tr)
+  result.paused = @[]
+  for t in paused:
+    if t notin excluded: result.paused.add(t)
+  for t in excluded: result.assumeActive.excl(t)
+
 proc hostRunningInstances*(tmpl: string): seq[string]
 
 proc heldTriggersOf*(resources: openArray[SystemResource];
@@ -1854,31 +1876,48 @@ proc installedListeners*(unitFile: string; dropIns: openArray[string]):
     tuple[service: string; paths: seq[string]] =
   ## The unix listeners an activator the add-on installed declares, and the
   ## service it starts, read from the files the add-on wrote for it (its
-  ## unit file, then its own drop-ins; an empty assignment resets), for the
-  ## one-time migration (spec §10.1 round 12, "The migration records
-  ## listeners").
+  ## unit file, then its own drop-ins), for the one-time migration (spec
+  ## §10.1 round 12, "The migration records listeners"). An empty
+  ## ``Listen*=`` clears the listeners. The service is read as systemd
+  ## reads it, by the reader the planner and the floor checks share
+  ## (``profile.triggeredUnits``): the last ``Service=`` naming a loadable
+  ## ``.service`` wins and an empty one is ignored, specifiers are
+  ## expanded, ``Accept=`` is a systemd boolean (its template then).
   let name = extractFilename(unitFile)
   let dot = name.rfind('.')
   if dot <= 0 or name[dot + 1 .. ^1] != "socket": return
-  var explicit, accept = ""
   var vals: seq[string]
-  for f in @[unitFile] & @dropIns:
+  var texts: seq[string]
+  # systemd parses a unit's drop-ins in the order of their file names,
+  # across every directory that applies (systemd.unit(5), "Description"),
+  # whatever order the ledger lists them in.
+  var ordered = @dropIns
+  when not mutated("migration-service-as-written"):
+    ordered.sort(proc (a, b: string): int =
+      result = cmp(extractFilename(a), extractFilename(b))
+      if result == 0: result = cmp(a, b))
+  for f in @[unitFile] & ordered:
     var text = ""
     try: text = readFile(f)
     except IOError, OSError: continue
+    texts.add(text)
     for d in serviceFloor.sectionDirectives(text, ["Socket"]):
       case d.key
-      of "Service": explicit = d.value.strip()
-      of "Accept": accept = d.value.strip()
       of "ListenStream", "ListenDatagram", "ListenSequentialPacket":
         if d.value.strip().len == 0: vals = @[]
         elif d.value.strip().startsWith("/"): vals.add(normalisedPath(d.value.strip()))
       else: discard
   result.paths = vals
-  result.service =
-    if explicit.len > 0: explicit
-    elif accept.toLowerAscii() in ["yes", "true", "1", "on"]: name[0 ..< dot] & "@.service"
-    else: name[0 ..< dot] & ".service"
+  when mutated("migration-service-as-written"):
+    # The falsifier: the last Service= as written, an empty one a reset.
+    var explicit = ""
+    for t in texts:
+      for d in serviceFloor.sectionDirectives(t, ["Socket"]):
+        if d.key == "Service": explicit = d.value.strip()
+    result.service = if explicit.len > 0: explicit else: name[0 ..< dot] & ".service"
+  else:
+    let units = triggeredUnits(name, texts)
+    result.service = if units.len > 0: units[0] else: ""
 
 proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
                          invocationOf: proc (unit: string): string;
@@ -6420,14 +6459,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if toRestart.len > 0:
         writeTriggersToRestart(stateDir,
           readTriggersToRestart(stateDir) & toRestart)
-        # The record owns them now (§13 decision 160): the revert's step 7
-        # does not start them again, or it would fail the same way and the
-        # revert with it.
-        when not mutated("revert-starts-unstartable-trigger"):
-          var kept: seq[Transition]
-          for tr in stepTransitions:
-            if tr.unit notin toRestart: kept.add(tr)
-          stepTransitions = kept
+        # The restart record owns these triggers now (§13 decision 160):
+        # step 7 leaves them out (``step7Inputs``), or the revert would fail
+        # the same way.
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the
@@ -7015,6 +7049,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 try: recordCreatedDirs(stateDir, u, createdPending,
                                        invocation = unitInvocation(u).id)
                 except IOError, OSError: discard
+          # A revert leaves out what its record of triggers to restart owns
+          # (§13 decision 160): one filter for every start of step 7.
+          block:
+            let reverting = purpose == "revert" or
+              (replaying and opts.replayOf == "revert")
+            let excluded =
+              if reverting: readTriggersToRestart(stateDir) else: @[]
+            let inputs = step7Inputs(stepTransitions, paused, assumeActive,
+                                     excluded)
+            stepTransitions = inputs.transitions
+            paused = inputs.paused
+            assumeActive = inputs.assumeActive
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
                    afterStart = recordAfter)

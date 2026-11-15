@@ -1545,6 +1545,16 @@ const
                           # its own unit file alone: a profile drop-in's
                           # Service= or Unit= is not read.
                           "activator-own-file-only",
+                          # a systemd.systemTimer resource is not one of
+                          # the profile's triggers, so it is never judged
+                          # as an activator.
+                          "activator-timer-resources-skipped",
+                          # the listener migration reads a socket's
+                          # Service= as written: an empty one resets it.
+                          "migration-service-as-written",
+                          # a floored service's systemd.systemTimer is not
+                          # a root of the system-state reach check.
+                          "reach-timer-resources-skipped",
                           # a listener's covering places are compared as
                           # spelled (/var/run is not /run, no link is
                           # resolved).

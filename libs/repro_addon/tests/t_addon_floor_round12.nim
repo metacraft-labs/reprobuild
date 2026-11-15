@@ -44,7 +44,10 @@
 ## ``migration-skips-listeners``, ``start-step-records-first-unit``,
 ## ``record-keeps-old-invocation``, ``revert-hold-any-content``, ``template-instances-unjudged``,
 ## ``template-refusal-forgotten``, ``template-acceptance-per-name``,
-## ``template-refused-written``, ``revert-holds-any-subject``.
+## ``template-refused-written``, ``revert-holds-any-subject``,
+## ``migration-service-as-written`` (the migration reads a socket's
+## ``Service=`` as written: reprobuild-pm issue
+## 2026-11-15-listener-migration-reads-a-sockets-service-unlike-systemd).
 ##
 ## Mocks: as in ``t_addon_floor_round10``: systemd's view and the path
 ## identities are stand-ins built from what systemd and statx report, since
@@ -642,6 +645,40 @@ suite "round 12 (§10.1 round 12, \"The migration records listeners\")":
     check r.getOrDefault("/run/a").unit == "a.socket"
     check "/run/b/x" notin r            # not named for the service: never recorded
     check m.len == 1
+
+  test "the activator's service is the one systemd reads from its files":
+    # config_parse_socket_service (systemd v257): an empty Service= in a
+    # drop-in is ignored, not a reset, and so is a value that is not a
+    # .service: z.socket still starts the floored a.service, where a reader
+    # taking the empty value as a reset reports its namesake z.service. %p
+    # expands to the socket's own prefix, and Accept= is a systemd boolean.
+    # (reprobuild-pm issue 2026-11-15-listener-migration-reads-a-sockets-
+    # service-unlike-systemd.)
+    let state = createTempDir("a9r12-", "-mig2")
+    defer: removeDir(state)
+    createDir(state / "addon")
+    let svcFile = state / "a.service"
+    writeFile(svcFile, "[Service]\nUser=a\n" & FloorMarker & "\n")
+    let sockFile = state / "z.socket"
+    writeFile(sockFile, "[Socket]\nListenStream=/run/a/z\nService = a.service\n")
+    let dropIn = state / "z-empty.conf"
+    writeFile(dropIn, "[Socket]\nService=\nService=not-a-service.socket\n")
+    check installedListeners(sockFile, [dropIn]).service == "a.service"
+    let specFile = state / "a.socket"
+    writeFile(specFile, "[Socket]\nListenStream=/run/a/s\nService=%p.service\n")
+    check installedListeners(specFile, []).service == "a.service"
+    let acceptFile = state / "q.socket"
+    writeFile(acceptFile, "[Socket]\nListenStream=/run/q/s\nAccept = y\n")
+    check installedListeners(acceptFile, []).service == "q@.service"
+    # Drop-ins in systemd's order, by file name, whatever order the ledger
+    # lists them in: 60-b's Service= is read after 50-a's.
+    let d50 = state / "50-a.conf"
+    let d60 = state / "60-b.conf"
+    writeFile(d50, "[Socket]\nService=other.service\n")
+    writeFile(d60, "[Socket]\nService=a.service\n")
+    let orderFile = state / "o.socket"
+    writeFile(orderFile, "[Socket]\nListenStream=/run/a/o\n")
+    check installedListeners(orderFile, [d60, d50]).service == "a.service"
 
 suite "round 12: no citation of a §13 entry the spec does not record":
   # Round 12 cited rules as entries 82 to 85 before the spec recorded them.

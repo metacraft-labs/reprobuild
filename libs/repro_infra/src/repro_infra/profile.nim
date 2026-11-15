@@ -1361,46 +1361,100 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
     return
   @[stem & ".service"]
 
+proc ownUnitName(r: SystemResource): string =
+  ## The unit file name ``r`` installs as a unit of the profile: a
+  ## ``systemd.systemUnit`` (not a drop-in) or a ``systemd.systemTimer``;
+  ## "" for any other resource.
+  case r.kind
+  of srkSystemdSystemUnit:
+    if r.suCollision != "dropIn": r.suName else: ""
+  of srkSystemdSystemTimer: r.stName
+  else: ""
+
+proc ownUnitContent(r: SystemResource): string =
+  ## The bytes of the unit file ``r`` installs (``ownUnitName``).
+  case r.kind
+  of srkSystemdSystemUnit: r.suContent
+  of srkSystemdSystemTimer: r.stContent
+  else: ""
+
+proc ownUnitEnabled(r: SystemResource): bool =
+  ## Whether the unit ``r`` installs (``ownUnitName``) is to be enabled, so
+  ## that its ``[Install]`` links pull it in.
+  case r.kind
+  of srkSystemdSystemUnit: r.suEnabled
+  of srkSystemdSystemTimer: r.stEnabled
+  else: false
+
 proc profileUnitOf(p: SystemProfile; name: string): int =
   ## The index of the profile's own unit ``name`` (or of the template an
-  ## instance ``name`` is of), -1 when the profile does not define it.
+  ## instance ``name`` is of), -1 when the profile does not define it. A
+  ## ``systemd.systemTimer`` is as much a unit of the profile as a
+  ## ``systemd.systemUnit`` (``ownUnitName``).
   for i, r in p.resources:
-    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
-        r.suName == name: return i
+    if ownUnitName(r) == name and name.len > 0: return i
   let at = name.find('@')
   let dot = name.rfind('.')
   if at > 0 and dot > at:
     let tmpl = name[0 .. at] & name[dot .. ^1]
     for i, r in p.resources:
-      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
-          r.suName == tmpl: return i
+      if ownUnitName(r) == tmpl: return i
   -1
+
+iterator profileTriggers(p: SystemProfile; skipTimerResources = false): string =
+  ## The names of the profile's own socket, timer and path units
+  ## (``ownUnitName``): each ``systemd.systemUnit`` of such a type and each
+  ## ``systemd.systemTimer``. ``skipTimerResources`` exists only for the
+  ## falsifying builds, each of which drops the timer resources from one
+  ## caller.
+  for r in p.resources:
+    let n = ownUnitName(r)
+    if skipTimerResources and r.kind == srkSystemdSystemTimer: continue
+    if n.endsWith(".socket") or n.endsWith(".timer") or n.endsWith(".path"):
+      yield n
 
 proc profileDropInsOf*(p: SystemProfile; name: string): seq[string] =
   ## The contents of the profile's drop-ins that apply to unit ``name``
   ## (``dropInApplies``): each ``systemd.systemDropIn``, and each
-  ## ``systemUnit`` with ``collision = "dropIn"``, in the order systemd
-  ## parses them -- by file name (``50-repro-<name>.conf``), across all the
-  ## directories that apply (systemd.unit(5), "Description"). Ties keep the
-  ## profile's order.
-  var named: seq[(string, int, string)]
+  ## ``systemUnit`` with ``collision = "dropIn"``, as systemd reads them.
+  ## Every one is ``/etc/systemd/system/<unit>.d/50-repro-<name>.conf``;
+  ## ``conf_files_list_strv()`` (``src/basic/conf-files.c``) keeps, of the
+  ## files that share a file name, only the one in the highest-priority
+  ## directory (``dropInDirNames``; the type-wide ``<type>.d/`` last), and
+  ## parses the survivors in file-name order (systemd.unit(5),
+  ## "Description").
+  var dirs = dropInDirNames(name)
+  let dot = name.rfind('.')
+  if dot > 0: dirs.add(name[dot + 1 .. ^1])
+  var best = initTable[string, (int, int, string)]()  # file -> (rank, idx, text)
   for i, d in p.resources:
-    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
-      named.add((AddOnDropInPrefix & d.diName & ".conf", i, d.diContent))
-    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
-        dropInApplies(d.suName, name):
-      let n = if d.suDropInName.len > 0: d.suDropInName else: "addon"
-      named.add((AddOnDropInPrefix & n & ".conf", i, d.suContent))
-  named.sort(proc (a, b: (string, int, string)): int =
-    result = cmp(a[0], b[0])
-    if result == 0: result = cmp(a[1], b[1]))
-  for (_, _, c) in named: result.add(c)
+    var unit, file, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      (unit, file, content) = (d.diUnit, d.diName, d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      (unit, file, content) = (d.suName,
+        (if d.suDropInName.len > 0: d.suDropInName else: "addon"), d.suContent)
+    else:
+      continue
+    # ``dropInApplies`` is the floor's reading, wider for a template (it
+    # also takes its instances' directories) and narrowed by the floor's
+    # falsifying builds; ``dirs`` is what systemd reads for ``name`` itself.
+    if not (dropInApplies(unit, name) or unit in dirs): continue
+    let f = AddOnDropInPrefix & file & ".conf"
+    var rank = dirs.find(unit)
+    if rank < 0: rank = dirs.len
+    if f notin best or rank < best[f][0]:
+      best[f] = (rank, i, content)
+  var files: seq[string]
+  for f in best.keys: files.add(f)
+  files.sort()
+  for f in files: result.add(best[f][2])
 
 proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
   ## The profile's bytes systemd reads for ``name``: its unit and every
   ## drop-in of the profile that applies to it, in parse order.
   let i = profileUnitOf(p, name)
-  if i >= 0: result.add(p.resources[i].suContent)
+  if i >= 0: result.add(ownUnitContent(p.resources[i]))
   result.add(profileDropInsOf(p, name))
 
 proc activatorFilesOf(p: SystemProfile; name: string): seq[string] =
@@ -1411,7 +1465,7 @@ proc activatorFilesOf(p: SystemProfile; name: string): seq[string] =
   when InfraAddonMutation == "activator-own-file-only":
     # The falsifier: the unit's own file alone.
     let i = profileUnitOf(p, name)
-    if i >= 0: result.add(p.resources[i].suContent)
+    if i >= 0: result.add(ownUnitContent(p.resources[i]))
   else:
     result = unitFilesOf(p, name)
 
@@ -1461,12 +1515,12 @@ proc checkFloorActivators*(p: SystemProfile) =
                 "a socket the base defines hands the service what it opens " &
                 "as root")
             activators.incl(t)
-    if r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
-        r.suName.endsWith(".path"):
-      # Its unit file and the profile's drop-ins onto it decide what it
-      # starts, as they decide it for the planner and `checkFloorReach`.
-      if isFloored(activatedService(p, r.suName, isFloored)):
-        activators.incl(r.suName)
+  for name in profileTriggers(p,
+      InfraAddonMutation == "activator-timer-resources-skipped"):
+    # Its unit file and the profile's drop-ins onto it decide what it
+    # starts, as they decide it for the planner and `checkFloorReach`.
+    if isFloored(activatedService(p, name, isFloored)):
+      activators.incl(name)
   # Spec §10.1 round 12, "A listener below a place its service can write",
   # as §13 decision 139 extends it: the places any unit sharing the
   # activated service's stem can write -- the service, a template of that
@@ -1490,13 +1544,13 @@ proc checkFloorActivators*(p: SystemProfile) =
           if unitStem(r.diUnit) == stem:
             result.add(floorWritablePlaces(serviceDirectives(r.diContent)))
   for r in p.resources:
-    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
-        r.suName in activators:
-      let svc = activatedService(p, r.suName, isFloored)
-      let why = activatorRefusal(r.suName, r.suContent, dropIn = false,
+    let name = ownUnitName(r)
+    if name.len > 0 and name in activators:
+      let svc = activatedService(p, name, isFloored)
+      let why = activatorRefusal(name, ownUnitContent(r), dropIn = false,
                                  service = svc, serviceWritable = writableOf(svc))
       if why.len > 0:
-        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+        raiseSystemProfileInvalid($r.kind & " '" & name &
           "' activates a floored service: " & why)
   for d in p.resources:
     var target, content = ""
@@ -1576,12 +1630,12 @@ proc profileStartsOf*(p: SystemProfile; name: string): seq[string] =
       if d.key in StartingDependencyKeys:
         for t in d.value.splitWhitespace(): result.add(t)
   for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
-        not r.suEnabled: continue
-    for d in sectionDirectives(r.suContent, ["Install"]):
+    let own = ownUnitName(r)
+    if own.len == 0 or not ownUnitEnabled(r): continue
+    for d in sectionDirectives(ownUnitContent(r), ["Install"]):
       if d.key in ["WantedBy", "RequiredBy", "UpheldBy"] and
           name in d.value.splitWhitespace():
-        result.add(r.suName)
+        result.add(own)
   if files.len > 0 and (name.endsWith(".socket") or name.endsWith(".timer") or
                         name.endsWith(".path")):
     for u in triggeredUnits(name, files):
@@ -1606,26 +1660,28 @@ proc checkFloorReach*(p: SystemProfile) =
   proc isFloored(unit: string): bool =
     for f in floored:
       if unit == f or dropInApplies(unit, f): return true
-  for r in p.resources:
-    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
-        (r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
-         r.suName.endsWith(".path")):
-      # What it starts, from its unit file and the profile's drop-ins onto
-      # it (``activatedService``).
-      if isFloored(activatedService(p, r.suName, isFloored)) and
-          r.suName notin roots:
-        roots.add(r.suName)
+  for name in profileTriggers(p,
+      InfraAddonMutation == "reach-timer-resources-skipped"):
+    # What it starts, from its unit file and the profile's drop-ins onto
+    # it (``activatedService``).
+    if isFloored(activatedService(p, name, isFloored)) and name notin roots:
+      roots.add(name)
   for root in roots:
+    # The root names the resource that declares it (a timer may be a
+    # systemd.systemTimer).
+    let ri = profileUnitOf(p, root)
+    let label = (if ri >= 0: $p.resources[ri].kind else: $srkSystemdSystemUnit) &
+      " '" & root & "'"
     # Conflicts= may name only the profile's own units (§13 decision 55).
     for c in unitFilesOf(p, root):
       let why = conflictsRefusal(root, c,
         proc (u: string): bool = profileUnitOf(p, u) >= 0)
       if why.len > 0:
-        raiseSystemProfileInvalid("systemd.systemUnit '" & root & "': " & why)
+        raiseSystemProfileInvalid(label & ": " & why)
     let route = systemStateRoute([root],
       proc (u: string): seq[string] = profileStartsOf(p, u))
     if route.len > 0:
-      raiseSystemProfileInvalid("systemd.systemUnit '" & root & "' starts " &
+      raiseSystemProfileInvalid(label & " starts " &
         route[^1] & " (" & route.join(" -> ") & "), which changes the " &
         "whole system's state; a floored unit, and a unit that activates " &
         "one, may not reach it by any route")
@@ -1635,7 +1691,7 @@ proc checkFloorReach*(p: SystemProfile) =
     let reach = reachedUnits([root],
       proc (u: string): seq[string] = profileStartsOf(p, u))
     if not reach.complete:
-      raiseSystemProfileInvalid("systemd.systemUnit '" & root & "': it " &
+      raiseSystemProfileInvalid(label & ": it " &
         "reaches more than " & $RouteLimit & " units; not judged, refused")
     for u in @[root] & reach.units:
       for c in unitFilesOf(p, u):
@@ -1705,7 +1761,8 @@ proc profileOrderedBeforeOf*(p: SystemProfile; name: string): seq[string] =
   let own = files.len > 0
   # Its [Install] pulls it in only when it is enabled.
   let at = profileUnitOf(p, name)
-  let enabled = at >= 0 and p.resources[at].suEnabled
+  # (``ownUnitEnabled``: the unit may be a systemd.systemTimer resource.)
+  let enabled = at >= 0 and ownUnitEnabled(p.resources[at])
   # A socket, timer or path unit of the profile with default dependencies
   # is ordered before its boot target, which ``basic.target`` -- and so the
   # re-assertion -- is ordered after (systemd.socket(5), systemd.timer(5),
@@ -1718,9 +1775,11 @@ proc profileOrderedBeforeOf*(p: SystemProfile; name: string): seq[string] =
                              (".path", "paths.target")]:
       if name.endsWith(suffix) and target notin result: result.add(target)
   for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
-        r.suName == name: continue
-    let other = unitFilesOf(p, r.suName)
+    # Every unit of the profile, a systemd.systemTimer as much as a
+    # systemd.systemUnit (``ownUnitName``).
+    let otherName = ownUnitName(r)
+    if otherName.len == 0 or otherName == name: continue
+    let other = unitFilesOf(p, otherName)
     var pulls, orderedAfter, orderedBefore = false
     for c in other:
       for d in sectionDirectives(c, ["Unit"]):
@@ -1732,14 +1791,14 @@ proc profileOrderedBeforeOf*(p: SystemProfile; name: string): seq[string] =
       for c in files:
         for d in sectionDirectives(c, ["Install"]):
           if d.key in ["WantedBy", "RequiredBy"] and
-              r.suName in d.value.splitWhitespace():
+              otherName in d.value.splitWhitespace():
             pulls = true
     if orderedAfter:
-      result.add(r.suName)
-    elif pulls and own and r.suName.endsWith(".target") and
-        not orderedBefore and r.suName notin after and
+      result.add(otherName)
+    elif pulls and own and otherName.endsWith(".target") and
+        not orderedBefore and otherName notin after and
         unitDefaultDependencies(other) and unitDefaultDependencies(files):
-      result.add(r.suName)
+      result.add(otherName)
 
 proc checkFloorBootOrdering*(p: SystemProfile) =
   ## Spec §10.1, "A floored unit's own ordering": no unit the floor orders
@@ -1894,15 +1953,29 @@ proc checkUnitStateConflicts*(resources: openArray[SystemResource]) =
   ## the two would converge the same unit from opposite ownership stances
   ## (ReproOS Add-On Mode §4.1). Both profile paths call this once the
   ## resource list is complete.
+  ##
+  ## A ``systemd.systemTimer`` writes its unit file as much as a
+  ## ``systemd.systemUnit`` does (``ownUnitName``), so it is owned too, and
+  ## one unit file may not be declared by both kinds at once: they would
+  ## write the same path with different bytes.
   var owned: seq[string]
+  var ownedKind = initTable[string, SystemResourceKind]()
   for r in resources:
     if r.kind == srkSystemdSystemUnit:
       owned.add(r.suName)
+    let own = ownUnitName(r)
+    if own.len > 0:
+      if own in ownedKind and ownedKind[own] != r.kind:
+        raiseSystemProfileInvalid("unit '" & own & "' is declared both " &
+          "as " & $ownedKind[own] & " and as " & $r.kind & "; one unit " &
+          "file is written by one resource")
+      ownedKind[own] = r.kind
+      if r.kind == srkSystemdSystemTimer: owned.add(own)
   for r in resources:
     if r.kind == srkSystemdUnitState and r.usName in owned:
       raiseSystemProfileInvalid("unit '" & r.usName & "' is declared both " &
-        "as systemd.unitState (not owned) and as systemd.systemUnit " &
-        "(owned); drop the systemd.unitState resource — a unit the " &
+        "as systemd.unitState (not owned) and as a unit the profile " &
+        "writes (owned); drop the systemd.unitState resource — a unit the " &
         "profile writes is enabled through its own `enabled` field")
 
 proc checkPasswdPrimaryGroups*(resources: openArray[SystemResource]) =

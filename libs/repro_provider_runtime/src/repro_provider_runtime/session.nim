@@ -13,6 +13,15 @@
 ## bytes, where ``length`` counts the ``u16le messageType`` + payload. One
 ## request → one response; synchronous per session.
 ##
+## The frame length is bounded by a value the two ends negotiate in the
+## handshake, and a reader allocates only as bytes arrive
+## (Low-Level-Provider-Protocol.md §2.1). On the provider side the protocol
+## travels on private descriptors, not on the fd 0 / fd 1 recipe code uses
+## (``protocol_channel``, §2.2); on the engine side the provider's stderr is
+## drained for the session's life (``stderr_drain``). A framing error, an
+## unexpected end of stream or a failed write tears the session down and is
+## reported with the provider's exit status and stderr tail (§2.6).
+##
 ## Codec (v1 §2): typed arg/result payloads travel as ``BoxedValue =
 ## (typeId: string, jsonStr: string)`` pairs, marshalled via the
 ## Typed-Graph-Extensions ``registerExtension`` registry. This module is
@@ -29,15 +38,20 @@
 ## BindDependencies is RP3; the ``dependencyBindings`` field is carried but
 ## unused in RP2.
 
-import std/[os, osproc, streams]
+import std/[os, osproc, streams, strutils]
 
 import repro_core
 import repro_core/portable_release_launch
 import repro_hash
 import repro_provider_runtime/types
+import repro_provider_runtime/stderr_drain
 
 type
   ProviderSessionError* = object of CatchableError
+  ProviderSessionClosed* = object of ProviderSessionError
+    ## End of stream exactly at a frame boundary: the peer closed the
+    ## session. Whether that is a clean shutdown or a lost peer depends on
+    ## whether a frame was due (Low-Level-Provider-Protocol.md §2.6).
 
   SessionMessageType* = enum
     ## The v1 §3 message set. BindDependencies (RP3) wires dependency handles
@@ -68,6 +82,11 @@ type
     engineCapabilities*: seq[string]
     lockSliceId*: string
     canonicalExecutionRoot*: string
+    maxFrameLength*: uint32
+      ## The largest frame the engine sends or accepts. 0 when building a
+      ## hello means "the default", ``ProviderSessionMaxFrameLength``; on the
+      ## wire it is always the explicit value (Low-Level-Provider-Protocol.md
+      ## §2.1).
 
   InvokeEntryPoint* = object
     ## v1 §3 InvokeEntryPoint. entryPointId names a manifest entry point; the
@@ -130,6 +149,20 @@ const
   ## The stdio-serve invocation flag the provider binary recognizes to enter
   ## the RP2 session serve loop (instead of the file-based single-shot path).
   ProviderServeFlag* = "--repro-provider-serve"
+
+  ProviderSessionMaxFrameLength* = 256'u32 * 1024 * 1024
+    ## The largest frame ``length`` either side offers by default
+    ## (Low-Level-Provider-Protocol.md §2.1). Large enough for any graph
+    ## fragment seen in practice; a frame above the negotiated bound is
+    ## refused before anything sized by it is allocated.
+  ProviderSessionMinFrameLength* = 64'u32 * 1024
+    ## An offer below this is malformed: no useful session fits in it.
+  ProviderSessionHelloFrameLength* = 1'u32 * 1024 * 1024
+    ## The bound on the ``EngineHello`` frame, which is read before any
+    ## bound has been negotiated.
+  FrameReadChunk = 64 * 1024
+    ## A frame is read in chunks of this size, so a length the stream never
+    ## delivers costs only the bytes that did arrive.
 
 proc raiseSession(message: string) {.noreturn.} =
   raise newException(ProviderSessionError, message)
@@ -201,6 +234,7 @@ proc encodeEngineHello*(value: EngineHello): seq[byte] =
     result.writeString(cap)
   result.writeString(value.lockSliceId)
   result.writeString(value.canonicalExecutionRoot)
+  result.writeU32Le(value.maxFrameLength)
 
 proc decodeEngineHello*(bytes: openArray[byte]): EngineHello =
   var pos = 0
@@ -211,6 +245,7 @@ proc decodeEngineHello*(bytes: openArray[byte]): EngineHello =
     result.engineCapabilities[i] = readString(bytes, pos)
   result.lockSliceId = readString(bytes, pos)
   result.canonicalExecutionRoot = readString(bytes, pos)
+  result.maxFrameLength = readU32Le(bytes, pos)
 
 proc encodeProviderManifestMsg*(value: ProviderManifest): seq[byte] =
   result.writeString(value.providerArtifactId)
@@ -223,6 +258,7 @@ proc encodeProviderManifestMsg*(value: ProviderManifest): seq[byte] =
     result.writeString(descriptor.bodyHash)
     result.writeString(descriptor.argumentSchemaId)
     result.writeString(descriptor.outputSchemaId)
+  result.writeU32Le(value.maxFrameLength)
 
 proc decodeProviderManifestMsg*(bytes: openArray[byte]): ProviderManifest =
   var pos = 0
@@ -243,6 +279,7 @@ proc decodeProviderManifestMsg*(bytes: openArray[byte]): ProviderManifest =
     result.entryPoints[i].bodyHash = readString(bytes, pos)
     result.entryPoints[i].argumentSchemaId = readString(bytes, pos)
     result.entryPoints[i].outputSchemaId = readString(bytes, pos)
+  result.maxFrameLength = readU32Le(bytes, pos)
 
 proc encodeInvokeEntryPoint*(value: InvokeEntryPoint): seq[byte] =
   result.writeString(value.entryPointId)
@@ -332,44 +369,82 @@ proc decodeBindDependencies*(bytes: openArray[byte]): BindDependencies =
 # Framing (v1 §2): u32le length + u16le messageType + payload
 # --------------------------------------------------------------------------
 
+proc hexBytes(bytes: openArray[byte]): string =
+  for b in bytes:
+    result.add(toHex(int(b), 2).toLowerAscii)
+
+proc frameHeaderText(bytes: openArray[byte]): string =
+  ## The header bytes as printable text, so a stray ``echo`` in the stream
+  ## is recognisable in the error ("hell" rather than 1819043176).
+  result = "\""
+  for b in bytes:
+    if b >= 0x20'u8 and b < 0x7f'u8: result.add(char(b))
+    else: result.add("\\x" & toHex(int(b), 2))
+  result.add("\"")
+
 proc writeFrame*(stream: Stream; messageType: SessionMessageType;
-                 payload: openArray[byte]) =
+                 payload: openArray[byte];
+                 maxFrameLength = ProviderSessionMaxFrameLength) =
   ## Emit one length-prefixed frame. ``length`` covers the ``u16le
   ## messageType`` + payload (so the reader knows how many bytes follow the
-  ## length word).
+  ## length word). A frame above ``maxFrameLength`` is refused before any
+  ## byte of it is written: the peer would refuse it, and a half-written
+  ## frame would leave the stream unusable (Low-Level-Provider-Protocol.md
+  ## §2.1).
+  let length = payload.len + 2
+  if length > int(maxFrameLength):
+    raiseSession("provider session frame of " & $length &
+      " bytes exceeds the negotiated maximum of " & $maxFrameLength &
+      " bytes")
   var header: seq[byte] = @[]
-  header.writeU32Le(uint32(payload.len + 2))
+  header.writeU32Le(uint32(length))
   header.writeU16Le(uint16(ord(messageType)))
   stream.writeData(addr header[0], header.len)
   if payload.len > 0:
-    var buf = @payload
-    stream.writeData(addr buf[0], buf.len)
+    stream.writeData(unsafeAddr payload[0], payload.len)
   stream.flush()
 
 proc readExact(stream: Stream; count: int): seq[byte] =
-  result = newSeq[byte](count)
-  if count == 0:
-    return
-  let got = stream.readData(addr result[0], count)
-  if got != count:
-    raiseSession("provider session stream closed mid-frame (wanted " &
-      $count & " bytes, got " & $got & ")")
+  ## Read exactly ``count`` bytes, growing the buffer only as bytes arrive:
+  ## a ``count`` the stream does not deliver costs at most the received
+  ## bytes plus one chunk, never ``count`` up front (Failure-Semantics.md
+  ## §"Cache And Store Failures", the stream rule).
+  result = newSeqOfCap[byte](min(count, FrameReadChunk))
+  while result.len < count:
+    let want = min(FrameReadChunk, count - result.len)
+    let at = result.len
+    result.setLen(at + want)
+    let got = stream.readData(addr result[at], want)
+    if got < want:
+      result.setLen(at + max(got, 0))
+      raiseSession("provider session stream closed mid-frame (wanted " &
+        $count & " bytes, got " & $result.len & ")")
 
-proc readFrame*(stream: Stream):
+proc readFrame*(stream: Stream;
+                maxFrameLength = ProviderSessionMaxFrameLength):
     tuple[messageType: SessionMessageType; payload: seq[byte]] =
-  ## Read one length-prefixed frame. Raises ``ProviderSessionError`` at clean
-  ## EOF-before-length or a truncated frame.
-  var lb = newSeq[byte](4)
+  ## Read one length-prefixed frame. Raises ``ProviderSessionError`` at
+  ## EOF before the length (the message says so: callers tell a clean
+  ## shutdown from a lost peer by when it happens), at a truncated frame, at
+  ## a length below 2 or above ``maxFrameLength`` (refused before anything
+  ## sized by it is allocated), and at an unknown message type.
+  var lb: array[4, byte]
   let firstGot = stream.readData(addr lb[0], 4)
-  if firstGot == 0:
-    raiseSession("provider session stream closed at frame boundary")
+  if firstGot <= 0:
+    raise newException(ProviderSessionClosed,
+      "provider session stream closed at frame boundary")
   if firstGot != 4:
     raiseSession("truncated provider session frame length")
   var pos = 0
-  let length = int(readU32Le(lb, pos))
-  if length < 2:
+  let length = readU32Le(lb, pos)
+  if length < 2'u32:
     raiseSession("provider session frame too short")
-  let rest = readExact(stream, length)
+  if length > maxFrameLength:
+    raiseSession("provider session frame length " & $length &
+      " exceeds the negotiated maximum of " & $maxFrameLength & " bytes" &
+      " (header bytes " & hexBytes(lb) & ", as text " & frameHeaderText(lb) &
+      "); the stream is corrupt or the provider wrote non-protocol bytes")
+  let rest = readExact(stream, int(length))
   var rp = 0
   let typeWord = readU16Le(rest, rp)
   if typeWord notin [uint16(ord(smtEngineHello)),
@@ -454,6 +529,11 @@ type
     toChild: Stream
     fromChild: Stream
     open: bool
+    maxFrameLength*: uint32
+      ## The bound negotiated in the handshake; binds both directions.
+    stderrDrain: ProviderStderrDrain
+      ## Drains the provider's stderr for the session's life (see
+      ## ``stderr_drain``); its tail goes into failure reports.
     boundDependencies*: seq[DependencyBinding]
       ## The dependency bindings the engine last wired into this session (v1
       ## §4). Carried on the session so a consumer's invoke can forward them to
@@ -478,19 +558,87 @@ type
 proc newProviderSessionPool*(): ProviderSessionPool =
   ProviderSessionPool(sessions: @[], launchCount: 0)
 
-proc engineHello(pool: ProviderSessionPool; hello: EngineHello;
-                 session: ProviderSession) =
-  session.toChild.writeFrame(smtEngineHello, encodeEngineHello(hello))
+proc sendFrame(session: ProviderSession; messageType: SessionMessageType;
+               payload: openArray[byte]; maxFrameLength: uint32) =
+  ## Engine-side write of one frame to the provider. A provider that is gone
+  ## makes the write fail with ``EPIPE`` (a Nim program ignores ``SIGPIPE``
+  ## unless built with ``-d:nimLegacySigpipeHandler``) or lose the frame,
+  ## and the read that follows sees end-of-file; either way the caller's
+  ## ``guardSession`` fails the session (Low-Level-Provider-Protocol.md §2.6).
+  session.toChild.writeFrame(messageType, payload, maxFrameLength)
 
-proc readManifestFrame(session: ProviderSession): ProviderManifest =
-  let frame = session.fromChild.readFrame()
+proc reapChild(session: ProviderSession): string =
+  ## Tear the child down and describe how it ended: close its input, give it
+  ## 2 s to exit, then terminate it, 2 s more, then kill it
+  ## (Low-Level-Provider-Protocol.md §2.6). Stops the stderr drain once the
+  ## child is gone, so the tail includes its last words.
+  const graceMillis = 2000
+  const stepMillis = 20
+  try: session.toChild.close() except CatchableError: discard
+  proc exitedWithin(p: Process; millis: int): bool =
+    var waited = 0
+    while true:
+      try:
+        if not p.running(): return true
+      except CatchableError:
+        return true
+      if waited >= millis: return false
+      sleep(stepMillis)
+      waited += stepMillis
+  var how = ""
+  if not exitedWithin(session.process, graceMillis):
+    try: session.process.terminate() except CatchableError: discard
+    if exitedWithin(session.process, graceMillis):
+      how = "terminated by the engine after it did not exit; "
+    else:
+      try: session.process.kill() except CatchableError: discard
+      how = "killed by the engine after it did not exit; "
+  var status = -1
+  try: status = session.process.waitForExit() except CatchableError: discard
+  session.stderrDrain.stop()
+  how & "exit status " & $status
+
+proc failSession(session: ProviderSession; phase, cause: string)
+    {.noreturn.} =
+  ## A protocol failure (Low-Level-Provider-Protocol.md §2.6,
+  ## Failure-Semantics.md §"Provider Failures"): the in-flight result is
+  ## discarded, the session is marked failed (the pool never hands it out
+  ## again), the child is torn down, and the error names the artifact, the
+  ## phase, the cause, the exit status and the provider's stderr tail.
+  session.open = false
+  let ended = session.reapChild()
+  let tail = session.stderrDrain.tail()
+  try: session.process.close() except CatchableError: discard
+  session.stderrDrain.release()
+  var message = "provider session " &
+    (if session.providerArtifactId.len > 0: session.providerArtifactId
+     else: "(no artifact id)") &
+    " failed during " & phase & ": " & cause & "; provider " & ended
+  if tail.len > 0:
+    message.add("; provider stderr (last " & $tail.len & " bytes):\n" & tail)
+  else:
+    message.add("; provider wrote nothing to stderr")
+  raiseSession(message)
+
+template guardSession(session: ProviderSession; phase: string;
+                      body: untyped) =
+  ## Run one protocol exchange; any failure in it fails the session.
+  try:
+    body
+  except CatchableError as err:
+    failSession(session, phase, err.msg)
+
+proc readManifestFrame(session: ProviderSession;
+                       offered: uint32): ProviderManifest =
+  let frame = session.fromChild.readFrame(offered)
   if frame.messageType != smtProviderManifest:
     raiseSession("expected ProviderManifest from provider, got frame type " &
       $ord(frame.messageType))
   decodeProviderManifestMsg(frame.payload)
 
 proc validateHandshakeManifest(manifest: ProviderManifest;
-                               expected: ProviderArtifactRef) =
+                               expected: ProviderArtifactRef;
+                               offeredFrameLength: uint32) =
   ## The handshake ProviderManifest is checked against what the engine
   ## expected (v1 §3). A HARD error tears the session down:
   ##
@@ -499,7 +647,9 @@ proc validateHandshakeManifest(manifest: ProviderManifest;
   ## * providerArtifactId disagreement, ONLY when the provider self-attests a
   ##   non-empty id. In v1 the provider reports "" (it cannot self-address),
   ##   and the engine binds the session to the id it derived for the launched,
-  ##   content-addressed binary (``expected.providerArtifactId``).
+  ##   content-addressed binary (``expected.providerArtifactId``);
+  ## * a negotiated frame bound above the engine's offer or below
+  ##   ``ProviderSessionMinFrameLength`` (Low-Level-Provider-Protocol.md §2.1).
   let wantVersion =
     if expected.expectedProtocolVersion != 0'u32: expected.expectedProtocolVersion
     else: ProviderProtocolVersion
@@ -512,6 +662,11 @@ proc validateHandshakeManifest(manifest: ProviderManifest;
     raiseSession("provider session artifact id mismatch: engine expects " &
       expected.providerArtifactId & ", provider reports " &
       manifest.providerArtifactId)
+  if manifest.maxFrameLength < ProviderSessionMinFrameLength or
+      manifest.maxFrameLength > offeredFrameLength:
+    raiseSession("provider session negotiated frame bound " &
+      $manifest.maxFrameLength & " is outside [" &
+      $ProviderSessionMinFrameLength & ", " & $offeredFrameLength & "]")
 
 proc launchSession(pool: ProviderSessionPool; artifact: ProviderArtifactRef;
                    key: string; hello: EngineHello): ProviderSession =
@@ -520,6 +675,12 @@ proc launchSession(pool: ProviderSessionPool; artifact: ProviderArtifactRef;
   let cwd =
     if artifact.workingDir.len > 0: artifact.workingDir
     else: getCurrentDir()
+  var offered = hello
+  if offered.maxFrameLength == 0'u32:
+    offered.maxFrameLength = ProviderSessionMaxFrameLength
+  if offered.maxFrameLength < ProviderSessionMinFrameLength:
+    raiseSession("engine frame bound " & $offered.maxFrameLength &
+      " is below the minimum " & $ProviderSessionMinFrameLength)
   # Under the portable Linux release a provider it compiled starts through
   # the bundled loader (`portableReleaseHelperArgv`), or it cannot load the
   # release's clingo on a host glibc older than the release's.
@@ -535,19 +696,17 @@ proc launchSession(pool: ProviderSessionPool; artifact: ProviderArtifactRef;
     process: process,
     toChild: process.inputStream,
     fromChild: process.outputStream,
-    open: true)
-  try:
-    pool.engineHello(hello, session)
-    session.manifest = session.readManifestFrame()
-    validateHandshakeManifest(session.manifest, artifact)
-  except CatchableError as err:
-    # A failed handshake tears the child down so a bad binary never lingers
-    # in the pool.
-    try: process.terminate() except CatchableError: discard
-    try: discard process.waitForExit() except CatchableError: discard
-    try: process.close() except CatchableError: discard
-    session.open = false
-    raise err
+    open: true,
+    stderrDrain: startProviderStderrDrain(process.errorHandle))
+  # A failed handshake tears the child down (``failSession``) so a bad
+  # binary never lingers in the pool.
+  guardSession(session, "handshake"):
+    session.sendFrame(smtEngineHello, encodeEngineHello(offered),
+      ProviderSessionHelloFrameLength)
+    session.manifest = session.readManifestFrame(offered.maxFrameLength)
+    validateHandshakeManifest(session.manifest, artifact,
+      offered.maxFrameLength)
+    session.maxFrameLength = session.manifest.maxFrameLength
   session
 
 proc openProviderSession*(pool: ProviderSessionPool;
@@ -559,8 +718,15 @@ proc openProviderSession*(pool: ProviderSessionPool;
   ## (no relaunch); a fresh key spawns a new child.
   let key = providerSessionKey(artifact.providerArtifactId,
     ProviderProtocolVersion, policy)
+  # A failed session is never handed out again (Failure-Semantics.md
+  # §"Provider Failures"); drop the ones a protocol failure closed.
+  var live: seq[ProviderSession] = @[]
   for existing in pool.sessions:
-    if existing.key == key and existing.open:
+    if existing.open:
+      live.add(existing)
+  pool.sessions = live
+  for existing in pool.sessions:
+    if existing.key == key:
       return ProviderHandle(session: existing)
   let session = launchSession(pool, artifact, key, hello)
   pool.sessions.add(session)
@@ -606,12 +772,13 @@ proc bindDependencies*(consumer: ProviderHandle;
   if session == nil or not session.open:
     raiseSession("provider session is not open")
   session.boundDependencies = @bindings
-  session.toChild.writeFrame(smtBindDependencies,
-    encodeBindDependencies(BindDependencies(bindings: @bindings)))
-  let frame = session.fromChild.readFrame()
-  if frame.messageType != smtBindDependenciesAck:
-    raiseSession("expected BindDependenciesAck from provider, got frame type " &
-      $ord(frame.messageType))
+  let payload = encodeBindDependencies(BindDependencies(bindings: @bindings))
+  guardSession(session, "bind dependencies"):
+    session.sendFrame(smtBindDependencies, payload, session.maxFrameLength)
+    let frame = session.fromChild.readFrame(session.maxFrameLength)
+    if frame.messageType != smtBindDependenciesAck:
+      raiseSession("expected BindDependenciesAck from provider, got " &
+        "frame type " & $ord(frame.messageType))
 
 proc boundDependencyInputs*(handle: ProviderHandle): seq[GraphEvaluationInput] =
   ## v1 §3: the union of every bound dependency's observed inputs. The engine
@@ -638,12 +805,15 @@ proc invokeEntryPoint*(handle: ProviderHandle; entryPointId: string;
     entryPointId: entryPointId,
     args: @args,
     dependencyBindings: @dependencyBindings)
-  session.toChild.writeFrame(smtInvokeEntryPoint, encodeInvokeEntryPoint(invoke))
-  let frame = session.fromChild.readFrame()
-  if frame.messageType != smtEntryPointResult:
-    raiseSession("expected EntryPointResult from provider, got frame type " &
-      $ord(frame.messageType))
-  var res = decodeEntryPointResult(frame.payload)
+  let payload = encodeInvokeEntryPoint(invoke)
+  var res: EntryPointResult
+  guardSession(session, "invoke of entry point '" & entryPointId & "'"):
+    session.sendFrame(smtInvokeEntryPoint, payload, session.maxFrameLength)
+    let frame = session.fromChild.readFrame(session.maxFrameLength)
+    if frame.messageType != smtEntryPointResult:
+      raiseSession("expected EntryPointResult from provider, got frame " &
+        "type " & $ord(frame.messageType))
+    res = decodeEntryPointResult(frame.payload)
   # v1 §3 observed-input propagation: fold the bound dependencies' observed
   # inputs onto the consumer edge so the consumer invalidates when a
   # dependency's realization changes. Deduplicated by (kind, identity, digest).
@@ -667,6 +837,8 @@ proc closeSession(session: ProviderSession) =
   try: session.toChild.close() except CatchableError: discard
   try: discard session.process.waitForExit() except CatchableError:
     try: session.process.terminate() except CatchableError: discard
+  # The drain must stop before ``close`` releases the handle it reads.
+  session.stderrDrain.release()
   try: session.process.close() except CatchableError: discard
 
 proc closeAll*(pool: ProviderSessionPool) =

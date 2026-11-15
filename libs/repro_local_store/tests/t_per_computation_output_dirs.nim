@@ -9,7 +9,8 @@
 ## `lookupActionResult`, eviction through the production per-edge cap, and the
 ## orphan sweep reads the same on-disk records the engine writes. The clock
 ## for the sweep's grace period is injected (`nowUnix`), which replaces a
-## sleep, not a collaborator.
+## sleep, not a collaborator. So are the inputs' modification times (see
+## `writeInput`), which replaces waiting for the filesystem clock to tick.
 ##
 ## The defect this layer must not have (measured 2026-10-29 at reprobuild
 ## `3f5a229979`): two computations that share a weak fingerprint wrote their
@@ -38,6 +39,7 @@ type Fixture = object
   staging: string
   cache: ActionCache
   cas: LocalCas
+  inputWrites: int      ## how many times `writeInput` has run
 
 proc newFixture(prefix: string): Fixture =
   result.root = createTempDir(prefix, "")
@@ -55,6 +57,34 @@ proc close(fx: var Fixture) =
   try: removeDir(fx.root)
   except OSError: discard
 
+const InputClockBase = 1_700_000_000'i64
+  ## A fixed past instant; `writeInput` counts whole seconds up from it.
+
+proc writeInput(fx: var Fixture; content: string) =
+  ## Write the action's one input and give it a modification time no earlier
+  ## write had.
+  ##
+  ## The lookups here run under `ffpHybrid`, which compares an input's
+  ## recorded (kind, size, mtime) FIRST and hashes its content only when
+  ## that metadata changed (Incremental-Invalidation.md §"File Fingerprint
+  ## Policies"). The filesystem clock is coarse -- about a millisecond on
+  ## Linux -- and this file rewrites one 1-byte input as "X", "Y", "X" in
+  ## well under that, so the third write could carry the second one's size
+  ## AND mtime to the nanosecond. The policy then rightly reads X's input as
+  ## unchanged since Y's record, and Y's metadata-only record (strong
+  ## fingerprint dropped by `hotMetadataRecord`) answered the lookup of X:
+  ## reprobuild-pm issue
+  ## 2026-11-15-per-computation-in-place-hit-returns-an-empty-record-on-linux.md,
+  ## where one run in five failed. A rewrite a test means as a change must
+  ## therefore be a metadata change, and an explicit clock makes it one on
+  ## every run rather than on most. Whole seconds survive every platform's
+  ## timestamp resolution, including `setLastModificationTime`'s.
+  let input = fx.work / "sibling.nim"
+  writeFile(input, content)
+  inc fx.inputWrites
+  setLastModificationTime(input,
+    fromUnix(InputClockBase + int64(fx.inputWrites)))
+
 proc stagedOutputs(fx: Fixture): seq[string] =
   @[fx.staging / "provider" / "project-provider",
     fx.staging / "provider-compile.rbsz"]
@@ -65,7 +95,7 @@ proc runComputation(fx: var Fixture; weak: ContentDigest;
   ## One execution: the input decides the computation, the run writes its
   ## outputs into staging, and the publish binds them.
   let input = fx.work / "sibling.nim"
-  writeFile(input, inputContent)
+  fx.writeInput(inputContent)
   createDir(fx.staging / "provider")
   writeFile(fx.staging / "provider" / "project-provider", outputContent)
   writeFile(fx.staging / "provider-compile.rbsz", "artifact:" & outputContent)
@@ -75,7 +105,7 @@ proc runComputation(fx: var Fixture; weak: ContentDigest;
 
 proc lookupInPlace(fx: var Fixture; weak: ContentDigest;
                    inputContent: string): ActionCacheLookup =
-  writeFile(fx.work / "sibling.nim", inputContent)
+  fx.writeInput(inputContent)
   fx.cache.lookupActionResult(fx.cas, weak, ffpHybrid,
     verifyOutputBlobs = false, allowMetadataOnlyHit = true,
     outputRoot = fx.work)
@@ -111,9 +141,18 @@ suite "per-computation output directories (cache layer)":
     let again = fx.lookupInPlace(weak, "X")
     check again.status in {aclHit, aclHybridCutoff}
     check again.record.strongFingerprint == x.strongFingerprint
+    # The record that answered names X's outputs, where X left them. This
+    # holds on every lookup path, including the metadata-only one that
+    # carries no strong fingerprint, so it is what says WHICH computation hit.
+    check again.record.outputs.len == x.outputs.len
+    for output in again.record.outputs:
+      check output.path.startsWith(recordComputationDir(x) & "/")
     let andY = fx.lookupInPlace(weak, "Y")
     check andY.status in {aclHit, aclHybridCutoff}
     check andY.record.strongFingerprint == y.strongFingerprint
+    check andY.record.outputs.len == y.outputs.len
+    for output in andY.record.outputs:
+      check output.path.startsWith(recordComputationDir(y) & "/")
 
   test "a computation directory that was removed is a miss, not a stale hit":
     var fx = newFixture("percomp-removed-")

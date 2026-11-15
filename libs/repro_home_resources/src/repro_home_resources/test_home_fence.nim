@@ -263,3 +263,64 @@ proc enforceTestRegistryFence*(subkey, name, operation: string) =
   e.path = target
   e.protectedRoot = "HKCU"
   raise e
+
+# ---------------------------------------------------------------------------
+# The user-defaults half of the fence.
+#
+# `macos.userDefault` writes with `defaults`, which goes through cfprefsd to
+# the ACCOUNT's real preferences whatever `$HOME` the apply was given, so
+# the path rule above cannot see it (reprobuild-pm issue
+# `2026-10-23-macos-user-default-gate-leaves-a-plist-in-the-real-users-preferences-every-run.md`).
+#
+# Rule. While the fence is active, a write or delete of a user default is
+# refused unless its domain lies in the scratch namespace
+# `com.reprobuild.test.` -- the registry rule's counterpart of
+# `HKCU\Software\Reprobuild-Tests`. A test that must exercise the real
+# `defaults` path names its per-run domain there and removes the domain AND
+# its `~/Library/Preferences/<domain>.plist` afterwards. Reads are never
+# refused.
+# ---------------------------------------------------------------------------
+
+const
+  TestUserDefaultsDomainPrefix* = "com.reprobuild.test."
+    ## The only user-defaults domain namespace a fenced process may write.
+
+proc isTestUserDefaultsDomain*(domain: string): bool =
+  ## Whether `domain` lies inside `TestUserDefaultsDomainPrefix`: the
+  ## prefix, then a non-empty name made only of ASCII letters, digits,
+  ## `-`, `_` and `.`. Case matters, as it does to `defaults`. A `/`,
+  ## whitespace or `..` could name a file outside `~/Library/Preferences`
+  ## or another domain, so they put the name outside the namespace.
+  if not domain.startsWith(TestUserDefaultsDomainPrefix):
+    return false
+  let name = domain[TestUserDefaultsDomainPrefix.len .. ^1]
+  if name.len == 0 or ".." in name:
+    return false
+  for c in name:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '-', '_', '.'}:
+      return false
+  true
+
+proc testUserDefaultFenceRefuses*(domain, fence: string): bool =
+  ## The decision, free of the process environment: `fence` is the value
+  ## of `REPRO_TEST_HOME_FENCE`. True when a write or delete of a default
+  ## in `domain` must be refused.
+  fence.strip().len > 0 and not isTestUserDefaultsDomain(domain)
+
+proc enforceTestUserDefaultFence*(domain, operation: string) =
+  ## Raise `TestHomeFenceError` when writing or deleting a default of
+  ## `domain` would change the invoking user's real preferences while the
+  ## fence is active. Called by `drivers/defaults.nim` before the first
+  ## side effect of every write and delete.
+  if not testUserDefaultFenceRefuses(domain, getEnv(TestHomeFenceEnvVar)):
+    return
+  var e = newException(TestHomeFenceError,
+    operation & ": refusing to write user-defaults domain '" & domain &
+    "': `defaults` reaches the invoking user's real preferences through " &
+    "cfprefsd whatever HOME says, and " & TestHomeFenceEnvVar &
+    " protects them. A test that must exercise macos.userDefault has to " &
+    "use a per-run domain under '" & TestUserDefaultsDomainPrefix &
+    "' and remove the domain and its ~/Library/Preferences plist afterwards.")
+  e.path = domain
+  e.protectedRoot = "defaults"
+  raise e

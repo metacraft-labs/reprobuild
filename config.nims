@@ -1,5 +1,21 @@
 import std/[algorithm, os, strutils, compilesettings]
 
+# A compile for a Windows TARGET on a non-Windows HOST: generate C for
+# `--os:windows` from Linux, as scripts/check_portable_engine_closure.sh does.
+# In NimScript `std/os` follows the target, so `/` and `parentDir` would build
+# `\`-separated paths that the host compiler then cannot open (every
+# `--path` below became `libs\<lib>\src`, and the compile died at
+# `cannot open file: repro_cli_support`). Joining with the host's separator is
+# what every path in this file needs: each one is probed and searched on the
+# machine running nim, never on the target. A native compile -- Windows on
+# Windows, Linux on Linux -- takes the `std/os` procs unchanged.
+when defined(windows) and buildOS != "windows":
+  proc `/`(head, tail: string): string =
+    os.`/`(head, tail).replace('\\', '/')
+
+  proc parentDir(path: string): string =
+    os.parentDir(path).replace('\\', '/')
+
 # The directory holding THIS file, resolved independently of whatever project
 # nim happens to be compiling.
 #
@@ -1530,7 +1546,20 @@ when not defined(windows):
         [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
     if dir.len == 0:
       dir = nixLdflagsLibDir(opensslNames)
-    if dir.len == 0:
+    # A Nix package build (a builder's `NIX_BUILD_TOP`, not a dev shell, which
+    # sets IN_NIX_SHELL) takes its OpenSSL from its closure alone. Darwin
+    # builds are not sandboxed, so the two host fallbacks below would find
+    # Homebrew's or the first store glob match and bake it into the output's
+    # rpath. `scripts/build_apps.sh` refuses the same fallbacks.
+    let nixPackageBuild = getEnv("NIX_BUILD_TOP").len > 0 and
+      getEnv("IN_NIX_SHELL").len == 0
+    if dir.len == 0 and nixPackageBuild and
+        not (ambientOpensslOnly):
+      quit("config.nims: a Nix package build found no OpenSSL in " &
+        "OPENSSL_LIBDIR, OPENSSL_PREFIX or NIX_LDFLAGS; refusing the Homebrew " &
+        "and /nix/store glob fallbacks (they would put a host path in the " &
+        "package's rpath). Set OPENSSL_LIBDIR in the derivation's env.")
+    if dir.len == 0 and not nixPackageBuild:
       dir = firstExistingLibDir(
         [
           "/opt/homebrew/opt/openssl@3",
@@ -1539,7 +1568,7 @@ when not defined(windows):
           "/usr/local/opt/openssl",
         ],
         opensslNames, targetArchOnly = true)
-    if dir.len == 0:
+    if dir.len == 0 and not nixPackageBuild:
       dir = nixLibDir("*-openssl-*", opensslNames)
     dir
   let opensslLibDir = if ambientOpensslOnly: "" else: opensslFound
