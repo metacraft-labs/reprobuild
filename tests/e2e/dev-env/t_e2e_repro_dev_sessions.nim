@@ -325,24 +325,28 @@ proc waitForStatus(path, status: string; timeoutMs = 10000): JsonNode =
     checkpoint("session metadata file was not present")
   raise newException(IOError, "timed out waiting for session status " & status)
 
-proc httpRequest(httpBindValue, path: string; httpMethod = "GET"): string =
-  let script =
-    "import http.client, sys, urllib.parse\n" &
-    "u=urllib.parse.urlparse(sys.argv[1])\n" &
-    "conn=http.client.HTTPConnection(u.hostname, u.port, timeout=5)\n" &
-    "conn.request(sys.argv[3], sys.argv[2])\n" &
-    "resp=conn.getresponse()\n" &
-    "body=resp.read().decode()\n" &
-    "print(body, end='')\n" &
-    "sys.exit(0 if 200 <= resp.status < 300 else 1)\n"
-  requireSuccess(shellCommand(@["python3", "-c", script,
-    httpBindValue, path, httpMethod]))
+proc httpRequest(httpBindValue, tokenPath, path: string;
+                 httpMethod = "GET"): string =
+  ## One authenticated request to a session's control API at
+  ## `httpBindValue`, with the token at `tokenPath` (the session's published
+  ## `httpTokenPath`); raises unless the answer is 2xx. The control API
+  ## refuses every request without the token (reprobuild-pm
+  ## `spec/Development-Environments-And-Control-API.md`
+  ## §"Control API Access Control"), so these cases use the production
+  ## client, which sends it.
+  let client = controlClientFor(%*{"httpBind": httpBindValue,
+    "httpTokenPath": tokenPath})
+  let response = controlRequest(client, path, httpMethod)
+  if response.status < 200 or response.status >= 300:
+    raise newException(IOError, httpMethod & " " & path & " at " &
+      httpBindValue & " answered " & $response.status & ": " & response.body)
+  response.body
 
-proc statusJson(httpBindValue: string): JsonNode =
-  parseJson(httpRequest(httpBindValue, "/status"))
+proc statusJson(httpBindValue, tokenPath: string): JsonNode =
+  parseJson(httpRequest(httpBindValue, tokenPath, "/status"))
 
-proc sseEvents(httpBindValue: string; waitMs = 500): seq[JsonNode] =
-  let text = httpRequest(httpBindValue, "/events?wait-ms=" & $waitMs)
+proc sseEvents(httpBindValue, tokenPath: string; waitMs = 500): seq[JsonNode] =
+  let text = httpRequest(httpBindValue, tokenPath, "/events?wait-ms=" & $waitMs)
   for line in text.splitLines:
     if line.startsWith("data: "):
       result.add(parseJson(line["data: ".len .. ^1]))
@@ -579,13 +583,13 @@ proc upAnnouncement(output: string): UpAnnouncement =
         httpBind: fields[2])
   UpAnnouncement()
 
-proc liveStatusAt(httpBindValue: string): JsonNode =
+proc liveStatusAt(httpBindValue, tokenPath: string): JsonNode =
   ## `/status` from whatever is listening at `httpBindValue`, or nil when
   ## NOTHING is. The point of the connect is that a string comparison
   ## between the printed address and the recorded one cannot tell a live
   ## bind from a closed one -- both are the same text.
   try:
-    parseJson(httpRequest(httpBindValue, "/status"))
+    parseJson(httpRequest(httpBindValue, tokenPath, "/status"))
   except CatchableError:
     nil
 
@@ -750,8 +754,9 @@ suite "e2e_repro_dev_sessions":
       options = {poParentStreams})
     waitForHttpReady(readyPath, helper)
     require fileExists(readyPath)
-    let httpBind = parseJson(readFile(readyPath))["httpBind"].getStr()
-    let response = dev_session.httpRequest(httpBind, "/session/stop", httpMethod = "POST")
+    let response = controlRequest(
+      controlClientFor(parseJson(readFile(readyPath))), "/session/stop",
+      httpMethod = "POST")
     check response.status == 202
     for _ in 0 ..< 100:
       if not helper.running(): break
@@ -839,7 +844,9 @@ suite "e2e_repro_dev_sessions":
       "sessionId": "legacy-without-owner-lock", "status": "up",
       "mode": "up", "projectRoot": root,
       "supervisorPid": getCurrentProcessId(), "httpPid": legacy.processID(),
-      "httpBind": legacyBind}))
+      "httpBind": legacyBind,
+      # The helper's own token: the live API answers only with it.
+      "httpTokenPath": parseJson(readFile(readyPath))["httpTokenPath"]}))
     var legacyRefusal = ""
     try:
       discard reusableDevSession(DevSessionSupervisorConfig(
@@ -943,7 +950,8 @@ suite "e2e_repro_dev_sessions":
       check reusedState["httpPid"].getInt() == httpPid
       check parseJson(readFile(parentDir(sessionMetadataPath(c.projectRoot)) /
         "http-ready.json"))["pid"].getInt() == httpPid
-      let status = statusJson(httpBindValue)
+      let tokenPath = metadata["httpTokenPath"].getStr()
+      let status = statusJson(httpBindValue, tokenPath)
       check status["status"].getStr() == "up"
       check status["services"].len == 2
       check status["services"][0]["name"].getStr() == "db"
@@ -956,7 +964,7 @@ suite "e2e_repro_dev_sessions":
       check pids.allIt(it > 0)
       check pids.allIt(pidAlive(it))
 
-      let upEvents = sseEvents(httpBindValue, waitMs = 250)
+      let upEvents = sseEvents(httpBindValue, tokenPath, waitMs = 250)
       let upKinds = eventKinds(upEvents)
       check upKinds.kindIndex("resources.reconciled") >= 0
       check upKinds.kindIndex("session.up") >= 0
@@ -1054,7 +1062,8 @@ suite "e2e_repro_dev_sessions":
         sleep(100)
         waitedMs.inc(100)
       let httpBindValue = up["httpBind"].getStr()
-      check statusJson(httpBindValue)["services"][0]["ready"].getBool()
+      let tokenPath = up["httpTokenPath"].getStr()
+      check statusJson(httpBindValue, tokenPath)["services"][0]["ready"].getBool()
 
       while not fileExists(c.projectRoot / "state" / "watch.log"):
         sleep(50)
@@ -1079,13 +1088,13 @@ suite "e2e_repro_dev_sessions":
       # sleeps; its ``watch.task.finished`` / ``watch.cycle.finished`` come
       # after. Read the stream once the second cycle has finished (or the
       # supervisor is gone, or the backstop passes), not at a fixed moment.
-      var events = sseEvents(httpBindValue, waitMs = 750)
+      var events = sseEvents(httpBindValue, tokenPath, waitMs = 750)
       var waitedFinishMs = 0
       while eventKinds(events).kindCount("watch.cycle.finished") < 2 and
           devProcess.running() and waitedFinishMs < 300_000:
         sleep(250)
         waitedFinishMs.inc(1000)
-        events = sseEvents(httpBindValue, waitMs = 750)
+        events = sseEvents(httpBindValue, tokenPath, waitMs = 750)
       let sseKinds = eventKinds(events)
       check "service.ready" in sseKinds
       check "watch.filesystem.changed" in sseKinds
@@ -1094,7 +1103,7 @@ suite "e2e_repro_dev_sessions":
       check "watch.cycle.finished" in sseKinds
       check sseKinds.kindCount("watch.cycle.started") >= 2
       check sseKinds.kindCount("watch.task.finished") >= 2
-      check statusJson(httpBindValue)["watch"]["cycles"].getInt() >= 2
+      check statusJson(httpBindValue, tokenPath)["watch"]["cycles"].getInt() >= 2
 
       discard requireRepro(c, @["down", c.projectRoot])
       let exitCode = devProcess.waitForExit()
@@ -1681,7 +1690,8 @@ suite "e2e_repro_dev_sessions":
       check secondUp.sessionId != firstUp.sessionId
       # The address printed beside `up` has to be the session's own live
       # control API.
-      let live = liveStatusAt(secondUp.httpBind)
+      let live = liveStatusAt(secondUp.httpBind,
+        parseJson(readFile(readyPath))["httpTokenPath"].getStr())
       checkpoint("printed bind: " & secondUp.httpBind)
       check not live.isNil
       if not live.isNil:
@@ -1747,7 +1757,9 @@ suite "e2e_repro_dev_sessions":
       check announced.sessionId.len > 0
       check announced.sessionId != staleId
       check announced.httpBind != staleBind
-      let live = liveStatusAt(announced.httpBind)
+      let live = liveStatusAt(announced.httpBind,
+        parseJson(readFile(sessionDir / "http-ready.json"))[
+          "httpTokenPath"].getStr())
       check not live.isNil
       if not live.isNil:
         check live{"sessionId"}.getStr() == announced.sessionId
@@ -1894,15 +1906,20 @@ suite "e2e_repro_dev_sessions":
       let outDir = tempRoot / ".repro" / "dev-env" / "default"
       let sessionDir = outDir / "session"
       createDir(sessionDir)
+      # A token for the client to send: the peer ignores it, but the
+      # parent reads no status at all from a record without one.
+      let peerToken = tempRoot / "peer-token"
+      writeFile(peerToken, "peer-token-not-checked")
       writeFile(sessionDir / "http-ready.json", $(%*{
         "schemaId": "reprobuild.dev-session.http.v1",
         "httpBind": peer.httpBind,
+        "httpTokenPath": peerToken,
         "pid": 0
       }))
       # The peer really answers, and really answers without a `status`:
       # asserted here as the POSITIVE CONTROL, so a case that reached the
       # third arm because the server was dead could not pass by accident.
-      let probe = statusJson(peer.httpBind)
+      let probe = statusJson(peer.httpBind, peerToken)
       check probe{"sessionId"}.getStr() == "dev-session-peer-000"
       check probe{"status"}.getStr() == ""
 

@@ -14457,6 +14457,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_prefix_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/dev-env/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests.nim",
+    binary: "build/test-bin/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_dev_env_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim",
     binary: "build/test-bin/t_e2e_dev_env_announces_before_working",
     defines: @[],

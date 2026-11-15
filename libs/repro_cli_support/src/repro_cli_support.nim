@@ -181,6 +181,7 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/cross_target_flag
 import repro_cli_support/dev_session
+import repro_cli_support/dev_session_access
 from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
 when not defined(windows):
@@ -511,11 +512,11 @@ const LegacyVerbSynopses = [
     "repro dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale] [--pre-activation-env=PATH]\n" &
       "repro dev-env deactivate <rollback-manifest> [--shell=bash|zsh|fish|nushell|pwsh]\n"),
   ("up",
-    "repro up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS] [--replace [--force]]\n"),
+    "repro up [selector] [--activity=name] [--foreground] [--http=HOST:PORT [--http-allow-remote]] [--ready-timeout=MS] [--replace [--force]]\n"),
   ("down",
     "repro down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n"),
   ("dev",
-    "repro dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n"),
+    "repro dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT [--http-allow-remote]] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n"),
   ("hooks",
     "repro hooks ensure|reinstall|uninstall [--vcs] [--record-store] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n"),
   ("check",
@@ -18233,6 +18234,11 @@ type
       ## Preserve explicit scope before selection resolution supplies default.
     foreground: bool
     httpBind: string
+      ## ``--http``, or empty for the platform default transport (AF_UNIX
+      ## on POSIX, ``127.0.0.1:0`` on Windows); see ``dev_session_access``.
+    httpAllowRemote: bool
+      ## ``--http-allow-remote``: the explicit opt-in a non-loopback
+      ## ``--http`` host needs.
     debounceMs: int
     force: bool
     replace: bool
@@ -18279,7 +18285,10 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
   ## future command gets the refusal until someone writes down that it
   ## waits.
   var selection = DevEnvCliSelection()
-  result.httpBind = "127.0.0.1:0"
+  # Empty: the platform default transport, chosen by the listener. A
+  # loopback TCP port is no longer the default on POSIX, because every
+  # local account can connect to one (§"Control API Access Control").
+  result.httpBind = ""
   result.debounceMs = 250
   var i = 0
   while i < args.len:
@@ -18303,6 +18312,14 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       result.replace = true
     elif arg == "--http" or arg.startsWith("--http="):
       result.httpBind = valueFromFlag(args, i, "--http")
+    elif arg == AllowRemoteFlag:
+      # Only the commands that START a session bind anything; they are the
+      # ones that take `--ready-timeout`. `down` refuses the flag rather
+      # than accepting one that would do nothing.
+      if not acceptReadyTimeout:
+        raise newException(ValueError,
+          "unsupported " & commandName & " flag: " & arg)
+      result.httpAllowRemote = true
     elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
       result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
       if result.debounceMs < 0:
@@ -18334,6 +18351,12 @@ proc parseDevSessionArgs(args: openArray[string]; commandName: string;
       raise newException(ValueError,
         "unexpected " & commandName & " argument: " & arg)
     inc i
+  # The bind restriction is checked here, before any session state exists:
+  # a non-loopback host needs the explicit opt-in.
+  if result.httpBind.len > 0:
+    let parts = parseHttpBind(result.httpBind)
+    refuseNonLoopbackBind(result.httpBind, parts.host,
+      result.httpAllowRemote)
   selection.resolveDevEnvSelection()
   result.selection = selection
 
@@ -18357,6 +18380,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     lockSliceId: parsed.selection.lockSliceId,
     developOverridesPath: parsed.selection.developOverridesPath,
     httpBind: parsed.httpBind,
+    httpAllowRemote: parsed.httpAllowRemote,
     debounceMs: parsed.debounceMs)
 
 proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
@@ -18377,6 +18401,8 @@ proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
     "--http", config.httpBind,
     "--debounce-ms", $config.debounceMs
   ]
+  if config.httpAllowRemote:
+    result.add(AllowRemoteFlag)
   if config.foreground:
     result.add("--foreground")
 
@@ -20213,8 +20239,11 @@ proc runDownCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "dev session metadata is missing httpBind: " & metadataPath)
   try:
-    let response = httpRequest(httpBindValue, "/session/stop",
-      httpMethod = "POST")
+    # Authenticated with the token the session published the path of; a
+    # caller that cannot read it is refused here, by name, before any
+    # request is sent.
+    let response = controlRequest(controlClientFor(metadata),
+      "/session/stop", httpMethod = "POST")
     if response.status < 200 or response.status >= 300:
       raise newException(IOError,
         "session stop request failed with HTTP " & $response.status &
@@ -20336,6 +20365,7 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     lockSliceId: valueAfterFlag(args, "--lock-slice"),
     developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
     httpBind: valueAfterFlag(args, "--http"),
+    httpAllowRemote: args.find(AllowRemoteFlag) >= 0,
     debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
   # W2 — a ``repro dev`` / ``repro up`` session starts services and runs
   # watch-cycle tasks in the activated environment, so it is an activation
@@ -20354,7 +20384,8 @@ proc runDevSessionHttpHelper(args: openArray[string]): int =
     sessionId: valueAfterFlag(args, "--session-id"),
     sessionDir: valueAfterFlag(args, "--session-dir"),
     host: valueAfterFlag(args, "--host"),
-    port: if portText.len > 0: parseInt(portText) else: 0))
+    port: if portText.len > 0: parseInt(portText) else: 0,
+    allowRemote: args.find(AllowRemoteFlag) >= 0))
 
 const
   DirenvManagedBlockId = "repro-dev-env-direnv"
