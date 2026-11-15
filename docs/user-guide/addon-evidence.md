@@ -281,20 +281,29 @@ goes ahead, with no override and no intent record of its own; while it
 does not, that run is refused like the first and you can wait or use the
 override. If the completion record itself could
 not be written (its directory read-only, say), the evidence is already
-gone and the attestation key is kept: the next uninstall finds that run's
-intent record (the newest one signed by the host's key with no completion
-record), completes it instead of writing a new one, and prints it with the
-completion's path.
+gone and the attestation key is kept. Before it tried, the run wrote a
+**discard marker** in the add-on's state (under `/var/lib/repro`, so a
+read-only log directory cannot stop it): a record, signed with the host's
+attestation key and flushed to disk once every object of its intent was
+removed and the removal flushed, that names that exact intent by file name
+and SHA-256. The next uninstall completes an earlier intent only when it
+carries a valid marker. It writes no intent of its own for it, and says
+"completing the discard an earlier uninstall authorised and carried out",
+never that it authorised anything itself, then prints the completion's
+path.
 
 Each run that discards writes its own intent record. When a run stops
-before the objects are gone, its intent record stays "authorised, not
-completed" for good, and the run that finishes writes a new intent record
+before the objects are gone (or before their removal is flushed), it writes
+no marker, and its intent record stays "authorised, not completed" for
+good, whatever happens to the objects later, and the run that finishes writes a new intent record
 and completes that one (or, when the sink acknowledged the records by
 then and the run used plain `--discard-store-evidence`, writes none:
 nothing was discarded unshipped). To tell them apart, check each intent record in
 `/var/log/repro-addon` with `verify-discard-record`: the one that reports
 **completed** is the discard that happened, and the completion record
-beside it names it by file name and SHA-256. The others are the
+beside it names it by file name and SHA-256. At most one intent reports
+completed per discarded object: an intent completed by a later run is the
+one whose own run removed its objects and left a marker. The others are the
 authorisations of runs that stopped: such a run may already have removed
 some of the objects its intent names, and the completed discard names only
 what was still there when its run began. All the files stay after uninstall:

@@ -88,6 +88,16 @@
 ## is held here again by deleting the configuration by hand before a
 ## re-run, §13 decision 149.)
 ##
+## Round 13 (§13 decision 148): the run after the failed completion
+## completes that intent from its discard marker and says so, never
+## "discarding … was authorised"; and at the end EVERY intent record the
+## runs wrote is verified: only that one is completed, every other stays
+## "authorised, not completed" (falsifier ``resume-without-marker``: the
+## last plain run completes an earlier run's intent too). The marker's
+## binding, signature and timing are held at unit level
+## (``t_addon_review_round8`` cases 16 and 19-22), since no step here forges
+## a marker or fails a sync.
+##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
 ## 3: the altered member is used), ``recovery-discards-evidence`` (the
@@ -612,7 +622,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("the re-run completes the earlier discard, then fails at /etc/repro " &
        "and keeps the state, the ledger copy and the attestation key",
        un3.exitCode != 0 and
-         ("the signed intent record is " & recordPath) in said3 and
+         # §13 decision 148: an earlier run's intent with its marker,
+         # completed, and never announced as this run's authorisation.
+         "completing the discard an earlier uninstall authorised" in said3 and
+         ("its signed intent record is " & recordPath) in said3 and
+         "was authorised; the signed intent record" notin said3 and
          "the discard completed; the signed completion record is " in said3 and
          "/etc/repro" in said3 and
          "are kept: the uninstall is incomplete" in said3 and
@@ -657,6 +671,29 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        keyless.stdout & keyless.stderr)
   step("the evidence directory is gone with the state",
        g.exec("test -e " & Evidence).exitCode != 0, "")
+  # §13 decision 148 (the reviewer's VM probe, IE/I4): EVERY intent record
+  # this gate's runs wrote is checked at the end. Only the run whose
+  # objects were all removed and synced -- its completion failed, and the
+  # next run completed it from its discard marker -- verifies as completed.
+  # Every other one, the runs that stopped before their objects were gone
+  # (I0, the failed store removal; IE, the failed evidence removal), stays
+  # "authorised, not completed" (exit 3) for good (falsifiers
+  # resume-without-marker, marker-not-bound-to-intent,
+  # marker-signature-unchecked).
+  let intents = g.exec("ls /var/log/repro-addon/*-discard-intent.json")
+    .stdout.strip().splitLines()
+  var verdicts = ""
+  var allRight = intents.len >= 3 and recordPath in intents
+  for it in intents:
+    let v = g.exec(repro & " system addon verify-discard-record " &
+      quoteShell(it) & " --key " & quoteShell(bs.attestationKey))
+    verdicts.add(it & " exit=" & $v.exitCode & "\n")
+    let want = if it == recordPath: 0 else: 3
+    if v.exitCode != want: allRight = false
+  record["everyIntent"] = %verdicts
+  step("every earlier intent is checked: only the one whose run removed " &
+       "and synced all its objects is completed; the others stay " &
+       "authorised, not completed (decision 148)", allRight, verdicts)
 
 suite Gate:
   test "store custody: coverage, recovery with evidence, refusal":
