@@ -44,7 +44,12 @@ proc everyFieldDetail(): TarballArchiveDetail =
     appBundle: "Tool.app",
     bundleId: "org.example.tool",
     teamId: "ABCDE12345",
-    installerApp: "Tool Installer.app")
+    installerApp: "Tool Installer.app",
+    elfInterpreter: "sysroot/lib/ld-linux-x86-64.so.2",
+    elfRunpath: @["sysroot/lib", "lib"],
+    elfPatchDirs: @["bin", "libexec"],
+    gccLinkSpecs: "lib/gcc/x86_64-linux-gnu/15.3.0/specs",
+    gccSpecDefaults: @["cc1:-fstack-protector-strong", "link:-z now"])
 
 proc requestCarrying(detail: TarballArchiveDetail):
     StoreDaemonExternalRealizeRequest =

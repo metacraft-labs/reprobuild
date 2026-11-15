@@ -71,8 +71,12 @@ import nimcrypto/[hash, sha2]
 import repro_tool_profiles/executable_evidence
 export executable_evidence
 import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest]
+import repro_tool_profiles/elf_relocation
 import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/packages/[lessmsi, wix3, innounp, php, jdk]
+# The realization helpers ``installationToolRoles`` names; importing them
+# registers their package definitions, which ``extractorToolUses`` resolves
+# a role against (``patchelf``: the ELF relocation of an archive).
+import repro_dsl_stdlib/packages/[lessmsi, wix3, innounp, php, jdk, patchelf]
 from repro_project_dsl import PackageDef, PackageUseDef, registeredPackages, registeredProvisioningContributions,
   DepKindTarget, DepKindNative, DepKindRuntime
 export archive_inputs
@@ -221,6 +225,16 @@ type
       ## re-hash, not what the tool is: a touch that leaves the bytes alone
       ## refreshes it without moving any fingerprint. See
       ## ``verifyResolvedExecutable``.
+    exportedExecutables*: seq[string]
+      ## Absolute paths of the further executables the realization exports
+      ## beside the declared one (a ``tarball`` arm's ``extraExecutable``
+      ## entries, resolved inside the realized prefix). A tool-identity
+      ## reference that names one of them by file name resolves to this
+      ## profile and puts that executable's directory on the action's PATH
+      ## (``mkToolIdentityResolver``): a C toolchain whose project declares
+      ## only ``gcc`` still supplies its own ``ar``. Threaded like
+      ## ``pathSearchList``: it locates files the digested realization
+      ## already names, so it is not fingerprinted.
     # M9.R.14e.1 — additional search-path channels populated by the
     # from-source resolver when the sibling recipe's install tree carries
     # the relevant artefacts. The engine threads each list onto a
@@ -308,6 +322,8 @@ type
       ## Mirror of ``PathOnlyToolProfile.provisioningReceipt``. The CLI's
       ## tool-identity projection hands it to the engine, which declares it
       ## as an input of every action that uses this tool.
+    exportedExecutables*: seq[string]
+      ## Mirror of ``PathOnlyToolProfile.exportedExecutables``.
     # M9.R.14e.1 — mirror of ``PathOnlyToolProfile``'s extra search-path
     # channels. The provider-compile pass copies these fields out of the
     # resolved profile and into the per-action identity so the CLI's
@@ -418,7 +434,11 @@ const
   # trusting the digest. A v9 or older profile reads back with no evidence,
   # so its first hit re-hashes (and a changed executable is then a miss)
   # instead of being trusted.
-  ArtifactVersion = 10'u16
+  # v11 — ``exportedExecutables`` on both the profile and the action
+  # identity. A v10 or older artifact reads back with none, so a reference
+  # to an exported executable resolves to nothing until the identity is
+  # resolved again (the tool-identity cache key moves with the interface).
+  ArtifactVersion = 11'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -2610,6 +2630,37 @@ proc hasTargetTarballProvisioning(useDef: InterfaceToolUse;
 proc hasHostTarballProvisioning(useDef: InterfaceToolUse): bool =
   hasTargetTarballProvisioning(useDef, hostRealizationTarget())
 
+const LinuxHostToolchainPackages* = ["gcc", "make", "binutils", "ar"]
+  ## The Linux C toolchain packages (Dependency-Provisioning-In-Build-Graph.md
+  ## §4.3, "Not the Linux C toolchain"). Tarball mode does not fall through
+  ## to their source recipes on a Linux host: those recipes need each other.
+  ## ``gcc`` and ``ar`` have a Linux x86_64 archive (``linux_toolchain_pin``
+  ## in the standard library), so on such a host tarball mode realizes them and
+  ## never reaches the fall-through; ``make`` and ``binutils`` have none.
+
+proc linuxHostToolchainFallThroughSkipsArchive*(useDef: InterfaceToolUse;
+                                                hostOs = hostOS): bool =
+  ## Whether a fall-back that would take ``useDef``'s host archive must not,
+  ## because the archive is the Linux C toolchain one: path mode's
+  ## fall-through when ``$PATH`` lacks the tool, and nix mode's fall-back
+  ## when the recipe's range refuses the pinned Nix version.
+  ##
+  ## That archive carries its own glibc and is relocated onto it
+  ## (``linux_toolchain_pin``), so it links executables against the loader
+  ## and C library in the store, not the host's. Tarball mode
+  ## takes it because the user asked for archives; a path-mode or nix-mode
+  ## build asked for the host's own toolchain, and silently getting one with
+  ## a different C library would change what its executables link against.
+  ## Those modes keep what they did before the archive was catalogued: Nix,
+  ## or the refusal.
+  hostOs == "linux" and useDef.packageSelector in LinuxHostToolchainPackages
+
+proc fallBackTakesHostTarball(useDef: InterfaceToolUse): bool =
+  ## ``hasHostTarballProvisioning`` for the fall-backs that
+  ## ``linuxHostToolchainFallThroughSkipsArchive`` excludes.
+  hasHostTarballProvisioning(useDef) and
+    not linuxHostToolchainFallThroughSkipsArchive(useDef)
+
 proc nixModeTakesTarballArm*(useDef: InterfaceToolUse;
     target = hostRealizationTarget()): bool =
   ## Whether ``tpmNix`` realizes ``useDef`` from its tarball arm because the
@@ -2631,8 +2682,10 @@ proc nixRangeRefusalFallsBackToTarball*(useDef: InterfaceToolUse;
   ## digest, which is what the refusal tells the author to add. Without a
   ## range, or without an archive in range, the refusal stands.
   let range = requestedUsesVersionRange(useDef)
-  range.len > 0 and selectTarballRecord(useDef.tarballProvisioning, target,
-    "", none(string), versionRange = range).status == kcSelected
+  range.len > 0 and
+    not linuxHostToolchainFallThroughSkipsArchive(useDef, $target.os) and
+    selectTarballRecord(useDef.tarballProvisioning, target,
+      "", none(string), versionRange = range).status == kcSelected
 
 proc nixSelectionRangeRefusal*(useDef: InterfaceToolUse;
     target = hostRealizationTarget()): string =
@@ -2660,7 +2713,7 @@ proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
   ## a Nix-capable host) a pinned Nix channel -- the fallbacks
   ## `toolProfileFor`'s `tpmPathOnly` arm takes. A tool with neither is simply
   ## absent in path mode, which is that mode's ordinary state.
-  hasHostTarballProvisioning(useDef) or
+  fallBackTakesHostTarball(useDef) or
     ((defined(linux) or defined(macosx)) and useDef.nixProvisioning.len > 0)
 
 proc selectTarballProvisioning*(useDef: InterfaceToolUse;
@@ -2843,11 +2896,18 @@ type
     ## refused by name rather than satisfied from the host.
     sevenZip*: string
     zstd*: string
+    patchelf*: string
+      ## The ELF editor an archive that declares an ELF relocation is
+      ## rewritten with (``ElfRelocationToolRole``).
     installation*: ArchiveStageTools
 
 const
   ExtractorRoleSevenZip* = "7z"
   ExtractorRoleZstd* = "zstd"
+  ElfRelocationToolRole* = "patchelf"
+    ## The realization helper that rewrites ``PT_INTERP`` and ``DT_RPATH``
+    ## of an archive that declares an ELF relocation: the stdlib ``patchelf``
+    ## package, realized by its own provisioning edge like an extractor.
 
 proc extractorRolesFor*(archiveType: string): seq[string] =
   ## Which provisioned extractors realizing an archive of `archiveType`
@@ -2929,11 +2989,24 @@ proc archiveDigestAlgorithm(plan: TarballAcquisitionPlan): string =
 proc archiveDigestValue(plan: TarballAcquisitionPlan): string =
   if plan.digestValue.len > 0: plan.digestValue else: plan.sha256
 
+proc declaresElfRelocation*(record: InterfaceTarballProvisioning): bool =
+  ## Whether realizing ``record`` rewrites the ELF files it ships
+  ## (``elfInterpreter`` / ``elfRunpath`` / ``gccLinkSpecs`` /
+  ## ``gccSpecDefaults``) to name the loader and C library realized with it.
+  ## A ``gccSpecDefaults`` without ``gccLinkSpecs`` counts, so realization
+  ## refuses it (``writeGccLinkSpecs``) instead of dropping it.
+  ## Dependency-Provisioning-In-Build-Graph.md §4.2, "Relocating a
+  ## dynamically linked archive".
+  let detail = record.detail
+  detail.elfInterpreter.len > 0 or detail.elfRunpath.len > 0 or
+    detail.gccLinkSpecs.len > 0 or detail.gccSpecDefaults.len > 0
+
 proc installationIdentity(plan: TarballAcquisitionPlan): string =
   ## Every semantic install field and helper receipt is an input to both
   ## local and shared-cache prefix identity. Plain archives retain their key.
   if archiveInstallerFeatures(plan.record).len > 0 or
-      plan.record.detail.extraExecutables.len > 0:
+      plan.record.detail.extraExecutables.len > 0 or
+      declaresElfRelocation(plan.record):
     $jsonutils.toJson(plan.record.detail) & "\0tools:" & plan.installationToolsIdentity
   else: ""
 
@@ -3436,6 +3509,8 @@ proc installationToolRoles*(record: InterfaceTarballProvisioning): seq[string] =
     else: discard
   for encoded in detail.launcherEmit:
     result.add(launcherToolRole(decodeLauncherEmitSpec(encoded)))
+  if declaresElfRelocation(record):
+    result.add(ElfRelocationToolRole)
 
 proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
   ## The provisioned package an extractor role is realized from, as a list
@@ -4201,7 +4276,8 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
       entryPlan.stripComponents, "", tools)
 
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
-                       packageName, version: string): CacheEntryIdentity =
+                       packageName, version: string;
+                       prefix: string): CacheEntryIdentity =
   ## The shared-cache identity of a realized tool prefix.
   ##
   ## Keyed on the things that actually determine the prefix's bytes: the
@@ -4257,6 +4333,13 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   if plan.declaredClosureManifest.len > 0:
     result.addOption("closure", closureManifestDigest(plan))
   result.addOption("stripComponents", $plan.stripComponents)
+  # An ELF relocation writes the realized prefix's ABSOLUTE path into every
+  # rewritten program (its ``PT_INTERP``) and shared object (its
+  # ``DT_RPATH``), so the bytes are a function of where the prefix lives.
+  # Two hosts whose stores sit at different paths hold different trees and
+  # must not serve each other; conditional, so no other package's key moves.
+  if declaresElfRelocation(plan.record):
+    result.addOption("relocatedTo", prefix)
 
 proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
                              tempPrefix, storeRoot: string): bool =
@@ -4380,7 +4463,7 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
     return false
   let endpoints = cacheCfg.endpoints
   let keyHex = deriveCacheEntryKeyHex(toolCacheIdentity(plan, packageName,
-    version))
+    version, prefix))
   try:
     let outcome = bcInProcess.substituteInProcess(keyHex, storeRoot, endpoints)
     if not outcome.ok or outcome.outcomes.len == 0:
@@ -4488,7 +4571,7 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   let certPath = cacheCfg.certPath
   try:
     let keypair = peerAuth.loadOrGenerateKeypair(certPath, keyPath)
-    let identity = toolCacheIdentity(plan, packageName, version)
+    let identity = toolCacheIdentity(plan, packageName, version, prefix)
     let request = bcInProcess.PublishInProcessRequest(
       entryKeyHex: deriveCacheEntryKeyHex(identity),
       prefixDir: prefix,
@@ -4691,6 +4774,23 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
         raise newException(OSError,
           "tool-resolution failed: prune path could not be removed: " &
           target)
+    # A dynamically linked archive that carries its own loader and C
+    # library: point its programs and shared objects at them, as absolute
+    # paths in the prefix it is about to become (``elf_relocation``). After
+    # the prunes, which describe what is in the tree, and before the alias
+    # copy, so a copied program carries the rewritten bytes. The step is
+    # keyed: the declaration is in ``installationIdentity`` (so in the local
+    # prefix key) and the prefix path in ``toolCacheIdentity``.
+    if declaresElfRelocation(plan.record):
+      let runRelocationTool: ElfToolRunner =
+        proc(argv: seq[string]): tuple[output: string; exitCode: int] =
+          # Every argument quoted, so the shell it runs under splits nothing.
+          execCmdExCloseOnce(quoteShellCommand(argv),
+            options = {poStdErrToStdOut})
+      discard relocateElfTree(plan.record.detail, tempPrefix, prefix,
+        tools.patchelf, runRelocationTool)
+      writeGccLinkSpecs(plan.record.detail, plan.declaredExecutablePath,
+        tempPrefix, prefix, runRelocationTool)
     let extractedProbe = probeDeclaredExecutable(tempPrefix,
       plan.declaredExecutablePath, rejectSymlinks = true)
     if extractedProbe.verdict != deOk:
@@ -5005,6 +5105,14 @@ proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
     resolvedExecutablePath: resolved,
     adapterStrength: asStrong,
     cachePortability: cpPortable)
+  # The further executables the arm exports (``extraExecutable``). Realize
+  # has already checked each resolves to an executable inside the prefix
+  # (``validateExtraTarballExecutables``).
+  # Not ``addUniquePath``: that helper keeps only existing DIRECTORIES.
+  for extra in plan.record.detail.extraExecutables:
+    let exported = os.normalizedPath(prefix / extra)
+    if exported notin result.exportedExecutables:
+      result.exportedExecutables.add(exported)
 
   # M9.R.14e.7 — auxiliary search-path channels for the tarball-resolved
   # prefix. Mirrors the nix-resolved population so tarball-shipped libs
@@ -5402,6 +5510,7 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
         of "lessmsi": tools.installation.lessmsi = exe
         of "wix3": tools.installation.dark = exe
         of "innounp": tools.installation.innounp = exe
+        of ElfRelocationToolRole: tools.patchelf = exe
         else: discard # declared interpreters are mapped in declaration order below
       var failures: seq[string]
       var firstError: ref CatchableError = nil
@@ -9853,12 +9962,6 @@ proc tarballModeFallsThroughToFromSource*(useDef: InterfaceToolUse): bool =
   ## executable name has no recipe to find and keeps the tarball diagnostic.
   useDef.executableName.len > 0 and not hasHostTarballProvisioning(useDef)
 
-const LinuxHostToolchainPackages* = ["gcc", "make", "binutils"]
-  ## The C toolchain tarball mode does not realize on a Linux host
-  ## (Dependency-Provisioning-In-Build-Graph.md §4.3, "Not the Linux C
-  ## toolchain"): their source recipes need each other, and the catalog has
-  ## no prebuilt Linux toolchain archive to break that cycle.
-
 proc tarballModeHostToolchainRefusal*(useDef: InterfaceToolUse;
                                       hostOs = hostOS): string =
   ## The refusal, or "", for a tarball-mode fall-through to one of the
@@ -10125,7 +10228,7 @@ proc pathModeFallThrough(useDef: InterfaceToolUse; storeRoot: string;
   if sibling.kind == rrResolved:
     profile = sibling.profile
     return
-  if hasHostTarballProvisioning(useDef):
+  if fallBackTakesHostTarball(useDef):
     try:
       profile = resolveTarballTool(useDef, storeRoot)
     except TarballHostLoaderMissing:
@@ -10435,6 +10538,7 @@ proc actionIdentityFor(useDef: InterfaceToolUse;
     # the payload.
     resolvedExecutableDigest: profile.resolvedExecutableDigest,
     provisioningReceipt: profile.provisioningReceipt,
+    exportedExecutables: profile.exportedExecutables,
     probes: profile.probes,
     adapterStrength: profile.adapterStrength,
     cachePortability: profile.cachePortability,
@@ -10703,6 +10807,8 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeU64Le(evidence.fileIdHigh)
   outp.writeU64Le(evidence.fileIdLow)
   outp.writeU64Le(cast[uint64](evidence.recordedAtNs))
+  # v11 — the exported executables. Same trailing-extension discipline.
+  outp.writeStringSeq(profile.exportedExecutables)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -10783,6 +10889,8 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.executableEvidence.fileIdHigh = readU64Le(bytes, pos)
     result.executableEvidence.fileIdLow = readU64Le(bytes, pos)
     result.executableEvidence.recordedAtNs = cast[int64](readU64Le(bytes, pos))
+  if version >= 11'u16:
+    result.exportedExecutables = readStringSeq(bytes, pos)
   # A v < 10 artifact leaves the evidence unrecorded, so its first cache hit
   # re-hashes the executable rather than trusting the digest.
   # A v < 8 artifact leaves the digest empty. Its stored
@@ -10841,6 +10949,8 @@ proc writeActionIdentity(outp: var seq[byte]; identity: ToolActionIdentity) =
   outp.writeString(identity.resolvedExecutableDigest)
   # v9 — the provisioning edge's receipt (see ``writeProfile``).
   outp.writeString(identity.provisioningReceipt)
+  # v11 — the exported executables (see ``writeProfile``).
+  outp.writeStringSeq(identity.exportedExecutables)
 
 proc readActionIdentity(bytes: openArray[byte];
     pos: var int; version: uint16): ToolActionIdentity =
@@ -10914,6 +11024,8 @@ proc readActionIdentity(bytes: openArray[byte];
     result.resolvedExecutableDigest = readString(bytes, pos)
   if version >= 9'u16:
     result.provisioningReceipt = readString(bytes, pos)
+  if version >= 11'u16:
+    result.exportedExecutables = readStringSeq(bytes, pos)
 
 proc encodePathOnlyBuildIdentity*(identity: PathOnlyBuildIdentity): seq[byte] =
   var payload: seq[byte] = @[]
