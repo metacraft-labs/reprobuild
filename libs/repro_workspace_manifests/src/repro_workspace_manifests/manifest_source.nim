@@ -70,6 +70,7 @@
 ## blocked on its stdin until this process exits, when the pipe closes and
 ## it exits too — wasteful, never incorrect.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, options, os, osproc, streams, strtabs, strutils, tables]
 
 import diagnostics
@@ -201,8 +202,8 @@ proc runGitCapture(gitBin: string; args: openArray[string];
     return (code: -1, output: "", errors: e.msg)
   defer: closeProcessOnce(child)
   child.inputStream.close()
-  result.output = child.outputStream.readAll()
-  result.errors = child.errorStream.readAll()
+  result.output = drainStream(child.outputStream)
+  result.errors = drainStream(child.errorStream)
   result.code = child.waitForExit()
 
 proc sourceError(path, message: string) {.noreturn.} =

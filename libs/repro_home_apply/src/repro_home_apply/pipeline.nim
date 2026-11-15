@@ -3075,6 +3075,28 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       writeMarker(opts.stateDir, "", "killed-after-step-4")
       raiseKilledByTestHook(4)
 
+    # GM4b: resolve every package reference before the no-op check — the
+    # selections are part of the generation id — with the same context
+    # `--plan` uses. Step 7 realizes these packages in the same context.
+    let catalog = packageResolutionCatalog(opts, applyPlan)
+    let resolutionCtx = packageResolutionContext(opts, applyPlan, catalog)
+    let packagePreviews = previewPackageResolutions(applyPlan.packages,
+      resolutionCtx)
+    # The commands application packages declare become launchers (and
+    # part of the generation id); see `addApplicationCommands`.
+    addApplicationCommands(applyPlan, packagePreviews)
+    # GM7: see `refuseClassificationDisagreement` (`runApplyPlan`).
+    refuseClassificationDisagreement(opts, applyPlan, packagePreviews,
+      applied, catalog)
+    # A package of an applied concern with no realization is refused HERE,
+    # before the store is opened (which a first apply creates), the no-op
+    # check, the marker, the generation directory and step 7 -- from the
+    # decision `--plan` reports -- so the apply changes nothing and names
+    # every such package, not only the first one step 7 would reach.
+    # Resolution and both refusals do not read the store, so they run
+    # ahead of step 5.
+    refuseUnrealizablePackages(packagePreviews, owned)
+
     # ---- Step 5: load active generation's manifest (for diff) -----------
     let activeGenIdHex = readCurrentGenerationId(opts.stateDir)
     var store = openStore(opts.storeRoot)
@@ -3098,25 +3120,6 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         for a in opts.adoptAddresses:
           resourcesSeed.add(a)
           resourcesSeed.add(",")
-      # GM4b: resolve every package reference before the no-op check — the
-      # selections are part of the generation id — with the same context
-      # `--plan` uses. Step 7 realizes these packages in the same context.
-      let catalog = packageResolutionCatalog(opts, applyPlan)
-      let resolutionCtx = packageResolutionContext(opts, applyPlan, catalog)
-      let packagePreviews = previewPackageResolutions(applyPlan.packages,
-        resolutionCtx)
-      # The commands application packages declare become launchers (and
-      # part of the generation id); see `addApplicationCommands`.
-      addApplicationCommands(applyPlan, packagePreviews)
-      # GM7: see `refuseClassificationDisagreement` (`runApplyPlan`).
-      refuseClassificationDisagreement(opts, applyPlan, packagePreviews,
-        applied, catalog)
-      # A package of an applied concern with no realization is refused HERE,
-      # before the no-op check, the marker, the generation directory and
-      # step 7 -- from the decision `--plan` reports -- so the apply changes
-      # nothing and names every such package, not only the first one step 7
-      # would reach.
-      refuseUnrealizablePackages(packagePreviews, owned)
       let candidateId = deriveGenerationId(applyPlan, snapshotDig,
         resourcesSeed, selectionSeedOf(packagePreviews))
       # GM7: the package references this apply realizes -- those whose

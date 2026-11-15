@@ -11,7 +11,8 @@
 ##   -- the apply exits 1 naming BOTH unrealizable packages, each with its
 ##   reason, and leaves no trace: no `apply.in-progress` marker, no
 ##   generation directory, nothing realized into the store for the package
-##   ordered ahead of them, no `current` generation. `--plan` names the same
+##   ordered ahead of them (the store byte-identical: the refusal precedes
+##   opening it), no `current` generation. `--plan` names the same
 ##   two packages. Positive control: with the two removed, the same apply
 ##   succeeds and realizes the remaining package into the store, so the
 ##   store check above can see a realization when there is one.
@@ -44,8 +45,12 @@ const
   UnrealizableOne = "zz-repro-unrealizable-one"
   UnrealizableTwo = "zz-repro-unrealizable-two"
     ## Defined by nothing in scope: no host inventory realizes them.
-  FixtureLeaf = "aa-repro-realizable-fixture-tool"
-    ## The seam's source file name; a realization copies it into the store.
+  FixtureLeaf = addFileExt("aa-repro-realizable-fixture-tool",
+    when defined(windows): "cmd" else: "")
+    ## The seam's source file name, extension included: a realization copies
+    ## the file into the store under exactly this name, so on Windows a
+    ## comparison without the `.cmd` would never match (and the store checks
+    ## below would hold vacuously).
   RefusalMessage = "package(s) of an applied concern have no realization " &
     "on this host"
 
@@ -66,8 +71,7 @@ proc both(r: ReproRun): string = r.stdout & r.stderr
 
 proc writeFixture(sb: ProfileSandbox): string =
   ## An executable for the path seam to realize.
-  result = sb.root / "fixtures" / addFileExt(FixtureLeaf,
-    when defined(windows): "cmd" else: "")
+  result = sb.root / "fixtures" / FixtureLeaf
   createDir(extendedPath(result.parentDir))
   when defined(windows):
     writeFile(extendedPath(result), "@echo fixture\r\n")
@@ -108,6 +112,9 @@ suite "home apply: an unrealizable package is refused before the commit":
     check UnrealizableOne in plan.stderr
     check UnrealizableTwo in plan.stderr
 
+    # The store as `--plan` left it: the refusal precedes even opening the
+    # store (which a first apply creates), so it stays byte-identical.
+    let storeBefore = treeFingerprint(sb.storeRoot)
     let applied = sb.runRepro(["home", "apply"], extraEnv = seam)
     show("apply", applied)
     check applied.exitCode == 1
@@ -121,6 +128,7 @@ suite "home apply: an unrealizable package is refused before the commit":
     checkpoint("generations/: " & sb.generationDirs().join(", "))
     check sb.generationDirs().len == 0
     check not sb.storeHolds(FixtureLeaf)
+    check treeFingerprint(sb.storeRoot) == storeBefore
     check readCurrentGenerationId(sb.stateDir).len == 0
 
     # A second apply refuses the same way and has nothing to quarantine.
@@ -129,6 +137,7 @@ suite "home apply: an unrealizable package is refused before the commit":
     check again.exitCode == 1
     check ("2 " & RefusalMessage) in again.stderr
     check sb.generationDirs().len == 0
+    check treeFingerprint(sb.storeRoot) == storeBefore
 
     # Positive control: without the two, the same apply realizes the package
     # ahead of them into the store, which `storeHolds` sees.

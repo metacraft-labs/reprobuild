@@ -45,6 +45,20 @@
 ##     the child never ran: a child that failed to spawn produces an empty
 ##     capture AND a different exit code.
 
+## THE FAKE STREAM CASES (the suite before `drainStdoutAndStderr`), and why a fake is used.
+##
+## The short read is a property of a Windows pipe handle: one `ReadFile`
+## returns whatever the writer has delivered. A POSIX host cannot produce it
+## from a real child (`fread` refills until the buffer is full or EOF), so on
+## the POSIX hosts this suite also runs on the real-child cases above pass
+## with `readAll` too. The fake `Stream` below delivers its bytes in exactly
+## the chunks the Windows handle would, on every platform, so the contract
+## -- "a read that returns fewer bytes than asked for is not the end" -- is
+## asserted where it can fail. The fake stands in only for the OS pipe; the
+## code under test (`drainStream`, and `readAll` as the control that shows the
+## fake really is short) is the real code. Reprobuild-pm issue
+## 2026-10-27-process-output-read-with-stream-readall-stops-at-the-first-short-read.
+
 import std/[os, osproc, streams, strutils, unittest]
 
 import repro_core/process_streams
@@ -192,6 +206,69 @@ suite "N51 repro_core/process_streams: drainStream reads a child to EOF":
   test "drainStream on a nil stream is empty, not a crash":
     ## Every call site guards `outputStream != nil` or relies on this.
     check drainStream(nil) == ""
+
+# ---------------------------------------------------------------------------
+# A stream that delivers short reads, on any platform.
+# ---------------------------------------------------------------------------
+
+var
+  fakeChunks: seq[string]
+  fakeNext: int
+  fakeAtEndLies: bool
+
+proc fakeRead(s: Stream; buffer: pointer; bufLen: int): int
+    {.nimcall, gcsafe.} =
+  ## One chunk per call, as a pipe returns what the writer has delivered so
+  ## far; 0 only once every chunk has been handed out.
+  {.cast(gcsafe).}:
+    if fakeNext >= fakeChunks.len:
+      return 0
+    let chunk = fakeChunks[fakeNext]
+    inc fakeNext
+    result = min(chunk.len, bufLen)
+    if result > 0:
+      copyMem(buffer, unsafeAddr chunk[0], result)
+
+proc fakeAtEnd(s: Stream): bool {.nimcall, gcsafe.} =
+  {.cast(gcsafe).}:
+    if fakeAtEndLies:
+      # A stream that reports end of input even before the first read.
+      result = true
+    else:
+      result = fakeNext >= fakeChunks.len
+
+proc fakeStream(chunks: seq[string]; atEndLies: bool): Stream =
+  fakeChunks = chunks
+  fakeNext = 0
+  fakeAtEndLies = atEndLies
+  result = Stream()
+  result.readDataImpl = fakeRead
+  result.atEndImpl = fakeAtEnd
+
+suite "repro_core/process_streams: drainStream on a stream that delivers short reads":
+
+  test "plain readAll stops at the first short read (the control)":
+    ## Proves the fake is short: without this the cases below could pass on
+    ## a stream `readAll` handles just as well.
+    let head = "5-byte"
+    let tail = repeat("t", 404)
+    let s = fakeStream(@[head, tail], atEndLies = false)
+    check s.readAll() == head
+
+  test "drainStream returns every chunk, however the writer split them":
+    let s = fakeStream(@["5-byte", repeat("a", 404), "x", repeat("b", 3000)],
+                       atEndLies = false)
+    check drainStream(s) ==
+      "5-byte" & repeat("a", 404) & "x" & repeat("b", 3000)
+
+  test "drainStream does not take atEnd's word for it":
+    let tail = repeat("t", 404)
+    let s = fakeStream(@["5-byte", tail], atEndLies = true)
+    check s.atEnd()
+    check drainStream(s) == "5-byte" & tail
+
+  test "drainStream of a stream that is empty from the start is empty":
+    check drainStream(fakeStream(@[], atEndLies = false)) == ""
 
 suite "repro_core/process_streams: drainStdoutAndStderr":
   ## REGRESSION for the cross-thread free. The stderr reader used to be a

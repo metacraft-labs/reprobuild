@@ -34,6 +34,7 @@
 ##
 ## macOS only; every proc raises ``OSError`` naming the failed command.
 
+from repro_core/process_streams import drainStream
 import std/[base64, os, osproc, streams, strutils]
 from repro_core/ambient_execution import uncontrolledStartProcess
 
@@ -50,7 +51,7 @@ proc runArgv(exe: string; args: openArray[string]; workingDir = ""):
     args = @args, options = {poStdErrToStdOut})
   try:
     p.inputStream.close()
-    result.output = p.outputStream.readAll()
+    result.output = drainStream(p.outputStream)
     result.exitCode = p.waitForExit()
   finally:
     p.close()
