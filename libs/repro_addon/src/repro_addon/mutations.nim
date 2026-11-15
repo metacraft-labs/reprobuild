@@ -614,6 +614,43 @@
 ##                                           template (decision 152)
 ## ``requirers-of-refused-released``       a unit that requires a refused
 ##                                           unit is released (decision 153)
+## ``trigger-repointing-ignored``          a trigger the generation re-points
+##                                           at a held unit is left running
+##                                           when its live unit runs
+##                                           (decision 151, round 10)
+## ``left-alone-triggers-forgotten``       a trigger the hold left alone is
+##                                           not started again at release
+##                                           (decision 151, round 10)
+## ``template-trigger-instances-unlisted`` a held template's loaded
+##                                           instance triggers are not looked
+##                                           for (decision 152, round 10)
+## ``live-check-triggers-in-memory``       the full apply keeps the triggers
+##                                           of its hold in memory only
+##                                           (decision 151, round 10)
+## ``template-requirer-shown-by-name``     a template that requires a
+##                                           refused unit is shown by name,
+##                                           which systemd refuses (decision
+##                                           153, round 10)
+## ``switch-ignores-restart-record``       an add-on switch does not check
+##                                           the record of triggers to
+##                                           restart (decision 160, round 10)
+## ``fixing-apply-refused``                no generation resolves an entry
+##                                           of the record of triggers to
+##                                           restart (round-10 owner decision)
+## ``restart-record-after-held``           a revert drops a trigger from the
+##                                           held record before it is on the
+##                                           restart record (round 10)
+## ``dependants-started``                  a revert's step 7 starts the units
+##                                           that require a recorded trigger
+##                                           (round-10 owner decision)
+## ``trigger-key-blanks-unread``           a trigger's ``Key = value`` with
+##                                           blanks is not read (decision 154)
+## ``trigger-accept-unread``               an ``Accept=yes`` socket is read
+##                                           as triggering its namesake
+##                                           (decision 154)
+## ``trigger-instance-unmapped``           a trigger naming a template's
+##                                           instance is not ordered after the
+##                                           template (decision 154)
 ## ``trigger-edges-omitted``               the planner orders no socket,
 ##                                           timer or path unit after the
 ##                                           unit it triggers (decision 137)
@@ -1758,6 +1795,20 @@ const
                           "fired-from-driver-starts-only",
                           "fired-instance-unmapped",
                           "requirers-of-refused-released",
+                          # A13 review round 10.
+                          "trigger-repointing-ignored",
+                          "left-alone-triggers-forgotten",
+                          "template-trigger-instances-unlisted",
+                          "live-check-triggers-in-memory",
+                          "template-requirer-shown-by-name",
+                          "switch-ignores-restart-record",
+                          "fixing-apply-refused",
+                          "restart-record-after-held",
+                          "dependants-started",
+                          # §13 decision 154: one falsifier per spelling.
+                          "trigger-key-blanks-unread",
+                          "trigger-accept-unread",
+                          "trigger-instance-unmapped",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",
