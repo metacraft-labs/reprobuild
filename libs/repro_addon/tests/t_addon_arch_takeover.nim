@@ -113,7 +113,7 @@ suite "%BACKUP% in the local database":
     let n = pacmanBackupFiles("%BACKUP%\netc/c\t(null)\n\n")
     check n.len == 1 and n[0].path == "/etc/c" and n[0].md5 == ""
     for bad in ["etc/a", "etc/a\tnot-a-digest", "/etc/a\t" & md5Hex("a"),
-                "etc/a\tnull", "etc/a\t(NULL)"]:
+                "etc/a\tnull", "etc/a\t(NULL)", "etc/a\t" & md5Hex("a").toUpperAscii()]:
       expect ValueError:
         discard pacmanBackupFiles("%BACKUP%\n" & bad & "\n\n")
 
@@ -390,6 +390,93 @@ suite "which bytes a removal restores":
     writeFile(pacnew, Packaged2)
     let b = decideTakeOverUndo(e, newPacmanDriver(root, noUnit))
     check sameDecision(a, a) and not sameDecision(a, b)
+
+suite "a switch's removal of a taken-over path":
+  let path = at("/etc/avahi/avahi-daemon.conf")
+  let pacnew = path & PacnewSuffix
+
+  setup:
+    removeFile(pacnew)
+    removeFile(path & PacsaveSuffix)
+    for v in ["1:0.8-1", "1:0.8-2"]: dropPkg("avahi", v)
+    dropPkg("avahi-ng", "1-1")
+    pkg("avahi", "1:0.8-1", ["etc/avahi/avahi-daemon.conf"],
+        [("etc/avahi/avahi-daemon.conf", md5Hex(Packaged1))])
+
+  test "an ordinary apply refuses a removal no rule allows; a revert or replay keeps it":
+    let e = takenOver(path, Packaged1, AddOnCopy)
+    dropPkg("avahi", "1:0.8-1")
+    pkg("avahi", "1:0.8-2", ["etc/avahi/avahi-daemon.conf"],
+        [("etc/avahi/avahi-daemon.conf", md5Hex(Packaged2))])
+    writeFile(pacnew, "edited by hand\n")
+    let d = newPacmanDriver(root, noUnit)
+    expect EAddOnPackageOwned:
+      discard planTakeOverRemoval(e, d, revertOrReplay = false)
+    let kept = planTakeOverRemoval(e, d, revertOrReplay = true)
+    check kept.keep and "EAddOnPackageOwned" in kept.drift and
+      "(left in place)" in kept.drift
+    check readFile(path) == AddOnCopy                 # nothing was written
+    writeFile(e.preserved, "swapped\n")
+    expect AddonCollisionError:
+      discard planTakeOverRemoval(e, d, revertOrReplay = false)
+    check planTakeOverRemoval(e, d, revertOrReplay = true).keep
+    writeFile(e.preserved, Packaged1)
+
+  test "the write-time re-check carries out only the plan's own decision":
+    let e = takenOver(path, Packaged1, AddOnCopy)
+    let d = newPacmanDriver(root, noUnit)
+    let plan = planTakeOverRemoval(e, d, revertOrReplay = false)
+    check not plan.keep and plan.undo.kind == tuRecorded
+    let same = recheckTakeOverRemoval(e, plan.undo, true, d)
+    check same.drift == "" and same.undo.kind == tuRecorded
+    # An upgrade between the plan and the restore changes the decision:
+    # left in place, never restored on the plan's stale reading.
+    dropPkg("avahi", "1:0.8-1")
+    pkg("avahi", "1:0.8-2", ["etc/avahi/avahi-daemon.conf"],
+        [("etc/avahi/avahi-daemon.conf", md5Hex(Packaged2))])
+    writeFile(pacnew, Packaged2)
+    let changed = recheckTakeOverRemoval(e, plan.undo, true,
+                                         newPacmanDriver(root, noUnit))
+    check "changed after the plan" in changed.drift and
+      changed.undo.kind == tuPacnew
+    check "no plan" in recheckTakeOverRemoval(e, plan.undo, false,
+                                              newPacmanDriver(root, noUnit)).drift
+    check readFile(path) == AddOnCopy
+
+  test "another package owning the path now: its %BACKUP% decides, never a hand-back":
+    let e = takenOver(path, Packaged1, AddOnCopy)
+    dropPkg("avahi", "1:0.8-1")
+    pkg("avahi-ng", "1-1", ["etc/avahi/avahi-daemon.conf"],
+        [("etc/avahi/avahi-daemon.conf", md5Hex(Packaged2))])
+    writeFile(pacnew, Packaged2)
+    let u = decideTakeOverUndo(e, newPacmanDriver(root, noUnit))
+    check u.package == "avahi-ng" and u.kind == tuPacnew
+    discard applyTakeOverUndo(e, u)
+    check readFile(path) == Packaged2 and not fileExists(pacnew)
+    dropPkg("avahi-ng", "1-1")
+
+  test "a replay finishes an undo interrupted before the .pacnew was deleted":
+    let e = takenOver(path, Packaged1, AddOnCopy)
+    dropPkg("avahi", "1:0.8-1")
+    pkg("avahi", "1:0.8-2", ["etc/avahi/avahi-daemon.conf"],
+        [("etc/avahi/avahi-daemon.conf", md5Hex(Packaged2))])
+    writeFile(path, Packaged2)          # installed, then the crash
+    writeFile(pacnew, Packaged2)
+    let d = newPacmanDriver(root, noUnit)
+    check not takeOverAlreadyUndone(e, d)   # a .pacnew of that version left
+    check finishInterruptedUndo(e, d)
+    check not fileExists(pacnew) and readFile(path) == Packaged2
+    check takeOverAlreadyUndone(e, d)
+    check not finishInterruptedUndo(e, d)   # nothing left to finish
+    # The add-on's copy still in place is not an interrupted undo.
+    writeFile(path, AddOnCopy)
+    writeFile(pacnew, Packaged2)
+    check not finishInterruptedUndo(e, d) and fileExists(pacnew)
+
+  test "a taken-over file stays a copy on every later apply":
+    check keepsCopyForm(takenOverBefore = true, takenOverNow = false)
+    check keepsCopyForm(takenOverBefore = false, takenOverNow = true)
+    check not keepsCopyForm(takenOverBefore = false, takenOverNow = false)
 
 # ---------------------------------------------------------------------------
 # The base identity's %FILES% digest.

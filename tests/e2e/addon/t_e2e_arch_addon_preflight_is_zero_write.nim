@@ -1,7 +1,7 @@
 ## Gate ``e2e_arch_addon_preflight_is_zero_write`` (spec ReproOS-Add-On-Mode
 ## §6.1, §12.5 condition 1).
 ##
-## A2's ``e2e_addon_preflight_is_zero_write`` on the Arch guests:
+## The Debian gate ``e2e_addon_preflight_is_zero_write`` on the Arch guests:
 ##
 ## 1. **zero write**: the prepared guest is shut down and its qcow2 overlay
 ##    hashed; it boots again with the disk write-protected below it (QEMU
@@ -89,7 +89,7 @@ proc snapperOf(p: JsonNode): seq[string] =
 
 proc newerThanMarker(g: Guest; repro: string): ExecOut =
   ## Every file on the root filesystem modified after a marker while the
-  ## preflight ran (A2's leg; ``/var/log`` holds the journal, which the base
+  ## preflight ran (the Debian gate's leg; ``/var/log`` holds the journal, which the base
   ## writes on its own; on Arch timesyncd keeps its clock file in the same
   ## place as on Debian).
   g.exec("touch /run/addon-marker && sleep 1 && " &

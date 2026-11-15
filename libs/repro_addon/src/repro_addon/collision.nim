@@ -738,8 +738,8 @@ proc refuseOptInForBase*(d: CollisionDriver; address, collision: string) =
       "\"divert\"` (spec §4.3, §4.3.1)")
 
 proc md5OfFile*(path: string): string =
-  ## Lower-case hex MD5 of ``path``'s bytes: the digest pacman's
-  ## ``%BACKUP%`` holds, and the one ``pacman -Qkk`` compares against.
+  ## Lower-case hex MD5 of ``path``'s bytes: the kind of digest pacman's
+  ## ``%BACKUP%`` holds for a backup file's packaged version.
   md5Hex(readFile(path))
 
 proc decidePacmanPackageFile(d: CollisionDriver; o: TargetObservation;
@@ -823,8 +823,10 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       e.msg.add(" -- package " & o.ownership.package & " came to own this " &
         "ledger path after the add-on took it (" & inp.address &
         "). Remove the resource to hand the path back to the package, " &
-        "then declare it again with `collision = \"divert\"` if the " &
-        "add-on should still own its content")
+        "then declare it again with " &
+        (if d.supportsDiversions: "`collision = \"divert\"`"
+         else: "`collision = \"takeOver\"` (a backup file only)") &
+        " if the add-on should still own its content")
       raise e
   if inp.ledgerOwns:
     if o.exists and o.sha256 == inp.ledgerSha256:

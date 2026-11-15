@@ -1,7 +1,7 @@
 ## Gate ``e2e_arch_addon_bootstrap_uninstall_byte_identity`` (spec
 ## ReproOS-Add-On-Mode §6.2, §6.4, §12.2, §12.5 condition 1).
 ##
-## A2's ``e2e_addon_bootstrap_uninstall_byte_identity`` sequence on the Arch
+## The Debian gate ``e2e_addon_bootstrap_uninstall_byte_identity``'s sequence on the Arch
 ## guests: fingerprint the base twice (the determinism guard), preflight,
 ## bootstrap with the acknowledged digest, apply a generation that adds a
 ## unit and an ``/etc`` file, apply one that removes the unit and changes

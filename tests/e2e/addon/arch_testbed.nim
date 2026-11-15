@@ -2,7 +2,7 @@
 ## digest-pinned Arch Linux cloud image, with pacman pinned to one Arch
 ## Linux Archive date.
 ##
-## It extends ``addon_testbed.nim`` (the A2 test bed) and reuses all of it:
+## It extends ``addon_testbed.nim`` (the Debian test bed) and reuses all of it:
 ## run directories claimed with an exclusive ``mkdir`` and an owner token,
 ## QEMU guests named with ``QemuNamePrefix``, each with its own user-mode
 ## network and a qcow2 overlay it owns, a cloud-init NoCloud seed with a key
@@ -94,7 +94,7 @@
 ## image as published, ``pacman -Qu`` against it lists nothing (measured
 ## 2026-11-13), and the build's ``pacman -Syu`` changes nothing.
 ##
-## *Base preparation* (the Arch counterpart of A2's apt adjustments; made
+## *Base preparation* (the Arch counterpart of the Debian test bed's apt adjustments; made
 ## when the image is built, so part of the base, not of anything a gate
 ## measures): the mirror list is replaced by the archive date's single
 ## ``Server`` line; ``archlinux-keyring-wkd-sync.timer`` is disabled (weekly,

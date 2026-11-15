@@ -4713,7 +4713,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                elif r.address in supersedingUser: "copy"
                elif p.keepLedgerSha.len > 0: prevForm.getOrDefault(path, "copy")
                elif carrier.len > 0: "copy"
-               elif prevTakeOver.contains(path) or dec.verdict == cvTakeOver:
+               elif keepsCopyForm(prevTakeOver.contains(path),
+                                  dec.verdict == cvTakeOver):
                  # A taken-over backup file is always a copy (spec
                  # §4.3.1): pacman compares its contents with the packaged
                  # MD5 on every upgrade and must never find a link into
@@ -4983,6 +4984,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     # link no longer resolves).
     var packageNow = ""
     for e in entries:
+      # A taken-over backup file is never handed back: another package
+      # owning it now (one that replaced the package the take-over named)
+      # is exactly the case §4.3.1's restore rule decides, from that
+      # package's `%BACKUP%`, as uninstall does.
+      if isTakeOver(e): continue
       let pkg = newPackageOwner(e, driver)
       if pkg.len > 0:
         packageNow = pkg
@@ -5031,24 +5037,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     var takeOverKept = false
     for e in entries:
       if not isTakeOver(e): continue
-      var u: TakeOverUndo
-      try: u = decideTakeOverUndo(e, driver)
-      except AddonTakeOverError as ex:
-        if purpose in ["revert", "replay"] or replaying:
-          result.drift.add(e.path & ": " & ex.msg & " (left in place)")
-          takeOverKept = true
-          continue
-        raise newException(AddonCollisionError, "refusing the removal of " &
-          r.address & ": " & ex.msg)
-      takeOverPlan[entryKeyOf(e)] = u
-      if u.kind == tuRefused:
-        if purpose in ["revert", "replay"] or replaying:
-          result.drift.add(refusal(e, u).msg & " (left in place)")
-          takeOverKept = true
-          continue
-        raise refusal(e, u)
+      let plan = planTakeOverRemoval(e, driver,
+        revertOrReplay = purpose in ["revert", "replay"] or replaying)
+      if plan.keep:
+        result.drift.add(plan.drift)
+        takeOverKept = true
+        continue
+      takeOverPlan[entryKeyOf(e)] = plan.undo
       result.ledgerDiff.add("take-over-restore\t" & e.path & "\t" &
-        r.address & " (" & describe(e, u) & ")")
+        r.address & " (" & describe(e, plan.undo) & ")")
     if takeOverKept:
       keptEntries.add(entries)
       keptAddresses.incl(r.address)
@@ -6077,7 +6074,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # new generation no longer carries, so the add-on's own link now
           # dangles; that is the removal in progress, and the restore (or
           # the deletion) replaces the link.
-          if replaying and (if isTakeOver(e): takeOverAlreadyUndone(e, driver)
+          if replaying and (if isTakeOver(e):
+                              finishInterruptedUndo(e, driver) or
+                                takeOverAlreadyUndone(e, driver)
                             else: alreadyRestored(e)):
             hookRestored.add(e.path)
             continue
@@ -6093,17 +6092,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # upgraded or removed in between, a `.pacnew` edited) is left,
             # as drift, never carried out on the plan's stale reading.
             try:
-              let now = decideTakeOverUndo(e, driver)
-              let planned = takeOverPlan.getOrDefault(entryKeyOf(e))
-              if entryKeyOf(e) notin takeOverPlan or
-                  not sameDecision(planned, now):
+              let check = recheckTakeOverRemoval(e,
+                takeOverPlan.getOrDefault(entryKeyOf(e)),
+                entryKeyOf(e) in takeOverPlan, driver)
+              if check.drift.len > 0:
                 hookKept.incl(e.resource)
-                hookKeptDrift.add(e.path & ": changed after the plan (" &
-                  (if entryKeyOf(e) in takeOverPlan: describe(e, planned)
-                   else: "no plan") & " -> " & describe(e, now) &
-                  "); left in place")
+                hookKeptDrift.add(check.drift)
                 continue
-              discard applyTakeOverUndo(e, now)
+              discard applyTakeOverUndo(e, check.undo)
               hookRestored.add(e.path)
             except CatchableError as ex:
               problems.add("restoring " & e.path & ": " & ex.msg)

@@ -37,10 +37,15 @@
 ## restore); a ``.pacnew`` or ``.pacsave`` that is a symbolic link is never
 ## read or deleted through.
 ##
-## Falsifying mutation (``mutations.nim``):
+## Falsifying mutations (``mutations.nim``): ``takeover-skips-write-recheck``
+## carries out the plan's undo without deciding it again before the
+## restore; ``takeover-replay-refuses`` refuses a revert's or replay's
+## removal it cannot carry out instead of keeping the path;
 ## ``takeover-restores-recorded-bytes`` always restores the recorded
 ## bytes, so after an upgrade that changed the packaged file the path's
-## MD5 differs from ``%BACKUP%`` (``pacman -Qkk`` reports it modified).
+## MD5 differs from ``%BACKUP%``, and ``pacman -Qkk`` prints a ``backup
+## file: ... (SHA256 checksum mismatch)`` line for it (pacman counts a
+## backup file's content change as a warning, not as an altered file).
 
 import std/[os, strutils]
 
@@ -52,6 +57,8 @@ import ./fingerprint
 import ./ledger
 import ./md5_hex
 import ./mutations
+
+export AddonCollisionError
 
 const
   TakeOverCollision* = "takeOver"
@@ -247,12 +254,90 @@ proc takeOverAlreadyUndone*(e: LedgerEntry; driver: CollisionDriver): bool =
   ## A replayed switch finds the undo already done: the path holds bytes
   ## whose MD5 is the current ``%BACKUP%`` entry's, with no ``.pacnew`` of
   ## that version left beside it; or the package is gone and so are the
-  ## path and the add-on's ``.pacsave``.
+  ## path and the add-on's ``.pacsave``. Read-only; a ``.pacnew`` undo the
+  ## interrupted switch carried out but for deleting the ``.pacnew`` is
+  ## finished by ``finishInterruptedUndo``.
   if not isTakeOver(e): return false
   let o = driver.packageOwner(e.path)
   if o.package.len == 0:
     let pacsave = e.path & PacsaveSuffix
     return not (fileExists(e.path) or symlinkExists(e.path)) and
       not (regularFileBeside(pacsave) and sha256OfFile(pacsave) == e.sha256)
+  let pacnew = e.path & PacnewSuffix
   o.backup and o.backupMd5.len > 0 and regularFileBeside(e.path) and
-    md5OfFile(e.path) == o.backupMd5
+    md5OfFile(e.path) == o.backupMd5 and
+    not (regularFileBeside(pacnew) and md5OfFile(pacnew) == o.backupMd5)
+
+proc finishInterruptedUndo*(e: LedgerEntry; driver: CollisionDriver): bool =
+  ## For a replay: when the interrupted switch installed the ``.pacnew`` at
+  ## the path (its bytes there, their MD5 the current ``%BACKUP%`` entry's)
+  ## and stopped before deleting the ``.pacnew``, delete it now and return
+  ## true, so the replay counts the undo as done instead of leaving the
+  ## ``.pacnew`` for good. False, touching nothing, in every other case.
+  if not isTakeOver(e): return false
+  let o = driver.packageOwner(e.path)
+  if o.package.len == 0 or not o.backup or o.backupMd5.len == 0: return false
+  let pacnew = e.path & PacnewSuffix
+  if not (regularFileBeside(e.path) and md5OfFile(e.path) == o.backupMd5):
+    return false
+  if not (regularFileBeside(pacnew) and md5OfFile(pacnew) == o.backupMd5):
+    return false
+  discard removeLeafNoFollow(pacnew)
+  true
+
+type
+  TakeOverRemoval* = object
+    ## What a switch's removal of a taken-over path will do, decided at plan
+    ## time (``planTakeOverRemoval``).
+    undo*: TakeOverUndo   ## the undo to carry out, when ``keep`` is false
+    keep*: bool           ## left in place, still owned (a revert or replay
+                          ## whose undo is refused or cannot be read)
+    drift*: string        ## why, when ``keep``
+
+proc planTakeOverRemoval*(e: LedgerEntry; driver: CollisionDriver;
+                          revertOrReplay: bool): TakeOverRemoval =
+  ## The plan-time decision for removing taken-over ``e`` (spec §4.3.1, §13
+  ## decision 89). A refused undo, or preserved bytes that are missing or
+  ## altered, raise for an ordinary apply -- the removal is refused before
+  ## anything is written -- and keep the path, owned and reported, for a
+  ## revert or a replay, which go back whatever is in the way.
+  try:
+    result.undo = decideTakeOverUndo(e, driver)
+  except AddonTakeOverError as ex:
+    if revertOrReplay:
+      return TakeOverRemoval(keep: true, drift: e.path & ": " & ex.msg &
+        " (left in place)")
+    raise newException(AddonCollisionError, "refusing the removal of " &
+      e.resource & ": " & ex.msg)
+  if result.undo.kind == tuRefused:
+    when not mutated("takeover-replay-refuses"):
+      if revertOrReplay:
+        return TakeOverRemoval(keep: true, drift: refusal(e, result.undo).msg &
+          " (left in place)")
+    raise refusal(e, result.undo)
+
+proc recheckTakeOverRemoval*(e: LedgerEntry; planned: TakeOverUndo;
+                             havePlan: bool; driver: CollisionDriver):
+    tuple[undo: TakeOverUndo; drift: string] =
+  ## The write-time re-check, immediately before the restore: the undo is
+  ## decided again, and carried out only when it is the decision the plan
+  ## made (``sameDecision``); otherwise ``drift`` says what changed and the
+  ## path is left, owned. Raises what ``decideTakeOverUndo`` raises.
+  result.undo = decideTakeOverUndo(e, driver)
+  when mutated("takeover-skips-write-recheck"):
+    # FALSIFYING MUTATION: the plan's undo is carried out whatever the
+    # database and the files beside the path say now.
+    if havePlan:
+      result.undo = planned
+      return
+  if not havePlan or not sameDecision(planned, result.undo):
+    result.drift = e.path & ": changed after the plan (" &
+      (if havePlan: describe(e, planned) else: "no plan") & " -> " &
+      describe(e, result.undo) & "); left in place"
+
+proc keepsCopyForm*(takenOverBefore: bool; takenOverNow: bool): bool =
+  ## A taken-over backup file is always materialised as a copy -- when it is
+  ## taken over and on every later apply that updates it -- because pacman
+  ## compares its bytes with the packaged MD5 and must never find a link
+  ## into the store there, nor move one to ``.pacsave`` (spec §4.3.1).
+  takenOverBefore or takenOverNow

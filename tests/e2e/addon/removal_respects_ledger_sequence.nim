@@ -137,7 +137,7 @@ proc runRemovalSequence*(g: Guest; repro: string; step: StepFn;
     f = after
 
   # b modified by hand, then leaves the profile: drift, left in place.
-  # (A managed file is a link into the read-only store since A4, so an
+  # (A managed file is a link into the read-only store (the static tree), so an
   # editor replaces the link with a file of its own, as `sed -i` does.)
   discard g.run("rm -f " & Dir & "/b.conf && printf 'b-modified\\n' > " & Dir & "/b.conf")
   f = fingerprint()
@@ -150,7 +150,7 @@ proc runRemovalSequence*(g: Guest; repro: string; step: StepFn;
        "exit " & $a3.exitCode & "\n" & a3.stdout & a3.stderr)
   block:
     # The apply went on with the rest and committed a generation, so
-    # the static tree link moved (A4, spec §7.2); nothing else may have.
+    # the static tree link moved (spec §7.2); nothing else may have.
     let after = fingerprint()
     let same = identityReport(f, after, ["etc:/etc/repro/static"])
     step("gen3: nothing changed on the host (but the static tree link)", same.ok, same.text)

@@ -103,7 +103,6 @@ proc pacmanBackupFiles*(filesEntry: string): seq[PacmanBackupFile] =
     let path = raw[0 ..< tab]
     var md5 = raw[tab + 1 .. ^1].strip()
     if md5 == PacmanNoDigest: md5 = ""
-    else: md5 = md5.toLowerAscii()
     if path[0] == '/' or (md5.len > 0 and not isMd5Hex(md5)):
       raise newException(ValueError, "a %BACKUP% line pacman did not " &
         "write: " & raw)

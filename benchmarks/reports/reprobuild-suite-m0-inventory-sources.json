@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2789,
+    "nimTestBinaries": 2790,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 761,
     "staticallyDetectedRuntimeCompilerFlowTests": 140,
-    "testEntries": 2833
+    "testEntries": 2834
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1616,7 +1616,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1538,
+      "integration": 1539,
       "platform/destructive": 178,
       "pure unit": 761,
       "unclassified": 334
@@ -1833,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2789,
+    "nimTestBinaryCount": 2790,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2833
+    "testEntryCount": 2834
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8789,8 +8789,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_arch_takeover.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 26,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 31,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32109,6 +32109,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_arch_addon_store_placement_by_root_fs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_arch_addon_takeover_restore_rechecked",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_arch_addon_takeover_restore_rechecked.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

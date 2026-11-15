@@ -131,11 +131,42 @@ proc md5InGuest*(g: Guest; path: string): string =
   g.run("if [ -f " & path & " ] && [ ! -L " & path & " ]; then md5sum " &
     path & " | cut -d' ' -f1; else echo absent; fi").strip()
 
+proc qkkProblems*(output: string): seq[string] =
+  ## The lines of ``pacman -Qkk`` output that say a file of the package does
+  ## not match what the database records. pacman reports a backup file whose
+  ## content differs only as a ``backup file: <pkg>: <path> (SHA256 checksum
+  ## mismatch)`` line (or MD5) and still counts "0 altered files", so the
+  ## summary cannot be trusted; every ``mismatch`` line counts except
+  ## ``Modification time mismatch``, which any restore causes (the file is
+  ## rewritten) and which says nothing about its bytes. A ``missing`` or
+  ## ``warning:`` line counts too.
+  for raw in output.splitLines():
+    let line = raw.strip()
+    if line.len == 0: continue
+    let low = line.toLowerAscii()
+    if "mismatch" in low:
+      if "(modification time mismatch)" in low: continue
+      result.add(line)
+    elif "missing" in low or low.startsWith("warning:") or low.startsWith("error:"):
+      result.add(line)
+
+block qkkProblemsSelfCheck:
+  # Measured pacman 7.1 output (Arch guest, 2026-11-15): a restored file
+  # whose bytes match carries only the modification-time line; one whose
+  # bytes do not adds the checksum line under the same "0 altered files".
+  doAssert qkkProblems("backup file: p: /etc/x (Modification time mismatch)\n" &
+    "p: 3 total files, 0 altered files\n").len == 0
+  doAssert qkkProblems("backup file: p: /etc/x (Modification time mismatch)\n" &
+    "backup file: p: /etc/x (SHA256 checksum mismatch)\n" &
+    "p: 3 total files, 0 altered files\n").len == 1
+  doAssert qkkProblems("backup file: p: /etc/x (MD5 checksum mismatch)\n").len == 1
+  doAssert qkkProblems("warning: p: /etc/y (No such file or directory)\n").len == 1
+  doAssert qkkProblems("p: /etc/z (Size mismatch)\n").len == 1
+
 proc pacmanQkkClean*(g: Guest; pkg: string): tuple[ok: bool; output: string] =
   ## ``pacman -Qkk <pkg>``: every file of the package, backup files
-  ## included, matches what the database records (no "MODIFIED" or
-  ## "missing" line, exit 0).
+  ## included, matches what the database records -- exit 0 and no line
+  ## ``qkkProblems`` counts.
   let r = g.exec("pacman -Qkk " & pkg & " 2>&1")
   let said = r.stdout & r.stderr
-  (r.exitCode == 0 and "MODIFIED" notin said.toUpperAscii() and
-     "missing" notin said.toLowerAscii(), said)
+  (r.exitCode == 0 and qkkProblems(said).len == 0, said)

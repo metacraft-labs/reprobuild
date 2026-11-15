@@ -24,7 +24,7 @@
 ## killed owner's ``flock`` on the host apply lock went with it -- and change
 ## nothing (fingerprint identical, the marker still there). After ``repro
 ## system addon recover`` the uninstall completes, and the fingerprint is
-## the one taken before bootstrap (AR1's byte identity).
+## the one taken before bootstrap (the Arch byte-identity gate's comparison).
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=uninstall-skips-pending-check``,
 ## with ``REPRO_ADDON_TEST_SEAMS=1``): uninstall proceeds over the pending

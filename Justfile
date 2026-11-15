@@ -118,6 +118,11 @@ e2e_arch_addon_takeover_survives_package_upgrade:
 e2e_arch_addon_removal_respects_ledger:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_removal_respects_ledger
 
+# A take-over's restore decided again before it is carried out, and a replay
+# that keeps what it cannot restore: the seam build pauses the switch.
+e2e_arch_addon_takeover_restore_rechecked:
+    REPRO_ADDON_TEST_SEAMS=1 REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_takeover_restore_rechecked
+
 e2e_addon_bootstrap_changes_nothing_preexisting:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
 

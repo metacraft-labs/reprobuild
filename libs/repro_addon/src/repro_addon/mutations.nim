@@ -1006,6 +1006,14 @@
 ##                                            bytes recorded at take-over,
 ##                                            whatever ``%BACKUP%`` now holds
 ##                                            (spec §4.3.1's rule ignored)
+## ``takeover-skips-write-recheck``           a switch carries out a
+##                                            ``takeOver`` undo as planned,
+##                                            without deciding it again
+##                                            before the restore
+## ``takeover-replay-refuses``                a revert or replay refuses a
+##                                            ``takeOver`` removal it cannot
+##                                            carry out instead of keeping
+##                                            the path, owned
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1678,7 +1686,9 @@ const
                           # blind to %BACKUP%, and a restore that ignores
                           # the MD5 rule (takeover.nim).
                           "observer-ignores-backup",
-                          "takeover-restores-recorded-bytes"]
+                          "takeover-restores-recorded-bytes",
+                          "takeover-skips-write-recheck",
+                          "takeover-replay-refuses"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

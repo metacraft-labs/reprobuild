@@ -36,7 +36,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_arch_base.nim	nim	30
-libs/repro_addon/tests/t_addon_arch_takeover.nim	nim	26
+libs/repro_addon/tests/t_addon_arch_takeover.nim	nim	31
 libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	98
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
@@ -1308,6 +1308,7 @@ tests/e2e/addon/t_e2e_arch_addon_collision_matrix.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_preflight_is_zero_write.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_removal_respects_ledger.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_store_placement_by_root_fs.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_takeover_restore_rechecked.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_takeover_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_uninstall_refuses_pending_switch.nim	nim	1
 tests/e2e/addon/t_e2e_arch_testbed_is_pinned.nim	nim	1

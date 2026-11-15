@@ -165,11 +165,15 @@ proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
               "modified-backup"]:
       may.add(rowSteps(r))
     may.add(@["takeover: one ledger entry, takeOver of backup:avahi, its packaged bytes preserved",
-              "takeover: a copy holding the add-on's bytes",
-              "removal: every resource leaves the profile",
-              "removal: fingerprint diff == ledger delta"])
+              "takeover: a copy holding the add-on's bytes"])
+    # Nothing was taken over, so the removal and the uninstall have nothing
+    # of the mutation's to undo: they must stay green.
     Falsifier(required: @["takeover: applied"], mayBeRed: may,
-      mustRunGreen: common & @["plain-file: refused",
+      mustRunGreen: common & @["removal: every resource leaves the profile",
+        "removal: fingerprint diff == ledger delta",
+        "removal: avahi-daemon.conf holds the packaged bytes again, pacman -Qkk clean",
+        "base fingerprint after uninstall == before bootstrap",
+        "plain-file: refused",
         "plain-file: the refused apply wrote nothing",
         "package-unit: refused", "package-unit-dropin: applied"])
   of "observer-never-package-owned":

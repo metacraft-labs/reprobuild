@@ -584,8 +584,11 @@ proc observeBaseIdentity*(ledger: Ledger;
           var bp = BasePackage(name: p.name, version: p.version,
             architecture: p.architecture, status: "installed")
           if p.name in names:
-            bp.filesSha256 = sha256Hex(
-              pacmanFilesSection(readFile(p.dir / "files")).join("\n") & "\n")
+            # One entry that cannot be read leaves its digest unknown; it
+            # never stops the loop and drops the packages after it.
+            bp.filesSha256 =
+              try: sha256Hex(pacmanFilesSection(readFile(p.dir / "files")).join("\n") & "\n")
+              except IOError, OSError: "unreadable"
           status[p.name] = bp
     except IOError, OSError:
       discard
