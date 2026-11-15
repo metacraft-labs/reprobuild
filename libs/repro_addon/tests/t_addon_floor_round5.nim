@@ -300,6 +300,26 @@ suite "round 5, finding 2: sockets and other activators":
         "OnCalendar=daily\nUnit=a.service\n"))
     check refused(plain & timerRes("t.timer", "[Unit]\nConflicts=nope.service\n\n" &
       "[Timer]\nOnCalendar=daily\nUnit=other.service\n")) == ""
+    # The boot-ordering walk reads it as a unit of the profile (not as a
+    # systemd.systemUnit, whose fields it does not have: a FieldDefect).
+    # With default dependencies a timer is ordered before timers.target,
+    # which the boot re-assertion waits for, so a timer ordered after the
+    # floored service -- by its own After= or the service's Before= -- is
+    # an ordering cycle, refused for either kind of declaration alike.
+    let after = "[Unit]\nAfter=a.service\n\n[Timer]\nOnCalendar=daily\n" &
+      "Unit=other.service\n"
+    let cycle = "(a.service -> t.timer -> timers.target)"
+    check cycle in refused(plain & timerRes("t.timer", after))
+    check cycle in refused(plain & rawUnit("t.timer", after))
+    let before = "systemd.systemUnit {\n  name = \"a.service\"\n  content = \"[Unit]\n" &
+      "Description=x\nBefore=t.timer\n\n[Service]\n" & svc & "\n[Install]\n" &
+      "WantedBy=multi-user.target\n\"\n}\n"
+    let plainTimer = "[Timer]\nOnCalendar=daily\nUnit=other.service\n"
+    check cycle in refused(before & timerRes("t.timer", plainTimer))
+    check cycle in refused(before & rawUnit("t.timer", plainTimer))
+    # Without default dependencies there is no cycle, and it is accepted.
+    check refused(before & timerRes("t.timer",
+      "[Unit]\nDefaultDependencies=no\n\n" & plainTimer)) == ""
     # Controls: the same timers starting nothing floored, and a plain timer
     # of the floored service, are accepted.
     check refused(plain & timerRes("t.timer", reach & "Unit=other.service\n")) == ""

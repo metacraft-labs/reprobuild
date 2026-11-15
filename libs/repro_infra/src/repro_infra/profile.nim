@@ -1327,6 +1327,14 @@ proc ownUnitContent(r: SystemResource): string =
   of srkSystemdSystemTimer: r.stContent
   else: ""
 
+proc ownUnitEnabled(r: SystemResource): bool =
+  ## Whether the unit ``r`` installs (``ownUnitName``) is to be enabled, so
+  ## that its ``[Install]`` links pull it in.
+  case r.kind
+  of srkSystemdSystemUnit: r.suEnabled
+  of srkSystemdSystemTimer: r.stEnabled
+  else: false
+
 proc profileUnitOf(p: SystemProfile; name: string): int =
   ## The index of the profile's own unit ``name`` (or of the template an
   ## instance ``name`` is of), -1 when the profile does not define it. A
@@ -1555,12 +1563,7 @@ proc profileStartsOf*(p: SystemProfile; name: string): seq[string] =
         for t in d.value.splitWhitespace(): result.add(t)
   for r in p.resources:
     let own = ownUnitName(r)
-    let enabled =
-      case r.kind
-      of srkSystemdSystemUnit: r.suEnabled
-      of srkSystemdSystemTimer: r.stEnabled
-      else: false
-    if own.len == 0 or not enabled: continue
+    if own.len == 0 or not ownUnitEnabled(r): continue
     for d in sectionDirectives(ownUnitContent(r), ["Install"]):
       if d.key in ["WantedBy", "RequiredBy", "UpheldBy"] and
           name in d.value.splitWhitespace():
@@ -1690,7 +1693,8 @@ proc profileOrderedBeforeOf*(p: SystemProfile; name: string): seq[string] =
   let own = files.len > 0
   # Its [Install] pulls it in only when it is enabled.
   let at = profileUnitOf(p, name)
-  let enabled = at >= 0 and p.resources[at].suEnabled
+  # (``ownUnitEnabled``: the unit may be a systemd.systemTimer resource.)
+  let enabled = at >= 0 and ownUnitEnabled(p.resources[at])
   # A socket, timer or path unit of the profile with default dependencies
   # is ordered before its boot target, which ``basic.target`` -- and so the
   # re-assertion -- is ordered after (systemd.socket(5), systemd.timer(5),
@@ -1703,9 +1707,11 @@ proc profileOrderedBeforeOf*(p: SystemProfile; name: string): seq[string] =
                              (".path", "paths.target")]:
       if name.endsWith(suffix) and target notin result: result.add(target)
   for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
-        r.suName == name: continue
-    let other = unitFilesOf(p, r.suName)
+    # Every unit of the profile, a systemd.systemTimer as much as a
+    # systemd.systemUnit (``ownUnitName``).
+    let otherName = ownUnitName(r)
+    if otherName.len == 0 or otherName == name: continue
+    let other = unitFilesOf(p, otherName)
     var pulls, orderedAfter, orderedBefore = false
     for c in other:
       for d in sectionDirectives(c, ["Unit"]):
@@ -1717,14 +1723,14 @@ proc profileOrderedBeforeOf*(p: SystemProfile; name: string): seq[string] =
       for c in files:
         for d in sectionDirectives(c, ["Install"]):
           if d.key in ["WantedBy", "RequiredBy"] and
-              r.suName in d.value.splitWhitespace():
+              otherName in d.value.splitWhitespace():
             pulls = true
     if orderedAfter:
-      result.add(r.suName)
-    elif pulls and own and r.suName.endsWith(".target") and
-        not orderedBefore and r.suName notin after and
+      result.add(otherName)
+    elif pulls and own and otherName.endsWith(".target") and
+        not orderedBefore and otherName notin after and
         unitDefaultDependencies(other) and unitDefaultDependencies(files):
-      result.add(r.suName)
+      result.add(otherName)
 
 proc checkFloorBootOrdering*(p: SystemProfile) =
   ## Spec §10.1, "A floored unit's own ordering": no unit the floor orders
