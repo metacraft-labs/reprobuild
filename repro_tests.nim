@@ -15909,6 +15909,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_home_resources_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/home-rollback/t_e2e_repro_home_managed_block_removal_keeps_user_content.nim",
+    binary: "build/test-bin/t_e2e_repro_home_managed_block_removal_keeps_user_content",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_home_rollback_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_drift.nim",
     binary: "build/test-bin/t_e2e_repro_home_rollback_resource_drift",
     defines: @[],

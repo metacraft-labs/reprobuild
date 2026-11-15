@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2836,
+    "nimTestBinaries": 2837,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 771,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2883
+    "testEntries": 2884
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1637,7 +1637,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1564,
+      "integration": 1565,
       "platform/destructive": 182,
       "pure unit": 771,
       "unclassified": 343
@@ -1854,9 +1854,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2836,
+    "nimTestBinaryCount": 2837,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2883
+    "testEntryCount": 2884
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17576,7 +17576,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34976,6 +34976,24 @@
       "source": "tests/e2e/home-resources/t_integration_resource_move.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_repro_home_managed_block_removal_keeps_user_content",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-rollback/t_e2e_repro_home_managed_block_removal_keeps_user_content.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

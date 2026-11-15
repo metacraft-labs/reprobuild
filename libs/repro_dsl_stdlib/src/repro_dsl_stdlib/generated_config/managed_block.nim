@@ -9,7 +9,8 @@
 ##
 ## Updates rewrite only the bytes between the sentinels (exclusive on
 ## both ends). Removal deletes the sentinels plus the managed content,
-## leaving the rest of the host file intact.
+## leaving the rest of the host file intact; a host file left empty is
+## deleted.
 
 import std/[os, strutils]
 from repro_core/paths import extendedPath
@@ -150,7 +151,9 @@ proc updateManagedBlock*(hostFile: string; blockId: string;
 
 proc removeManagedBlock*(hostFile: string; blockId: string): bool =
   ## Remove `blockId`'s sentinels and contents. Returns true if the file
-  ## was modified.
+  ## was modified. The bytes outside the block are kept exactly as they
+  ## are now; the file is deleted only when nothing is left in it
+  ## (Generated-Configuration-Files.md §"Deletion semantics").
   if not fileExists(extendedPath(hostFile)): return false
   let prior = readFile(extendedPath(hostFile))
   let range = locateBlock(prior, blockId)
@@ -158,6 +161,9 @@ proc removeManagedBlock*(hostFile: string; blockId: string): bool =
   let newContent = prior.substr(0, range.openLineStart - 1) &
     prior.substr(range.closeLineEnd, prior.len - 1)
   if newContent == prior: return false
+  if newContent.len == 0:
+    removeFile(extendedPath(hostFile))
+    return true
   let tmpPath = hostFile & ".reprotmp." & $getCurrentProcessId()
   writeFile(extendedPath(tmpPath), newContent)
   if fileExists(extendedPath(hostFile)):

@@ -495,7 +495,7 @@ libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_sized_typed_tools.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
-libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
+libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	16
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_solver_inputs_canonical_under_random_permutations.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_solver_inputs_render_order_independent.nim	nim	13
@@ -1453,6 +1453,7 @@ tests/e2e/home-resources/t_e2e_home_resource_rollback_preserves_unrelated.nim	ni
 tests/e2e/home-resources/t_e2e_macos_user_default_restart_target.nim	nim	1
 tests/e2e/home-resources/t_integration_prevent_destroy.nim	nim	3
 tests/e2e/home-resources/t_integration_resource_move.nim	nim	3
+tests/e2e/home-rollback/t_e2e_repro_home_managed_block_removal_keeps_user_content.nim	nim	2
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_drift.nim	nim	4
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_resource_removes_and_updates_respect_drift.nim	nim	8
 tests/e2e/home-rollback/t_e2e_repro_home_rollback_restore_respects_drift.nim	nim	4
