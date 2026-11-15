@@ -45,7 +45,7 @@ class RequestRequiresWorkspaceRoot(unittest.TestCase):
         self.output.mkdir()
         self.commands = []
 
-        def record(argv, cwd):
+        def record(argv, cwd, nix_env=None):
             self.commands.append((list(argv), Path(cwd)))
             return [str(self.output)]
 

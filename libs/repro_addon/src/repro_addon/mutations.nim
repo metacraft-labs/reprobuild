@@ -1530,6 +1530,10 @@ const
                           # the activated service alone, not of every
                           # unit sharing its stem.
                           "listener-writable-own-unit-only",
+                          # an activator is classified, and judged, from
+                          # its own unit file alone: a profile drop-in's
+                          # Service= or Unit= is not read.
+                          "activator-own-file-only",
                           # a listener's covering places are compared as
                           # spelled (/var/run is not /run, no link is
                           # resolved).
@@ -1548,6 +1552,10 @@ const
                           # through its observation instance, its
                           # specifiers resolved for that instance.
                           "writable-specifier-resolved",
+                          # a writable place whose first component is a
+                          # specifier (%t/a9q/%i) is dropped, not counted
+                          # as /.
+                          "writable-leading-specifier-dropped",
                           # a listener the switch's restart of its
                           # activator makes again keeps its stale record.
                           "restarted-listener-not-rerecorded",

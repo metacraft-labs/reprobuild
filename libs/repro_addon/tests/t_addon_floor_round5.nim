@@ -10,7 +10,9 @@
 ## - sockets, timers and path units that activate a floored service
 ##   (finding 2): only network and unix-socket listeners under ``/run``, no
 ##   command line, ``Sockets=`` naming only the profile's sockets, and no
-##   command line in a drop-in onto any socket, timer or path unit.
+##   command line in a drop-in onto any socket, timer or path unit; what a
+##   trigger activates is read from its unit file and the profile's
+##   drop-ins onto it, as systemd reads it.
 ## - realtime scheduling, the reboot actions and the resource limits
 ##   (finding 3), and every property classified by name.
 ## - privileged groups by gid (finding 4).
@@ -20,7 +22,10 @@
 ## Falsifying builds (each turns its own cases red):
 ## ``floor-round5-static-off``, ``environment-files-trusted``,
 ## ``inert-families-by-pattern``, ``privileged-groups-by-name``,
-## ``start-hold-removes-directory``, ``stale-start-holds-kept``.
+## ``start-hold-removes-directory``, ``stale-start-holds-kept``,
+## ``activator-own-file-only`` (a profile drop-in's ``Service=`` or
+## ``Unit=`` not read: reprobuild-pm issue
+## 2026-11-15-floor-activator-check-ignores-a-profile-drop-in-that-sets-service).
 ##
 ## Mocks: as in ``t_addon_floor_round4``, ``systemctl show`` text written
 ## out here and stubs for the accounts and the manager's limits, because the
@@ -201,6 +206,59 @@ suite "round 5, finding 2: sockets and other activators":
     check "activates a floored service" in refused(plain & rawUnit("a.path",
       "[Path]\nPathExists=/etc/x\nMakeDirectory=yes\n"))
     check refused(plain & rawUnit("a.timer", "[Timer]\nOnCalendar=daily\n")) == ""
+
+  test "a profile drop-in that points a trigger at a floored service makes it an activator":
+    # systemd reads a socket's Service= and a timer's or path unit's Unit=
+    # from the unit file and from its drop-ins (systemd.unit(5),
+    # "Description"), so a drop-in can make a trigger start a floored
+    # service that its own file does not name (reprobuild-pm issue
+    # 2026-11-15-floor-activator-check-ignores-a-profile-drop-in-that-
+    # sets-service). b.socket's own file starts b.service, which the
+    # profile does not define; the drop-in points it at a.service.
+    let toA = dropInStanza("b.socket", "[Socket]\nService=a.service\n")
+    # The socket's own listeners are judged as an activator's.
+    check "'b.socket' activates a floored service" in refused(plain &
+      rawUnit("b.socket", "[Socket]\nListenFIFO=/run/b.fifo\n") & toA)
+    check "'b.socket' activates a floored service" in refused(plain &
+      rawUnit("b.socket", "[Socket]\nListenSpecial=/etc/b-target\n" &
+        "Service=other.service\n") & toA)
+    # The drop-in is judged as one onto an activator, not for command
+    # lines alone.
+    check "which activates a floored service" in refused(plain &
+      rawUnit("b.socket", "[Socket]\nListenStream=/run/a/b.sock\n") &
+      dropInStanza("b.socket", "[Socket]\nService=a.service\n" &
+        "ListenFIFO=/run/b.fifo\n"))
+    # A timer's and a path unit's Unit= in a drop-in, too.
+    check "'b.path' activates a floored service" in refused(plain &
+      rawUnit("b.path", "[Path]\nPathExists=/etc/x\nMakeDirectory=yes\n") &
+      dropInStanza("b.path", "[Path]\nUnit=a.service\n"))
+    # And the route to a system-state unit (§13 decision 49) is judged
+    # from it, as from any unit that activates a floored service.
+    let viaX = rawUnit("b.socket", "[Unit]\nWants=x.target\n\n" &
+      "[Socket]\nListenStream=/run/a/b.sock\n") &
+      rawUnit("x.target", "[Unit]\nWants=reboot.target\n")
+    check "'b.socket' starts reboot.target" in refused(plain & viaX & toA)
+    check refused(plain & viaX) == ""
+    # Controls: the same socket with a drop-in that names no floored
+    # service, and the same drop-in over a socket with only /run
+    # listeners, are accepted.
+    check refused(plain & rawUnit("b.socket",
+      "[Socket]\nListenFIFO=/run/b.fifo\n") &
+      dropInStanza("b.socket", "[Socket]\nService=other.service\n")) == ""
+    check refused(plain & rawUnit("b.socket",
+      "[Socket]\nListenStream=/run/a/b.sock\n") & toA) == ""
+    # The last valid Service= wins: a drop-in that points a floored
+    # service's socket elsewhere leaves it no activator.
+    check refused(plain & rawUnit("b.socket",
+      "[Socket]\nListenFIFO=/run/b.fifo\nService=a.service\n") &
+      dropInStanza("b.socket", "[Socket]\nService=other.service\n")) == ""
+    # Any unit the trigger starts being floored makes it an activator: an
+    # Accept=yes socket with a listener that cannot accept triggers both
+    # its template and its namesake (``profile.triggeredUnits``), and here
+    # only the namesake is floored.
+    check "'a.socket' activates a floored service" in refused(plain &
+      rawUnit("a.socket", "[Socket]\nAccept=yes\n" &
+        "ListenStream=/run/a/a.sock\nListenFIFO=/etc/a.fifo\n"))
 
   test "no command line in a drop-in onto any socket, timer or path unit":
     check "carries a command line" in refused(rawUnit("b.socket",
