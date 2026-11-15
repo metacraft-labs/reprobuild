@@ -42,6 +42,7 @@ import repro_peer_cache/types
 import repro_deploy_agent/secrets
 
 import ./addon_apply
+import ./uninstall
 import ./attestation
 import ./evidence
 import ./evidence_keys
@@ -154,7 +155,11 @@ proc rootEntry(path, kindHint, replaced: string): LedgerEntry =
   let st = statOwner(path)
   LedgerEntry(class: lcRoot, path: path, mode: st.mode, owner: st.owner,
               kindHint: kindHint, replaced: replaced,
-              collision: (if replaced.len > 0: "adopt" else: ""))
+              collision: (if replaced.len > 0: "adopt" else: ""),
+              # A takeover's prior value is read before the takeover
+              # (§13 decision 167): the marker says so to uninstall.
+              observation: (if replaced.len > 0: PriorCapturedBeforeTakeover
+                            else: ""))
 
 proc baseRootValue(path: string): string =
   if path == "/etc" or path.startsWith("/etc/"): etcEntryValue(path)
@@ -243,6 +248,10 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       " while the bootstrap waited for the host apply lock; nothing was " &
       "written apart from that lock (" & hostApplyLockPath() & ", outside " &
       "every add-on root). Re-run the preflight and review what changed.")
+  # A state-removal token an earlier uninstall left (§13 decision 165)
+  # belongs to that uninstall, not to this install: a later re-run must
+  # never act on it. Removed durably before anything is written.
+  clearStateRemovalToken()
   if plan.preBootstrap.roots.len > 0 and stateDir != DefaultStateDir:
     # The preflight inspected the default state directory; a bootstrap
     # into another one would leave the inspected /var/lib/repro/system
@@ -277,7 +286,14 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       if mode < 0:
         raise newException(AddonBootstrapError, "the plan lists " & p &
           " as a pre-bootstrap input, which bootstrap has no mode for")
-      entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
+      # The prior value first: rootEntry's arguments are evaluated left to
+      # right, and the takeover changes the mode and owner it records
+      # (§13 decision 167).
+      when mutated("prior-mode-captured-after-takeover"):
+        entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
+      else:
+        let before = baseRootValue(p)
+        entries.add(rootEntry(p, takeOverRootDir(p, mode), before))
   ensureSystemStateDir(stateDir)
   # Every apply's pending-switch check finds the add-on's state through
   # this, whatever --state-dir it was itself given (§7.7).
