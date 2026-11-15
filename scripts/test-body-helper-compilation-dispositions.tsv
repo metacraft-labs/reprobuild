@@ -101,6 +101,9 @@
 # 2026-11-14 added one compiler-is-subject row:
 # t_build_package_fragment_outside_provider_mode_names_the_define (a nim check
 # that must fail, naming -d:reproProviderMode).
+# 2026-11-15 added one product-api row:
+# t_dsl_body_hash_does_not_justify_fragment_reuse (two DSL recipe variants
+# compiled by the product compile, whose manifests are the assertion).
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -273,6 +276,7 @@ tests/integration/t_d6_runner_test_timeout.nim	migrate-pending	MIGRATABLE: Fixtu
 tests/integration/t_declared_daemon_ipc_trust.nim	migrate-pending	MIGRATABLE: compileC writes the fixed DaemonSource and ClientSource consts verbatim and invokes cc; compilation is fixture setup, not the assertion. Move the C helpers to declared fixture edges, then materialize copies in each non-volatile workRoot/binDir so per-case path and executable-identity checks keep their isolation.
 tests/integration/t_derived_daemon_ipc_trust.nim	migrate-pending	MIGRATABLE: compileC builds fixed DaemonSource, ClientSource and SleeperSource consts. Needs C fixture edges and per-case executable copies, including the space-containing sleeper path; process ownership and executable identity are the assertions, not compilation. Keep helper binaries outside the test-runner binary catalog.
 tests/integration/t_dev_env_artifact.nim	product-api	extractInterfaceFromModule + compileProviderBinary over a provider written per test.
+tests/integration/t_dsl_body_hash_does_not_justify_fragment_reuse.nim	product-api	extractInterfaceFromModule + compileProviderBinary over two DSL recipe variants written per test. The subject is what the PRODUCT compile emits: the two providers' manifests must carry identical body hashes while their graphs differ, so the providers have to come out of the real frontend rather than a fixture edge.
 tests/integration/t_e2e_cross_compilation_aarch64.nim	compiler-is-subject	Executes the resolved Toolchain.compile/link argv the cross adapter produced and checks the resulting ELF; skips when no aarch64 probe resolves. The argv IS the assertion.
 tests/integration/t_e2e_selectable_toolchain_fixture.nim	migrate-pending	MIGRATABLE: ProbeSrcTemplate.replace('@ROOT@', root) + nim c is byte-for-byte the shape already migrated as reprobuild.test_fixtures.variant_feature_flag_probe. @ROOT@ exists only to make the fixture's import resolve, which a checked-in probe does not need.
 tests/integration/t_every_launch_path_is_monitored.nim	migrate-pending	MIGRATABLE: FixtureSource is a fixed const (:435) written verbatim (:2440) then cc (:1317). That the fixture exists to be OBSERVED by io-mon does not make its text dynamic -- a graph-built binary is observed the same way. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.

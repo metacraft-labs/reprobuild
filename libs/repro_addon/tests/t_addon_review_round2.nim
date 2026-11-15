@@ -60,7 +60,10 @@ import repro_addon/store_custody
 
 import ./addon_evidence_fixture
 
-let root = getTempDir() / ("a11-round2-" & $getCurrentProcessId())
+# The PHYSICAL temporary directory: the add-on's no-follow writer refuses a
+# symlinked ancestor, and on macOS ``/tmp`` is a symlink to ``/private/tmp``,
+# so the logical ``getTempDir()`` would fail the suite for no finding's reason.
+let root = expandFilename(getTempDir()) / ("a11-round2-" & $getCurrentProcessId())
 removeDir(root)
 createDir(root)
 
