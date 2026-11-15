@@ -15436,6 +15436,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_home_apply_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/home-apply/t_e2e_home_apply_refuses_unrealizable_packages_before_commit.nim",
+    binary: "build/test-bin/t_e2e_home_apply_refuses_unrealizable_packages_before_commit",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_home_apply_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/home-apply/t_e2e_repro_home_add_remove_immediate.nim",
     binary: "build/test-bin/t_e2e_repro_home_add_remove_immediate",
     defines: @[],

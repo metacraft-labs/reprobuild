@@ -472,6 +472,11 @@ proc runApplyInline*(commandName: string;
     stderr.writeLine("repro home " & commandName &
       ": step 1 (load intent) failed: " & err.msg)
     return 1
+  except EApplyUnrealizablePackages as err:
+    # Refused at planning time, before anything changed: the message names
+    # every package with its reason, not the one step 7 would have reached.
+    stderr.writeLine("repro home " & commandName & ": " & err.msg)
+    return 1
   except EApplyRealizeFailed as err:
     stderr.writeLine("repro home " & commandName &
       ": step 7 (realize package " & err.packageId & " via " &
