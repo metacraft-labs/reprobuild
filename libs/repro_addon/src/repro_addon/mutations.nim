@@ -1055,6 +1055,17 @@
 ##                                            re-run rmdir a directory that
 ##                                            was a pre-bootstrap root
 ##                                            (decision 165 (b))
+## ``inputs-removed-and-restored``           the pre-bootstrap inputs under
+##                                            /var/lib/repro go with the
+##                                            state and are written back from
+##                                            memory after the ledger copy
+##                                            (decision 166)
+## ``input-mode-owner-not-restored``          an input's mode and owner are
+##                                            not put back (decision 166)
+## ``input-metadata-after-ledger-copy``       the mode and owner are put back
+##                                            after the ledger copy goes, so
+##                                            a crash between them is never
+##                                            finished (decision 166)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1905,6 +1916,9 @@ const
                           "state-removal-rerun-unwired",
                           "state-removal-token-not-required",
                           "pre-bootstrap-root-rmdir",
+                          "inputs-removed-and-restored",
+                          "input-mode-owner-not-restored",
+                          "input-metadata-after-ledger-copy",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
