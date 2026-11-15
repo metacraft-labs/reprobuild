@@ -29,6 +29,7 @@
 ## `debugfs`, `e2fsck`, `resize2fs`, `mcopy`, `mdel`, `curl` and the QEMU
 ## system emulator. A missing one is refused by name before anything runs.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, os, osproc, posix, sequtils, sets, streams,
             strutils, tables, times]
 
@@ -193,7 +194,7 @@ proc catFile(fs: Ext4; path: string): string =
   let p = uncontrolledStartProcess(tool("debugfs"),
     args = ["-R", "cat " & path, fs.spec], options = {})
   defer: p.close()
-  result = p.outputStream.readAll()
+  result = drainStream(p.outputStream)
   discard p.waitForExit()
 
 proc listDir(fs: Ext4; path: string): seq[string] =

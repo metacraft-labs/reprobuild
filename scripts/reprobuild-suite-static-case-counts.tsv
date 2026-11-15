@@ -61,7 +61,7 @@ libs/repro_addon/tests/t_addon_floor_round13.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round14.nim	nim	13
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
-libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15
+libs/repro_addon/tests/t_addon_floor_round5.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round6.nim	nim	23
 libs/repro_addon/tests/t_addon_floor_round7.nim	nim	38
 libs/repro_addon/tests/t_addon_floor_round8.nim	nim	9
@@ -351,7 +351,7 @@ libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
 libs/repro_core/tests/t_installed_prefix_anchors.nim	nim	2
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_link_target_reads_reparse_points.nim	nim	15
-libs/repro_core/tests/t_n51_drain_process_stream.nim	nim	7
+libs/repro_core/tests/t_n51_drain_process_stream.nim	nim	11
 libs/repro_core/tests/t_n51_host_tar_resolution.nim	nim	5
 libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_nix_store_references_scan.nim	nim	15

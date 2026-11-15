@@ -16913,7 +16913,8 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     id: id,
     launched: true,
     runQuotaBackend: "runquota-helper")
-  # N51 triage: LEFT AS `readAll` DELIBERATELY. This IS short-read-prone on
+  # N51 triage: LEFT AS `readAll` DELIBERATELY (a declared waiver of
+  # scripts/check_process_stream_readall.py). This IS short-read-prone on
   # Windows, but the child is the RunQuota helper — a process supervisor
   # (`repro __repro-runquota-helper`) whose own children are the build actions
   # it launched. Draining to EOF here means waiting for every descendant that
@@ -16940,7 +16941,7 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
   let helperExit = process.waitForExit()
   var helperOutput = ""
   if process.outputStream != nil:
-    helperOutput = process.outputStream.readAll()
+    helperOutput = process.outputStream.readAll() # readall-ok: see N51 note above; EOF could outlast a descendant
   if not fileExists(extendedPath(resultPath)):
     result.status = asFailed
     result.exitCode = if helperExit == 0: 1 else: helperExit
@@ -17906,7 +17907,7 @@ when not defined(windows):
             # merged) is the only first-hand account of why it did not bind.
             try:
               if helper.outputStream != nil:
-                let printed = helper.outputStream.readAll().strip()
+                let printed = drainStream(helper.outputStream).strip()
                 if printed.len > 0:
                   lastOutput = printed
             except CatchableError:
