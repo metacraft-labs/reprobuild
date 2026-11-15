@@ -1528,6 +1528,10 @@ const
                           # through its observation instance, its
                           # specifiers resolved for that instance.
                           "writable-specifier-resolved",
+                          # a writable place whose first component is a
+                          # specifier (%t/a9q/%i) is dropped, not counted
+                          # as /.
+                          "writable-leading-specifier-dropped",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
