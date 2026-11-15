@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2812,
+    "nimTestBinaries": 2814,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 765,
+    "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2858
+    "testEntries": 2861
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -31,6 +31,7 @@
       "owner": "libs/repro_addon",
       "sources": [
         "libs/repro_addon/tests/t_addon_agent_repin.nim",
+        "libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim",
         "libs/repro_addon/tests/t_addon_floor_round13.nim",
         "libs/repro_addon/tests/t_addon_floor_round8.nim",
         "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
@@ -1621,8 +1622,8 @@
       "graph-fixture": 23,
       "integration": 1551,
       "platform/destructive": 180,
-      "pure unit": 765,
-      "unclassified": 339
+      "pure unit": 766,
+      "unclassified": 341
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1836,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2812,
-    "pythonTestFileCount": 46,
-    "testEntryCount": 2858
+    "nimTestBinaryCount": 2814,
+    "pythonTestFileCount": 47,
+    "testEntryCount": 2861
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8911,7 +8912,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 29,
-      "staticCaseCount": 124,
+      "staticCaseCount": 125,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9240,6 +9241,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_floor_boot_ordering_cycle",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_floor_round10",
       "class": "unclassified",
       "classificationReason": "imports `posix`, which grants out-of-process reach",
@@ -9325,7 +9344,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round14.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 10,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13365,7 +13384,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14919,6 +14938,23 @@
       "source": "libs/repro_core/tests/t_nim_dep_scanner.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 19,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nix_configuration_env",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_nix_configuration_env.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59649,6 +59685,21 @@
       "source": "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `importlib.machinery`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_nix_daemon_runs_nix_with_the_requesting_clients_configuration.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -20,7 +20,12 @@
 ##   socket's start made is recorded for the service (finding 3; spec
 ##   §10.1, round 12), and once
 ##   the service has started outside a switch, the next apply accepts the
-##   directory it was handed;
+##   directory it was handed; that apply, which changes the running
+##   service, does not stop its socket, and neither does a refused switch
+##   that changes it while it runs, whose revert commits with the socket
+##   active and the host not pending (§11.1, the triggers of the held
+##   units; issue 2026-11-15-addon-switch-a-socket-stopped-for-a-hold-
+##   while-its-service-runs-cannot-start-again);
 ##
 ## Then once per base:
 ##
@@ -107,7 +112,9 @@
 ## revert commits over an empty hold and the unit starts),
 ## ``recreated-bound-from-main-start`` (the trees made before the main
 ## process pass), ``writable-specifier-resolved`` (the instance's link is
-## followed).
+## followed), ``triggers-of-running-units-stopped`` (the socket is stopped
+## while its service runs and cannot start again: the apply after the
+## service ran, and the refused switch's revert, fail).
 ##
 ## Also red here: ``restarted-listener-not-rerecorded`` (the record keeps
 ## the listener the socket's restart unlinked). ``start-hold-any-content``
@@ -243,10 +250,46 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("and the next apply accepts the directory it was handed" & tag,
            r.exitCode == 0, r.stdout & r.stderr & ev4)
       notPending("the socket's apply after its service ran" & tag)
+      # A refused switch that changes the socket's service while it runs
+      # (issue 2026-11-15-addon-switch-a-socket-stopped-for-a-hold-while-
+      # its-service-runs-cannot-start-again): a unit of the same switch is
+      # refused (a tree made before its first start), so the switch is
+      # reverted. Neither the switch nor its revert may stop the socket
+      # while its service runs (with Accept=no the service holds the
+      # listening descriptor, and the socket could not start again), so the
+      # revert commits, the socket is active and the host is not pending.
+      # (Whether /run/a9r-sk/sock exists is evidence only: the listener is
+      # below the service's RuntimeDirectory=, which a stop of the service
+      # removes.)
+      # Falsifier: the add-on build triggers-of-running-units-stopped.
+      discard g.run("systemctl start a9r-sk.service; rm -rf /var/lib/a9r-skbad; " &
+                    "mkdir /var/lib/a9r-skbad; touch /var/lib/a9r-skbad/theirs")
+      let before4 = g.exec("systemctl show -p ActiveState a9r-sk.service " &
+                           "a9r-sk.socket | tr '\\n' ' '").stdout.strip()
+      r = g.applyProfile(repro, "s4-" & $n, sk("s4") &
+        unitResource("a9r-skbad.service", "User=a9e\nStateDirectory=a9r-skbad\n",
+                     binary, description = "s4"))
+      let out4 = r.stdout & r.stderr
+      let after4 = g.exec("systemctl show -p ActiveState -p Result a9r-sk.socket " &
+        "a9r-sk.service | tr '\\n' ' '; test -S /run/a9r-sk/sock && echo listening").stdout.strip()
+      step("a refused switch that changes the socket's running service is " &
+           "refused for its other unit" & tag, r.exitCode != 0 and
+           "[rule:existing-tree" in out4 and "/var/lib/a9r-skbad" in out4,
+           out4 & "\nbefore: " & before4)
+      step("and its revert commits with the socket active and its " &
+           "service running" & tag,
+           before4.count("ActiveState=active") == 2 and
+           "could not be rolled back" notin out4 and
+           "Job failed" notin out4 and
+           after4.count("ActiveState=active") == 2 and
+           after4.startsWith("Result=success ActiveState=active"),
+           out4 & "\nbefore: " & before4 & "\nafter: " & after4)
+      notPending("the refused switch with the socket's service running" & tag)
       r = g.applyProfile(repro, "c-" & $n, control)
       step("back to the control" & tag, r.exitCode == 0, r.stdout & r.stderr)
       discard g.run("systemctl stop 'a9r-t@*' a9r-sk.socket a9r-sk.service 2>/dev/null; " &
-                    "systemctl reset-failed 'a9r-*' 2>/dev/null; rm -rf /run/a9r-sk; true")
+                    "systemctl reset-failed 'a9r-*' 2>/dev/null; rm -rf /run/a9r-sk " &
+                    "/var/lib/a9r-skbad; true")
     record["evidence"] = evidences
     # A stopped unit (spec §10.1 round 12, "A stopped unit's
     # directory"), and a failed apply's revert ("A revert does not refuse

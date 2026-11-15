@@ -22,7 +22,10 @@
 ## add-on's tree or at the existing ``/run/systemd``, a system-state target
 ## reached through a unit of the profile, an isolating job mode, an
 ## activator socket with ``Mark=``; §13 decision 55: ``Conflicts=`` naming a
-## base service). Each is
+## base service; spec §10.1 "A floored unit's own ordering": a unit ordered
+## before the boot re-assertion, which decision 144 orders it after,
+## directly, through ``sysinit.target`` and through a base unit before it).
+## Each is
 ## applied by an operator on a fresh add-on host. A case passes when the
 ## apply is refused and the unit never started, or -- for a writable place
 ## the floor now covers -- when the unit runs and systemd shows it holding
@@ -251,6 +254,20 @@ proc cases(binary, prefix: string): seq[Case] =
     # (a base service that is harmless to stop, if a build lets it through).
     Case(name: "a9e-conflicts.service", rule: "conflicts", service: "",
          unitLines: "Conflicts=systemd-timesyncd.service\n"),
+    # Spec §10.1, "A floored unit's own ordering" (issue 2026-11-15): a
+    # unit the floor orders after the boot re-assertion and that is also
+    # ordered before it is an ordering cycle at every boot. The issue's two
+    # profiles (Before= the re-assertion; DefaultDependencies=no and
+    # Before=sysinit.target), and a route only systemd's report shows:
+    # Before= a base unit that is itself before sysinit.target. A build
+    # that lets them through changes nothing until the next boot.
+    Case(name: "a9e-bootcyc.service", rule: "boot-ordering", service: "",
+         unitLines: "Before=repro-addon-reassert.service\n"),
+    Case(name: "a9e-bootsys.service", rule: "boot-ordering", service: "",
+         unitLines: "DefaultDependencies=no\nBefore=sysinit.target\n"),
+    Case(name: "a9e-bootbase.service", rule: "boot-ordering", service: "",
+         unitLines: "DefaultDependencies=no\n" &
+                    "Before=systemd-tmpfiles-setup.service\n"),
     # Review round 8: a profile target the unit reaches, conflicting with a
     # base service (decision 55, the reviewer's open question); directories
     # inside other software's trees (finding 1). Last, because a build that
