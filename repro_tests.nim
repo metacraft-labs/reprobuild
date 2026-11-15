@@ -6790,6 +6790,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_multi_output_realization_id_covers_modes_and_links.nim",
+    binary: "build/test-bin/t_multi_output_realization_id_covers_modes_and_links",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_local_store_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim",
     binary: "build/test-bin/t_newest_alias_and_interned_records",
     defines: @[],
@@ -29241,6 +29252,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_o757f6dd4_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_install_mirror_realization_id_covers_modes_and_links.nim",
+    binary: "build/test-bin/t_install_mirror_realization_id_covers_modes_and_links",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g02",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_install_mirror_rebuild_after_hashed_publish.nim",
     binary: "build/test-bin/t_install_mirror_rebuild_after_hashed_publish",
     defines: @[],
@@ -29777,7 +29799,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15p_1_6_share_only_lib_cmake.nim",
@@ -30415,7 +30437,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_nonredistributable_publish_gate.nim",
