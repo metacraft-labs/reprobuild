@@ -12242,7 +12242,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14936,8 +14936,8 @@
       "owner": "libs/repro_core",
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_nix_store_roots_large_closure.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
