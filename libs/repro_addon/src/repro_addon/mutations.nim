@@ -1552,6 +1552,11 @@ const
                           # specifier (%t/a9q/%i) is dropped, not counted
                           # as /.
                           "writable-leading-specifier-dropped",
+                          # a listener the switch's restart of its
+                          # activator makes again keeps its stale record.
+                          "restarted-listener-not-rerecorded",
+                          # a start hold is the add-on's by its name alone.
+                          "start-hold-any-content",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

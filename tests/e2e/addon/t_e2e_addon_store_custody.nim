@@ -550,6 +550,25 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("a third object is left aside in the store, and the sink stops " &
        "acknowledging again", leave3.exitCode == 0, leave3.stderr)
   sink.revoke(host)
+  # §13 decision 148, the reviewer's IE: a run that authorises a discard
+  # and stops with an evidence entry still on disk. It writes its intent and
+  # no marker, so no later run may complete that intent (the check of every
+  # intent at the end).
+  let immIE = g.exec("chattr +i " & quoteShell(entryFile))
+  let unIE = g.exec(repro & " system addon uninstall --keep-store " &
+                    "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
+  let saidIE = unIE.stdout & unIE.stderr
+  record["uninstallStopsWithIntent"] = %saidIE
+  step("a run that authorises the discard and stops with an evidence entry " &
+       "on disk writes its intent and no completion (decision 148's IE)",
+       immIE.exitCode == 0 and unIE.exitCode != 0 and
+         "the signed intent record is " in saidIE and
+         "the discard did NOT complete" in saidIE and
+         g.exec("test -d " & quoteShell(entry)).exitCode == 0,
+       saidIE)
+  let unimmIE = g.exec("chattr -i " & quoteShell(entryFile))
+  step("that cause is cleared", unimmIE.exitCode == 0,
+       unimmIE.stdout & unimmIE.stderr)
 
   # Decision 62, the explicit recorded override: uninstall discards anyway,
   # after a signed local record of every object discarded unshipped, which
@@ -683,7 +702,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let intents = g.exec("ls /var/log/repro-addon/*-discard-intent.json")
     .stdout.strip().splitLines()
   var verdicts = ""
-  var allRight = intents.len >= 3 and recordPath in intents
+  var allRight = intents.len >= 3 and recordPath in intents  # I0, IE, I4
   for it in intents:
     let v = g.exec(repro & " system addon verify-discard-record " &
       quoteShell(it) & " --key " & quoteShell(bs.attestationKey))
