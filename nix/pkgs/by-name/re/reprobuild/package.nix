@@ -341,6 +341,16 @@ stdenv.mkDerivation (finalAttrs: {
     # named, so the reference scan missed it and the cached package failed
     # on every other machine (`dyld: Library not loaded: …-openssl-3.4.3`).
     OPENSSL_LIBDIR = "${openssl.out}/lib";
+    # The same holds for the two libraries `repro` dlopen()s by leaf name.
+    # `scripts/build_apps.sh` turns these prefixes into link-time rpaths, and
+    # unset it falls back to the first `/nix/store/*-clingo-*` and to
+    # Homebrew's zstd: darwin builds are not sandboxed, so which one wins
+    # depended on the builder (a second clingo outside the closure; two
+    # OpenSSLs and Homebrew rpaths in one process). Both scripts now refuse
+    # to build here without them, and `scripts/audit_macho_runtime.sh` rejects
+    # any installed LC_RPATH outside the closure.
+    ZSTD_PREFIX = "${zstd.out}";
+    CLINGO_PREFIX = "${clingo}";
     SQLITE_PREFIX = "${sqlite.out}";
     XXHASH_PREFIX = "${xxhash}";
   };

@@ -2110,13 +2110,13 @@ test "incomplete name" and:
                     macho.read_text(encoding="utf-8"),
                 )
             ),
-            # 53, not 50: 2af81ac9 adds three cases for the interpreted
-            # Darwin helper principal, so the host file's own count is 18.
-            53,
+            # 55, not 53: two cases reject an LC_RPATH outside the package
+            # closure, so the host file's own count is 20.
+            55,
         )
         self.assertEqual(
             by_source[macho.relative_to(REPO_ROOT).as_posix()]["sourceCaseCount"],
-            18,
+            20,
         )
 
         nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)

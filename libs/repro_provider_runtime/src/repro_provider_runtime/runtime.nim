@@ -534,18 +534,75 @@ proc fileReadInput*(path: string): GraphEvaluationInput =
   GraphEvaluationInput(kind: gevFileRead, identity: path,
     digest: fileContentDigest(path))
 
+proc providerSourceInput*(providerArtifactId, binaryDigest: string):
+    GraphEvaluationInput =
+  ## The record of WHICH PROVIDER produced a fragment: its artifact id, and
+  ## the content digest of the binary that ran (the digest
+  ## ``fileReadInput`` computes for that binary).
+  ##
+  ## ``executePlan`` adds one to every fragment it stores -- the root and
+  ## every child -- and ``providerSnapshotBinaryFresh`` refuses a snapshot
+  ## in which any fragment's record names a different provider or lacks
+  ## one. That is what makes "a stored fragment is reused only when it was
+  ## produced by the current provider source" a property of the stored data
+  ## rather than of the order the refresh happens to check things in.
+  ##
+  ## An unchanged entry point id and body hash NEVER justify keeping a
+  ## fragment across a provider change by themselves. The body hashes the
+  ## DSL ships are not closure-complete: the project root's is the constant
+  ## ``<package>.build.v1`` (``runtime_provider.nim``), and a ``foreach``
+  ## body's is a digest of its untyped syntax (``liftForeachStatements`` in
+  ## ``macros_b.nim``), which covers no callee, no package-scope state, no
+  ## global and not the compiler. A change to any of those leaves the hash
+  ## as it was and the graph it produces different.
+  GraphEvaluationInput(kind: gevProviderSource, identity: providerArtifactId,
+    digest: binaryDigest)
+
 proc providerSnapshotBinaryFresh*(snapshot: ProviderGraphSnapshot;
                                   binaryPath: string): bool =
-  ## Legacy snapshots have no binary binding and must be evaluated once.
+  ## Whether ``snapshot`` was produced, fragment by fragment, by the provider
+  ## at ``binaryPath``: the ONE freshness predicate over the provider that
+  ## both the refresh (``refreshProviderGraph``) and the CLI's cached
+  ## snapshot reads apply before serving a stored fragment.
+  ##
+  ## Two conditions, both required:
+  ##
+  ## * The binary binding: the snapshot holds a ``gevFileRead`` input on
+  ##   ``binaryPath`` (the root fragment carries it), and every such input
+  ##   matches the binary's current content.
+  ## * The provider source: EVERY fragment records a ``gevProviderSource``
+  ##   (``providerSourceInput``), and every such record names the
+  ##   snapshot's ``providerArtifactId`` and the binary's current digest. A
+  ##   child fragment carries no other trace of the provider that produced
+  ##   it, so without this a child kept from an earlier provider would be
+  ##   served as current whenever the root's binding happened to be fresh.
+  ##
+  ## A snapshot failing either is not reused at all: the refresh then runs
+  ## the root and every child again. That includes a LEGACY snapshot,
+  ## written before the record existed, which is therefore evaluated once.
   let digest = fileContentDigest(binaryPath)
-  if digest == "missing":
+  if digest == "missing" or snapshot.fragments.len == 0:
     return false
+  var bound = false
   for fragment in snapshot.fragments:
+    var sourced = false
     for input in fragment.evaluationInputs:
-      if input.kind == gevFileRead and input.identity == binaryPath:
-        if input.digest != digest:
+      case input.kind
+      of gevFileRead:
+        if input.identity == binaryPath:
+          if input.digest != digest:
+            return false
+          bound = true
+      of gevProviderSource:
+        if input.identity != snapshot.providerArtifactId or
+            input.digest != digest:
           return false
-        result = true
+        sourced = true
+      else:
+        discard
+    if not sourced:
+      return false
+  bound
 
 proc requireUnchangedProviderBinary(input: GraphEvaluationInput) =
   if fileContentDigest(input.identity) != input.digest:
@@ -892,11 +949,34 @@ proc executePlan(config: RefreshConfig; provider: ProviderExecutionConfig;
     arguments: plan.arguments,
     reason: plan.reason))
   var fragment = response.fragment
+  # Which provider produced this fragment is the ENGINE's record, not the
+  # provider's claim: drop any provider-source input the response carried,
+  # so every stored fragment holds exactly the one written below.
+  var inputs: seq[GraphEvaluationInput] = @[]
+  for input in fragment.evaluationInputs:
+    if input.kind != gevProviderSource:
+      inputs.add(input)
+  # Every fragment, root and child, records the provider source that
+  # produced it; ``providerSnapshotBinaryFresh`` refuses to reuse any
+  # fragment whose record is not the current provider's. An unchanged entry
+  # point id / body hash is never enough on its own (see
+  # ``providerSourceInput`` for why).
+  inputs.add(providerSourceInput(config.providerArtifactId, binaryInput.digest))
   if plan.entryPointId == config.rootEntryPointId:
     # A monitored recompile may change the binary without changing the
     # protocol's textual source identity. Bind its graph to the actual code.
-    fragment.evaluationInputs.add(binaryInput)
-    fragment.fragmentDigest = computeGraphFragmentDigest(fragment)
+    inputs.add(binaryInput)
+  fragment.evaluationInputs = inputs
+  # The fragment digest is over the fragment's CONTENT (nodes, edges,
+  # effects, children: ``encodeFragmentForDigest``), not its evaluation
+  # inputs, so the records added above leave it unchanged. That is
+  # deliberate. Reuse is governed by the recorded provider source; the
+  # digest is what ``recordReplacement`` compares for early cutoff, and a
+  # new provider that reproduces a child's content exactly must still cut
+  # off downstream work. Recomputed anyway so the stored digest is, by
+  # construction, the one ``computeGraphFragmentDigest`` gives for the
+  # stored fragment.
+  fragment.fragmentDigest = computeGraphFragmentDigest(fragment)
   result = storedFragmentFrom(fragment, config.providerArtifactId,
     config.lockSliceId, config.activity)
   applyStoredFragment(snapshot, report, result)
@@ -942,33 +1022,6 @@ proc runRootAndChildren(config: RefreshConfig; provider: ProviderExecutionConfig
       namespace: child.namespace,
       reason: girNoPriorFragment))
 
-proc detectBodyHashChanges(config: RefreshConfig; manifest: ProviderManifest;
-                           snapshot: var ProviderGraphSnapshot;
-                           report: var ProviderRefreshReport;
-                           plans: var seq[InvocationPlan];
-                           planKeys: var HashSet[string];
-                           rootNeedsRerun: var bool) =
-  var i = 0
-  while i < snapshot.fragments.len:
-    let fragment = snapshot.fragments[i]
-    let descriptor = currentDescriptor(manifest, fragment.entryPointId)
-    if not descriptor.found:
-      if fragment.entryPointId == config.rootEntryPointId:
-        raiseRuntime("stored root entry point is absent from provider manifest")
-      pruneFragmentAt(snapshot, report, i)
-      continue
-    if descriptor.descriptor.bodyHash != fragment.entryPointBodyHash:
-      if fragment.entryPointId == config.rootEntryPointId:
-        rootNeedsRerun = true
-      else:
-        enqueue(plans, planKeys, InvocationPlan(
-          entryPointId: fragment.entryPointId,
-          entryPointBodyHash: descriptor.descriptor.bodyHash,
-          arguments: fragment.arguments,
-          namespace: fragment.namespace,
-          reason: girEntryPointBodyChanged))
-    inc i
-
 proc detectEvaluationInputChanges(manifest: ProviderManifest;
                                   snapshot: ProviderGraphSnapshot;
                                   plans: var seq[InvocationPlan];
@@ -981,6 +1034,13 @@ proc detectEvaluationInputChanges(manifest: ProviderManifest;
         if fileContentDigest(input.identity) != input.digest:
           changed = true
       of gevDirectoryEnumeration:
+        # Membership changes are handled by ``handleDirectoryChanges``.
+        discard
+      of gevProviderSource:
+        # Not re-checked per fragment: ``refreshProviderGraph`` reaches this
+        # pass only for a snapshot ``providerSnapshotBinaryFresh`` accepted,
+        # which already requires every fragment's record to be the current
+        # provider's. A snapshot that fails it is not reused at all.
         discard
       else:
         discard
@@ -995,6 +1055,22 @@ proc detectEvaluationInputChanges(manifest: ProviderManifest;
           reason: girEvaluationInputChanged))
 
 proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
+  ## Bring the persisted provider-graph snapshot up to date and return it.
+  ##
+  ## The reuse rule: a stored fragment is reused only when it was produced
+  ## by the CURRENT provider source -- the snapshot's artifact id is this
+  ## config's, and ``providerSnapshotBinaryFresh`` finds every fragment's
+  ## recorded ``gevProviderSource`` to be this binary. Then only the
+  ## fragments whose own evaluation inputs (files read, directory
+  ## membership) changed are re-invoked. Otherwise the root and every child
+  ## are run again and the old snapshot is consulted only to report what was
+  ## replaced, cut off or pruned.
+  ##
+  ## There is deliberately no third arm that keeps fragments across a
+  ## provider change because their entry point id and body hash are
+  ## unchanged. The body hashes the DSL ships are not closure-complete (see
+  ## ``providerSourceInput``), so such an arm would serve a stale graph
+  ## after, for example, a change to a helper proc or a package-scope flag.
   # Before anything is spawned or read: a refresh with no project root
   # cannot produce a usable graph, and every plan below inherits this
   # value.

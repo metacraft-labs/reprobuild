@@ -19,6 +19,7 @@ import repro_test_support/reasoned_skip
 
 import repro_home_generations
 import repro_local_store
+import repro_tool_profiles/scoop_removal
 
 import ../scoop/scoop_sandbox
 
@@ -183,5 +184,16 @@ else:
       # is reclaimed, so the line shows zero.
       check output.contains("apply: eager gc reclaimed 0 prefixes (ranAt ")
       check dirExists(storeRoot / "gc" / "pending-deletion")
+
+      # Install provenance (Scoop-Catalog-Adapter.md § Install Provenance):
+      # `populateScoopApp` pre-positioned the version directory, so the
+      # apply reused it as a cache-hit and ran no `scoop install`. The
+      # version is adopted, and the store's install ledger must not claim
+      # it: `--uninstall-from-scoop` may remove only what Reprobuild
+      # installed.
+      check not scoopVersionInstalledByReprobuild(verifyStore, sandbox.root,
+        fixture.name, fixture.version)
+      check verifyStore.recordedScoopInstalls(sandbox.root,
+        fixture.name).len == 0
 
       discard cmdLauncher  # silence unused-binding on copy-fallback hosts

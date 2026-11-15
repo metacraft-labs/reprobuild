@@ -50,6 +50,12 @@ type
     homeDir*: string                   ## "" -> getHomeDir()
     targetGenerationId*: string        ## "" -> "the immediately previous"
     acceptOverwrite*: bool
+    uninstallFromScoop*: bool          ## `--uninstall-from-scoop`: remove
+                                       ## from Scoop the Scoop apps the
+                                       ## target generation drops (only
+                                       ## the versions Reprobuild
+                                       ## installed, only when unheld).
+                                       ## false leaves Scoop untouched.
     activationTimestamp*: int64        ## 0 -> getTime().toUnix
 
   RollbackOutcome* = object
@@ -864,20 +870,25 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
             op.targetRecord)
         else: discard
         inc result.launcherOpsApplied
-      # Scoop packages (Scoop-Catalog-Adapter.md § Removal): uninstall any
-      # Scoop package owned by the current generation that is not in the
-      # target generation's Scoop package set.
-      if hcPackages in ownedConcernsOf(tgt.manifest):
+      # Scoop packages (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed
+      # by Store GC Roots): a rollback leaves every Scoop install in place
+      # unless it was given `--uninstall-from-scoop`. With it, a Scoop app
+      # the current generation records and the target does not is removed
+      # by the same policy the apply uses: only the versions Reprobuild
+      # installed, only when no non-profile root holds any prefix of it.
+      if opts.uninstallFromScoop and
+          hcPackages in ownedConcernsOf(tgt.manifest):
         var targetScoopApps: HashSet[string]
         for rp in tgt.manifest.realizedPackages:
           let sc = recordedScoopApp(rp)
           if sc.ok and sc.app.len > 0:
             targetScoopApps.incl(sc.app)
+        var handled: HashSet[string]
         for rp in cur.manifest.realizedPackages:
           let sc = recordedScoopApp(rp)
-          if sc.ok and sc.app notin targetScoopApps:
-            if heldByNonProfileRoot(store, rp.realizedPrefixId).len == 0:
-              uninstallScoopRecord(sc.app)
+          if sc.ok and sc.app notin targetScoopApps and
+              not handled.containsOrIncl(sc.app):
+            executeScoopRemoval(store, planDroppedScoopRecord(store, rp, true))
       # M68 resources.
       for op in plan.resourceOps:
         if removesNothingOwned(op):
