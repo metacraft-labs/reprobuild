@@ -68284,7 +68284,7 @@ type
   GatewayConfig* = object
     ## The daemon-owned configuration the gateway bare repo carries: where the
     ## lock a certificate is checked against lives, the registered-keys
-    ## (allowed-signers) store, and the real upstream the ``post-receive``
+    ## (allowed-signers) store, and the real upstream the ``pre-receive``
     ## forwards a verified push to. It is written by ``wirePushGateway`` and
     ## read by the hooks.
     ##
@@ -68313,7 +68313,8 @@ type
       ## ``pre-receive`` reads it to verify each cert's signature.
     upstreamUrl*: string
       ## The real upstream (a second bare repo standing in for GitHub) the
-      ## ``post-receive`` forwards the push to on success.
+      ## ``pre-receive`` forwards an accepted push to, before the gateway's
+      ## own refs move (so an upstream refusal rejects the push).
     # TC-8c (operator decision D12): there is no certificate-store setting.
     # The gateway reads certificates ONLY from the notes that arrive with the
     # push; its former read of ``.repro/workspace/certificates`` is gone and
@@ -68460,8 +68461,9 @@ proc wirePushGateway*(gitBin, repoPath, gatewayBareDir, upstreamUrl: string;
   ## upstream. Concretely:
   ##   1. ``git init --bare`` the gateway if absent.
   ##   2. Install the gateway's ``pre-receive`` + ``post-receive`` hooks.
-  ##   3. Write the daemon-owned ``GatewayConfig`` (policy + lock + registered
-  ##      keys + the real upstream to forward to) under the bare dir.
+  ##   3. Write the daemon-owned ``GatewayConfig`` (lock records dir +
+  ##      registered keys + the real upstream to forward to; no policy, TC-9d)
+  ##      under the bare dir.
   ##   4. Set ``remote.<remoteName>.pushurl`` of ``repoPath`` to the gateway bare,
   ##      while ``remote.<remoteName>.url`` (FETCH) stays the real upstream — so the
   ##      developer still fetches from upstream but PUSHES through the gateway.
@@ -105420,8 +105422,9 @@ proc runLegacyCommand(programName: string; args: seq[string];
   if programName == "repro" and args.len > 0 and args[0] == "gateway":
     # TC-6 — the receiving-side push gateway. The bare gateway repo's
     # ``pre-receive`` / ``post-receive`` hooks invoke ``repro gateway
-    # <phase>`` so the AUTHORITATIVE certificate verify (pre-receive) and the
-    # forward-to-upstream (post-receive) live here, not in shell. This is the
+    # <phase>`` so the AUTHORITATIVE certificate verify and the
+    # forward-to-upstream (both pre-receive; post-receive does nothing) live
+    # here, not in shell. This is the
     # ``--no-verify``-proof enforcement point (Test-Certificates.md
     # §"Enforcement").
     try:
