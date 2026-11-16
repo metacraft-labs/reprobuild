@@ -100,7 +100,7 @@
 ## file (a failure of the
 ## file system cannot be produced on demand). Nothing else.
 
-import std/[json, os, sequtils, strutils, times, unittest]
+import std/[json, os, posix, sequtils, strutils, times, unittest]
 
 import repro_addon/attestation
 import repro_addon/cli
@@ -671,6 +671,34 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
       check text.startsWith("completing the discard an earlier uninstall")
       check text.endsWith(hint)
       check "was authorised;" notin text
+
+suite "A11 code review round 18: the records' directory is never a link's target":
+  test "a link planted in the records' directory's place is refused, its target untouched":
+    # Falsifier record-dir-link-followed. Ubuntu's /var/log is
+    # root:syslog 0775: a group member can put a link where
+    # /var/log/repro-addon goes. The gate must neither chmod the link's
+    # target nor write the signed records into it.
+    let name = "linkdir"
+    let key = root / name / "agent" / "attestation.key"
+    createDir(parentDir(key))
+    discard ensureAttestationKey(key)
+    let site = scratchSite(name, key)
+    discard leaveAside(site, "1-a")
+    let victim = root / name / "victim"
+    createDir(victim)
+    setFilePermissions(victim, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    createSymlink(victim, root / name / "log")
+    let gate = storeEvidenceGate(site, override, notAcknowledged,
+                                 overrideDir = root / name / "log")
+    checkpoint $gate.errors
+    check gate.errors.len > 0 and gate.overrideRecord.len == 0
+    var n = 0
+    for _ in walkDir(victim): inc n
+    check n == 0
+    var st: Stat
+    check stat(victim.cstring, st) == 0 and (int(st.st_mode) and 0o7777) == 0o755
+    check symlinkExists(root / name / "log")
 
 suite "A11 code review round 12: §13 decision 56, amended":
   test "18: records no run can ship are never waited for":

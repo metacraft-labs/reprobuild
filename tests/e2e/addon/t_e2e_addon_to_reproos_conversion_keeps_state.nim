@@ -649,6 +649,13 @@ const
           "/var/lib/a13-r11/%n.ran'\n",
         enabled = false,
         address = "r11TimerSvc")"""
+  R12EssResource = """
+      # Decision 177 (A13 review round 11): a drop-in that makes an
+      # essential unit, a console getty, require a unit the live check
+      # judges. The apply must be refused before it writes anything.
+      systemdSystemDropIn(unit = "getty@tty6.service", name = "a13-ess",
+        content = "[Unit]\nRequires=eth-r10-sock.service\nAfter=eth-r10-sock.service\n",
+        address = "r12Ess")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -1072,9 +1079,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
       ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
       R10Resources & R11Resources))
+    # The next generation with one profile drop-in that makes a console
+    # getty require a judged unit (decision 177's essential-unit case).
+    writeFile(work / "system_ess.nim", src0.replace(anchor, anchor &
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources & R11Resources & R12EssResource))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
-    for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
+    for f in ["system.nim", "system_next.nim", "system_ess.nim", PinsModule,
+              "home.nim"]:
       nw.copyTo(work / f, RefDir / f)
     let env = ReidentifyPrefix
     putReferenceSecrets(nw, env & eng & " system secret put", jwt, adminToken,
@@ -1462,34 +1475,6 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "a refused unit stays held with it, not active, and the apply " &
            "says why", ureqReported and ureqHeld and ureqActive != "active",
            o & "\nheld: " & $ureqHeld & " active: " & ureqActive)
-    # Decision 171 as the owner decided it in A13 review round 11: an
-    # essential unit (here a console getty, through a profile drop-in that
-    # makes it require a judged unit) would be held, so the apply is
-    # refused before it writes anything. Falsifier: the engine build
-    # essential-requirers-held.
-    block:
-      let ess = "      systemdSystemDropIn(unit = \"getty@tty6.service\", " &
-        "name = \"a13-ess\",\n        content = \"[Unit]\\nRequires=" &
-        "eth-r10-gen.service\\nAfter=eth-r10-gen.service\\n\", address = " &
-        "\"r12Ess\")\n"
-      let pf = probeFile("r12ess")
-      writeFile(work / pf, probeProfile("r12ess",
-        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & ess))
-      nw.copyTo(work / pf, RefDir / pf)
-      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
-        pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
-      let o = r.stdout & r.stderr
-      let refusedEss = "getty@tty6.service would be held" in o
-      let written = nw.exec("ls /etc/systemd/system/getty@tty6.service.d 2>&1").stdout
-      let dropInWritten = "a13-ess" in written
-      discard nw.run("rm -rf /etc/systemd/system/getty@tty6.service.d " &
-        "/run/systemd/system/getty@tty6.service.d; systemctl daemon-reload")
-      record["decisionEssential"] = %*{"exit": r.exitCode,
-        "refused": refusedEss, "dropInWritten": dropInWritten}
-      step("decision 171: an apply in which an essential requirer would be held " &
-           "(a console getty that requires a judged unit) is refused before " &
-           "it writes anything", r.exitCode != 0 and refusedEss and
-           not dropInWritten, o & "\n" & written)
     # A stored plan made now, before install-unit: no requirement is due
     # yet, so the plan has none (finding 4; applied after the restore).
     let planFile = probeFile("r5plan")
@@ -1849,7 +1834,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # -- and keep the record until the trigger is up. Falsifier: the engine
     # build live-check-restart-before-stale-holds-cleared.
     block:
-      discard nw.run("systemctl stop " & R11Socket & "; mkdir -p " &
+      discard nw.run("systemctl stop " & R11Socket & " " & R11SocketSvc &
+        "; mkdir -p " &
         "/run/systemd/system/" & R11Socket & ".d && printf '[Unit]\\n" &
         "ConditionPathExists=!/\\n' > /run/systemd/system/" & R11Socket &
         ".d/zz-repro-carried-check-hold.conf && printf '" & R11Socket &
@@ -1872,6 +1858,33 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "it starts the triggers that apply left on record, and keeps the " &
            "record until they are up", h1Ok, h1Apply.stdout & h1Apply.stderr &
            "\nactive: " & h1Active & "\nrecord: " & h1Record & "\nhold: " & h1Hold)
+    # Decision 177 (A13 review round 11): with carried state restored, an
+    # apply of the next generation plus a drop-in that makes a console getty
+    # require a judged unit would hold an essential unit, so it is refused
+    # before it writes anything -- by that refusal and no other (its text,
+    # and the absence of every other refusal the apply reports). Falsifier:
+    # the engine build essential-requirers-held.
+    block:
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_ess.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let essText = "getty@tty6.service would be held for the carried-state check"
+      let otherRefusal = "carried state is not restored yet" in o or
+        "carried state's owners would not match" in o or
+        "ECarriedStatePending" in o.replace("ECarriedStatePending: getty@tty6.service would be held", "")
+      let refusedEss = r.exitCode != 0 and essText in o and not otherRefusal
+      let written = nw.exec("ls /etc/systemd/system/getty@tty6.service.d 2>&1").stdout
+      let dropInWritten = "a13-ess" in written
+      discard nw.run("rm -rf /etc/systemd/system/getty@tty6.service.d " &
+        "/run/systemd/system/getty@tty6.service.d; systemctl daemon-reload")
+      record["decisionEssential"] = %*{"exit": r.exitCode,
+        "refused": refusedEss, "essentialRefusalText": essText in o,
+        "otherRefusal": otherRefusal, "dropInWritten": dropInWritten}
+      step("decision 171: an apply in which an essential requirer would be held " &
+           "(a console getty that requires a judged unit) is refused before " &
+           "it writes anything", refusedEss and not dropInWritten,
+           o & "\n" & written)
     # Decision 151 with the socket's service running and connections
     # arriving during the apply (the common case): a trigger whose unit runs
     # cannot fire at the hold and is left alone -- with Accept=no the

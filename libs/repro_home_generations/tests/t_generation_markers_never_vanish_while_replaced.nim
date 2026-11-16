@@ -12,8 +12,10 @@
 ## The test replaces each marker many times while a second thread keeps
 ## checking that it exists. A remove-then-create writer is caught by the
 ## observer within a few hundred replacements; an atomic rename is never
-## caught. It also checks that no temporary file is left behind, and that
-## the last write is the one in place.
+## caught. It also checks that no temporary file is left behind, that the
+## last write is the one in place, and that the temporary file of a write
+## that died before its rename is swept by the next write once it is too old
+## to belong to a write in progress, while a fresh one is kept.
 ##
 ## No mocks: it drives the library's production writers against the real
 ## filesystem in a scratch state directory.
@@ -21,7 +23,7 @@
 ## Recorded as reprobuild-pm issue
 ## `issues/2026-11-12-binary-content-is-regenerable-conflicts-with-binary-state-that-is-authoritative.md`.
 
-import std/[os, unittest, atomics, strutils]
+import std/[os, unittest, atomics, strutils, times]
 from repro_core/paths import extendedPath
 
 import repro_home_generations
@@ -111,3 +113,32 @@ suite "home generation markers are replaced atomically":
     check readPointerFile(pointer).activationTimestamp ==
       1700000000'i64 + int64(Replacements)
     check leftoverTemps(dir).len == 0
+
+  test "a crashed write's temporary file is swept by the next write":
+    let stateDir = absolutePath(ScratchRoot / "sweep")
+    resetDir(stateDir)
+    createDir(extendedPath(generationDir(stateDir, "gen-a")))
+    let current = currentPath(stateDir)
+    let pointer = generationDir(stateDir, "gen-a") / PointerFileName
+    # What a writer killed between creating its temporary file and renaming
+    # it leaves behind, named as `repro_core/durable_replace` names them.
+    var stale, fresh: seq[string]
+    for marker in [current, pointer]:
+      let (dir, name) = splitPath(marker)
+      let old = dir / ("." & name & ".1-1-1.tmp")
+      let young = dir / ("." & name & ".2-2-2.tmp")
+      writeFile(old, "torn")
+      writeFile(young, "in progress")
+      setLastModificationTime(old, getTime() - initDuration(hours = 2))
+      stale.add(old)
+      fresh.add(young)
+    writeCurrentGenerationId(stateDir, "gen-a")
+    writePointerFile(pointer, samplePointer(1700000000'i64))
+    for path in stale:
+      checkpoint("stale temporary " & path)
+      check not fileExists(path)
+    for path in fresh:
+      checkpoint("fresh temporary " & path)
+      check fileExists(path)
+    check readCurrentGenerationId(stateDir) == "gen-a"
+    check readPointerFile(pointer).activationTimestamp == 1700000000'i64

@@ -73,29 +73,14 @@ type
     ownSid: string ## Windows: the host's user SID
     closed: bool
 
-when defined(linux):
-  type Ucred {.importc: "struct ucred", header: "<sys/socket.h>".} = object
-    pid: Pid
-    uid: Uid
-    gid: Gid
-  var SO_PEERCRED {.importc, header: "<sys/socket.h>".}: cint
+when defined(posix):
+  from repro_core/peer_identity import socketPeerCredentials
 
   proc peerCred*(fd: SocketHandle): PeerCred =
-    var c: Ucred
-    var len = SockLen(sizeof(c))
-    if getsockopt(fd, SOL_SOCKET, SO_PEERCRED, addr c, addr len) != 0:
-      raiseOSError(osLastError(), "SO_PEERCRED")
-    PeerCred(uid: int(c.uid), pid: int(c.pid))
-elif defined(posix):
-  proc getpeereid(s: SocketHandle; uid: var Uid; gid: var Gid): cint {.
-    importc, header: "<unistd.h>".}
-
-  proc peerCred*(fd: SocketHandle): PeerCred =
-    var uid: Uid
-    var gid: Gid
-    if getpeereid(fd, uid, gid) != 0:
-      raiseOSError(osLastError(), "getpeereid")
-    PeerCred(uid: int(uid), pid: -1)
+    ## The kernel's record of the peer (``SO_PEERCRED`` on Linux, no pid
+    ## from ``getpeereid`` elsewhere): ``repro_core/peer_identity``.
+    let c = socketPeerCredentials(fd)
+    PeerCred(uid: c.uid, pid: c.pid)
 else:
   proc peerCred*(s: PipeStream): PeerCred =
     ## The client's identity, from its impersonation token (raises
