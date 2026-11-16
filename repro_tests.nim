@@ -17812,6 +17812,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_a_lock_pin_named_like_a_tool_is_not_its_producer.nim",
+    binary: "build/test-bin/t_a_lock_pin_named_like_a_tool_is_not_its_producer",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_a_mixed_direction_refusal_clears_in_one_pass.nim",
     binary: "build/test-bin/t_a_mixed_direction_refusal_clears_in_one_pass",
     defines: @[],
