@@ -114,6 +114,22 @@ proc writeHoldFile*(path, text: string) =
     raise newException(OSError, path & " does not hold what was written (" &
       $back.len & " of " & $text.len & " bytes)")
 
+proc removeDurably*(path: string) =
+  ## Remove ``path`` and ``fsync`` its directory, so the removal of an
+  ## emptied record survives a crash (A13 review round 12): a record
+  ## removed only in the page cache comes back after a power loss and names
+  ## units already dealt with. Nothing when ``path`` does not exist; raises
+  ## ``OSError`` when the directory cannot be synced.
+  if not fileExists(path): return
+  removeFile(path)
+  let dir = parentDir(path)
+  let dfd = posix.open(dir.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+  if dfd < 0: raiseOSError(osLastError(), "open " & dir)
+  let synced = fsync(dfd)
+  let err = osLastError()
+  discard posix.close(dfd)
+  if synced != 0: raiseOSError(err, "fsync " & dir)
+
 proc writeHolds*(units: openArray[string]; name, text: string;
                  dir = RuntimeUnitDir): seq[string] =
   ## A hold for each unit, each written by ``writeHoldFile``; returns the
@@ -137,6 +153,12 @@ proc removeHolds*(holds: openArray[string]) =
       except OSError: discard
     else:
       discard rmdir(parentDir(p).cstring)   # fails, harmlessly, when not empty
+
+proc heldUnitOf*(hold: string): string =
+  ## The unit a hold file is for: ``<dir>/<unit>.d/<name>`` names ``<unit>``
+  ## (a template's for every instance it covers).
+  let d = extractFilename(parentDir(hold))
+  if d.endsWith(".d"): d[0 ..< d.len - 2] else: ""
 
 proc staleHolds*(name: string; dir = RuntimeUnitDir): seq[string] =
   ## Every hold ``name`` under ``dir``.

@@ -1,0 +1,103 @@
+# Producer of the windows-aarch64 clingo.dll (reprobuild-pm
+# spec/Distribution-And-Packaging.md §7.1, W3; approved by Zahary Karadjov,
+# 2026-11-16). Builds clingo from its tag tarball with the leg's llvm-mingw,
+# qualifies it natively and, from the producer branch, publishes it as a
+# release asset that windows/toolchain-versions.env pins by sha256
+# (CLINGO_WIN_ARM64_URL / CLINGO_WIN_ARM64_SHA256).
+#
+# It runs on a push to a producer branch, not on agents/dev: an asset is
+# produced once per pin change, and every later build consumes the pin.
+name: clingo windows-arm64 producer
+
+on:
+  push:
+    branches:
+      - producer/clingo-windows-arm64
+      - producer/clingo-windows-arm64-probe
+    paths:
+      - .github/workflows/clingo-windows-arm64.yml
+      - windows/build-clingo-windows-arm64.ps1
+      - windows/toolchain-utils.ps1
+      - windows/toolchain-versions.env
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clingo-windows-arm64-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # CLINGO_VERSION is shared with the x64 leg (toolchain-versions.env); the
+  # job refuses to build any other version.
+  CLINGO_TARBALL_SHA256: 4ddd5975e79d7a0f8d126039f1b923a371b1a43e0e0687e1537a37d6d6d5cc7c
+  # Producer-only build tool; not part of any installed closure.
+  CMAKE_VERSION: 4.1.2
+  CMAKE_SHA256: 396bb14c77d12615dfbd666ef6ecd67d3442eb449c321aad25d738216fd9962d
+
+jobs:
+  build:
+    name: Build and qualify clingo (Windows ARM64)
+    # The producer branch builds on the fleet's Windows-ARM class. The probe
+    # branch exists only while that class is down (2026-11-16, m3 GARM
+    # stopped) and uses GitHub's hosted windows-11-arm image -- a documented
+    # exception per metacraft-dev-guidelines ci-workflow-standards.md: named
+    # leg "clingo windows-arm64 producer (probe)", owner the windows-aarch64
+    # leg (reprobuild-pm Distribution-And-Packaging.md §7.1), follow-up:
+    # delete the probe branch once eph-win-arm64 builds the producer branch.
+    # Nothing the probe builds is published.
+    runs-on: ${{ github.ref_name == 'producer/clingo-windows-arm64' && fromJSON('["self-hosted","windows","arm64"]') || 'windows-11-arm' }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: windows
+      - name: Build and qualify
+        run: |
+          . ./windows/toolchain-utils.ps1
+          $pins = Read-KeyValueFile -Path ./windows/toolchain-versions.env
+          & ./windows/build-clingo-windows-arm64.ps1 `
+            -ClingoVersion $pins['CLINGO_VERSION'] `
+            -ClingoTarballSha256 $env:CLINGO_TARBALL_SHA256 `
+            -LlvmMingwRelease $pins['LLVM_MINGW_WIN_ARM64_RELEASE'] `
+            -LlvmMingwSha256 $pins['LLVM_MINGW_WIN_ARM64_SHA256'] `
+            -CMakeVersion $env:CMAKE_VERSION -CMakeSha256 $env:CMAKE_SHA256 `
+            -WorkRoot (Join-Path $env:RUNNER_TEMP 'clingo') `
+            -OutDir (Join-Path $env:GITHUB_WORKSPACE 'out') `
+            -ProducerRevision $env:GITHUB_SHA
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clingo-windows-arm64
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish (producer branch only)
+    needs: build
+    if: github.ref_name == 'producer/clingo-windows-arm64'
+    runs-on: [self-hosted, linux, x64]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: clingo-windows-arm64
+          path: out
+      - name: Create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          zip=$(ls out/clingo-*-windows-arm64-*.zip)
+          (cd out && sha256sum -c SHA256SUMS)
+          tag="$(basename "$zip" .zip)"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$tag" --prerelease \
+            --notes "clingo built from its v-tag tarball for Windows ARM64 with llvm-mingw (-static) by producer revision ${GITHUB_SHA}, run ${GITHUB_RUN_ID}, and qualified natively. Pinned by reprobuild windows/toolchain-versions.env; not a reprobuild release." \
+            "$zip" out/SHA256SUMS

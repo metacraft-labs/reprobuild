@@ -189,17 +189,32 @@ The add-on handles this in four ways:
     re-assertion, so a small boot unit, `repro-addon-boot-hold.service`,
     puts the holds of a step back that is still pending in place before
     any of them can start. It runs only while a switch is pending, so a
-    normal boot skips it. A host installed by an add-on version without
-    that unit gets it at its next apply. That apply also points the
-    add-on's boot-time re-assertion at the add-on version doing the apply,
-    so the next boot recovers with the current rules; nothing else the
-    add-on installed changes. If a file is already at one of those paths
-    and it is not exactly what the add-on put there, the apply refuses
-    and changes nothing until you move it away. A socket, path or timer
-    unit that starts a hardened service must start after
-    `sysinit.target`: one with `DefaultDependencies=no` and no
-    `After=sysinit.target`, or ordered before an early boot unit, is
-    refused. If a switch whose profile has a hardened unit with a health
+    normal boot skips it. `sysinit.target` requires it, so systemd never
+    drops it to break an ordering cycle, and it never fails: if a step of
+    it fails it logs that and goes on, and if it cannot read the pending
+    switch's list of holds it holds every socket, timer and path unit in
+    `/etc/systemd/system` until the switch is resolved. A host installed
+    by an add-on version without that unit gets it at its next apply.
+    That apply also points the add-on's boot-time re-assertion, its
+    boot-time confirm and the deploy agent's two units at the add-on
+    version doing the apply, so the next boot and the next agent tick
+    recover with the current rules; nothing else the add-on installed
+    changes. A later step back or rollback keeps them on the newest
+    version. Only the statically linked add-on binary is installed this
+    way: when the full `reprobuild` engine applies, the add-on binary of
+    the same version already in the store is used, and if there is none
+    the apply says so and leaves the units as they are. If a file is
+    already at one of those paths and it is not exactly what the add-on
+    put there, the apply refuses and changes nothing until you move it
+    away. A socket, path or timer unit that starts a hardened service
+    must start after `sysinit.target`: one with `DefaultDependencies=no`
+    and no `After=sysinit.target`, or ordered before an early boot unit,
+    is refused. So is any unit of the profile that starts after
+    `sysinit.target` and is ordered, directly or through other units,
+    before a unit that runs before it -- a local mount,
+    `local-fs.target`, `systemd-remount-fs.service`, journald, udev and
+    the like: that is an ordering cycle. An empty `Before=` or `After=`
+    in a drop-in does not clear the unit file's list; systemd adds to it. If a switch whose profile has a hardened unit with a health
     check is interrupted, the next boot finishes it in a separate unit,
     `repro-addon-boot-confirm.service`, after the re-assertion, so the
     health check can see the unit start; the boot itself does not wait

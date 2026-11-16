@@ -47,12 +47,101 @@ function Get-ClingoInstallDir {
   return (Join-Path $Root "clingo/$Version")
 }
 
+function Ensure-ClingoWindowsArm64 {
+  ## windows-aarch64: the producer-built clingo (reprobuild-pm
+  ## Distribution-And-Packaging.md §7.1, W3; windows/build-clingo-windows-arm64.ps1
+  ## and .github/workflows/clingo-windows-arm64.yml). A ZIP with one top-level
+  ## directory holding clingo.dll, clingo.exe, clingo.h, LICENSE.md and
+  ## BUILDINFO.txt; built with llvm-mingw -static, so it needs no runtime DLL.
+  param(
+    [Parameter(Mandatory = $true)][string]$Root,
+    [Parameter(Mandatory = $true)][hashtable]$Toolchain
+  )
+
+  $version = $Toolchain["CLINGO_VERSION"]
+  if ([string]::IsNullOrWhiteSpace($version)) {
+    throw "ensure-clingo: CLINGO_VERSION is missing from windows/toolchain-versions.env."
+  }
+  $url = Get-ToolchainArchPin -Toolchain $Toolchain -Arch "arm64" `
+    -X64Key "CLINGO_URL" -Arm64Key "CLINGO_WIN_ARM64_URL" -Consumer "ensure-clingo"
+  $expectedSha = Get-ToolchainArchPin -Toolchain $Toolchain -Arch "arm64" `
+    -X64Key "CLINGO_SHA256" -Arm64Key "CLINGO_WIN_ARM64_SHA256" -Consumer "ensure-clingo"
+  $assetName = [IO.Path]::GetFileName(([Uri]$url).AbsolutePath)
+  if ($assetName -notmatch ("^clingo-" + [regex]::Escape($version) + "-windows-arm64-[0-9a-f]{12}\.zip$")) {
+    throw ("ensure-clingo: CLINGO_WIN_ARM64_URL names '$assetName', which is not a " +
+           "windows-arm64 build of CLINGO_VERSION $version. The two legs share one " +
+           "clingo version.")
+  }
+
+  $installDir = Get-ClingoInstallDir -Root $Root -Version $version
+  $clingoDll = Join-Path $installDir "clingo.dll"
+  $installMetaFile = Join-Path $installDir "clingo.install.meta"
+  $expectedMetadata = @{
+    clingo_version = $version
+    clingo_arch = "arm64"
+    clingo_asset = $assetName
+    clingo_archive_sha256 = $expectedSha.ToLowerInvariant()
+  }
+  if ((Test-Path -LiteralPath $clingoDll -PathType Leaf) -and
+      (Test-Path -LiteralPath $installMetaFile -PathType Leaf) -and
+      (Test-KeyValueFileMatches -Expected $expectedMetadata -Actual (Read-KeyValueFile -Path $installMetaFile))) {
+    Assert-PeMachine -Path $clingoDll -Arch "arm64" -Consumer "ensure-clingo"
+    Write-Host "clingo $version (arm64) already installed at $installDir"
+    return $installDir
+  }
+
+  $cacheDir = Join-Path $Root "clingo/_downloads"
+  New-Item -ItemType Directory -Force -Path $cacheDir | Out-Null
+  $archivePath = Join-Path $cacheDir $assetName
+  $haveCachedArchive = $false
+  if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
+    try {
+      Assert-FileSha256 -Path $archivePath -Expected $expectedSha
+      $haveCachedArchive = $true
+    } catch {
+      Remove-Item -LiteralPath $archivePath -Force
+    }
+  }
+  if (-not $haveCachedArchive) {
+    Write-Host "Downloading clingo $version for arm64 ($assetName)..."
+    Download-File -Url $url -OutFile $archivePath
+    Assert-FileSha256 -Path $archivePath -Expected $expectedSha
+  }
+
+  $staging = Join-Path $cacheDir "staging-$version-arm64"
+  Ensure-CleanDirectory -Path $staging
+  try {
+    Expand-ZipArchive -ArchivePath $archivePath -Destination $staging
+    $top = Join-Path $staging ([IO.Path]::GetFileNameWithoutExtension($assetName))
+    foreach ($member in @("clingo.dll", "clingo.exe")) {
+      $path = Join-Path $top $member
+      if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "ensure-clingo: '$assetName' has no $member under its top-level directory."
+      }
+      Assert-PeMachine -Path $path -Arch "arm64" -Consumer "ensure-clingo"
+    }
+    Ensure-CleanDirectory -Path $installDir
+    Copy-Item -Path (Join-Path $top "*") -Destination $installDir -Recurse -Force
+    Write-KeyValueFile -Path $installMetaFile -Values $expectedMetadata
+  } finally {
+    if (Test-Path -LiteralPath $staging) {
+      Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Write-Host "Installed clingo $version (arm64) at $installDir"
+  return $installDir
+}
+
 function Ensure-Clingo {
   param(
     [Parameter(Mandatory = $true)][string]$Root,
     [Parameter(Mandatory = $true)][string]$Arch,
     [Parameter(Mandatory = $true)][hashtable]$Toolchain
   )
+
+  if ($Arch -eq "arm64") {
+    return (Ensure-ClingoWindowsArm64 -Root $Root -Toolchain $Toolchain)
+  }
 
   $version = $Toolchain["CLINGO_VERSION"]
   $buildString = $Toolchain["CLINGO_BUILD_STRING"]
@@ -68,17 +157,12 @@ function Ensure-Clingo {
     }
   }
 
-  # conda-forge publishes clingo for `win-64` only. A native ARM64 `repro.exe`
-  # cannot load an x64 `clingo.dll` — the loader rejects the machine type — so
-  # fail loudly instead of installing a DLL that will abort at module init.
-  # (x64 repro.exe running under ARM64 emulation is a different case and is
-  # served by the win-64 package; set WINDOWS_DIY_ARCH_OVERRIDE=x64 for that.)
+  # conda-forge publishes clingo for `win-64` only; arm64 returned above with
+  # the producer-built DLL. Any other arch is refused rather than handed an x64
+  # clingo.dll that its repro.exe could not load.
   if ($Arch -ne "x64") {
-    throw ("ensure-clingo: conda-forge publishes clingo for win-64 only, but " +
-           "this host resolved to '$Arch'. A native ARM64 repro.exe cannot " +
-           "load an x64 clingo.dll. Build clingo from source for ARM64, or " +
-           "set WINDOWS_DIY_ARCH_OVERRIDE=x64 when targeting an emulated x64 " +
-           "toolchain.")
+    throw ("ensure-clingo: no clingo is pinned for Windows architecture " +
+           "'$Arch' (x64: conda-forge win-64; arm64: CLINGO_WIN_ARM64_*).")
   }
 
   $assetName = "clingo-$version-$buildString.conda"

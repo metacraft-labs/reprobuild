@@ -1139,6 +1139,23 @@ proc waitReasserted*(g: Guest; timeoutSec = 900): string =
     sleep(1000)
   result = g.exec("journalctl -b -o cat --no-pager -u " &
                   "repro-addon-reassert.service").stdout
+  # §13 decision 157: the re-assertion leaves a switch with a
+  # health-checked floored unit -- its replay, or its revert to a
+  # generation with one -- to repro-addon-boot-confirm.service, after it.
+  # The boot's recovery is over only when that unit has run too; its
+  # journal follows the re-assertion's.
+  if "left to repro-addon-boot-confirm.service" in result:
+    while epochTime() < deadline:
+      let st = g.exec("systemctl show -p ActiveState -p ExecMainExitTimestampMonotonic " &
+                      "-p ConditionResult -p ConditionTimestampMonotonic " &
+                      "repro-addon-boot-confirm.service").stdout
+      if "ActiveState=failed" in st or ("ActiveState=active" in st and
+          "ExecMainExitTimestampMonotonic=0" notin st) or
+          ("ConditionResult=no" in st and "ConditionTimestampMonotonic=0" notin st):
+        break
+      sleep(1000)
+    result.add(g.exec("journalctl -b -o cat --no-pager -u " &
+                      "repro-addon-boot-confirm.service").stdout)
   if testSeams():
     # A hard reset can bring back a seam control file the paused switch had
     # already consumed: its unlink is not fsynced (the seam must not sync,
