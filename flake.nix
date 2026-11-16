@@ -378,7 +378,14 @@
       # The range also carries Linux fixes (wordexp/pidfd_spawn process starts,
       # an uninjectable /bin/sh under system/popen reported as a loss, a
       # refusal to build the shim against a non-glibc libc).
-      url = "github:metacraft-labs/io-mon/30d85793e891c1a80859d52a9eb197b42d56752c";
+      # Bumped 30d85793 -> 73572696 (2026-11-16, io-mon `agents`): io-mon
+      # accepts a sealed table of each image's inline syscall sites
+      # (`io_mon/inline_site_table`, `FsSnoopRequest.inlineSiteTables`), so the
+      # engine computes a compiler image's sites once per build instead of
+      # every monitored process decoding it again. The range also builds the
+      # debug shim at the stated -O level and injects native ARM64 children on
+      # Windows on Arm.
+      url = "github:metacraft-labs/io-mon/735726963f48d91031463cbd9d1e9cf8f444f5ee";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -574,7 +581,10 @@
       # promotion merge, now the tip of both `dev` and `agents`. Its tree is
       # identical to c1d55ce, but a checkout synced to either branch is at this
       # commit, and the engine refuses a placed sibling off its pin.
-      url = "github:metacraft-labs/nim-stackable-hooks/d715806424e8373708494913e59a48237978cc2a";
+      # Bumped d715806 -> c34e325 (2026-11-16) with io-mon-src: io-mon
+      # 73572696 is built against it; it makes the raw syscall entries safe
+      # for CLONE_VM clones.
+      url = "github:metacraft-labs/nim-stackable-hooks/c34e3252d413361a0f250d8921e00c119d30e114";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

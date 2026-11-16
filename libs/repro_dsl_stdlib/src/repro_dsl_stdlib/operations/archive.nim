@@ -25,7 +25,7 @@ proc archive*(opts: ArchiveOptions): BuildActionDef =
 
 proc archive*(objects: seq[BuildActionDef];
               target: string;
-              modifiers = "rcs"): BuildActionDef =
+              modifiers = DefaultArModifiers): BuildActionDef =
   archive(ArchiveOptions(
     objects: objects,
     target: target,

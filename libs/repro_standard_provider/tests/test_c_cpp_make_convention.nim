@@ -316,7 +316,8 @@ suite "c-cpp-make convention M17":
       check sawArchive
 
       # The argv's first token is ``ar`` (or its absolute path) and the
-      # second is ``rcs``.
+      # second is the deterministic modifier set (``rcsD``; ``rcs`` on
+      # macOS, whose ``ar`` has no ``D``).
       let argv = inlineArgvOf(archiveActions[0])
       check argv.len >= 2
       let arg0Base = extractFilename(argv[0]).toLowerAscii
@@ -325,7 +326,7 @@ suite "c-cpp-make convention M17":
       # `aarch64-linux-gnu-ar`, …) and the `.exe` suffix on Windows.
       check arg0Base == "ar" or arg0Base == "ar.exe" or
             arg0Base.endsWith("-ar") or arg0Base.endsWith("-ar.exe")
-      check argv[1] == "rcs"
+      check argv[1] == DeterministicArModifiers
 
   test "M9.K: makeFlags injection retired (M9.R.6.1)":
     # M9.R.6.1 (2026-06-19): the ``registeredBuildFlags`` runtime
