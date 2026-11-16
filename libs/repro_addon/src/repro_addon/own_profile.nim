@@ -331,7 +331,7 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
   when mutated("repoint-backwards"):
     # FALSIFYING MUTATION: a revert or a rollback installs the engine its
     # target generation names, older than the one on disk.
-    result.exe = if engineExe.len > 0: engineExe else: found[0].ownExe
+    result.exe = found[0].ownExe
   when mutated("reassert-not-repointed"):
     # FALSIFYING MUTATION: the units keep the engine their own profile
     # names (the bootstrap engine on a host an earlier one bootstrapped).
