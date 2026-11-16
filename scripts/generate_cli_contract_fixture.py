@@ -162,6 +162,23 @@ COVERED_COMMANDS = [
     "health",
     "debug",
     "debug artifact",
+    "exec",
+    "run",
+    "shell",
+    "shell hook",
+    "allow",
+    "deny",
+    "dev-env",
+    "dev-env export",
+    "dev-env deactivate",
+    "up",
+    "down",
+    "dev",
+    "hcr",
+    "hcr coordinate",
+    "hcr prepare-object",
+    "prompt",
+    "prompt init",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
