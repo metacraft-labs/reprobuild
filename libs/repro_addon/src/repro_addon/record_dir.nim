@@ -125,7 +125,9 @@ proc fdIdentity*(fd: cint): string =
 
 proc validIdentity*(s: string): bool =
   ## Whether ``s`` is an identity ``fdIdentity`` could have produced:
-  ## ``<digits>@<digits>.<digits>`` with an optional ``g<integer>``.
+  ## ``<digits>@<digits>.<digits>`` with an optional ``g<integer>``, the
+  ## integer one optional ``-`` and at least one digit (A11 round 21: a
+  ## lone ``-`` or ``--4`` is not a generation).
   let at = s.find('@')
   if at <= 0: return false
   if not s[0 ..< at].allCharsInSet(Digits): return false
@@ -133,7 +135,8 @@ proc validIdentity*(s: string): bool =
   let g = rest.find('g')
   if g >= 0:
     let gen = rest[g + 1 .. ^1]
-    if gen.len == 0 or not gen.strip(chars = {'-'}, trailing = false).allCharsInSet(Digits):
+    let digits = if gen.startsWith('-'): gen[1 .. ^1] else: gen
+    if digits.len == 0 or not digits.allCharsInSet(Digits):
       return false
     rest = rest[0 ..< g]
   let dot = rest.find('.')
@@ -157,6 +160,7 @@ type DirBinding = object
   corrupt: string        ## why the identity file cannot be trusted, or ""
   recordedNow: bool      ## recorded at first use by this process
   stateGone: bool        ## used with no state to compare against (L3)
+  ledgerCopy: string     ## the state's ledger copy; "" when not given
 
 var bindings = initTable[string, DirBinding]()
   ## The records directories bound to a recorded identity (§13 decision
@@ -165,16 +169,21 @@ var bindings = initTable[string, DirBinding]()
   ## they touch it, and read by ``openCheckedDir``. A table keyed by path,
   ## so a test binds its own temporary directory the same way.
 
-proc bindRecordsDir*(dir, identityFile: string) =
+proc bindRecordsDir*(dir, identityFile: string; ledgerCopy = "") =
   ## Bind ``dir`` to the identity recorded in ``identityFile`` (root-only
   ## add-on state). When there is no recorded identity yet -- a host
   ## bootstrapped before §13 decision 178's amendment -- the first checked
   ## open records it (trust on first use) where ``identityFile``'s
-  ## directory exists.
+  ## directory exists. The state counts as gone, and ``dir`` is used with
+  ## nothing to compare (``boundWithoutState``), only when that directory
+  ## AND the ledger copy ``ledgerCopy`` are both absent: uninstall removes
+  ## the identity only after the ledger copy (A11 round 21), so with the
+  ## ledger copy present and no identity directory something removed the
+  ## record, and every checked open refuses.
   ## An identity file that is present but empty or malformed (a torn
   ## write, or one somebody else wrote) is never taken as "nothing
   ## recorded": every checked open then refuses, naming it.
-  var b = DirBinding(identityFile: identityFile)
+  var b = DirBinding(identityFile: identityFile, ledgerCopy: ledgerCopy)
   if fileExists(identityFile) or symlinkExists(identityFile):
     try:
       let text = readInCheckedDir(identityFile).strip()
@@ -270,11 +279,24 @@ proc openCheckedDir*(dir: string; create: bool): cint =
             "birth time (statx STATX_BTIME), so the add-on cannot tell it " &
             "from another directory put in its place; keep /var/log on a " &
             "file system that records birth times"
-        elif b.expected.len == 0 and not dirExists(parentDir(b.identityFile)):
-          # The state is gone (an uninstall removed it): nothing to compare
-          # with and nowhere to record; reported by the caller.
+        elif b.expected.len == 0 and not dirExists(parentDir(b.identityFile)) and
+            (mutated("state-gone-from-addon-dir-alone") or
+             b.ledgerCopy.len == 0 or
+             not (fileExists(b.ledgerCopy) or symlinkExists(b.ledgerCopy))):
+          # The state is gone (an uninstall removed its ledger copy, then
+          # the identity): nothing to compare with and nowhere to record;
+          # reported by the caller.
           b.stateGone = true
           bindings[dir] = b
+        elif b.expected.len == 0 and not dirExists(parentDir(b.identityFile)):
+          refusal = "refusing " & dir & ": the add-on's ledger copy " &
+            b.ledgerCopy & " is there but the directory of its records " &
+            "directory's identity (" & parentDir(b.identityFile) & ") is " &
+            "not, so the identity bootstrap recorded is gone and nothing " &
+            "tells " & dir & " from another directory put in its place. " &
+            "Inspect " & dir & "; if it is the directory bootstrap made, " &
+            "create " & parentDir(b.identityFile) & " (root's 0700) so the " &
+            "next use records it again"
         elif b.expected.len == 0:
           if now.len > 0:
             # First use on a host bootstrapped before the identity was

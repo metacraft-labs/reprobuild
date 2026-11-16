@@ -1197,7 +1197,12 @@ suite "Resource constructors":
     fsSystemFile(target, path = "/etc/hosts.d/local",
       content = "127.0.0.1 dev")
     check target[0].kind == "fs.systemFile"
-    check target[0].fields["mode"].s == "0644"
+    # `mode`, `group` and `form` are emitted only when declared: an
+    # undeclared mode keeps the replaced file's bits (else 0644) and
+    # leaves the intent as it was before the fields existed.
+    check "mode" notin target[0].fields
+    check "group" notin target[0].fields
+    check "form" notin target[0].fields
     # The three external-source fields stay absent in the inline-
     # content shape: this is the backward-compat guarantee.
     check "sourceUrl" notin target[0].fields
