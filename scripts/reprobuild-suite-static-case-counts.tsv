@@ -105,7 +105,7 @@ libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
-libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	39
+libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	41
 libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
@@ -359,6 +359,7 @@ libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
 libs/repro_core/tests/t_installed_prefix_anchors.nim	nim	2
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_link_target_reads_reparse_points.nim	nim	15
+libs/repro_core/tests/t_lock_holder_lookup_names_the_holder_on_btrfs.nim	nim	6
 libs/repro_core/tests/t_n51_drain_process_stream.nim	nim	11
 libs/repro_core/tests/t_n51_host_tar_resolution.nim	nim	5
 libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
@@ -1779,6 +1780,7 @@ tests/integration/t_cose_rfc9052_vectors.nim	nim	21
 tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	nim	3
 tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim	nim	5
 tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim	nim	1
+tests/integration/t_cs_m6_machines_command_lines.nim	nim	4
 tests/integration/t_cs_m6_project_introspection_command_lines.nim	nim	4
 tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim	nim	3
 tests/integration/t_ct_test_surface_case_addressability.nim	nim	6
@@ -2637,7 +2639,7 @@ tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_cs_m1_external_tool_argv_unchanged.nim	nim	3
 tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim	nim	2
 tests/unit/t_cs_m6_no_hand_written_argv_parsing.nim	nim	3
-tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	7
+tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	8
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	6
 tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
