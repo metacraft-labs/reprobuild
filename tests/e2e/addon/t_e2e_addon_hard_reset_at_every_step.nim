@@ -97,7 +97,8 @@ import repro_test_support/reasoned_skip
 import ./addon_testbed
 
 const
-  BootVariance* = ["mounts:/tmp", "mounts:/dev", "mounts:/run"]
+  BootVariance* = ["mounts:/tmp", "mounts:/dev", "mounts:/run",
+                   "active-units:repro-addon-boot-confirm.service"]
     ## Differences between two boots of the same base that no switch makes:
     ## the base's tmpfs ``/tmp`` reports ``size=`` in its options at some
     ## boots and not at others (measured on Debian 13 across a QEMU
@@ -107,6 +108,10 @@ const
     ## ``998204k``, measured the same way), and so is ``/run``'s tmpfs
     ## (``size=201484k`` against ``201488k`` on Ubuntu 24.04, measured
     ## across a revert in this gate). The add-on manages none of them.
+    ## And the boot-confirm unit (§13 decision 157): it is active after a
+    ## boot whose recovery it ran -- a switch with a health-checked floored
+    ## unit, which every point of this gate has -- and skipped by its
+    ## condition at a boot with nothing pending, like the references'.
   BAccount = "reprofixb"
   KeptAccount* = ["accounts:user:" & BAccount, "accounts:group:" & BAccount,
                   "etc:/etc/passwd", "etc:/etc/passwd-", "etc:/etc/group",
