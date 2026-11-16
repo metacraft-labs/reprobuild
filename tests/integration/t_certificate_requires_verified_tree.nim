@@ -249,7 +249,7 @@ suite "Distributed-Execution M7: certificates require a re-verified tree":
         check reg.keyId == "repro-worker-" & ($workerId)[0 ..< 16]
         check reg.publicKey.startsWith("cert-authority ")
         let keys = base / "caller" / "registered-keys.toml"
-        writeFile(keys, "schema = \"reprobuild.registered-keys.v1\"\n\n" &
+        writeFile(keys, "schema = \"registered-keys.v1\"\n\n" &
           "[[key]]\nkey_id = \"" & reg.keyId & "\"\npublic_key = \"" &
           reg.publicKey & "\"\nstatus = \"active\"\n")
         proc verify(path, content: string): CmdResult =
@@ -348,7 +348,7 @@ suite "Distributed-Execution M7: certificates require a re-verified tree":
       check gen.exitCode == 0
       let keyId = "repro-requester-" & ($o.identity.hostId)[0 ..< 16]
       let keys = base / "caller" / "registered-keys.toml"
-      writeFile(keys, "schema = \"reprobuild.registered-keys.v1\"\n\n" &
+      writeFile(keys, "schema = \"registered-keys.v1\"\n\n" &
         "[[key]]\nkey_id = \"" & keyId & "\"\npublic_key = \"" &
         readFile(keyPath & ".pub").strip() & "\"\nstatus = \"active\"\n")
 

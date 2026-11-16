@@ -28248,6 +28248,10 @@ proc devEnvProducerEdgesPossible*(projectRoot: string): bool =
 ##     build graph edge was declared. Typed schema import may use it; producer
 ##     materialization/splicing must not.
 
+proc workspaceKeepsNamesakeOutOfReach(selector, owner: string): bool
+  ## Forward declaration; defined beside ``usesDiscoveryCanReach``, whose
+  ## probes it shares.
+
 proc resolveProducerBinding*(selector: string;
                              workspaceRoot: string;
                              lock: LockedDependencies;
@@ -28299,8 +28303,21 @@ proc resolveProducerBinding*(selector: string;
   # 2. lock-pinned mode — consult sibling pins, not the consumer's own record.
   # The self row is bookkeeping and can name an earlier containing revision.
   # It does not turn a same-named archive or host tool into a source producer.
+  #
+  # Nor does a sibling pin that merely shares the selector's name: a pin is
+  # recorded under the REPO's name, and a workspace may keep a repo called
+  # ``nim`` at ``codetracer-nim`` while recipes declare the Nim tool with
+  # ``uses: "nim"``. When the workspace places the namesake where ``uses:``
+  # discovery from this consumer cannot reach it, the pin names that
+  # repository, not the tool (``workspaceKeepsNamesakeOutOfReach``;
+  # Unified-Locking-And-Hooks.md §14.3 "A lock pin named like a tool",
+  # reprobuild-pm issue 2026-11-15). Splicing it here is what failed the
+  # build with "cross-repo producer \"nim\" … declares no materialized
+  # executable".
   for dep in lock.deps:
     if dep.name == selector and not isSelfLockedDep(dep):
+      if workspaceKeepsNamesakeOutOfReach(selector, workspaceRoot):
+        break
       return ProducerBinding(
         selector: selector,
         kind: pbkLockPinned,
@@ -29508,7 +29525,8 @@ proc cachedProducerLockedDep(checkoutRoot, consumerRoot, pathBase: string;
   none(LockedDep)
 
 proc usesProducerLockedDep(selector, root, pathBase: string;
-                           existingDeps: seq[LockedDep]): Option[LockedDep] =
+                           existingDeps: seq[LockedDep];
+                           owners: seq[string] = @[]): Option[LockedDep] =
   ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
   ## dependency so ``repro lock refresh`` carries the declared cross-repo
   ## producer edge in the committed lock (the bug: refresh previously dropped
@@ -29522,6 +29540,18 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
   ## forward unchanged, preserving pinned revisions during a refresh. A selector
   ## that names NO workspace producer — a plain toolchain/host ``uses:`` such as
   ## ``nim`` / ``gcc`` — yields ``none`` and is not locked.
+  ##
+  ## The carry-forward matches a pin to the selector by NAME, and a pin is
+  ## recorded under the repo's name, so it is withheld when the pinned repo
+  ## is not what the selector can mean: the workspace keeps a repo of that
+  ## name where ``uses:`` discovery from none of ``owners`` (the recipes that
+  ## declare the selector; ``root`` when none is given) reaches it
+  ## (``workspaceKeepsNamesakeOutOfReach``). That is a ``nim`` repo kept at
+  ## ``codetracer-nim`` beside a recipe's ``uses: "nim"``: carrying its pin
+  ## forward kept a pin no recipe derives in the lock for good, and the
+  ## pre-push set check, which derives through this writer, called it
+  ## current (Unified-Locking-And-Hooks.md §14.3 "A lock pin named like a
+  ## tool"; reprobuild-pm issue 2026-11-15).
   if selector.len == 0: return none(LockedDep)
   let srcRoot =
     try: discoverProducerSourceRoot(selector, root)
@@ -29545,6 +29575,12 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
   # Not discoverable on disk — carry an existing VCS lock pin forward if present.
   for d in existingDeps:
     if d.name == selector and d.coordinates.kind == ckVcs:
+      var namesakeOnly = true
+      for owner in (if owners.len > 0: owners else: @[root]):
+        if not workspaceKeepsNamesakeOutOfReach(selector, owner):
+          namesakeOnly = false
+          break
+      if namesakeOnly: return none(LockedDep)
       return some(d)
   none(LockedDep)
 
@@ -30137,7 +30173,12 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if selector in seenNames:
       selectorEntry[selector] = selector
       continue
-    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
+    var owners: seq[string] = @[]
+    for edge in usesEdges:
+      if edge.selector == selector and edge.owner notin owners:
+        owners.add(edge.owner)
+    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps,
+      owners)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     let key = observedKey(dep.path)
@@ -65731,8 +65772,18 @@ type
     keys*: seq[RegisteredKey]
 
 const
-  registeredKeysSchemaV1* = "reprobuild.registered-keys.v1"
-    ## ``schema`` value the registered-keys store file carries.
+  registeredKeysSchemaV1* = "registered-keys.v1"
+    ## ``schema`` value the registered-keys store file carries: the id the
+    ## test-certificate standard fixes for a registered-key store
+    ## (test-certificates-spec, Verification.md §3.1 "Key stores",
+    ## https://github.com/metacraft-labs/test-certificates-spec/blob/latest/Verification.md#31-key-stores).
+    ## A conforming verifier rejects a store under any other id, so a store
+    ## written under one is not a store another implementation can read.
+    ##
+    ## Stores reprobuild wrote before it used the standard's id carry
+    ## ``reprobuild.registered-keys.v1``. ``parseRegisteredKeyStoreStrict``
+    ## does not consult ``schema``, so those stores keep reading with the same
+    ## signers and need no migration; the next write records the standard id.
 
 proc resolveSigner*(store: RegisteredKeyStore;
                     keyId: string): tuple[found: bool; publicKey: string;
@@ -65785,13 +65836,16 @@ proc serializeRegisteredKeyStore*(store: RegisteredKeyStore): string =
 proc registeredKeyStorePath*(workspaceRoot: string): string =
   ## Where the allowed-signers store lives for a workspace. CI / the server
   ## owns this set (Test-Certificates.md: "CI/server registers trusted public
-  ## keys"); we colocate it with the workspace's daemon-owned ``.repo`` tree so
-  ## both the issuance path and the pre-push gate read the SAME registry.
+  ## keys"); we colocate it with the workspace's daemon-owned
+  ## ``.repro/workspace/`` tree so both the issuance path and the pre-push
+  ## gate read the SAME registry.
   workspaceRoot / ".repro" / "workspace" / "certificates" / "registered-keys.toml"
 
 proc parseRegisteredKeyStoreStrict*(content: string): RegisteredKeyStore =
   ## STRICT reader: raises ``ValueError`` on content that is not well-formed
-  ## TOML in the store's shape.
+  ## TOML in the store's shape. ``schema`` is not consulted, so a store
+  ## written under the earlier ``reprobuild.registered-keys.v1`` id still
+  ## reads (see ``registeredKeysSchemaV1``).
   ##
   ## Strictness is the whole point. A tolerant reader turns a CORRUPT store
   ## into an EMPTY one, and an empty store is fail-closed — so the operator is
@@ -65899,7 +65953,7 @@ proc reproSigningKeyPath*(workspaceRoot: string): string =
   ##      privileged ``reprostored`` (or a remote signer) would hand the signing
   ##      capability to the issuance step WITHOUT the key ever being readable by
   ##      the unprivileged agent. Tests set it to a hermetic key.
-  ##   2. Otherwise a workspace-local daemon key under ``.repo/workspace/
+  ##   2. Otherwise a workspace-local daemon key under ``.repro/workspace/
   ##      certificates/signing-key`` (the colocated daemon-state default).
   ## DEFER-TC5-PRIV-DAEMON: in this implementation the key at either location
   ## is a plain file readable by whoever runs issuance; standing up the actual
@@ -92936,30 +92990,53 @@ type UnreachedDevelopSibling = object
     ## committed lock then knows it, and `repro sync` / `repro ws enable` act
     ## on declared repos only, so the usual remedy cannot work.
 
+proc workspaceDeclaredCheckout(projectDir, name: string):
+    tuple[inWorkspace, declared: bool; checkout: string] =
+  ## Where the workspace enclosing ``projectDir`` keeps the repo it declares
+  ## as ``name`` — its resolved membership first, then any ``repos/*.toml``
+  ## fragment, enabled or not, the precedence ``declaredDevelopSet`` uses —
+  ## as an absolute, normalized checkout path. ``inWorkspace`` is false when
+  ## ``projectDir`` is in no resolved workspace (then nothing is declared);
+  ## ``declared`` is false when the workspace names no such repo.
+  let membership = manifestMembershipOf(projectDir)
+  if not membership.resolved: return (false, false, "")
+  result.inWorkspace = true
+  proc at(path: string): string =
+    os.normalizedPath(absolutePath(membership.workspaceRoot / path))
+  for r in membership.repos:
+    if r.name == name:
+      return (true, true, at(if r.path.len > 0: r.path else: name))
+  let fragments = manifestsRoot(membership.workspaceRoot) / "repos"
+  if dirExists(extendedPath(fragments)):
+    for file in walkFiles(fragments / "*.toml"):
+      var fragment: RepoFragment
+      try: fragment = readRepoFragment(file)
+      except CatchableError: continue
+      if fragment.repo.name == name:
+        let path =
+          if fragment.repo.path.len > 0: fragment.repo.path else: name
+        return (true, true, at(path))
+
 proc workspaceDeclaresRepo(projectDir, name: string): bool =
   ## Whether the workspace enclosing ``projectDir`` declares a repo called
   ## ``name`` (resolved membership or any ``repos/*.toml`` fragment, enabled
   ## or not). True outside a workspace: with no manifests there is nothing
   ## whose absence could be reported.
-  let membership = manifestMembershipOf(projectDir)
-  if not membership.resolved: return true
-  for r in membership.repos:
-    if r.name == name: return true
-  let fragments = manifestsRoot(membership.workspaceRoot) / "repos"
-  if dirExists(extendedPath(fragments)):
-    for file in walkFiles(fragments / "*.toml"):
-      try:
-        if readRepoFragment(file).repo.name == name: return true
-      except CatchableError: continue
-  false
+  let declaration = workspaceDeclaredCheckout(projectDir, name)
+  declaration.declared or not declaration.inWorkspace
 
-type DevelopSetMember = tuple[name, checkout: string; lockRecorded: bool]
+type DevelopSetMember = tuple[name, checkout: string;
+    lockRecorded, workspaceDeclared: bool]
   ## One repo ``declaredDevelopSet`` names. ``lockRecorded``: the committed
   ## lock pins it, so a previous refresh read its recipe through ``uses:``
-  ## and the name is a repository of ours whatever its path. A member only the
-  ## workspace manifest declares is a finding only for an owner from which
-  ## ``uses:`` discovery can reach its checkout path
-  ## (``usesDiscoveryCanReach``).
+  ## and the name is a repository of ours whatever its path — unless the
+  ## workspace declares it too (``workspaceDeclared``): the workspace then
+  ## says where the repo is kept, and a member the workspace declares, pinned
+  ## or not, is a finding only for an owner from which ``uses:`` discovery
+  ## can reach its checkout path (``usesDiscoveryCanReach``). A pin shares
+  ## the repo's NAME with the selector, nothing more; the repo ``nim`` kept
+  ## at ``codetracer-nim`` is not what ``uses: "nim"`` means however the
+  ## lock came to pin it (reprobuild-pm issue 2026-11-15).
 
 proc usesDiscoveryCanReach(selector, owner, checkout: string): bool =
   ## Whether ``uses: "<selector>"`` in the recipe directory ``owner`` can ever
@@ -93003,6 +93080,55 @@ proc usesDiscoveryCanReach(selector, owner, checkout: string): bool =
     try: os.normalizedPath(committedLockPathBase(ownerAbs))
     except CatchableError: ownerAbs
   cmpPaths(mainBase, ownerAbs) != 0 and walkReaches(mainBase)
+
+proc workspaceKeepsNamesakeOutOfReach(selector, owner: string): bool =
+  ## Whether ``uses: "<selector>"`` in the recipe directory ``owner`` names a
+  ## TOOL although the enclosing workspace declares a repo of that name: the
+  ## workspace keeps that repo at a checkout path ``uses:`` discovery from
+  ## ``owner`` cannot reach (``usesDiscoveryCanReach``), and discovery finds
+  ## no recipe where it does look (``discoverProducerSourceRoot``). A lock
+  ## pin of that name then records the repository, not a producer of the
+  ## selector, and must not be taken as one — not carried forward by a
+  ## refresh (``usesProducerLockedDep``), not counted as a develop-set
+  ## sibling (``unreachedDevelopSiblings``), not spliced by a build
+  ## (``resolveProducerBinding``).
+  ##
+  ## The case it exists for: the metacraft workspace keeps a repo ``nim`` at
+  ## ``codetracer-nim``, and codetracer-trace-format declares the Nim tool
+  ## with ``uses: "nim"``. Once its lock pinned ``nim`` (through a fragment
+  ## ``depends`` edge, before those stopped declaring anything), the refresh
+  ## refused for good and the CI build tried to splice the compiler fork as
+  ## the ``nim`` producer (reprobuild-pm issue 2026-11-15, "a workspace repo
+  ## named like a tool is taken as that tool's producer";
+  ## Unified-Locking-And-Hooks.md §14.3 "A lock pin named like a tool").
+  ##
+  ## False whenever the answer is not proven: outside a workspace (the lock
+  ## is then the only record of what the name means), when the workspace
+  ## declares no such repo, or when discovery reaches a recipe for the
+  ## selector. The on-disk probe runs first, so a sibling that is checked
+  ## out where ``uses:`` finds it — the common case for a real lock-pinned
+  ## producer — costs no manifest resolution.
+  ##
+  ## The probe is ``discoverProducerSourceRoot``'s walk WITHOUT its develop
+  ## override step, which goes through ``resolveProducerBinding`` and would
+  ## recurse back here. Nothing is lost: ``resolveProducerBinding`` consults
+  ## the overrides before the lock, ``usesProducerLockedDep`` asks only after
+  ## a full discovery found nothing, and ``usesDiscoveryCanReach`` below
+  ## counts an override pointing at the declared checkout as reachable.
+  if selector.len == 0 or owner.len == 0: return false
+  let ownerAbs = os.normalizedPath(absolutePath(owner))
+  if findSiblingProjectFile(selector, ownerAbs).len > 0: return false
+  let mainBase =
+    try: os.normalizedPath(committedLockPathBase(ownerAbs))
+    except CatchableError: ownerAbs
+  if cmpPaths(mainBase, ownerAbs) != 0 and
+      findSiblingProjectFile(selector, mainBase).len > 0:
+    return false
+  let declaration =
+    try: workspaceDeclaredCheckout(ownerAbs, selector)
+    except CatchableError: (false, false, "")
+  declaration.declared and
+    not usesDiscoveryCanReach(selector, ownerAbs, declaration.checkout)
 
 proc declaredDevelopSet(projectDir, lockPath: string):
     seq[DevelopSetMember] =
@@ -93048,7 +93174,7 @@ proc declaredDevelopSet(projectDir, lockPath: string):
         member.lockRecorded = member.lockRecorded or lockRecorded
         return
     members.add((name, os.normalizedPath(absolutePath(checkout)),
-      lockRecorded))
+      lockRecorded, not lockRecorded))
   let membership = manifestMembershipOf(projectDir)
   if membership.resolved:
     for r in membership.repos:
@@ -93115,7 +93241,9 @@ proc unreachedDevelopSiblings(projectDir, lockPath: string;
       if member.name == miss.selector:
         # Not recorded in `reported`: another owner of the same selector may
         # sit where discovery does reach this checkout.
-        if member.lockRecorded or
+        # A pin counts wherever it is only when no manifest says where the
+        # repo is kept; a declared repo counts only where discovery reaches.
+        if (member.lockRecorded and not member.workspaceDeclared) or
             usesDiscoveryCanReach(miss.selector, miss.owner, member.checkout):
           checkout = member.checkout
         break
