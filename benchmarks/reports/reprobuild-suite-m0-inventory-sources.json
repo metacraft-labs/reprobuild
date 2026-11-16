@@ -1639,10 +1639,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1567,
+      "integration": 1568,
       "platform/destructive": 183,
       "pure unit": 774,
-      "unclassified": 345
+      "unclassified": 344
     },
     "graphOwnedTestArtifacts": [
       {
@@ -26246,8 +26246,8 @@
     },
     {
       "binary": "build/test-bin/test_csharp_dotnet_convention",
-      "class": "unclassified",
-      "classificationReason": "imports `osproc`, which grants out-of-process reach",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "reproProviderMode"
       ],
@@ -26262,8 +26262,8 @@
       "owner": "libs/repro_standard_provider",
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
