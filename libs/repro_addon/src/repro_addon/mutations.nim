@@ -614,6 +614,51 @@
 ##                                           template (decision 152)
 ## ``requirers-of-refused-released``       a unit that requires a refused
 ##                                           unit is released (decision 153)
+## ``trigger-repointing-ignored``          a trigger the generation re-points
+##                                           at a held unit is left running
+##                                           when its live unit runs
+##                                           (decision 151, round 10)
+## ``left-alone-triggers-forgotten``       a trigger the hold left alone is
+##                                           not started again at release
+##                                           (decision 151, round 10)
+## ``template-trigger-instances-unlisted`` a held template's loaded
+##                                           instance triggers are not looked
+##                                           for (decision 152, round 10)
+## ``live-check-triggers-in-memory``       the full apply keeps the triggers
+##                                           of its hold in memory only
+##                                           (decision 151, round 10)
+## ``template-requirer-shown-by-name``     a template that requires a
+##                                           refused unit is shown by name,
+##                                           which systemd refuses (decision
+##                                           153, round 10)
+## ``unjudged-requirers-released``         a unit the live check does not
+##                                           judge that requires a refused
+##                                           unit is not held (decision 153,
+##                                           round 10)
+## ``switch-ignores-restart-record``       an add-on switch does not check
+##                                           the record of triggers to
+##                                           restart (decision 160, round 10)
+## ``fixing-apply-refused``                no generation resolves an entry
+##                                           of the record of triggers to
+##                                           restart (round-10 owner decision)
+## ``partial-fix-accepted``                a generation that resolves one
+##                                           recorded trigger goes through
+##                                           with others still on record
+##                                           (decision 170)
+## ``restart-record-after-held``           a revert drops a trigger from the
+##                                           held record before it is on the
+##                                           restart record (round 10)
+## ``dependants-started``                  a revert's step 7 starts the units
+##                                           that require a recorded trigger
+##                                           (round-10 owner decision)
+## ``trigger-key-blanks-unread``           a trigger's ``Key = value`` with
+##                                           blanks is not read (decision 154)
+## ``trigger-accept-unread``               an ``Accept=yes`` socket is read
+##                                           as triggering its namesake
+##                                           (decision 154)
+## ``trigger-instance-unmapped``           a trigger naming a template's
+##                                           instance is not ordered after the
+##                                           template (decision 154)
 ## ``trigger-edges-omitted``               the planner orders no socket,
 ##                                           timer or path unit after the
 ##                                           unit it triggers (decision 137)
@@ -1046,15 +1091,53 @@
 ##                                            (decision 161)
 ## ``state-removal-rerun-unwired``           uninstall never calls the
 ##                                            re-run that finishes the
-##                                            state removal (decision 163)
+##                                            state removal (decision 165)
 ## ``state-removal-token-not-required``       a re-run removes any tree of
 ##                                            empty directories under the
 ##                                            state, token or not
-##                                            (decision 163 (a))
+##                                            (decision 165 (a))
 ## ``pre-bootstrap-root-rmdir``               the state removal and its
 ##                                            re-run rmdir a directory that
 ##                                            was a pre-bootstrap root
-##                                            (decision 163 (b))
+##                                            (decision 165 (b))
+## ``inputs-removed-and-restored``           the pre-bootstrap inputs under
+##                                            /var/lib/repro go with the
+##                                            state and are written back from
+##                                            memory after the ledger copy
+##                                            (decision 166)
+## ``input-mode-owner-not-restored``          an input's mode and owner are
+##                                            not put back (decision 166)
+## ``input-metadata-after-ledger-copy``       the mode and owner are put back
+##                                            after the ledger copy goes, so
+##                                            a crash between them is never
+##                                            finished (decision 166)
+## ``etc-input-rewritten-in-step-4``         step 4 writes an input /etc
+##                                            file's preserved bytes back
+##                                            (decision 166)
+## ``etc-sweep-rewrites-inputs``              the /etc/repro sweep removes
+##                                            the inputs and writes them back
+## ``run-repro-rewrites-inputs``              /run/repro's removal does
+## ``store-remover-rewrites-inputs``          /repro's removal does
+## ``new-floors-removed``                     a sequence floor the add-on's
+##                                            agent wrote goes while its key
+##                                            stays (decision 168)
+## ``prior-mode-captured-after-takeover``     bootstrap records a takeover
+##                                            root's prior mode after the
+##                                            takeover (decision 167)
+## ``unmarked-prior-trusted``                 uninstall takes an unmarked
+##                                            ledger's prior mode as captured
+##                                            and says nothing (decision 167)
+## ``token-dir-unchecked``                    the state-removal token is
+##                                            written to and read from any
+##                                            directory (decision 165)
+## ``token-not-bound-to-install``            a re-run takes a token whose
+##                                            directories are not the ones
+##                                            its uninstall recorded
+##                                            (decision 165)
+## ``corrupt-input-record-continues``         an uninstall goes on past a
+##                                            corrupt record of a
+##                                            pre-bootstrap input
+##                                            (decision 166)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1286,6 +1369,11 @@ const
                           "floor-paths-unnormalised",
                           "floor-allows-images",
                           "floor-ignores-prefix-dropins",
+                          # the dashed prefix of an instance built
+                          # without its instance (foo-.service, never
+                          # foo-@x.service, for foo-bar@x.service), at
+                          # parse time and in the scan of foreign drop-ins.
+                          "dropins-skip-instance-prefix",
                           "stored-floor-unversioned",
                           "floor-change-by-ledger-bytes",
                           "replay-forgets-stored-target",
@@ -1622,6 +1710,25 @@ const
                           # a listener the switch's restart of its
                           # activator makes again keeps its stale record.
                           "restarted-listener-not-rerecorded",
+                          # a restart's delay is read as the next one's.
+                          "restart-delay-from-next",
+                          # the restart window's lower bound stays at
+                          # InactiveExitTimestamp.
+                          "restart-lower-bound-from-inactive-exit",
+                          # an activator ordered before the boot-hold
+                          # unit passes the effective half.
+                          "activator-boot-order-effective-unchecked",
+                          # ... and the parse half.
+                          "activator-boot-order-parse-unchecked",
+                          # what a revert stopped is not started again
+                          # once its hold is cleared.
+                          "revert-stopped-not-restarted",
+                          # a host an earlier engine bootstrapped keeps
+                          # its re-assert unit on that engine.
+                          "reassert-not-repointed",
+                          # the boot re-assertion replays and confirms
+                          # a health-checked floored unit's switch itself.
+                          "boot-confirm-in-reassert",
                           # a start hold is the add-on's by its name alone.
                           "start-hold-any-content",
                           # A13: a state backup or restore runs while a
@@ -1742,6 +1849,22 @@ const
                           "fired-from-driver-starts-only",
                           "fired-instance-unmapped",
                           "requirers-of-refused-released",
+                          # A13 review round 10.
+                          "trigger-repointing-ignored",
+                          "left-alone-triggers-forgotten",
+                          "template-trigger-instances-unlisted",
+                          "live-check-triggers-in-memory",
+                          "template-requirer-shown-by-name",
+                          "unjudged-requirers-released",
+                          "switch-ignores-restart-record",
+                          "fixing-apply-refused",
+                          "partial-fix-accepted",
+                          "restart-record-after-held",
+                          "dependants-started",
+                          # §13 decision 154: one falsifier per spelling.
+                          "trigger-key-blanks-unread",
+                          "trigger-accept-unread",
+                          "trigger-instance-unmapped",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",
@@ -1900,6 +2023,19 @@ const
                           "state-removal-rerun-unwired",
                           "state-removal-token-not-required",
                           "pre-bootstrap-root-rmdir",
+                          "inputs-removed-and-restored",
+                          "input-mode-owner-not-restored",
+                          "input-metadata-after-ledger-copy",
+                          "etc-input-rewritten-in-step-4",
+                          "etc-sweep-rewrites-inputs",
+                          "run-repro-rewrites-inputs",
+                          "store-remover-rewrites-inputs",
+                          "new-floors-removed",
+                          "prior-mode-captured-after-takeover",
+                          "unmarked-prior-trusted",
+                          "token-dir-unchecked",
+                          "token-not-bound-to-install",
+                          "corrupt-input-record-continues",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",

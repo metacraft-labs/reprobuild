@@ -360,9 +360,14 @@ suite "repo_relocation — the move, and the order of it":
       # entirely before `z/`, and a front-loaded sample would never touch `z`.
       createDir(repoPath / "a")
       createDir(repoPath / "z")
+      # Each file is long enough to count as a DISTINCTIVE blob (the sampler
+      # skips blobs under `relocationMinDistinctiveBlobSize` bytes; see
+      # `t_relocate_blob_sample_excludes_coincident_blobs`).
       for i in 0 ..< 60:
-        writeFile(repoPath / "a" / ("f" & $i & ".txt"), "a" & $i & "\n")
-        writeFile(repoPath / "z" / ("f" & $i & ".txt"), "z" & $i & "\n")
+        writeFile(repoPath / "a" / ("f" & $i & ".txt"),
+          "a" & $i & " is a line long enough to be a distinctive blob\n")
+        writeFile(repoPath / "z" / ("f" & $i & ".txt"),
+          "z" & $i & " is a line long enough to be a distinctive blob\n")
       discard git(gitBin, "-C " & q(repoPath) & " add -A")
       discard git(gitBin, "-C " & q(repoPath) & " commit --quiet -m many")
 
@@ -383,3 +388,79 @@ suite "repo_relocation — the move, and the order of it":
       # everything.
       check not objectPresent(probe, repoPath,
         "0123456789012345678901234567890123456789")
+
+  test "t_relocate_blob_sample_excludes_coincident_blobs":
+    ## §3.3(b) — the sample is drawn from DISTINCTIVE blobs only. Blob ids are
+    ## content hashes, so the empty blob, a stock licence or a template
+    ## `.gitignore`, and any very short file, are shared by unrelated
+    ## repositories; finding one of them in a candidate says nothing about
+    ## lineage. A blob reachable at several paths is one blob, sampled once,
+    ## so it cannot be counted towards the quorum more than once.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case uses real Git repositories")
+    else:
+      let scratch = createTempDir("repro-reloc-distinct-", "")
+      defer: removeDir(scratch)
+      let probe = RelocationGitProbe(identity: resolveGitTool(tpmPathOnly, getEnv("PATH")))
+      let repoPath = scratch / "mixed"
+      discard git(gitBin, "init --quiet -b main " & q(repoPath))
+      discard git(gitBin, "-C " & q(repoPath) &
+        " config user.email t@example.invalid")
+      discard git(gitBin, "-C " & q(repoPath) & " config user.name t")
+      let licence = "Permission is hereby granted, free of charge, to any " &
+        "person obtaining a copy of this software.\n"
+      let distinctA = "proc alpha*(): int = 1 # distinctive to this repo\n"
+      let distinctB = "proc beta*(): int = 2 # also distinctive to this repo\n"
+      createDir(repoPath / "pkg")
+      createDir(repoPath / "docs" / "legal")
+      createDir(repoPath / "src")
+      createDir(repoPath / "copy")
+      writeFile(repoPath / "pkg" / "__init__.py", "")
+      writeFile(repoPath / ".gitkeep", "")
+      writeFile(repoPath / "LICENSE", licence)
+      writeFile(repoPath / "docs" / "legal" / "COPYING.LESSER", licence & "x")
+      writeFile(repoPath / "LICENSE-MIT.md", licence & "y")
+      writeFile(repoPath / ".gitignore", "build/\nnimcache/\n*.o\n*.so\n" &
+        "*.dylib\n*.exe\n")
+      writeFile(repoPath / ".gitattributes", "*.nim text eol=lf diff=nim\n" &
+        "*.png binary\n")
+      writeFile(repoPath / "VERSION", "1.0.0\n")
+      writeFile(repoPath / "src" / "a.nim", distinctA)
+      writeFile(repoPath / "copy" / "a.nim", distinctA)
+      writeFile(repoPath / "src" / "b.nim", distinctB)
+      discard git(gitBin, "-C " & q(repoPath) & " add -A")
+      discard git(gitBin, "-C " & q(repoPath) & " commit --quiet -m mixed")
+
+      proc blobOf(path: string): string =
+        git(gitBin, "-C " & q(repoPath) & " rev-parse HEAD:" & path).strip()
+
+      let sample = sampleBlobIds(probe, repoPath, "HEAD")
+      checkpoint("sample: " & $sample)
+      check sample.len == 2
+      check blobOf("src/a.nim") in sample
+      check blobOf("src/b.nim") in sample
+      for excluded in ["pkg/__init__.py", "LICENSE", "docs/legal/COPYING.LESSER",
+                       "LICENSE-MIT.md", ".gitignore", ".gitattributes",
+                       "VERSION"]:
+        checkpoint("must be excluded: " & excluded)
+        check blobOf(excluded) notin sample
+      check emptyBlobSha1 notin sample
+
+  test "t_relocate_blob_quorum_is_k_of_n":
+    ## §3.3(b) — one coincident distinctive blob is not lineage. A sample of
+    ## n distinctive blobs is satisfied by min(relocationBlobQuorum, n) of
+    ## them, and an EMPTY sample (no distinctive blob at all) is never
+    ## satisfied: "nothing to compare" must not read as "agreement".
+    check relocationBlobQuorum >= 2
+    check not blobSampleSatisfied(present = 0, sampled = 0)
+    check not blobSampleSatisfied(present = 0, sampled = 1)
+    check blobSampleSatisfied(present = 1, sampled = 1)
+    check not blobSampleSatisfied(present = 1, sampled = 2)
+    check blobSampleSatisfied(present = 2, sampled = 2)
+    check not blobSampleSatisfied(present = 1, sampled = 7)
+    check not blobSampleSatisfied(present = relocationBlobQuorum - 1,
+      sampled = relocationBlobSampleSize)
+    check blobSampleSatisfied(present = relocationBlobQuorum,
+      sampled = relocationBlobSampleSize)
+    check blobSampleSatisfied(present = 7, sampled = 7)

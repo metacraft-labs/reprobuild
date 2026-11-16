@@ -173,14 +173,23 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
     $m.step & "); finished its step 9"]
 
 proc recoverMarker(stateDir: string; atBoot: bool;
-                   driver: CollisionDriver = nil): RecoveryOutcome =
+                   driver: CollisionDriver = nil;
+                   bootConfirm = false): RecoveryOutcome =
   ## An interrupted switch's own recovery: finish it or revert it; with no
   ## marker, start again the triggers a revert could not (§13 decision 160).
   if not hasPendingMarker(stateDir):
+    # A full apply that died between its hold and its release left the
+    # triggers it stopped on record (§13 decision 151): started first.
+    var lines: seq[string]
+    if fileExists(stateDir / LiveCheckTriggersFile):
+      let failed = restartRecordedLiveCheckTriggers(stateDir, addonLiveHost())
+      if failed.len > 0:
+        return RecoveryOutcome(resolved: false, lines: failed)
+      lines.add("the triggers an interrupted full apply stopped started again")
     if hasTriggersToRestart(stateDir):
       let r = retryTriggerRestarts(stateDir)
-      return RecoveryOutcome(resolved: r.ok, lines: r.lines)
-    return RecoveryOutcome(resolved: true)
+      return RecoveryOutcome(resolved: r.ok, lines: lines & r.lines)
+    return RecoveryOutcome(resolved: true, lines: lines)
   when mutated("reassert-skips-recovery"):
     # The negative control: an interrupted switch is left as it is found.
     return RecoveryOutcome(resolved: true,
@@ -199,6 +208,29 @@ proc recoverMarker(stateDir: string; atBoot: bool;
   # own the marker: it is waited for like any apply, and if it still holds
   # the lock at the deadline the run is degraded, never deferred, so an
   # interrupted switch is not silently left to the next boot.
+  # §13 decision 157: at boot, a switch to a generation with a
+  # health-checked floored unit is left to the boot-confirm unit, ordered
+  # after this one, which replays it once the floored units can start. Only
+  # where that unit is installed: a host without it keeps the replay here.
+  when not mutated("boot-confirm-in-reassert"):
+    if atBoot and not bootConfirm and fileExists(unitPath(BootConfirmUnit)):
+      var plan: PendingPlan
+      var planRead = false
+      try:
+        plan = readPendingPlan(stateDir)
+        planRead = true
+      except CatchableError: discard
+      if planRead and needsBootConfirm(plan.targetUserText):
+        try:
+          createDir(stateDir / "addon")
+          writeFileAtomic(bootConfirmFlagPath(stateDir), m.purpose & "\n", 0o600)
+          return RecoveryOutcome(resolved: true, deferred: true,
+            lines: @["the pending switch has a health-checked floored unit, " &
+                     "which cannot start while the re-assertion runs: it is " &
+                     "left to " & BootConfirmUnit & ", which replays it after " &
+                     "this unit (§13 decision 157)"])
+        except CatchableError as e:
+          discard e   # the replay below runs here, as before
   var (hostLock, holder, holderPids) =
     tryAcquireHostApplyLock("add-on switch recovery")
   if holder.len > 0:
@@ -294,12 +326,19 @@ proc afterRecovery*(rec: RecoveryOutcome; stateDir: string;
       result.resolved = r.ok
 
 proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
-                           driver: CollisionDriver = nil): RecoveryOutcome =
+                           driver: CollisionDriver = nil;
+                           bootConfirm = false): RecoveryOutcome =
   ## Finish or revert an interrupted switch (see the module header), and
   ## start again the triggers a revert could not (§13 decision 160) --
   ## also those the switch it finishes or reverts leaves on record, so a
   ## resolved marker never leaves the host pending on a trigger.
-  afterRecovery(recoverMarker(stateDir, atBoot, driver), stateDir)
+  ## ``bootConfirm``: the boot-confirm unit's run (§13 decision 157), a
+  ## boot run -- queued starts, the boot's confirm cap -- that replays the
+  ## switch the re-assertion left to it instead of leaving it again. Its
+  ## starts are queued (``--no-block``), never waited for: a unit ordered
+  ## after this one would wait for it, and the confirm polls the units'
+  ## health whatever their start jobs do.
+  afterRecovery(recoverMarker(stateDir, atBoot, driver, bootConfirm), stateDir)
 
 proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## After a recovery: every unit the current generation started is
@@ -433,7 +472,8 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
                            pid = getCurrentProcessId();
                            bootId = currentBootId();
                            pointer = AddonStateDirPointer;
-                           pointerOwner = 0):
+                           pointerOwner = 0;
+                           target = SystemProfile(); hasTarget = false):
     tuple[ok: bool; why: string] =
   ## The apply-side check (§7.7), run with the host apply lock held. For
   ## each pending marker: one written by this process, in this boot, is
@@ -450,6 +490,12 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
       if hasTriggersToRestart(dir):
         let rec = recover(dir)
         if not rec.resolved:
+          # Unless the apply's generation changes or removes every trigger
+          # still on record (the owner decision "allow the fixing apply"):
+          # its commit clears them (``pendingSwitchCommitted``).
+          if hasTarget and hasTriggersToRestart(dir) and
+              unresolvedRestartEntries(dir, target).len == 0:
+            continue
           return (false, dir & ": " & rec.lines.join("; "))
       continue
     var m = PendingMarker()
@@ -481,11 +527,18 @@ proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
     r = proc (dir: string): RecoveryOutcome {.closure, gcsafe.} =
       {.cast(gcsafe).}:
         recoverPendingSwitch(dir, atBoot = false)
-  pendingSwitchGuard = proc (applyStateDir: string):
+  pendingSwitchGuard = proc (applyStateDir: string; target: SystemProfile;
+                            hasTarget: bool):
       tuple[ok: bool; why: string] {.closure, gcsafe.} =
     {.cast(gcsafe).}:
       checkPendingSwitches(applyStateDir, r, pointer = pointer,
-        pointerOwner = pointerOwner)
+        pointerOwner = pointerOwner, target = target, hasTarget = hasTarget)
+  pendingSwitchCommitted = proc (applyStateDir: string; target: SystemProfile)
+      {.closure, gcsafe.} =
+    {.cast(gcsafe).}:
+      for dir in guardStateDirs(applyStateDir, pointer, pointerOwner):
+        try: discard clearResolvedRestartEntries(dir, target)
+        except CatchableError: discard
 
 installPendingSwitchGuard()
 
@@ -624,11 +677,12 @@ proc createLateRecipientKey*(stateDir: string): seq[string] =
     defaultSite(stateDir))
 
 proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
-                       driver: CollisionDriver = nil): ReassertReport =
+                       driver: CollisionDriver = nil;
+                       bootConfirm = false): ReassertReport =
   ## Recover, check, report. Never raises: every failure is a finding.
   result.status = "ok"
   try:
-    let rec = recoverPendingSwitch(stateDir, atBoot, driver)
+    let rec = recoverPendingSwitch(stateDir, atBoot, driver, bootConfirm)
     result.recovery = rec.lines
     if rec.deferred:
       # Mid-switch: the live state is the switch's, not drift. Report and

@@ -26,9 +26,39 @@
 ##     Packages index → .deb URL with content-addressed mirror selection).
 ##     Network fetching against ``snapshot.ubuntu.com`` is non-trivial and
 ##     deserves its own milestone. ``installAptDeb`` takes a pre-supplied
-##     ``debRegistry`` map; the snapshot string is plumbed into the
-##     fingerprint per spec §3 but the live fetch path is a TODO.
+##     list of ``(name, version, debPath, sha256)`` sources; the live fetch
+##     path is a TODO.
 ##   * Mirror policy / offline mode — flagged in spec §9 as open work.
+##
+## ## Store identity (spec §2, §3, §6)
+##
+## Every store path this module creates is named by a full, untruncated
+## SHA-256 (64 lowercase hex chars) over a length-prefixed encoding of the
+## BYTES it holds — never over the snapshot string, the request's argument
+## order, or the caller's assertions about the result:
+##
+##   * ``apt.install``: the resolved set of ``(name, version, sha256)``
+##     triples, sorted (``installFingerprint``).
+##   * ``apt.extract``: the ``.deb``'s sha256 (``extractFingerprint``).
+##   * ``apt.installSystemdUnit``: the unit name and the unit file's sha256.
+##
+## Why bytes and not the pin: a snapshot string such as
+## ``ubuntu/jammy/20260615T000000Z`` names no digest, and any mirror it is
+## resolved through can serve different ``.deb`` bytes for it. Keying the
+## store by the pin let two hosts — or one host fed first by an honest and
+## then by a hostile mirror — hold different bytes under one store path,
+## poisoning any store or cache shared by that name (reprobuild-pm issue
+## ``issues/2026-11-12-apt-adapter-the-snapshot-string-is-not-a-trust-root-inrelease-is-never-signature-checked.md``).
+## The snapshot is therefore provenance only. ``expectedFiles`` is a CHECK run
+## on every call, including a reuse of an existing path, and is not part of
+## the identity: tightening an assertion that holds must not fork identical
+## content into a new path.
+##
+## Encoding (``identityPreimage``): each field is an 8-byte big-endian
+## unsigned length followed by the field's bytes; a count is the same 8-byte
+## big-endian integer with no payload. With every field framed, no two
+## distinct field sequences produce the same preimage, so (for example) the
+## triples ``("ab", "c", s)`` and ``("a", "bc", s)`` cannot collide.
 ##
 ## ## DSL embedding
 ##
@@ -83,6 +113,17 @@ type
     ## of extracted .deb trees after extraction.
     relPath*: string
 
+  AptInputError* = object of AptAdapterError
+    ## A request that cannot name a well-defined store identity: a
+    ## malformed sha256 (not 64 lowercase hex chars), an empty or
+    ## control-character-bearing package name or version, a package named
+    ## twice in one request, or a unit name that is not a single path
+    ## component. Raised BEFORE anything is read or written (fail-closed):
+    ## an identity computed from such input would either be ambiguous or
+    ## let one request overwrite another's bytes.
+    field*: string        ## which input was rejected (e.g. "sha256")
+    value*: string        ## the rejected value, verbatim
+
   AptExtractError* = object of AptAdapterError
     ## ar/tar invocation failed; typically a malformed archive or a
     ## missing host tool. Carries the failed command for diagnostics.
@@ -115,11 +156,18 @@ type
     debs*: seq[ExtractedDeb]          ## sorted (name, version, sha256)
 
 # ---------------------------------------------------------------------------
-# Adapter version constant — part of the spec §3 fingerprint
+# Adapter version constant — part of every spec §2/§3 fingerprint
 # ---------------------------------------------------------------------------
 
 const
-  AptJammyAdapterVersion* = "0.1.0"
+  AptJammyAdapterVersion* = "0.2.0"
+    ## Mixed into every store identity, so bumping it invalidates every store
+    ## path this adapter made. 0.2.0 replaced the pin-keyed, unframed,
+    ## 16-hex-truncated identity of 0.1.0 with the byte-keyed, framed, full
+    ## SHA-256 one described in the module header. Keep
+    ## ``recipes/packages/adapters/apt-jammy/repro.nim`` (its ``versions:``
+    ## key and ``config.adapterVersion``) equal to this; the NDE0-A test
+    ## asserts they match.
 
   ## Default store root. Tests override via ``storeRoot`` arg.
   DefaultStoreRoot* = "/opt/reproos-linux/store"
@@ -171,40 +219,133 @@ proc sha256OfString*(s: string): string =
 # Fingerprint composition (spec §3)
 # ---------------------------------------------------------------------------
 
-proc extractFingerprint*(sha256: string): string =
-  ## Spec §2: ``<hash>`` for ``apt.extract`` is
-  ##   sha256("apt.extract" || adapterVersion || sha256(deb))
-  ## truncated to 16 hex chars.
-  ##
-  ## The string concatenation matches the §3 layout (no separators —
-  ## consistent with the shell-script's ``catalog_hash`` in
-  ## ``recipes/reproos-mvp-config/build-linux-graphics-stack.sh``).
-  let composed = "apt.extract" & AptJammyAdapterVersion & sha256
-  let h = sha256OfString(composed)
-  result = h[0 ..< 16]
+proc addLengthPrefixed(buf: var string; n: uint64) =
+  ## Append ``n`` as 8 big-endian bytes. Used both as a field's length prefix
+  ## and, on its own, to encode a count.
+  for shift in countdown(56, 0, 8):
+    buf.add(char((n shr uint64(shift)) and 0xff'u64))
 
-proc installFingerprint*(snapshot: string;
-                         debNames: seq[string];
-                         expectedFiles: seq[string]): string =
-  ## Spec §3: ``<hash>`` for ``apt.install`` is
-  ##   sha256(
-  ##     "apt.install" || adapterVersion || snapshot ||
-  ##     sortedDebNames.joinNul() || sortedExpectedFiles.joinNul()
-  ##   )
-  ## truncated to 16 hex chars.
+proc addField(buf: var string; field: string) =
+  ## Append one framed field: its byte length (8 bytes, big-endian), then
+  ## its bytes. The prefix is what makes the preimage injective — without
+  ## it, adjacent fields could trade bytes across their boundary.
+  buf.addLengthPrefixed(uint64(field.len))
+  buf.add(field)
+
+proc identityPreimage(tag: string; fields: openArray[string]): string =
+  ## The bytes hashed for a store identity: ``tag``, the adapter version,
+  ## then ``fields``, each framed by ``addField``. The tag keeps the
+  ## identities of the three store-path kinds (install / extract / unit)
+  ## disjoint even if their remaining fields happened to coincide.
+  result.addField(tag)
+  result.addField(AptJammyAdapterVersion)
+  for f in fields:
+    result.addField(f)
+
+proc isLowerSha256Hex*(s: string): bool =
+  ## True when ``s`` is a SHA-256 digest in the canonical form this adapter
+  ## stores and compares: exactly 64 lowercase hex chars. A mixed-case or
+  ## short digest is refused rather than normalised, so one digest never
+  ## has two spellings in an identity.
+  s.len == 64 and s.allCharsInSet({'0' .. '9', 'a' .. 'f'})
+
+proc raiseInputError(field, value, why: string) {.noreturn.} =
+  var e = newException(AptInputError,
+    "apt-jammy: invalid " & field & " " & value.escape & ": " & why)
+  e.field = field
+  e.value = value
+  raise e
+
+proc requireSha256(field, value: string) =
+  if not value.isLowerSha256Hex:
+    raiseInputError(field, value, "expected 64 lowercase hex characters")
+
+proc requirePrintableToken(field, value: string; allowEmpty: bool) =
+  ## Package names and versions are Debian tokens (Debian Policy §5.6.1 and
+  ## §5.6.12, https://www.debian.org/doc/debian-policy/ch-controlfields.html):
+  ## no whitespace and no control characters. Refusing those keeps the
+  ## idempotency marker (one line per triple) unambiguous; the identity
+  ## itself is framed and would not need it.
+  if value.len == 0 and not allowEmpty:
+    raiseInputError(field, value, "must not be empty")
+  for ch in value:
+    if ord(ch) <= 0x20 or ord(ch) == 0x7f:
+      raiseInputError(field, value,
+        "must not contain whitespace or control characters")
+
+proc sortedValidatedDebs(debs: openArray[ExtractedDeb]): seq[ExtractedDeb] =
+  ## Validate a resolved ``(name, version, sha256)`` set and return it sorted
+  ## by ``(name, version, sha256)``. Raises ``AptInputError`` (fail-closed)
+  ## for an empty name, a whitespace/control character in a name or version,
+  ## a malformed sha256, or a package name that appears twice — two archives
+  ## for one package in one request would be extracted over each other, and
+  ## which bytes survived would depend on the sort order.
   ##
-  ## Sorting is intentional: argument order is not part of the cache key.
-  ## NUL separator avoids ambiguity if a name happens to contain the
-  ## separator characters of any other formatter we might add later.
-  var debs = debNames
-  debs.sort(cmp[string])
-  var ef = expectedFiles
-  ef.sort(cmp[string])
-  const NUL = "\x00"
-  let composed = "apt.install" & AptJammyAdapterVersion & snapshot &
-                 debs.join(NUL) & NUL & ef.join(NUL)
-  let h = sha256OfString(composed)
-  result = h[0 ..< 16]
+  ## ``version`` may be empty: a caller that does not know it still names
+  ## the bytes by sha256, and the empty string is framed like any other.
+  result = @debs
+  for d in result:
+    requirePrintableToken("package name", d.name, allowEmpty = false)
+    requirePrintableToken("version of " & d.name, d.version, allowEmpty = true)
+    requireSha256("sha256 of " & d.name, d.sha256)
+  result.sort(proc (a, b: ExtractedDeb): int =
+    var c = cmp(a.name, b.name)
+    if c == 0: c = cmp(a.version, b.version)
+    if c == 0: c = cmp(a.sha256, b.sha256)
+    c)
+  for i in 1 ..< result.len:
+    if result[i].name == result[i - 1].name:
+      raiseInputError("package name", result[i].name,
+        "named more than once in one request")
+
+proc extractFingerprint*(sha256: string): string =
+  ## Spec §2: the store-path name for ``apt.extract`` of the ``.deb`` whose
+  ## bytes hash to ``sha256``:
+  ##
+  ##   hex(SHA-256(F("apt.extract") ‖ F(adapterVersion) ‖ F(sha256)))
+  ##
+  ## where ``F`` is the 8-byte big-endian length prefix + bytes framing of
+  ## ``identityPreimage``. The full 64 hex chars are returned (no
+  ## truncation). Raises ``AptInputError`` if ``sha256`` is not 64
+  ## lowercase hex chars.
+  requireSha256("sha256", sha256)
+  sha256OfString(identityPreimage("apt.extract", [sha256]))
+
+proc installFingerprint*(debs: openArray[ExtractedDeb]): string =
+  ## Spec §3: the store-path name for ``apt.install`` of a resolved package
+  ## set. The identity is the BYTES, named by their digests:
+  ##
+  ##   hex(SHA-256(F("apt.install") ‖ F(adapterVersion) ‖ N ‖
+  ##               F(name_1) ‖ F(version_1) ‖ F(sha256_1) ‖ … ‖
+  ##               F(name_N) ‖ F(version_N) ‖ F(sha256_N)))
+  ##
+  ## with ``N`` the count as an 8-byte big-endian integer, the triples sorted
+  ## by ``(name, version, sha256)`` (argument order is not part of the key),
+  ## and ``F`` the length-prefix framing of ``identityPreimage``. The full
+  ## 64 hex chars are returned (no truncation).
+  ##
+  ## Deliberately NOT inputs:
+  ##   * the snapshot string — it names no digest, so it cannot say which
+  ##     bytes are stored; the same bytes reached under two snapshots share
+  ##     one path, and different bytes under one snapshot never do;
+  ##   * ``expectedFiles`` — an assertion about the result, checked by
+  ##     ``installAptDeb`` on every call, not a property of the bytes.
+  ##
+  ## Raises ``AptInputError`` for an input set ``sortedValidatedDebs``
+  ## refuses.
+  let sorted = sortedValidatedDebs(debs)
+  var fields: seq[string]
+  for d in sorted:
+    fields.add(d.name)
+    fields.add(d.version)
+    fields.add(d.sha256)
+  var preimage = ""
+  preimage.addField("apt.install")
+  preimage.addField(AptJammyAdapterVersion)
+  preimage.addLengthPrefixed(uint64(sorted.len))
+  for f in fields:
+    preimage.addField(f)
+  sha256OfString(preimage)
 
 # ---------------------------------------------------------------------------
 # .deb (ar archive) parsing
@@ -639,15 +780,17 @@ proc extractAptDeb*(debPath: string;
   ## path + the expected sha256, verifies, extracts, and plants the
   ## content under ``storeRoot / <hash> /``.
   ##
-  ## The store path is content-addressed; re-invocation with the same
-  ## (debPath, sha256, storeRoot) lands at the same path and (when the
-  ## bytes match) is a graph-cache hit. Two .debs with different bytes
+  ## The store path is content-addressed by the ``.deb``'s sha256
+  ## (``extractFingerprint``); re-invocation with the same bytes lands at
+  ## the same path and is a graph-cache hit. Two .debs with different bytes
   ## land at distinct paths even if both have the same name.
   ##
   ## Failure modes (fail-closed):
+  ##   * ``sha256`` not 64 lowercase hex chars → ``AptInputError``.
   ##   * Missing or unreadable ``debPath`` → ``IOError``.
   ##   * sha256 mismatch → ``AptVerifyError`` (no output written).
   ##   * ar/tar invocation failed → ``AptExtractError``.
+  requireSha256("sha256", sha256)
   if not fileExists(debPath):
     raise newException(IOError, "deb missing: " & debPath)
 
@@ -708,6 +851,36 @@ type
     debPath*: string      ## absolute path to a pre-fetched .deb on disk
     sha256*: string       ## expected sha256 of the .deb's bytes
 
+proc checkExpectedFiles(storePath: string; expectedFiles: seq[string]) =
+  ## Spec §1: every ``expectedFiles`` entry must be a file in the extracted
+  ## tree, else ``AptExpectedFileMissing``. Run on EVERY ``installAptDeb``
+  ## call — a fresh extraction and a reuse of an existing path alike — so
+  ## a caller's assertion is never satisfied by a cache hit it did not see.
+  if expectedFiles.len == 0:
+    return
+  let actualSet = walkStoreRelFiles(storePath).toHashSet
+  for ef in expectedFiles:
+    let canon = canonicalisePath(ef)
+    if canon notin actualSet:
+      var e = newException(AptExpectedFileMissing,
+        "expected file not present in extracted tree: " & ef)
+      e.relPath = ef
+      raise e
+
+proc installMarkerContent(fingerprint: string;
+                          sorted: openArray[ExtractedDeb]): string =
+  ## The idempotency marker for an ``apt.install`` store path: the identity
+  ## and the byte set it was computed from, one ``deb`` line per sorted
+  ## triple. It records ONLY the byte identity — no snapshot, no
+  ## ``expectedFiles`` — so the same bytes reached under two snapshots, or
+  ## with different assertions, recognise one completed path. The marker is
+  ## written last, so its presence means the extraction finished.
+  ## ``sortedValidatedDebs`` has refused whitespace and control characters
+  ## in names and versions, so the space-separated lines are unambiguous.
+  result = "fingerprint=" & fingerprint & "\n"
+  for d in sorted:
+    result.add("deb=" & d.name & " " & d.version & " " & d.sha256 & "\n")
+
 proc installAptDeb*(snapshot: string;
                     debs: seq[AptDebSource];
                     expectedFiles: seq[string] = @[];
@@ -718,43 +891,66 @@ proc installAptDeb*(snapshot: string;
   ## produces a single content-addressed store path that is the union
   ## of the extracted trees.
   ##
-  ## v1 limitation: the snapshot string is part of the fingerprint
-  ## (spec §3) but is **not** consulted to fetch .debs over the
-  ## network. Callers must supply ``debPath`` + ``sha256`` for every
-  ## package; the snapshot is informational+identity-only until the
-  ## spec §6 four-link chain lands in a follow-up milestone.
+  ## Identity (spec §3): the store path is
+  ## ``storeRoot / installFingerprint(<the (name, version, sha256) triples>)``
+  ## — keyed by the bytes, so a different ``.deb`` for the same package name
+  ## (e.g. one served by a substituting mirror) can never land at, or
+  ## overwrite, the path of the bytes another caller installed.
   ##
-  ## Failure modes:
-  ##   * Any per-.deb sha256 mismatch → ``AptVerifyError`` (action
-  ##     produces no output).
-  ##   * Any ``expectedFiles`` entry absent after extraction →
-  ##     ``AptExpectedFileMissing``.
-  let debNames = debs.mapIt(it.name)
-  let hash = installFingerprint(snapshot, debNames, expectedFiles)
+  ## ``snapshot`` is PROVENANCE ONLY. It is kept in the signature for API
+  ## compatibility and to say where the caller resolved the ``.deb``s from,
+  ## but it names no digest and so is not part of the identity: the same
+  ## bytes under two snapshots share one path. It is not consulted to fetch
+  ## anything either; callers supply ``debPath`` + ``sha256`` for every
+  ## package until the spec §6 four-link chain lands.
+  ##
+  ## ``expectedFiles`` is a check, not identity: it is evaluated against the
+  ## store tree on every call, including when an existing completed path is
+  ## reused.
+  ##
+  ## Failure modes (all fail-closed):
+  ##   * An invalid source (empty name, whitespace/control character in a
+  ##     name or version, sha256 not 64 lowercase hex chars, a package named
+  ##     twice) → ``AptInputError``, before anything is read or written.
+  ##   * Any per-.deb sha256 mismatch → ``AptVerifyError``. The store path
+  ##     carries no marker, so the next call redoes it.
+  ##   * Any ``expectedFiles`` entry absent → ``AptExpectedFileMissing``.
+  ##     On a fresh extraction the marker is not written; on a reuse the
+  ##     completed path is left as it is (its bytes are still correct for
+  ##     their identity — only the caller's assertion failed).
+  discard snapshot   # provenance only; see above
+  let requested = debs.mapIt(ExtractedDeb(
+    name: it.name, version: it.version, sha256: it.sha256))
+  let sorted = sortedValidatedDebs(requested)
+  let hash = installFingerprint(sorted)
   let storePath = storeRoot / hash
-
-  # Idempotency: identity marker file carrying snapshot + sorted debs.
   let marker = storePath / ".apt-jammy-install"
-  var sortedDebs = debs
-  sortedDebs.sort(proc (a, b: AptDebSource): int = cmp(a.name, b.name))
-  let markerContent = "snapshot=" & snapshot & "\n" &
-    "debs=" & sortedDebs.mapIt(it.name & ":" & it.sha256).join(",") & "\n"
-  if dirExists(storePath) and fileExists(marker):
-    let existing = readFile(marker).strip()
-    if existing == markerContent.strip():
-      result.storePath = storePath
-      result.debs = sortedDebs.mapIt(ExtractedDeb(
-        name: it.name, version: it.version, sha256: it.sha256))
-      return
+  let markerContent = installMarkerContent(hash, sorted)
 
+  result.storePath = storePath
+  result.debs = sorted
+
+  # Reuse: a completed path for this byte identity already exists. The
+  # caller's assertions are still checked against it.
+  if dirExists(storePath) and fileExists(marker) and
+      readFile(marker) == markerContent:
+    checkExpectedFiles(storePath, expectedFiles)
+    return
+
+  # Fresh extraction: remove any partial path (no marker, or a marker from
+  # an older layout), recreate.
   if dirExists(storePath):
     removeDir(storePath)
   createDir(storePath)
 
   # Extract each .deb directly into the shared storePath. Sha verification
   # happens here (NOT via ``extractAptDeb`` so we don't pay for a separate
-  # per-deb content-addressed dir).
-  for d in sortedDebs:
+  # per-deb content-addressed dir). The sources are walked in the same
+  # sorted order the identity uses, so the extraction order is a function of
+  # the identity too.
+  var sortedSources = debs
+  sortedSources.sort(proc (a, b: AptDebSource): int = cmp(a.name, b.name))
+  for d in sortedSources:
     if not fileExists(d.debPath):
       raise newException(IOError, "deb missing for " & d.name & ": " & d.debPath)
     let observedSha = sha256OfFile(d.debPath)
@@ -770,23 +966,12 @@ proc installAptDeb*(snapshot: string;
     tarExtractDataMember(d.debPath, memName, memOff, memSize,
                          storePath)
 
-  # expectedFiles assertion (spec §1: fail-closed at build time).
-  if expectedFiles.len > 0:
-    let actual = walkStoreRelFiles(storePath)
-    let actualSet = actual.toHashSet
-    for ef in expectedFiles:
-      let canon = canonicalisePath(ef)
-      if canon notin actualSet:
-        var e = newException(AptExpectedFileMissing,
-          "expected file not present in extracted tree: " & ef)
-        e.relPath = ef
-        raise e
+  # expectedFiles assertion (spec §1: fail-closed at build time). Checked
+  # before the marker so a failing fresh extraction does not publish a
+  # completed path on behalf of a call that raised.
+  checkExpectedFiles(storePath, expectedFiles)
 
   writeFile(marker, markerContent)
-
-  result.storePath = storePath
-  result.debs = sortedDebs.mapIt(ExtractedDeb(
-    name: it.name, version: it.version, sha256: it.sha256))
 
 # ---------------------------------------------------------------------------
 # Public: installSystemdUnit (spec §5)
@@ -803,11 +988,23 @@ proc installSystemdUnit*(unit: AptFiles;
   ## all hit (R9 systemd's compiled-in ``UnitPath`` does not include
   ## ``/lib/systemd/system/``).
   ##
-  ## The output is itself content-addressed; the hash mixes the source
-  ## unit's bytes with the canonical destination path so:
+  ## The output is itself content-addressed:
+  ##
+  ##   hex(SHA-256(F("apt.installSystemdUnit") ‖ F(adapterVersion) ‖
+  ##               F(unitName) ‖ F(sha256(unit bytes))))
+  ##
+  ## (the framing of ``identityPreimage``; full 64 hex chars), so:
   ##   * Two unit files at the same source path but with different bytes
   ##     produce different output store paths.
   ##   * Re-installing the same unit twice is a graph-cache hit.
+  ##
+  ## ``unitName`` must be a single path component (no ``/`` or ``\``, not
+  ## ``.`` or ``..``, no control characters): it is joined onto store paths,
+  ## so anything else could read or write outside them. Raises
+  ## ``AptInputError`` otherwise.
+  requirePrintableToken("unit name", unitName, allowEmpty = false)
+  if unitName in [".", ".."] or '/' in unitName or '\\' in unitName:
+    raiseInputError("unit name", unitName, "must be a single path component")
   let candidateA = unit.storePath / "lib" / "systemd" / "system" / unitName
   let candidateB = unit.storePath / "usr" / "lib" / "systemd" / "system" / unitName
   var src = ""
@@ -825,10 +1022,8 @@ proc installSystemdUnit*(unit: AptFiles;
       cast[ptr UncheckedArray[byte]](nil).toOpenArray(0, -1)
     else:
       cast[ptr UncheckedArray[byte]](bytes[0].unsafeAddr).toOpenArray(0, bytes.len - 1))
-  let composed = "apt.installSystemdUnit" & AptJammyAdapterVersion &
-                 unitName & bytesSha
-  let h = sha256OfString(composed)
-  let hash = h[0 ..< 16]
+  let hash = sha256OfString(
+    identityPreimage("apt.installSystemdUnit", [unitName, bytesSha]))
   let storePath = storeRoot / hash
   let marker = storePath / ".apt-jammy-unit"
   if dirExists(storePath) and fileExists(marker):

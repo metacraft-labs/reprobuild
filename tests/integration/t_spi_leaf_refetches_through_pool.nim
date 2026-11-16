@@ -45,6 +45,18 @@
 ##     subsequent read heals both leaf and pool. Wrong chain keys must also
 ##     be diagnosed, independently of object presence.
 ##
+##   - ``bounded_lock_is_not_retained_by_an_executed_child`` — a VCS lock
+##     taken with the ordinary deadline (the cache push's) is close-on-exec
+##     too: a child its owner started does not keep it once the owner exits.
+##   - ``hung_cache_push_releases_the_pool_lock_and_its_waiter_names_it`` —
+##     issues/2026-11-15-a-hung-cache-push-holds-the-shared-pool-lock-and-
+##     stalls-every-pre-push.md. A cache push whose ``receive-pack`` never
+##     finishes (a real pool ``pre-receive`` hook that sleeps) holds the pool
+##     lock; a lazy read in the leaf waits behind it, prints a notice naming
+##     the push's pid and command, and completes once the push's deadline
+##     stops it. The push reports the deadline, its hook process is gone, no
+##     ref lock is left, and the next push lands.
+##
 ##   - ``chain_survives_removal_of_the_engine_that_wired_it`` — the leaf's
 ##     ``remote.repro-pool.uploadpack`` names the pool's launcher
 ##     (``<pool>/repro/shared-pool-upload-pack``), not the executable that
@@ -76,7 +88,9 @@
 ## making every suite execution wait two minutes. Child harness modes below
 ## exercise real exec/descriptor inheritance, rather than a mocked lock.
 
-import std/[json, os, osproc, streams, strutils, tempfiles, unittest]
+import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
+when defined(posix):
+  import std/posix
 import repro_test_support/reasoned_skip
 import repro_test_support/process_fixtures
 
@@ -94,8 +108,13 @@ if paramCount() == 3 and paramStr(1) == "lock-inheritance-child":
   while not fileExists(paramStr(3)): sleep(10)
   writeFile(paramStr(3) & ".done", "")
   quit(0)
-if paramCount() == 4 and paramStr(1) == "lock-inheritance-owner":
-  let owned = acquireVcsFileLock(paramStr(2), timeoutMs = -1)
+if paramCount() == 5 and paramStr(1) == "lock-inheritance-owner":
+  # ``paramStr(5)`` picks the acquisition mode: ``indefinite`` is the lazy
+  # transport's (``timeoutMs = -1``), ``bounded`` the ordinary deadline every
+  # other VCS caller -- the cache push among them -- uses.
+  let owned =
+    if paramStr(5) == "indefinite": acquireVcsFileLock(paramStr(2), timeoutMs = -1)
+    else: acquireVcsFileLock(paramStr(2))
   if not owned.acquired: quit(3)
   let child = startProcess(getAppFilename(), args = @["lock-inheritance-child",
     paramStr(3), paramStr(4)], options = {poParentStreams})
@@ -105,6 +124,14 @@ if paramCount() == 4 and paramStr(1) == "lock-inheritance-owner":
   # Intentionally exit without releasing: only an inherited OS descriptor
   # could retain ownership after this process is gone.
   quit(0)
+
+if paramCount() == 4 and paramStr(1) == "cache-push-owner":
+  # The production post-commit push, run in a process of its own so the test
+  # can watch the lock it holds from outside, as a sibling workspace would.
+  let pushed = pushCacheRef(findExe("git"), paramStr(2), paramStr(3),
+    paramStr(4), "main")
+  stdout.write(pushed.diagnostic)
+  quit(if pushed.ok: 0 else: 1)
 
 if paramCount() == 2 and paramStr(1) == "refill-orphan-child":
   let stage = paramStr(2)
@@ -391,7 +418,7 @@ suite "SPI-2: leaves refetch through the pool":
         writeFile(release, "")
         while not fileExists(release & ".done"): sleep(10)
     let owner = startProcess(getAppFilename(), args = @["lock-inheritance-owner",
-      lockPath, ready, release], options = {poStdErrToStdOut})
+      lockPath, ready, release, "indefinite"], options = {poStdErrToStdOut})
     check owner.waitForExit() == 0
     owner.close()
     doAssert fileExists(ready)
@@ -401,6 +428,150 @@ suite "SPI-2: leaves refetch through the pool":
     var reacquired = acquireVcsFileLock(lockPath)
     defer: releaseVcsFileLock(reacquired)
     check reacquired.acquired
+
+  test "bounded_lock_is_not_retained_by_an_executed_child":
+    # The cache push takes the pool lock with the ordinary deadline and then
+    # runs ``git push``, whose ``receive-pack`` runs the pool's hooks. A
+    # descriptor those children inherit keeps the flock alive after its
+    # owner is gone: in the incident the hung ``receive-pack`` had the lock
+    # file open as fd 3. Same proof as the indefinite case above.
+    let root = genTempPath("repro-spi2-lock-exec-bounded-", "")
+    releaseDirAtProcessExit(root)
+    createDir(root)
+    defer: removeDir(root)
+    let ready = root / "child-ready"
+    let release = root / "release-child"
+    let lockPath = root / "lock"
+    var started = false
+    defer:
+      if started:
+        writeFile(release, "")
+        while not fileExists(release & ".done"): sleep(10)
+    let owner = startProcess(getAppFilename(), args = @["lock-inheritance-owner",
+      lockPath, ready, release, "bounded"], options = {poStdErrToStdOut})
+    check owner.waitForExit() == 0
+    owner.close()
+    doAssert fileExists(ready)
+    started = true
+    when defined(posix):
+      terminateAtProcessExit(parseInt(readFile(ready).strip()))
+    var reacquired = acquireVcsFileLock(lockPath)
+    defer: releaseVcsFileLock(reacquired)
+    check reacquired.acquired
+
+  test "hung_cache_push_releases_the_pool_lock_and_its_waiter_names_it":
+    # issues/2026-11-15-a-hung-cache-push-holds-the-shared-pool-lock-and-
+    # stalls-every-pre-push.md: a post-commit cache push whose
+    # ``receive-pack`` never finishes held the pool lock for an hour, and a
+    # lazy read in another workspace waited behind it in silence. The hang
+    # is recreated with a real pool ``pre-receive`` hook that never returns
+    # (the incident's was a futex wait inside ``receive-pack``; any
+    # ``receive-pack`` that does not finish holds the push the same way).
+    # The waiter is the incident's: a lazy ``git cat-file`` in a leaf whose
+    # object only upstream still has, which reaches the pool transport.
+    when not defined(posix):
+      skip("the hook and the process checks are POSIX")
+    else:
+      # Spelled through ``declared`` so this case compiles, and FAILS, against
+      # a build without the deadline: that is the reproduction.
+      const pushDeadlineMs = 5000
+      when declared(CacheRefPushDeadlineMs):
+        doAssert CacheRefPushDeadlineMs == pushDeadlineMs,
+          "the sibling cfg must be honored"
+      when declared(VcsLockWaitNoticeMs):
+        doAssert VcsLockWaitNoticeMs == 500, "the sibling cfg must be honored"
+      let root = createTempDir("repro-spi2-hung-cache-push-", "")
+      releaseDirAtProcessExit(root)
+      var hookPid = 0
+      var owner, reader: Process
+      defer:
+        # On a build without the deadline nothing ever stops the hook, and
+        # the processes it strands may still be writing under ``root``.
+        if hookPid > 0: discard posix.kill(Pid(hookPid), SIGKILL)
+        for p in [owner, reader]:
+          if p != nil:
+            if p.running(): p.kill()
+            discard p.waitForExit()
+            p.close()
+        tearDown()
+        try: removeDir(root)
+        except OSError: discard
+      let f = setUp(root)
+      let tip = loseSideFromPool(f)
+      let hookStarted = root / "hook-started"
+      writeFile(f.pool / "hooks" / "pre-receive", "#!/bin/sh\n" &
+        "echo $$ > " & q(hookStarted & ".tmp") & " && mv " &
+        q(hookStarted & ".tmp") & " " & q(hookStarted) & "\n" &
+        "exec sleep 600\n")
+      setFilePermissions(f.pool / "hooks" / "pre-receive",
+        {fpUserRead, fpUserWrite, fpUserExec})
+      let started = epochTime()
+      owner = startProcess(getAppFilename(), args = @["cache-push-owner",
+        f.leaf, f.pool, "hung-ws"], options = {poStdErrToStdOut})
+      while not fileExists(hookStarted):
+        doAssert owner.peekExitCode() == -1, "the cache push ended early: " &
+          owner.outputStream.readAll()
+        doAssert epochTime() - started < 120, "the pool hook never started"
+        sleep(10)
+      hookPid = parseInt(readFile(hookStarted).strip())
+      # The push now holds the pool lock and will never finish by itself.
+      let readerLog = root / "reader.log"
+      reader = startProcess("/bin/sh", args = @["-c",
+        "env -u GIT_NO_LAZY_FETCH git -C " & q(f.leaf) & " cat-file -t " &
+        q(tip) & " > " & q(readerLog) & " 2>&1"], options = {poParentStreams})
+      var readerCode = -1
+      while true:
+        readerCode = reader.peekExitCode()
+        if readerCode != -1: break
+        # Generous: the deadline, the stop's grace and a slow shared host.
+        if epochTime() - started > float(pushDeadlineMs) / 1000.0 + 90:
+          break
+        sleep(50)
+      let readerOutput = readFile(readerLog)
+      checkpoint("lazy read: " & readerOutput)
+      # The mandatory read finished, so the best-effort push let go.
+      check readerCode == 0
+      var answered = false
+      for line in readerOutput.splitLines():
+        if line.strip() == "commit": answered = true
+      check answered
+      check has(f.leaf, tip)
+      # While it waited it said who it was waiting for: the push's pid and
+      # command, not silence.
+      check ("held by pid " & $owner.processID) in readerOutput
+      check "cache-push-owner" in readerOutput
+      # The push itself reports why it gave up and leaves no process behind.
+      var ownerCode = -1
+      while true:
+        ownerCode = owner.peekExitCode()
+        if ownerCode != -1 or epochTime() - started > 300: break
+        sleep(50)
+      if ownerCode == -1:
+        # Without the deadline the push is still running and its output
+        # pipe stays open, so reading it would wait out the hook's sleep.
+        # Stop the hook to let the push finish, then read what it said.
+        discard posix.kill(Pid(hookPid), SIGKILL)
+        discard owner.waitForExit()
+      let ownerOutput = owner.outputStream.readAll()
+      checkpoint("cache push: " & ownerOutput)
+      check ownerCode == 1
+      check "deadline" in ownerOutput
+      var hookGone = false
+      for _ in 0 ..< 200:
+        if posix.kill(Pid(hookPid), 0) != 0:
+          hookGone = true
+          break
+        sleep(25)
+      check hookGone
+      if hookGone: hookPid = 0
+      check not fileExists(f.pool / "refs/cache/hung-ws/main.lock")
+      # Nothing it left behind blocks the next push.
+      removeFile(f.pool / "hooks" / "pre-receive")
+      let again = pushCacheRef(f.gitBin, f.leaf, f.pool, "hung-ws", "main")
+      checkpoint(again.diagnostic)
+      check again.ok
+      check must(f.pool, "rev-parse", "refs/cache/hung-ws/main") ==
+        must(f.leaf, "rev-parse", "HEAD")
 
   test "concurrent_missing_history_refills_only_missing_objects":
     let root = createTempDir("repro-spi2 user's & %PATH% bounded-", "")

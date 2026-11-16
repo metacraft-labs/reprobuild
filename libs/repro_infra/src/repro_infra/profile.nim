@@ -1048,42 +1048,93 @@ proc floorAppliesByDefault*(r: SystemResource): bool =
     r.suCollision != "dropIn" and
     (hasServiceSection(r.suContent) or hasExecLines(r.suContent))
 
+proc addDropInDirNames(name: string; acc: var seq[string]) =
+  ## ``unit_file_find_dirs()`` of systemd v257 (``src/shared/dropin.c``,
+  ## https://github.com/systemd/systemd/blob/v257/src/shared/dropin.c) for
+  ## one unit-path directory, followed step by step: the name itself, then,
+  ## for an instance, its template's chain, then the chain of the name's
+  ## dashed prefix. The prefix is the part before ``@`` with its last
+  ## dash-separated component cut (a trailing dash is chopped once first),
+  ## and it keeps the instance (``unit_name_build_from_type(prefix,
+  ## instance, type)``). Highest priority first.
+  acc.add(name)
+  let dot = name.rfind('.')
+  if dot <= 0: return
+  let typ = name[dot .. ^1]
+  let n = name[0 ..< dot]
+  let at = n.find('@')
+  let isInstance = at > 0 and at + 1 < n.len
+  if isInstance:
+    addDropInDirNames(n[0 .. at] & typ, acc)    # the template, `foo@.type`
+  var prefix = if at >= 0: n[0 ..< at] else: n
+  var chopped = false
+  while true:
+    let dash = prefix.rfind('-')
+    if dash <= 0: return                         # no dash, or a leading one
+    if dash + 1 < prefix.len or chopped:
+      prefix = prefix[0 .. dash]
+      break
+    prefix = prefix[0 ..< dash]                  # a trailing dash, once
+    chopped = true
+  var built = if isInstance: prefix & "@" & n[at + 1 .. ^1] else: prefix
+  when InfraAddonMutation == "dropins-skip-instance-prefix":
+    built = prefix                               # the instance dropped
+  addDropInDirNames(built & typ, acc)
+
+proc dropInDirNames*(name: string): seq[string] =
+  ## The unit names whose ``<name>.d/`` systemd reads for the unit ``name``,
+  ## highest priority first (``addDropInDirNames``): for
+  ## ``foo-bar@x.service`` that is ``foo-bar@x.service``,
+  ## ``foo-bar@.service``, ``foo-.service``, ``foo-@x.service`` and
+  ## ``foo-@.service``. The type-wide ``service.d/`` comes after them all;
+  ## it is not a unit name, so it is not in the list.
+  addDropInDirNames(name, result)
+
+proc systemdReadsDropInDir*(dir, unit: string): bool =
+  ## Whether systemd reads the directory named for ``dir`` (a unit name, or
+  ## the type alone: ``<dir>.d/`` for drop-ins, ``<dir>.wants/`` and the
+  ## other dependency directories alike) for ``unit`` or -- ``unit`` a
+  ## template ``foo@.service`` -- for any of its instances: one of
+  ## ``dropInDirNames``, or the type-wide ``service`` (systemd.unit(5),
+  ## "Description"; ``unit_file_find_dropin_paths()`` in systemd v257's
+  ## ``src/shared/dropin.c``, the same list for every suffix). The one
+  ## reading every caller shares: the profile's ``dropInApplies``, the
+  ## switch's scan of drop-ins it did not write, and the carried-state
+  ## reach.
+  let dot = unit.rfind('.')
+  if dot <= 0: return false
+  let typ = unit[dot .. ^1]
+  if dir == typ[1 .. ^1] or dir in dropInDirNames(unit): return true
+  let stem = unit[0 ..< dot]
+  if not stem.endsWith("@") or not dir.endsWith(typ): return false
+  # A template: the directories systemd reads for the instance ``dir``
+  # names (``foo-bar@1.service`` and ``foo-@1.service`` for
+  # ``foo-bar@.service``) or, for a ``dir`` without an instance, for any
+  # instance (``foo-@.service``, which every instance reads): the names in
+  # the list that carry no instance are the same for every instance.
+  let dstem = dir[0 ..< dir.len - typ.len]
+  let at = dstem.find('@')
+  let inst = if at >= 0 and at + 1 < dstem.len: dstem[at + 1 .. ^1] else: "i"
+  dir in dropInDirNames(stem & inst & typ)
+
 proc dropInApplies*(dropInUnit, unitName: string): bool =
   ## Whether systemd reads the drop-ins of `dropInUnit` for `unitName`
-  ## (systemd.unit(5), "Description"): the unit's own `<name>.d/`, a
-  ## template's `<prefix>@.<type>.d/` for its instances, and the dashed
-  ## prefixes -- for `foo-bar-baz.service`, `foo-bar-.service.d/` and
-  ## `foo-.service.d/` -- of the name and, for an instance, of its
-  ## template's name. (The type-level `service.d/` is not a unit name the
-  ## profile can name.)
+  ## (``systemdReadsDropInDir``): the unit's own name, an instance's
+  ## template, and the dashed prefixes, an instance's keeping the instance
+  ## (``foo-.service`` and ``foo-@x.service`` for ``foo-bar@x.service``).
+  ## For a template `unitName`, which the floor covers for every instance,
+  ## the drop-ins systemd reads for any of its instances apply as well
+  ## (`foo-bar@1.service.d/`, `foo-@1.service.d/` and `foo-@.service.d/`
+  ## for `foo-bar@.service`; A9 review round 3, finding 4). The type-wide
+  ## `service.d/` is not a unit name the profile can name.
   when InfraAddonMutation == "floor-ignores-prefix-dropins":
     return dropInUnit == unitName
-  if dropInUnit == unitName: return true
+  when InfraAddonMutation in ["floor-static-r3-disabled", "floor-unchecked"]:
+    # Round 3's reading: no instance's directories for a template.
+    return dropInUnit in dropInDirNames(unitName)
   let dot = unitName.rfind('.')
-  if dot <= 0: return false
-  let typ = unitName[dot .. ^1]
-  if not dropInUnit.endsWith(typ): return false
-  var stems = @[unitName[0 ..< dot]]
-  let at = stems[0].find('@')
-  if at >= 0:
-    stems.add(stems[0][0 .. at])     # `foo@` -- the template `foo@.type`
-  # A floored template's instances read the drop-ins of their instance
-  # names (`foo-bar@1.service.d/` for `foo-bar@.service`; A9 review round
-  # 3, finding 4).
-  when InfraAddonMutation notin ["floor-static-r3-disabled", "floor-unchecked"]:
-    if stems[0].endsWith("@"):
-      let dstem = dropInUnit[0 ..< dropInUnit.len - typ.len]
-      if dstem.startsWith(stems[0]) and dstem.len > stems[0].len:
-        return true
-  for stem in stems:
-    if dropInUnit == stem & typ: return true
-    # every dashed prefix: `a-b-c` -> `a-b-`, `a-`
-    var i = stem.len - 1
-    while i > 0:
-      if stem[i - 1] == '-' and i < stem.len:
-        if dropInUnit == stem[0 ..< i] & typ: return true
-      dec i
-  false
+  if dot > 0 and dropInUnit == unitName[dot + 1 .. ^1]: return false
+  systemdReadsDropInDir(dropInUnit, unitName)
 
 proc checkFloorDropIns*(p: SystemProfile) =
   ## A `systemd.systemDropIn` of a unit under the floor is judged by the
@@ -1278,7 +1329,11 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
       if current != section: continue
       let eq = t.find('=')
       if eq <= 0: continue
-      let k = t[0 ..< eq].strip()
+      when InfraAddonMutation == "trigger-key-blanks-unread":
+        # FALSIFYING MUTATION (§13 decision 154): `Key = value` unread.
+        let k = t[0 ..< eq]
+      else:
+        let k = t[0 ..< eq].strip()
       let v = t[eq + 1 .. ^1].strip()
       if k == key:
         if explicitSet and not isSocket: continue
@@ -1293,7 +1348,11 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
           explicitSet = true
       elif isSocket and k == "Accept":
         let b = systemdBoolean(v)
-        if b >= 0: accept = b == 1
+        when InfraAddonMutation != "trigger-accept-unread":
+          # FALSIFYING MUTATION (when absent, §13 decision 154): an
+          # Accept=yes spelling is not read, so the socket triggers its
+          # namesake instead of its template.
+          if b >= 0: accept = b == 1
       elif isSocket and k.startsWith("Listen"):
         if v.len == 0: listeners.setLen(0)
         elif k in NonAcceptListenKeys or k in AcceptListenKeys:
@@ -1362,36 +1421,6 @@ iterator profileTriggers(p: SystemProfile; skipTimerResources = false): string =
     if n.endsWith(".socket") or n.endsWith(".timer") or n.endsWith(".path"):
       yield n
 
-proc dropInDirNames(name: string; acc: var seq[string]) =
-  ## ``unit_file_find_dirs()`` (``src/shared/dropin.c``,
-  ## https://github.com/systemd/systemd/blob/v257/src/shared/dropin.c) for
-  ## one unit-path directory: the unit names whose ``<name>.d/`` systemd
-  ## reads for ``name``, highest priority first -- the name itself, then
-  ## (an instance) its template's chain, then the chain of its dashed
-  ## prefix (``foo-bar-baz.service`` -> ``foo-bar-.service`` ->
-  ## ``foo-.service``, the instance kept: ``foo-@x.service``).
-  acc.add(name)
-  let dot = name.rfind('.')
-  if dot <= 0: return
-  let typ = name[dot .. ^1]
-  let n = name[0 ..< dot]
-  let at = n.find('@')
-  let isInstance = at > 0 and at + 1 < n.len
-  if isInstance:
-    dropInDirNames(n[0 .. at] & typ, acc)
-  var prefix = if at >= 0: n[0 ..< at] else: n
-  var chopped = false
-  while true:
-    let dash = prefix.rfind('-')
-    if dash <= 0: return
-    if dash + 1 < prefix.len or chopped:
-      prefix = prefix[0 .. dash]
-      break
-    prefix = prefix[0 ..< dash]       # a trailing dash, chopped once
-    chopped = true
-  let instance = if isInstance: n[at + 1 .. ^1] else: ""
-  dropInDirNames((if isInstance: prefix & "@" & instance else: prefix) & typ, acc)
-
 proc profileDropInsOf*(p: SystemProfile; name: string): seq[string] =
   ## The contents of the profile's drop-ins that apply to unit ``name``
   ## (``dropInApplies``): each ``systemd.systemDropIn``, and each
@@ -1402,8 +1431,7 @@ proc profileDropInsOf*(p: SystemProfile; name: string): seq[string] =
   ## directory (``dropInDirNames``; the type-wide ``<type>.d/`` last), and
   ## parses the survivors in file-name order (systemd.unit(5),
   ## "Description").
-  var dirs: seq[string]
-  dropInDirNames(name, dirs)
+  var dirs = dropInDirNames(name)
   let dot = name.rfind('.')
   if dot > 0: dirs.add(name[dot + 1 .. ^1])
   var best = initTable[string, (int, int, string)]()  # file -> (rank, idx, text)
@@ -1416,9 +1444,9 @@ proc profileDropInsOf*(p: SystemProfile; name: string): seq[string] =
         (if d.suDropInName.len > 0: d.suDropInName else: "addon"), d.suContent)
     else:
       continue
-    # ``dropInApplies`` is the floor's (deliberately wider) reading; it does
-    # not name the dashed prefix that keeps an instance (``foo-@x.service``
-    # for ``foo-bar@x.service``), which ``unit_file_find_dirs`` does.
+    # ``dropInApplies`` is the floor's reading, wider for a template (it
+    # also takes its instances' directories) and narrowed by the floor's
+    # falsifying builds; ``dirs`` is what systemd reads for ``name`` itself.
     if not (dropInApplies(unit, name) or unit in dirs): continue
     let f = AddOnDropInPrefix & file & ".conf"
     var rank = dirs.find(unit)
@@ -1532,6 +1560,13 @@ proc checkFloorActivators*(p: SystemProfile) =
       if why.len > 0:
         raiseSystemProfileInvalid($r.kind & " '" & name &
           "' activates a floored service: " & why)
+      # §13 decision 163: ordered after sysinit.target, its file and the
+      # profile's drop-ins onto it read together.
+      when InfraAddonMutation != "activator-boot-order-parse-unchecked":
+        let early = activatorBootOrderOfFiles(name, activatorFilesOf(p, name))
+        if early.len > 0:
+          raiseSystemProfileInvalid($r.kind & " '" & name &
+            "' activates a floored service: " & early)
   for d in p.resources:
     var target, content = ""
     if d.kind == srkSystemdSystemDropIn:

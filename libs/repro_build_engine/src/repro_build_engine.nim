@@ -163,6 +163,7 @@ import repro_build_engine/monitor_flush
 # because a private field is writable from anywhere in its declaring module, so
 # declared here it would seal nothing. Read its header before adding a refusal.
 import repro_build_engine/cache_refusal
+import repro_build_engine/embedded_root_scan
 # Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
 # worker pool, not a thread of its own, and TP-2's monitor finish is the
 # second. The flush's tenancy is entirely inside ``monitor_flush``, so the
@@ -1151,11 +1152,24 @@ type
     portableRoots*: seq[LogicalRoot]
       ## Cache-Scope P3.1: the logical roots against which each recorded
       ## action's PORTABLE fingerprint is computed
-      ## (`repro_local_store/portable_fingerprint`). Empty — the default —
-      ## computes none: path independence is "off unless explicitly
-      ## requested" (Hermetic-Builds-And-Path-Independence.md), and it
-      ## costs a BLAKE3 pass over every observed input. The local
-      ## fingerprint and every local cache decision are unaffected.
+      ## (`repro_local_store/portable_fingerprint`). Empty — the default of
+      ## a hand-built configuration — computes none: path independence is
+      ## "off unless explicitly requested"
+      ## (Hermetic-Builds-And-Path-Independence.md), and it costs a BLAKE3
+      ## pass over every observed input. The local fingerprint and every
+      ## local cache decision are unaffected. Which edges it applies to is
+      ## `portableContentCheckedOnly`'s.
+    portableContentCheckedOnly*: bool
+      ## Caching-Architecture.md D1: when true, the portable identity (the
+      ## record and the pre-pass lookup) is computed only for an edge whose
+      ## input-check policy is `ffpChecksum` or `ffpHybrid` -- the edges that
+      ## REQUESTED sharing by declaring a content-checked policy
+      ## (Edge-Derived-Identities.md §3.3a). A `timestamp` edge is left
+      ## exactly as if `portableRoots` were empty. False applies the
+      ## identity to every edge, which is what `REPRO_PORTABLE_CACHE=1`
+      ## asks for. The CLI sets it for its default, same-host-only portable
+      ## configuration (`wirePortableCache`); it has no effect while
+      ## `portableRoots` is empty.
     portableMemoPublisher*: PortableMemoPublisher
       ## Cache-Scope P3.3. When non-nil (and `portableRoots` is set), every
       ## portable record is also published to the remote memoization plane.
@@ -14690,6 +14704,30 @@ proc resolveMonitorShimLibForInstall*(): string =
     shimLibMemoKey = key
     shimLibMemoValue = result
 
+proc msvcInheritedSearchLists(action: BuildAction;
+                              config: BuildEngineConfig):
+    seq[(string, string)] =
+  ## The MSVC search lists (``MsvcListKeys``) the launched process inherits
+  ## from this one, with their values NOW: what ``mergeActionEnvWithMsvc``
+  ## puts the activation's MSVC-owned entries in front of when the action
+  ## does not declare the list itself. An isolated launch, or one under an
+  ## allowlisted environment, inherits none of them, so none is returned and
+  ## such an action gets the owned entries alone.
+  ##
+  ## Read per launch rather than taken from the activation, which is
+  ## captured once per process: the activation's own copy of ``PATH`` is the
+  ## host's ``PATH`` at that moment, and layering it would hide every later
+  ## change from both the launch and the key (``actionEnvResolver`` mirrors
+  ## this composition). See ``msvcDevEnvFromActivation``.
+  when defined(windows):
+    if config.hermeticEnv or action.isolateHostEnvironment:
+      return @[]
+    for name in MsvcListKeys:
+      if existsEnv(name):
+        result.add((name, getEnv(name)))
+  else:
+    discard
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -15173,7 +15211,7 @@ proc preparedActionEnv(action: BuildAction;
   let childEnv = launchChildEnv(action, config)
   let mergedEnv =
     if actionUsesMsvcToolchain(action, monitorCliPath(config)):
-      mergeActionEnvWithMsvc(childEnv)
+      mergeActionEnvWithMsvc(childEnv, msvcInheritedSearchLists(action, config))
     else:
       childEnv
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
@@ -19482,6 +19520,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     config.peerCacheActionPublisher(stated, record, cas)
     finishStat("repro peer-cache publish", publishStart)
 
+  proc portableEligible(action: BuildAction): bool =
+    ## Whether `action` gets a portable identity at all (Caching-Architecture
+    ## D1): never without portable roots; for every edge when the
+    ## configuration asked for all of them (`REPRO_PORTABLE_CACHE=1`); else
+    ## only for an edge that declared a content-checked input policy, which
+    ## is the request to have its results shared (Edge-Derived-Identities.md
+    ## §3.3a). A `timestamp` record could not be served across a checkout
+    ## anyway, so computing its identity by default would cost a BLAKE3 pass
+    ## per input and buy nothing.
+    if config.portableRoots.len == 0:
+      return false
+    if not config.portableContentCheckedOnly:
+      return true
+    action.actionCachePolicy in {ffpChecksum, ffpHybrid}
+
+  proc graphHasPortableEligible(g: BuildGraph): bool =
+    for action in g.actions:
+      if portableEligible(action):
+        return true
+    false
+
   proc portableEnvOf(action: BuildAction): seq[(string, string)] =
     for entry in action.env:
       let eq = entry.find('=')
@@ -20034,7 +20093,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     result = PeerCacheActionQuery(
       weakFingerprint: action.weakFingerprint,
       peerKey: action.weakFingerprint.bytes,
-      portable: config.portableRoots.len > 0,
+      # A peer cache is another host: the default, same-host portable scope
+      # (Caching-Architecture D1) leaves its key the local one, exactly as
+      # before that default existed; only `REPRO_PORTABLE_CACHE=1` keys peers
+      # on the portable fingerprint.
+      portable: config.portableRoots.len > 0 and
+        not config.portableContentCheckedOnly,
       cwd: action.cwd,
       policy: action.actionCachePolicy,
       workspaceRoot: config.peerCacheWorkspaceRoot,
@@ -20070,6 +20134,30 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if key notin seen:
         seen.incl(key)
         result.add(physical)
+
+  proc embeddedRootReason(action: BuildAction): string =
+    ## Caching-Architecture D4: "" when no declared output of `action`
+    ## carries the physical path of a tracked logical root of this
+    ## invocation or of a declared source tree; else the trace reason
+    ## (`embedded_root_scan`). An output that cannot be scanned is reported
+    ## like one that embeds a path: it is not shown path-free.
+    var needles: seq[EmbeddedRootNeedle] = @[]
+    for root in config.portableRoots:
+      if root.kind == lrkTracked and root.path.len > 0:
+        needles.add(EmbeddedRootNeedle(label: root.label, path: root.path))
+    for tree in config.sourceTrees:
+      if tree.len > 0:
+        needles.add(EmbeddedRootNeedle(label: "source tree", path: tree))
+    if needles.len == 0:
+      return ""
+    for physical in portablePhysicalOutputsOf(action):
+      let finding = scanOutputForEmbeddedRoots(physical, needles)
+      if finding.found or finding.unscannable.len > 0:
+        let lp = toLogicalPath(config.portableRoots, physical)
+        let shown =
+          if lp.kind == lpkTracked: lp.label & ":" & lp.rel else: physical
+        return finding.describe(shown)
+    ""
 
   proc finishPortableRecord(idx: int; launched: BuildAction;
                             reads, probes, enumerations: seq[string];
@@ -20151,7 +20239,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let outs = portableOutputs(config.portableRoots,
         portablePhysicalOutputsOf(action).filterIt(
           it notin optionalPaths or pathExists(it)))
-      if outs.portable:
+      # Caching-Architecture D4: an
+      # output that carries the physical path of a root -- a `-g` object's
+      # compressed debug info, a `__FILE__` string, a linked executable's
+      # interpreter in the store -- would be served to a checkout whose
+      # build names its own path there. Such a record is not portable; the
+      # local record serves this checkout as before.
+      let embedded =
+        if outs.portable: embeddedRootReason(action)
+        else: ""
+      if outs.portable and embedded.len > 0:
+        fp.portable = false
+        fp.reason = embedded
+        fp.strongHex = ""
+      elif outs.portable:
         runResult.results[idx].portableOutputs = outs.outputs
         # P3.3: persist the memo record beside the shared action cache so
         # any checkout of any project on this host can find it by portable
@@ -20251,6 +20352,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
       probed.incl(materialPath(action.cwd, path))
+    # A path the action both probed and READ is a read: its content is what
+    # the action consumed, and keying it by its kind alone would give two
+    # different contents one key. Measured: GNU `ar` stats the object before
+    # it reads it, and the archive edge's record bound the object it
+    # archived as a probe ("file"), so the archive of two different objects
+    # had one portable key.
+    for path in evidence.monitorReads:
+      probed.excl(materialPath(action.cwd, path))
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
@@ -20283,7 +20392,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     accesses.evidenceSource = evidenceSource
     cache.recordInputAccesses(record.weakFingerprint,
       record.strongFingerprint, accesses)
-    if config.portableRoots.len == 0:
+    if not portableEligible(action):
       return
     # The OBSERVED environment, exactly as the local fingerprint takes it:
     # a variable a process read is an input whether or not the action
@@ -20309,7 +20418,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## M17): the action's own input-check policy and this execution's
     ## evidence level. There is no local record, so no recorded input to
     ## check for a content hash.
-    if config.portableRoots.len == 0:
+    if not portableEligible(action):
       return
     var reads: seq[string] = @[]
     for input in portableDeclaredInputsOf(action):
@@ -20340,7 +20449,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## A record without stored accesses (written before they were, or
     ## installed from a peer) derives nothing; the action's next run
     ## records the portable record live.
-    if config.portableRoots.len == 0:
+    if not portableEligible(action):
       return
     let accesses = cache.inputAccessesFor(record.weakFingerprint,
       record.strongFingerprint)
@@ -20601,8 +20710,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if config.publishCachedResults:
       return none(BuildRunResult)
     # Cache-Scope P3.4: portable records are derived per action from its
-    # local hit, which the whole-graph short-circuit never looks at.
-    if config.portableRoots.len > 0:
+    # local hit, which the whole-graph short-circuit never looks at. Under
+    # the default content-checked scope (Caching-Architecture D1) a graph
+    # with no `checksum` or `hybrid` edge derives nothing, so it keeps the
+    # short-circuit.
+    if graphHasPortableEligible(buildGraph):
       return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
@@ -22113,6 +22225,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       ancestorsOf[id] = ancestors
       if not (action.cacheable or action.fixedOutput) or
           action.dynamicDepsFile.len > 0:
+        continue
+      if not portableEligible(action):
+        # Caching-Architecture D1: under the default scope only an edge that
+        # declared a content-checked policy has a portable identity, so a
+        # `timestamp` edge is never served from the portable plane; it, and
+        # every descendant (its dependency stays unresolved), go through the
+        # ordinary scheduler.
         continue
       if id in preservingIds:
         # UNSAFE preserve-outputs: never served from another host (nor

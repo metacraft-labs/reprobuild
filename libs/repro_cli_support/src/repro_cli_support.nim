@@ -55,6 +55,7 @@ import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
+import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
@@ -381,9 +382,9 @@ export infra.runInfraCommand, infra.runSystemCommand
 export provisioning_lock_selection
 export catalog_publication
 export cli_hardware.runHardwareCommand
-export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
+export cli_disk.runDiskCommand,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
-       cli_disk.DiskCliOptions, cli_disk.DiskSubcommand,
+       cli_disk.DiskCliOptions,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
 export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
        cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
@@ -545,24 +546,6 @@ const LegacyVerbSynopses = [
       "repro develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n"),
   ("flake",
     "repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|<develop selectors>] [--flake=DIR] [--strip-suffix=LIST] [--workspace-root=PATH] [--json]\n"),
-  ("debug",
-    "repro debug io monitor [inspect <depfile> | [options] -- <command> [args...]]\n" &
-      "repro debug artifact <path> [--format=text|json]\n"),
-  ("home",
-    "repro home {add | remove | enable | disable | list | why | history | apply | plan | export | facts | compare | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n"),
-  ("infra",
-    "repro infra {plan | apply | install-root} ...\n"),
-  ("system",
-    "repro system {add | remove | list | why | sync | history | rollback | audit} ...\n"),
-  ("deploy-agent",
-    "repro deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n" &
-      "repro deploy-agent keygen --secrets-key <FILE>\n"),
-  ("hardware",
-    "repro hardware {probe} [--dry-run | --output PATH | --regenerate]\n"),
-  ("cargo",
-    "repro cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n" &
-      "repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n" &
-      "repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID] [--relative-to DIR] [--libs] -- cargo ARGS...\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
@@ -2524,6 +2507,57 @@ proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
   lines.sort()
   lines.join("\n")
 
+proc toolDeclaredInputCheckPolicyForRefs*(
+    profiles: Table[string, PathOnlyToolProfile];
+    refs: openArray[string]): Option[FileFingerprintPolicy] =
+  ## Caching-Architecture D2: the input-check policy an edge that states
+  ## none takes from the tools it names. Only a ref that RESOLVES to a tool
+  ## profile here counts -- by executable name, by bare package selector, or
+  ## (when neither matches, as ``mkToolIdentityResolver`` does) as an
+  ## executable a profile's realization exports -- so the declaration
+  ## travels with the resolved tool identity: a ref that resolves to nothing
+  ## (the C convention dispatched under ``--tool-provisioning=path`` sees no
+  ## profiles at all) leaves the edge on ``timestamp``. Each resolved ref is
+  ## looked up by the bare package name of its profile, then by its own
+  ## name (``repro_core/tool_input_check_policies``); with several declaring
+  ## tools the strongest policy wins. `none` when no resolved tool declares
+  ## one.
+  for refName in refs:
+    if refName.len == 0:
+      continue
+    var resolvedPackages: seq[string] = @[]
+    for profile in profiles.values:
+      let bare = bareToolSelector(profile.packageSelector)
+      if profile.executableName == refName or bare == refName:
+        resolvedPackages.add(bare)
+    if resolvedPackages.len == 0:
+      for profile in profiles.values:
+        for exported in profile.exportedExecutables:
+          let file = extractFilename(exported)
+          if file == refName or file == addFileExt(refName, ExeExt):
+            resolvedPackages.add(bareToolSelector(profile.packageSelector))
+            break
+    if resolvedPackages.len == 0:
+      continue
+    for key in resolvedPackages & @[refName]:
+      let declared = toolDeclaredInputCheckPolicy(key)
+      if declared.isSome:
+        result = some(if result.isSome:
+            strongestInputCheckPolicy(result.get(), declared.get())
+          else: declared.get())
+
+proc keyedOnToolDeclaredInputCheckPolicy*(weak: ContentDigest;
+                                          policy: FileFingerprintPolicy):
+    ContentDigest =
+  ## Mix a policy an edge took from its tools' declaration into its weak
+  ## fingerprint. The payload says "unstated" either way, so without this the
+  ## same edge would key identically whether it resolved to ``hybrid`` (a
+  ## tarball-provisioned ``gcc``) or to ``timestamp`` (no resolved profile).
+  var text = "reprobuild.toolDeclaredInputCheckPolicy.v1\n" & $policy & "\n"
+  for b in weak.bytes:
+    text.add(toHex(b, 2))
+  weakFingerprintFromText(text)
+
 proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
     seq[string] =
   ## The sub-tools that reach the engine as
@@ -3242,14 +3276,29 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.removeBeforeRun = payload.removeBeforeRun
     result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
+  # Caching-Architecture D2: an edge that states no policy takes the one its
+  # resolved tools declare, else the owner-decided default, timestamp.
+  var policyFromTools = false
   let actionCachePolicy =
     case payload.actionCachePolicy
+    of acfpUnstated:
+      let declared = toolDeclaredInputCheckPolicyForRefs(profiles,
+        payload.toolIdentityRefs)
+      if declared.isSome and declared.get() != ffpTimestamp:
+        policyFromTools = true
+        declared.get()
+      else:
+        ffpTimestamp
     of acfpTimestamp:
       ffpTimestamp
     of acfpChecksum:
       ffpChecksum
     of acfpHybrid:
       ffpHybrid
+  defer:
+    if policyFromTools:
+      result.weakFingerprint = keyedOnToolDeclaredInputCheckPolicy(
+        result.weakFingerprint, actionCachePolicy)
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
@@ -5407,9 +5456,15 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     for a in args:
       cmd.add(" ")
       cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd,
-      env = scrubbedGitRepositoryEnv())
-    (code: r.exitCode, output: r.output)
+    # ``poStdErrToStdOut`` is what puts git's reason in ``output``: every
+    # failure below quotes it, and git reports a failure only on stderr
+    # (``--quiet`` silences the rest). ``execCmdEx``'s default carries it;
+    # an explicit option set without it discards stderr, and a CI fetch
+    # failure then read "fetch failed from <url> at pinned revision <rev>: "
+    # with no cause at all.
+    let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      workingDir = cwd, env = scrubbedGitRepositoryEnv())
+    (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
 
   proc verifyRevisionIntegrity() =
     verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
@@ -5467,12 +5522,16 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # back to fetching every branch and tag, then checking out the pinned
     # revision. A bare ``fetch <url>`` takes only the remote's HEAD, which
     # misses a pin that only a non-default branch reaches.
+    let byRevision = step.output.strip()
     step = git(["-C", checkoutRoot, "fetch", "--quiet", url,
       "+refs/heads/*:refs/remotes/pinned-source/*",
       "+refs/tags/*:refs/tags/*"])
     if step.code != 0:
+      # Both attempts' reasons: the by-revision fetch is the one expected
+      # to work, and its failure is usually the one that explains this.
       fail("fetch failed from " & url & " at pinned revision " & revision &
-        ": " & step.output.strip())
+        ": by revision: " & byRevision & "; all branches and tags: " &
+        step.output.strip())
   step = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
     "--end-of-options", revision & "^{commit}"])
   if step.code != 0:
@@ -25960,14 +26019,25 @@ const
     "REPROBUILD_SOURCE_ROOT"
   ]
 
-  ## Well-known toolchain env vars that must also be forwarded to the daemon
-  ## when present in the user's shell. On Nix systems (especially macOS where
-  ## ``-liconv`` must resolve to ``libiconv`` from the Nix store) the cc-wrapper
-  ## consumes these to inject the correct ``-L``/``-isystem`` paths into clang/
-  ## ld invocations driven by cargo/rustc. Without forwarding, a daemon spawned
-  ## by launchd has none of them and cargo actions like
-  ## ``db-replay-server-cargo`` fail at the rustc link step. Values are NEVER
-  ## hardcoded; they are read live from the launching shell's environment.
+  ## The compiler-toolchain environment: variables that change what the
+  ## tools an action runs produce, and that a build REQUEST is therefore
+  ## authoritative over (``daemonWorkerEnvUnsets``). On Nix systems the
+  ## cc-wrapper consumes them to add ``-L``/``-isystem`` paths, rpaths and its
+  ## hardening flags to every clang/gcc/ld invocation (``NIX_HARDENING_ENABLE``
+  ## alone decides whether it adds ``-O2`` and ``_FORTIFY_SOURCE``).
+  ##
+  ## The request carries the caller's whole environment
+  ## (``daemonCarriedEnvironment``), so a value the caller has always reaches
+  ## the hosted build. What this list adds is the other direction: a value the
+  ## DAEMON was started with and the caller does not have is unset for the
+  ## build, so a daemon started from a ``nix develop`` shell does not compile
+  ## a later plain-shell caller's code with that shell's hardening, which
+  ## ``--daemon=off`` from the same shell would not.
+  ##
+  ## Every client before v0.2.0 forwarded exactly this list (plus
+  ## ``DaemonNixToolchainEnvPrefixes``) whenever the caller had a value, so
+  ## "absent from the request" means "absent from the caller" for clients of
+  ## every version, which is what makes the unset safe.
   DaemonNixToolchainEnvVars* = [
     # Nix cc-wrapper inputs — consumed by the wrapper to extend the underlying
     # clang/ld invocation with the correct -L/-isystem paths.
@@ -26009,12 +26079,15 @@ const
     "CARGO_NET_OFFLINE"
   ]
 
-  ## Env-var name prefixes forwarded wholesale. The cc-wrapper synthesizes
-  ## per-tuple variables of the form
-  ## ``NIX_LDFLAGS_<HOST>_<TARGET>``/``NIX_CFLAGS_COMPILE_<HOST>_<TARGET>`` /
-  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>`` whose suffixes vary by host
-  ## triple (e.g. ``aarch64_apple_darwin``). Forwarding them by prefix avoids
-  ## host-specific allowlist drift.
+  ## Name prefixes of the same toolchain environment. The cc-wrapper reads
+  ## per-target variables of the form ``NIX_CFLAGS_COMPILE_<triple>`` and
+  ## activates its roles through ``NIX_CC_WRAPPER_TARGET_HOST_<triple>`` /
+  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>``, whose suffixes vary by
+  ## host triple (e.g. ``aarch64_apple_darwin``). Matching them by prefix
+  ## avoids host-specific list drift. ``NIX_HARDENING_ENABLE_<triple>`` is
+  ## not matched: the wrapper derives it from ``NIX_HARDENING_ENABLE`` (in
+  ## ``DaemonNixToolchainEnvVars``) inside its own process, and a stdenv
+  ## shell exports only the unsuffixed name.
   DaemonNixToolchainEnvPrefixes* = [
     "NIX_LDFLAGS_",
     "NIX_CFLAGS_",
@@ -26072,13 +26145,30 @@ const DaemonRequestAuthoritativeEnvNames* =
   ## consults it, never one a project merely passes through to its actions.
 
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
-                            currentEnv: openArray[string]): seq[string] =
-  ## Variables the daemon process carries that the REQUEST does not, limited
-  ## to reprobuild's own control namespace
-  ## (``DaemonRequestAuthoritativeEnvPrefixes``) plus the few variables
-  ## outside it that reprobuild reads to pick a default
-  ## (``DaemonRequestAuthoritativeEnvNames``). The worker must unset these
-  ## before running a hosted build.
+                            currentEnv: openArray[string];
+                            requestEnvIsComplete = false): seq[string] =
+  ## Variables the daemon process carries that the REQUEST does not, which
+  ## the worker must unset before running a hosted build.
+  ##
+  ## A COMPLETE request (``environmentIsComplete``: the client sent its whole
+  ## environment, as every client since v0.2.0 does) is the caller's
+  ## environment, so every name it lacks is unset and the hosted build sees
+  ## exactly what a direct build from the same shell sees, which is what a
+  ## hosted build must be equivalent to. The curated rule below could not
+  ## deliver it: a daemon started from a ``nix develop`` shell also holds
+  ## ``CC``, ``CXX``, ``AR``, ``LD``, ``PKG_CONFIG``, the pkg-config
+  ## wrapper's role variable, ``CONFIG_SHELL``, ``SOURCE_DATE_EPOCH`` and
+  ## more, and no list of them stays complete. Names the daemon publishes for
+  ## its own builds (``RUNQUOTA_SOCKET``, the ``*_SRC`` roots) are
+  ## re-established by the build itself, as on the direct route.
+  ##
+  ## An INCOMPLETE request is overlaid, and only these names are unset:
+  ## reprobuild's own control namespace
+  ## (``DaemonRequestAuthoritativeEnvPrefixes``), the few variables outside
+  ## it that reprobuild reads to pick a default
+  ## (``DaemonRequestAuthoritativeEnvNames``), and the compiler-toolchain
+  ## environment (``DaemonNixToolchainEnvVars`` /
+  ## ``DaemonNixToolchainEnvPrefixes``).
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -26091,10 +26181,18 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
   ## a dependency chain; the same hole reaches action fingerprints and cache
   ## inputs, so the consequence is not only latency.
   ##
-  ## Scoped to the prefixes rather than the whole environment because a
-  ## request cannot distinguish "the client had no PATH" from "PATH was not
-  ## forwarded", and clearing the ambient environment of a build is a much
-  ## larger claim than making reprobuild's own knobs request-scoped.
+  ## The toolchain environment is in scope because it decides what an action
+  ## COMPILES, not just how the build is run: a daemon started from a
+  ## ``nix develop`` shell kept that shell's ``NIX_HARDENING_ENABLE``, so the
+  ## cc-wrapper added ``-O2`` and ``_FORTIFY_SOURCE`` to a later plain-shell
+  ## caller's daemon-hosted compiles while ``--daemon=off`` from the same
+  ## shell compiled at ``-O0``.
+  ##
+  ## The incomplete rule is scoped to these names rather than the whole
+  ## environment because a request from a client before v0.2.0 carried only
+  ## a curated list, so it cannot distinguish "the client had no PATH" from
+  ## "PATH was not forwarded". Every name added here was on that curated
+  ## list.
   var carried = initHashSet[string]()
   for item in requestEnv:
     let split = item.find('=')
@@ -26108,19 +26206,19 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
     let key = item[0 ..< split]
     if carried.contains(key):
       continue
-    if key in DaemonRequestAuthoritativeEnvNames:
+    if requestEnvIsComplete or
+        key in DaemonRequestAuthoritativeEnvNames or
+        key in DaemonNixToolchainEnvVars or
+        DaemonRequestAuthoritativeEnvPrefixes.anyIt(key.startsWith(it)) or
+        DaemonNixToolchainEnvPrefixes.anyIt(key.startsWith(it)):
       result.add(key)
-      continue
-    for prefix in DaemonRequestAuthoritativeEnvPrefixes:
-      if key.startsWith(prefix):
-        result.add(key)
-        break
 
 proc currentEnvironmentPairs*(): seq[string] =
   for key, value in envPairs():
     result.add(key & "=" & value)
 
-proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
+proc applyDaemonRequestEnvironment*(requestEnv: openArray[string];
+                                    requestEnvIsComplete = false):
     seq[tuple[key: string; value: string; present: bool]] =
   ## Install a request's environment for the duration of one hosted session
   ## and return the restore list, newest first is not required because every
@@ -26129,7 +26227,8 @@ proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
   ## The one funnel both the build and watch executors use, so the two cannot
   ## drift: a hole fixed for builds but not for watch cycles would reappear on
   ## the next `repro watch` that spawns the same actions.
-  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs()):
+  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs(),
+                                    requestEnvIsComplete):
     result.add((key: name, value: getEnv(name), present: existsEnv(name)))
     delEnv(name)
   for item in requestEnv:
@@ -31194,6 +31293,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonBuildEnvironment(),
+      environmentIsComplete: true,
       attached: true,
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
@@ -34776,34 +34876,11 @@ proc renderLoweredGraphRecordText(record: LoweredGraphCacheRecord): string =
       " command=" & commandDisplay(action))
   lines.join("\n")
 
-proc runDebugArtifactCommand(args: openArray[string]): int =
-  var path = ""
-  var format = gofText
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--json":
-      format = gofJson
-      inc i
-    elif arg.startsWith("--format="):
-      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
-        allowDot = false)
-      inc i
-    elif arg == "--format":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--format requires a value")
-      format = parseGraphOutputFormat(args[i + 1], allowDot = false)
-      inc i, 2
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported debug artifact flag: " & arg)
-    elif path.len == 0:
-      path = arg
-      inc i
-    else:
-      raise newException(ValueError,
-        "unexpected debug artifact argument: " & arg)
-  if path.len == 0:
-    raise newException(ValueError, "debug artifact requires a path")
+proc runDebugArtifactCommand(c: ReproCommandLineDebugArtifact): int =
+  ## ``repro debug artifact <path> [--format text|json] [--json]``; as for
+  ## `graph` and `why`, `--format` wins over `--json`.
+  let path = c.path
+  let format = inspectionFormat(c.format, c.json, allowDot = false)
   let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
   case format
   of gofText:
@@ -36182,6 +36259,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonWatchEnvironment(),
+      environmentIsComplete: true,
       attached: not detach,
       detached: detach,
       cancelOnDisconnect: not detach,
@@ -40867,7 +40945,8 @@ proc installUserDaemonBuildExecutor() =
       # merely overlaid on it -- see `daemonWorkerEnvUnsets` for what an
       # overlay let through and what it cost.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # RE-SEED THE EMBEDDED SOURCE ROOTS AFTER THE REQUEST IS INSTALLED, so
       # a hosted build does not depend on WHICH CLIENT sent it.
       #
@@ -41016,7 +41095,8 @@ proc installUserDaemonWatchExecutor() =
       # must enforce the same private-environment boundary, including the
       # request's authority over reprobuild's own namespace.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # Same re-seed as the build executor, for the reason its comment gives:
       # a hole closed for builds and left open for watch cycles reappears on
       # the next `repro watch` that spawns the same actions.
@@ -50520,9 +50600,12 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     # at the declared previous path was RELOCATED, which is the single
     # outcome this check exists to prevent.
     #
-    # So the move requires URL evidence (or a checkout with no remote at all,
-    # which has no URL to disagree with and leans entirely on the
-    # shared-object half below).
+    # So the move requires URL evidence. A checkout with NO remote is refused
+    # too (below): it has no URL to agree with, so accepting it would leave the
+    # verdict resting on the shared-object half alone, and an unrelated,
+    # never-published repository holding a byte-identical empty file or stock
+    # LICENSE would be moved (reprobuild-pm Declared-Repository-Renames.md
+    # §3.3a).
     if agreement.verdict == raPinnedRevision:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
         "the checkout at '" & prior.path & "' has remote URL(s) " &
@@ -50535,6 +50618,17 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
           "it cannot authorise moving the directory. Point its remote at one " &
           "of the accepted URLs if it really is '" & repo.name &
           "', or move it aside. Nothing was moved.")
+      continue
+    if agreement.verdict == raNoRemotes:
+      result[repoIdx] = relocationRefusal("previous_remote_mismatch",
+        "the checkout at '" & prior.path & "' has no remote configured, so " &
+          "nothing identifies it as '" & repo.name & "': a move needs its " &
+          "remote URL to match the URL this fragment resolves to or one " &
+          "derived from a declared previous identity (accepted URLs are " &
+          agreement.acceptedUrls.join(", ") & "). If it really is '" &
+          repo.name & "', run `git -C " & prior.path &
+          " remote add origin <url>` with one of them and re-run; otherwise " &
+          "move it aside. Nothing was moved.")
       continue
     if agreement.verdict == raCaseOnly:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
@@ -50643,6 +50737,11 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         # rewrites commits and trees but carries BLOBS across, so blob
         # presence survives a rewrite where every commit id does not. This
         # fallback is the whole reason the renamed-AND-rewritten case works.
+        #
+        # The sample holds DISTINCTIVE blobs only and a quorum of them must be
+        # present (`sampleBlobIds`, `blobSampleSatisfied`): the empty blob, a
+        # stock LICENSE or a template `.gitignore` are shared by unrelated
+        # repositories, and finding one says nothing about lineage.
         let sample = sampleBlobIds(probe, tipRepo, tipRef)
         var present = 0
         var firstPresent = ""
@@ -50651,20 +50750,27 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
             inc present
             if firstPresent.len == 0:
               firstPresent = oid
-        if present > 0:
+        let required = min(relocationBlobQuorum, sample.len)
+        if blobSampleSatisfied(present, sample.len):
           sharedEvidence = $present & "/" & $sample.len &
             " sampled blob(s) from " & tipRef[0 ..< min(12, tipRef.len)] &
-            " present in the candidate (first: " &
+            " present in the candidate (distinctive blobs only, " &
+            $required & " required; first: " &
             firstPresent[0 ..< min(12, firstPresent.len)] & ")"
         else:
           result[repoIdx] = relocationRefusal("no_shared_history",
             "the checkout at '" & prior.path &
-              "' has a matching remote, but shares no object with '" &
+              "' has a matching remote, but no evidence of shared history with '" &
               repo.name & "' as published at " & newCloneUrl &
               ": merge-base(HEAD " &
               (if candidateHead.len > 0: candidateHead else: "<none>") &
-              ", tip " & tipRef & ") is empty AND none of " & $sample.len &
-              " sampled blob(s) from that tip is present. Evidence was read " &
+              ", tip " & tipRef & ") is empty AND only " & $present & " of " &
+              $sample.len & " sampled blob(s) from that tip is present " &
+              "(distinctive blobs only; required: " & $max(required, 1) & ")" &
+              (if sample.len == 0: " (the tip has no distinctive blob: " &
+                "empty, very short, licence and template files are not " &
+                "evidence of shared history)" else: "") &
+              ". Evidence was read " &
               "from " & evidenceSource &
               ". Nothing was moved and nothing was cloned over it.")
           continue
@@ -50681,9 +50787,6 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
 
     let identityEvidence = "remote agreement via " &
       (case agreement.verdict
-       of raNoRemotes:
-         "no remotes configured in the candidate (so this verdict rests " &
-           "entirely on the shared object below)"
        of raCurrentUrl: "the current URL (" & agreement.foundUrl & ")"
        of raPreviousUrl: "a declared previous URL (" & agreement.foundUrl & ")"
        else: "an accepted URL") &
@@ -60736,13 +60839,15 @@ proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
         " could not be read (" & err.msg & ")")
 
 proc reproNimDeclaresExactUses(root: string): bool =
-  ## Does ``<root>/repro.nim`` state any unconditional exact `uses:` version?
-  ## The cheap question asked before anything resolves a workspace.
+  ## Does ``<root>/repro.nim`` state any exact `uses:` version? The cheap
+  ## question asked before anything resolves a workspace, so it does not ask
+  ## whether a conditional one applies to the lock: ``reproRepinVerdict``
+  ## decides that, per dependency, against the lock (§16.3 H1).
   let path = root / "repro.nim"
   if not fileExists(extendedPath(path)): return false
   try:
     for d in scanReproUsesDeclarations(readFile(extendedPath(path)), path):
-      if not d.conditional and d.constraint.kind == uckExact: return true
+      if d.constraint.kind == uckExact: return true
   except CatchableError:
     discard
   false
@@ -62753,11 +62858,13 @@ proc preCommitConsistencyOutsideWorkspace(repoRoot: string): int =
     return 0
   for d in consistency.diagnostics:
     stderr.writeLine("repro pre-commit: note: " & d)
-  if not consistency.hasViolations:
-    return 0
+  # Listed whatever the verdict: a constraint the check could not evaluate is
+  # neither a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3).
   for n in consistency.notChecked:
     stderr.writeLine("repro pre-commit: note: recipe/lock consistency not " &
       "checked: " & n)
+  if not consistency.hasViolations:
+    return 0
   stderr.writeLine("repro pre-commit: commit REFUSED: the recipe and the " &
     "locks this commit carries are inconsistent; nothing was written or " &
     "staged.")
@@ -63874,7 +63981,19 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     result.add("repro check: lock update FAILED: " &
       report.lockUpdate.diagnostic)
   if report.exitCode == 0 and report.failures.len == 0:
-    result.add("repro check: OK")
+    # A recipe constraint the consistency check could not evaluate is neither
+    # a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3), so the
+    # verdict line must not read as if every constraint had been checked.
+    var notChecked = 0
+    for notice in report.notices:
+      if notice.startsWith(ConsistencyNotCheckedNotice): inc notChecked
+    if notChecked == 0:
+      result.add("repro check: OK")
+    else:
+      result.add("repro check: OK, except that " & $notChecked &
+        " recipe constraint" & (if notChecked == 1: " was" else: "s were") &
+        " not checked against the lock (listed above as `" &
+        ConsistencyNotCheckedNotice.strip() & "`)")
 
 type
   CheckArgs* = object
@@ -71607,7 +71726,7 @@ proc executeCheckPrePush(parsed: CheckArgs;
     for d in consistency.diagnostics: result.notices.add(d)
     # What the check could not evaluate is named, not left to read as a pass.
     for n in consistency.notChecked:
-      result.notices.add("recipe/lock consistency not checked: " & n)
+      result.notices.add(ConsistencyNotCheckedNotice & n)
     # §16.6 — wording only; the verdict below is already fixed by the check.
     if consistency.hasViolations:
       annotateSiblingGuidance(parsed.currentRepo, consistency.violations)
@@ -77447,31 +77566,16 @@ type
       ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
       ## each with the URL ``--fix`` re-creates its pool from.
 
-proc parseHealthArgs(args: openArray[string]): HealthArgs =
+proc healthArgsOf(c: ReproCommandLineHealth): HealthArgs =
+  ## What `repro health` was given, from its configuration object (repro's
+  ## description, `repro_cli_support/cli_description`).
   result.forgeCache = newRepositoryIdentityCache()
-  result.workspaceRoot = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--offline":
-      result.offline = true
-    elif arg == "--fix":
-      result.fix = true
-    elif arg == "--verbose" or arg == "-v":
-      result.verbose = true
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro health` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro health`: " & arg)
-    inc i
+  result.workspaceRoot = c.workspaceRoot
+  result.json = c.json
+  result.offline = c.offline
+  result.fix = c.fix
+  result.verbose = c.verbose
+  result.projectName = c.project
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -80326,17 +80430,14 @@ proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
     result.add("fix: could NOT migrate the workspace state file: " &
       getCurrentExceptionMsg())
 
-proc runHealthCommand*(args: openArray[string]): int =
-  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--offline]``.
+proc runHealthCommand*(c: ReproCommandLineHealth): int =
+  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json]
+  ## [--offline] [--verbose]``.
   ##
   ## Diagnose every layer and pair each failure with the exact remedy
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
-  if "--help" in args or "-h" in args:
-    stdout.writeLine("Usage: repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--verbose] [--offline]")
-    stdout.writeLine("  --offline  Skip forge identity API probes; other checks retain their existing fetch behavior.")
-    return 0
-  let parsed = parseHealthArgs(args)
+  let parsed = healthArgsOf(c)
   let stateFixActions =
     if parsed.fix: applyStateFileMigrationFix(parsed.workspaceRoot)
     else: @[]
@@ -101530,6 +101631,11 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       var depOf = initTable[string, LockedDep]()
       for i in reproOfRepo: depOf[ld.deps[i].name] = ld.deps[i]
       var edits: seq[tuple[line: int; raw, exact, version: string]]
+      # The arms that apply to this lock are decided from what it records
+      # (its platform and variant values), as H1 decides them: an entry
+      # whose arms apply constrains the move like an unconditional one, so
+      # an exact pin under it is rewritten too, and H1 then passes.
+      let armFacts = armFactsOf(ld)
       for decl in scanReproUsesDeclarations(inputs.reproNim.text,
           reproNimPath):
         let c = decl.constraint
@@ -101537,10 +101643,20 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         if c.kind notin {uckRange, uckExact}: continue
         let where = reproNimPath & ":" & $c.line
         if decl.conditional:
-          result.notes.add(where & ": '" & decl.rawConstraint & "' is under " &
-            "a when/if/case arm, so whether it constrains '" & c.selector &
-            "' is not decidable without compiling the recipe; left alone")
-          continue
+          let arm = armApplicability(decl, armFacts)
+          case arm.applicability
+          of aaApplies:
+            discard
+          of aaExcluded:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so it does not constrain '" & c.selector &
+              "' in this lock; left alone")
+            continue
+          of aaUndecidable:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so whether it constrains '" & c.selector &
+              "' is not decidable without compiling the recipe; left alone")
+            continue
         let dep = depOf[c.selector]
         let depAbs = os.normalizedPath(absolutePath(pathBase / dep.path))
         let at = versionMappedTo(inputs, c, depAbs, dep.coordinates.url,
@@ -104953,26 +105069,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len >= 3 and args[0] == "debug" and
-      args[1] == "io" and args[2] == "monitor":
-    let monitorArgs =
-      if args.len > 3:
-        args[3 .. ^1]
-      else:
-        @[]
-    return runIoMonitorCli("repro debug io monitor", monitorArgs)
-  if programName == "repro" and args.len >= 2 and args[0] == "debug" and
-      args[1] == "artifact":
-    try:
-      let artifactArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runDebugArtifactCommand(artifactArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro debug artifact: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:
       let buildArgs =
@@ -105338,23 +105434,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro gateway: error: " & err.msg &
         "; REJECTING (fail closed)")
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "health":
-    # RA-30 — top-level `repro health` (the environment doctor) per
-    # CLI/health.md. Diagnoses every layer and pairs each failure with the
-    # exact remedy (Interactive-UX Principle 2); ``--fix`` performs only
-    # the safe remediations; ``--json`` for agents/CI; non-zero exit on any
-    # ``fail``. Same dispatch convention as the M14/M15 top-level commands;
-    # implementation in ``runHealthCommand``.
-    try:
-      let healthArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runHealthCommand(healthArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro health: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "restore":
@@ -105882,63 +105961,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "__remote-activate":
-    let remoteArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHomeCommand(@["__remote-activate"] & remoteArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "home":
-    let homeArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHomeCommand(homeArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "infra":
-    let infraArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runInfraCommand(infraArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "anywhere":
-    when defined(linux):
-      return cli_anywhere.runAnywhereCli(if args.len > 1: args[1 .. ^1] else: @[])
-    else:
-      stderr.writeLine("repro anywhere --mode addon runs on Linux only")
-      return 2
-  if programName == "repro" and args.len > 0 and args[0] == "system":
-    let systemArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runSystemCommand(systemArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "deploy-agent":
-    # Windows-Runner-Binary-Cache-Deploy M5: one tick of the signed
-    # desired-state manifest pull loop (poll → verify against the
-    # allowed-signers set → apply the highest valid sequence for this
-    # target via the M4 runInfraApply path).
-    let deployArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return cli_deploy_agent.runDeployAgentCommand(deployArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "hardware":
-    # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
-    # from the live system. The dispatcher lives in
-    # `repro_cli_support/hardware.nim`; see
-    # `reprobuild-specs/ReproOS-Configuration-Architecture.md` §3 for
-    # the surface contract.
-    let hardwareArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHardwareCommand(hardwareArgs)
   if programName == "repro" and args.len > 0 and args[0] == "prompt":
     # RA-26 — `repro prompt` ambient workspace-state segment (+ `prompt
     # init <shell>`) per CLI/prompt.md. Reads only cheap cached state (no
@@ -105960,26 +105982,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro prompt: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "disk":
-    # M9.R.22.4: `repro disk` subcommand surface (plan/apply/mount/...)
-    # per `reprobuild-specs/ReproOS-Disko-Port.md` §4. The dispatcher
-    # lives in `repro_cli_support/disk.nim`.
-    let diskArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runDiskCommand(diskArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "cargo":
-    # `repro cargo gc|record-live`: the cargo target-directory janitor. The
-    # dispatcher lives in `repro_cli_support/cargo_gc.nim`; the logic in the
-    # `repro_cargo_gc` library.
-    let cargoArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return cli_cargo_gc.runCargoCommand(cargoArgs)
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
     # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
@@ -106166,15 +106168,6 @@ proc runReapCommand(conf: ReproCommandLineReap): int =
     stderr.writeLine("repro reap: error: " & err.msg)
     return 1
 
-proc reportReproUsageError(e: ref CliUsageError): int =
-  ## A command line the generated parser rejected: its one-line message
-  ## (clispec's error taxonomy, naming the command) and where to look next,
-  ## on stderr; the usage exit code (2).
-  stderr.writeLine("repro: " & e.msg)
-  stderr.writeLine("Run `repro --help` for the list of commands, or " &
-    "`repro help <command>` for one of them.")
-  e.exitCode
-
 const LegacyVerbsAnsweringHelp = [
   # The unmigrated commands whose own parser answers `--help` with their
   # usage (exit 0), so `repro help <command> [<word>...]` can ask it. Any
@@ -106182,8 +106175,7 @@ const LegacyVerbsAnsweringHelp = [
   # takes it as an operand (`repro allow --help` trusts a directory named
   # `--help`), so `repro help` must never hand it one. An entry goes when its
   # command moves onto the description.
-  "anywhere", "branch", "cargo", "clean", "health", "hooks", "switch",
-  "sync", "workspace"]
+  "branch", "clean", "hooks", "switch", "sync", "workspace"]
 
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string): int =
@@ -106234,18 +106226,9 @@ proc runReproCommandLine(programName: string; args: seq[string];
   ## its typed configuration; any other is handed to ``runLegacyCommand``
   ## with its unparsed arguments.
   var conf: ReproCommandLine
-  try:
-    conf = ReproCommandLine.load(reproArgvForParser(args),
-      CliSources(env: cliProcessEnv()))
-  except CliHelpRequest as e:
-    # `CliCompletionRequest` too: its text is the completion reply.
-    stdout.write(e.text)
-    return 0
-  except CliUsageError as e:
-    return reportReproUsageError(e)
-  except CliConfigError as e:
-    stderr.writeLine("repro: " & e.msg)
-    return 2
+  let answered = loadReproCommandLine(args, conf)
+  if answered >= 0:
+    return answered
   case conf.command
   of ReproCommandLineCommand.call:
     if conf.call.version:
@@ -106350,6 +106333,60 @@ proc runReproCommandLine(programName: string; args: seq[string];
       return 1
   of ReproCommandLineCommand.self:
     return runSelfCommand(conf.self)
+  of ReproCommandLineCommand.home:
+    return runHomeCommand(conf.home)
+  of ReproCommandLineCommand.remoteActivate:
+    return runRemoteActivateCommand(conf.remoteActivate)
+  of ReproCommandLineCommand.system:
+    return runSystemCommand(conf.system)
+  of ReproCommandLineCommand.infra:
+    return runInfraCommand(conf.infra)
+  of ReproCommandLineCommand.anywhere:
+    when defined(linux):
+      return cli_anywhere.runAnywhereCli(conf.anywhere)
+    else:
+      stderr.writeLine("repro anywhere --mode addon runs on Linux only")
+      return 2
+  of ReproCommandLineCommand.deployAgent:
+    # Windows-Runner-Binary-Cache-Deploy M5: one tick of the signed
+    # desired-state manifest pull loop (poll → verify against the
+    # allowed-signers set → apply the highest valid sequence for this
+    # target via the M4 runInfraApply path).
+    return cli_deploy_agent.runDeployAgentCommand(conf.deployAgent)
+  of ReproCommandLineCommand.hardware:
+    # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
+    # from the live system (`repro_cli_support/hardware.nim`).
+    return runHardwareCommand(conf.hardware)
+  of ReproCommandLineCommand.disk:
+    # M9.R.22.4: `repro disk plan|apply|mount|...` (`repro_cli_support/disk`).
+    return runDiskCommand(conf.disk)
+  of ReproCommandLineCommand.cargo:
+    # `repro cargo gc|record-live|run`: the cargo target-directory janitor
+    # and the thin cargo edge (`repro_cli_support/cargo_gc.nim`).
+    return cli_cargo_gc.runCargoCommand(conf.cargo)
+  of ReproCommandLineCommand.health:
+    # RA-30 — top-level `repro health` (the environment doctor): every
+    # layer diagnosed, each failure paired with the exact remedy; `--fix`
+    # performs only the safe remediations; non-zero exit on any `fail`.
+    try:
+      return runHealthCommand(conf.health)
+    except CatchableError as err:
+      stderr.writeLine("repro health: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.debug:
+    case conf.debug.command
+    of ReproCommandLineDebugCommand.io:
+      case conf.debug.io.command
+      of ReproCommandLineDebugIoCommand.monitor:
+        # The monitor's own command line (io-mon's), unparsed.
+        return runIoMonitorCli("repro debug io monitor",
+          conf.debug.io.monitor.args)
+    of ReproCommandLineDebugCommand.artifact:
+      try:
+        return runDebugArtifactCommand(conf.debug.artifact)
+      except CatchableError as err:
+        stderr.writeLine("repro debug artifact: error: " & err.msg)
+        return 1
   else:
     let passed = reproPassThrough(conf)
     if not passed.found:

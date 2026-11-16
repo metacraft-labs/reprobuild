@@ -60,7 +60,7 @@
 ## The plan's three add-on sections (spec §7.1) are in the result: the
 ## ledger diff, the collision report, and the service transition list.
 
-import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
+import std/[algorithm, json, math, monotimes, options, os, sets, strutils, tables,
             times]
 from std/posix import Statvfs, statvfs, Stat, lstat, stat, rmdir, S_ISLNK, ENOENT, O_WRONLY, O_CREAT,
   O_TRUNC, O_RDONLY, O_CLOEXEC, fsync
@@ -74,6 +74,7 @@ import repro_dsl_stdlib/packages/apt_closure
 import repro_elevation
 import repro_elevation/posix_system_driver
 import repro_infra
+import repro_infra/systemd_syntax
 import repro_infra/addon_diagnostics
 import repro_infra/planner
 import repro_infra/start_holds
@@ -1434,6 +1435,14 @@ proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
         effectiveFloor(r).len > 0:
       result.add(r.suName)
 
+proc installedUnitName*(r: SystemResource): string =
+  ## The unit file ``r`` installs: a ``systemd.systemUnit`` (not a drop-in)
+  ## or a ``systemd.systemTimer``; "" for any other resource.
+  case r.kind
+  of srkSystemdSystemUnit: (if r.suCollision != "dropIn": r.suName else: "")
+  of srkSystemdSystemTimer: r.stName
+  else: ""
+
 proc activatorOf(r: SystemResource): tuple[name, content: string] =
   ## The socket, timer or path unit ``r`` installs -- a
   ## ``systemd.systemUnit`` of such a type, or a ``systemd.systemTimer`` --
@@ -1457,6 +1466,20 @@ proc activatorTargets(resources: openArray[SystemResource];
   var p = SystemProfile()
   for x in resources: p.resources.add(x)
   triggeredUnits(name, @[content] & profileDropInsOf(p, name))
+
+proc needsBootConfirm*(userText: string): bool =
+  ## Whether a switch to the user profile ``userText`` must be confirmed
+  ## outside the boot re-assertion (§13 decision 157): it has a floored unit
+  ## with a health check, which cannot start while the re-assertion runs
+  ## (decision 144), so a confirm inside it can only time out. A profile
+  ## that does not parse is left to the re-assertion, which reports it.
+  try:
+    for r in parseAddOnUserProfile(userText).resources:
+      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+          r.suHealthCheck.len > 0 and effectiveFloor(r).len > 0:
+        return true
+  except CatchableError: discard
+  false
 
 proc flooredActivatorNames*(resources: openArray[SystemResource]): seq[string] =
   ## The socket, timer and path units of the generation that activate one of
@@ -1514,6 +1537,45 @@ const HeldTriggersFile = "held-triggers"
 
 proc heldTriggersPath(stateDir: string): string = stateDir / HeldTriggersFile
 
+const RevertStoppedFile = "revert-stopped"
+  ## The units a revert stopped because it holds them (§13 decision 155),
+  ## one per line, in the state directory: written before any is stopped,
+  ## so the switch whose check passes starts exactly those again, whatever
+  ## their kind -- a ``systemd.systemTimer`` resource, an activator the
+  ## profile does not enable (A9 review round 16, finding 5).
+
+proc revertStoppedPath(stateDir: string): string = stateDir / RevertStoppedFile
+
+proc readRevertStopped*(stateDir: string): seq[string] =
+  ## The units on record as stopped by a revert; empty when none is.
+  let p = revertStoppedPath(stateDir)
+  if symlinkExists(p) or not fileExists(p): return
+  for l in readFile(p).splitLines():
+    let t = l.strip()
+    if t.len > 0 and t notin result: result.add(t)
+
+proc writeRevertStopped*(stateDir: string; units: openArray[string]) =
+  ## Record ``units`` as stopped by a revert (durably), or remove the record.
+  let p = revertStoppedPath(stateDir)
+  if units.len == 0:
+    if fileExists(p): removeFile(p)
+    return
+  writeHoldFile(p, units.join("\n") & "\n")
+
+proc revertStoppedToStart*(recorded: openArray[string];
+                           generationUnits: HashSet[string];
+                           planned: openArray[string];
+                           isActive: proc (u: string): bool): seq[string] =
+  ## Of the units a revert stopped (``recorded``), those the passing switch
+  ## starts again: still installed by the generation, not already planned,
+  ## and not running.
+  when mutated("revert-stopped-not-restarted"):
+    return
+  for u in recorded:
+    if u in generationUnits and u notin planned and not isActive(u) and
+        u notin result:
+      result.add(u)
+
 proc readHeldTriggers*(stateDir: string): seq[string] =
   ## The triggers on record as stopped for a hold; empty when none is.
   let p = heldTriggersPath(stateDir)
@@ -1532,30 +1594,164 @@ proc writeHeldTriggers*(stateDir: string; triggers: openArray[string]) =
   writeHoldFile(p, triggers.join("\n") & "\n")
 
 const TriggersToRestartFile = "triggers-to-restart"
-  ## §13 decision 160: the triggers a revert could not start again. While
-  ## the file names any, the host is pending: the next switch first retries
-  ## them (the pending-switch guard) and refuses while one still does not
-  ## start, and `repro system addon recover` retries them and says so.
+  ## §13 decision 160: the triggers a revert could not start again, and the
+  ## units step 7 left out with them (the owner decision "leave dependants
+  ## out", A13 review round 10). While the file names any, the host is
+  ## pending: the next switch first retries them and refuses while one
+  ## still does not start, unless its generation resolves every one (the
+  ## owner decision "allow the fixing apply"); `repro system addon recover`
+  ## retries them and says so.
+  ##
+  ## One entry per line: the unit, then tab-separated ``key=value`` fields
+  ## -- ``of=<trigger>`` for a dependant left out with that trigger, and
+  ## ``rendered=<unit>:<sha256>,...`` for a trigger: the digest of what the
+  ## reverted-to generation renders for the trigger and for each unit it
+  ## triggers (``renderedUnitDigest``; empty when the generation renders
+  ## nothing for that unit). A line with no fields (an older record) is a
+  ## trigger with nothing rendered on record.
+
+type
+  TriggerRestartEntry* = object
+    unit*: string
+    dependantOf*: string
+      ## "" for a trigger; else the trigger it was left out with.
+    rendered*: seq[tuple[unit, digest: string]]
+      ## A trigger's: the generation's rendering of it and its units.
 
 proc triggersToRestartPath(stateDir: string): string =
   stateDir / TriggersToRestartFile
 
-proc readTriggersToRestart*(stateDir: string): seq[string] =
+proc readTriggerRestartEntries*(stateDir: string): seq[TriggerRestartEntry] =
+  ## The record's entries, in their order (a dependant after the trigger,
+  ## and after each dependant it depends on).
   let p = triggersToRestartPath(stateDir)
   if not fileExists(p): return
+  var seen: seq[string]
   for l in readFile(p).splitLines():
-    let t = l.strip()
-    if t.len > 0 and t notin result: result.add(t)
+    let fields = l.split('\t')
+    let u = fields[0].strip()
+    if u.len == 0 or u in seen: continue
+    seen.add(u)
+    var e = TriggerRestartEntry(unit: u)
+    for f in fields[1 .. ^1]:
+      let eq = f.find('=')
+      if eq <= 0: continue
+      let (k, v) = (f[0 ..< eq], f[eq + 1 .. ^1])
+      if k == "of": e.dependantOf = v
+      elif k == "rendered":
+        for pair in v.split(','):
+          let c = pair.rfind(':')
+          if c > 0: e.rendered.add((unit: pair[0 ..< c], digest: pair[c + 1 .. ^1]))
+    result.add(e)
 
-proc writeTriggersToRestart*(stateDir: string; triggers: openArray[string]) =
+proc writeTriggerRestartEntries*(stateDir: string;
+                                 entries: openArray[TriggerRestartEntry]) =
+  ## Write the record (durably: a checked write, renamed into place), or
+  ## remove it when there are no entries.
   let p = triggersToRestartPath(stateDir)
-  if triggers.len == 0:
+  if entries.len == 0:
     if fileExists(p): removeFile(p)
     return
-  writeHoldFile(p, triggers.join("\n") & "\n")
+  var text = ""
+  for e in entries:
+    text.add(e.unit)
+    if e.dependantOf.len > 0: text.add("\tof=" & e.dependantOf)
+    if e.rendered.len > 0:
+      var parts: seq[string]
+      for (u, d) in e.rendered: parts.add(u & ":" & d)
+      text.add("\trendered=" & parts.join(","))
+    text.add("\n")
+  writeHoldFile(p, text)
+
+proc readTriggersToRestart*(stateDir: string): seq[string] =
+  ## Every unit on the record, triggers and dependants alike.
+  for e in readTriggerRestartEntries(stateDir): result.add(e.unit)
+
+proc writeTriggersToRestart*(stateDir: string; triggers: openArray[string]) =
+  ## The record as triggers with nothing rendered on record (tests, and the
+  ## form older builds wrote).
+  var entries: seq[TriggerRestartEntry]
+  for t in triggers: entries.add(TriggerRestartEntry(unit: t))
+  writeTriggerRestartEntries(stateDir, entries)
 
 proc hasTriggersToRestart*(stateDir: string): bool =
-  readTriggersToRestart(stateDir).len > 0
+  readTriggerRestartEntries(stateDir).len > 0
+
+proc renderedUnitDigest*(p: SystemProfile; unit: string): string =
+  ## The sha256 of what the generation ``p`` renders for ``unit``: its own
+  ## unit file (``renderedSystemUnitContent``; a timer resource's content),
+  ## else its template's for an instance, followed by every profile drop-in
+  ## systemd reads for it; "" when the generation renders nothing for it.
+  ## Two generations "change" a unit when these differ (the owner decision
+  ## "allow the fixing apply", A13 review round 10).
+  var text = ""
+  var found = false
+  var names = @[unit]
+  if not isTemplateUnit(unit) and unit.find('@') > 0:
+    names.add(templateOfUnit(unit))
+  for n in names:
+    if found: break
+    for r in p.resources:
+      if r.kind == srkSystemdSystemUnit and r.suName == n and
+          r.suCollision != "dropIn":
+        text.add(renderedSystemUnitContent(r))
+        found = true
+        break
+      if r.kind == srkSystemdSystemTimer and r.stName == n:
+        text.add(r.stContent)
+        found = true
+        break
+  for d in profileDropInsOf(p, unit):
+    text.add("\n--- drop-in\n" & d)
+    found = true
+  if not found: return ""
+  sha256Hex(text)
+
+proc restartEntryResolvedBy*(e: TriggerRestartEntry; p: SystemProfile): bool =
+  ## Whether the generation ``p`` resolves the trigger entry ``e``: it
+  ## removes or changes the trigger or a unit it triggers -- one of the units
+  ## on record renders differently, or not at all where the record has a
+  ## rendering (removed), or at all where it has none. A dependant is
+  ## resolved with its trigger. An entry with nothing on record (an older
+  ## record) is resolved by no generation.
+  when mutated("fixing-apply-refused"):
+    # FALSIFYING MUTATION: no generation resolves an entry.
+    return false
+  if e.dependantOf.len > 0: return false
+  for (u, d) in e.rendered:
+    if renderedUnitDigest(p, u) != d: return true
+  false
+
+proc unresolvedRestartEntries*(stateDir: string; p: SystemProfile):
+    seq[TriggerRestartEntry] =
+  ## The record's trigger entries ``p`` does not resolve. An apply goes
+  ## through only when this is empty: a generation that resolves some of
+  ## the recorded triggers but not all is refused (decision 170).
+  var resolvedAny = false
+  for e in readTriggerRestartEntries(stateDir):
+    if e.dependantOf.len > 0: continue
+    if restartEntryResolvedBy(e, p): resolvedAny = true
+    else: result.add(e)
+  when mutated("partial-fix-accepted"):
+    # FALSIFYING MUTATION: resolving one recorded trigger is enough.
+    if resolvedAny: result.setLen(0)
+
+proc clearResolvedRestartEntries*(stateDir: string; p: SystemProfile):
+    seq[string] =
+  ## Once the generation ``p`` is committed, the entries it resolves leave
+  ## the record, each trigger with its dependants. Returns their units.
+  var keep: seq[TriggerRestartEntry]
+  var gone: seq[string]
+  let entries = readTriggerRestartEntries(stateDir)
+  for e in entries:
+    if e.dependantOf.len == 0 and restartEntryResolvedBy(e, p): gone.add(e.unit)
+  if gone.len == 0: return
+  for e in entries:
+    if e.unit in gone or e.dependantOf in gone:
+      result.add(e.unit)
+    else:
+      keep.add(e)
+  writeTriggerRestartEntries(stateDir, keep)
 
 proc addonLiveHost*(): LiveHost =
   ## systemctl, as the full apply's release reads and drives it.
@@ -1574,22 +1770,131 @@ proc addonLiveHost*(): LiveHost =
 proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
     tuple[ok: bool; lines: seq[string]] =
   ## §13 decision 160: start again each trigger a revert could not, after a
-  ## ``reset-failed``; those that start leave the record, and each outcome
-  ## is a line of the report. ``ok`` when none is left. ``host0`` is
+  ## ``reset-failed``, and then, in the order they were recorded (each after
+  ## what it depends on), the units step 7 left out with it (the owner
+  ## decision "leave dependants out"). What starts leaves the record; a
+  ## dependant whose trigger still fails is not tried. Each outcome is a
+  ## line of the report. ``ok`` when nothing is left. ``host0`` is
   ## systemctl unless a caller (a test) gives another.
   let host = if host0.start == nil: addonLiveHost() else: host0
-  var left: seq[string]
-  for t in readTriggersToRestart(stateDir):
-    let failed = triggerRestarts([t], [], host)
+  var left: seq[TriggerRestartEntry]
+  var downTriggers: seq[string]
+  let entries = readTriggerRestartEntries(stateDir)
+  for e in entries:
+    if e.dependantOf.len > 0: continue
+    let failed = triggerRestarts([e.unit], [], host)
     if failed.len == 0:
-      result.lines.add("trigger " & t & " started again")
+      result.lines.add("trigger " & e.unit & " started again")
     else:
-      left.add(t)
+      left.add(e)
+      downTriggers.add(e.unit)
       for f in failed:
         result.lines.add(f & " (still pending: run `repro system addon " &
           "recover` once its cause is cleared)")
-  writeTriggersToRestart(stateDir, left)
+  var downDependants: seq[string]
+  for e in entries:
+    if e.dependantOf.len == 0: continue
+    if e.dependantOf in downTriggers:
+      left.add(e)
+      downDependants.add(e.unit)
+      continue
+    if host.resetFailed != nil: host.resetFailed(e.unit)
+    let s = host.start(e.unit)
+    if s.ok:
+      result.lines.add("unit " & e.unit & " (left out with " & e.dependantOf &
+        ") started again")
+    else:
+      left.add(e)
+      downDependants.add(e.unit)
+      result.lines.add("systemctl start " & e.unit & " (left out with " &
+        e.dependantOf & ", §13 decision 160): " & s.output.strip() &
+        " (still pending: run `repro system addon recover` once its cause " &
+        "is cleared)")
+  writeTriggerRestartEntries(stateDir, left)
   result.ok = left.len == 0
+
+proc recordUnstartableTriggers*(stateDir: string; keep: openArray[string];
+                                toRestart: openArray[TriggerRestartEntry];
+                                between: proc () = nil) =
+  ## A revert's move of the triggers it cannot start from the record of
+  ## triggers held for its switch (``keep`` is what stays there) to the
+  ## record of triggers to restart (§13 decision 160). The restart record
+  ## is written first, so a crash between the two writes leaves each trigger
+  ## on at least one record (A13 review round 10, finding 4); ``between`` is
+  ## a test's crash point.
+  when mutated("restart-record-after-held"):
+    # FALSIFYING MUTATION: the held record is rewritten first.
+    writeHeldTriggers(stateDir, keep)
+    if between != nil: between()
+    if toRestart.len > 0:
+      writeTriggerRestartEntries(stateDir,
+        readTriggerRestartEntries(stateDir) & @toRestart)
+    return
+  if toRestart.len > 0:
+    var all = readTriggerRestartEntries(stateDir)
+    for e in toRestart:
+      var dup = false
+      for x in all:
+        if x.unit == e.unit: dup = true
+      if not dup: all.add(e)
+    writeTriggerRestartEntries(stateDir, all)
+  if between != nil: between()
+  writeHeldTriggers(stateDir, keep)
+
+proc step7Dependants*(candidates, excluded: openArray[string];
+                      show: proc (u: string): Table[string, string]):
+    seq[tuple[unit, root: string]] =
+  ## The units among ``candidates`` (everything step 7 would start) that
+  ## ``Requires=``, ``BindsTo=`` or ``Sockets=`` one of ``excluded`` (the
+  ## triggers a revert recorded), directly or through another such unit
+  ## (the owner decision "leave dependants out", A13 review round 10):
+  ## starting one would start the recorded trigger with it, and fail the
+  ## revert the way the trigger did. In dependency order, each with the
+  ## recorded trigger it leads to.
+  when mutated("dependants-started"):
+    # FALSIFYING MUTATION: step 7 starts them.
+    return
+  var reached = initTable[string, string]()
+  for t in excluded: reached[t] = t
+  var changed = true
+  while changed:
+    changed = false
+    for u in candidates:
+      if u in reached: continue
+      var props: Table[string, string]
+      try: props = show(u)
+      except CatchableError: continue
+      var root = ""
+      for key in ["Requires", "BindsTo", "Sockets"]:
+        for d in props.getOrDefault(key).splitWhitespace():
+          if d in reached and root.len == 0: root = reached[d]
+      if root.len > 0:
+        reached[u] = root
+        result.add((unit: u, root: root))
+        changed = true
+
+proc switchTriggerRecordRefusal*(stateDir: string; target: SystemProfile;
+                                 host: LiveHost = LiveHost()): string =
+  ## Before an add-on switch writes anything (not its own replay or
+  ## revert): a host pending on triggers a revert could not start (§13
+  ## decision 160) retries them first; while one still does not start, the
+  ## switch is refused -- unless the generation it realises (``target``)
+  ## resolves every trigger still on record (``restartEntryResolvedBy``;
+  ## the owner decision "allow the fixing apply"), whose entries its commit
+  ## then clears. "" when the switch may go ahead.
+  if not hasTriggersToRestart(stateDir): return ""
+  let r = retryTriggerRestarts(stateDir, host)
+  if r.ok: return ""
+  let open = unresolvedRestartEntries(stateDir, target)
+  if open.len == 0: return ""
+  var names: seq[string]
+  for e in open: names.add(e.unit)
+  "the host is pending (§13 decision 160): " & names.join(", ") &
+    " could not be started again after a revert (" & r.lines.join("; ") &
+    "); run `repro system addon recover` once the cause is cleared, or " &
+    "apply a generation that changes or removes " &
+    (if names.len == 1: "it" else: "them") & " or the units " &
+    (if names.len == 1: "it triggers" else: "they trigger")
 
 proc step7Inputs*(transitions: seq[Transition]; paused: seq[string];
                   assumeActive: HashSet[string]; excluded: openArray[string]):
@@ -1616,14 +1921,22 @@ proc step7Inputs*(transitions: seq[Transition]; paused: seq[string];
 proc hostRunningInstances*(tmpl: string): seq[string]
 
 proc heldTriggersOf*(resources: openArray[SystemResource];
-                     held: openArray[string]; host: LiveHost): seq[string] =
+                     held: openArray[string]; host: LiveHost;
+                     list: proc (pattern: string): seq[string] = nil): seq[string] =
   ## The socket, path and timer units of the ``held`` units (§13 decision
-  ## 151): the generation's own, whatever their target, and every one
-  ## systemd has loaded that triggers a held unit, one of a held
-  ## template's instances or its observation instance.
+  ## 151): the generation's own, whatever their target, every one systemd
+  ## has loaded that triggers a held unit, one of a held template's
+  ## instances or its observation instance, and every loaded instance of a
+  ## held template's trigger templates (§13 decision 152,
+  ## ``templateTriggerInstances``; ``list`` is systemd's ``list-units
+  ## --all`` unless a test gives another).
   var profile = SystemProfile()
   for r in resources: profile.resources.add(r)
   result = profileTriggersOf(profile, held)
+  let lister = if list != nil: list
+               else: (proc (pattern: string): seq[string] = hostLoadedInstances(pattern))
+  for t in templateTriggerInstances(profile, held, lister):
+    if t notin result: result.add(t)
   var names: seq[string]
   for u in held:
     names.add(u)
@@ -1662,25 +1975,11 @@ proc unitSearchPaths*(): seq[string] =
 proc dropInDirApplies*(dir, unit: string): bool =
   ## Whether systemd reads the drop-in directory ``dir`` (``<name>.d``'s
   ## name, without ``.d``) for ``unit`` or -- for a template
-  ## ``foo@.service`` -- for any of its instances: the unit's own name, an
-  ## instance's name, the template's, a dashed prefix (``foo-.service``)
-  ## and the type-wide ``service`` (systemd.unit(5), "Description").
-  ## Independent of the profile's parse-time ``dropInApplies``.
-  let dot = unit.rfind('.')
-  if dot <= 0: return false
-  let typ = unit[dot .. ^1]
-  if dir == unit or dir == typ[1 .. ^1]: return true
-  if not dir.endsWith(typ): return false
-  let dstem = dir[0 ..< dir.len - typ.len]
-  let stem = unit[0 ..< dot]
-  let at = stem.find('@')
-  if at >= 0 and at == stem.len - 1:
-    # A template: every instance name, and the template's own.
-    if dstem.startsWith(stem): return true
-  if dstem.endsWith("-") and stem.startsWith(dstem): return true
-  if at >= 0 and dstem.endsWith("-") and stem[0 .. at].startsWith(dstem):
-    return true
-  false
+  ## ``foo@.service`` -- for any of its instances
+  ## (``profile.systemdReadsDropInDir``: systemd v257's list, the type-wide
+  ## ``service`` included). Not the profile's parse-time ``dropInApplies``,
+  ## whose falsifying builds must not turn this check off too.
+  systemdReadsDropInDir(dir, unit)
 
 proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
                         roots: openArray[string]): seq[string] =
@@ -2139,9 +2438,10 @@ type UnitRun* = object
     ## ``NRestarts``: automatic restarts since the unit was last started
     ## explicitly (§13 decision 156's bound)
   restartDelay*: int64
-    ## the ``Restart=`` delay, nanoseconds: ``RestartUSecNext`` where systemd
-    ## reports it (systemd 254 and later, with ``RestartSteps=``), else
-    ## ``RestartUSec``
+    ## the delay before the current run's automatic restart, nanoseconds
+    ## (``restartDelayBefore``): ``RestartUSec``, grown by ``RestartSteps=``
+    ## towards ``RestartMaxDelaySec=`` as systemd grows it. Not
+    ## ``RestartUSecNext``, which is the delay of the NEXT restart.
   running*: bool
 
 proc parseUtcStamp(v: string): int64 =
@@ -2181,11 +2481,42 @@ proc parseTimespanNs*(v: string): int64 =
     if unitNs < 0: return -1
     result += int64(n * unitNs)
 
+proc restartDelayBefore*(nRestarts: int; restartUsec, maxDelayUsec: int64;
+                         steps: int): int64 =
+  ## The delay systemd waited before the restart that began the run whose
+  ## ``NRestarts`` is ``nRestarts``, in the same unit as its inputs (§13
+  ## decision 156, as amended in A9 review round 16). systemd computes the
+  ## delay of restart number n (``n_restarts_next``) in
+  ## ``service_restart_usec_next()``, src/core/service.c
+  ## (https://github.com/systemd/systemd/blob/v257/src/core/service.c):
+  ## ``RestartUSec`` for n <= 1, without steps, with no or an infinite
+  ## maximum, or with a maximum not above it; ``RestartMaxDelayUSec`` once n
+  ## exceeds ``RestartSteps``; else ``r0 * (rmax / r0) ^ ((n - 1) /
+  ## steps)``. When systemd schedules restart n, ``NRestarts`` is n - 1 and
+  ## becomes n as the restart is queued, so the run with ``NRestarts`` = n
+  ## followed the delay for n. -1 for an unknown (infinite) ``RestartUSec``.
+  when mutated("restart-delay-from-next"):
+    # Falsifying build: the delay of the NEXT restart (RestartUSecNext's
+    # meaning), n + 1.
+    let n = nRestarts + 1
+  else:
+    let n = nRestarts
+  if restartUsec < 0: return -1
+  if n <= 1 or steps <= 0 or restartUsec == 0 or maxDelayUsec <= 0 or
+      restartUsec >= maxDelayUsec:
+    return restartUsec
+  if n > steps: return maxDelayUsec
+  let ratio = maxDelayUsec.float64 / restartUsec.float64
+  int64(restartUsec.float64 * pow(ratio, (n - 1).float64 / steps.float64))
+
 proc parseUnitRun*(output: string): UnitRun =
   ## ``UnitRun`` from the output of ``systemctl show --timestamp=us+utc -p
   ## InvocationID -p InactiveExitTimestamp -p InactiveEnterTimestamp -p
-  ## ActiveState`` (and ``NRestarts``, ``RestartUSec``, ``RestartUSecNext``).
-  var nextSeen = false
+  ## ActiveState`` (and ``NRestarts``, ``RestartUSec``, ``RestartSteps``,
+  ## ``RestartMaxDelayUSec``).
+  var restartUsec = 0'i64
+  var maxDelay = 0'i64
+  var steps = 0
   for l in output.splitLines():
     let eq = l.find('=')
     if eq <= 0: continue
@@ -2198,15 +2529,16 @@ proc parseUnitRun*(output: string): UnitRun =
     of "ExecMainStartTimestamp": result.mainStart = parseUtcStamp(v)
     of "NRestarts":
       try: result.nRestarts = parseInt(v) except ValueError: discard
-    of "RestartUSec":
-      if not nextSeen: result.restartDelay = parseTimespanNs(v)
-    of "RestartUSecNext":
-      let d = parseTimespanNs(v)
-      if d >= 0:
-        result.restartDelay = d
-        nextSeen = true
+    of "RestartUSec": restartUsec = parseTimespanNs(v)
+    of "RestartMaxDelayUSec": maxDelay = parseTimespanNs(v)
+    of "RestartSteps":
+      try: steps = parseInt(v) except ValueError: discard
     of "ActiveState": result.running = v in ["active", "activating", "reloading"]
     else: discard
+  # systemd 252 (debian-12) reports neither RestartSteps nor the maximum:
+  # the delay is RestartUSec.
+  result.restartDelay = restartDelayBefore(result.nRestarts, restartUsec,
+                                           maxDelay, steps)
 
 proc unitRun*(unit: string;
               show: proc (args: seq[string]): tuple[exitCode: int; output: string] = nil):
@@ -2216,7 +2548,8 @@ proc unitRun*(unit: string;
   let args = @["show", "--no-pager", "--timestamp=us+utc", "-p", "InvocationID",
                "-p", "InactiveExitTimestamp", "-p", "InactiveEnterTimestamp",
                "-p", "ExecMainStartTimestamp", "-p", "NRestarts",
-               "-p", "RestartUSec", "-p", "RestartUSecNext",
+               "-p", "RestartUSec", "-p", "RestartSteps",
+               "-p", "RestartMaxDelayUSec",
                "-p", "ActiveState", "--", unit]
   try:
     let r = (if show != nil: show(args)
@@ -4766,7 +5099,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     # recovery does not resolve it, the apply refuses with nothing written.
     var why = "run `repro system addon recover` to finish or revert it first"
     if pendingSwitchGuard != nil:
-      let g = pendingSwitchGuard(stateDir)
+      let g = pendingSwitchGuard(stateDir, SystemProfile(), false)
       if not g.ok: why = "recovery did not resolve it: " & g.why
     if hasPendingMarker(stateDir):
       raise newException(AddonApplyError, "an interrupted switch is " &
@@ -4803,7 +5136,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # by an earlier engine gets the boot-hold unit at its next apply). Here,
   # under the host apply lock and before anything is written, so a path in
   # the way stops the apply before any generation change.
-  let ownText =
+  let ownTextUpgraded =
     if replaying: migratedOwn
     else:
       try:
@@ -4816,6 +5149,41 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       except ValueError as e:
         raise newException(AddonApplyError, "generation 0 cannot be " &
           "upgraded: " & e.msg)
+  # §13 decision 164: the re-assert unit runs the engine that applies, so
+  # a host an earlier engine bootstrapped recovers with this one's holds.
+  # The engine goes into the store as a binary prefix, which the
+  # generation's ledger names (a generation-0 entry, carried by every later
+  # switch) and its root holds. Under the host apply lock, before anything
+  # else is written; a plan writes nothing, and a replay applies exactly
+  # what the interrupted switch planned.
+  var bootstrapEntries = opts.bootstrapEntries
+  var ownText = ownTextUpgraded
+  if not replaying and not opts.planOnly:
+    let engine = getAppFilename()
+    var engineSha = ""
+    try: engineSha = sha256OfFile(engine) except CatchableError: discard
+    if engineSha.len > 0:
+      let engineExe = reproExeFor(engineSha)
+      try:
+        let rp = repointReassert(ownText, engineExe, ownPathProbe,
+          proc (path: string): string =
+            for e in previous.entries:
+              if e.path == path: return e.sha256
+            "")
+        if rp.changed:
+          let pre = realiseEnginePrefix(engine, engineSha)
+          if pre.exe != engineExe:
+            raise newException(ValueError, "the engine was realised at " &
+              pre.exe & ", not " & engineExe)
+          bootstrapEntries.add(LedgerEntry(class: lcStorePrefix, path: pre.path,
+            sha256: prefixIdHex(pre.id), value: pre.digest, resource: ""))
+          # Under store custody (§13 decision 48) the digest is recorded
+          # outside the store, as bootstrap records its binary's.
+          recordRealised(custodySite(stateDir), pre.path, pre.digest)
+          ownText = rp.own
+      except ValueError as e:
+        raise newException(AddonApplyError, "generation 0's re-assert unit " &
+          "cannot be re-pointed: " & e.msg)
   result.previousLedger = previous
   # The generation `current` names, not the ledger copy's: a switch that
   # failed after its writes leaves the copy describing the host under the
@@ -4823,6 +5191,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # and the pending marker speak of committed generations only.
   let committedPrevious = readCurrentGenerationId(stateDir)
   result.previousGenerationId = committedPrevious
+  # §13 decision 160: a host pending on triggers a revert could not start
+  # again is not switched over -- the infra apply's guard leaves a switch's
+  # own marker to it, so the switch checks here, before its first write --
+  # unless its generation changes or removes every one still on record
+  # (the owner decision "allow the fixing apply", A13 review round 10). Its
+  # own replay and revert, and a plan, are not refused.
+  when not mutated("switch-ignores-restart-record"):
+    if not opts.planOnly and purpose notin ["replay", "revert"] and
+        hasTriggersToRestart(stateDir):
+      let target =
+        if opts.storedTarget: parseStoredUserProfile(opts.userProfileText, stateDir)
+        else: parseAddOnUserProfile(opts.userProfileText)
+      let why = switchTriggerRecordRefusal(stateDir, target)
+      if why.len > 0:
+        raise newException(AddonApplyError, why & "; nothing was written")
   # §13 decision 72: a host whose committed generation an engine without
   # the record of floored units' directories wrote is migrated once, from
   # what systemd runs now, before this apply changes anything. A plan
@@ -6600,16 +6983,26 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       for u in liveUnits:
         if u notin held: held.add(u)
       let triggers = heldTriggersOf(composed.resources, held, host)
-      var stopped = readHeldTriggers(stateDir)
+      var onRecord = readHeldTriggers(stateDir)
+      # Every active trigger is remembered, those left alone too
+      # (``rememberedTriggers``): one whose service stops during the hold
+      # can fire at the held unit and fail, and the release starts every
+      # remembered trigger that is not active (A13 review round 10).
+      var remember: seq[string]
+      when not mutated("left-alone-triggers-forgotten"):
+        for t in rememberedTriggers(triggers, host):
+          if t notin onRecord: remember.add(t)
       var toStop: seq[string]
-      # Only those that could fire at a held unit (``triggersToStop``): the
-      # switch stops a running unit itself only in step 2, which pauses
-      # its triggers already, and restarts the rest after its check.
-      for t in triggersToStop(triggers, [], host):
-        if t notin stopped: toStop.add(t)
-      if toStop.len > 0:
-        writeHeldTriggers(stateDir, stopped & toStop)
-        for t in toStop: discard host.stop(t)
+      # Only those that could fire at a held unit (``triggersToStop``,
+      # with the generation's own trigger targets): the switch stops a
+      # running unit itself only in step 2, which pauses its triggers
+      # already, and restarts the rest after its check.
+      for t in triggersToStop(triggers, [], host, triggerTargets(composed)):
+        if t notin onRecord and t notin remember: remember.add(t)
+        if t notin toStop: toStop.add(t)
+      if remember.len > 0:
+        writeHeldTriggers(stateDir, onRecord & remember)
+      for t in toStop: discard host.stop(t)
       for h in writeHolds(triggers, StartHoldName, StartHoldText):
         if h notin startHolds: startHolds.add(h)
 
@@ -6624,7 +7017,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     ## restart and commits: the host is then pending until `repro system
     ## addon recover` starts it (``retryTriggerRestarts``).
     when not mutated("triggers-left-running"):
-      var keep, go, toRestart: seq[string]
+      var keep, go: seq[string]
+      var toRestart: seq[TriggerRestartEntry]
       let host = addonLiveHost()
       let reverting = purpose == "revert" or
         (replaying and opts.replayOf == "revert")
@@ -6638,7 +7032,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # dropped, and the switch goes on as if it had.
           continue
         if reverting:
-          toRestart.add(t)
+          # What the reverted-to generation renders for the trigger and its
+          # units, so an apply that changes either is known as the fixing
+          # one (the owner decision "allow the fixing apply").
+          var e = TriggerRestartEntry(unit: t)
+          var units = @[t]
+          try:
+            for u in triggeredUnits(host.show(t)):
+              if u notin units: units.add(u)
+          except CatchableError: discard
+          for (pt, target) in triggerTargets(composed):
+            if pt == t and target notin units: units.add(target)
+          for u in units:
+            e.rendered.add((unit: u, digest: renderedUnitDigest(composed, u)))
+          toRestart.add(e)
           for f in failed:
             stderr.writeLine("repro-addon: " & f & "; the revert commits, " &
               "and the host is pending until `repro system addon recover` " &
@@ -6646,13 +7053,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         else:
           keep.add(t)
           for f in failed: result.add(f)
-      writeHeldTriggers(stateDir, keep)
-      if toRestart.len > 0:
-        writeTriggersToRestart(stateDir,
-          readTriggersToRestart(stateDir) & toRestart)
-        # The restart record owns these triggers now (§13 decision 160):
-        # step 7 leaves them out (``step7Inputs``), or the revert would fail
-        # the same way.
+      # The restart record owns these triggers now (§13 decision 160):
+      # step 7 leaves them out (``step7Inputs``), or the revert would fail
+      # the same way. Written before the held record drops them.
+      recordUnstartableTriggers(stateDir, keep, toRestart)
 
   proc releaseUnflippedHolds() =
     ## The start holds of a switch refused before its flip: nothing of the
@@ -7174,6 +7578,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # round 15). A template's instances are stopped by
             # pattern. A stop that fails keeps the revert from committing.
             when not mutated("revert-held-left-running"):
+              # Recorded first, so the switch that clears the holds starts
+              # exactly these again (A9 review round 16, finding 5).
+              var stopping: seq[string]
+              for u in held:
+                if '@' notin u and unitIsActive(u): stopping.add(u)
+              if stopping.len > 0:
+                try: writeRevertStopped(stateDir, readRevertStopped(stateDir) & stopping)
+                except CatchableError as ex:
+                  problems.add("the revert could not record what it stops: " & ex.msg)
               for u in held:
                 let at = u.find('@')
                 let target =
@@ -7246,6 +7659,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                       not unitIsActive(u):
                     stepTransitions.add(Transition(unit: u, verb: tvStart,
                       reason: "a revert held it; its hold is cleared"))
+            # What a revert stopped because it held it comes back now, read
+            # from its record, whatever kind of unit it is.
+            block:
+              var genUnits = initHashSet[string]()
+              for rr in composed.resources:
+                let n = installedUnitName(rr)
+                if n.len > 0: genUnits.incl(n)
+              var plannedUnits: seq[string]
+              for t in stepTransitions: plannedUnits.add(t.unit)
+              for u in revertStoppedToStart(readRevertStopped(stateDir), genUnits,
+                                            plannedUnits, unitIsActive):
+                stepTransitions.add(Transition(unit: u, verb: tvStart,
+                  reason: "a revert stopped it while it held it; its hold is cleared"))
+              try: writeRevertStopped(stateDir, [])
+              except CatchableError as ex: problems.add(ex.msg)
             if startHolds.len > 0 or stale.len > 0 or revertStale.len > 0:
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
@@ -7284,8 +7712,32 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           block:
             let reverting = purpose == "revert" or
               (replaying and opts.replayOf == "revert")
-            let excluded =
+            var excluded =
               if reverting: readTriggersToRestart(stateDir) else: @[]
+            # And every unit step 7 would start that requires, binds to or
+            # takes its sockets from one of them, transitively (the owner
+            # decision "leave dependants out"): recorded with its trigger,
+            # so recover starts it after the trigger.
+            if excluded.len > 0:
+              var candidates: seq[string]
+              for tr in stepTransitions:
+                if tr.unit notin candidates: candidates.add(tr.unit)
+              for t in paused:
+                if t notin candidates: candidates.add(t)
+              for u in assumeActive:
+                if u notin candidates: candidates.add(u)
+              let deps = step7Dependants(candidates, excluded,
+                proc (u: string): Table[string, string] = systemctlShow(u))
+              if deps.len > 0:
+                var all = readTriggerRestartEntries(stateDir)
+                for (u, root) in deps:
+                  all.add(TriggerRestartEntry(unit: u, dependantOf: root))
+                  excluded.add(u)
+                  stderr.writeLine("repro-addon: " & u & " is left out " &
+                    "with " & root & ", which could not be started again; " &
+                    "`repro system addon recover` starts it after " & root &
+                    " (§13 decision 160)")
+                writeTriggerRestartEntries(stateDir, all)
             let inputs = step7Inputs(stepTransitions, paused, assumeActive,
                                      excluded)
             stepTransitions = inputs.transitions
@@ -7348,7 +7800,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # ``evidence-enrol --rekey`` replaced, decision 52) takes the new
       # entry; the previous one is not carried.
       var restated = initHashSet[string]()
-      for e in opts.bootstrapEntries: restated.incl($e.class & " " & e.path)
+      for e in bootstrapEntries: restated.incl($e.class & " " & e.path)
       for e in previous.entries:
         if e.resource.len > 0 or e.class == lcStaticLink: continue
         if ($e.class & " " & e.path) in restated: continue
@@ -7358,7 +7810,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             readUnitProvision(e.unit).activeState != "active":
           continue      # the instance left running has ended: forgotten
         put(e)
-      for e in opts.bootstrapEntries: put(e)
+      for e in bootstrapEntries: put(e)
       for e in forgottenEntries: put(e)
       # The static tree: its link and its prefix, rebuilt every generation.
       put(LedgerEntry(class: lcStaticLink, path: StaticLinkPath,
@@ -7764,6 +8216,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # (its pending plan's), so until the commit the record is the only
   # place that names them.
   clearRevertHoldDirs(stateDir)
+  # The entries of the record of triggers to restart that this generation
+  # resolves -- it changes or removes the trigger or its units -- are done
+  # with (the owner decision "allow the fixing apply"); a revert's own,
+  # recorded against this generation, are not resolved by it.
+  for u in clearResolvedRestartEntries(stateDir, composed):
+    stderr.writeLine("repro-addon: " & u & " leaves the record of triggers " &
+      "to restart: this generation changes or removes it or the units it " &
+      "triggers")
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
   # A switch the rollback floor kept in place is resolved by its commit.

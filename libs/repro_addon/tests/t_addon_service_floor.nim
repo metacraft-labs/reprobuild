@@ -380,6 +380,42 @@ suite "A9 review round 2: floor version 3":
     check not dropInApplies("a-b.service", "a-b-c.service")
     check not dropInApplies("a-.socket", "a-b.service")
 
+  test "an instance's dashed prefix keeps the instance, and is judged":
+    # Red under dropins-skip-instance-prefix. systemd v257's
+    # unit_file_find_dirs() builds the dashed prefix of an instance with the
+    # instance kept, so foo-bar@x.service also reads foo-@x.service.d/.
+    const weak = "[Service]\nMemoryDenyWriteExecute=no\n"
+    check dropInDirNames("foo-bar@x.service") == @["foo-bar@x.service",
+      "foo-bar@.service", "foo-.service", "foo-@x.service", "foo-@.service"]
+    check dropInDirNames("a-b-c.service") ==
+      @["a-b-c.service", "a-b-.service", "a-.service"]
+    let inst = unitStanza("foo-bar@x.service", "User=a\nExecStart=" & Prefix &
+      "/bin/svc\n")
+    for target in ["foo-@x.service", "foo-@.service", "foo-.service",
+                   "foo-bar@.service"]:
+      checkpoint target
+      check dropInApplies(target, "foo-bar@x.service")
+      check refused(inst & dropInStanza(target, weak)).len > 0
+    # Another instance's prefix is not this instance's.
+    check not dropInApplies("foo-@y.service", "foo-bar@x.service")
+    check refused(inst & dropInStanza("foo-@y.service", weak)) == ""
+    # A floored template covers every instance, and so every instance's
+    # instance-kept prefix.
+    let tpl = unitStanza("foo-bar@.service", "User=a\nExecStart=" & Prefix &
+      "/bin/svc\n")
+    check dropInApplies("foo-@1.service", "foo-bar@.service")
+    check refused(tpl & dropInStanza("foo-@1.service", weak)).len > 0
+    # ... and their template foo-@.service, which every instance reads.
+    check dropInApplies("foo-@.service", "foo-bar@.service")
+    check refused(tpl & dropInStanza("foo-@.service", weak)).len > 0
+    check not dropInApplies("bar-@.service", "foo-bar@.service")
+    # A unit that is not an instance builds its prefix without one.
+    check not dropInApplies("foo-@.service", "foo-bar.service")
+    check not dropInApplies("foo-@1.socket", "foo-bar@.service")
+    # The prefix is cut from the part before `@`: a dash in the instance
+    # makes no prefix systemd reads.
+    check not dropInApplies("foo@a-.service", "foo@a-b.service")
+
   test "a drop-in that resets ReadOnlyPaths= drops /proc and is refused":
     check "ReadOnlyPaths" in refused(unitStanza("a.service", "User=a\n" &
       "ExecStart=" & Prefix & "/bin/svc\n") & dropInStanza("a.service",

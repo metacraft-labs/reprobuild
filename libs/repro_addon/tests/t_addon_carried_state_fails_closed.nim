@@ -642,6 +642,23 @@ suite "reach reads every drop-in systemd applies (round 4)":
       check pendingRefused(confinedR("c0-x.service", ""),
         proc (root: string) = hostFile(root, path, content))
 
+  for path in ["/etc/systemd/system/c0-@1.service.d/10-x.conf",
+               "/run/systemd/system/c0-@.service.d/10-x.conf"]:
+    test "a host source is read: an instance's dashed prefix keeps the " &
+        "instance, " & path:
+      # systemd v257 unit_file_find_dirs(): c0-x@1.service reads
+      # c0-@1.service.d/ and c0-@.service.d/ (the prefix keeps the
+      # instance). Red under dropins-skip-instance-prefix.
+      check not pendingRefused(confinedR("c0-x@1.service", ""))
+      check pendingRefused(confinedR("c0-x@1.service", ""),
+        proc (root: string) = hostFile(root, path, "[Service]\nUser=root\n"))
+
+  test "control: another instance's dashed prefix is not read":
+    check not pendingRefused(confinedR("c0-x@2.service", ""),
+      proc (root: string) = hostFile(root,
+        "/etc/systemd/system/c0-@1.service.d/10-x.conf",
+        "[Service]\nUser=root\n"))
+
   test "a host drop-in that keeps the unit confined is read and let in":
     check not pendingRefused(confinedR("c0-x.service", ""),
       proc (root: string) = hostFile(root,
@@ -1779,3 +1796,412 @@ suite "a trigger that cannot start again leaves the host pending (decision 160)"
       reason: "enabled")], @["t.socket"], assume, [])
     check same.transitions.len == 1 and same.paused == @["t.socket"] and
       "t.socket" in same.assumeActive
+
+suite "the triggers of held units, and a revert's record of them (A13 review round 10)":
+  # The reviewer's probe scenarios (A13 review round 10) as tests. systemd is
+  # a closure (``LiveHost``) whose answers change as the scenario goes on;
+  # the records are files in a state directory of the test's own.
+  proc scratch(tag: string): string =
+    result = getTempDir() / ("t-r10-" & tag & "-" & $getCurrentProcessId())
+    removeDir(result)
+    createDir(result)
+
+  proc liveHost10(active: ref seq[string];
+                  shows: ref Table[string, Table[string, string]];
+                  log: ref seq[string]; failing: seq[string] = @[]): LiveHost =
+    LiveHost(
+      isActive: proc (u: string): bool = u in active[],
+      show: proc (u: string): Table[string, string] =
+        if u notin shows[]: raise newException(OSError, "no unit " & u)
+        shows[][u],
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("start " & u)
+        if u in failing: return (false, "Job failed")
+        if u notin active[]: active[].add(u)
+        (true, ""),
+      stop: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("stop " & u)
+        (true, ""),
+      resetFailed: proc (u: string) = log[].add("reset-failed " & u))
+
+  const SockGen = """systemd.systemUnit {
+  name = "s.socket"
+  content = "[Socket]\nListenStream=/run/s\n"
+}
+systemd.systemUnit {
+  name = "s.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+}
+systemd.systemUnit {
+  name = "other.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+}
+"""
+
+  proc entryFor(p: SystemProfile; t: string; units: seq[string]): TriggerRestartEntry =
+    result = TriggerRestartEntry(unit: t)
+    for u in @[t] & units:
+      result.rendered.add((unit: u, digest: renderedUnitDigest(p, u)))
+
+  test "decision 160: an add-on switch is refused before its first write while a recorded trigger does not start":
+    # Finding 1: the infra apply's guard leaves a switch's own marker to
+    # the switch, so the switch checks the record itself.
+    let dir = scratch("f1")
+    defer: removeDir(dir)
+    let g = parseSystemProfile(SockGen)
+    writeTriggerRestartEntries(dir, [entryFor(g, "s.socket", @["s.service"])])
+    var active = new seq[string]
+    var shows = new Table[string, Table[string, string]]
+    shows[]["s.socket"] = {"LoadState": "loaded"}.toTable
+    var log = new seq[string]
+    let why = switchTriggerRecordRefusal(dir, g,
+      liveHost10(active, shows, log, failing = @["s.socket"]))
+    check "the host is pending" in why
+    check "s.socket" in why
+    check readTriggersToRestart(dir) == @["s.socket"]
+    # Once the trigger starts, the same switch goes ahead and the record
+    # is gone.
+    check switchTriggerRecordRefusal(dir, g, liveHost10(active, shows, log)) == ""
+    check not hasTriggersToRestart(dir)
+
+  test "the fixing apply: a generation that changes or removes the recorded trigger or its unit goes through, any other is refused":
+    let dir = scratch("f9")
+    defer: removeDir(dir)
+    let g = parseSystemProfile(SockGen)
+    let e = entryFor(g, "s.socket", @["s.service"])
+    var active = new seq[string]
+    var shows = new Table[string, Table[string, string]]
+    shows[]["s.socket"] = {"LoadState": "loaded"}.toTable
+    var log = new seq[string]
+    let host = liveHost10(active, shows, log, failing = @["s.socket"])
+    let sockChanged = parseSystemProfile(SockGen.replace("ListenStream=/run/s",
+                                                        "ListenStream=/run/s2"))
+    let unitChanged = parseSystemProfile(SockGen.replace(
+      "name = \"s.service\"\n  content = \"[Service]\\nExecStart=/bin/true",
+      "name = \"s.service\"\n  content = \"[Service]\\nExecStart=/bin/false"))
+    let removed = parseSystemProfile("""systemd.systemUnit {
+  name = "other.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+}
+""")
+    let unrelated = parseSystemProfile(SockGen.replace(
+      "name = \"other.service\"\n  content = \"[Service]\\nExecStart=/bin/true",
+      "name = \"other.service\"\n  content = \"[Service]\\nExecStart=/bin/false"))
+    check renderedUnitDigest(unitChanged, "s.service") !=
+      renderedUnitDigest(g, "s.service")
+    check renderedUnitDigest(unrelated, "s.service") ==
+      renderedUnitDigest(g, "s.service")
+    for (name, target, goes) in [("the same generation", g, false),
+                                 ("another unit changed", unrelated, false),
+                                 ("the trigger changed", sockChanged, true),
+                                 ("its unit changed", unitChanged, true),
+                                 ("both removed", removed, true)]:
+      writeTriggerRestartEntries(dir, [e, TriggerRestartEntry(unit: "d.service",
+        dependantOf: "s.socket")])
+      let why = switchTriggerRecordRefusal(dir, target, host)
+      checkpoint name & ": " & why
+      check (why == "") == goes
+      # The full apply's guard decides the same way.
+      let guard = checkPendingSwitches(dir,
+        proc (d: string): RecoveryOutcome {.closure, gcsafe.} =
+          RecoveryOutcome(resolved: false, lines: @["s.socket did not start"]),
+        pointer = dir / "no-pointer", target = target, hasTarget = true)
+      check guard.ok == goes
+      # The commit clears what its generation resolves, the dependant with
+      # its trigger, and nothing else.
+      let cleared = clearResolvedRestartEntries(dir, target)
+      if goes:
+        check cleared == @["s.socket", "d.service"]
+        check not hasTriggersToRestart(dir)
+      else:
+        check cleared.len == 0
+        check readTriggersToRestart(dir) == @["s.socket", "d.service"]
+    # An apply that names no generation (the guard of a switch's own infra
+    # apply) is never the fixing one.
+    writeTriggerRestartEntries(dir, [e])
+    check not checkPendingSwitches(dir,
+      proc (d: string): RecoveryOutcome {.closure, gcsafe.} =
+        RecoveryOutcome(resolved: false, lines: @["no"]),
+      pointer = dir / "no-pointer").ok
+
+  test "decision 151: a trigger left alone whose Accept=no service exits during the hold is started again at release":
+    # Finding 2: the socket's service ran, so the hold left the socket
+    # alone; the service exited during the hold, the next connection fired
+    # the socket at the held service, and the socket failed with it.
+    var active = new seq[string]
+    active[] = @["s.socket", "s.service"]
+    var shows = new Table[string, Table[string, string]]
+    shows[]["s.socket"] = {"Triggers": "s.service", "LoadState": "loaded"}.toTable
+    var log = new seq[string]
+    let host = liveHost10(active, shows, log)
+    let remembered = rememberedTriggers(["s.socket"], host)
+    let stopped = triggersToStop(["s.socket"], [], host)
+    check remembered == @["s.socket"]
+    check stopped.len == 0
+    # During the hold: the service exits, the socket fails.
+    active[] = @[]
+    let release = triggersToRelease(remembered, stopped, [], ["s.socket"])
+    check release == @["s.socket"]
+    check triggerRestarts(release, [], host).len == 0
+    check log[] == @["reset-failed s.socket", "start s.socket"]
+    # One still up at release needs nothing.
+    log[].setLen(0)
+    check triggerRestarts(release, [], host).len == 0
+    check log[].len == 0
+
+  test "decision 151: a running socket the generation re-points at a held unit is stopped for the hold":
+    # Finding 6: systemd still reports the old, running target; after the
+    # drivers' reload it fires at the held one.
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "s.socket"
+  content = "[Socket]
+ListenStream=/run/s
+Service=new.service
+"
+}
+""")
+    var active = new seq[string]
+    active[] = @["s.socket", "old.service"]
+    var shows = new Table[string, Table[string, string]]
+    shows[]["s.socket"] = {"Triggers": "old.service"}.toTable
+    var log = new seq[string]
+    let host = liveHost10(active, shows, log)
+    check triggersToStop(["s.socket"], [], host).len == 0
+    check triggersToStop(["s.socket"], [], host, triggerTargets(p)) == @["s.socket"]
+
+  test "decision 152: a held template's idle instance timer is found by asking systemd":
+    # Finding 3: tpl@daily.timer is neither running nor named by the
+    # generation; the host lists it.
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "tpl@.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+}
+systemd.systemUnit {
+  name = "tpl@.timer"
+  content = "[Timer]\nOnCalendar=daily\n"
+}
+""")
+    let loaded = @["tpl@daily.timer", "tpl@weekly.service", "other@x.timer",
+                   "tpl@.timer"]
+    var asked = new seq[string]
+    let lister = proc (pattern: string): seq[string] =
+      asked[].add(pattern)
+      let star = pattern.find('*')
+      for n in loaded:
+        if n.startsWith(pattern[0 ..< star]) and n.endsWith(pattern[star + 1 .. ^1]):
+          result.add(n)
+    check templateTriggerInstances(p, ["tpl@.service"], lister) == @["tpl@daily.timer"]
+    check "tpl@*.timer" in asked[]
+    var active = new seq[string]
+    var shows = new Table[string, Table[string, string]]
+    var log = new seq[string]
+    let held = heldTriggersOf(p.resources, ["tpl@.service"],
+                              liveHost10(active, shows, log), lister)
+    check "tpl@daily.timer" in held
+
+  test "decision 160: a crash between the revert's two records leaves the trigger on the restart record":
+    # Finding 4: the restart record is written before the held record
+    # drops the trigger.
+    let dir = scratch("f4")
+    defer: removeDir(dir)
+    writeHeldTriggers(dir, ["a.socket", "b.socket"])
+    expect IOError:
+      recordUnstartableTriggers(dir, ["b.socket"],
+        [TriggerRestartEntry(unit: "a.socket")],
+        proc () = raise newException(IOError, "crash between the writes"))
+    check "a.socket" in readTriggersToRestart(dir)
+    # Uninterrupted: the held record drops it once it is on the other.
+    recordUnstartableTriggers(dir, ["b.socket"],
+                              [TriggerRestartEntry(unit: "a.socket")])
+    check readHeldTriggers(dir) == @["b.socket"]
+    check readTriggersToRestart(dir) == @["a.socket"]
+
+  test "decision 151: a full apply that dies during its hold leaves its triggers on record for the next apply":
+    # Finding 5: the record is written before any trigger is stopped, and
+    # the next apply (or recover) starts them again.
+    let dir = scratch("f5")
+    defer: removeDir(dir)
+    recordLiveCheckTriggers(dir, ["s.socket", "t.timer"])
+    # ... the apply raises here ...
+    var active = new seq[string]
+    var shows = new Table[string, Table[string, string]]
+    shows[]["s.socket"] = {"LoadState": "loaded"}.toTable
+    shows[]["t.timer"] = {"LoadState": "loaded"}.toTable
+    var log = new seq[string]
+    check restartRecordedLiveCheckTriggers(dir,
+      liveHost10(active, shows, log, failing = @["t.timer"])).len == 1
+    check "start s.socket" in log[]
+    check readLiveCheckTriggers(dir) == @["t.timer"]
+    check restartRecordedLiveCheckTriggers(dir,
+      liveHost10(active, shows, log)).len == 0
+    check not fileExists(dir / LiveCheckTriggersFile)
+
+  test "leave dependants out: a unit that requires, binds to or takes its sockets from a recorded trigger is left out and started after it":
+    let shows = {
+      "dep.service": {"Requires": "t.socket"}.toTable,
+      "dep2.service": {"BindsTo": "dep.service"}.toTable,
+      "sk.service": {"Sockets": "t.socket"}.toTable,
+      "free.service": {"Wants": "t.socket"}.toTable}.toTable
+    let deps = step7Dependants(["dep2.service", "free.service", "dep.service",
+                                "sk.service"], ["t.socket"],
+      proc (u: string): Table[string, string] = shows[u])
+    var names: seq[string]
+    for (u, root) in deps:
+      check root == "t.socket"
+      names.add(u)
+    check names.len == 3
+    check names.find("dep.service") < names.find("dep2.service")
+    check "sk.service" in names and "free.service" notin names
+    # Recover starts the trigger, then its dependants in recorded order; a
+    # trigger that still fails keeps its dependants untried.
+    let dir = scratch("f7")
+    defer: removeDir(dir)
+    var entries = @[TriggerRestartEntry(unit: "t.socket")]
+    for u in names: entries.add(TriggerRestartEntry(unit: u, dependantOf: "t.socket"))
+    writeTriggerRestartEntries(dir, entries)
+    var active = new seq[string]
+    var shows2 = new Table[string, Table[string, string]]
+    shows2[]["t.socket"] = {"LoadState": "loaded"}.toTable
+    var log = new seq[string]
+    check not retryTriggerRestarts(dir,
+      liveHost10(active, shows2, log, failing = @["t.socket"])).ok
+    check log[] == @["reset-failed t.socket", "start t.socket"]
+    check readTriggersToRestart(dir).len == 4
+    log[].setLen(0)
+    check retryTriggerRestarts(dir, liveHost10(active, shows2, log)).ok
+    var starts: seq[string]
+    for l in log[]:
+      if l.startsWith("start "): starts.add(l[6 .. ^1])
+    check starts == @["t.socket"] & names
+    check not hasTriggersToRestart(dir)
+
+  test "decision 153: a template that requires a refused unit is judged through its instances":
+    # Finding 8: systemd refuses to show a template by name.
+    var shows = initTable[string, Table[string, string]]()
+    shows["tpl@a.service"] = {"Requires": "bad.service"}.toTable
+    shows["tpl@repro-addon-observe.service"] = {"Requires": ""}.toTable
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "refused: " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    let held = requiringRefused(["tpl@.service", "ok.service"], ["bad.service"],
+      host, proc (t: string): seq[string] = @["tpl@a.service"])
+    check held.len == 1
+    check held[0].unit == "tpl@.service" and held[0].because == "bad.service"
+
+
+suite "every requirer of a refused unit stays held (decision 153, A13 review round 10)":
+  test "decision 153: the generation's units that require a judged unit, judged or not, transitively":
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "grp.target"
+  content = "[Unit]
+Requires=gen.service
+"
+}
+systemd.systemUnit {
+  name = "bound.service"
+  content = "[Unit]
+BindsTo=grp.target
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "reset.service"
+  content = "[Unit]
+Requires=gen.service
+Requires=
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "wants.service"
+  content = "[Unit]
+Wants=gen.service
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "dropped.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemDropIn {
+  unit = "dropped.service"
+  name = "req"
+  content = "[Unit]
+Requires=gen.service
+"
+}
+""")
+    let reqs = profileRequirersOf(p, ["gen.service"])
+    check "grp.target" in reqs
+    check "bound.service" in reqs
+    check "dropped.service" in reqs
+    check "reset.service" notin reqs        # an empty Requires= resets
+    check "wants.service" notin reqs        # Wants= is not a requirement
+    check "gen.service" notin reqs
+    check reqs.find("grp.target") < reqs.find("bound.service")
+    # Read live after the reload, an unjudged requirer of a refused unit
+    # stays held with it (``requiringRefused`` over the passed units and
+    # these requirers).
+    let shows = {"grp.target": {"Requires": "gen.service"}.toTable,
+                 "bound.service": {"BindsTo": "grp.target"}.toTable}.toTable
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    var held: seq[string]
+    for (u, because) in requiringRefused(reqs, ["gen.service"], host):
+      held.add(u)
+    check "grp.target" in held and "bound.service" in held
+
+  test "decision 170: a generation that resolves only some of the recorded triggers is refused":
+    let dir = getTempDir() / ("t-r10-partial-" & $getCurrentProcessId())
+    removeDir(dir)
+    createDir(dir)
+    defer: removeDir(dir)
+    let g = parseSystemProfile("""systemd.systemUnit {
+  name = "a.socket"
+  content = "[Socket]\nListenStream=/run/a\n"
+}
+systemd.systemUnit {
+  name = "b.socket"
+  content = "[Socket]\nListenStream=/run/b\n"
+}
+""")
+    var ea = TriggerRestartEntry(unit: "a.socket")
+    ea.rendered.add((unit: "a.socket", digest: renderedUnitDigest(g, "a.socket")))
+    var eb = TriggerRestartEntry(unit: "b.socket")
+    eb.rendered.add((unit: "b.socket", digest: renderedUnitDigest(g, "b.socket")))
+    writeTriggerRestartEntries(dir, [ea, eb])
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
+      start: proc (u: string): tuple[ok: bool, output: string] = (false, "Job failed"))
+    let onlyA = parseSystemProfile("""systemd.systemUnit {
+  name = "a.socket"
+  content = "[Socket]\nListenStream=/run/a2\n"
+}
+systemd.systemUnit {
+  name = "b.socket"
+  content = "[Socket]\nListenStream=/run/b\n"
+}
+""")
+    let why = switchTriggerRecordRefusal(dir, onlyA, host)
+    check "b.socket" in why
+    check "a.socket" notin why.split("could not")[0]
+    check readTriggersToRestart(dir) == @["a.socket", "b.socket"]

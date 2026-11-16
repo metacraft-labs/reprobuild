@@ -971,6 +971,17 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nStateDirectory=a13r10b\n" &
       "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
       trigWaiver & "}\n"
+    # The owner decision "leave dependants out" (A13 review round 10): a
+    # service that Requires= the socket, in generations 3 and 4 only, each
+    # with its own description, so the revert of generation 4 restarts it
+    # at its step 7 -- which would start the socket it requires.
+    let trigDep =
+      "systemd.systemUnit {\n  name = \"a13r10-dep.service\"\n" &
+      "  content = \"[Unit]\nDescription=A13 round-10 probe: requires the " &
+      "socket, generation @DEPGEN@\nRequires=a13r10.socket\n" &
+      "After=a13r10.socket\n\n[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+      "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
+      trigWaiver & "}\n"
     # The agitator also samples, every half second until it stops, which
     # holds are in place and what each trigger has done (A13 review round 9:
     # what a switch's hold does to a trigger is recorded, not inferred).
@@ -1088,7 +1099,8 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          t2Out & "\n" & t2State.join("\n"))
     discard g.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
       "/run/systemd/generator/a13r10-bad.service.d; systemctl daemon-reload")
-    let t3 = g.applyProfile(repro, "trig3", trigProfile.replace("@GEN@", "3"))
+    let t3 = g.applyProfile(repro, "trig3", trigProfile.replace("@GEN@", "3") &
+                            trigDep.replace("@DEPGEN@", "3"))
     let t3State = g.exec(trigCheck).stdout.splitLines()
     let t3Ok = t3.exitCode == 0 and t3State.len >= 4 and
       "ActiveState=active" in t3State[0] and "ActiveState=active" in t3State[1] and
@@ -1109,12 +1121,60 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "&& break; systemctl stop a13r10-blocker.socket a13r10-blocker.service " &
       ">/dev/null 2>&1; systemctl reset-failed a13r10-blocker.socket " &
       "a13r10-blocker.service >/dev/null 2>&1; sleep 0.1; done' >/dev/null 2>&1 &")
-    let t4 = g.applyProfile(repro, "trig4", trigProfile.replace("@GEN@", "4"))
+    let t4Since = g.exec("date +%s").stdout.strip()
+    let t4 = g.applyProfile(repro, "trig4", trigProfile.replace("@GEN@", "4") &
+                            trigDep.replace("@DEPGEN@", "4"))
     let t4Out = t4.stdout & t4.stderr
     discard g.exec("touch /run/a13r10-blockstop; sleep 1; true")
     let pendingFile = g.exec("cat /var/lib/repro/system/" &
       "triggers-to-restart 2>/dev/null").stdout.strip()
     let blocked = g.exec("systemctl is-active a13r10-blocker.socket").stdout.strip()
+    # The revert committed with the trigger on record (§13 decision 160),
+    # not failed on starting it again at its own step 7; and the unit that
+    # requires it was left out of that step with it and recorded after it
+    # (the owner decision "leave dependants out", A13 review round 10).
+    # Falsifiers: the add-on builds trigger-restart-failure-ignored (the
+    # switch passes), revert-starts-unstartable-trigger and
+    # dependants-started (the revert's step 7 starts the trigger, or the
+    # unit that requires it, and fails).
+    let depRecorded = "a13r10-dep.service\tof=a13r10.socket" in pendingFile
+    let t4Revert = t4.exitCode != 0 and blocked == "active" and
+      "could not be rolled back" notin t4Out and
+      "a13r10.socket" in pendingFile and depRecorded
+    # Why a start of the socket failed while the blocker held its port, in
+    # the socket's journal since the switch began: a failure the classifier
+    # attributes to the socket is this one, nothing else (A13 review round 10).
+    let socketBindFailed = "Address already in use" in g.exec("journalctl " &
+      "-b --no-pager -u a13r10.socket --since @" & t4Since & " 2>&1").stdout
+    record["decision160Revert"] = %*{"exit": t4.exitCode, "blocked": blocked,
+      "revertFailed": "could not be rolled back" in t4Out,
+      "pending": pendingFile, "dependantRecorded": depRecorded,
+      "dependantInOutput": "a13r10-dep.service" in t4Out,
+      "dependantJobFailed":
+        "A dependency job for a13r10-dep.service failed" in t4Out,
+      "socketBindFailed": socketBindFailed, "ok": t4Revert}
+    step("decision 160: a trigger that cannot start again fails the switch, " &
+         "and its revert commits with the trigger, and the unit that " &
+         "requires it, on record", t4Revert, t4Out & "\npending: " &
+         pendingFile & "\nblocker: " & blocked)
+    # §13 decision 160 (A13 review round 10, finding 1): while the record is
+    # pending, an add-on switch whose generation leaves the trigger and its
+    # unit as they are is refused before it writes anything, and the record
+    # stays. Falsifier: the add-on build switch-ignores-restart-record.
+    let t4b = g.applyProfile(repro, "trig4b", trigProfile.replace("@GEN@", "4b") &
+                             trigDep.replace("@DEPGEN@", "3"))
+    let t4bOut = t4b.stdout & t4b.stderr
+    let t4bAfter = g.exec("cat /var/lib/repro/system/triggers-to-restart " &
+      "2>/dev/null; test -e /var/lib/repro/system/addon/pending && echo marker; " &
+      "systemctl show -p Description a13r10-bad.service").stdout
+    let t4bOk = t4b.exitCode != 0 and "the host is pending" in t4bOut and
+      "a13r10.socket" in t4bAfter and "marker" notin t4bAfter and
+      "generation 4b" notin t4bAfter
+    record["decision160Guard"] = %*{"exit": t4b.exitCode, "out": t4bOut,
+      "after": t4bAfter, "ok": t4bOk}
+    step("decision 160: while a trigger is on record, an add-on switch that " &
+         "leaves it and its unit as they are is refused before it writes " &
+         "anything", t4bOk, t4bOut & "\nafter: " & t4bAfter)
     discard g.exec("systemctl stop a13r10-blocker.socket " &
       "a13r10-blocker.service; true")
     let rc = g.exec(repro & " system addon recover")
@@ -1122,22 +1182,18 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let t4After = g.exec("systemctl show -p ActiveState -p Result " &
       "a13r10.socket | tr '\\n' ' '; test -e /var/lib/repro/system/" &
       "triggers-to-restart && echo still-pending; true").stdout.strip()
-    # The revert committed with the trigger on record (§13 decision 160),
-    # not failed on starting it again at its own step 7.
-    let t4Ok = t4.exitCode != 0 and blocked == "active" and
-      "could not be rolled back" notin t4Out and
-      "a13r10.socket" in pendingFile and rc.exitCode == 0 and
+    # Recover starts the trigger, then the unit left out with it.
+    let depAfter = g.exec("systemctl is-active a13r10-dep.service").stdout.strip()
+    let t4Ok = rc.exitCode == 0 and
       "trigger a13r10.socket started again" in rcOut and
+      "unit a13r10-dep.service" in rcOut and depAfter == "active" and
       "ActiveState=active" in t4After and "still-pending" notin t4After
-    record["decision160"] = %*{"exit": t4.exitCode, "blocked": blocked,
-      "revertFailed": "could not be rolled back" in t4Out,
-      "pending": pendingFile, "recoverExit": rc.exitCode, "recover": rcOut,
-      "after": t4After, "ok": t4Ok}
-    step("decision 160: a trigger that cannot start again fails the switch, " &
-         "the revert commits with the host pending, and recover starts it " &
-         "once the cause is cleared", t4Ok, t4Out & "\npending: " &
-         pendingFile & "\nblocker: " & blocked & "\nrecover: " & rcOut &
-         "\nafter: " & t4After)
+    record["decision160"] = %*{"recoverExit": rc.exitCode, "recover": rcOut,
+      "after": t4After, "dependant": depAfter, "ok": t4Ok}
+    step("decision 160: once the cause is cleared, recover starts the " &
+         "recorded trigger and then the unit left out with it", t4Ok,
+         "recover: " & rcOut & "\nafter: " & t4After & "\ndependant: " &
+         depAfter)
     # And the host is not pending any more: the next switch applies.
     let t5 = g.applyProfile(repro, "trig5", trigProfile.replace("@GEN@", "5"))
     let t5Pending = g.exec("test -e /var/lib/repro/system/triggers-to-restart " &
