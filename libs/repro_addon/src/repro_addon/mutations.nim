@@ -1186,6 +1186,31 @@
 ##                                            made is used (decision 178)
 ## ``records-dir-left-open``                  bootstrap keeps an existing
 ##                                            directory's mode (decision 178)
+## ``bootstrap-identity-reopened``            bootstrap records the identity
+##                                            of a fresh open of the path, not
+##                                            of the descriptor it tightened
+##                                            (decision 178, A11 round 20)
+## ``bootstrap-identity-not-recorded``        bootstrap records no identity
+##                                            (decision 178)
+## ``unbound-when-no-birth-time``             a records directory with no
+##                                            birth time is used unbound, and
+##                                            bootstrap goes on (decision 178,
+##                                            amended 2026-11-16)
+## ``identity-file-torn-accepted``            an empty or malformed identity
+##                                            file reads as nothing recorded
+##                                            (decision 178)
+## ``uninstall-records-dir-unbound``          uninstall uses the records
+##                                            directory without its recorded
+##                                            identity (decision 178)
+## ``verify-first-use-silent``                verify records the identity at
+##                                            first use without saying so
+## ``record-read-blocking``                   a record is opened without
+##                                            O_NONBLOCK: a FIFO hangs it
+## ``record-read-unbounded``                  a record is read whole, with
+##                                            no size cap
+## ``operator-read-blocking``                 verify-discard-record reads its
+##                                            path with a blocking, unbounded
+##                                            read
 ## ``token-cleared-before-anchors``           bootstrap clears a stale token
 ##                                            before it validates the trust
 ##                                            anchors (decision 178)
@@ -2125,6 +2150,15 @@ const
                           "records-dir-identity-unchecked",
                           "records-dir-left-open",
                           "token-cleared-before-anchors",
+                          "bootstrap-identity-reopened",
+                          "bootstrap-identity-not-recorded",
+                          "unbound-when-no-birth-time",
+                          "identity-file-torn-accepted",
+                          "uninstall-records-dir-unbound",
+                          "verify-first-use-silent",
+                          "record-read-blocking",
+                          "record-read-unbounded",
+                          "operator-read-blocking",
                           "corrupt-check-after-gate",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
@@ -2145,7 +2179,12 @@ const
                           # asymmetry spec §10.1 *An agent apply never
                           # weakens the floor* closed
                           # (t_addon_agent_cannot_weaken_the_floor).
-                          "agent-may-weaken-floor"]
+                          "agent-may-weaken-floor",
+                          # An agent apply may add, change or remove a
+                          # drop-in over a unit the profile does not define
+                          # (a package's, which may run as root) unattended
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-change-package-dropins"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

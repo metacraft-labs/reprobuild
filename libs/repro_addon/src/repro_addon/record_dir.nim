@@ -84,12 +84,15 @@ type
   RecordExistsError* = object of OSError
     ## The record's name is taken: a record is never written over.
 
-proc fdIdentity*(fd: cint): string =
-  ## The identity of the directory open at ``fd``: ``<ino>@<btime>`` with
-  ## ``g<generation>`` where the file system has one -- the same scheme as
-  ## the state-removal token's (§13 decision 165). "" when no birth time is
-  ## known: then nothing tells a replacement with a reused inode number
-  ## apart, and the caller fails closed.
+proc statxIdentity(fd: cint): string =
+  ## The identity of the directory open at ``fd``: ``<ino>@<sec>.<nsec>``
+  ## (its inode number and birth time, from ``statx``), with ``g<N>``
+  ## appended where the file system reports an inode generation -- the
+  ## same scheme as the state-removal token's (§13 decision 165). "" when
+  ## the kernel or the file system reports no birth time: the inode number
+  ## alone does not tell a replacement apart (it is reused), so every
+  ## caller refuses then (§13 decision 178, amended: "Refuse at
+  ## bootstrap"; the checked open refuses too).
   when SysStatx > 0:
     var buf: array[256, byte]
     if c_syscall(clong(SysStatx), fd, cstring(""), cint(AtEmptyPath),
@@ -111,6 +114,36 @@ proc fdIdentity*(fd: cint): string =
   else:
     ""
 
+var identityOverride*: proc (fd: cint): string {.nimcall.} = nil
+  ## A test seam, nil in production: what ``fdIdentity`` returns instead
+  ## of the kernel's answer, so a test can fake a file system with no
+  ## birth time, or a reused inode number with another birth time.
+
+proc fdIdentity*(fd: cint): string =
+  ## ``statxIdentity``, unless a test set ``identityOverride``.
+  if identityOverride != nil: identityOverride(fd) else: statxIdentity(fd)
+
+proc validIdentity*(s: string): bool =
+  ## Whether ``s`` is an identity ``fdIdentity`` could have produced:
+  ## ``<digits>@<digits>.<digits>`` with an optional ``g<integer>``.
+  let at = s.find('@')
+  if at <= 0: return false
+  if not s[0 ..< at].allCharsInSet(Digits): return false
+  var rest = s[at + 1 .. ^1]
+  let g = rest.find('g')
+  if g >= 0:
+    let gen = rest[g + 1 .. ^1]
+    if gen.len == 0 or not gen.strip(chars = {'-'}, trailing = false).allCharsInSet(Digits):
+      return false
+    rest = rest[0 ..< g]
+  let dot = rest.find('.')
+  dot > 0 and dot < rest.high and rest[0 ..< dot].allCharsInSet(Digits) and
+    rest[dot + 1 .. ^1].allCharsInSet(Digits)
+
+proc writeInCheckedDir*(path, text: string; mode = 0o600;
+                        replace = false; create = true)
+proc readInCheckedDir*(path: string): string
+
 const RecordsDirIdentityName* = "records-dir.identity"
 
 proc recordsDirIdentityPath*(stateDir: string): string =
@@ -121,6 +154,9 @@ proc recordsDirIdentityPath*(stateDir: string): string =
 type DirBinding = object
   identityFile: string   ## root-only state holding the recorded identity
   expected: string       ## the identity read or recorded; "" until known
+  corrupt: string        ## why the identity file cannot be trusted, or ""
+  recordedNow: bool      ## recorded at first use by this process
+  stateGone: bool        ## used with no state to compare against (L3)
 
 var bindings = initTable[string, DirBinding]()
   ## The records directories bound to a recorded identity (§13 decision
@@ -135,9 +171,18 @@ proc bindRecordsDir*(dir, identityFile: string) =
   ## bootstrapped before §13 decision 178's amendment -- the first checked
   ## open records it (trust on first use) where ``identityFile``'s
   ## directory exists.
+  ## An identity file that is present but empty or malformed (a torn
+  ## write, or one somebody else wrote) is never taken as "nothing
+  ## recorded": every checked open then refuses, naming it.
   var b = DirBinding(identityFile: identityFile)
-  if fileExists(identityFile):
-    b.expected = readFile(identityFile).strip()
+  if fileExists(identityFile) or symlinkExists(identityFile):
+    try:
+      let text = readInCheckedDir(identityFile).strip()
+      if validIdentity(text) or mutated("identity-file-torn-accepted"):
+        b.expected = text
+      else: b.corrupt = identityFile & " holds no identity the add-on wrote"
+    except CatchableError as e:
+      b.corrupt = identityFile & " cannot be read: " & e.msg
   bindings[dir] = b
 
 proc unbindRecordsDir*(dir: string) =
@@ -146,6 +191,20 @@ proc unbindRecordsDir*(dir: string) =
 proc recordedIdentity*(dir: string): string =
   ## The identity ``dir`` is bound to, "" when unbound or not yet recorded.
   bindings.getOrDefault(dir).expected
+
+proc boundWithoutState*(dir: string): bool =
+  ## Whether ``dir`` was used with nothing to compare its identity with,
+  ## because the state that holds the record is gone: only an uninstall's
+  ## re-run after it removed the state (§13 decision 165). The token it
+  ## reads binds its own chain, so a directory put in the place of the
+  ## records directory can deny that re-run and do nothing else
+  ## (threat-model G54, residual); the caller reports it, never silently.
+  bindings.getOrDefault(dir).stateGone
+
+proc recordedAtFirstUse*(dir: string): bool =
+  ## Whether this process recorded ``dir``'s identity at its first use (a
+  ## host bootstrapped before the identity was recorded).
+  bindings.getOrDefault(dir).recordedNow
 
 proc fdDirRefusal(fd: cint; dir: string): string =
   ## "" when the directory open at ``fd`` may hold the add-on's records:
@@ -196,24 +255,50 @@ proc openCheckedDir*(dir: string; create: bool): cint =
     # other. A member of a group that can write /var/log can rename the
     # root-only directory away and put another root directory in its
     # place; rename(2) needs write permission on the parent only.
-    let now = fdIdentity(fd)
-    var b = bindings[dir]
-    when not mutated("records-dir-identity-unchecked"):
-      if b.expected.len == 0:
-        if now.len > 0 and dirExists(parentDir(b.identityFile)):
-          writeFile(b.identityFile & ".tmp", now & "\n")
-          moveFile(b.identityFile & ".tmp", b.identityFile)
-          b.expected = now
+    var refusal = ""
+    try:
+      let now = fdIdentity(fd)
+      var b = bindings[dir]
+      when not mutated("records-dir-identity-unchecked"):
+        if b.corrupt.len > 0:
+          refusal = "refusing " & dir & ": its recorded identity is " &
+            "unusable (" & b.corrupt & "). Inspect " & dir & "; if it is the " &
+            "directory bootstrap made, remove " & b.identityFile &
+            " so the next use records it again"
+        elif now.len == 0 and not mutated("unbound-when-no-birth-time"):
+          refusal = "refusing " & dir & ": its file system reports no " &
+            "birth time (statx STATX_BTIME), so the add-on cannot tell it " &
+            "from another directory put in its place; keep /var/log on a " &
+            "file system that records birth times"
+        elif b.expected.len == 0 and not dirExists(parentDir(b.identityFile)):
+          # The state is gone (an uninstall removed it): nothing to compare
+          # with and nowhere to record; reported by the caller.
+          b.stateGone = true
           bindings[dir] = b
-      elif now.len == 0 or now != b.expected:
-        discard posix.close(fd)
-        raise newException(OSError, "refusing " & dir & ": it is not the " &
-          "directory bootstrap made (identity " &
-          (if now.len > 0: now else: "unknown") & ", recorded " & b.expected &
-          " in " & b.identityFile & "); something renamed it or put another " &
-          "directory in its place. Inspect " & dir & " and the directory " &
-          "it replaced; if it is the add-on's and only moved back, remove " &
-          b.identityFile & " so the next use records it again")
+        elif b.expected.len == 0:
+          if now.len > 0:
+            # First use on a host bootstrapped before the identity was
+            # recorded: recorded now, atomically, 0600, durably, through
+            # the checked state directory. A record that cannot be written
+            # is a refusal: the directory is never used unbound.
+            writeInCheckedDir(b.identityFile, now & "\n", 0o600,
+                              replace = true, create = false)
+            b.expected = now
+            b.recordedNow = true
+            bindings[dir] = b
+        elif now != b.expected:
+          refusal = "refusing " & dir & ": it is not the directory " &
+            "bootstrap made (identity " & now & ", recorded " & b.expected &
+            " in " & b.identityFile & "); something renamed it or put another " &
+            "directory in its place. Inspect " & dir & " and the directory " &
+            "it replaced; if it is the add-on's and only moved back, remove " &
+            b.identityFile & " so the next use records it again"
+    except CatchableError as e:
+      refusal = "refusing " & dir & ": its identity cannot be recorded or " &
+        "compared (" & e.msg & ")"
+    if refusal.len > 0:
+      discard posix.close(fd)
+      raise newException(OSError, refusal)
   fd
 
 proc checkedDirRefusal*(dir: string): string =
@@ -222,13 +307,20 @@ proc checkedDirRefusal*(dir: string): string =
     let fd = openCheckedDir(dir, create = false)
     if fd >= 0: discard posix.close(fd)
     ""
-  except OSError as ex: ex.msg
+  except CatchableError as ex: ex.msg
 
-proc ensureCheckedDir*(dir: string; tighten = false) =
+var afterTightenHook*: proc () {.nimcall.} = nil
+  ## A test seam, nil in production: run by ``ensureCheckedDir`` between
+  ## the tightening and the identity, where a rename race would land.
+
+proc ensureCheckedDir*(dir: string; tighten = false): string {.discardable.} =
   ## ``dir`` created root's 0700 when absent, and checked; raises
   ## ``OSError`` when it may not hold the records. With ``tighten`` (§13
   ## decision 178: bootstrap) an existing root directory that passed the
-  ## checks gets mode 0700, through the descriptor.
+  ## checks gets mode 0700, through the descriptor. Returns the identity
+  ## of the directory on that same descriptor, after the tightening: the
+  ## one bootstrap records (A11 round 20: a second open could find
+  ## another directory renamed into the place in between).
   let fd = openCheckedDir(dir, create = true)
   defer: discard posix.close(fd)
   if tighten:
@@ -236,6 +328,33 @@ proc ensureCheckedDir*(dir: string; tighten = false) =
       if fchmod(fd, Mode(0o700)) != 0:
         raiseOSError(osLastError(), "chmod 0700 " & dir)
       if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & dir)
+  if afterTightenHook != nil: afterTightenHook()
+  when mutated("bootstrap-identity-reopened"):
+    # FALSIFIER: round 19's identity, from a fresh open of the path.
+    let fd2 = openCheckedDir(dir, create = false)
+    if fd2 >= 0:
+      result = fdIdentity(fd2)
+      discard posix.close(fd2)
+  else:
+    result = fdIdentity(fd)
+
+proc birthTimeProbe*(dir: string): string =
+  ## The identity ``dir`` would have, read before anything is written:
+  ## ``dir``'s own when it exists (checked like every use of it), else its
+  ## parent's -- the file system ``dir`` would be made on. "" when that
+  ## file system reports no birth time; bootstrap then refuses with
+  ## nothing written (§13 decision 178, amended 2026-11-16).
+  var st: Stat
+  if lstat(dir.cstring, st) == 0:
+    let fd = openCheckedDir(dir, create = false)
+    if fd < 0: return ""
+    defer: discard posix.close(fd)
+    return fdIdentity(fd)
+  let pfd = posix.open(parentDir(dir).cstring,
+                       O_RDONLY or O_CLOEXEC or ODirectory)
+  if pfd < 0: raiseOSError(osLastError(), "open " & parentDir(dir))
+  defer: discard posix.close(pfd)
+  fdIdentity(pfd)
 
 proc identityOfCheckedDir*(dir: string): string =
   ## The identity of ``dir`` as the checked open sees it; "" when absent.
@@ -357,7 +476,7 @@ proc readRegularBounded(fd: cint; path: string): string =
     if n < 0: raiseOSError(osLastError(), "read " & path)
     if n == 0: break
     result.add(buf[0 ..< n])
-    if result.len > MaxRecordBytes:
+    if result.len > MaxRecordBytes and not mutated("record-read-unbounded"):
       raise newException(OSError, path & " is larger than any record (" &
         $MaxRecordBytes & " bytes)")
 
@@ -365,6 +484,8 @@ proc readBoundedByPath*(path: string): string =
   ## A record an operator names on the command line (``verify-discard-
   ## record``), wherever it was copied: opened by path, but non-blocking,
   ## required to be a regular file and read up to ``MaxRecordBytes``.
+  when mutated("operator-read-blocking"):
+    return readFile(path)     # FALSIFIER: a blocking, unbounded read by path
   let fd = posix.open(path.cstring, O_RDONLY or O_CLOEXEC or ONonBlock)
   if fd < 0: raiseOSError(osLastError(), "open " & path)
   defer: discard posix.close(fd)
@@ -381,7 +502,8 @@ proc readInCheckedDir*(path: string): string =
   # (while uninstall holds the host apply lock); it is then refused as not
   # a regular file.
   let fd = openatC(dfd, extractFilename(path).cstring,
-                   O_RDONLY or O_CLOEXEC or ONoFollow or ONonBlock)
+                   O_RDONLY or O_CLOEXEC or ONoFollow or
+                   (when mutated("record-read-blocking"): 0 else: ONonBlock))
   if fd < 0: raiseOSError(osLastError(), "open " & path)
   defer: discard posix.close(fd)
   readRegularBounded(fd, path)

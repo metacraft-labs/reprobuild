@@ -1452,11 +1452,11 @@
     "nim-shm-lease": {
       "flake": false,
       "locked": {
-        "lastModified": 1790618872,
-        "narHash": "sha256-hjlaK5aECxEbCGhG9CSPVOhTQoyFdF64m9nieVapDD8=",
+        "lastModified": 1794766859,
+        "narHash": "sha256-Jm0oyf3aT/ZJ7EixurDMBm3smLHQBRHbZOXZzJb4UPk=",
         "owner": "metacraft-labs",
         "repo": "nim-shm-lease",
-        "rev": "22e3100cdb4fbc374689ddac55b4b32c90654140",
+        "rev": "08a3f50a391b32b053598f64c670d5232e1eb051",
         "type": "github"
       },
       "original": {
@@ -2157,11 +2157,11 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
-        "lastModified": 1794590569,
-        "narHash": "sha256-gCm0D1JESXQZCFJWOAvgVsd6Pp7VG8hKNSgCuSEGmyk=",
+        "lastModified": 1794829136,
+        "narHash": "sha256-29TZ+ttH5C2qeb6zEMWICUQ55u/1PjpEhMJgAVvtcZg=",
         "owner": "metacraft-labs",
         "repo": "devops-modules",
-        "rev": "88e4d74b07f58f341be48f2c4ddc0a28991a9028",
+        "rev": "a69415adff173f1a1649f3e27360fe10c53af3c8",
         "type": "github"
       },
       "original": {
@@ -2655,11 +2655,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1794797954,
-        "narHash": "sha256-dP15GNERcepYJSACH3DZeleVJgSFJpciq8yA9kdwc00=",
+        "lastModified": 1794842703,
+        "narHash": "sha256-bcQdT3tchFx1o863+gzO31ePljYqFLiFbTP2SektMBY=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "98ea3e58df67f736a8527788d1563e31291a4881",
+        "rev": "3f22edae64fa04efb07f215dcef5ee7b4b3cf14f",
         "type": "github"
       },
       "original": {

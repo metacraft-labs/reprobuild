@@ -66,6 +66,7 @@ import repro_project_dsl
 
 import ../interfaces/cross_target
 import ./zig_0_13_arm_compiler_rt_symbols
+import ./zig_0_14_arm_compiler_rt_symbols
 # The wrapper edge's `sh` and `install-file` (the stdlib's GNU coreutils,
 # for `rm` / `mkdir` / `chmod`), registered wherever the adapter is.
 import ../packages/sh as zig_wrapper_sh
@@ -199,29 +200,49 @@ proc zigDriverArgSeq*(t: ZigCrossTarget): seq[string] =
 proc zigDriverArgs(t: ZigCrossTarget): string =
   zigDriverArgSeq(t).join(" ")
 
+const ZigCcUbsanTrapArg* = "-fsanitize-trap=undefined"
+  ## What the `cc` / `c++` wrappers and `zigCrossCc` add after the driver
+  ## arguments: undefined-behaviour checks trap instead of calling a runtime.
+  ## That is what zig 0.13 always did. zig 0.14, given a C source and a link
+  ## in one invocation at its debug default (no `-O`, or `-O0`), links its
+  ## UBSan runtime instead, and the shared library then exports it with
+  ## compiler-rt's atomics: 492 symbols on x86_64 musl and 591 on aarch64
+  ## musl for a one-function library, where an optimized build exports one
+  ## (measured 2026-11-16, zig 0.14.1). zig cc does not accept
+  ## `-fno-ubsan-rt`, the zig build flag that would turn the runtime off.
+  ## Trapping keeps the checks, where `-fno-sanitize=undefined` would drop
+  ## them, and keeps 0.13's behaviour. It comes before the caller's own
+  ## arguments, so a recipe that wants the runtime can pass
+  ## `-fno-sanitize-trap=undefined`.
+
 const
   ZigCrossCompilerRtMapName* = "compiler-rt-local.map"
     ## The version script beside the wrappers that makes compiler-rt local
     ## in a shared library (`zigCrossCompilerRtMap`).
 
 proc zigArmCompilerRtSymbols*(): seq[string] =
-  ## The global symbols of zig 0.13's compiler-rt for its 32-bit ARM
-  ## targets (`zig_0_13_arm_compiler_rt_symbols`).
-  @ZigArmCompilerRtSymbols
+  ## The global symbols of zig's compiler-rt for its 32-bit ARM targets, for
+  ## every zig a recipe may declare (0.13 and 0.14): zig 0.13's
+  ## (`zig_0_13_arm_compiler_rt_symbols`) and those zig 0.14 adds
+  ## (`zig_0_14_arm_compiler_rt_symbols`). One list serves both because a
+  ## name the zig in use does not define is harmless in the version script.
+  @ZigArmCompilerRtSymbols & @ZigArmCompilerRtSymbolsAddedIn014
 
 proc zigCrossCompilerRtMap*(t: ZigCrossTarget): string =
   ## The version script the `cc` / `c++` wrappers give a shared-library link
   ## for `t`, or "" when the row needs none.
   ##
-  ## zig 0.13 links its compiler-rt into a 32-bit ARM shared library as
-  ## weak, default-visibility symbols, so the library exports them, and a
-  ## program linked against it imports the helpers from it instead of
-  ## linking its own. Where the program then runs against another build of
+  ## zig (0.13 and 0.14) links its compiler-rt into a 32-bit ARM shared
+  ## library as weak, default-visibility symbols, so the library exports
+  ## them, and a program linked against it imports the helpers from it
+  ## instead of linking its own. Where the program then runs against another build of
   ## that soname -- the target system's own sqlite, under `--target` -- it
   ## does not load ("undefined symbol: __aeabi_uidiv"; reprobuild-pm issue
   ## 2026-11-02-zig-built-shared-libraries-export-compiler-rt-and-armv7-images-import-it).
   ## zig refuses `--exclude-libs`, so the symbols are named `local:`.
-  ## Measured: the aarch64 and x86_64 musl rows export none of compiler-rt.
+  ## Measured: the aarch64 and x86_64 musl rows export none of compiler-rt
+  ## (zig 0.13 and 0.14.1). zig 0.14's UBSan runtime, which would otherwise
+  ## be exported on every row, is kept out by `ZigCcUbsanTrapArg`.
   if t.nimCpu != "arm":
     return ""
   result = "{\n  local:\n"
@@ -374,8 +395,10 @@ proc zigCrossCc*(t: ZigCrossTarget): string =
   ## `zig cc` with the target's driver arguments, as ONE string: the form
   ## a configure script takes in `CC` (make expands `$(CC)` through the
   ## shell, so the arguments ride along). The wrappers exist for cargo,
-  ## whose `CC_<triple>` must name a single program.
-  "zig cc " & zigDriverArgs(t)
+  ## whose `CC_<triple>` must name a single program. `ZigCcUbsanTrapArg`
+  ## keeps zig 0.14's UBSan runtime out of a one-step link, as in the
+  ## wrappers.
+  "zig cc " & zigDriverArgs(t) & " " & ZigCcUbsanTrapArg
 
 proc crossZigTarget*(rustTriple: string): CrossTarget =
   ## The `CrossTarget` record for a listed triple. Refuses an unlisted one
@@ -458,7 +481,8 @@ proc zigCrossWrapperScript*(role: string; t: ZigCrossTarget;
         ("@MARKER@", ZigCrossCompilerRtMarker),
         ("@TRIPLE@", t.rustTriple), ("@SCAN@", PrefixMapScan))) &
     PrefixMapApply &
-    "exec zig " & role & " " & zigDriverArgs(t) & " \"$@\"\n"
+    "exec zig " & role & " " & zigDriverArgs(t) & " " & ZigCcUbsanTrapArg &
+      " \"$@\"\n"
   of "rust-linker":
     "#!/bin/sh\n" &
     "# zig cc as rustc's linker for " & t.rustTriple & ". Drops what zig's\n" &
