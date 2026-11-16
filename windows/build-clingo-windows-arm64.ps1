@@ -138,36 +138,36 @@ try {
     # API, as repro_solver does (LoadLibrary, not import-table binding).
     $probe = Join-Path $WorkRoot 'load_clingo.c'
     [IO.File]::WriteAllText($probe, @'
-    #include <windows.h>
-    #include <stdio.h>
-    #include <stdbool.h>
-    #include <stddef.h>
-    typedef void (*version_fn)(int *, int *, int *);
-    typedef bool (*control_new_fn)(char const *const *, size_t, void *, void *, unsigned, void **);
-    typedef bool (*control_add_fn)(void *, char const *, char const *const *, size_t, char const *);
-    typedef bool (*control_ground_fn)(void *, void const *, size_t, void *, void *);
-    typedef void (*control_free_fn)(void *);
-    typedef struct { char const *name; void const *params; size_t size; } part_t;
-    int main(void) {
-      HMODULE h = LoadLibraryA("clingo.dll");
-      if (!h) { printf("LoadLibrary failed: %lu\n", GetLastError()); return 2; }
-      version_fn version = (version_fn)GetProcAddress(h, "clingo_version");
-      control_new_fn control_new = (control_new_fn)GetProcAddress(h, "clingo_control_new");
-      control_add_fn control_add = (control_add_fn)GetProcAddress(h, "clingo_control_add");
-      control_ground_fn control_ground = (control_ground_fn)GetProcAddress(h, "clingo_control_ground");
-      control_free_fn control_free = (control_free_fn)GetProcAddress(h, "clingo_control_free");
-      if (!version || !control_new || !control_add || !control_ground || !control_free) return 3;
-      int ma, mi, re; version(&ma, &mi, &re);
-      void *ctl = NULL;
-      if (!control_new(NULL, 0, NULL, NULL, 20, &ctl)) return 4;
-      if (!control_add(ctl, "base", NULL, 0, "a :- not b. b :- not a.")) return 5;
-      part_t part = { "base", NULL, 0 };
-      if (!control_ground(ctl, &part, 1, NULL, NULL)) return 6;
-      control_free(ctl);
-      printf("clingo %d.%d.%d loaded and grounded through the C API\n", ma, mi, re);
-      return 0;
-    }
-    '@)
+#include <windows.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <stddef.h>
+typedef void (*version_fn)(int *, int *, int *);
+typedef bool (*control_new_fn)(char const *const *, size_t, void *, void *, unsigned, void **);
+typedef bool (*control_add_fn)(void *, char const *, char const *const *, size_t, char const *);
+typedef bool (*control_ground_fn)(void *, void const *, size_t, void *, void *);
+typedef void (*control_free_fn)(void *);
+typedef struct { char const *name; void const *params; size_t size; } part_t;
+int main(void) {
+  HMODULE h = LoadLibraryA("clingo.dll");
+  if (!h) { printf("LoadLibrary failed: %lu\n", GetLastError()); return 2; }
+  version_fn version = (version_fn)GetProcAddress(h, "clingo_version");
+  control_new_fn control_new = (control_new_fn)GetProcAddress(h, "clingo_control_new");
+  control_add_fn control_add = (control_add_fn)GetProcAddress(h, "clingo_control_add");
+  control_ground_fn control_ground = (control_ground_fn)GetProcAddress(h, "clingo_control_ground");
+  control_free_fn control_free = (control_free_fn)GetProcAddress(h, "clingo_control_free");
+  if (!version || !control_new || !control_add || !control_ground || !control_free) return 3;
+  int ma, mi, re; version(&ma, &mi, &re);
+  void *ctl = NULL;
+  if (!control_new(NULL, 0, NULL, NULL, 20, &ctl)) return 4;
+  if (!control_add(ctl, "base", NULL, 0, "a :- not b. b :- not a.")) return 5;
+  part_t part = { "base", NULL, 0 };
+  if (!control_ground(ctl, &part, 1, NULL, NULL)) return 6;
+  control_free(ctl);
+  printf("clingo %d.%d.%d loaded and grounded through the C API\n", ma, mi, re);
+  return 0;
+}
+'@)
     $probeExe = Join-Path (Split-Path -Parent $dll) 'load_clingo.exe'
     Invoke-Checked 'probe-compile' { & (Join-Path $llvmBin 'gcc.exe') -O2 -o $probeExe $probe 2>&1 | Out-Host }
     $probeOut = & $probeExe 2>&1 | Out-String
