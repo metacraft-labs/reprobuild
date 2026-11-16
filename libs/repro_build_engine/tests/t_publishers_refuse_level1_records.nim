@@ -22,6 +22,13 @@
 ## predates the level field (version 1) publishes nothing either: what it
 ## does not say cannot be assumed to be Level 0.
 ##
+## The same two publishers refuse a HOST-BOUND record: one whose execution
+## read a runtime object under `/run` (a socket, a FIFO, a device node) that
+## the volatile-runtime fold dropped (Filesystem-Policy-And-Observed-Inputs.md
+## §"Volatile Runtime Prefixes"). That case needs a real socket under `/run`,
+## which a test cannot create, so it uses one of the host's daemon endpoints
+## and skips on a host that has none.
+##
 ## MOCK POLICY. Two seams, both justified by what is under test -- what the
 ## ENGINE offers each publisher:
 ##   * the publishers are recording closures in the engine's own hook slots
@@ -40,6 +47,7 @@
 import std/[options, os, strutils, unittest]
 
 from repro_test_support import testCaseScratchSlug
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_core/paths
@@ -221,14 +229,16 @@ suite "M17: neither publisher offers a Level-1 record":
     require sidecars.len == 1
     # Rewrite it as the version-1 sidecar the previous build wrote: the
     # same bytes without the trailing level byte (and, since version 3, the
-    # evidence source after it).
+    # evidence source after it; since version 4, the host-bound reason after
+    # that).
     var raw = readFile(extendedPath(sidecars[0]))
     require raw.len > 6
-    require raw[4] == char(3) and raw[5] == char(0)
+    require raw[4] == char(4) and raw[5] == char(0)
     let stated = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
       extractFilename(sidecars[0]).changeFileExt("")).get()
     raw[4] = char(1)
-    raw.setLen(raw.len - 1 - 4 - ($stated.evidenceSource).len)
+    raw.setLen(raw.len - 1 - 4 - ($stated.evidenceSource).len -
+      4 - stated.hostBoundReason.len)
     writeFile(extendedPath(sidecars[0]), raw)
     let warm = build(project, cacheRoot, capture)
     checkpoint(warm.trace)
@@ -256,14 +266,16 @@ suite "M17: neither publisher offers a Level-1 record":
     require sidecars.len == 1
     var raw = readFile(extendedPath(sidecars[0]))
     require raw.len > 6
-    require raw[4] == char(3) and raw[5] == char(0)
+    require raw[4] == char(4) and raw[5] == char(0)
     let stated = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
       extractFilename(sidecars[0]).changeFileExt("")).get()
     check stated.evidenceLevel == elComplete
     check stated.evidenceSource == MonitoredEvidence
-    # The version-2 sidecar: level stated, no source after it.
+    # The version-2 sidecar: level stated, no source (and no version-4
+    # host-bound reason) after it.
     raw[4] = char(2)
-    raw.setLen(raw.len - 4 - ($stated.evidenceSource).len)
+    raw.setLen(raw.len - 4 - ($stated.evidenceSource).len -
+      4 - stated.hostBoundReason.len)
     writeFile(extendedPath(sidecars[0]), raw)
     let warm = build(project, cacheRoot, capture)
     checkpoint(warm.trace)
@@ -273,3 +285,72 @@ suite "M17: neither publisher offers a Level-1 record":
     let refused = refusals(warm.trace, "portable-memo-publish-refused")
     check refused.len == 1
     check refused.len == 1 and "evidence source" in refused[0]
+
+proc hostRuntimeSocket(): string =
+  ## A socket of this host under `/run` (outside `/run/user/<uid>` and
+  ## `/run/media`, which the fold keeps by place), or "" when there is none.
+  ## A test cannot create one there, so it uses whatever daemon endpoint the
+  ## host has (`/run/nscd/socket`, `/run/dbus/system_bus_socket`, ...).
+  if not dirExists("/run"):
+    return ""
+  var dirs = @["/run"]
+  for kind, path in walkDir("/run"):
+    if kind == pcDir and path notin ["/run/user", "/run/media"]:
+      dirs.add(path)
+  for dir in dirs:
+    for kind, path in walkDir(dir):
+      if kind == pcFile and runtimeEntryKind(path) == rekSocket and
+          dropsAsVolatileRuntimeState(path, volatileScope([])):
+        return path
+  ""
+
+suite "a host-bound execution is offered to neither publisher":
+
+  setup:
+    if dirExists(TmpDir):
+      removeDir(extendedPath(TmpDir))
+    createDir(TmpDir)
+
+  test "an execution that read a runtime object under /run serves locally and is offered to neither publisher":
+    # The volatile-runtime fold drops a socket, FIFO or device node under
+    # `/run` (it has no content to fingerprint), and the record that read
+    # one read state of THIS host. It serves this host, and neither
+    # cross-host publisher is offered it, live or from a later local hit
+    # (the reason travels in the access sidecar). Falsifier: dropping the
+    # host-bound check from `finishPortableRecord` or from
+    # `publishPeerCacheBundle` offers it.
+    let socket = hostRuntimeSocket()
+    if socket.len == 0:
+      skip("this host has no socket under /run to read")
+    else:
+      let project = newProject("host-bound")
+      let capture = TmpDir / "host-bound" / "capture.iomon"
+      writeCapture(capture, fileRead(project / "src" / "main.c"),
+        MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
+          osPid: 4242, threadId: 4242, path: socket, detail: ""))
+      let cacheRoot = TmpDir / "host-bound" / "cache"
+      let live = build(project, cacheRoot, capture)
+      checkpoint(live.trace)
+      require live.result.launched
+      check live.result.evidence.hostBoundInput == socket
+      check live.result.evidence.runtimeStateDrops == 1
+      check socket notin live.result.evidence.monitorProbes
+      check not live.result.portable
+      check socket in live.result.portableReason
+      check live.portable.len == 0
+      check live.peer.len == 0
+      let peerRefused = refusals(live.trace, "peer-cache-publish-refused")
+      check peerRefused.len == 1
+      check peerRefused.len == 1 and socket in peerRefused[0]
+
+      # Local reuse is unaffected, and the portable record a hit derives is
+      # host-bound too: the hit ran no monitor, and the reason came from the
+      # sidecar the producing run stored.
+      let warm = build(project, cacheRoot, capture)
+      checkpoint(warm.trace)
+      check not warm.result.launched
+      check warm.result.status in {asCacheHit, asUpToDate}
+      check not warm.result.portable
+      check socket in warm.result.portableReason
+      check warm.portable.len == 0
+      check warm.peer.len == 0

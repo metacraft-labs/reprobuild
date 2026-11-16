@@ -280,6 +280,15 @@ type
       ## hit itself cannot say. `eskUnstated` for a sidecar written before the
       ## field (versions 1 and 2), which therefore derives a record that stays
       ## on this host.
+    hostBoundReason*: string
+      ## A runtime object under `/run` (a daemon's socket, a FIFO, a device
+      ## node) the execution read and the build engine's volatile-runtime
+      ## fold dropped, or "" (`PathSetEvidence.hostBoundInput`). Stored for
+      ## the same reason as the level: such a record must not be published
+      ## off this host, and a portable record derived from a later local hit
+      ## could not otherwise know. "" for a sidecar written before the field
+      ## (versions 1 to 3), whose producer dropped such reads without
+      ## recording them.
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -2796,10 +2805,10 @@ proc observedExecutionNames(raw: openArray[byte];
 
 const
   InputAccessMagic = "RBIA"
-  InputAccessVersion = 3'u16
+  InputAccessVersion = 4'u16
     ## v2 (campaign M17 chunk 1) appends the evidence level; v3 (chunk 2) the
-    ## evidence source after it. Versions 1 and 2 still decode, with what they
-    ## lack unstated.
+    ## evidence source after it; v4 the host-bound reason after that.
+    ## Versions 1 to 3 still decode, with what they lack unstated.
     ## v2 (campaign M17) appends the execution's evidence level. A v1
     ## sidecar still decodes, with `elUnstated`.
   InputAccessFileExt* = ".acc"
@@ -2863,6 +2872,7 @@ proc encodeInputAccesses*(strongHex: string;
   result.writeFrontCoded(accesses.enumerations)
   result.add(evidenceLevelByte(accesses.evidenceLevel))
   result.writeString($accesses.evidenceSource)
+  result.writeString(accesses.hostBoundReason)
 
 proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
     Option[InputAccesses] =
@@ -2877,7 +2887,7 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
   try:
     var pos = 4
     let version = readU16Le(raw, pos)
-    if version notin [1'u16, 2'u16, InputAccessVersion]:
+    if version notin [1'u16, 2'u16, 3'u16, InputAccessVersion]:
       return none(InputAccesses)
     if readString(raw, pos) != strongHex:
       return none(InputAccesses)
@@ -2894,6 +2904,8 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
       if not parseEvidenceSource(readString(raw, pos),
           accesses.evidenceSource):
         return none(InputAccesses)
+    if version >= 4'u16:
+      accesses.hostBoundReason = readString(raw, pos)
     if pos != raw.len:
       return none(InputAccesses)
     some(accesses)
