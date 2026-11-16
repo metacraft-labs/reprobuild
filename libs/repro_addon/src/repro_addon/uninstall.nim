@@ -753,9 +753,12 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
     result.path = dir / (stamp & (if n == 0: "" else: "-" & $n) & DiscardIntentSuffix)
     when mutated("intent-overwrites-existing"):
       break
-    if not (recExists(result.path) or
-            recExists(result.path & DiscardRecordSigExt) or
-            recExists(completionPathOf(result.path))):
+    # Probed through the checked descriptor, raising when the directory
+    # may not be trusted: ``recExists`` counts that as "present", which here
+    # would never end (A11 round 19).
+    if not (existsInCheckedDir(result.path) or
+            existsInCheckedDir(result.path & DiscardRecordSigExt) or
+            existsInCheckedDir(completionPathOf(result.path))):
       break
     inc n
   # The signature goes first and the record last, so a record exists only
