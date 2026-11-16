@@ -487,10 +487,11 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
     check result.exitCode == 1
     check result.output.contains("--force has no effect on `repro up`")
     check result.output.contains("without --replace")
-    # And `--replace` is refused by `down`, which takes nothing over.
+    # And `--replace` is refused by `down`, which takes nothing over: `down`
+    # does not declare it, so the parser refuses it (exit 2).
     let onDown = runRepro(c, c.projects[0], @["down", "--replace"])
-    check onDown.exitCode == 1
-    check onDown.output.contains("unsupported down flag: --replace")
+    check onDown.exitCode == 2
+    check onDown.output.contains("unknown flag '--replace' for 'repro down'")
 
 
   test "a shared service without registrations refuses an unsatisfied probe":

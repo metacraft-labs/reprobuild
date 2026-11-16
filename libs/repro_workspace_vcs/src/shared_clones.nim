@@ -1177,6 +1177,29 @@ proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
   ##
   ## ``gc.pruneExpire`` is written LAST, so a run that fails part-way never
   ## leaves a pool expiring objects without the hook that protects them.
+  ##
+  ## THE FAILURE-INJECTION SEAM, and why one is needed at all.
+  ## ``prepareSharedBare``'s ordering guarantee -- safety installed before the
+  ## refspec, so no bare can be left in the refspec-without-safety state that
+  ## §1.6d(ii) treats as the signature of a foreign writer -- is only
+  ## observable when THIS write fails while the refspec write would have
+  ## succeeded. Permissions cannot produce that: both writes go through
+  ## ``git config`` into the same file, so making the directory read-only
+  ## fails both and the refspec is absent whichever order the two run in. A
+  ## test built that way passes against a deliberately reordered
+  ## ``prepareSharedBare`` -- measured, 2026-11-05, which is how this seam
+  ## came to exist.
+  ##
+  ## It can only ever fail CLOSED. Setting the variable makes this proc report
+  ## failure without writing anything, which makes ``prepareSharedBare``
+  ## refuse; it cannot cause an unsafe write or skip a key. It must name the
+  ## exact bare path rather than being a boolean, so a stray export in a shell
+  ## cannot silently disable safety installation across a whole cache.
+  let forcedFailurePath = getEnv("REPROBUILD_FORCE_SAFETY_WRITE_FAILURE")
+  if forcedFailurePath.len > 0 and
+      normalizedPath(absolutePath(forcedFailurePath)) ==
+        normalizedPath(absolutePath(barePath)):
+    return false
   result = true
   for (key, value) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
       barePath):
