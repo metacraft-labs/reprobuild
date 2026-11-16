@@ -4402,13 +4402,16 @@ proc managedBlockOpenSentinel*(scope: ManagedBlockScope;
                                packageName, blockId: string): string =
   ## Spec §"Sentinel uniqueness" — open sentinel of the triple form.
   ## Public so tests + the apply phase can format the same string the
-  ## merger emits.
-  "# >>> repro:" & $scope & ":" & packageName & ":" & blockId & " >>>"
+  ## merger emits. Rendered by the managed-file writer
+  ## (``repro_core/managed_block``), the one owner of the format.
+  coreManagedBlock.openSentinel(
+    coreManagedBlock.managedBlockKey($scope, packageName, blockId))
 
 proc managedBlockCloseSentinel*(scope: ManagedBlockScope;
                                 packageName, blockId: string): string =
   ## Spec §"Sentinel uniqueness" — close sentinel of the triple form.
-  "# <<< repro:" & $scope & ":" & packageName & ":" & blockId & " <<<"
+  coreManagedBlock.closeSentinel(
+    coreManagedBlock.managedBlockKey($scope, packageName, blockId))
 
 proc renderManagedBlockChunk(c: DslManagedBlockContribution): string =
   ## Render one sentinel-delimited chunk: open + content (trailing \n

@@ -996,19 +996,14 @@ proc nimRepropathsConfig*(pkg: NimPackage;
     actionId = "ensure_ignore_nim_paths_" & currentOwningPackage())
   result.add(ignoreAction)
   
-  let label = "repro-paths-bootstrap"
-  let version = "1"
-  let openSentinel = "# >>> repro:project:" & currentOwningPackage() & ":" & label & ":v" & version & " >>>"
-  let closeSentinel = "# <<< repro:project:" & currentOwningPackage() & ":" & label & ":v" & version & " <<<"
-  let openSearch = "# >>> repro:project:" & currentOwningPackage() & ":" & label & ":v"
-  let closeSearch = "# <<< repro:project:" & currentOwningPackage() & ":" & label & ":v"
+  # Nim-Package-Path-Handling.md Edge (c): the managed block
+  # `repro:project:<package>:repro-paths-bootstrap`. Its sentinels are
+  # rendered by the managed-file writer from the block id; a block an
+  # earlier release wrote with a `:v1` suffix is replaced in place.
   let snippet = "when withDir(thisDir(), system.fileExists(\"" & reproPathsFile & "\")):\n  include \"" & reproPathsFile & "\""
   
   let snippetAction = fs.ensureSnippet(configNimsFile,
-    openSentinel = openSentinel,
-    closeSentinel = closeSentinel,
-    openSearch = openSearch,
-    closeSearch = closeSearch,
+    blockId = "repro-paths-bootstrap",
     snippet = snippet,
     actionId = "ensure_snippet_config_nims_" & currentOwningPackage())
   result.add(snippetAction)
