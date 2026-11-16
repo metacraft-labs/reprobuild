@@ -2685,6 +2685,7 @@ tests/unit/t_dev_session_control_api_writes_every_byte_once.nim	nim	5
 tests/unit/t_dev_session_ready_file_is_never_seen_partial.nim	nim	3
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_engine_built_actions_key_their_argv.nim	nim	10
+tests/unit/t_env_tables_keep_one_path_on_windows.nim	nim	10
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
 tests/unit/t_export_plan_carries_tool_ops.nim	nim	4
 tests/unit/t_false_declares_absence.nim	nim	1
