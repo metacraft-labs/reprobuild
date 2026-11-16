@@ -17,7 +17,7 @@
 ## ``-d:reproAddonMutation=omarchy-path-set-empty`` the reader returns no
 ## path, and the cases that read the fixture's set go red.
 
-import std/[os, strutils, unittest]
+import std/[os, sequtils, strutils, unittest]
 
 import repro_infra/addon_diagnostics
 import repro_infra/profile
@@ -76,7 +76,8 @@ proc fixtureBase() =
   put(Install & "omarchy-base.packages", "hyprland\nsddm\n")
   put(Migrations & "1780000000.sh",
     "sudo sed -i 's/x/y/' /etc/ssh/sshd_config.d/10-omarchy-hardening.conf\n" &
-    "sudo cp a $target_root/etc/omarchy/language\n")
+    "sudo cp a $target_root/etc/omarchy/language\n" &
+    "sudo ln -s x /etc/systemd/system/timers.target.wants/omarchy-cleanup.timer\n")
   # Not the package's: a file it does not list is not read.
   put(Install & "stray.sh", "sudo tee /etc/stray.conf\n")
   put("usr/share/omarchy/bin/omarchy-update", "cat /etc/not-a-script-path\n")
@@ -132,6 +133,7 @@ suite "the Omarchy path set from the installed omarchy package":
       "/etc/systemd/system/fprintd.service.d",
       "/etc/systemd/system/multi-user.target.wants/omarchy-thunderbolt-authorization.service",
       "/etc/systemd/system/omarchy-nvme-suspend-fix.service",
+      "/etc/systemd/system/timers.target.wants/omarchy-cleanup.timer",
       "/etc/systemd/system/v4l2-relayd@camlink.service.d"]
     check "/etc/stray.conf" notin pathsOf(s)
     check "/etc/not-a-script-path" notin pathsOf(s)
@@ -147,7 +149,7 @@ suite "the Omarchy path set from the installed omarchy package":
     check entry(s, "/etc/sudoers.d/99-omarchy-installer-reboot").owners.len == 0
     check describe(hard) == "/etc/ssh/sshd_config.d/10-omarchy-hardening.conf " &
       "(named by " & SshScript & ", " & Migration &
-      "; also owned by package omarchy-settings)"
+      "; also in the %FILES% of package omarchy-settings)"
 
   test "fails closed: the omarchy package not installed":
     fixtureBase()
@@ -168,6 +170,15 @@ suite "the Omarchy path set from the installed omarchy package":
     removeDir(root / "var/lib/pacman/local/omarchy-4.5.0-3")
     pkg("omarchy", "4.5.0-3", ["usr/share/omarchy/bin/omarchy-update"])
     check "lists no file" in readOmarchyPathSet(root).problem
+
+  test "fails closed: files listed, but none names an /etc path":
+    fixtureBase()
+    removeDir(root / "var/lib/pacman/local/omarchy-4.5.0-3")
+    pkg("omarchy", "4.5.0-3", [Install & "omarchy-base.packages"])
+    let s = readOmarchyPathSet(root)
+    check s.paths.len == 0 and "name no /etc path" in s.problem
+    check baseLayerRefusal(s, baseLayerCheck(s, profileOf(""))).startsWith(
+      "EAddOnBaseLayerOwned: the omarchy package's 1 file(s)")
 
   test "fails closed: a damaged package database entry":
     fixtureBase()
@@ -203,6 +214,8 @@ suite "intersections with the set":
     check unitsNamedBy("/etc/systemd/system/multi-user.target.wants/a.service") ==
       @["a.service"]
     check unitsNamedBy("/etc/systemd/system").len == 0
+    # A dependency directory on its own names no unit.
+    check unitsNamedBy("/etc/systemd/system/multi-user.target.wants").len == 0
     check unitsNamedBy("/etc/systemd/network/x.network").len == 0
     check unitIntersections(s, "omarchy-nvme-suspend-fix.service").len == 1
     check unitIntersections(s, "fprintd.service").len == 1
@@ -234,7 +247,7 @@ suite "the plan-time check of an operator profile":
     check why.startsWith("EAddOnBaseLayerOwned: Omarchy 4.5.0-3")
     check "managed prefix /etc/ssh/ covers" in why
     check SshScript in why and SudoScript in why
-    check "also owned by package omarchy-settings" in why
+    check "also in the %FILES% of package omarchy-settings" in why
     check "/etc/sudoers.d/repro-fx is written by the base layer" in why
     check "omarchy-nvme-suspend-fix.service is a unit" in why
     check "a prefix carries no `collision`" in why
@@ -271,7 +284,7 @@ suite "the plan-time check of an operator profile":
         "  content = \"x\n\"\n  collision = \"takeOver\"\n}\n"))
     # The prefix covers the file, and the file is not acknowledged.
     check c.refusals.len == 2
-    check "also owned by package omarchy-settings" in c.refusals[1]
+    check "also in the %FILES% of package omarchy-settings" in c.refusals[1]
     check "no opt-in covers both" in c.refusals[1]
 
   test "a prefix narrowed to an acknowledged file of the set is not refused":
@@ -295,8 +308,10 @@ suite "the plan-time check of an operator profile":
       "systemd.systemDropIn {\n  unit = \"fprintd.service\"\n  name = \"x\"\n" &
         "  content = \"[Service]\nX=1\n\"\n}\n" &
       "systemd.unitState {\n  name = \"omarchy-thunderbolt-authorization.service\"\n" &
-        "  enabled = false\n}\n"))
-    check c.refusals.len == 2
+        "  enabled = false\n}\n" &
+      "systemd.systemTimer {\n  name = \"omarchy-cleanup.timer\"\n" &
+        "  content = \"[Timer]\nOnCalendar=daily\n\"\n}\n"))
+    check c.refusals.len == 3
     for r in c.refusals: check "has no acknowledgement" in r
 
   test "a unit with collision = dropIn on a unit the set names is refused":
@@ -304,6 +319,33 @@ suite "the plan-time check of an operator profile":
       "systemd.systemUnit {\n  name = \"fprintd.service\"\n" &
         "  content = \"[Service]\nX=1\n\"\n  collision = \"dropIn\"\n}\n"))
     check c.refusals.len == 1 and "no opt-in covers both" in c.refusals[0]
+
+  test "a file beside a set path in a .d directory intersects it":
+    check dropInSiblings(s, "/etc/ssh/sshd_config.d/05-repro.conf").mapIt(it.path) ==
+      @["/etc/ssh/sshd_config.d/10-omarchy-hardening.conf"]
+    check dropInSiblings(s, "/etc/ssh/sshd_config.d/10-omarchy-hardening.conf").len == 0
+    check dropInSiblings(s, "/etc/ssh/other/05.conf").len == 0
+    let refused = baseLayerCheck(s, profileOf(
+      "addOn {\n  managedEtcPrefixes = [\"/etc/ssh/sshd_config.d/05-repro.conf\"]\n}\n" &
+      "fs.systemFile {\n  path = \"/etc/ssh/sshd_config.d/05-repro.conf\"\n" &
+        "  content = \"PasswordAuthentication yes\n\"\n}\n"))
+    check refused.refusals.len == 1
+    check "10-omarchy-hardening.conf" in refused.refusals[0]
+    let acknowledged = baseLayerCheck(s, profileOf(
+      "addOn {\n  managedEtcPrefixes = [\"/etc/ssh/sshd_config.d/05-repro.conf\"]\n}\n" &
+      "fs.systemFile {\n  path = \"/etc/ssh/sshd_config.d/05-repro.conf\"\n" &
+        "  content = \"PasswordAuthentication yes\n\"\n" &
+        "  collision = \"overrideBaseLayer\"\n}\n"))
+    check acknowledged.refusals.len == 0 and acknowledged.overrides.len == 1
+
+  test "acknowledging a sibling does not acknowledge the set file for a prefix":
+    let c = baseLayerCheck(s, profileOf(
+      "addOn {\n  managedEtcPrefixes = [\"/etc/ssh/sshd_config.d/\"]\n}\n" &
+      "fs.systemFile {\n  path = \"/etc/ssh/sshd_config.d/05-repro.conf\"\n" &
+        "  content = \"x\n\"\n  collision = \"overrideBaseLayer\"\n}\n"))
+    check c.refusals.len == 1
+    check "managed prefix /etc/ssh/sshd_config.d/ covers " &
+      "/etc/ssh/sshd_config.d/10-omarchy-hardening.conf" in c.refusals[0]
 
   test "a profile that intersects nothing passes":
     let c = baseLayerCheck(s, profileOf(

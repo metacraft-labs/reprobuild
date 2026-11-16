@@ -35,7 +35,7 @@ import std/[algorithm, options, strutils, tables]
 
 import repro_profile
 import repro_infra/addon_diagnostics
-from repro_infra/profile import SystemResourceKind
+from repro_infra/profile import SystemResourceKind, OverrideBaseLayerCollision
 
 type
   FieldClass* = enum
@@ -141,7 +141,7 @@ proc debianCollisionCheck(value: FieldValue): string =
     return "`takeOver` is for pacman backup files (Arch); on a Debian " &
       "base a package-owned file is replaced through `collision = " &
       "\"divert\"` (spec §4.3)"
-  if v == "overrideBaseLayer":
+  if v == OverrideBaseLayerCollision:
     return NoBaseLayerOnDebian
   ""
 
@@ -149,7 +149,7 @@ proc debianUnitCollisionCheck(value: FieldValue): string =
   ## `systemd.systemUnit.collision` in `add-on-debian`: as for a file,
   ## `overrideBaseLayer` has nothing to override there (spec §4.3.2).
   let v = if value.kind == fvkString: value.s else: ""
-  if v == "overrideBaseLayer": NoBaseLayerOnDebian else: ""
+  if v == OverrideBaseLayerCollision: NoBaseLayerOnDebian else: ""
 
 proc archCollisionCheck(value: FieldValue): string =
   ## `fs.systemFile.collision` in `add-on-arch`: pacman has no diversions,

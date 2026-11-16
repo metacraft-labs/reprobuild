@@ -36,7 +36,7 @@ import std/[algorithm, os, posix, sequtils, sets, strutils, tables]
 
 import repro_infra/addon_diagnostics
 from repro_infra/profile import SystemProfile, SystemResource,
-  SystemResourceKind
+  SystemResourceKind, OverrideBaseLayerCollision
 
 import ./mutations
 import ./pacman_db
@@ -164,7 +164,7 @@ const
     ## The two trees under ``OmarchyShareDir`` whose files write ``/etc``
     ## outside pacman: the installer's steps and the migrations
     ## ``omarchy-migrate`` runs after an update.
-  OverrideBaseLayer* = "overrideBaseLayer"
+  OverrideBaseLayer* = OverrideBaseLayerCollision
     ## The ``collision`` value that acknowledges one path or unit the base
     ## layer writes (spec §4.3.2, §8.4).
   EtcTokenChars = {'A'..'Z', 'a'..'z', '0'..'9', '.', '_', '@', '+', '-', '/'}
@@ -287,6 +287,14 @@ proc readOmarchyPathSet*(root = "/"): OmarchyPathSet =
   except IOError, OSError, ValueError:
     fail("the package owners of the Omarchy path set cannot be read: " &
       getCurrentExceptionMsg())
+  if order.len == 0:
+    # Files were read and none names an /etc path: a release that builds
+    # its paths from variables, or moved its writes elsewhere. An empty set
+    # would let every path through, so it is a problem, not a pass.
+    fail("the " & OmarchyPackage & " package's " & $result.scriptCount &
+      " file(s) under " & OmarchyShareDir & "/{" &
+      OmarchyScriptDirs.join(",") & "}/ name no /etc path; an empty " &
+      "Omarchy path set would let every path through")
   order.sort(system.cmp)
   for p in order:
     result.paths.add(OmarchyPath(path: p, scripts: byPath[p],
@@ -306,6 +314,19 @@ proc fileIntersections*(s: OmarchyPathSet; file: string): seq[OmarchyPath] =
   ## ``/etc/sudoers.d/x``).
   for e in s.paths:
     if e.path == file or isBelow(file, e.path): result.add(e)
+
+proc dropInSiblings*(s: OmarchyPathSet; file: string): seq[OmarchyPath] =
+  ## The set's paths ``file`` sits beside in a ``*.d`` drop-in directory
+  ## (§13 decision 179): ``/etc/ssh/sshd_config.d/05-x.conf`` beside the
+  ## set's ``/etc/ssh/sshd_config.d/10-omarchy-hardening.conf``. A program
+  ## reads every file of such a directory, in order, so a sibling can
+  ## override what the base layer set there (sshd takes the first value it
+  ## reads). The path itself and the set's directories are
+  ## ``fileIntersections``'.
+  let dir = file.parentDir
+  if not dir.endsWith(".d"): return
+  for e in s.paths:
+    if e.path != file and e.path.parentDir == dir: result.add(e)
 
 proc prefixIntersections*(s: OmarchyPathSet; prefix: string): seq[OmarchyPath] =
   ## The set's paths a managed prefix covers (§4.4: with or without a
@@ -329,11 +350,13 @@ proc unitsNamedBy*(path: string): seq[string] =
   if not isBelow(path, EtcSystemUnitDir): return
   let parts = path[EtcSystemUnitDir.len + 1 .. ^1].split('/')
   let first = parts[0]
+  let dependency = first.endsWith(".wants") or first.endsWith(".requires") or
+    first.endsWith(".upholds")
   if first.endsWith(".d") and first.len > 2:
     result.add(first[0 ..< first.len - 2])
-  elif parts.len >= 2 and (first.endsWith(".wants") or
-      first.endsWith(".requires") or first.endsWith(".upholds")):
-    result.add(parts[1])
+  elif dependency:
+    # A dependency directory names the units linked into it, never itself.
+    if parts.len >= 2: result.add(parts[1])
   else:
     result.add(first)
   result.keepItIf('.' in it)
@@ -358,10 +381,11 @@ proc unitIntersections*(s: OmarchyPathSet; unit: string): seq[OmarchyPath] =
         break
 
 proc describe*(e: OmarchyPath): string =
-  ## ``<path> (named by <scripts>; also owned by package <p>)``.
+  ## ``<path> (named by <scripts>; also in the %FILES% of package <p>)``:
+  ## the second owner, which for a directory is every package listing it.
   result = e.path & " (named by " & e.scripts.join(", ")
   if e.owners.len > 0:
-    result.add("; also owned by package" &
+    result.add("; also in the %FILES% of package" &
       (if e.owners.len > 1: "s " else: " ") & e.owners.join(", "))
   result.add(")")
 
@@ -398,9 +422,11 @@ proc baseLayerCheck*(s: OmarchyPathSet; user: SystemProfile): BaseLayerCheck =
   ## ``collision = "overrideBaseLayer"``, which is listed instead. A prefix
   ## carries no ``collision``: it is refused for each path of the set it
   ## covers that no acknowledged file intersects. A timer, a drop-in and a
-  ## unit state carry none either, and have no acknowledgement. A unit file is matched by its name, never
-  ## by its path: every unit lives in ``/etc/systemd/system``, which the
-  ## scripts name as a directory.
+  ## unit state carry none either, and have no acknowledgement. A file
+  ## beside a set path in a ``*.d`` directory intersects it too
+  ## (``dropInSiblings``). A unit file is matched by its name, never by its
+  ## path: every unit lives in ``/etc/systemd/system``, which the scripts
+  ## name as a directory. (§13 decision 179.)
   proc hits(es: seq[OmarchyPath]): string =
     es.map(describe).join("; ")
   # The set's paths the profile's files acknowledge: a prefix needs no
@@ -430,7 +456,7 @@ proc baseLayerCheck*(s: OmarchyPathSet; user: SystemProfile): BaseLayerCheck =
       subject = r.sfPath
       collision = r.sfCollision
       what = "is written by the base layer"
-      es = fileIntersections(s, r.sfPath)
+      es = fileIntersections(s, r.sfPath) & dropInSiblings(s, r.sfPath)
     of SystemResourceKind.srkSystemdSystemUnit:
       subject = r.suName
       collision = r.suCollision

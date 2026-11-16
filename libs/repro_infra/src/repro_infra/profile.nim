@@ -1587,12 +1587,16 @@ const
   SecretFileStanzaTag* = "secrets.secretFile"
     ## The `secrets.secretFile` declaration (`SecretFileDecl`). Like the
     ## `addOn` stanza it is not a resource stanza.
-  UnitCollisionOptIns* = ["dropIn", "replace", "overrideBaseLayer"]
+  OverrideBaseLayerCollision* = "overrideBaseLayer"
+    ## The `collision` value acknowledging a path or unit a configuration
+    ## layer above the distribution writes (Omarchy, ReproOS-Add-On-Mode
+    ## §4.3.2), valid on a file and on a unit.
+  UnitCollisionOptIns* = ["dropIn", "replace", OverrideBaseLayerCollision]
     ## `collision` values a `systemd.systemUnit` may declare: `dropIn` and
     ## `replace` for a unit a package provides (ReproOS-Add-On-Mode §4.3),
     ## `overrideBaseLayer` for one a configuration layer above the
     ## distribution installs (Omarchy, §4.3.2).
-  FileCollisionOptIns* = ["divert", "takeOver", "overrideBaseLayer"]
+  FileCollisionOptIns* = ["divert", "takeOver", OverrideBaseLayerCollision]
     ## `collision` values an `fs.systemFile` may declare: `divert` (a
     ## dpkg diversion, Debian), `takeOver` (a pacman backup file,
     ## Arch) and `overrideBaseLayer` (a path a configuration layer above

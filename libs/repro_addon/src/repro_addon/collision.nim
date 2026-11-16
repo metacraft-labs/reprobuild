@@ -744,7 +744,7 @@ proc refuseOptInForBase*(d: CollisionDriver; address, collision: string;
       "`takeOver` is for pacman backup files (Arch); on the " & d.name &
       " base a package-owned file is replaced through `collision = " &
       "\"divert\"` (spec §4.3, §4.3.1)")
-  if collision == "overrideBaseLayer" and not d.hasBaseLayers:
+  if collision == OverrideBaseLayerCollision and not d.hasBaseLayers:
     raise newAddOnOutOfScope(field, "", address,
       "`overrideBaseLayer` acknowledges a path or unit a configuration " &
       "layer above the distribution writes, and the only such layer the " &
