@@ -2763,3 +2763,54 @@ Requires=gen.service
     check startResolvedRestartEntries(dir, fixed, host, noBlock = true).len == 0
     check log[].filterIt(it.startsWith("start ")).len == 0
     check "queue s.socket" in log[]
+
+  test "decision 180: recover leaves on record, with its hold, a trigger whose unit is still held":
+    # The implementer's clarification of decision 180, accepted by the
+    # coordinator: started now, a socket with a pending connection would
+    # fire at the held service until systemd's trigger limit failed it, so
+    # it waits for the next full apply, which starts it after its check.
+    let state = scratch12("d180held")
+    let holds = state / "run-systemd-system"
+    defer: removeDir(state)
+    putEnv(HostApplyLockEnvVar, state / "host-apply.lock")
+    defer: delEnv(HostApplyLockEnvVar)
+    recordLiveCheckTriggers(state, ["h.socket"])
+    discard writeHolds(["h.service", "h.socket"], CarriedCheckHoldName, "x", holds)
+    var log = new seq[string]
+    var host = simHost(log)
+    let base = host.show
+    host.show = proc (u: string): Table[string, string] =
+      result = base(u)
+      if u == "h.socket": result["Triggers"] = "h.service"
+    let r = repairTriggerRecords(state, host, holdDir = holds)
+    checkpoint $r.lines
+    check r.resolved
+    check readLiveCheckTriggers(state) == @["h.socket"]
+    check fileExists(holdPath("h.socket", CarriedCheckHoldName, holds))
+    check fileExists(holdPath("h.service", CarriedCheckHoldName, holds))
+    check log[].filterIt(it.startsWith("start ")).len == 0
+    check r.lines.anyIt("left for the next full apply" in it and "h.socket" in it)
+
+  test "M2: a full apply compares the record with the generation as written, not its carried-state requirements":
+    # Only the shape differs: the text the apply runs carries the restore
+    # requirement's drop-in on the validator (``withCarriedRequirements``);
+    # the generation is otherwise unchanged, so the entry stays unresolved.
+    # Its own backup: earlier cases change the shared one.
+    let src = fresh("r12-shape-src")
+    createDir(src / "var/lib/ethereum/validator")
+    writeFile(src / "var/lib/ethereum/validator/validator.db", "history\n")
+    let d = src / "out"
+    discard backupStateSet(parseSystemProfile(Validator), d, "h", stopped(),
+                           hold = false, root = src)
+    let root = fresh("r12-shape-root")
+    discard restoreStateSet(d, stopped(), root = root)
+    writeFile(installedMarkerPath(d), d & "\n")
+    let applied = withCarriedRequirements(Validator, d, root)
+    check applied != Validator
+    let written = parseSystemProfile(Validator)
+    let e = entry12(restartRecordProfile(written), "eth-validator.service", @[])
+    # The premise: rendered from the applied text, the unit differs.
+    check renderedUnitDigest(restartRecordProfile(parseSystemProfile(applied)),
+                             "eth-validator.service") != e.rendered[0].digest
+    check not restartEntryResolvedBy(e,
+      fullApplyRecordProfile(recordComparisonProfile(Validator, applied)))

@@ -1438,6 +1438,10 @@ when defined(posix):
       for u in targets:
         if fileExists(holdPath(u, CarriedCheckHoldName, holdDir)):
           stillHeld = u
+      when ApplyMutation == "recover-starts-trigger-of-held-unit":
+        # FALSIFYING MUTATION: a trigger whose unit is still held is lifted
+        # and started like any other.
+        stillHeld = ""
       if stillHeld.len > 0:
         result.left.add(t)
       else:
@@ -1947,6 +1951,20 @@ when defined(posix):
       result.add("ECarriedStatePending: " & t & " stays stopped: it " &
         "triggers a unit the carried-state check refused")
 
+proc recordComparisonProfile*(writtenText, appliedText: string): SystemProfile =
+  ## What a full apply's generation is compared with the record of triggers
+  ## to restart as, at its fixing starts and its commit (§13 decision 175
+  ## as amended in A13 review round 12): the generation as its author wrote
+  ## it (``writtenText``), never the text the apply runs (``appliedText``),
+  ## which ``withCarriedRequirements`` extends with a drop-in on every unit
+  ## that reaches carried state -- that drop-in alone would "change" the
+  ## unit and resolve its entry. The guard compares the written text too.
+  when ApplyMutation == "full-apply-renders-full-profile":
+    # FALSIFYING MUTATION: the applied text, carried-state requirements
+    # included, is compared.
+    return parseSystemProfile(appliedText)
+  parseSystemProfile(writtenText)
+
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
   ## the `system.nim` text and resolved `opts`.
@@ -2295,10 +2313,8 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   if pendingSwitchStartResolved != nil and not opts.carriedStateChecked and
       opts.elevationMode != emNoElevate:
     for pr in pendingSwitchStartResolved(opts.stateDir,
-                                         parseSystemProfile(
-                                           when ApplyMutation == "full-apply-renders-full-profile":
-                                             profileText
-                                           else: recordText)):
+                                         recordComparisonProfile(recordText,
+                                                                 profileText)):
       inc result.errorCount
       result.diagnostics.add(pr)
 
@@ -2368,9 +2384,6 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # An add-on switch clears what it resolves at its own commit; any other
   # committed apply here.
   if pendingSwitchCommitted != nil and not opts.carriedStateChecked:
-    # FALSIFYING MUTATION ``full-apply-renders-full-profile``: the text with
-    # the carried-state requirements is compared.
-    pendingSwitchCommitted(opts.stateDir, parseSystemProfile(
-        when ApplyMutation == "full-apply-renders-full-profile": profileText
-        else: recordText),
+    pendingSwitchCommitted(opts.stateDir,
+      recordComparisonProfile(recordText, profileText),
       clean = result.errorCount == 0 and result.driftCount == 0)

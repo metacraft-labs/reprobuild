@@ -1884,31 +1884,66 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # connections keep arriving. The next full apply must not lift that
     # hold before its own check: it adopts the service and the socket and
     # starts them only after the check -- and here the check refuses the
-    # service (a generator makes it root at the apply's reload, as round
-    # 6's live probe), so it never runs. Falsifier: the engine build
+    # service (a generator makes it root at the apply's own reload, as the
+    # decision-153 case's does: installed after the staging's reload, so
+    # the static analysis before the apply does not see it and the live
+    # check judges the service), so it never runs. The order is measured
+    # on the guest: when the new apply's check began (a hold of the judged
+    # path service appears), when it released (that hold goes), and when
+    # the service first ran. Falsifier: the engine build
     # dead-apply-holds-lifted (round 11's order: every stale hold lifted and
-    # the socket started first, so a connection starts the service as root
-    # before any check).
+    # the socket started first, so a connection starts the service before
+    # the new apply's release).
     block:
       discard nw.run("rm -f " & R10MarkerDir & "/" & R10SocketSvc & ".ran; " &
-        "systemctl stop " & R10Socket & " " & R10SocketSvc & "; " &
-        "mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
-        "mkdir -p \"$1/" & R10SocketSvc & ".d\"\\nprintf \"[Service]\\\\nUser=root\\\\n\" " &
-        "> \"$1/" & R10SocketSvc & ".d/10-root.conf\"\\n' > " &
-        "/etc/systemd/system-generators/a13r12-m3 && chmod 755 " &
-        "/etc/systemd/system-generators/a13r12-m3; for u in " & R10Socket &
-        " " & R10SocketSvc & "; do mkdir -p /run/systemd/system/$u.d && " &
-        "printf '[Unit]\\nConditionPathExists=!/\\n' > " &
+        "systemctl stop " & R10Socket & " " & R10SocketSvc & "; for u in " &
+        R10Socket & " " & R10SocketSvc & "; do mkdir -p " &
+        "/run/systemd/system/$u.d && printf '[Unit]\\nConditionPathExists=!/\\n' > " &
         "/run/systemd/system/$u.d/zz-repro-carried-check-hold.conf; done; " &
         "printf '" & R10Socket & "\\n' > /var/lib/repro/system/live-check-triggers; " &
         "printf '" & R10SocketSvc & "\\twas-active\\n' > " &
         "/var/lib/repro/system/live-check-units; systemctl daemon-reload")
+      # After the reload: the generator runs first at the apply's own.
+      discard nw.run("mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
+        "mkdir -p \"$1/" & R10SocketSvc & ".d\"\\nprintf \"[Service]\\\\nUser=root\\\\n\" " &
+        "> \"$1/" & R10SocketSvc & ".d/10-root.conf\"\\n' > " &
+        "/etc/systemd/system-generators/a13r12-m3 && chmod 755 " &
+        "/etc/systemd/system-generators/a13r12-m3")
+      let watch = "H=/run/systemd/system/" & R10PathSvc &
+        ".d/zz-repro-carried-check-hold.conf\nh=; r=; s=\n" &
+        "while [ ! -e /run/a13m3-stop ]; do\n" &
+        "  t=$(cut -d' ' -f1 /proc/uptime)\n" &
+        "  if [ -z \"$h\" ] && [ -e \"$H\" ]; then h=$t; echo \"check $t\" >> /run/a13m3.log; fi\n" &
+        "  if [ -n \"$h\" ] && [ -z \"$r\" ] && [ ! -e \"$H\" ]; then r=$t; echo \"release $t\" >> /run/a13m3.log; fi\n" &
+        "  if [ -z \"$s\" ] && systemctl is-active --quiet " & R10SocketSvc &
+        "; then s=$t; echo \"service $t\" >> /run/a13m3.log; fi\n" &
+        "  sleep 0.1\ndone\n"
+      writeFile(work / "a13m3-watch.sh", watch)
+      nw.copyTo(work / "a13m3-watch.sh", "/run/a13m3-watch.sh")
+      discard nw.exec("rm -f /run/a13m3.log /run/a13m3-stop; nohup bash " &
+        "/run/a13m3-watch.sh >/dev/null 2>&1 &")
       let m3Since = nw.exec("date +%s").stdout.strip()
       nw.startAgitator()
       let m3Apply = nw.exec(env & eng & " infra apply --profile " & RefDir &
         "/system_next.nim --host " & AgentTarget & " --no-preview",
         timeoutSec = 3600)
       nw.stopAgitator()
+      discard nw.exec("sleep 1; touch /run/a13m3-stop; sleep 1; true")
+      let m3Order = nw.exec("cat /run/a13m3.log 2>/dev/null").stdout
+      var checkAt, releaseAt, serviceAt = -1.0
+      for l in m3Order.splitLines():
+        let w = l.splitWhitespace()
+        if w.len != 2: continue
+        var t = -1.0
+        try: t = parseFloat(w[1])
+        except ValueError: continue
+        case w[0]
+        of "check": checkAt = t
+        of "release": releaseAt = t
+        of "service": serviceAt = t
+        else: discard
+      let beforeRelease = serviceAt >= 0 and (releaseAt < 0 or serviceAt < releaseAt)
+      let beforeCheck = serviceAt >= 0 and (checkAt < 0 or serviceAt < checkAt)
       let m3Out = m3Apply.stdout & m3Apply.stderr
       let m3Refused = (R10SocketSvc & " as systemd loaded it is not confined") in m3Out
       let m3Ran = nw.exec("test -s " & R10MarkerDir & "/" & R10SocketSvc &
@@ -1919,10 +1954,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let m3Started = journalStarted(m3Journal, R10SocketSvc) or m3Ran
       let m3HeldEtc = nw.exec("test -f /etc/systemd/system/" & R10SocketSvc &
         ".d/zz-repro-carried-check-hold.conf").exitCode == 0
-      let m3Ok = m3Refused and not m3Started and m3HeldEtc
+      let m3Ok = m3Refused and not m3Started and m3HeldEtc and
+        not beforeRelease and checkAt >= 0
       record["deadApplyAdopted"] = %*{"exit": m3Apply.exitCode,
         "refusedForReason": m3Refused, "ran": m3Ran, "started": m3Started,
-        "heldInEtc": m3HeldEtc, "ok": m3Ok}
+        "heldInEtc": m3HeldEtc, "checkBeganAt": checkAt,
+        "releasedAt": releaseAt, "serviceActiveAt": serviceAt,
+        "serviceStartedBeforeCheck": beforeCheck,
+        "serviceStartedBeforeRelease": beforeRelease, "ok": m3Ok}
       discard nw.run("rm -f /etc/systemd/system-generators/a13r12-m3 " &
         "/var/lib/repro/system/live-check-units " &
         "/var/lib/repro/system/live-check-triggers; for u in " & R10Socket &
@@ -1935,7 +1974,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "arriving, stays held until the next apply's check, and never " &
            "starts when that check refuses it", m3Ok,
            m3Out & "\n" & m3Journal & "\nheld in /etc: " & $m3HeldEtc &
-           " ran: " & $m3Ran)
+           " ran: " & $m3Ran & "\norder (uptime s): " & m3Order)
     # A13 review round 12, M2 (the owner decision "yes, same as 175"): a
     # full apply whose generation resolves an entry of the record of
     # triggers to restart starts it, confirmed, before its commit. Staged:

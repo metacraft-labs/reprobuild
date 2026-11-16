@@ -651,6 +651,10 @@
 ## ``recover-lifts-unit-holds``            recover lifts a dead apply's hold
 ##                                           on a judged service, not only
 ##                                           the triggers' own (round 12, M3)
+## ``recover-starts-trigger-of-held-unit`` recover lifts the hold of, and
+##                                           starts, a recorded trigger whose
+##                                           unit a dead apply still holds
+##                                           (decision 180's clarification)
 ## ``recover-keeps-trigger-holds``         recover starts a recorded trigger
 ##                                           without lifting its own hold
 ##                                           (round 12, recover's stale-hold
@@ -2051,6 +2055,7 @@ const
                           "dead-apply-holds-lifted",
                           "recover-lifts-unit-holds",
                           "recover-keeps-trigger-holds",
+                          "recover-starts-trigger-of-held-unit",
                           "alias-names-unresolved",
                           "judged-template-shown-by-name",
                           "essential-judged-units-held",
