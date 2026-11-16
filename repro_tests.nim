@@ -6064,6 +6064,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_home_apply_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_home_generations/tests/t_generation_markers_never_vanish_while_replaced.nim",
+    binary: "build/test-bin/t_generation_markers_never_vanish_while_replaced",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_home_generations_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_home_generations/tests/t_smoke_home_generations.nim",
     binary: "build/test-bin/t_smoke_home_generations",
     defines: @[],
@@ -6072,8 +6083,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "",
-    singleReason: "no other source shares its compile options"),
+    group: "t_group_libs_repro_home_generations_tests_g01",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_home_intent/tests/t_host_identity_resolver.nim",
     binary: "build/test-bin/t_host_identity_resolver",
