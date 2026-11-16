@@ -2832,7 +2832,7 @@ tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim	nim	3
 tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_fragment_writer_emits_only_repo_v2.nim	nim	5
-tests/unit/t_repo_relocation_move_ordering.nim	nim	12
+tests/unit/t_repo_relocation_move_ordering.nim	nim	16
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
 tests/unit/t_role_falls_back_toward_mainline.nim	nim	3
 tests/unit/t_role_validation_refused_at_manifest_load.nim	nim	7

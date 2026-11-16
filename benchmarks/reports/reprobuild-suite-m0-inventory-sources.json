@@ -59619,7 +59619,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_repo_relocation_move_ordering.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
