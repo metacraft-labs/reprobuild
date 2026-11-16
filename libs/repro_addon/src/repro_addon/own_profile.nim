@@ -329,9 +329,12 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
     if engineExe.len > 0 and age(engineExe) >= age(newestOnDisk): engineExe
     else: newestOnDisk
   when mutated("repoint-backwards"):
-    # FALSIFYING MUTATION: a revert or a rollback installs the engine its
-    # target generation names, older than the one on disk.
-    result.exe = found[0].ownExe
+    # FALSIFYING MUTATION: a revert or a rollback -- a target generation
+    # that names another engine than the one on disk -- installs the engine
+    # it names, older than the one on disk. A forward re-point (the units
+    # still run what the own profile names) is left as it is.
+    if found[0].ownExe != newestOnDisk:
+      result.exe = found[0].ownExe
   when mutated("reassert-not-repointed"):
     # FALSIFYING MUTATION: the units keep the engine their own profile
     # names (the bootstrap engine on a host an earlier one bootstrapped).
