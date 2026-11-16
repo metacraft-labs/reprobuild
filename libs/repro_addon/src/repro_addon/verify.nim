@@ -9,8 +9,11 @@
 
 import std/[os, strutils]
 
+import ./mutations
+
 import ./addon_apply
 import ./ledger
+import ./record_dir
 
 type
   VerifyReport* = object
@@ -42,6 +45,20 @@ proc runAddonVerify*(stateDir = DefaultStateDir): VerifyReport =
       result.notes.add(e.unit & ": the add-on's /etc unit shadows the " &
         "package's (" & e.observation & "); check it after every upgrade " &
         "of that package")
+  # §13 decision 178: the directory of the uninstall records is root's,
+  # writable by no group or other, and not a link -- checked on a
+  # descriptor, as uninstall uses it. Absent on a host bootstrapped before
+  # bootstrap made it: a note, since its first use creates it the same way.
+  when not mutated("verify-skips-log-dir"):
+    if dirExists(AddonLogDir) or symlinkExists(AddonLogDir):
+      let why = checkedDirRefusal(AddonLogDir)
+      if why.len > 0:
+        result.findings.add(AddonLogDir & ": " & why & "; the add-on did " &
+          "not make it so: inspect it, and remove it -- the add-on makes it " &
+          "root's 0700 again at its next use")
+    else:
+      result.notes.add(AddonLogDir & " is absent; the add-on makes it " &
+        "root's 0700 at its first use")
   if result.findings.len > 0:
     result.status = "drift"
 

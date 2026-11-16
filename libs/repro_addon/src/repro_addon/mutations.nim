@@ -1159,6 +1159,18 @@
 ##                                            corrupt record of a
 ##                                            pre-bootstrap input
 ##                                            (decision 166)
+## ``record-dir-link-followed``              the uninstall records are
+##                                            written by path, following a
+##                                            link in their directory's place
+##                                            (decision 178)
+## ``token-binds-inode-only``                 the token's install binding
+##                                            compares inode numbers only
+##                                            (decision 165)
+## ``bootstrap-leaves-log-dir``               bootstrap does not make the
+##                                            uninstall records' directory
+##                                            (decision 178)
+## ``verify-skips-log-dir``                   verify does not check that
+##                                            directory (decision 178)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -2067,6 +2079,10 @@ const
                           "token-dir-unchecked",
                           "token-not-bound-to-install",
                           "corrupt-input-record-continues",
+                          "record-dir-link-followed",
+                          "token-binds-inode-only",
+                          "bootstrap-leaves-log-dir",
+                          "verify-skips-log-dir",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
