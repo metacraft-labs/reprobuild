@@ -256,13 +256,25 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       "inputs under /var/lib/repro, which the preflight inspected at the " &
       "default state directory " & DefaultStateDir & "; --state-dir " &
       stateDir & " is refused; nothing was written")
-  # A state-removal token an earlier uninstall left (§13 decision 165)
-  # belongs to that uninstall, not to this install: a later re-run must
-  # never act on it. Removed durably before anything is written.
-  clearStateRemovalToken()
   for p in [opts.deploySignersPath, opts.cachePublishersPath]:
     if p.len > 0:
       discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
+  # A state-removal token an earlier uninstall left (§13 decision 165)
+  # belongs to that uninstall, not to this install: a later re-run must
+  # never act on it. Removed durably, and the directory that holds the
+  # add-on's uninstall records made root's 0700 through a descriptor that
+  # does not follow a link (§13 decision 178), before anything else is
+  # written.
+  try:
+    clearStateRemovalToken()
+    when not mutated("bootstrap-leaves-log-dir"):
+      ensureUninstallLogDir()
+  except OSError as e:
+    raise newException(AddonBootstrapError, UninstallOverrideDir &
+      " cannot hold the add-on's uninstall records (" & e.msg & "). It " &
+      "is not one this add-on made: inspect it, remove it (or the entry " &
+      "named " & StateRemovalTokenName & " in it), and run bootstrap " &
+      "again; nothing was written")
 
   # 2. Roots: created, or taken over where the plan says they are
   # pre-bootstrap inputs. The directories the plan lists beyond the
