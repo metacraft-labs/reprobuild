@@ -1734,12 +1734,18 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # The records directory is the one bootstrap made (§13 decision 178,
   # amended): every checked open of it compares its identity with the one
   # recorded in the state.
-  bindRecordsDir(parentDir(tokenPath), recordsDirIdentityPath(stateDir))
+  when not mutated("uninstall-records-dir-unbound"):
+    bindRecordsDir(parentDir(tokenPath), recordsDirIdentityPath(stateDir))
   defer: unbindRecordsDir(parentDir(tokenPath))
   when not mutated("state-removal-rerun-unwired"):
     if stateDir.startsWith(stateRoot & "/") and
         finishEmptyStateRoot(result, stateRoot, ledgerCopyPath(stateDir),
                              tokenPath):
+      if boundWithoutState(parentDir(tokenPath)):
+        result.notes.add(parentDir(tokenPath) & " was used without its " &
+          "recorded identity, which went with the state an earlier " &
+          "uninstall removed; the token it holds binds the directories " &
+          "it names, so nothing else was trusted from it")
       return
   let l = readLedger(ledgerCopyPath(stateDir))
   # Pre-bootstrap inputs the add-on took over stay where they are (spec
