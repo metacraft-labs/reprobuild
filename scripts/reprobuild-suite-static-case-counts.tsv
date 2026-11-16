@@ -36,7 +36,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	21
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	139
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	149
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
@@ -1337,7 +1337,7 @@ tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim	nim	5
 tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim	nim	3
 tests/e2e/cmake-path-hermeticity/t_cmake_actions_declare_their_path.nim	nim	4
 tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim	nim	4
-tests/e2e/dev-env/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests.nim	nim	7
+tests/e2e/dev-env/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests.nim	nim	9
 tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim	nim	5
 tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim	nim	2
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_per_shell.nim	nim	7
