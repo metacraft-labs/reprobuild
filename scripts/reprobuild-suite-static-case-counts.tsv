@@ -41,7 +41,7 @@ libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
 libs/repro_addon/tests/t_addon_drill_findings.nim	nim	7
-libs/repro_addon/tests/t_addon_egress_observer.nim	nim	6
+libs/repro_addon/tests/t_addon_egress_observer.nim	nim	7
 libs/repro_addon/tests/t_addon_engine_agent_route.nim	nim	4
 libs/repro_addon/tests/t_addon_engine_agent_tick_records.nim	nim	1
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
@@ -2187,6 +2187,7 @@ tests/integration/t_pre_commit_gate_ignores_the_record_store_lock.nim	nim	1
 tests/integration/t_pre_commit_gate_is_advisory_when_the_dispatcher_is_displaced.nim	nim	1
 tests/integration/t_pre_commit_gate_judges_the_index_being_committed.nim	nim	4
 tests/integration/t_pre_commit_gate_names_the_re_pin_as_the_cause.nim	nim	1
+tests/integration/t_pre_commit_gate_refuses_when_its_repro_cannot_service_it.nim	nim	3
 tests/integration/t_pre_commit_gate_requires_what_the_branch_rule_names.nim	nim	1
 tests/integration/t_pre_commit_gate_stands_down_during_replay.nim	nim	1
 tests/integration/t_pre_commit_hook_keeps_unstaged_work_when_interrupted.nim	nim	3
