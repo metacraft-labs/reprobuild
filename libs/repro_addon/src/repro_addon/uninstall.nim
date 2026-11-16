@@ -1886,6 +1886,29 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     removeOwned(li, result)
   for u in byClass[lcUnit]:
     removeOwned(u, result, driver)
+  # sysinit.target requires the boot-hold unit (§13 decision 172): a link
+  # left naming it once its file is gone -- one the ledger's removal kept
+  # because it had drifted -- would make every later boot wait for a unit
+  # that cannot load. Removed whatever it points at: the name is the
+  # add-on's (A9 review round 18, M1).
+  when not mutated("uninstall-leaves-boot-hold-requires"):
+    if not fileExists(unitPath(BootHoldUnit)):
+      for dir in ["sysinit.target.requires", "sysinit.target.wants"]:
+        let link = parentDir(unitPath(BootHoldUnit)) / dir / BootHoldUnit
+        if symlinkExists(link) or fileExists(link):
+          try:
+            removeFile(link)
+            result.removed.add(link & " (it named the boot-hold unit, now gone)")
+            # The ledger's entry for it is undone, and the drift its
+            # removal above reported (a link changed since) is resolved.
+            for li in byClass[lcInstallLink]:
+              if li.path == link: result.undone.incl(entryKey(li))
+            var kept: seq[string]
+            for dl in result.drift:
+              if not dl.startsWith(link & ":"): kept.add(dl)
+            result.drift = kept
+          except OSError as ex:
+            result.errors.add(link & ": " & ex.msg)
   for di in byClass[lcDropIn]:
     removeOwned(di, result, driver)
   # A revert's persistent holds (§13 decision 133) go with the drop-ins:

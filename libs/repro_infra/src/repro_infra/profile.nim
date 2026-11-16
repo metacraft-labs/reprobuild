@@ -1893,6 +1893,21 @@ proc checkBootHoldOrdering*(p: SystemProfile) =
       if n notin late and profileUnitLate(p, n, late):
         late.incl(n)
         grew = true
+  # A unit that would stop the boot-hold unit stops sysinit.target and
+  # every unit that requires it (systemd.unit(5): Requires= propagates a
+  # stop): Conflicts= naming it (starting the unit stops it), or
+  # PropagatesStopTo= naming it (A9 review round 18, L4).
+  when InfraAddonMutation != "boot-hold-stop-deps-unchecked":
+    for n in names:
+      for c in unitFilesOf(p, n):
+        for d in sectionDirectives(c, ["Unit"]):
+          if d.key in ["Conflicts", "PropagatesStopTo"] and
+              BootHoldUnitName in d.value.splitWhitespace():
+            raiseSystemProfileInvalid("systemd unit '" & n & "' names " &
+              BootHoldUnitName & " in " & d.key & "=, which would stop it; " &
+              "sysinit.target requires it, so that stop would stop " &
+              "sysinit.target and every unit that requires it. Drop it from " &
+              d.key & "=")
   for n in names:
     if n notin late: continue
     let route = earlyOrderingRoute(n,
