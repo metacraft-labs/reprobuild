@@ -103,7 +103,8 @@ suite "membership model — retired names fail as unknown":
 
     let retired = runRepro(reproBin, ws, ["develop", "--list", "--group=libs"])
     check retired.code != 0
-    check retired.output.contains("--group=libs")
+    # The parser names the flag, not the value written with it.
+    check retired.output.contains("unknown flag '--group'")
 
     let current = runRepro(reproBin, ws, ["develop", "--list", "--tag=libs"])
     check "--tag=libs" notin current.output

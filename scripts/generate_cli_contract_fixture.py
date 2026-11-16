@@ -241,6 +241,11 @@ COVERED_COMMANDS = [
     "gateway migrate",
     "add",
     "remove",
+    "develop",
+    "flake",
+    "flake override-args",
+    "flake refresh-lock",
+    "flake override-status",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
