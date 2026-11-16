@@ -1,6 +1,7 @@
-## Files in a directory that only root may change, written, read and
-## removed through one descriptor of that directory (ReproOS Add-On Mode
-## spec §13 decisions 165 and 166; A11 code review rounds 17 and 18).
+## The uninstall records' directory: files in a directory that only root
+## may change, written, read and removed through one descriptor of that
+## directory (ReproOS Add-On Mode spec §13 decisions 165 and 178; A11 code
+## review rounds 17 and 18).
 ##
 ## The add-on keeps signed records -- the discard intents and completions,
 ## the state-removal token -- in ``/var/log/repro-addon``. Its parent is not
@@ -23,7 +24,7 @@
 ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/renameat.html,
 ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/unlinkat.html.
 
-import std/[os, posix, strutils]
+import std/[os, posix, strutils, tables]
 
 import ./mutations
 
@@ -44,6 +45,36 @@ proc fstatatC(dirfd: cint; path: cstring; buf: var Stat; flags: cint): cint
 var AtSymlinkNoFollow {.importc: "AT_SYMLINK_NOFOLLOW", header: "<fcntl.h>".}: cint
 var ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
 var ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+var ONonBlock {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
+proc fdopendirC(fd: cint): ptr DIR {.importc: "fdopendir", header: "<dirent.h>".}
+proc c_syscall(n: clong): clong {.importc: "syscall", header: "<unistd.h>",
+                                  varargs.}
+proc c_ioctl(fd: cint; req: culong): cint {.importc: "ioctl",
+  header: "<sys/ioctl.h>", varargs.}
+
+# statx(2) by number, on the open descriptor (AT_EMPTY_PATH): neither libc
+# this links against is required to wrap it; only stx_ino (offset 32) and
+# stx_btime (offset 80: tv_sec i64, tv_nsec u32) are read
+# (https://man7.org/linux/man-pages/man2/statx.2.html).
+const
+  SysStatx =
+    when defined(amd64): 332
+    elif defined(arm64) or defined(riscv64): 291
+    elif defined(arm): 397
+    elif defined(i386): 383
+    else: -1
+  AtEmptyPath = 0x1000
+  StatxIno = 0x100'u32
+  StatxBtime = 0x800'u32
+  # FS_IOC_GETVERSION = _IOR('v', 1, long)
+  # (https://man7.org/linux/man-pages/man2/ioctl_iflags.2.html).
+  FsIocGetVersion = (2'u64 shl 30) or (uint64(sizeof(clong)) shl 16) or
+                    (uint64(ord('v')) shl 8) or 1'u64
+
+const MaxRecordBytes* = 1024 * 1024
+  ## No record the add-on writes comes near this; a read stops here, so a
+  ## planted endless file (a link to ``/dev/zero``, were one followed)
+  ## cannot exhaust memory.
 
 const AddonLogDir* = "/var/log/repro-addon"
   ## Where the add-on keeps its uninstall records: the discard intents and
@@ -52,6 +83,69 @@ const AddonLogDir* = "/var/log/repro-addon"
 type
   RecordExistsError* = object of OSError
     ## The record's name is taken: a record is never written over.
+
+proc fdIdentity*(fd: cint): string =
+  ## The identity of the directory open at ``fd``: ``<ino>@<btime>`` with
+  ## ``g<generation>`` where the file system has one -- the same scheme as
+  ## the state-removal token's (§13 decision 165). "" when no birth time is
+  ## known: then nothing tells a replacement with a reused inode number
+  ## apart, and the caller fails closed.
+  when SysStatx > 0:
+    var buf: array[256, byte]
+    if c_syscall(clong(SysStatx), fd, cstring(""), cint(AtEmptyPath),
+                 cuint(StatxIno or StatxBtime), addr buf) != 0:
+      return ""
+    var mask: uint32
+    copyMem(addr mask, addr buf[0], 4)
+    if (mask and StatxBtime) == 0: return ""
+    var ino: uint64
+    var sec: int64
+    var nsec: uint32
+    copyMem(addr ino, addr buf[32], 8)
+    copyMem(addr sec, addr buf[80], 8)
+    copyMem(addr nsec, addr buf[88], 4)
+    result = $ino & "@" & $sec & "." & $nsec
+    var v: clong
+    if c_ioctl(fd, culong(FsIocGetVersion), addr v) == 0:
+      result.add("g" & $v)
+  else:
+    ""
+
+const RecordsDirIdentityName* = "records-dir.identity"
+
+proc recordsDirIdentityPath*(stateDir: string): string =
+  ## Where the identity of the records directory bootstrap made is kept:
+  ## in the add-on's root-only state (§13 decision 178, amended).
+  stateDir / "addon" / RecordsDirIdentityName
+
+type DirBinding = object
+  identityFile: string   ## root-only state holding the recorded identity
+  expected: string       ## the identity read or recorded; "" until known
+
+var bindings = initTable[string, DirBinding]()
+  ## The records directories bound to a recorded identity (§13 decision
+  ## 178, amended): the module's one piece of state, set by the verbs that
+  ## use ``/var/log/repro-addon`` (bootstrap, uninstall, verify) before
+  ## they touch it, and read by ``openCheckedDir``. A table keyed by path,
+  ## so a test binds its own temporary directory the same way.
+
+proc bindRecordsDir*(dir, identityFile: string) =
+  ## Bind ``dir`` to the identity recorded in ``identityFile`` (root-only
+  ## add-on state). When there is no recorded identity yet -- a host
+  ## bootstrapped before §13 decision 178's amendment -- the first checked
+  ## open records it (trust on first use) where ``identityFile``'s
+  ## directory exists.
+  var b = DirBinding(identityFile: identityFile)
+  if fileExists(identityFile):
+    b.expected = readFile(identityFile).strip()
+  bindings[dir] = b
+
+proc unbindRecordsDir*(dir: string) =
+  bindings.del(dir)
+
+proc recordedIdentity*(dir: string): string =
+  ## The identity ``dir`` is bound to, "" when unbound or not yet recorded.
+  bindings.getOrDefault(dir).expected
 
 proc fdDirRefusal(fd: cint; dir: string): string =
   ## "" when the directory open at ``fd`` may hold the add-on's records:
@@ -97,6 +191,29 @@ proc openCheckedDir*(dir: string; create: bool): cint =
   if why.len > 0:
     discard posix.close(fd)
     raise newException(OSError, "refusing " & why)
+  if dir in bindings:
+    # §13 decision 178, amended: the directory bootstrap made, and no
+    # other. A member of a group that can write /var/log can rename the
+    # root-only directory away and put another root directory in its
+    # place; rename(2) needs write permission on the parent only.
+    let now = fdIdentity(fd)
+    var b = bindings[dir]
+    when not mutated("records-dir-identity-unchecked"):
+      if b.expected.len == 0:
+        if now.len > 0 and dirExists(parentDir(b.identityFile)):
+          writeFile(b.identityFile & ".tmp", now & "\n")
+          moveFile(b.identityFile & ".tmp", b.identityFile)
+          b.expected = now
+          bindings[dir] = b
+      elif now.len == 0 or now != b.expected:
+        discard posix.close(fd)
+        raise newException(OSError, "refusing " & dir & ": it is not the " &
+          "directory bootstrap made (identity " &
+          (if now.len > 0: now else: "unknown") & ", recorded " & b.expected &
+          " in " & b.identityFile & "); something renamed it or put another " &
+          "directory in its place. Inspect " & dir & " and the directory " &
+          "it replaced; if it is the add-on's and only moved back, remove " &
+          b.identityFile & " so the next use records it again")
   fd
 
 proc checkedDirRefusal*(dir: string): string =
@@ -107,10 +224,50 @@ proc checkedDirRefusal*(dir: string): string =
     ""
   except OSError as ex: ex.msg
 
-proc ensureCheckedDir*(dir: string) =
+proc ensureCheckedDir*(dir: string; tighten = false) =
   ## ``dir`` created root's 0700 when absent, and checked; raises
-  ## ``OSError`` when it may not hold the records.
-  discard posix.close(openCheckedDir(dir, create = true))
+  ## ``OSError`` when it may not hold the records. With ``tighten`` (§13
+  ## decision 178: bootstrap) an existing root directory that passed the
+  ## checks gets mode 0700, through the descriptor.
+  let fd = openCheckedDir(dir, create = true)
+  defer: discard posix.close(fd)
+  if tighten:
+    when not mutated("records-dir-left-open"):
+      if fchmod(fd, Mode(0o700)) != 0:
+        raiseOSError(osLastError(), "chmod 0700 " & dir)
+      if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & dir)
+
+proc identityOfCheckedDir*(dir: string): string =
+  ## The identity of ``dir`` as the checked open sees it; "" when absent.
+  let fd = openCheckedDir(dir, create = false)
+  if fd < 0: return ""
+  defer: discard posix.close(fd)
+  fdIdentity(fd)
+
+proc listInCheckedDir*(dir: string): seq[tuple[name: string; regular: bool]] =
+  ## The entries of ``dir``, enumerated through a duplicate of its checked
+  ## descriptor (``fdopendir``), each judged without following a link
+  ## (``fstatat(AT_SYMLINK_NOFOLLOW)``): ``regular`` is true only for a
+  ## regular file. Empty when the directory is absent.
+  let dfd = openCheckedDir(dir, create = false)
+  if dfd < 0: return
+  defer: discard posix.close(dfd)
+  let lfd = dup(dfd)
+  if lfd < 0: raiseOSError(osLastError(), "dup " & dir)
+  let d = fdopendirC(lfd)
+  if d == nil:
+    discard posix.close(lfd)
+    raiseOSError(osLastError(), "fdopendir " & dir)
+  defer: discard closedir(d)
+  while true:
+    let ent = readdir(d)
+    if ent == nil: break
+    let name = $cast[cstring](addr ent.d_name)
+    if name == "." or name == "..": continue
+    var st: Stat
+    let regular = fstatatC(dfd, name.cstring, st, AtSymlinkNoFollow) == 0 and
+                  S_ISREG(st.st_mode)
+    result.add((name, regular))
 
 proc unlinkAt(dfd: cint; name, dir: string) =
   ## Unlink ``name`` in the open directory, if there, and fsync it.
@@ -188,17 +345,9 @@ proc writeInCheckedDir*(path, text: string; mode = 0o600;
     discard unlinkatC(dfd, tmp.cstring, 0)
   if fsync(dfd) != 0: raiseOSError(osLastError(), "fsync " & dir)
 
-proc readInCheckedDir*(path: string): string =
-  ## ``path``'s bytes, read through its directory's checked descriptor
-  ## without following a link; raises ``OSError`` when they cannot be.
-  let dir = parentDir(path)
-  let dfd = openCheckedDir(dir, create = false)
-  if dfd < 0: raise newException(OSError, dir & " is absent")
-  defer: discard posix.close(dfd)
-  let fd = openatC(dfd, extractFilename(path).cstring,
-                   O_RDONLY or O_CLOEXEC or ONoFollow)
-  if fd < 0: raiseOSError(osLastError(), "open " & path)
-  defer: discard posix.close(fd)
+proc readRegularBounded(fd: cint; path: string): string =
+  ## The bytes of the regular file open at ``fd``, at most
+  ## ``MaxRecordBytes``; raises ``OSError`` for anything else.
   var st: Stat
   if fstat(fd, st) != 0 or not S_ISREG(st.st_mode):
     raise newException(OSError, path & " is not a regular file")
@@ -208,3 +357,31 @@ proc readInCheckedDir*(path: string): string =
     if n < 0: raiseOSError(osLastError(), "read " & path)
     if n == 0: break
     result.add(buf[0 ..< n])
+    if result.len > MaxRecordBytes:
+      raise newException(OSError, path & " is larger than any record (" &
+        $MaxRecordBytes & " bytes)")
+
+proc readBoundedByPath*(path: string): string =
+  ## A record an operator names on the command line (``verify-discard-
+  ## record``), wherever it was copied: opened by path, but non-blocking,
+  ## required to be a regular file and read up to ``MaxRecordBytes``.
+  let fd = posix.open(path.cstring, O_RDONLY or O_CLOEXEC or ONonBlock)
+  if fd < 0: raiseOSError(osLastError(), "open " & path)
+  defer: discard posix.close(fd)
+  readRegularBounded(fd, path)
+
+proc readInCheckedDir*(path: string): string =
+  ## ``path``'s bytes, read through its directory's checked descriptor
+  ## without following a link; raises ``OSError`` when they cannot be.
+  let dir = parentDir(path)
+  let dfd = openCheckedDir(dir, create = false)
+  if dfd < 0: raise newException(OSError, dir & " is absent")
+  defer: discard posix.close(dfd)
+  # O_NONBLOCK: a FIFO planted under the name must not block the read
+  # (while uninstall holds the host apply lock); it is then refused as not
+  # a regular file.
+  let fd = openatC(dfd, extractFilename(path).cstring,
+                   O_RDONLY or O_CLOEXEC or ONoFollow or ONonBlock)
+  if fd < 0: raiseOSError(osLastError(), "open " & path)
+  defer: discard posix.close(fd)
+  readRegularBounded(fd, path)

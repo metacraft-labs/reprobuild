@@ -1383,6 +1383,16 @@ suite "e2e_repro_dev_sessions":
             "--ready-timeout=20000"],
           workingDir = c.repoRoot, env = c.envFor(),
           options = {poStdErrToStdOut})
+        # Read `up`'s output from the start: dev-env progress can fill the
+        # pipe before `session.json` exists, and a blocked `repro up` never
+        # writes the status the wait below is for.
+        let drain = startOutputDrain(up)
+        defer:
+          if up.running():
+            up.terminate()
+            discard up.waitForExit()
+          discard drain.collect()
+          up.close()
         discard waitForStatus(sessionMetadataPath(c.projectRoot),
           "starting", timeoutMs = 120_000)
         let sessionDir = sessionMetadataPath(c.projectRoot).parentDir
@@ -1401,9 +1411,8 @@ suite "e2e_repro_dev_sessions":
         require supervisorPid > 0
         require belongsToSession(supervisorPid, c.projectRoot)
         discard runShell(shellCommand(@["kill", "-KILL", $supervisorPid]))
-        let output = up.outputStream.readAll()
         let exitCode = up.waitForExit()
-        up.close()
+        let output = drain.collect()
         checkpoint("repro up output:\n" & output)
         check exitCode == 1
         check output.contains("dev session cannot start")
@@ -1613,21 +1622,24 @@ suite "e2e_repro_dev_sessions":
       let c = prepareCase("repro-m8-flag-refusals")
       defer: removeDir(c.tempRoot)
 
+      # A flag the command line does not declare is a usage error (exit
+      # 2), reported by the parser generated from repro's description.
       let unknown = runRepro(c, @["up", c.projectRoot, "--nope"])
-      check unknown.exitCode == 1
-      check unknown.output.contains("unsupported up flag: --nope")
+      check unknown.exitCode == 2
+      check unknown.output.contains("unknown flag '--nope' for 'repro up'")
 
       let unknownDev = runRepro(c, @["dev", c.projectRoot, "--nope=1"])
-      check unknownDev.exitCode == 1
-      check unknownDev.output.contains("unsupported dev flag: --nope=1")
+      check unknownDev.exitCode == 2
+      check unknownDev.output.contains("unknown flag '--nope' for 'repro dev'")
 
       # `down` does not wait for readiness, so accepting `--ready-timeout`
-      # there would be a flag that parses and does nothing.
+      # there would be a flag that parses and does nothing: `down` does not
+      # declare it.
       let onDown = runRepro(c, @["down", c.projectRoot,
         "--ready-timeout=5000"])
-      check onDown.exitCode == 1
+      check onDown.exitCode == 2
       check onDown.output.contains(
-        "unsupported down flag: --ready-timeout=5000")
+        "unknown flag '--ready-timeout' for 'repro down'")
 
       # Same rule for `--foreground`: a foreground session IS the
       # supervisor, so there is no parent wait to bound.
@@ -2121,13 +2133,15 @@ suite "e2e_repro_dev_sessions":
       let c = prepareCase("repro-m8-stop-timeout-refusals")
       defer: removeDir(c.tempRoot)
 
+      # Neither `up` nor `dev` declares it, so the parser refuses it (exit 2).
       let onUp = runRepro(c, @["up", c.projectRoot, "--stop-timeout=5000"])
-      check onUp.exitCode == 1
-      check onUp.output.contains("unsupported up flag: --stop-timeout=5000")
+      check onUp.exitCode == 2
+      check onUp.output.contains("unknown flag '--stop-timeout' for 'repro up'")
 
       let onDev = runRepro(c, @["dev", c.projectRoot, "--stop-timeout=5000"])
-      check onDev.exitCode == 1
-      check onDev.output.contains("unsupported dev flag: --stop-timeout=5000")
+      check onDev.exitCode == 2
+      check onDev.output.contains(
+        "unknown flag '--stop-timeout' for 'repro dev'")
 
       let nonPositive = runRepro(c, @["down", c.projectRoot,
         "--stop-timeout=0"])

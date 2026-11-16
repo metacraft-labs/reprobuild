@@ -18,7 +18,9 @@
 ## `daemon`, `store`, `cas`, `cache`, `bundle`, `reap`, `launch-plan`,
 ## `cert-signer`, `self` and their subcommands; the fourth: `home`,
 ## `system`, `infra`, `anywhere`, `deploy-agent`, `hardware`, `disk`,
-## `cargo`, `health`, `debug` and their subcommands). Each later
+## `cargo`, `health`, `debug` and their subcommands; the fifth: `exec`,
+## `run`, `shell`, `allow`, `deny`, `dev-env`, `up`, `down`, `dev`, `hcr`,
+## `prompt` and their subcommands). Each later
 ## group of commands is added by listing it here and in the generator's
 ## `COVERED_COMMANDS`; the last one replaces the list with every command. The
 ## top-level command list is compared in full already. Both comparisons run
@@ -88,7 +90,13 @@ const
     "repro disk apply", "repro disk mount", "repro disk unmount",
     "repro disk generate", "repro disk image", "repro cargo",
     "repro cargo gc", "repro cargo record-live", "repro cargo run",
-    "repro health", "repro debug", "repro debug artifact"]
+    "repro health", "repro debug", "repro debug artifact",
+    # The fifth group (development environments).
+    "repro exec", "repro run", "repro shell", "repro shell hook",
+    "repro allow", "repro deny", "repro dev-env", "repro dev-env export",
+    "repro dev-env deactivate", "repro up", "repro down", "repro dev",
+    "repro hcr", "repro hcr coordinate", "repro hcr prepare-object",
+    "repro prompt", "repro prompt init"]
     ## The commands whose flags and environment variables are compared.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
@@ -100,7 +108,12 @@ const
     "flag\trepro infra apply\t--activity", "flag\trepro infra apply\t--json",
     "flag\trepro infra apply\t--staged", "flag\trepro infra apply\t--yes",
     "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--json",
-    "flag\trepro infra plan\t--strict"]
+    "flag\trepro infra plan\t--strict",
+    # The proposed surface of `repro dev` beyond what is implemented: a cap
+    # on how long repeated changes may postpone a cycle, and hot code
+    # reloading (which `repro watch --hcr` implements).
+    "flag\trepro dev\t--max-debounce", "flag\trepro dev\t--hcr",
+    "flag\trepro dev\t--hcr-debug", "flag\trepro dev\t--hcr-mode"]
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
@@ -196,6 +209,8 @@ const
   WithoutDaemonEndpoint = declaredSurface("daemon", "endpoint", true)
   # A command of the fourth group, compared since its parsing moved.
   WithoutHealthFix = declaredSurface("health", "fix", true)
+  # A command of the fifth group, compared since its parsing moved.
+  WithoutDownStopTimeout = declaredSurface("down", "stopTimeout", true)
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -281,6 +296,15 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro deploy-agent\t--allowed-signers" in Declared
     # An `alias` is a spelling of its own.
     check "flag\trepro home apply\t--accept-overwrite" in Declared
+    # The fifth group: a `call:`'s flags beside a subcommand (`shell`,
+    # `prompt`), a subcommand's own (`shell hook`, `dev-env export`), and an
+    # internal flag (listed by the pages, kept out of help).
+    check "flag\trepro shell\t--print-env" in Declared
+    check "flag\trepro shell hook\t--repro-bin" in Declared
+    check "flag\trepro dev-env export\t--pre-activation-env" in Declared
+    check "flag\trepro prompt\t--workspace-root" in Declared
+    check "flag\trepro up\t--lock-slice" in Declared
+    check "flag\trepro down\t--ready-timeout" notin Declared
     check "verb\tws" notin Declared
 
   test "removing one flag's declaration fails the comparison":
@@ -300,6 +324,10 @@ suite "CS-M6: the specification pages match the declarations":
   test "removing a fourth-group command's flag fails the comparison":
     check differences(WithoutHealthFix, specified()) ==
       @["flag\trepro health\t--fix: specified, not declared"]
+
+  test "removing a fifth-group command's flag fails the comparison":
+    check differences(WithoutDownStopTimeout, specified()) ==
+      @["flag\trepro down\t--stop-timeout: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==

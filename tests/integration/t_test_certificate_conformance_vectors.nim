@@ -31,7 +31,10 @@
 ##   * ``verify/``    — the three-valued decision (19 cases), the state given
 ##                      as the content ids ``state.json`` lists, so an
 ##                      algorithm it does not list is one this consumer cannot
-##                      compute;
+##                      compute; and every readable ``registered-keys.toml``
+##                      read and WRITTEN back through reprobuild's store, which
+##                      must carry the suite's own ``schema`` id
+##                      (Verification §3.1);
 ##   * ``store/``     — the store path of each certificate (8 cases), derived
 ##                      from the PARSED certificate and compared with the
 ##                      hand-derived ``expected-path.txt``;
@@ -63,10 +66,11 @@
 ## object store, FAILS naming what to fetch; it never skips.
 ## ``TEST_CERTIFICATES_SPEC`` still overrides where the sibling is.
 
-import std/[algorithm, base64, json, os, osproc, sequtils, sets, strutils, tempfiles,
-            unittest]
+import std/[algorithm, base64, json, os, osproc, sequtils, sets, strutils, tables,
+            tempfiles, unittest]
 
 import repro_cli_support
+from test_certificates/toml as tctoml import nil
 import ./certificate_note_seed
 import repro_cli_support/content_id
 import spec_vectors_pin
@@ -417,6 +421,53 @@ suite "test-certificate.v1 conformance vectors":
                       "unknown-keys=not-covered",
                       "content-algorithm-name=not-covered"]:
         check reached in verifyOutcomes
+      # --- the store reprobuild WRITES is a conforming store --------------
+      # Verification §3.1 fixes the registered-key store's ``schema`` id, and
+      # a verifier that meets a store under any other id cannot evaluate it:
+      # every certificate it would have trusted becomes unverifiable. The
+      # suite reads stores; this asserts the converse, that a store reprobuild
+      # serializes is one the suite's verifiers would read. The expected id is
+      # taken from the suite's own stores rather than from reprobuild's
+      # constant, so the two cannot pass by drifting together.
+      var standardStoreSchemas: HashSet[string]
+      var readableStores = 0
+      for path in caseDirs(root, "verify"):
+        let name = path.extractFilename
+        var vectorStore: tctoml.TomlNode
+        try:
+          vectorStore = tctoml.parseToml(readFile(path / "registered-keys.toml"))
+        except tctoml.TomlError:
+          continue                  # the deliberately unreadable stores
+        inc readableStores
+        require "schema" in vectorStore.fields
+        let standardSchema = vectorStore.fields["schema"].str
+        standardStoreSchemas.incl(standardSchema)
+        let loaded = readRegisteredKeyStoreChecked(path / "registered-keys.toml")
+        require loaded.availability == ksaReadable
+        let written = serializeRegisteredKeyStore(loaded.store)
+        let writtenDoc = tctoml.parseToml(written)
+        let writtenSchema =
+          if "schema" in writtenDoc.fields: writtenDoc.fields["schema"].str
+          else: "<absent>"
+        if writtenSchema != standardSchema:
+          checkpoint("verify/" & name & ": reprobuild writes the store as " &
+            "schema " & writtenSchema.escape() & ", the standard's store is " &
+            standardSchema.escape())
+        check writtenSchema == standardSchema
+        # The written store reads back to the same signers and statuses.
+        check parseRegisteredKeyStoreStrict(written).keys == loaded.store.keys
+        # Stores written before reprobuild used the standard's id carry
+        # ``reprobuild.registered-keys.v1``. The reader does not consult
+        # ``schema``, so they keep reading with the same signers and need no
+        # migration; this pins that, so a reader that starts checking the id
+        # has to decide what happens to them.
+        require written.startsWith("schema = ")
+        let earlier = "schema = \"reprobuild.registered-keys.v1\"" &
+          written[written.find('\n') .. ^1]
+        check parseRegisteredKeyStoreStrict(earlier).keys == loaded.store.keys
+      check readableStores == 17
+      check standardStoreSchemas.len == 1
+
       # WHY they are rejected matters as much as THAT they are: an
       # earlier-draft record carries ``vcs.commit`` / ``vcs.clean``, keys the
       # v1 schema no longer defines, and must still be classified as the

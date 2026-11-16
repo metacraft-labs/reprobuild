@@ -18,7 +18,8 @@
 ##      planned.
 ##
 ## And a selector that really selects only unmarked work must not end
-## silently: ``repro test`` prints ``no certificate for '<selector>'`` with
+## silently (a fragment-less path whose default graph holds no marked node
+## included): ``repro test`` prints ``no certificate for '<selector>'`` with
 ## the reason (reprobuild-pm issue
 ## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md).
 ##
@@ -124,6 +125,23 @@ suite "t_every_selector_spelling_plans_the_certificates_its_build_materializes":
     check marked.code == 0
     check "no certificate for '.#test#unit'" notin marked.output
     check "repro test: no certificate" in marked.output
+
+    # A fragment-less path whose default graph holds no marked node is
+    # named by its spelling, with a reason that does not claim tests ran:
+    # the default graph leaves the ``test`` collection out.
+    let bare = fx.root / "bare"
+    gitInit(bare)
+    writeCertProject(bare, "barepkg", ["gen", "unit"],
+      "    discard collect(\"test\", @[unit])\n" &
+      "    certificate \"unit-only\", unit\n")
+    let path = fx.runRepro(bare, ["test", ".", "--tool-provisioning=path"])
+    checkpoint("repro test . (no marked node outside test):\n" & path.output)
+    check path.code == 0
+    check "build/gen-out" in readFile(bare / ".repro" / "runs.log")
+    check "no certificate for '.'" in path.output
+    check "builds the project's default graph" in path.output
+    check "contains no certificate-producing node" in path.output
+    check "ran without one" notin path.output
 
     # Two selectors, one certifying and one not: only the second is named.
     let mixed = fx.runRepro(project, ["test", ".#test#unit", ".#test#e2e",
