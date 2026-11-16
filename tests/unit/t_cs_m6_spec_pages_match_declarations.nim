@@ -16,7 +16,9 @@
 ## `completion`, `capabilities`, `show-conventions`; the second: `configs`,
 ## `tasks`, `graph`, `why`, `deps` with `deps refresh`, `stats`; the third:
 ## `daemon`, `store`, `cas`, `cache`, `bundle`, `reap`, `launch-plan`,
-## `cert-signer`, `self` and their subcommands). Each later
+## `cert-signer`, `self` and their subcommands; the fourth: `home`,
+## `system`, `infra`, `anywhere`, `deploy-agent`, `hardware`, `disk`,
+## `cargo`, `health`, `debug` and their subcommands). Each later
 ## group of commands is added by listing it here and in the generator's
 ## `COVERED_COMMANDS`; the last one replaces the list with every command. The
 ## top-level command list is compared in full already. Both comparisons run
@@ -62,13 +64,43 @@ const
     "repro launch-plan id", "repro cert-signer", "repro cert-signer serve",
     "repro cert-signer registration", "repro self", "repro self install",
     "repro self provision", "repro self hold", "repro self which",
-    "repro self list", "repro self prune-roots"]
+    "repro self list", "repro self prune-roots",
+    # The fourth group (machines). `attest` is still parsed by its own code;
+    # the commands that hand their arguments to another command line
+    # (`system addon|state|secret|adopt`, `debug io monitor`) and the
+    # internal remote-apply steps (`home __build-bundle`, ...) are not
+    # compared yet.
+    "repro home", "repro home add", "repro home remove", "repro home enable",
+    "repro home disable", "repro home list", "repro home why",
+    "repro home history", "repro home apply", "repro home plan",
+    "repro home export", "repro home facts", "repro home compare",
+    "repro home rollback", "repro home gc", "repro home set",
+    "repro home get", "repro home adopt", "repro home resource",
+    "repro home resource move", "repro home migrate-from-env-scripts",
+    "repro system", "repro system add", "repro system remove",
+    "repro system list", "repro system why", "repro system sync",
+    "repro system history", "repro system rollback", "repro system audit",
+    "repro infra", "repro infra plan", "repro infra apply",
+    "repro infra cache-keys", "repro infra install-root", "repro infra image",
+    "repro anywhere", "repro deploy-agent", "repro deploy-agent keygen",
+    "repro deploy-agent compile-profile", "repro hardware",
+    "repro hardware probe", "repro disk", "repro disk plan",
+    "repro disk apply", "repro disk mount", "repro disk unmount",
+    "repro disk generate", "repro disk image", "repro cargo",
+    "repro cargo gc", "repro cargo record-live", "repro cargo run",
+    "repro health", "repro debug", "repro debug artifact"]
     ## The commands whose flags and environment variables are compared.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
     "flag\trepro stats\t--db", "flag\trepro stats\t--metric-group",
     "flag\trepro stats\t--redact", "flag\trepro stats\t--runs",
-    "flag\trepro stats\t--since", "flag\trepro stats\t--watch-session"]
+    "flag\trepro stats\t--since", "flag\trepro stats\t--watch-session",
+    # The proposed V1 surface of `repro infra plan|apply` beyond the system
+    # profile commands implemented today.
+    "flag\trepro infra apply\t--activity", "flag\trepro infra apply\t--json",
+    "flag\trepro infra apply\t--staged", "flag\trepro infra apply\t--yes",
+    "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--json",
+    "flag\trepro infra plan\t--strict"]
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
@@ -131,9 +163,10 @@ proc surfaceOf(body: NimNode): seq[string] =
         cmd.visibility != cvHidden:
       result.add("verb\t" & cmd.name)
   for cmd in model.commands:
+    # A `call:` holds the flags of the command it belongs to (the root's
+    # own, or a namespace's that runs without a subcommand, such as `repro
+    # deploy-agent`), so its rows are that command's.
     let path = ("repro " & cmd.path.join(" ")).strip()
-    if cmd.anonymous and cmd.path.len > 0:
-      continue
     for p in cmd.params:
       if p.declaredIn != cmd.path:
         continue
@@ -161,6 +194,8 @@ const
     true)
   # A namespace's own flag (inherited by every `repro daemon` subcommand).
   WithoutDaemonEndpoint = declaredSurface("daemon", "endpoint", true)
+  # A command of the fourth group, compared since its parsing moved.
+  WithoutHealthFix = declaredSurface("health", "fix", true)
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -241,6 +276,11 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro cache publish\t--platform-cpu" in Declared
     check "flag\trepro\t-V" in Declared
     check "verb\tbuild" in Declared
+    check "flag\trepro home\t--profile-dir" in Declared
+    # A namespace's `call:` flags are its own (`repro deploy-agent`'s tick).
+    check "flag\trepro deploy-agent\t--allowed-signers" in Declared
+    # An `alias` is a spelling of its own.
+    check "flag\trepro home apply\t--accept-overwrite" in Declared
     check "verb\tws" notin Declared
 
   test "removing one flag's declaration fails the comparison":
@@ -256,6 +296,10 @@ suite "CS-M6: the specification pages match the declarations":
   test "removing a namespace's own flag fails the comparison":
     check differences(WithoutDaemonEndpoint, specified()) ==
       @["flag\trepro daemon\t--endpoint: specified, not declared"]
+
+  test "removing a fourth-group command's flag fails the comparison":
+    check differences(WithoutHealthFix, specified()) ==
+      @["flag\trepro health\t--fix: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==
