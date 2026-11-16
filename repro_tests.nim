@@ -4469,6 +4469,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_addon_apt_closure_runs_its_alternatives.nim",
+    binary: "build/test-bin/t_addon_apt_closure_runs_its_alternatives",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "per-file config libs/repro_dsl_stdlib/tests/t_addon_apt_closure_runs_its_alternatives.nim.cfg"),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim",
     binary: "build/test-bin/t_addon_apt_closure_trixie_armhf",
     defines: @[],

@@ -299,8 +299,8 @@ unit (`apt_closure.realiseAptClosure`):
      `0644`: no setuid, setgid, sticky, group- or world-writable bit is
      written, and owners are not restored (files belong to the realising
      user, root on a host).
-   No maintainer script runs; `dpkg` and `apt` are never invoked; nothing
-   is written to `/usr`. A second pass (`verifyHardenedTree`) refuses the
+   No maintainer script runs (step 3 reads `postinst`, never executes it);
+   `dpkg` and `apt` are never invoked; nothing is written to `/usr`. A second pass (`verifyHardenedTree`) refuses the
    prefix if any entry violates the mode or type policy.
 3. The closure is a hard-link union of its members at
    `/repro/store/prefixes/apt-closure-<first root>/<version>-<hash16>/`.
@@ -308,12 +308,37 @@ unit (`apt_closure.realiseAptClosure`):
    `bin`/`sbin`/`lib*` directories are folded into `usr/`. Two members that
    ship different bytes at the same path are a refusal, and so is a path
    that would be written through another member's symlink.
+
+   The union also carries the links Debian makes with
+   [`update-alternatives`](https://manpages.debian.org/trixie/dpkg/update-alternatives.1.en.html).
+   No package ships `/usr/bin/awk`, `/usr/bin/which`, `/usr/bin/pager`,
+   `/bin/nc` or `/usr/sbin/iptables`: each provider's `postinst` registers
+   its candidate, and dpkg links the one with the highest priority. The
+   realiser reads each member's `postinst` from the `control.tar.*` member
+   of its verified `.deb` (unpacked by the same reader and policy) and
+   takes every `update-alternatives --install <link> <name> <path>
+   <priority> [--slave <link> <name> <path>]...` whose words are literal.
+   Per name it links the highest-priority candidate whose path the closure
+   holds (ties by path, then package name), with that candidate's slaves
+   whose paths the closure holds. Each link is a relative symlink straight
+   to the chosen file (`usr/bin/awk -> mawk`), not through
+   `/etc/alternatives`, which inside a unit is the host's. A file a member
+   ships is never replaced by a link, and `/bin/nc` lands at `usr/bin/nc`
+   like any folded path. Invocations a shell would have to expand
+   (`/usr/bin/$i` in a loop) are not linked. `.repro-apt-alternatives` at
+   the union's top records every link made (`master`, `slave`), every one
+   not made and why (`skipped`, `skipped-slave`, `unread`), and every member
+   whose `.deb` the archive no longer serves (`unknown`): its registrations
+   could not be read, and the union is built without them.
 4. Both levels are filled in a fresh `0700` temporary sibling, made `0755`
    and marked complete, then published through the store like any other
    prefix: the store seals a `.repro-receipt` into it, renames it into
    place and records it in the store's index.
-5. Once a member's prefix exists its cached `.deb` is deleted (the prefix
-   supersedes it), so the cache holds only in-flight downloads. Prefixes no
+5. Once a member's prefix exists and the union has read its `postinst`, its
+   cached `.deb` is deleted, so the cache holds only in-flight downloads. A
+   member already published by an earlier closure is not unpacked again,
+   but building a new union fetches and verifies its `.deb` again to read
+   its `postinst`. Prefixes no
    longer named by any generation belong to the store's garbage collector:
    each generation registers the closure it runs from (the union and its
    members) as a store root, and `repro store gc` collects a prefix no
@@ -324,7 +349,10 @@ Each `<hash16>` is the store's realization hash for the prefix: for a
 member it depends on the realiser version, the package name, version and
 architecture and the `.deb`'s SHA-256; for the closure on the realiser
 version, the first root's name and version, the architecture and the member
-digests. The planner therefore renders the unit offline, and the host
+digests, and on the union's layout (`alternatives-1`: the union carries
+the links above; a union built before them sits at another path, and a
+unit bound to it is moved to the new one). The planner therefore renders
+the unit offline, and the host
 realises exactly the path the unit names. The name and version in the path
 keep only `[A-Za-z0-9._-]` and write every other character `_` (so an
 epoch's `:`, which separates a `BindReadOnlyPaths=` source from its target,

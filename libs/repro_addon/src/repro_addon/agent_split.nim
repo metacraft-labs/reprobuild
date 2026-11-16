@@ -259,9 +259,12 @@ proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];
 
 proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
                       storeRoot = StoreRoot): bool =
-  ## Whether the apply unit will need ``d``'s archive: not when its
-  ## closure is realised, nor when the member is already published at its
-  ## store path. (An older realiser's prefix of it does not count: the
+  ## Whether the apply unit will need ``d``'s archive: when the member is
+  ## not published at its store path, or when its closure's union is not
+  ## realised -- building a union reads every member's ``postinst`` for the
+  ## alternatives links it makes (ReproOS Add-On Mode §8.3 item 4,
+  ## "Alternatives"), so a member already published still needs its
+  ## archive then. (An older realiser's prefix of it does not count: the
   ## archive is the source whenever it is served, threat model C20.) The
   ## store is world-readable, so the fetch unit's dynamic user decides this
   ## itself.
@@ -273,7 +276,8 @@ proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
     not aptClosureRealised(storeRoot, lock) and
       not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
   else:
-    not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
+    not aptClosureRealised(storeRoot, lock) or
+      not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
 
 proc stageDebs(canonical: string; dir: string; notes: var seq[string];
                storeRoot = StoreRoot) =
