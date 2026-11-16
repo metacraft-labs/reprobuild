@@ -75,123 +75,131 @@ $llvmBin = Join-Path $WorkRoot "llvm-mingw-$LlvmMingwRelease-ucrt-aarch64\bin"
 $cmake = Join-Path $WorkRoot "cmake-$CMakeVersion-windows-arm64\bin\cmake.exe"
 Assert-PeMachine -Path (Join-Path $llvmBin 'clang.exe') -Arch arm64 -Consumer 'build-clingo-windows-arm64'
 Assert-PeMachine -Path $cmake -Arch arm64 -Consumer 'build-clingo-windows-arm64'
+# Only the pinned tools and the system directories, for the build and every
+# qualification below; the caller's PATH is put back on the way out, since
+# this script may be dot-run inside a longer job.
+$callerPath = $env:PATH
 $env:PATH = "$llvmBin;$(Split-Path -Parent $cmake);$env:SystemRoot\System32;$env:SystemRoot"
+try {
 
-$source = Join-Path $WorkRoot "clingo-$ClingoVersion"
-$build = Join-Path $WorkRoot 'build'
-# CMake's Windows-GNU platform file sets CMAKE_SHARED_LIBRARY_PREFIX to "lib"
-# as a normal variable, which shadows a -D cache entry. A project include runs
-# after the platform files, so setting it there names the DLL clingo.dll.
-$noLibPrefix = Join-Path $WorkRoot 'no-lib-prefix.cmake'
-[IO.File]::WriteAllText($noLibPrefix, "set(CMAKE_SHARED_LIBRARY_PREFIX `"`")`n")
-Invoke-Checked 'configure' {
-    & $cmake -S $source -B $build -G 'MinGW Makefiles' '-DCMAKE_BUILD_TYPE=Release' `
-        '-DCMAKE_C_COMPILER=gcc' '-DCMAKE_CXX_COMPILER=g++' '-DCMAKE_MAKE_PROGRAM=mingw32-make' `
-        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5' "-DCMAKE_PROJECT_INCLUDE=$noLibPrefix" `
-        '-DCMAKE_SHARED_LINKER_FLAGS=-static' '-DCMAKE_EXE_LINKER_FLAGS=-static' `
-        '-DCLINGO_BUILD_WITH_PYTHON=OFF' '-DCLINGO_BUILD_WITH_LUA=OFF' `
-        '-DCLINGO_BUILD_SHARED=ON' '-DCLINGO_BUILD_APPS=ON' '-DCLINGO_BUILD_TESTS=OFF' 2>&1 | Out-Host
-}
-Invoke-Checked 'build' { & $cmake --build $build --parallel ([Environment]::ProcessorCount) 2>&1 | Out-Host }
-
-$dll = Join-Path $build 'bin\clingo.dll'
-$exe = Join-Path $build 'bin\clingo.exe'
-foreach ($image in @($dll, $exe)) {
-    if (-not (Test-Path -LiteralPath $image -PathType Leaf)) { throw "build-clingo-windows-arm64: $image was not produced" }
-    Assert-PeMachine -Path $image -Arch arm64 -Consumer 'build-clingo-windows-arm64'
-}
-
-# Qualification 1: the closure. Only system DLLs: KERNEL32 and the UCRT set,
-# plus (for clingo.exe) clingo.dll itself.
-foreach ($image in @($dll, $exe)) {
-    $imports = @(& (Join-Path $llvmBin 'llvm-readobj.exe') --coff-imports $image |
-        Select-String -Pattern '^\s*Name:\s*(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value })
-    foreach ($import in $imports) {
-        if ($import -notmatch '^(?i:kernel32\.dll|api-ms-win-crt-[a-z0-9-]+\.dll|clingo\.dll)$') {
-            throw "build-clingo-windows-arm64: $image imports $import, outside the allowed closure"
-        }
+    $source = Join-Path $WorkRoot "clingo-$ClingoVersion"
+    $build = Join-Path $WorkRoot 'build'
+    # CMake's Windows-GNU platform file sets CMAKE_SHARED_LIBRARY_PREFIX to "lib"
+    # as a normal variable, which shadows a -D cache entry. A project include runs
+    # after the platform files, so setting it there names the DLL clingo.dll.
+    $noLibPrefix = Join-Path $WorkRoot 'no-lib-prefix.cmake'
+    [IO.File]::WriteAllText($noLibPrefix, "set(CMAKE_SHARED_LIBRARY_PREFIX `"`")`n")
+    Invoke-Checked 'configure' {
+        & $cmake -S $source -B $build -G 'MinGW Makefiles' '-DCMAKE_BUILD_TYPE=Release' `
+            '-DCMAKE_C_COMPILER=gcc' '-DCMAKE_CXX_COMPILER=g++' '-DCMAKE_MAKE_PROGRAM=mingw32-make' `
+            '-DCMAKE_POLICY_VERSION_MINIMUM=3.5' "-DCMAKE_PROJECT_INCLUDE=$noLibPrefix" `
+            '-DCMAKE_SHARED_LINKER_FLAGS=-static' '-DCMAKE_EXE_LINKER_FLAGS=-static' `
+            '-DCLINGO_BUILD_WITH_PYTHON=OFF' '-DCLINGO_BUILD_WITH_LUA=OFF' `
+            '-DCLINGO_BUILD_SHARED=ON' '-DCLINGO_BUILD_APPS=ON' '-DCLINGO_BUILD_TESTS=OFF' 2>&1 | Out-Host
     }
-    Write-Host "$([IO.Path]::GetFileName($image)) imports: $($imports -join ', ')"
-}
+    Invoke-Checked 'build' { & $cmake --build $build --parallel ([Environment]::ProcessorCount) 2>&1 | Out-Host }
 
-# Qualification 2: the solver, with PATH cut to the system directories.
-$program = Join-Path $WorkRoot 'choice.lp'
-[IO.File]::WriteAllText($program, "a :- not b. b :- not a.`n")
-$solve = & $exe $program 0 2>&1 | Out-String
-$solveExit = $LASTEXITCODE
-Write-Host $solve
-# clingo's exit code: 10 satisfiable, +20 search space exhausted.
-if ($solveExit -ne 30 -or $solve -notmatch 'Models\s*:\s*2\b') {
-    throw "build-clingo-windows-arm64: clingo.exe did not find exactly the two models (exit $solveExit)"
-}
-$versionLine = (& $exe --version | Select-Object -First 1).Trim()
-if ($versionLine -ne "clingo version $ClingoVersion") {
-    throw "build-clingo-windows-arm64: clingo.exe reports '$versionLine', not $ClingoVersion"
-}
+    $dll = Join-Path $build 'bin\clingo.dll'
+    $exe = Join-Path $build 'bin\clingo.exe'
+    foreach ($image in @($dll, $exe)) {
+        if (-not (Test-Path -LiteralPath $image -PathType Leaf)) { throw "build-clingo-windows-arm64: $image was not produced" }
+        Assert-PeMachine -Path $image -Arch arm64 -Consumer 'build-clingo-windows-arm64'
+    }
 
-# Qualification 3: a separate C image loads clingo.dll by name through the C
-# API, as repro_solver does (LoadLibrary, not import-table binding).
-$probe = Join-Path $WorkRoot 'load_clingo.c'
-[IO.File]::WriteAllText($probe, @'
-#include <windows.h>
-#include <stdio.h>
-#include <stdbool.h>
-#include <stddef.h>
-typedef void (*version_fn)(int *, int *, int *);
-typedef bool (*control_new_fn)(char const *const *, size_t, void *, void *, unsigned, void **);
-typedef bool (*control_add_fn)(void *, char const *, char const *const *, size_t, char const *);
-typedef bool (*control_ground_fn)(void *, void const *, size_t, void *, void *);
-typedef void (*control_free_fn)(void *);
-typedef struct { char const *name; void const *params; size_t size; } part_t;
-int main(void) {
-  HMODULE h = LoadLibraryA("clingo.dll");
-  if (!h) { printf("LoadLibrary failed: %lu\n", GetLastError()); return 2; }
-  version_fn version = (version_fn)GetProcAddress(h, "clingo_version");
-  control_new_fn control_new = (control_new_fn)GetProcAddress(h, "clingo_control_new");
-  control_add_fn control_add = (control_add_fn)GetProcAddress(h, "clingo_control_add");
-  control_ground_fn control_ground = (control_ground_fn)GetProcAddress(h, "clingo_control_ground");
-  control_free_fn control_free = (control_free_fn)GetProcAddress(h, "clingo_control_free");
-  if (!version || !control_new || !control_add || !control_ground || !control_free) return 3;
-  int ma, mi, re; version(&ma, &mi, &re);
-  void *ctl = NULL;
-  if (!control_new(NULL, 0, NULL, NULL, 20, &ctl)) return 4;
-  if (!control_add(ctl, "base", NULL, 0, "a :- not b. b :- not a.")) return 5;
-  part_t part = { "base", NULL, 0 };
-  if (!control_ground(ctl, &part, 1, NULL, NULL)) return 6;
-  control_free(ctl);
-  printf("clingo %d.%d.%d loaded and grounded through the C API\n", ma, mi, re);
-  return 0;
-}
-'@)
-$probeExe = Join-Path (Split-Path -Parent $dll) 'load_clingo.exe'
-Invoke-Checked 'probe-compile' { & (Join-Path $llvmBin 'gcc.exe') -O2 -o $probeExe $probe 2>&1 | Out-Host }
-$probeOut = & $probeExe 2>&1 | Out-String
-if ($LASTEXITCODE -ne 0 -or $probeOut -notmatch "clingo $([regex]::Escape($ClingoVersion)) loaded") {
-    throw "build-clingo-windows-arm64: loading clingo.dll through the C API failed (exit $LASTEXITCODE): $probeOut"
-}
-Write-Host $probeOut
-Remove-Item -LiteralPath $probeExe -Force
+    # Qualification 1: the closure. Only system DLLs: KERNEL32 and the UCRT set,
+    # plus (for clingo.exe) clingo.dll itself.
+    foreach ($image in @($dll, $exe)) {
+        $imports = @(& (Join-Path $llvmBin 'llvm-readobj.exe') --coff-imports $image |
+            Select-String -Pattern '^\s*Name:\s*(\S+)' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+        foreach ($import in $imports) {
+            if ($import -notmatch '^(?i:kernel32\.dll|api-ms-win-crt-[a-z0-9-]+\.dll|clingo\.dll)$') {
+                throw "build-clingo-windows-arm64: $image imports $import, outside the allowed closure"
+            }
+        }
+        Write-Host "$([IO.Path]::GetFileName($image)) imports: $($imports -join ', ')"
+    }
 
-# Package. One top-level directory, named like the ZIP.
-$name = "clingo-$ClingoVersion-windows-arm64-$($ProducerRevision.Substring(0, 12))"
-$stage = Join-Path $WorkRoot $name
-New-Item -ItemType Directory -Force -Path $stage | Out-Null
-Copy-Item -LiteralPath $dll, $exe -Destination $stage
-Copy-Item -LiteralPath (Join-Path $source 'libclingo\clingo.h') -Destination $stage
-Copy-Item -LiteralPath (Join-Path $source 'LICENSE.md') -Destination $stage
-@(
-    "clingo_version=$ClingoVersion"
-    "clingo_tarball_sha256=$($ClingoTarballSha256.ToLowerInvariant())"
-    "compiler=llvm-mingw-$LlvmMingwRelease-ucrt-aarch64 sha256=$($LlvmMingwSha256.ToLowerInvariant())"
-    "cmake=$CMakeVersion sha256=$($CMakeSha256.ToLowerInvariant())"
-    "producer_revision=$ProducerRevision"
-    "runner=$env:RUNNER_NAME"
-) | Set-Content -LiteralPath (Join-Path $stage 'BUILDINFO.txt') -Encoding ascii
-$zip = Join-Path $OutDir "$name.zip"
-if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $true)
-$zipSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
-$dllSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $dll).Hash.ToLowerInvariant()
-"$zipSha  $name.zip" | Set-Content -LiteralPath (Join-Path $OutDir 'SHA256SUMS') -Encoding ascii
-Write-Host "Packaged $name.zip sha256 $zipSha (clingo.dll sha256 $dllSha)"
+    # Qualification 2: the solver, with PATH cut to the system directories.
+    $program = Join-Path $WorkRoot 'choice.lp'
+    [IO.File]::WriteAllText($program, "a :- not b. b :- not a.`n")
+    $solve = & $exe $program 0 2>&1 | Out-String
+    $solveExit = $LASTEXITCODE
+    Write-Host $solve
+    # clingo's exit code: 10 satisfiable, +20 search space exhausted.
+    if ($solveExit -ne 30 -or $solve -notmatch 'Models\s*:\s*2\b') {
+        throw "build-clingo-windows-arm64: clingo.exe did not find exactly the two models (exit $solveExit)"
+    }
+    $versionLine = (& $exe --version | Select-Object -First 1).Trim()
+    if ($versionLine -ne "clingo version $ClingoVersion") {
+        throw "build-clingo-windows-arm64: clingo.exe reports '$versionLine', not $ClingoVersion"
+    }
+
+    # Qualification 3: a separate C image loads clingo.dll by name through the C
+    # API, as repro_solver does (LoadLibrary, not import-table binding).
+    $probe = Join-Path $WorkRoot 'load_clingo.c'
+    [IO.File]::WriteAllText($probe, @'
+    #include <windows.h>
+    #include <stdio.h>
+    #include <stdbool.h>
+    #include <stddef.h>
+    typedef void (*version_fn)(int *, int *, int *);
+    typedef bool (*control_new_fn)(char const *const *, size_t, void *, void *, unsigned, void **);
+    typedef bool (*control_add_fn)(void *, char const *, char const *const *, size_t, char const *);
+    typedef bool (*control_ground_fn)(void *, void const *, size_t, void *, void *);
+    typedef void (*control_free_fn)(void *);
+    typedef struct { char const *name; void const *params; size_t size; } part_t;
+    int main(void) {
+      HMODULE h = LoadLibraryA("clingo.dll");
+      if (!h) { printf("LoadLibrary failed: %lu\n", GetLastError()); return 2; }
+      version_fn version = (version_fn)GetProcAddress(h, "clingo_version");
+      control_new_fn control_new = (control_new_fn)GetProcAddress(h, "clingo_control_new");
+      control_add_fn control_add = (control_add_fn)GetProcAddress(h, "clingo_control_add");
+      control_ground_fn control_ground = (control_ground_fn)GetProcAddress(h, "clingo_control_ground");
+      control_free_fn control_free = (control_free_fn)GetProcAddress(h, "clingo_control_free");
+      if (!version || !control_new || !control_add || !control_ground || !control_free) return 3;
+      int ma, mi, re; version(&ma, &mi, &re);
+      void *ctl = NULL;
+      if (!control_new(NULL, 0, NULL, NULL, 20, &ctl)) return 4;
+      if (!control_add(ctl, "base", NULL, 0, "a :- not b. b :- not a.")) return 5;
+      part_t part = { "base", NULL, 0 };
+      if (!control_ground(ctl, &part, 1, NULL, NULL)) return 6;
+      control_free(ctl);
+      printf("clingo %d.%d.%d loaded and grounded through the C API\n", ma, mi, re);
+      return 0;
+    }
+    '@)
+    $probeExe = Join-Path (Split-Path -Parent $dll) 'load_clingo.exe'
+    Invoke-Checked 'probe-compile' { & (Join-Path $llvmBin 'gcc.exe') -O2 -o $probeExe $probe 2>&1 | Out-Host }
+    $probeOut = & $probeExe 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $probeOut -notmatch "clingo $([regex]::Escape($ClingoVersion)) loaded") {
+        throw "build-clingo-windows-arm64: loading clingo.dll through the C API failed (exit $LASTEXITCODE): $probeOut"
+    }
+    Write-Host $probeOut
+    Remove-Item -LiteralPath $probeExe -Force
+
+    # Package. One top-level directory, named like the ZIP.
+    $name = "clingo-$ClingoVersion-windows-arm64-$($ProducerRevision.Substring(0, 12))"
+    $stage = Join-Path $WorkRoot $name
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    Copy-Item -LiteralPath $dll, $exe -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $source 'libclingo\clingo.h') -Destination $stage
+    Copy-Item -LiteralPath (Join-Path $source 'LICENSE.md') -Destination $stage
+    @(
+        "clingo_version=$ClingoVersion"
+        "clingo_tarball_sha256=$($ClingoTarballSha256.ToLowerInvariant())"
+        "compiler=llvm-mingw-$LlvmMingwRelease-ucrt-aarch64 sha256=$($LlvmMingwSha256.ToLowerInvariant())"
+        "cmake=$CMakeVersion sha256=$($CMakeSha256.ToLowerInvariant())"
+        "producer_revision=$ProducerRevision"
+        "runner=$env:RUNNER_NAME"
+    ) | Set-Content -LiteralPath (Join-Path $stage 'BUILDINFO.txt') -Encoding ascii
+    $zip = Join-Path $OutDir "$name.zip"
+    if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [IO.Compression.CompressionLevel]::Optimal, $true)
+    $zipSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+    $dllSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $dll).Hash.ToLowerInvariant()
+    "$zipSha  $name.zip" | Set-Content -LiteralPath (Join-Path $OutDir 'SHA256SUMS') -Encoding ascii
+    Write-Host "Packaged $name.zip sha256 $zipSha (clingo.dll sha256 $dllSha)"
+} finally {
+    $env:PATH = $callerPath
+}
