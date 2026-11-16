@@ -36,7 +36,8 @@ import std/[os]
 
 import blake3
 import repro_core
-from repro_core/durable_replace import replaceFileDurably
+from repro_core/durable_replace import replaceFileDurably,
+  removeStaleDurableTemps
 
 import ./errors
 
@@ -159,6 +160,9 @@ proc writePointerFile*(pointerFilePath: string; envelope: PointerEnvelope) =
   let parent = parentDir(pointerFilePath)
   if parent.len > 0:
     createDir(extendedPath(parent))
+  # A write that died before its rename left its temporary file behind;
+  # sweep the ones too old to belong to a write in progress.
+  discard removeStaleDurableTemps(pointerFilePath)
   replaceFileDurably(pointerFilePath, bytesToString(bytes))
 
 # ---------------------------------------------------------------------------

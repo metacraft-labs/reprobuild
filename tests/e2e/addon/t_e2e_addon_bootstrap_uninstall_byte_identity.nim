@@ -176,12 +176,23 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
     "chmod 0444 /var/lib/repro/agent/recipient.pub; " &
     "printf '7\\n' > /var/lib/repro/agent/state/deploy-agent/" & R3Target & ".seq; " &
     "chmod 0600 /var/lib/repro/agent/state/deploy-agent/" & R3Target & ".seq; " &
-    "chown -R 0:0 /repro /etc/repro /var/lib/repro /run/repro")
+    "chown -R 0:0 /repro /etc/repro /var/lib/repro /run/repro; " &
+    # The earlier rounds' uninstalls made /var/log/repro-addon; it goes, so
+    # this round sees bootstrap make it (§13 decision 178).
+    "rm -rf /var/log/repro-addon")
   let st0 = g.exec(stage)
   step("round 3: the pre-bootstrap inputs are staged", st0.exitCode == 0,
        st0.stdout & st0.stderr)
   result.before = g.takeFingerprint(repro)
   let pre = r3Stat(g)
+  # The identity is only as good as its birth time: where the file system
+  # reports none (statx gives "-"), the comparison fails closed here.
+  var noBirth: seq[string]
+  for k, v in pre:
+    if v.splitWhitespace()[0].endsWith("@-"): noBirth.add(k)
+  step("round 3: every input has a birth time", noBirth.len == 0 and
+       pre.len == R3Dirs.len + R3Files.len,
+       "no birth time: " & noBirth.join(", ") & "; inputs read: " & $pre.len)
   # R16-5: who owns /var/log here (Ubuntu's is root:syslog 0775).
   let logOwner = g.run("stat -c '%n %U:%G %a' /var/log 2>&1")
   step("round 3: /var/log ownership (recorded)", true, logOwner)
@@ -193,6 +204,14 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
                   planDigestOf(pf.stdout) & anchors.flags)
   step("round 3: bootstrap", bs.exitCode == 0, bs.stdout & bs.stderr)
   if bs.exitCode != 0: return
+  # §13 decision 178: bootstrap made the uninstall records' directory,
+  # root's 0700, and verify checks it.
+  let logDir = g.exec("stat -c '%U:%G %a %F' /var/log/repro-addon")
+  let vf = g.exec(repro & " system addon verify")
+  step("round 3: bootstrap made /var/log/repro-addon root's 0700, and verify checks it",
+       logDir.exitCode == 0 and logDir.stdout.strip() == "root:root 700 directory" and
+         "/var/log/repro-addon:" notin vf.stdout,
+       logDir.stdout & logDir.stderr & "\n" & vf.stdout)
   let taken = g.run("stat -c '%n %a %u:%g' /var/lib/repro/agent/state/deploy-agent /var/lib/repro/agent")
   step("round 3: the takeover gave the inputs the add-on's modes (recorded)", true, taken)
   # The deploy agent's writes: the floor bumped in place, a floor for a

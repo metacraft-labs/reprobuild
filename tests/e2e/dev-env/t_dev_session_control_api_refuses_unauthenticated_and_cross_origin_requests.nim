@@ -27,8 +27,8 @@
 ## `stop.request.json` the listener writes when it accepts a stop, and whether
 ## the listener and the session are still running afterwards.
 
-import std/[json, net, os, osproc, streams, strtabs, strutils, tempfiles,
-  unittest]
+import std/[atomics, json, net, os, osproc, streams, strtabs, strutils,
+  tempfiles, times, unittest]
 when defined(posix):
   import std/posix
 
@@ -199,6 +199,31 @@ proc requireNoLeak(response: RawResponse) =
   check not response.body.contains("secret-session-id-7f3a")
   check not response.body.contains("/secret/project/root")
   check response.header("Access-Control-Allow-Origin").len == 0
+
+type
+  DripArgs = tuple[bindValue: string; started: ptr Atomic[bool]]
+
+proc dripRequest(args: DripArgs) {.thread.} =
+  ## A peer that never finishes its request but is never silent for long:
+  ## one byte of a request line every 500 ms for up to 15 s, longer than the
+  ## test client's 10 s read timeout. A listener that restarted its timeout
+  ## on every read would be held by this peer for the whole 15 s; one whose
+  ## deadline covers the whole request drops it after the deadline, and the
+  ## drip stops at the first failed send.
+  const fragment = "GET /status HTTP/1.1 and never a line end"
+  try:
+    let socket = connectTo(args.bindValue)
+    defer: socket.close()
+    # `flags = {}`: with the default SafeDisconn, std/net's `send` retries
+    # a send to a peer that has hung up forever instead of failing.
+    socket.send(fragment[0 .. 0], flags = {})
+    args.started[].store(true)
+    for i in 1 ..< 30:
+      sleep(500)
+      socket.send(fragment[i mod fragment.len .. i mod fragment.len],
+        flags = {})
+  except CatchableError:
+    discard
 
 when defined(posix):
   proc modeOf(path: string): int =
@@ -379,6 +404,84 @@ suite "dev_session_control_api_access_control":
     # The token does not outlive its listener.
     if listener.tokenPath.len > 0:
       check not fileExists(listener.tokenPath)
+
+  test "a connection that never finishes its request cannot lock the session's user out":
+    # The listener serves one connection at a time. Any account that can
+    # reach a TCP port can open a connection and send nothing (or half a
+    # request line); without a request deadline that alone kept every other
+    # client -- `repro down` included -- from the API for as long as the
+    # stalled connection stayed open (§"Control API Access Control",
+    # "Request deadline").
+    let root = createTempDir("repro-ctl-acl-", "")
+    defer: removeDir(root)
+    var listener = startListener(root / "session",
+      ["--host", "127.0.0.1", "--port", "0"])
+    defer: listener.close()
+    # A peer that drips a request line one byte at a time and never ends
+    # it: the deadline must cover the whole request, not each read, or this
+    # peer would hold the listener for as long as it kept dripping.
+    var dripStarted: Atomic[bool]
+    var dripper: Thread[DripArgs]
+    createThread(dripper, dripRequest,
+      (bindValue: listener.bindValue, started: addr dripStarted))
+    defer: joinThread(dripper)
+    for _ in 0 ..< 500:
+      if dripStarted.load(): break
+      sleep(10)
+    require dripStarted.load()
+    # The dripping peer stays connected throughout; the session's own client
+    # must be served once the deadline drops it, not only after it hangs up.
+    let started = epochTime()
+    let r = exchange(listener.bindValue, request("GET", "/status",
+      ["Host: " & hostOf(listener.bindValue), listener.auth()]))
+    let waited = epochTime() - started
+    checkpoint("authenticated client behind a stalled peer: HTTP " &
+      $r.status & " after " & $waited & " s")
+    check r.status == 200
+    check waited < 20.0
+    listener.requireNoSideEffect("after the stalled connection")
+
+  when defined(posix):
+    # SO_LINGER is set through std/posix; the listener fix itself is
+    # platform-independent.
+    test "a client that resets the connection before its answer cannot wedge the listener":
+      # `std/net`'s `send`, with its default SafeDisconn flag, swallows EPIPE /
+      # ECONNRESET and retries without counting the attempt. A peer that sent
+      # a complete request and then reset the connection before the answer
+      # was written therefore left the single-threaded listener spinning
+      # forever -- one packet, from any account that can reach the port, and
+      # the session's user could never be served again (§"Control API Access
+      # Control": a client's failure ends only its own exchange).
+      let root = createTempDir("repro-ctl-acl-", "")
+      defer: removeDir(root)
+      var listener = startListener(root / "session",
+        ["--host", "127.0.0.1", "--port", "0"])
+      defer: listener.close()
+      let port = listener.bindValue[listener.bindValue.rfind(':') + 1 .. ^1]
+      # Occupy the listener so the next request waits in the accept queue
+      # until the reset has certainly arrived; the request deadline releases
+      # it a few seconds later and the listener then answers a dead peer.
+      let stalled = connectTo(listener.bindValue)
+      defer: stalled.close()
+      stalled.send("GET /sta", flags = {})
+      sleep(200)
+      let resetter = connectTo(listener.bindValue)
+      resetter.send(request("GET", "/status",
+        ["Host: attacker.example:" & port]), flags = {})
+      sleep(100)
+      # SO_LINGER {on, 0}: close() sends RST instead of FIN.
+      var linger = TLinger(l_onoff: 1, l_linger: 0)
+      check setsockopt(resetter.getFd(), SOL_SOCKET, SO_LINGER, addr linger,
+        SockLen(sizeof(linger))) == 0
+      resetter.close()
+      let started = epochTime()
+      let r = exchange(listener.bindValue, request("GET", "/status",
+        ["Host: 127.0.0.1:" & port, listener.auth()]))
+      let waited = epochTime() - started
+      checkpoint("owner behind a reset peer: HTTP " & $r.status & " after " &
+        $waited & " s")
+      check r.status == 200
+      listener.requireNoSideEffect("after the reset connection")
 
   test "a non-loopback bind is refused unless remote access is asked for":
     let root = createTempDir("repro-ctl-acl-", "")

@@ -30,8 +30,10 @@ when defined(posix):
   # ``IPPROTO_NONE``, or the ``POLL*`` family ``import std/posix`` (or
   # ``std/net``) themselves.
   export Socket, bindUnix, connectUnix
+  from repro_core/peer_identity import socketPeerCredentials
 when defined(windows):
   import std/winlean
+  from repro_core/peer_identity import currentUserSid, kernelObjectOwnerSid
 
 type
   IpcEndpointError* = object of CatchableError
@@ -40,6 +42,19 @@ type
     ## existing daemon code surfaces these via the daemon-specific
     ## error types; the IPC layer keeps the type generic so neither
     ## daemon library needs to depend on the other.
+
+  IpcPeerIdentityError* = object of CatchableError
+    ## The account listening at a connected endpoint is not the one the
+    ## caller trusts, or who it is cannot be established. Deliberately NOT
+    ## an ``IpcEndpointError``: a caller that treats an unreachable endpoint
+    ## as "no daemon" must not treat this one the same way without saying
+    ## so (``requireIpcListener``).
+
+  IpcPeerIdentity* = object
+    ## An account as the operating system identifies it: a uid on POSIX,
+    ## a string user SID (``S-1-5-21-…``) on Windows.
+    uid*: int
+    sid*: string
 
 const
   WindowsNamedPipePrefix* = r"\\.\pipe\"
@@ -118,6 +133,9 @@ when defined(windows):
 
     IpcListener* = object
       endpoint*: string
+      sddl*: string
+        ## The security descriptor every instance is created with; empty
+        ## for the default (``bindIpcListener``).
       pending*: Handle
       pendingEvent*: Handle
       pendingOverlapped*: OVERLAPPED
@@ -511,15 +529,46 @@ when defined(windows):
     raise newException(IpcEndpointError,
       prefix & " (Windows error " & $actualCode & ")")
 
+  const
+    SecuritySqosPresent = 0x00100000'i32
+    SecurityIdentification = 0x00010000'i32 ## SecurityIdentification shl 16
+
   proc ensurePipeEndpoint(endpoint: string) =
     if not endpoint.startsWith(WindowsNamedPipePrefix):
       raise newException(IpcEndpointError,
         "Windows endpoints must start with " & WindowsNamedPipePrefix &
           ", got: " & endpoint)
 
-  proc createServerInstance(endpoint: string; firstInstance: bool): Handle =
+  const SddlRevision1 = 1'i32
+
+  proc ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    sddl: WideCString; revision: int32; sd: ptr pointer; size: ptr int32):
+    WINBOOL {.stdcall, dynlib: "advapi32", importc.}
+  proc localFreeRaw(p: pointer): pointer {.
+    stdcall, dynlib: "kernel32", importc: "LocalFree".}
+
+  proc ownerOnlyPipeSddl*(sid: string): string =
+    ## The security descriptor of a pipe that ``sid`` alone may use: owner
+    ## ``sid`` and a protected DACL granting only ``sid``. The explicit owner
+    ## keeps the pipe's owner equal to the user SID when the creator runs
+    ## elevated, where the token's default owner is ``BUILTIN\Administrators``
+    ## (``ipcListenerIdentity`` reads that owner).
+    "O:" & sid & "D:P(A;;GA;;;" & sid & ")"
+
+  proc createServerInstance(endpoint: string; firstInstance: bool;
+                            sddl: string): Handle =
+    ## ``sddl`` empty: the default security descriptor (the creator's
+    ## default owner and default DACL).
+    var sd: pointer = nil
+    if sddl.len > 0:
+      if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+          newWideCString(sddl), SddlRevision1, addr sd, nil) == 0:
+        raiseWin("cannot build the security descriptor " & sddl &
+          " for " & endpoint)
+    defer:
+      if sd != nil: discard localFreeRaw(sd)
     var sa = SECURITY_ATTRIBUTES(nLength: int32(sizeof(SECURITY_ATTRIBUTES)),
-      lpSecurityDescriptor: nil, bInheritHandle: 0)
+      lpSecurityDescriptor: sd, bInheritHandle: 0)
     var openMode = PIPE_ACCESS_DUPLEX or FILE_FLAG_OVERLAPPED
     if firstInstance:
       openMode = openMode or FILE_FLAG_FIRST_PIPE_INSTANCE
@@ -537,7 +586,8 @@ when defined(windows):
     if listener.pendingArmed:
       return
     let firstInstance = not listener.everArmed
-    listener.pending = createServerInstance(listener.endpoint, firstInstance)
+    listener.pending = createServerInstance(listener.endpoint, firstInstance,
+      listener.sddl)
     listener.everArmed = true
     listener.pendingEvent = createEvent(nil, 1, 0, nil)
     if listener.pendingEvent == 0:
@@ -560,9 +610,15 @@ when defined(windows):
         raiseWin("ConnectNamedPipe failed during arm", err)
     listener.pendingArmed = true
 
-  proc bindIpcListener*(endpoint: string): IpcListener =
+  proc bindIpcListener*(endpoint: string; sddl = ""): IpcListener =
+    ## Create the first instance of the pipe ``endpoint``
+    ## (``FILE_FLAG_FIRST_PIPE_INSTANCE``: a name that already exists is
+    ## refused, never served beside a squatter). Every instance carries
+    ## ``sddl`` when it is given (``ownerOnlyPipeSddl``), otherwise the
+    ## default security descriptor.
     ensurePipeEndpoint(endpoint)
     result.endpoint = endpoint
+    result.sddl = sddl
     armPending(result)
 
   proc closeIpcListener*(listener: var IpcListener) =
@@ -606,9 +662,16 @@ when defined(windows):
     let wpath = newWideCString(endpoint)
     var attempt = 0
     while true:
+      # SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION: the server may
+      # identify this client but never impersonate it. Without it the
+      # default is SecurityImpersonation, and a squatter on the pipe name
+      # could act as this user before the caller has checked who it is
+      # (``requireIpcListener``).
+      # https://learn.microsoft.com/en-us/windows/win32/secauthz/impersonation-levels
       let h = createFileW(wpath,
         (GENERIC_READ or GENERIC_WRITE).DWORD,
-        0.DWORD, nil, OPEN_EXISTING.DWORD, 0.DWORD, 0)
+        0.DWORD, nil, OPEN_EXISTING.DWORD,
+        (SecuritySqosPresent or SecurityIdentification).DWORD, 0)
       if h != INVALID_HANDLE_VALUE:
         return IpcConn(handle: h, ownsHandle: true)
       let err = int32(osLastError())
@@ -741,6 +804,93 @@ when defined(windows):
       return false
     discard closeHandle(h)
     true
+
+# ---------------------------------------------------------------------------
+# Who is listening: the kernel's answer, never the peer's
+# ---------------------------------------------------------------------------
+
+proc `$`*(id: IpcPeerIdentity): string =
+  when defined(windows): "SID " & id.sid
+  else: "uid " & $id.uid
+
+proc ipcOwnIdentity*(): IpcPeerIdentity =
+  ## This process's own account: its effective uid, or its token's user
+  ## SID. Raises ``IpcPeerIdentityError`` when the SID cannot be read.
+  when defined(windows):
+    try:
+      IpcPeerIdentity(uid: -1, sid: currentUserSid())
+    except OSError as err:
+      raise newException(IpcPeerIdentityError,
+        "cannot read this process's own user SID: " & err.msg)
+  else:
+    IpcPeerIdentity(uid: int(geteuid()))
+
+proc ipcListenerIdentity*(conn: IpcConn): IpcPeerIdentity =
+  ## The account of the process listening at the other end of ``conn``, a
+  ## CLIENT connection made by ``connectIpc``, as the kernel recorded it.
+  ## Raises ``IpcPeerIdentityError`` when it cannot be obtained.
+  ##
+  ## * Linux: ``SO_PEERCRED`` (the credentials the listener had at
+  ##   ``listen(2)``); macOS and the BSDs: ``getpeereid(3)``
+  ##   (``repro_core/peer_identity.socketPeerCredentials``).
+  ## * Windows: the pipe's owner SID, read from the connected handle
+  ##   (``repro_core/peer_identity.kernelObjectOwnerSid``:
+  ##   ``GetSecurityInfo(..., SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION)``).
+  ##   The owner is fixed by whoever created the pipe's first instance, and
+  ##   another unprivileged account cannot make it this user's SID. A
+  ##   listener that should pass sets that owner explicitly
+  ##   (``ownerOnlyPipeSddl``). ``GetNamedPipeServerProcessId`` is NOT used:
+  ##   the pid it reports is not bound to the process holding the server
+  ##   end, since the handle can be inherited or duplicated and pids are
+  ##   reused, so the token found under it proves nothing.
+  when defined(windows):
+    if conn.handle == 0 or conn.handle == INVALID_HANDLE_VALUE:
+      raise newException(IpcPeerIdentityError, "the connection is closed")
+    try:
+      IpcPeerIdentity(uid: -1, sid: kernelObjectOwnerSid(conn.handle))
+    except OSError as err:
+      raise newException(IpcPeerIdentityError,
+        "cannot read the owner of the pipe: " & err.msg)
+  else:
+    if conn.socket == nil:
+      raise newException(IpcPeerIdentityError, "the connection is closed")
+    try:
+      IpcPeerIdentity(uid:
+        socketPeerCredentials(SocketHandle(conn.socket.getFd())).uid)
+    except OSError as err:
+      raise newException(IpcPeerIdentityError, err.msg)
+
+proc requireIpcListener*(conn: IpcConn; endpoint, daemonName: string;
+                         expected: IpcPeerIdentity; expectedLabel: string) =
+  ## Refuse ``conn`` unless the account listening at ``endpoint`` is
+  ## ``expected``. Call it right after ``connectIpc`` and before writing or
+  ## reading anything: a peer that is refused has then been sent nothing and
+  ## has had nothing read from it. A listener whose identity cannot be
+  ## obtained is refused like a mismatched one.
+  ##
+  ## ``daemonName`` names the daemon in the message (``"dev store daemon"``)
+  ## and ``expectedLabel`` says whose the expected identity is (``"this
+  ## user"``). Raises ``IpcPeerIdentityError``, whose message names the
+  ## endpoint, the listener's identity and the expected one; ``conn`` is
+  ## left open for the caller to close.
+  let peer =
+    try:
+      ipcListenerIdentity(conn)
+    except IpcPeerIdentityError as err:
+      raise newException(IpcPeerIdentityError,
+        "refusing the " & daemonName & " at " & endpoint & ": the account " &
+        "listening there cannot be identified (" & err.msg & "), and only " &
+        $expected & " (" & expectedLabel & ") is trusted; nothing was sent " &
+        "to it")
+  let matches =
+    when defined(windows): peer.sid.len > 0 and peer.sid == expected.sid
+    else: peer.uid == expected.uid
+  if not matches:
+    raise newException(IpcPeerIdentityError,
+      "refusing the " & daemonName & " at " & endpoint & ": the endpoint is " &
+      "held by another account: its listener is " & $peer & ", and only " &
+      $expected & " (" & expectedLabel & ") is trusted; nothing was sent " &
+      "to it")
 
 # ---------------------------------------------------------------------------
 # Cross-platform helpers callers reach for
