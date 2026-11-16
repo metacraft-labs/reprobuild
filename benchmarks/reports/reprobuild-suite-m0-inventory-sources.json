@@ -10149,8 +10149,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_round8.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 37,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 41,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10372,8 +10372,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 13,
-      "staticCaseCount": 51,
+      "sourceSuiteCount": 14,
+      "staticCaseCount": 60,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
