@@ -46,6 +46,7 @@
 ##   * `passwd.user`          wholly new — no home-scope analogue.
 
 from repro_core/process_streams import drainStream
+import repro_core/system_file_holding
 import std/[algorithm, os, sequtils, strutils, tables]
 
 import blake3
@@ -62,7 +63,8 @@ import ./store_view
 
 when defined(linux) or defined(macosx):
   import std/[os, osproc, streams]
-  from std/posix import geteuid
+  from std/posix import geteuid, getgrnam, getgrgid, lstat, Stat, Gid,
+    S_ISLNK
 elif defined(windows):
   import std/[os, osproc]
   # Windows-System-Resources Phase D: re-observe the live NTFS ACL
@@ -300,6 +302,35 @@ proc addOnToolDesiredDigestText*(op: PrivilegedOperation): string =
     renderAddOnToolWrapper(addOnToolManifestPath(op.atCommand)),
     renderAddOnToolManifest(prefix, op.atProgram))
 
+proc fsSystemFileDesiredContentDigestHex(op: PrivilegedOperation): string =
+  ## The digest of the bytes an `fs.systemFile` operation puts at its path.
+  if op.sfSourceUrl.len > 0:
+    # The profile pins the digest the controller would obtain by
+    # fetching `sfSourceUrl`. We can return it directly without a
+    # network round trip — the digest IS the canonical desired
+    # state, and the apply path verifies the fetched body against
+    # this same string before writing.
+    op.sfSha256
+  elif op.sfSourceLocal.len > 0:
+    # The desired bytes are the controller-side file's current
+    # contents. Read at observation time so the dispatcher's
+    # observed-vs-desired test compares the same bytes the apply path
+    # would write. Missing / unreadable is a hard error — same
+    # contract as `desiredFileContent`.
+    when defined(linux) or defined(macosx) or defined(windows):
+      if not fileExists(op.sfSourceLocal):
+        raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
+          " not found or unreadable")
+      try:
+        posixDigestHexOfText(readFile(op.sfSourceLocal))
+      except IOError, OSError:
+        raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
+          " not found or unreadable")
+    else:
+      raiseNotImplementedPlatform("fs.systemFile sourceLocal digest")
+  else:
+    posixDigestHexOfText(op.sfContent)
+
 proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
   ## Canonical desired-state digest for a Phase-C system-scope
   ## operation. A destroy op's desired state is the absent sentinel.
@@ -323,32 +354,17 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
   of pokFsSystemFile:
     if op.sfDestroy:
       ZeroDigestHex
-    elif op.sfSourceUrl.len > 0:
-      # The profile pins the digest the controller would obtain by
-      # fetching `sfSourceUrl`. We can return it directly without a
-      # network round trip — the digest IS the canonical desired
-      # state, and the apply path verifies the fetched body against
-      # this same string before writing.
-      op.sfSha256
-    elif op.sfSourceLocal.len > 0:
-      # The desired bytes are the controller-side file's current
-      # contents. Read at observation time so the dispatcher's
-      # observed-vs-desired test compares the same bytes the apply path
-      # would write. Missing / unreadable is a hard error — same
-      # contract as `desiredFileContent`.
-      when defined(linux) or defined(macosx) or defined(windows):
-        if not fileExists(op.sfSourceLocal):
-          raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
-            " not found or unreadable")
-        try:
-          posixDigestHexOfText(readFile(op.sfSourceLocal))
-        except IOError, OSError:
-          raiseProtocol("fs.systemFile sourceLocal=" & op.sfSourceLocal &
-            " not found or unreadable")
-      else:
-        raiseNotImplementedPlatform("fs.systemFile sourceLocal digest")
     else:
-      posixDigestHexOfText(op.sfContent)
+      # Content alone when the file declares neither `mode` nor `group`
+      # (the digest every plan and record before those fields used);
+      # otherwise the content and each declared attribute, the same text
+      # `observeFsSystemFile` builds from what it sees.
+      let contentHex = fsSystemFileDesiredContentDigestHex(op)
+      if systemFileDeclaresAttributes(op.sfMode, op.sfGroup):
+        posixDigestHexOfText(systemFileStateText(contentHex, op.sfMode,
+                                                 op.sfGroup))
+      else:
+        contentHex
   of pokFsSystemDirectory:
     # The directory has no content to digest the way `pokFsSystemFile`
     # does. The desired payload is therefore the "present" sentinel,
@@ -675,18 +691,26 @@ proc managedCopyMode*(existing: LeafKind; existingMode, defaultMode: int): int =
   if existing == lkFile and kept != 0: kept else: defaultMode and 0o777
 
 proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
-                      defaultMode: int; what: string) =
+                      defaultMode: int; what: string; exactMode = -1;
+                      gid = -1) =
   ## Put `content` at `path` as the add-on asked: a link to
-  ## `m.linkTarget` when set, else a copy owned by root (`0:0`, the
-  ## owner every kind written here declares) with the permission bits an
-  ## existing regular file at the path already has (an operator's
-  ## `chmod 0600` on a managed configuration file survives an update) or
-  ## `defaultMode`. The setuid, setgid and sticky bits are never carried
-  ## over -- none of these kinds declares them, and keeping a setuid bit
-  ## someone put on the path would make the add-on's root-owned bytes a
-  ## setuid program -- and neither is the previous owner: the bytes are
-  ## the add-on's, written as root. Atomic and never through a link; a
-  ## link on the path is `EProtocol` naming it.
+  ## `m.linkTarget` when set, else a copy owned by root.
+  ##
+  ## The copy's permission bits are `exactMode` when the resource declares
+  ## them (`fs.systemFile`'s `mode`); otherwise those an existing regular
+  ## file at the path already has (an operator's `chmod 0600` on a managed
+  ## configuration file survives an update), else `defaultMode`. The
+  ## setuid, setgid and sticky bits are never carried over -- no kind
+  ## declares them, and keeping a setuid bit someone put on the path would
+  ## make the add-on's root-owned bytes a setuid program.
+  ##
+  ## The copy's group is `gid` when the resource declares one
+  ## (`fs.systemFile`'s `group`, resolved by the caller), else root's (0).
+  ## The previous owner is never kept: the bytes are the add-on's, written
+  ## as root. Atomic and never through a link; a link on the path is
+  ## `EProtocol` naming it, unless it is exactly `m.replacingLinkTo` (the
+  ## add-on's own link of a previous generation, which this copy replaces
+  ## in one rename).
   when DriverMutation == "path-based-write-follows-links":
     # The falsifying mutation: the pre-A4 writer, a path-based
     # `open(fmWrite)` that resolves every link on the path.
@@ -703,20 +727,32 @@ proc writeManagedFile(m: AddOnMaterialisation; path, content: string;
       return
   try:
     if m.linkTarget.len > 0:
+      if exactMode >= 0 or gid >= 0:
+        # A link has no mode or group of its own; the add-on plans a file
+        # declaring either as a copy (ReproOS Add-On Mode §7.2 step 5),
+        # so this is a planning defect, refused rather than ignored.
+        raiseProtocol(what & " " & path & " declares a mode or a group " &
+          "and cannot be materialised as a link")
       replaceWithLinkNoFollow(path, m.linkTarget)
     else:
       let (kind, mode) = leafNoFollow(path)
-      let finalMode = managedCopyMode(kind, mode, defaultMode)
-      # Root: owned by 0:0 explicitly (a process's group need not be 0).
-      # Anyone else (the unprivileged unit tests) owns what it creates.
-      # Every caller is Linux-only; the guard mirrors the `geteuid` import
-      # so the module still compiles for its Windows drivers, where a POSIX
-      # owner means nothing and nothing is chowned.
+      let finalMode = if exactMode >= 0: exactMode and 0o777
+                      else: managedCopyMode(kind, mode, defaultMode)
+      # Root: owned by 0:<gid> explicitly (a process's group need not be
+      # 0). Anyone else (the unprivileged unit tests) owns what it creates,
+      # and sets only a declared group (a user may give a file to any group
+      # it is a member of). Every caller is Linux-only; the guard mirrors
+      # the `geteuid` import so the module still compiles for its Windows
+      # drivers, where a POSIX owner means nothing and nothing is chowned.
       when defined(linux) or defined(macosx):
-        let owner = if geteuid() == 0: 0 else: -1
+        let root = geteuid() == 0
+        let owner = if root: 0 else: -1
+        let group = if gid >= 0: gid elif root: 0 else: -1
       else:
         let owner = -1
-      writeFileNoFollow(path, content, finalMode, uid = owner, gid = owner)
+        let group = -1
+      writeFileNoFollow(path, content, finalMode, uid = owner, gid = group,
+                        replacingLinkTo = m.replacingLinkTo)
   except SymlinkOnPath as e:
     raiseProtocol(what & " refuses to write through a symbolic link: " &
       e.link & " (threat model G29)")
@@ -1396,15 +1432,80 @@ proc desiredFileContent*(op: PrivilegedOperation): string =
   else:
     raiseNotImplementedPlatform("fs.systemFile desiredFileContent")
 
+proc refuseUnsupportedHolding(op: PrivilegedOperation) {.used.} =
+  ## `mode` and `group` are POSIX file attributes. Windows has neither (an
+  ## NTFS file's access is its ACL: `windows.acl`), and the macOS write
+  ## path below does not set them; a declaration either cannot honour is
+  ## refused by name, never dropped -- dropping `mode` is how a `0640`
+  ## secret came to be readable by every local user (reprobuild-pm issue
+  ## 2026-11-12-fs-systemfile-cannot-express-mode-group-or-copy-form).
+  if systemFileDeclaresAttributes(op.sfMode, op.sfGroup):
+    raiseProtocol("fs.systemFile " & op.sfPath & " declares `mode` or " &
+      "`group`, which this platform's driver cannot set" &
+      (when defined(windows): "; on Windows declare the file's access " &
+         "with `windows.acl`" else: "") &
+      "; the file was not written")
+
+when defined(linux) or defined(macosx):
+  proc observedHolding(path: string): tuple[mode, group: string] =
+    ## The permission bits (four octal digits) and the owning group's name
+    ## of the leaf at `path`, never following a link: a link reads as
+    ## `link` for both, which no declaration equals, so a link where a
+    ## copy was declared is drift. A gid with no name reads as `#<gid>`.
+    var st: Stat
+    if lstat(path.cstring, st) != 0:
+      return ("absent", "absent")
+    if S_ISLNK(st.st_mode):
+      return ("link", "link")
+    let g = getgrgid(st.st_gid)
+    result.mode = toOct(int(st.st_mode) and 0o7777, 4)
+    result.group = if g != nil and g.gr_name != nil: $g.gr_name
+                   else: "#" & $int(st.st_gid)
+
+  proc resolveGroupId(op: PrivilegedOperation): int =
+    ## The gid of the declared group, or -1 when none is declared. A
+    ## group that does not exist fails the operation before anything is
+    ## written.
+    if op.sfGroup.len == 0:
+      return -1
+    let g = getgrnam(op.sfGroup.cstring)
+    if g == nil:
+      raiseProtocol("fs.systemFile " & op.sfPath & " declares group '" &
+        op.sfGroup & "', which does not exist on this host; the file " &
+        "was not written (a group the same generation creates must be a " &
+        "`passwd.group` the file dependsOn)")
+    int(g.gr_gid)
+
 proc observeFsSystemFile*(op: PrivilegedOperation): ObservedOperationState =
   ## Re-observe a managed system file. The digest covers the file
-  ## contents. The path's allowlist membership is re-validated as
-  ## defence in depth.
+  ## contents and, when the operation declares `mode` or `group`, each
+  ## declared attribute of the file as it is (`systemFileStateText`), so a
+  ## `chmod` or `chgrp` of such a file is drift. A link where a copy is
+  ## declared (`form = "copy"`) is drift too. A file declaring none of the
+  ## three is observed by its content alone, as before. The path's allowlist
+  ## membership is re-validated as defence in depth.
   when defined(linux) or defined(macosx) or defined(windows):
     let scopeErr = systemFileScopeError(op.sfPath, programDataRoot())
     if scopeErr.len > 0:
       raiseProtocol(scopeErr)
     result = observeManagedFile(op.sfPath)
+    if result.present and systemFileDeclaresAttributes(op.sfMode, op.sfGroup):
+      when defined(windows):
+        refuseUnsupportedHolding(op)
+      else:
+        let seen = observedHolding(op.sfPath)
+        result.digestHex = posixDigestHexOfText(systemFileStateText(
+          result.digestHex,
+          (if op.sfMode.len > 0: seen.mode else: ""),
+          (if op.sfGroup.len > 0: seen.group else: "")))
+    elif result.present and op.sfForm == "copy":
+      # Only `form = "copy"` declared: the state is the content, but a link
+      # is not a copy (`systemFileLinkedCopyStateText`). A file declaring
+      # `mode` or `group` reads a link as `link` above already.
+      when defined(linux):
+        if symlinkExists(op.sfPath):
+          result.digestHex = posixDigestHexOfText(
+            systemFileLinkedCopyStateText(result.digestHex))
   else:
     raiseNotImplementedPlatform("fs.systemFile observe")
 
@@ -1459,11 +1560,18 @@ proc applyFsSystemFile*(ctx: FixtureContext;
     let desired = desiredFileContent(op)
     let parent = parentDir(op.sfPath)
     when defined(linux):
+      # The declared group is resolved before anything is written: a
+      # missing group fails the operation with the file untouched.
+      let gid = resolveGroupId(op)
       if parent.len > 0:
         createManagedDirs(parent, "fs.systemFile")
       writeManagedFile(ctx.materialisationOf(op), op.sfPath, desired, 0o644,
-                       "fs.systemFile")
+                       "fs.systemFile",
+                       exactMode = (if op.sfMode.len > 0:
+                                      parseOctInt(op.sfMode) else: -1),
+                       gid = gid)
     else:
+      refuseUnsupportedHolding(op)
       if parent.len > 0:
         createDir(parent)
       block:
@@ -1475,9 +1583,16 @@ proc applyFsSystemFile*(ctx: FixtureContext;
             discard f.writeBuffer(unsafeAddr desired[0], desired.len)
         finally:
           close(f)
-    # Post-apply re-probe — see the contract comment above.
+    # Post-apply re-probe — see the contract comment above. It compares
+    # what `observeFsSystemFile` covers: the content, and the declared
+    # mode and group when there are any.
     let post = observeFsSystemFile(op)
-    let desiredHex = posixDigestHexOfText(desired)
+    let contentHex = posixDigestHexOfText(desired)
+    let desiredHex =
+      if systemFileDeclaresAttributes(op.sfMode, op.sfGroup):
+        posixDigestHexOfText(systemFileStateText(contentHex, op.sfMode,
+                                                 op.sfGroup))
+      else: contentHex
     if not post.present or post.digestHex != desiredHex:
       raiseProtocol("fs.systemFile " & op.sfPath &
         " post-apply observation disagrees with desired state: " &

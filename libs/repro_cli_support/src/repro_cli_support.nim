@@ -121,6 +121,7 @@ import repro_runquota
 # ``runquotad``'s query interface. This module is the ONLY read path;
 # nothing here opens the store's database file.
 import repro_runquota/stats_query
+import repro_runquota/store_status
 import runquota_daemon/host_config
 from runquota_process/cgroup_placement import CgroupRootEnvVar,
   currentCgroupRoot
@@ -33878,11 +33879,26 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
   # ``runquotad`` is the only sanctioned reader of the observation store,
   # so this is the whole of what ``repro stats`` can know about raw rows.
   let sharedStore = readSharedStore()
+  # THE STORE STATUS, reported by every view (``repro_runquota/store_status``):
+  # three top-level keys on every JSON object printed below, and one stderr
+  # line after a text-mode view when the store is not ready. It describes
+  # the store, not the view's filter: a ready store whose view matched
+  # nothing stays ``ready``.
+  let storeStatus = statsStoreStatus(sharedStore, projectRoot)
+  proc emitJson(node: JsonNode) =
+    addStoreStatus(node, storeStatus)
+    echo $node
   case view
   of "status":
-    stdout.write(statsStatusText(projectRoot, sharedStore))
+    if format == sofJson:
+      emitJson(statsStatusJson(projectRoot, sharedStore))
+    else:
+      stdout.write(statsStatusText(projectRoot, sharedStore))
   of "overview":
-    stdout.write(statsOverviewText(projectRoot, sharedStore))
+    if format == sofJson:
+      emitJson(statsOverviewJson(projectRoot, sharedStore))
+    else:
+      stdout.write(statsOverviewText(projectRoot, sharedStore))
   of "rank":
     if scope.len == 0:
       raise newException(ValueError, "stats rank requires --scope")
@@ -33911,7 +33927,7 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
       else:
         raise newException(ValueError, "unsupported stats scope: " & scope)
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderStatsRankText(outputNode))
   of "show":
@@ -33938,7 +33954,7 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
       else:
         raise newException(ValueError, "unsupported stats show scope: " & scope)
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderStatsShowText(outputNode))
   of "snapshot":
@@ -33952,7 +33968,7 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
     createDir(parentDir(path))
     writeFile(path, pretty(outputNode))
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderSnapshotText(outputNode, path))
   of "compare":
@@ -33961,11 +33977,13 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
         "stats compare requires --baseline and --candidate")
     let outputNode = compareSnapshotsJson(projectRoot, baseline, candidate)
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderCompareText(outputNode))
   else:
     raise newException(ValueError, "unsupported stats view: " & view)
+  if format != sofJson:
+    writeStoreStatusNotice("repro stats", storeStatus)
   0
 
 proc normalizedGraphPath(projectRoot, path: string): string =

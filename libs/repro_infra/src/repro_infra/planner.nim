@@ -387,7 +387,12 @@ proc summaryLine(r: SystemResource; action: string): string =
   of srkLaunchdSystemDaemon:
     action & " system-daemon " & r.sdaLabel
   of srkFsSystemFile:
-    action & " system-file " & r.sfPath
+    # The declared mode and group are named (only when declared, so an
+    # undeclared file's summary is unchanged): a chmod or chgrp of such a
+    # file is drift, and the plan line says what the update restores.
+    action & " system-file " & r.sfPath &
+      (if r.sfMode.len > 0: " (mode " & r.sfMode & ")" else: "") &
+      (if r.sfGroup.len > 0: " (group " & r.sfGroup & ")" else: "")
   of srkFsSystemDirectory:
     action & " system-directory " & r.dirPath &
       (if r.dirAclPresent: " (acl: " & $r.dirAclEntries.len &

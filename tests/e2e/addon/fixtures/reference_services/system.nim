@@ -142,7 +142,7 @@ profile "referenceServices":
         content = "d /var/lib/vaultwarden 0700 vaultwarden vaultwarden -\n",
         address = "vaultwardenState", dependsOn = @["linux.sysusersEntry:vaultwarden"])
       fsSystemFile(path = "/etc/vaultwarden/config.env",
-        content = VaultwardenConfig, mode = "0644",
+        content = VaultwardenConfig,
         address = "vaultwardenConfig")
       secretFile(service = "vaultwarden", name = "admin-token",
         address = "vaultwardenAdminToken")
