@@ -55,6 +55,7 @@ import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
+import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
@@ -74,6 +75,7 @@ import repro_dev_env_activation
 import repro_depfile
 import repro_dev_env_artifacts
 import repro_dev_env_engine
+import repro_dev_env_engine/directory_trust
 import repro_interface_artifacts
 # Incremental-Test-Runner M7: the io-monitor CLI driver and shim discovery now
 # come from the shared ``io-mon`` library. Import the package hub rather than
@@ -184,6 +186,7 @@ import repro_elevation
 import repro_cli_support/watch
 import repro_cli_support/cross_target_flag
 import repro_cli_support/dev_session
+import repro_cli_support/dev_session_access
 from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
 when not defined(windows):
@@ -380,9 +383,9 @@ export infra.runInfraCommand, infra.runSystemCommand
 export provisioning_lock_selection
 export catalog_publication
 export cli_hardware.runHardwareCommand
-export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
+export cli_disk.runDiskCommand,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
-       cli_disk.DiskCliOptions, cli_disk.DiskSubcommand,
+       cli_disk.DiskCliOptions,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
 export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
        cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
@@ -503,22 +506,6 @@ const LegacyVerbSynopses = [
     "repro lint [build options]\n"),
   ("clean",
     "repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]\n"),
-  ("run",
-    "repro run [task:NAME|PACKAGE:NAME|NAME] [--choose] [--activity=NAME] [--work-root=PATH] [-- ARGS...]\n"),
-  ("exec",
-    "repro exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n"),
-  ("shell",
-    "repro shell [selector] [--activity=name] [--print-env=posix|fish|powershell|json] [--dev-env-stats=PATH]\n" &
-      "repro shell hook bash|zsh|fish|nushell|pwsh [--repro-bin=PATH]\n"),
-  ("dev-env",
-    "repro dev-env export bash|zsh|fish|nushell|pwsh [--project-root=PATH] [--activity=name] [--develop-overrides=PATH] [--allow-stale] [--pre-activation-env=PATH]\n" &
-      "repro dev-env deactivate <rollback-manifest> [--shell=bash|zsh|fish|nushell|pwsh]\n"),
-  ("up",
-    "repro up [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--ready-timeout=MS] [--replace [--force]]\n"),
-  ("down",
-    "repro down [selector] [--activity=name] [--force] [--stop-timeout=MS]\n"),
-  ("dev",
-    "repro dev [selector] [--activity=name] [--foreground] [--http=HOST:PORT] [--debounce-ms=N] [--ready-timeout=MS] [--replace [--force]]\n"),
   ("hooks",
     "repro hooks ensure|reinstall|uninstall [--vcs] [--record-store] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n"),
   ("check",
@@ -531,9 +518,6 @@ const LegacyVerbSynopses = [
     "repro switch <branch> [-b|--new-branch] [--yes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n"),
   ("watch",
     "repro watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr] [--hcr-mode=direct|shlib] [--hcr-debug=embedded|external|none] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n"),
-  ("hcr",
-    "repro hcr coordinate --project PATH --target NAME --socket PATH --source-edit-driver PATH --artifacts PATH\n" &
-      "repro hcr prepare-object --input PATH --output PATH (--function NAME|--all-code) [--segment NAME]\n"),
   ("develop",
     "repro develop --list [--json] [--at=REV] [membership selectors] [--workspace-root=PATH]\n" &
       "repro develop --list-overrides\n" &
@@ -544,30 +528,9 @@ const LegacyVerbSynopses = [
       "repro develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n"),
   ("flake",
     "repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|<develop selectors>] [--flake=DIR] [--strip-suffix=LIST] [--workspace-root=PATH] [--json]\n"),
-  ("debug",
-    "repro debug io monitor [inspect <depfile> | [options] -- <command> [args...]]\n" &
-      "repro debug artifact <path> [--format=text|json]\n"),
-  ("home",
-    "repro home {add | remove | enable | disable | list | why | history | apply | plan | export | facts | compare | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n"),
-  ("infra",
-    "repro infra {plan | apply | install-root} ...\n"),
-  ("system",
-    "repro system {add | remove | list | why | sync | history | rollback | audit} ...\n"),
-  ("deploy-agent",
-    "repro deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n" &
-      "repro deploy-agent keygen --secrets-key <FILE>\n"),
-  ("hardware",
-    "repro hardware {probe} [--dry-run | --output PATH | --regenerate]\n"),
-  ("cargo",
-    "repro cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n" &
-      "repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n" &
-      "repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID] [--relative-to DIR] [--libs] -- cargo ARGS...\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
-  ("prompt",
-    "repro prompt [--format=plain|ansi|json|<template>] [--workspace-root=PATH]\n" &
-      "repro prompt init bash|zsh|fish|starship|p10k|oh-my-zsh|prezto\n"),
   ("workspace",
     "repro workspace|ws {bootstrap [<dir>] | init <project|url> [<path>] | new <path> [--branch=NAME] [--existing-branch] [--projects=A,B] | restore <source> <destination> --projects=A,B [--at=REV] (--record=PATH|PROJECT/REPO@SHA | --snapshot=NAME) [--record-store=SOURCE] [--record-store-at=REV] | sync [<project>...] | pull | switch <branch> [-b] | status [<project>] | lock [<project>] | list | enable <project>... [--default] [--no-sync] | disable <project>... [--keep-checkouts] [--force] | projects {list [--enabled|--disabled] | add <name> [-m DESC] | remove <name>} | repos {list [--project=NAME] | add <repo> --remote=URL [--project=NAME]... | remove <repo>} | branch-roles [--to=<role>|--mainline|--unstable|--staging|--stable|--production|--lts] [<project>...] [--only=LIST] [--except=LIST] [--filter=GLOB] [--tags=LIST] [--json] | manifests | shared-clones | forall -c <command> | provision | publish-evidence | migrate-locks [--dry-run|--apply]} [--workspace-root=PATH]\n" &
       "\n" &
@@ -2523,6 +2486,57 @@ proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
   lines.sort()
   lines.join("\n")
 
+proc toolDeclaredInputCheckPolicyForRefs*(
+    profiles: Table[string, PathOnlyToolProfile];
+    refs: openArray[string]): Option[FileFingerprintPolicy] =
+  ## Caching-Architecture D2: the input-check policy an edge that states
+  ## none takes from the tools it names. Only a ref that RESOLVES to a tool
+  ## profile here counts -- by executable name, by bare package selector, or
+  ## (when neither matches, as ``mkToolIdentityResolver`` does) as an
+  ## executable a profile's realization exports -- so the declaration
+  ## travels with the resolved tool identity: a ref that resolves to nothing
+  ## (the C convention dispatched under ``--tool-provisioning=path`` sees no
+  ## profiles at all) leaves the edge on ``timestamp``. Each resolved ref is
+  ## looked up by the bare package name of its profile, then by its own
+  ## name (``repro_core/tool_input_check_policies``); with several declaring
+  ## tools the strongest policy wins. `none` when no resolved tool declares
+  ## one.
+  for refName in refs:
+    if refName.len == 0:
+      continue
+    var resolvedPackages: seq[string] = @[]
+    for profile in profiles.values:
+      let bare = bareToolSelector(profile.packageSelector)
+      if profile.executableName == refName or bare == refName:
+        resolvedPackages.add(bare)
+    if resolvedPackages.len == 0:
+      for profile in profiles.values:
+        for exported in profile.exportedExecutables:
+          let file = extractFilename(exported)
+          if file == refName or file == addFileExt(refName, ExeExt):
+            resolvedPackages.add(bareToolSelector(profile.packageSelector))
+            break
+    if resolvedPackages.len == 0:
+      continue
+    for key in resolvedPackages & @[refName]:
+      let declared = toolDeclaredInputCheckPolicy(key)
+      if declared.isSome:
+        result = some(if result.isSome:
+            strongestInputCheckPolicy(result.get(), declared.get())
+          else: declared.get())
+
+proc keyedOnToolDeclaredInputCheckPolicy*(weak: ContentDigest;
+                                          policy: FileFingerprintPolicy):
+    ContentDigest =
+  ## Mix a policy an edge took from its tools' declaration into its weak
+  ## fingerprint. The payload says "unstated" either way, so without this the
+  ## same edge would key identically whether it resolved to ``hybrid`` (a
+  ## tarball-provisioned ``gcc``) or to ``timestamp`` (no resolved profile).
+  var text = "reprobuild.toolDeclaredInputCheckPolicy.v1\n" & $policy & "\n"
+  for b in weak.bytes:
+    text.add(toHex(b, 2))
+  weakFingerprintFromText(text)
+
 proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
     seq[string] =
   ## The sub-tools that reach the engine as
@@ -3241,14 +3255,29 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.removeBeforeRun = payload.removeBeforeRun
     result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
+  # Caching-Architecture D2: an edge that states no policy takes the one its
+  # resolved tools declare, else the owner-decided default, timestamp.
+  var policyFromTools = false
   let actionCachePolicy =
     case payload.actionCachePolicy
+    of acfpUnstated:
+      let declared = toolDeclaredInputCheckPolicyForRefs(profiles,
+        payload.toolIdentityRefs)
+      if declared.isSome and declared.get() != ffpTimestamp:
+        policyFromTools = true
+        declared.get()
+      else:
+        ffpTimestamp
     of acfpTimestamp:
       ffpTimestamp
     of acfpChecksum:
       ffpChecksum
     of acfpHybrid:
       ffpHybrid
+  defer:
+    if policyFromTools:
+      result.weakFingerprint = keyedOnToolDeclaredInputCheckPolicy(
+        result.weakFingerprint, actionCachePolicy)
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
@@ -5406,9 +5435,15 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     for a in args:
       cmd.add(" ")
       cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd,
-      env = scrubbedGitRepositoryEnv())
-    (code: r.exitCode, output: r.output)
+    # ``poStdErrToStdOut`` is what puts git's reason in ``output``: every
+    # failure below quotes it, and git reports a failure only on stderr
+    # (``--quiet`` silences the rest). ``execCmdEx``'s default carries it;
+    # an explicit option set without it discards stderr, and a CI fetch
+    # failure then read "fetch failed from <url> at pinned revision <rev>: "
+    # with no cause at all.
+    let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      workingDir = cwd, env = scrubbedGitRepositoryEnv())
+    (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
 
   proc verifyRevisionIntegrity() =
     verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
@@ -5466,12 +5501,16 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # back to fetching every branch and tag, then checking out the pinned
     # revision. A bare ``fetch <url>`` takes only the remote's HEAD, which
     # misses a pin that only a non-default branch reaches.
+    let byRevision = step.output.strip()
     step = git(["-C", checkoutRoot, "fetch", "--quiet", url,
       "+refs/heads/*:refs/remotes/pinned-source/*",
       "+refs/tags/*:refs/tags/*"])
     if step.code != 0:
+      # Both attempts' reasons: the by-revision fetch is the one expected
+      # to work, and its failure is usually the one that explains this.
       fail("fetch failed from " & url & " at pinned revision " & revision &
-        ": " & step.output.strip())
+        ": by revision: " & byRevision & "; all branches and tags: " &
+        step.output.strip())
   step = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
     "--end-of-options", revision & "^{commit}"])
   if step.code != 0:
@@ -15149,16 +15188,6 @@ type
     developOverridesPath: string
     statsPath: string
 
-  ParsedDevEnvExec = object
-    selection: DevEnvCliSelection
-    command: seq[string]
-
-  ParsedDevEnvShell = object
-    selection: DevEnvCliSelection
-    printEnv: bool
-    printFormat: DevEnvPrintFormat
-    shellPath: string
-
   RunTargetQualifier = enum
     ## Named-Runnable-Edges N1: how the user spelled the ``repro run``
     ## positional, so resolution can honour an explicit disambiguation
@@ -15604,107 +15633,32 @@ proc resolveDevEnvSelection(selection: var DevEnvCliSelection) =
   selection.outDir = defaultDevEnvOutDir(declaredModulePath,
     selection.workRoot, selection.activity)
 
-proc parseDevEnvExecArgs(args: openArray[string]): ParsedDevEnvExec =
-  var selection = DevEnvCliSelection()
-  var afterSeparator = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if afterSeparator:
-      result.command.add(arg)
-    elif arg == "--":
-      afterSeparator = true
-    elif arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity.appendActivitySelection(valueFromFlag(args, i,
-        "--activity"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      selection.workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
-      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
-    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
-      selection.statsPath = valueFromFlag(args, i, "--dev-env-stats")
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported exec flag: " & arg)
-    elif selection.selector.len == 0:
-      selection.selector = arg
-    else:
-      raise newException(ValueError,
-        "unexpected exec argument before --: " & arg)
-    inc i
-  if result.command.len == 0:
-    raise newException(ValueError,
-      "repro exec requires -- <command> [args...]")
-  selection.resolveDevEnvSelection()
-  result.selection = selection
+proc devEnvSelectionOf(selector: string; activity: openArray[string];
+                       workRoot, lockSlice, statsPath: string):
+    DevEnvCliSelection =
+  ## The development environment a command's typed configuration selects
+  ## (``--activity``, ``--work-root``, ``--lock-slice``,
+  ## ``--dev-env-stats`` and the selector positional), resolved. Each
+  ## ``--activity`` value may itself be a comma-separated list; the
+  ## activities are collected in order, each once.
+  result = DevEnvCliSelection(selector: selector, workRoot: workRoot,
+    lockSliceId: lockSlice, statsPath: statsPath)
+  for value in activity:
+    result.activity.appendActivitySelection(value)
+  result.resolveDevEnvSelection()
 
-proc parseDevEnvShellArgs(args: openArray[string]): ParsedDevEnvShell =
-  var selection = DevEnvCliSelection()
-  result.printFormat = depPosix
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity.appendActivitySelection(valueFromFlag(args, i,
-        "--activity"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      selection.workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
-      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
-    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
-      selection.statsPath = valueFromFlag(args, i, "--dev-env-stats")
-    elif arg == "--shell" or arg.startsWith("--shell="):
-      result.shellPath = valueFromFlag(args, i, "--shell")
-    elif arg == "--print-env" or arg.startsWith("--print-env="):
-      result.printEnv = true
-      result.printFormat = parseDevEnvPrintFormat(valueFromFlag(args, i,
-        "--print-env"))
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported shell flag: " & arg)
-    elif selection.selector.len == 0:
-      selection.selector = arg
-    else:
-      raise newException(ValueError,
-        "unexpected shell argument: " & arg)
-    inc i
-  selection.resolveDevEnvSelection()
-  result.selection = selection
-
-proc parseReproRunArgs(args: openArray[string]): ParsedReproRun =
-  var selection = DevEnvCliSelection()
-  var afterSeparator = false
-  var rawTarget = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if afterSeparator:
-      result.forwardedArgs.add(arg)
-    elif arg == "--":
-      afterSeparator = true
-    elif arg == "--choose":
-      result.choose = true
-    elif arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity.appendActivitySelection(valueFromFlag(args, i, "--activity"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      selection.workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
-      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
-    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
-      selection.statsPath = valueFromFlag(args, i, "--dev-env-stats")
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported run flag: " & arg)
-    elif rawTarget.len == 0:
-      rawTarget = arg
-    else:
-      raise newException(ValueError, "unexpected run argument before --: " & arg)
-    inc i
-
+proc reproRunOf(conf: ReproCommandLineRun): ParsedReproRun =
+  ## ``repro run``'s typed configuration, with its target's qualifier
+  ## (``task:NAME``, ``PACKAGE:NAME``) taken apart.
+  result.choose = conf.choose
+  result.forwardedArgs = conf.args
+  let rawTarget = conf.target
   # Named-Runnable-Edges N1: the dev-env edge is always computed against
   # the current project (``.``) — a ``<pkg>:<name>`` qualifier disambiguates
   # the export-table resolution, NOT the project anchor, so it must not be
   # fed to ``moduleForTarget`` (which would treat ``<pkg>`` as a sibling
   # checkout path and fail). The raw positional is kept verbatim for the
   # run-edge delegation + diagnostics.
-  selection.selector = "."
   result.rawTarget = rawTarget
   if rawTarget.len > 0:
     if rawTarget.contains('/') or rawTarget.contains('\\') or
@@ -15729,8 +15683,8 @@ proc parseReproRunArgs(args: openArray[string]): ParsedReproRun =
         result.qualifier = rtqNone
         result.target = rawTarget
 
-  selection.resolveDevEnvSelection()
-  result.selection = selection
+  result.selection = devEnvSelectionOf(".", conf.activity, conf.workRoot,
+    conf.lockSlice, conf.devEnvStats)
 
 proc publicDevEnvMonitor(publicCliPath: string):
     tuple[path: string, args: seq[string]] =
@@ -17438,9 +17392,12 @@ proc buildRunEdgeSessionResolver*(
     pool.openProviderSession(artifact, defaultSessionPolicy(),
       runEdgeSessionEngineHello())
 
-proc runReproRunCommand(args: openArray[string];
+proc runReproRunCommand(conf: ReproCommandLineRun;
                         publicCliPath: string): int =
-  let parsed = parseReproRunArgs(args)
+  ## ``repro run [<target>] [-- <args>...]``. Its command line is parsed from
+  ## repro's description (``repro_cli_support/cli_description``); the
+  ## arguments after ``--`` reach the program exactly as written.
+  let parsed = reproRunOf(conf)
   let userToolchainEnv = snapshotBootstrapToolchainEnv()
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
@@ -17675,12 +17632,8 @@ proc runReproTasksCommand(conf: ReproCommandLineTasks;
   ## description (``repro_cli_support/cli_description``); each
   ## ``--activity`` value may itself be a comma-separated list, and the
   ## activities are collected in order, each once.
-  var selection = DevEnvCliSelection(selector: conf.selector,
-    workRoot: conf.workRoot, lockSliceId: conf.lockSlice,
-    statsPath: conf.devEnvStats)
-  for value in conf.activity:
-    selection.activity.appendActivitySelection(value)
-  selection.resolveDevEnvSelection()
+  let selection = devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats)
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   var listedTasks = inspectDevEnvTasks(selection, publicCliPath)
@@ -17698,9 +17651,17 @@ proc runReproTasksCommand(conf: ReproCommandLineTasks;
   emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
   0
 
-proc runReproExecCommand(args: openArray[string];
+proc runReproExecCommand(conf: ReproCommandLineExec;
                          publicCliPath: string): int =
-  let parsed = parseDevEnvExecArgs(args)
+  ## ``repro exec [<selector>] -- <command>...``. Its command line is parsed
+  ## from repro's description (``repro_cli_support/cli_description``); the
+  ## command is every word after ``--``, exactly as written.
+  if conf.command.len == 0:
+    stderr.writeLine("repro exec: no command after `--`; run `repro help " &
+      "exec`")
+    return 2
+  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats), command: conf.command)
   # The bootstrap toolchain the edge below publishes is for compiling the
   # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
   let userToolchainEnv = snapshotBootstrapToolchainEnv()
@@ -17738,9 +17699,19 @@ proc defaultInteractiveShell(): string =
   else:
     getEnv("SHELL", "/bin/sh")
 
-proc runReproShellCommand(args: openArray[string];
+proc runReproShellCommand(conf: ReproCommandLineShellCall;
                           publicCliPath: string): int =
-  let parsed = parseDevEnvShellArgs(args)
+  ## ``repro shell [<selector>]``: start a shell in the development
+  ## environment, or print it (``--print-env``). Its command line is parsed
+  ## from repro's description (``repro_cli_support/cli_description``).
+  # The format is checked first, before anything is resolved.
+  let printFormat =
+    if conf.printEnv.isSome: parseDevEnvPrintFormat(conf.printEnv.get)
+    else: depPosix
+  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats),
+    printEnv: conf.printEnv.isSome, printFormat: printFormat,
+    shellPath: conf.shell)
   let userToolchainEnv = snapshotBootstrapToolchainEnv()
   let edge = computePublicDevEnv(parsed.selection, publicCliPath,
     announce = true)
@@ -17791,43 +17762,22 @@ type
     allowStale: bool
     preActivationEnvPath: string
 
-proc parseDevEnvExportArgs(args: openArray[string]): ParsedDevEnvExport =
-  if args.len == 0:
-    raise newException(ValueError,
-      "repro dev-env export requires a shell argument " &
-        "(bash|zsh|fish|nushell|pwsh)")
-  result.shell = parseShellKind(args[0])
-  var i = 1
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--project-root" or arg.startsWith("--project-root="):
-      result.projectRoot = valueFromFlag(args, i, "--project-root")
-    elif arg == "--activity" or arg.startsWith("--activity="):
-      result.activity = valueFromFlag(args, i, "--activity")
-    elif arg == "--develop-overrides" or
-        arg.startsWith("--develop-overrides="):
-      result.developOverridesPath =
-        valueFromFlag(args, i, "--develop-overrides")
-    elif arg == "--allow-stale":
-      result.allowStale = true
-    elif arg == "--pre-activation-env" or
-        arg.startsWith("--pre-activation-env="):
-      # M75 — shell hook writes its env to this file before calling
-      # ``export`` so the rollback manifest captures the SHELL's env,
-      # not the spawned child's env. Optional; when absent we fall
-      # back to the child process's own env (graceful-degradation
-      # path used by direct CLI invocation outside the hook).
-      result.preActivationEnvPath =
-        valueFromFlag(args, i, "--pre-activation-env")
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported dev-env export flag: " & arg)
-    else:
-      raise newException(ValueError,
-        "unexpected dev-env export argument: " & arg)
-    inc i
-  if result.activity.len == 0:
-    result.activity = "default"
+proc devEnvExportOf(conf: ReproCommandLineDevEnvExport): ParsedDevEnvExport =
+  ## ``repro dev-env export``'s typed configuration (parsed from repro's
+  ## description), with its shell named. An unknown shell raises
+  ## ``ExportPlanError`` before anything is touched.
+  ##
+  ## ``--pre-activation-env``: the shell hook writes the shell's environment
+  ## to this file before calling ``export``, so the rollback manifest
+  ## captures the SHELL's environment, not the spawned child's. Without it
+  ## the command falls back to its own environment (a direct invocation
+  ## outside the hook).
+  result.shell = parseShellKind(conf.shell)
+  result.projectRoot = conf.projectRoot
+  result.activity = if conf.activity.len > 0: conf.activity else: "default"
+  result.developOverridesPath = conf.developOverrides
+  result.allowStale = conf.allowStale
+  result.preActivationEnvPath = conf.preActivationEnv
 
 proc artifactIdFingerprint(artifact: DevEnvArtifact): string =
   ## Deterministic, content-derived. The artifact's ``artifactId`` is
@@ -17836,9 +17786,6 @@ proc artifactIdFingerprint(artifact: DevEnvArtifact): string =
   result = newStringOfCap(64)
   for b in artifact.artifactId:
     result.add(toHex(int(b), 2).toLowerAscii())
-
-proc allowFileHash(path: string): string =
-  digestHex(blake3DomainDigest(path.bytesOf(), hdMetadataEnvelope))
 
 proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
   let msg = "repro: dev-env directory " & path & " is not allowed/trusted.\n" &
@@ -17864,35 +17811,26 @@ proc emitWarnedResetScript(shell: ShellKind): string =
   of skNushell: "hide-env __REPRO_WARNED\n"
   of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
 
-proc runReproAllowCommand(args: openArray[string]): int =
-  var path = ""
-  if args.len > 0:
-    path = args[0]
-  else:
-    path = getCurrentDir()
-  
+proc runReproAllowCommand(directory: string): int =
+  ## ``repro allow [<directory>]``: trust the directory (the current one when
+  ## ``directory`` is empty). Its command line is parsed from repro's
+  ## description, so ``--help`` is help, never a directory.
+  let path = if directory.len > 0: directory else: getCurrentDir()
   let root = os.normalizedPath(absolutePath(path))
-  let hash = allowFileHash(root)
-  let allowDir = getConfigDir() / "repro" / "allow"
   try:
-    createDir(allowDir)
-    writeFile(allowDir / hash, root)
+    writeAllowRecord(root)
     stderr.writeLine("Allowed repro dev-env for: " & root)
     return 0
   except CatchableError as err:
     stderr.writeLine("repro allow: error writing trust file: " & err.msg)
     return 1
 
-proc runReproDenyCommand(args: openArray[string]): int =
-  var path = ""
-  if args.len > 0:
-    path = args[0]
-  else:
-    path = getCurrentDir()
-  
+proc runReproDenyCommand(directory: string): int =
+  ## ``repro deny [<directory>]``: revoke the trust ``repro allow`` recorded
+  ## (for the current directory when ``directory`` is empty).
+  let path = if directory.len > 0: directory else: getCurrentDir()
   let root = os.normalizedPath(absolutePath(path))
-  let hash = allowFileHash(root)
-  let f = getConfigDir() / "repro" / "allow" / hash
+  let f = allowRecordPath(root)
   try:
     if fileExists(f):
       removeFile(f)
@@ -17904,19 +17842,16 @@ proc runReproDenyCommand(args: openArray[string]): int =
     stderr.writeLine("repro deny: error removing trust file: " & err.msg)
     return 1
 
-proc runDevEnvExportCommand(args: openArray[string];
+proc runDevEnvExportCommand(conf: ReproCommandLineDevEnvExport;
                             publicCliPath: string): int =
   ## ``repro dev-env export <shell>`` dispatch arm. Exit codes:
   ##   0 — success
   ##   1 — engine error (project not found, edge failure, ...)
-  ##   2 — usage error (unknown shell, bad flag)
+  ##   2 — usage error (unknown shell; the parser reports a bad flag)
   var parsed: ParsedDevEnvExport
   try:
-    parsed = parseDevEnvExportArgs(args)
+    parsed = devEnvExportOf(conf)
   except ExportPlanError as err:
-    stderr.writeLine("repro dev-env export: " & err.msg)
-    return 2
-  except ValueError as err:
     stderr.writeLine("repro dev-env export: " & err.msg)
     return 2
 
@@ -17932,15 +17867,8 @@ proc runDevEnvExportCommand(args: openArray[string];
     parsed.projectRoot = os.normalizedPath(absolutePath(parsed.projectRoot))
 
   # Check if directory is allowed/trusted
-  let allowFilePath = getConfigDir() / "repro" / "allow" / allowFileHash(parsed.projectRoot)
-  var isAllowed = false
-  if fileExists(allowFilePath):
-    try:
-      let contents = readFile(allowFilePath).strip()
-      if contents == parsed.projectRoot:
-        isAllowed = true
-    except CatchableError:
-      discard
+  let trust = directoryTrustState(parsed.projectRoot)
+  var isAllowed = trust == dtTrusted
 
   if getEnv("REPRO_DEV_ENV_AUTO_ALLOW") == "1":
     isAllowed = true
@@ -18209,42 +18137,22 @@ type
     shell: ShellKind
     shellSet: bool
 
-proc parseDevEnvDeactivateArgs(args: openArray[string]):
-    ParsedDevEnvDeactivate =
-  result.shell = skBash
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--shell" or arg.startsWith("--shell="):
-      result.shell = parseShellKind(valueFromFlag(args, i, "--shell"))
-      result.shellSet = true
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported dev-env deactivate flag: " & arg)
-    elif result.manifestPath.len == 0:
-      result.manifestPath = arg
-    else:
-      raise newException(ValueError,
-        "unexpected dev-env deactivate argument: " & arg)
-    inc i
-  if result.manifestPath.len == 0:
-    raise newException(ValueError,
-      "repro dev-env deactivate requires a rollback manifest path")
-
-proc runDevEnvDeactivateCommand(args: openArray[string]): int =
+proc runDevEnvDeactivateCommand(conf: ReproCommandLineDevEnvDeactivate):
+    int =
   ## ``repro dev-env deactivate <rollback-manifest> [--shell=<shell>]``
-  ## dispatch arm. Exit codes:
+  ## dispatch arm; its command line is parsed from repro's description.
+  ## Exit codes:
   ##   0 — success
   ##   1 — engine error (manifest / artifact missing or corrupt)
-  ##   2 — usage error (unknown shell, missing argument)
+  ##   2 — usage error (unknown shell; the parser reports a missing argument)
   ##   3 — tamper detected (activation hash mismatch)
   var parsed: ParsedDevEnvDeactivate
   try:
-    parsed = parseDevEnvDeactivateArgs(args)
+    parsed = ParsedDevEnvDeactivate(manifestPath: conf.manifest,
+      shell: (if conf.shell.isSome: parseShellKind(conf.shell.get)
+              else: skBash),
+      shellSet: conf.shell.isSome)
   except ExportPlanError as err:
-    stderr.writeLine("repro dev-env deactivate: " & err.msg)
-    return 2
-  except ValueError as err:
     stderr.writeLine("repro dev-env deactivate: " & err.msg)
     return 2
 
@@ -18329,38 +18237,16 @@ type
     shell: ShellKind
     reproBin: string  ## explicit path; otherwise we autodetect
 
-proc parseShellHookArgs(args: openArray[string]): ParsedShellHook =
-  if args.len == 0:
-    raise newException(ValueError,
-      "repro shell hook requires a shell argument " &
-        "(bash|zsh|fish|nushell|pwsh)")
-  result.shell = parseShellKind(args[0])
-  var i = 1
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--repro-bin" or arg.startsWith("--repro-bin="):
-      # Escape hatch for the test surface — embed an explicit absolute
-      # path to ``repro.exe`` so the hook does not depend on PATH
-      # resolution. Default (empty) means "use the bare ``repro``
-      # name and rely on PATH".
-      result.reproBin = valueFromFlag(args, i, "--repro-bin")
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported shell hook flag: " & arg)
-    else:
-      raise newException(ValueError,
-        "unexpected shell hook argument: " & arg)
-    inc i
-
-proc runShellHookCommand(args: openArray[string]): int =
-  ## ``repro shell hook <shell>`` dispatch arm.
+proc runShellHookCommand(conf: ReproCommandLineShellHook): int =
+  ## ``repro shell hook <shell>`` dispatch arm; its command line is parsed
+  ## from repro's description. ``--repro-bin`` is the escape hatch for the
+  ## test surface: it embeds an explicit path to repro so the hook does not
+  ## depend on PATH (empty: the bare ``repro`` name, found on PATH).
   var parsed: ParsedShellHook
   try:
-    parsed = parseShellHookArgs(args)
+    parsed = ParsedShellHook(shell: parseShellKind(conf.shell),
+      reproBin: conf.reproBin)
   except ExportPlanError as err:
-    stderr.writeLine("repro shell hook: " & err.msg)
-    return 2
-  except ValueError as err:
     stderr.writeLine("repro shell hook: " & err.msg)
     return 2
 
@@ -18381,6 +18267,11 @@ type
       ## Preserve explicit scope before selection resolution supplies default.
     foreground: bool
     httpBind: string
+      ## ``--http``, or empty for the platform default transport (AF_UNIX
+      ## on POSIX, ``127.0.0.1:0`` on Windows); see ``dev_session_access``.
+    httpAllowRemote: bool
+      ## ``--http-allow-remote``: the explicit opt-in a non-loopback
+      ## ``--http`` host needs.
     debounceMs: int
     force: bool
     replace: bool
@@ -18406,84 +18297,56 @@ type
       ## of the field above, and accepted on exactly the opposite set of
       ## commands.
 
-proc parseDevSessionArgs(args: openArray[string]; commandName: string;
-                         acceptReadyTimeout: bool;
-                         acceptStopTimeout = false;
-                         acceptReplace = false): ParsedDevSessionCommand =
-  ## ``acceptReadyTimeout`` has no default because ``down`` must REFUSE
-  ## ``--ready-timeout`` rather than accept and ignore it: ``down`` does not
-  ## wait for readiness, so an accepted flag there would be a flag that
-  ## parses and does nothing, which is the failure mode this campaign keeps
-  ## finding. A new caller has to decide in writing.
-  ##
-  ## ``acceptReplace`` follows the same rule and the same default-to-
-  ## refusing convention: ``down`` must REFUSE ``--replace`` rather than
-  ## accept and ignore it, because ``down`` takes no instance over.
-  ##
-  ## ``acceptStopTimeout`` is the same rule pointing the other way, and it
-  ## DOES default -- to false, the refusing value. ``up`` and ``dev`` do not
-  ## wait for a session to stop, so ``--stop-timeout`` there would parse and
-  ## do nothing; only ``down`` passes true. A default that refuses means a
-  ## future command gets the refusal until someone writes down that it
-  ## waits.
-  var selection = DevEnvCliSelection()
-  result.httpBind = "127.0.0.1:0"
+proc devSessionCommandOf(selector: string; activity: openArray[string];
+                         workRoot, lockSlice: string): ParsedDevSessionCommand =
+  ## The session ``up``, ``dev`` or ``down`` acts on, from its typed
+  ## configuration (parsed from repro's description). Each command declares
+  ## exactly the flags it reads: ``down`` has no ``--ready-timeout``,
+  ## ``--replace`` or ``--http-allow-remote`` (it waits for no readiness,
+  ## takes nothing over and binds nothing), and ``up`` and ``dev`` have no
+  ## ``--stop-timeout`` (they wait for no session to stop), so a flag that
+  ## would parse and do nothing is refused by the parser.
+  result.activitySpecified = activity.len > 0
+  # Empty: the platform default transport, chosen by the listener. A
+  # loopback TCP port is no longer the default on POSIX, because every
+  # local account can connect to one (§"Control API Access Control").
+  result.httpBind = ""
   result.debounceMs = 250
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--activity" or arg.startsWith("--activity="):
-      result.activitySpecified = true
-      selection.activity.appendActivitySelection(valueFromFlag(args, i,
-        "--activity"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      selection.workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
-      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
-    elif arg == "--foreground":
-      result.foreground = true
-    elif arg == "--force":
-      result.force = true
-    elif arg == "--replace":
-      if not acceptReplace:
-        raise newException(ValueError,
-          "unsupported " & commandName & " flag: " & arg)
-      result.replace = true
-    elif arg == "--http" or arg.startsWith("--http="):
-      result.httpBind = valueFromFlag(args, i, "--http")
-    elif arg == "--debounce-ms" or arg.startsWith("--debounce-ms="):
-      result.debounceMs = parseInt(valueFromFlag(args, i, "--debounce-ms"))
-      if result.debounceMs < 0:
-        raise newException(ValueError, "--debounce-ms must be non-negative")
-    elif arg == "--ready-timeout" or arg.startsWith("--ready-timeout="):
-      if not acceptReadyTimeout:
-        raise newException(ValueError,
-          "unsupported " & commandName & " flag: " & arg)
-      result.readyTimeoutMs = parseInt(valueFromFlag(args, i,
-        "--ready-timeout"))
-      if result.readyTimeoutMs <= 0:
-        raise newException(ValueError,
-          "--ready-timeout must be a positive number of milliseconds")
-    elif arg == "--stop-timeout" or arg.startsWith("--stop-timeout="):
-      if not acceptStopTimeout:
-        raise newException(ValueError,
-          "unsupported " & commandName & " flag: " & arg)
-      result.stopTimeoutMs = parseInt(valueFromFlag(args, i,
-        "--stop-timeout"))
-      if result.stopTimeoutMs <= 0:
-        raise newException(ValueError,
-          "--stop-timeout must be a positive number of milliseconds")
-    elif arg.startsWith("-"):
+  result.selection = DevEnvCliSelection(selector: selector,
+    workRoot: workRoot, lockSliceId: lockSlice)
+  for value in activity:
+    result.selection.activity.appendActivitySelection(value)
+
+proc resolveDevSessionCommand(parsed: var ParsedDevSessionCommand) =
+  ## The checks every session command makes on its parsed values, then the
+  ## selection resolved. The bind restriction is checked here, before any
+  ## session state exists: a non-loopback host needs the explicit opt-in.
+  if parsed.debounceMs < 0:
+    raise newException(ValueError, "--debounce-ms must be non-negative")
+  if parsed.httpBind.len > 0:
+    let parts = parseHttpBind(parsed.httpBind)
+    refuseNonLoopbackBind(parsed.httpBind, parts.host,
+      parsed.httpAllowRemote)
+  parsed.selection.resolveDevEnvSelection()
+
+proc devSessionStartOf[T](conf: T; mode: DevSessionMode):
+    ParsedDevSessionCommand =
+  ## ``repro up`` or ``repro dev``'s typed configuration.
+  result = devSessionCommandOf(conf.selector, conf.activity, conf.workRoot,
+    conf.lockSlice)
+  result.foreground = conf.foreground
+  result.force = conf.force
+  result.replace = conf.replace
+  result.httpBind = conf.http
+  result.httpAllowRemote = conf.httpAllowRemote
+  when compiles(conf.debounceMs):
+    result.debounceMs = conf.debounceMs
+  if conf.readyTimeout.isSome:
+    result.readyTimeoutMs = conf.readyTimeout.get
+    if result.readyTimeoutMs <= 0:
       raise newException(ValueError,
-        "unsupported " & commandName & " flag: " & arg)
-    elif selection.selector.len == 0:
-      selection.selector = arg
-    else:
-      raise newException(ValueError,
-        "unexpected " & commandName & " argument: " & arg)
-    inc i
-  selection.resolveDevEnvSelection()
-  result.selection = selection
+        "--ready-timeout must be a positive number of milliseconds")
+  result.resolveDevSessionCommand()
 
 proc supervisorConfig(parsed: ParsedDevSessionCommand;
                       edge: DevEnvEdgeResult;
@@ -18505,6 +18368,7 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     lockSliceId: parsed.selection.lockSliceId,
     developOverridesPath: parsed.selection.developOverridesPath,
     httpBind: parsed.httpBind,
+    httpAllowRemote: parsed.httpAllowRemote,
     debounceMs: parsed.debounceMs)
 
 proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
@@ -18525,6 +18389,8 @@ proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
     "--http", config.httpBind,
     "--debounce-ms", $config.debounceMs
   ]
+  if config.httpAllowRemote:
+    result.add(AllowRemoteFlag)
   if config.foreground:
     result.add("--foreground")
 
@@ -20123,11 +19989,11 @@ proc releaseSharedServiceInstances(outDir: string): int =
     discard
   0
 
-proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
-                       mode: DevSessionMode): int =
+proc runUpOrDevCommand(parsed: ParsedDevSessionCommand;
+                       publicCliPath: string; mode: DevSessionMode): int =
+  ## ``repro up`` / ``repro dev``, from the typed configuration
+  ## ``devSessionStartOf`` read.
   let commandName = if mode == dsmDev: "dev" else: "up"
-  var parsed = parseDevSessionArgs(args, commandName,
-    acceptReadyTimeout = true, acceptReplace = true)
   if parsed.force and not parsed.replace:
     # REFUSED, not ignored, and this closes a silent drop that was
     # present at the base commit: `parseDevSessionArgs` set
@@ -20323,9 +20189,18 @@ proc namedDevSessionsForDown(selection: DevEnvCliSelection): seq[string] =
     result.add(hint & ": " & records.join(", "))
   result.sort()
 
-proc runDownCommand(args: openArray[string]): int =
-  let parsed = parseDevSessionArgs(args, "down", acceptReadyTimeout = false,
-    acceptStopTimeout = true)
+proc runDownCommand(conf: ReproCommandLineDown): int =
+  ## ``repro down [<selector>]``; its command line is parsed from repro's
+  ## description.
+  var parsed = devSessionCommandOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice)
+  parsed.force = conf.force
+  if conf.stopTimeout.isSome:
+    parsed.stopTimeoutMs = conf.stopTimeout.get
+    if parsed.stopTimeoutMs <= 0:
+      raise newException(ValueError,
+        "--stop-timeout must be a positive number of milliseconds")
+  parsed.resolveDevSessionCommand()
   if not parsed.activitySpecified:
     let namedSessions = namedDevSessionsForDown(parsed.selection)
     if namedSessions.len > 0:
@@ -20361,8 +20236,11 @@ proc runDownCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "dev session metadata is missing httpBind: " & metadataPath)
   try:
-    let response = httpRequest(httpBindValue, "/session/stop",
-      httpMethod = "POST")
+    # Authenticated with the token the session published the path of; a
+    # caller that cannot read it is refused here, by name, before any
+    # request is sent.
+    let response = controlRequest(controlClientFor(metadata),
+      "/session/stop", httpMethod = "POST")
     if response.status < 200 or response.status >= 300:
       raise newException(IOError,
         "session stop request failed with HTTP " & $response.status &
@@ -20484,6 +20362,7 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
     lockSliceId: valueAfterFlag(args, "--lock-slice"),
     developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
     httpBind: valueAfterFlag(args, "--http"),
+    httpAllowRemote: args.find(AllowRemoteFlag) >= 0,
     debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
   # W2 — a ``repro dev`` / ``repro up`` session starts services and runs
   # watch-cycle tasks in the activated environment, so it is an activation
@@ -20502,7 +20381,8 @@ proc runDevSessionHttpHelper(args: openArray[string]): int =
     sessionId: valueAfterFlag(args, "--session-id"),
     sessionDir: valueAfterFlag(args, "--session-dir"),
     host: valueAfterFlag(args, "--host"),
-    port: if portText.len > 0: parseInt(portText) else: 0))
+    port: if portText.len > 0: parseInt(portText) else: 0,
+    allowRemote: args.find(AllowRemoteFlag) >= 0))
 
 const
   DirenvManagedBlockId = "repro-dev-env-direnv"
@@ -20547,6 +20427,13 @@ const
     ## TC-8g — follows ``PreCommitGatePhaseArg`` as ``=1`` when the dispatcher
     ## is running as ``pre-commit.legacy`` under another hook manager, ``=0``
     ## otherwise.
+  PreCommitGateUnservicedRefusal* = "the certificate gate REFUSES this commit"
+    ## The verdict the certificate-gate phase prints when no ``repro`` it can
+    ## trust answered (a failed contract handshake, or none resolvable). It
+    ## refuses: a gate an unidentified build decides is not a gate.
+  PreCommitGateNotEvaluated* = "the certificate gate was not evaluated"
+    ## The same condition under a displaced dispatcher, where the gate is
+    ## advisory and the commit proceeds.
 
 type
   HookActionKind = enum
@@ -22239,9 +22126,10 @@ proc managedHookRefusalRecordName*(hookName: string): string =
   ##     timestamps can see which happened last, which is a question neither
   ##     of the other two shapes can answer at all.
   ##
-  ## Keyed BY HOOK because five hook types can refuse independently and the
-  ## four observational ones fail open while ``pre-push`` fails closed: one
-  ## shared file would be overwritten by whichever fired last and would lose
+  ## Keyed BY HOOK because five hook types can refuse independently, and the
+  ## observational ones fail open while ``pre-push`` (and ``pre-commit``'s
+  ## certificate-gate phase) fail closed: one shared file would be
+  ## overwritten by whichever fired last and would lose
   ## the one distinction that changes what the operator does.
   ##
   ## Four of the five hooks have no dispatch report to overwrite in any case
@@ -22403,7 +22291,7 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # dates are kept deliberately: the date moved while the finding did not, so
   # quoting only the first would date a defect that is still live.
   #
-  # Stderr alone cannot carry this. The four observational hooks exit 0, git
+  # Stderr alone cannot carry this. The observational hooks exit 0, git
   # relays their stderr to a terminal that may not exist (a CI step, an editor
   # subprocess, an agent harness — §1.6b measures that those are exactly the
   # shells in which the refusal happens), and nothing afterwards can be asked
@@ -22694,6 +22582,57 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("  echo \"repro hooks: " & hookName & " above was produced by " &
     "$REPRO_CMD (resolved from $REPRO_CMD_SOURCE).\" >&2\n")
   result.add("}\n\n")
+  if hookName == "pre-commit":
+    # The certificate-gate phase when no build it can trust answered: either
+    # the resolved `repro` failed the contract handshake (argument
+    # `resolved`), or none could be resolved at all (`unresolved`).
+    #
+    # It FAILS CLOSED, unlike the lock refresh before it. The two phases look
+    # alike and are opposite in kind. The refresh's one refusal (a pin moving
+    # backward) guards a write the refresh itself makes; under a mismatch it
+    # makes no write, so the commit carries the lock it already had and the
+    # pre-push gate still judges it — announcing and exiting 0 loses nothing.
+    # The gate phase writes nothing and exists only to refuse: under
+    # `commit_gate = required` an uncovered commit must not be recorded. A
+    # gate an unidentified build decides is not a gate (CLI/hooks.md
+    # §"Contract Handshake And Stand-Down", the rule `pre-push` already
+    # follows), and an ambiguous correctness failure fails closed
+    # (Failure-Semantics.md). The body cannot tell whether the branch's rule
+    # is `required`, `advisory` or absent — that is read by the very binary
+    # that did not answer — so it refuses whatever the rule would have said.
+    #
+    # Except when the dispatcher was displaced to `pre-commit.legacy`: there
+    # the gate is advisory in every case (it cannot know it ran last), so it
+    # says it was not evaluated and lets the commit through, exactly as an
+    # evaluated advisory gate would.
+    #
+    # Pinned by t_pre_commit_gate_refuses_when_its_repro_cannot_service_it.
+    result.add("repro_certificate_gate_unserviced() {\n")
+    result.add("  if [ \"$1\" = resolved ]; then\n")
+    result.add("    REPRO_GATE_WHO=\"the 'repro' it resolved, $REPRO_CMD " &
+      "(resolved from $REPRO_CMD_SOURCE), cannot service this hook\"\n")
+    result.add("  else\n")
+    result.add("    REPRO_GATE_WHO=\"no 'repro' could be resolved " &
+      "(REPROBUILD_REPRO names nothing executable, or none is on PATH)\"\n")
+    result.add("  fi\n")
+    result.add("  if [ \"$REPRO_HOOK_DISPLACED\" = 1 ]; then\n")
+    result.add("    echo \"repro hooks: pre-commit: " & PreCommitGateNotEvaluated &
+      ": $REPRO_GATE_WHO.\" >&2\n")
+    result.add("    echo \"repro hooks: This dispatcher runs as " &
+      "pre-commit.legacy, so the gate is advisory and the commit " &
+      "proceeds.\" >&2\n")
+    result.add("    exit 0\n")
+    result.add("  fi\n")
+    result.add("  echo \"repro hooks: pre-commit: " & PreCommitGateUnservicedRefusal &
+      ": $REPRO_GATE_WHO.\" >&2\n")
+    result.add("  echo \"repro hooks: A gate that cannot be evaluated does " &
+      "not pass: whether trusted certificates\" >&2\n")
+    result.add("  echo \"repro hooks: cover this commit was never decided. " &
+      "Make the repro this repository\" >&2\n")
+    result.add("  echo \"repro hooks: runs resolvable (refresh your shell, " &
+      "or set REPROBUILD_REPRO), then commit again.\" >&2\n")
+    result.add("  exit 1\n")
+    result.add("}\n\n")
   result.add("REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)\n")
   result.add("cd \"$REPO_ROOT\"\n")
   if hookName == "pre-commit":
@@ -22811,20 +22750,25 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       " || REPRO_STATUS=$?\n")
   else:
     # The non-blocking hooks announce and keep going: failing a commit after
-    # the fact would be worse than the mismatch being reported.
+    # the fact would be worse than the mismatch being reported. The one
+    # exception is `pre-commit`'s certificate-gate phase, which runs BEFORE
+    # the fact and exists to refuse; it fails closed (below).
     result.add("  REPRO_PROBE_STATUS=0\n")
     # Captured for the same reason as in `pre-push` above, and it matters MORE
-    # here: these four hooks exit 0, so the terminal is the only thing that
-    # ever saw the refusal and §1.6b measures that the shells which refuse are
-    # precisely the ones with no terminal attached.
+    # here: these hooks exit 0 (all but `pre-commit`'s gate phase), so the
+    # terminal is the only thing that ever saw the refusal, and §1.6b
+    # measures that the shells which refuse are precisely the ones with no
+    # terminal attached.
     result.add("  REPRO_PROBE_DIAGNOSTIC=$(\"$REPRO_CMD\" hooks protocol " &
       "--require=2 --hook-contract=" & hookContract & " 2>&1) || " &
       "REPRO_PROBE_STATUS=$?\n")
     result.add("  if [ \"$REPRO_PROBE_STATUS\" -ne 0 ]; then\n")
     if hookName == "pre-commit":
       # The refresh phase of this same commit has already printed (and
-      # recorded) the refusal; saying it twice per commit adds nothing.
-      result.add("    [ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
+      # recorded) the full refusal; the gate phase adds only its verdict,
+      # and that verdict refuses (see `repro_certificate_gate_unserviced`).
+      result.add("    [ \"$REPRO_HOOK_PHASE\" = refresh ] || " &
+        "repro_certificate_gate_unserviced resolved\n")
     result.add("    repro_contract_refusal\n")
     result.add("    exit 0\n")
     result.add("  fi\n")
@@ -22865,8 +22809,11 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("exit 1\n")
   else:
     if hookName == "pre-commit":
-      # Said once per commit, by the refresh phase.
-      result.add("[ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
+      # The "not found" notice is said once per commit, by the refresh
+      # phase; the gate phase refuses, for the reason given on
+      # `repro_certificate_gate_unserviced`.
+      result.add("[ \"$REPRO_HOOK_PHASE\" = refresh ] || " &
+        "repro_certificate_gate_unserviced unresolved\n")
     result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
       hookName & "\" >&2\n")
     result.add("exit 0\n")
@@ -24926,9 +24873,10 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # re-pin moves lock resolutions, never a constraint); or the recipe and the
     # locks are inconsistent (§16.3 H1 / H2). Nothing else this hook meets is a
     # reason to reject a developer's work: a dirty sibling skips the flake refresh
-    # (Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" says
-    # the lock must not be updated, not that the commit must be refused), and
-    # every other failure is a tooling fault, logged. The PUSH is where a stale
+    # (Nix-Flake-Coexistence.md §4 "Dirty siblings") and is pinned at its HEAD
+    # in `repro.lock` with a warning (§13.3, "Dirty siblings are recorded and
+    # said out loud"), neither of which refuses the commit, and every other
+    # failure is a tooling fault, logged. The PUSH is where a stale
     # pin is refused (NF-3, §13.5), because that is the boundary where a wrong
     # pin can reach somebody else.
     #
@@ -25929,14 +25877,25 @@ const
     "REPROBUILD_SOURCE_ROOT"
   ]
 
-  ## Well-known toolchain env vars that must also be forwarded to the daemon
-  ## when present in the user's shell. On Nix systems (especially macOS where
-  ## ``-liconv`` must resolve to ``libiconv`` from the Nix store) the cc-wrapper
-  ## consumes these to inject the correct ``-L``/``-isystem`` paths into clang/
-  ## ld invocations driven by cargo/rustc. Without forwarding, a daemon spawned
-  ## by launchd has none of them and cargo actions like
-  ## ``db-replay-server-cargo`` fail at the rustc link step. Values are NEVER
-  ## hardcoded; they are read live from the launching shell's environment.
+  ## The compiler-toolchain environment: variables that change what the
+  ## tools an action runs produce, and that a build REQUEST is therefore
+  ## authoritative over (``daemonWorkerEnvUnsets``). On Nix systems the
+  ## cc-wrapper consumes them to add ``-L``/``-isystem`` paths, rpaths and its
+  ## hardening flags to every clang/gcc/ld invocation (``NIX_HARDENING_ENABLE``
+  ## alone decides whether it adds ``-O2`` and ``_FORTIFY_SOURCE``).
+  ##
+  ## The request carries the caller's whole environment
+  ## (``daemonCarriedEnvironment``), so a value the caller has always reaches
+  ## the hosted build. What this list adds is the other direction: a value the
+  ## DAEMON was started with and the caller does not have is unset for the
+  ## build, so a daemon started from a ``nix develop`` shell does not compile
+  ## a later plain-shell caller's code with that shell's hardening, which
+  ## ``--daemon=off`` from the same shell would not.
+  ##
+  ## Every client before v0.2.0 forwarded exactly this list (plus
+  ## ``DaemonNixToolchainEnvPrefixes``) whenever the caller had a value, so
+  ## "absent from the request" means "absent from the caller" for clients of
+  ## every version, which is what makes the unset safe.
   DaemonNixToolchainEnvVars* = [
     # Nix cc-wrapper inputs — consumed by the wrapper to extend the underlying
     # clang/ld invocation with the correct -L/-isystem paths.
@@ -25978,12 +25937,15 @@ const
     "CARGO_NET_OFFLINE"
   ]
 
-  ## Env-var name prefixes forwarded wholesale. The cc-wrapper synthesizes
-  ## per-tuple variables of the form
-  ## ``NIX_LDFLAGS_<HOST>_<TARGET>``/``NIX_CFLAGS_COMPILE_<HOST>_<TARGET>`` /
-  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>`` whose suffixes vary by host
-  ## triple (e.g. ``aarch64_apple_darwin``). Forwarding them by prefix avoids
-  ## host-specific allowlist drift.
+  ## Name prefixes of the same toolchain environment. The cc-wrapper reads
+  ## per-target variables of the form ``NIX_CFLAGS_COMPILE_<triple>`` and
+  ## activates its roles through ``NIX_CC_WRAPPER_TARGET_HOST_<triple>`` /
+  ## ``NIX_BINTOOLS_WRAPPER_TARGET_HOST_<triple>``, whose suffixes vary by
+  ## host triple (e.g. ``aarch64_apple_darwin``). Matching them by prefix
+  ## avoids host-specific list drift. ``NIX_HARDENING_ENABLE_<triple>`` is
+  ## not matched: the wrapper derives it from ``NIX_HARDENING_ENABLE`` (in
+  ## ``DaemonNixToolchainEnvVars``) inside its own process, and a stdenv
+  ## shell exports only the unsuffixed name.
   DaemonNixToolchainEnvPrefixes* = [
     "NIX_LDFLAGS_",
     "NIX_CFLAGS_",
@@ -26041,13 +26003,30 @@ const DaemonRequestAuthoritativeEnvNames* =
   ## consults it, never one a project merely passes through to its actions.
 
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
-                            currentEnv: openArray[string]): seq[string] =
-  ## Variables the daemon process carries that the REQUEST does not, limited
-  ## to reprobuild's own control namespace
-  ## (``DaemonRequestAuthoritativeEnvPrefixes``) plus the few variables
-  ## outside it that reprobuild reads to pick a default
-  ## (``DaemonRequestAuthoritativeEnvNames``). The worker must unset these
-  ## before running a hosted build.
+                            currentEnv: openArray[string];
+                            requestEnvIsComplete = false): seq[string] =
+  ## Variables the daemon process carries that the REQUEST does not, which
+  ## the worker must unset before running a hosted build.
+  ##
+  ## A COMPLETE request (``environmentIsComplete``: the client sent its whole
+  ## environment, as every client since v0.2.0 does) is the caller's
+  ## environment, so every name it lacks is unset and the hosted build sees
+  ## exactly what a direct build from the same shell sees, which is what a
+  ## hosted build must be equivalent to. The curated rule below could not
+  ## deliver it: a daemon started from a ``nix develop`` shell also holds
+  ## ``CC``, ``CXX``, ``AR``, ``LD``, ``PKG_CONFIG``, the pkg-config
+  ## wrapper's role variable, ``CONFIG_SHELL``, ``SOURCE_DATE_EPOCH`` and
+  ## more, and no list of them stays complete. Names the daemon publishes for
+  ## its own builds (``RUNQUOTA_SOCKET``, the ``*_SRC`` roots) are
+  ## re-established by the build itself, as on the direct route.
+  ##
+  ## An INCOMPLETE request is overlaid, and only these names are unset:
+  ## reprobuild's own control namespace
+  ## (``DaemonRequestAuthoritativeEnvPrefixes``), the few variables outside
+  ## it that reprobuild reads to pick a default
+  ## (``DaemonRequestAuthoritativeEnvNames``), and the compiler-toolchain
+  ## environment (``DaemonNixToolchainEnvVars`` /
+  ## ``DaemonNixToolchainEnvPrefixes``).
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -26060,10 +26039,18 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
   ## a dependency chain; the same hole reaches action fingerprints and cache
   ## inputs, so the consequence is not only latency.
   ##
-  ## Scoped to the prefixes rather than the whole environment because a
-  ## request cannot distinguish "the client had no PATH" from "PATH was not
-  ## forwarded", and clearing the ambient environment of a build is a much
-  ## larger claim than making reprobuild's own knobs request-scoped.
+  ## The toolchain environment is in scope because it decides what an action
+  ## COMPILES, not just how the build is run: a daemon started from a
+  ## ``nix develop`` shell kept that shell's ``NIX_HARDENING_ENABLE``, so the
+  ## cc-wrapper added ``-O2`` and ``_FORTIFY_SOURCE`` to a later plain-shell
+  ## caller's daemon-hosted compiles while ``--daemon=off`` from the same
+  ## shell compiled at ``-O0``.
+  ##
+  ## The incomplete rule is scoped to these names rather than the whole
+  ## environment because a request from a client before v0.2.0 carried only
+  ## a curated list, so it cannot distinguish "the client had no PATH" from
+  ## "PATH was not forwarded". Every name added here was on that curated
+  ## list.
   var carried = initHashSet[string]()
   for item in requestEnv:
     let split = item.find('=')
@@ -26077,19 +26064,19 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
     let key = item[0 ..< split]
     if carried.contains(key):
       continue
-    if key in DaemonRequestAuthoritativeEnvNames:
+    if requestEnvIsComplete or
+        key in DaemonRequestAuthoritativeEnvNames or
+        key in DaemonNixToolchainEnvVars or
+        DaemonRequestAuthoritativeEnvPrefixes.anyIt(key.startsWith(it)) or
+        DaemonNixToolchainEnvPrefixes.anyIt(key.startsWith(it)):
       result.add(key)
-      continue
-    for prefix in DaemonRequestAuthoritativeEnvPrefixes:
-      if key.startsWith(prefix):
-        result.add(key)
-        break
 
 proc currentEnvironmentPairs*(): seq[string] =
   for key, value in envPairs():
     result.add(key & "=" & value)
 
-proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
+proc applyDaemonRequestEnvironment*(requestEnv: openArray[string];
+                                    requestEnvIsComplete = false):
     seq[tuple[key: string; value: string; present: bool]] =
   ## Install a request's environment for the duration of one hosted session
   ## and return the restore list, newest first is not required because every
@@ -26098,7 +26085,8 @@ proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
   ## The one funnel both the build and watch executors use, so the two cannot
   ## drift: a hole fixed for builds but not for watch cycles would reappear on
   ## the next `repro watch` that spawns the same actions.
-  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs()):
+  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs(),
+                                    requestEnvIsComplete):
     result.add((key: name, value: getEnv(name), present: existsEnv(name)))
     delEnv(name)
   for item in requestEnv:
@@ -28063,6 +28051,10 @@ proc devEnvProducerEdgesPossible*(projectRoot: string): bool =
 ##     build graph edge was declared. Typed schema import may use it; producer
 ##     materialization/splicing must not.
 
+proc workspaceKeepsNamesakeOutOfReach(selector, owner: string): bool
+  ## Forward declaration; defined beside ``usesDiscoveryCanReach``, whose
+  ## probes it shares.
+
 proc resolveProducerBinding*(selector: string;
                              workspaceRoot: string;
                              lock: LockedDependencies;
@@ -28114,8 +28106,21 @@ proc resolveProducerBinding*(selector: string;
   # 2. lock-pinned mode — consult sibling pins, not the consumer's own record.
   # The self row is bookkeeping and can name an earlier containing revision.
   # It does not turn a same-named archive or host tool into a source producer.
+  #
+  # Nor does a sibling pin that merely shares the selector's name: a pin is
+  # recorded under the REPO's name, and a workspace may keep a repo called
+  # ``nim`` at ``codetracer-nim`` while recipes declare the Nim tool with
+  # ``uses: "nim"``. When the workspace places the namesake where ``uses:``
+  # discovery from this consumer cannot reach it, the pin names that
+  # repository, not the tool (``workspaceKeepsNamesakeOutOfReach``;
+  # Unified-Locking-And-Hooks.md §14.3 "A lock pin named like a tool",
+  # reprobuild-pm issue 2026-11-15). Splicing it here is what failed the
+  # build with "cross-repo producer \"nim\" … declares no materialized
+  # executable".
   for dep in lock.deps:
     if dep.name == selector and not isSelfLockedDep(dep):
+      if workspaceKeepsNamesakeOutOfReach(selector, workspaceRoot):
+        break
       return ProducerBinding(
         selector: selector,
         kind: pbkLockPinned,
@@ -29323,7 +29328,8 @@ proc cachedProducerLockedDep(checkoutRoot, consumerRoot, pathBase: string;
   none(LockedDep)
 
 proc usesProducerLockedDep(selector, root, pathBase: string;
-                           existingDeps: seq[LockedDep]): Option[LockedDep] =
+                           existingDeps: seq[LockedDep];
+                           owners: seq[string] = @[]): Option[LockedDep] =
   ## FUP-M — resolve a recipe ``uses:`` producer SELECTOR to a locked sibling
   ## dependency so ``repro lock refresh`` carries the declared cross-repo
   ## producer edge in the committed lock (the bug: refresh previously dropped
@@ -29337,6 +29343,18 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
   ## forward unchanged, preserving pinned revisions during a refresh. A selector
   ## that names NO workspace producer — a plain toolchain/host ``uses:`` such as
   ## ``nim`` / ``gcc`` — yields ``none`` and is not locked.
+  ##
+  ## The carry-forward matches a pin to the selector by NAME, and a pin is
+  ## recorded under the repo's name, so it is withheld when the pinned repo
+  ## is not what the selector can mean: the workspace keeps a repo of that
+  ## name where ``uses:`` discovery from none of ``owners`` (the recipes that
+  ## declare the selector; ``root`` when none is given) reaches it
+  ## (``workspaceKeepsNamesakeOutOfReach``). That is a ``nim`` repo kept at
+  ## ``codetracer-nim`` beside a recipe's ``uses: "nim"``: carrying its pin
+  ## forward kept a pin no recipe derives in the lock for good, and the
+  ## pre-push set check, which derives through this writer, called it
+  ## current (Unified-Locking-And-Hooks.md §14.3 "A lock pin named like a
+  ## tool"; reprobuild-pm issue 2026-11-15).
   if selector.len == 0: return none(LockedDep)
   let srcRoot =
     try: discoverProducerSourceRoot(selector, root)
@@ -29360,6 +29378,12 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
   # Not discoverable on disk — carry an existing VCS lock pin forward if present.
   for d in existingDeps:
     if d.name == selector and d.coordinates.kind == ckVcs:
+      var namesakeOnly = true
+      for owner in (if owners.len > 0: owners else: @[root]):
+        if not workspaceKeepsNamesakeOutOfReach(selector, owner):
+          namesakeOnly = false
+          break
+      if namesakeOnly: return none(LockedDep)
       return some(d)
   none(LockedDep)
 
@@ -29952,7 +29976,12 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if selector in seenNames:
       selectorEntry[selector] = selector
       continue
-    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
+    var owners: seq[string] = @[]
+    for edge in usesEdges:
+      if edge.selector == selector and edge.owner notin owners:
+        owners.add(edge.owner)
+    let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps,
+      owners)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     let key = observedKey(dep.path)
@@ -31163,6 +31192,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonBuildEnvironment(),
+      environmentIsComplete: true,
       attached: true,
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
@@ -33662,6 +33692,66 @@ proc projectCleanSnapshotStores(buildRoot: string): seq[string] =
         result.add(variantDir)
   result.sort()
 
+proc cleanContainerOutputs(action: BuildActionDef): seq[string] =
+  ## The declared outputs of the DSL action ``action`` that are CONTAINER
+  ## directories: a directory the action declares only to say it exists,
+  ## while other writers fill it (Incremental-Invalidation.md §"Non-regular
+  ## outputs", "Container directory outputs"). ``fs.ensureDir``'s one output,
+  ## and the output root of ``fs.preserveTree``.
+  ##
+  ## This is the twin, over the provider payload a snapshot stores, of
+  ## ``repro_build_engine.containerDirectoryOutputs``, which classifies the
+  ## LOWERED action for the revalidation and restore paths. Both read the
+  ## action's built-in kind; keep them in step. The paths are returned as the
+  ## action spells them, which is how the provider spells the action's
+  ## owned-effect claims (``runtime_provider``).
+  if action.call.packageName != "reprobuild.builtin" or
+      action.call.executableName != "fs":
+    return
+  case action.call.subcommand
+  of "ensureDir":
+    if action.outputs.len == 1:
+      result.add(action.outputs[0])
+  of "preserveTree":
+    for arg in action.call.arguments:
+      if arg.name == "outputRoot" and arg.encodedValue.len > 0:
+        result.add(arg.encodedValue)
+  else:
+    discard
+
+proc classifyContainerClaims(snapshot: var ProviderGraphSnapshot) =
+  ## Mark the owned-effect claims of ``snapshot`` that name a CONTAINER
+  ## directory output as ``oekDirectory``, so that ``repro clean`` removes the
+  ## container only once its members are gone and nothing else is left in it,
+  ## instead of deleting its tree with every other writer's output and every
+  ## user file in it (clean.md §"Ownership Records").
+  ##
+  ## The provider claims every declared output as ``oekFile``. The
+  ## classification comes from the ACTION, not from the record
+  ## (Incremental-Invalidation.md §"Non-regular outputs"): each fragment's
+  ## action nodes carry the provider payload, and a claim names its producing
+  ## action in ``payload``. Deciding it here, when the snapshot is read,
+  ## covers snapshots that older builds wrote as well. A node whose payload
+  ## does not decode leaves its claims as they are.
+  for fragment in snapshot.fragments.mitems:
+    var containers: seq[(string, string)]   # (action id, normalized path)
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      var action: BuildActionDef
+      try:
+        action = decodeBuildActionPayload(toBytes(node.payload))
+      except CatchableError:
+        continue
+      for path in cleanContainerOutputs(action):
+        containers.add((action.id, os.normalizedPath(path)))
+    if containers.len == 0:
+      continue
+    for claim in fragment.effectClaims.mitems:
+      if claim.kind == oekFile and
+          (claim.payload, os.normalizedPath(claim.identity)) in containers:
+        claim.kind = oekDirectory
+
 proc runCleanCommand(args: openArray[string]): int =
   ## ``repro clean``: remove the materialised outputs the project's build
   ## state records as its own.
@@ -33672,7 +33762,8 @@ proc runCleanCommand(args: openArray[string]): int =
   ## executor that prunes the outputs of a vanished edge
   ## (``applyProjectClean``). The snapshots, the action cache, the content
   ## store, ``.repro/stats/`` and every unclaimed file stay, so the next build
-  ## still reuses the cache.
+  ## still reuses the cache. A container directory output is removed only once
+  ## it is empty (``classifyContainerClaims``).
   ##
   ## Exit 0 when every deletable output is gone (or, with ``--dry-run``, was
   ## listed), 1 when a deletion failed, 2 on a usage error.
@@ -33705,7 +33796,9 @@ proc runCleanCommand(args: openArray[string]): int =
   var snapshots: seq[ProviderGraphSnapshot]
   for buildRoot in projectCleanBuildRoots(projectRoot, workRoot):
     for store in projectCleanSnapshotStores(buildRoot):
-      snapshots.add(loadProviderGraphSnapshot(store))
+      var snapshot = loadProviderGraphSnapshot(store)
+      classifyContainerClaims(snapshot)
+      snapshots.add(snapshot)
 
   let res = applyProjectClean(snapshots, projectRoot, dryRun = dryRun)
   for act in res.actions:
@@ -34682,34 +34775,11 @@ proc renderLoweredGraphRecordText(record: LoweredGraphCacheRecord): string =
       " command=" & commandDisplay(action))
   lines.join("\n")
 
-proc runDebugArtifactCommand(args: openArray[string]): int =
-  var path = ""
-  var format = gofText
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--json":
-      format = gofJson
-      inc i
-    elif arg.startsWith("--format="):
-      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
-        allowDot = false)
-      inc i
-    elif arg == "--format":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--format requires a value")
-      format = parseGraphOutputFormat(args[i + 1], allowDot = false)
-      inc i, 2
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported debug artifact flag: " & arg)
-    elif path.len == 0:
-      path = arg
-      inc i
-    else:
-      raise newException(ValueError,
-        "unexpected debug artifact argument: " & arg)
-  if path.len == 0:
-    raise newException(ValueError, "debug artifact requires a path")
+proc runDebugArtifactCommand(c: ReproCommandLineDebugArtifact): int =
+  ## ``repro debug artifact <path> [--format text|json] [--json]``; as for
+  ## `graph` and `why`, `--format` wins over `--json`.
+  let path = c.path
+  let format = inspectionFormat(c.format, c.json, allowDot = false)
   let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
   case format
   of gofText:
@@ -36088,6 +36158,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonWatchEnvironment(),
+      environmentIsComplete: true,
       attached: not detach,
       detached: detach,
       cancelOnDisconnect: not detach,
@@ -39489,7 +39560,15 @@ proc runStoreDaemonCommand(conf: ReproCommandLineStoreDaemon): int =
       echo renderStatus(status)
       return 0
     of ReproCommandLineStoreDaemonCommand.status:
-      echo renderStatus(queryDevStatus(config.endpoint))
+      # An endpoint another account holds is reported as such and fails;
+      # it is never "not-running" (reprobuild-pm
+      # spec/Store-Daemon-And-Multi-User-Coordination.md, "A client
+      # authenticates the daemon").
+      try:
+        echo renderStatus(queryDevStatus(config.endpoint))
+      except StoreDaemonEndpointRefused as err:
+        echo renderRefusedStatus(config.endpoint, err.msg)
+        return 1
       return 0
     of ReproCommandLineStoreDaemonCommand.stop:
       let status = queryDevStatus(config.endpoint)
@@ -39679,7 +39758,7 @@ proc runStoreCommand*(conf: ReproCommandLineStore): int =
       resolveActionCacheRoot: proc (explicit: string): string =
         resolveActionCacheRoot(explicit),
       allowProject: proc (projectRoot: string): int =
-        runReproAllowCommand([projectRoot])))
+        runReproAllowCommand(projectRoot)))
   of ReproCommandLineStoreCommand.materialize:
     let m = conf.materialize
     let srcDir = m.srcDir
@@ -40207,48 +40286,6 @@ proc runLaunchPlanCommand*(conf: ReproCommandLineLaunchPlan): int =
       return 1
 
 
-type
-  HcrCoordinateArgs = object
-    project: string
-    target: string
-    socketPath: string
-    sourceEditDriver: string
-    artifacts: string
-    patchFunction: string
-
-proc parseHcrCoordinateArgs(args: seq[string]): HcrCoordinateArgs =
-  result.patchFunction = "reprobuild_hcr_patchable_value"
-  var index = 0
-  while index < args.len:
-    let arg = args[index]
-    proc valueFor(flag: string): string =
-      let prefix = flag & "="
-      if arg.startsWith(prefix):
-        return arg[prefix.len .. ^1]
-      if arg == flag:
-        if index + 1 >= args.len:
-          raise newException(ValueError, flag & " requires a value")
-        index.inc
-        return args[index]
-      raise newException(ValueError, "internal HCR argument parse error")
-
-    if arg == "--project" or arg.startsWith("--project="):
-      result.project = valueFor("--project")
-    elif arg == "--target" or arg.startsWith("--target="):
-      result.target = valueFor("--target")
-    elif arg == "--socket" or arg.startsWith("--socket="):
-      result.socketPath = valueFor("--socket")
-    elif arg == "--source-edit-driver" or
-        arg.startsWith("--source-edit-driver="):
-      result.sourceEditDriver = valueFor("--source-edit-driver")
-    elif arg == "--artifacts" or arg.startsWith("--artifacts="):
-      result.artifacts = valueFor("--artifacts")
-    elif arg == "--patch-function" or arg.startsWith("--patch-function="):
-      result.patchFunction = valueFor("--patch-function")
-    else:
-      raise newException(ValueError, "unsupported HCR coordinate flag: " & arg)
-    index.inc
-
 proc requireHcrArg(value, name: string) =
   if value.len == 0:
     raise newException(ValueError, name & " is required")
@@ -40279,44 +40316,6 @@ proc runHcrBuildCycle(project, target, logPath: string): string =
       "repro build failed during HCR coordination with exit code " &
         $res.exitCode & "\n" & res.output)
 
-type HcrPrepareObjectArgs = object
-  input: string
-  output: string
-  functionName: string
-  segmentName: string
-  allCodeSections: bool
-
-proc parseHcrPrepareObjectArgs(args: seq[string]): HcrPrepareObjectArgs =
-  result.segmentName = "__HCR"
-  var index = 0
-  proc valueFor(name: string): string =
-    let arg = args[index]
-    let prefix = name & "="
-    if arg.startsWith(prefix):
-      arg[prefix.len .. ^1]
-    else:
-      index.inc
-      if index >= args.len:
-        raise newException(ValueError, name & " requires a value")
-      args[index]
-
-  while index < args.len:
-    let arg = args[index]
-    if arg == "--input" or arg.startsWith("--input="):
-      result.input = valueFor("--input")
-    elif arg == "--output" or arg.startsWith("--output="):
-      result.output = valueFor("--output")
-    elif arg == "--function" or arg.startsWith("--function="):
-      result.functionName = valueFor("--function")
-    elif arg == "--all-code":
-      result.allCodeSections = true
-    elif arg == "--segment" or arg.startsWith("--segment="):
-      result.segmentName = valueFor("--segment")
-    else:
-      raise newException(ValueError,
-        "unsupported HCR prepare-object flag: " & arg)
-    index.inc
-
 proc objectFileIsElf(path: string): bool =
   ## Decide by the file's own magic, not by the host. A coordinator can be
   ## handed either object format on either host, and `prepare-object`'s whole
@@ -40329,8 +40328,13 @@ proc objectFileIsElf(path: string): bool =
   let read = handle.readBuffer(addr header[0], 4)
   read == 4 and header[0] == '\x7F' and header[1 .. 3] == "ELF"
 
-proc runHcrPrepareObjectCommand(args: seq[string]): int =
-  let parsed = parseHcrPrepareObjectArgs(args)
+proc runHcrPrepareObjectCommand(conf: ReproCommandLineHcrPrepareObject):
+    int =
+  ## ``repro hcr prepare-object``; its command line is parsed from repro's
+  ## description (``--segment`` defaults to ``__HCR`` there).
+  let parsed = (input: conf.input, output: conf.output,
+    functionName: conf.function, allCodeSections: conf.allCode,
+    segmentName: conf.segment)
   requireHcrFile(parsed.input, "--input")
   requireHcrArg(parsed.output, "--output")
   if parsed.functionName.len == 0 and not parsed.allCodeSections:
@@ -40400,22 +40404,13 @@ proc runHcrPrepareObjectCommand(args: seq[string]): int =
       " function=" & parsed.functionName & " segment=" & parsed.segmentName
   0
 
-proc runHcrCoordinateCommand(args: seq[string]): int =
-  if args.len == 0:
-    stderr.writeLine(
-      "repro hcr coordinate --project PATH --target NAME --socket PATH " &
-      "--source-edit-driver PATH --artifacts PATH\n" &
-      "repro hcr prepare-object --input PATH --output PATH " &
-      "(--function NAME|--all-code) " &
-      "[--segment NAME]")
-    return 2
-  if args[0] == "prepare-object":
-    return runHcrPrepareObjectCommand(args[1 .. ^1])
-  if args[0] != "coordinate":
-    stderr.writeLine("repro hcr: unknown subcommand: " & args[0])
-    return 2
-
-  var parsed = parseHcrCoordinateArgs(args[1 .. ^1])
+proc runHcrCoordinateCommand(conf: ReproCommandLineHcrCoordinate): int =
+  ## ``repro hcr coordinate``; its command line is parsed from repro's
+  ## description (``--patch-function`` defaults to
+  ## ``reprobuild_hcr_patchable_value`` there).
+  let parsed = (project: conf.project, target: conf.target,
+    socketPath: conf.socket, sourceEditDriver: conf.sourceEditDriver,
+    artifacts: conf.artifacts, patchFunction: conf.patchFunction)
   requireHcrDir(parsed.project, "--project")
   requireHcrArg(parsed.target, "--target")
   requireHcrArg(parsed.socketPath, "--socket")
@@ -40773,7 +40768,8 @@ proc installUserDaemonBuildExecutor() =
       # merely overlaid on it -- see `daemonWorkerEnvUnsets` for what an
       # overlay let through and what it cost.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # RE-SEED THE EMBEDDED SOURCE ROOTS AFTER THE REQUEST IS INSTALLED, so
       # a hosted build does not depend on WHICH CLIENT sent it.
       #
@@ -40922,7 +40918,8 @@ proc installUserDaemonWatchExecutor() =
       # must enforce the same private-environment boundary, including the
       # request's authority over reprobuild's own namespace.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # Same re-seed as the build executor, for the reason its comment gives:
       # a hole closed for builds and left open for watch cycles reappears on
       # the next `repro watch` that spawns the same actions.
@@ -50426,9 +50423,12 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     # at the declared previous path was RELOCATED, which is the single
     # outcome this check exists to prevent.
     #
-    # So the move requires URL evidence (or a checkout with no remote at all,
-    # which has no URL to disagree with and leans entirely on the
-    # shared-object half below).
+    # So the move requires URL evidence. A checkout with NO remote is refused
+    # too (below): it has no URL to agree with, so accepting it would leave the
+    # verdict resting on the shared-object half alone, and an unrelated,
+    # never-published repository holding a byte-identical empty file or stock
+    # LICENSE would be moved (reprobuild-pm Declared-Repository-Renames.md
+    # §3.3a).
     if agreement.verdict == raPinnedRevision:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
         "the checkout at '" & prior.path & "' has remote URL(s) " &
@@ -50441,6 +50441,17 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
           "it cannot authorise moving the directory. Point its remote at one " &
           "of the accepted URLs if it really is '" & repo.name &
           "', or move it aside. Nothing was moved.")
+      continue
+    if agreement.verdict == raNoRemotes:
+      result[repoIdx] = relocationRefusal("previous_remote_mismatch",
+        "the checkout at '" & prior.path & "' has no remote configured, so " &
+          "nothing identifies it as '" & repo.name & "': a move needs its " &
+          "remote URL to match the URL this fragment resolves to or one " &
+          "derived from a declared previous identity (accepted URLs are " &
+          agreement.acceptedUrls.join(", ") & "). If it really is '" &
+          repo.name & "', run `git -C " & prior.path &
+          " remote add origin <url>` with one of them and re-run; otherwise " &
+          "move it aside. Nothing was moved.")
       continue
     if agreement.verdict == raCaseOnly:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
@@ -50549,6 +50560,11 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         # rewrites commits and trees but carries BLOBS across, so blob
         # presence survives a rewrite where every commit id does not. This
         # fallback is the whole reason the renamed-AND-rewritten case works.
+        #
+        # The sample holds DISTINCTIVE blobs only and a quorum of them must be
+        # present (`sampleBlobIds`, `blobSampleSatisfied`): the empty blob, a
+        # stock LICENSE or a template `.gitignore` are shared by unrelated
+        # repositories, and finding one says nothing about lineage.
         let sample = sampleBlobIds(probe, tipRepo, tipRef)
         var present = 0
         var firstPresent = ""
@@ -50557,20 +50573,27 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
             inc present
             if firstPresent.len == 0:
               firstPresent = oid
-        if present > 0:
+        let required = min(relocationBlobQuorum, sample.len)
+        if blobSampleSatisfied(present, sample.len):
           sharedEvidence = $present & "/" & $sample.len &
             " sampled blob(s) from " & tipRef[0 ..< min(12, tipRef.len)] &
-            " present in the candidate (first: " &
+            " present in the candidate (distinctive blobs only, " &
+            $required & " required; first: " &
             firstPresent[0 ..< min(12, firstPresent.len)] & ")"
         else:
           result[repoIdx] = relocationRefusal("no_shared_history",
             "the checkout at '" & prior.path &
-              "' has a matching remote, but shares no object with '" &
+              "' has a matching remote, but no evidence of shared history with '" &
               repo.name & "' as published at " & newCloneUrl &
               ": merge-base(HEAD " &
               (if candidateHead.len > 0: candidateHead else: "<none>") &
-              ", tip " & tipRef & ") is empty AND none of " & $sample.len &
-              " sampled blob(s) from that tip is present. Evidence was read " &
+              ", tip " & tipRef & ") is empty AND only " & $present & " of " &
+              $sample.len & " sampled blob(s) from that tip is present " &
+              "(distinctive blobs only; required: " & $max(required, 1) & ")" &
+              (if sample.len == 0: " (the tip has no distinctive blob: " &
+                "empty, very short, licence and template files are not " &
+                "evidence of shared history)" else: "") &
+              ". Evidence was read " &
               "from " & evidenceSource &
               ". Nothing was moved and nothing was cloned over it.")
           continue
@@ -50587,9 +50610,6 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
 
     let identityEvidence = "remote agreement via " &
       (case agreement.verdict
-       of raNoRemotes:
-         "no remotes configured in the candidate (so this verdict rests " &
-           "entirely on the shared object below)"
        of raCurrentUrl: "the current URL (" & agreement.foundUrl & ")"
        of raPreviousUrl: "a declared previous URL (" & agreement.foundUrl & ")"
        else: "an accepted URL") &
@@ -60642,13 +60662,15 @@ proc explicitDevelopOverrideTargets(workspaceRoot, repoRoot: string):
         " could not be read (" & err.msg & ")")
 
 proc reproNimDeclaresExactUses(root: string): bool =
-  ## Does ``<root>/repro.nim`` state any unconditional exact `uses:` version?
-  ## The cheap question asked before anything resolves a workspace.
+  ## Does ``<root>/repro.nim`` state any exact `uses:` version? The cheap
+  ## question asked before anything resolves a workspace, so it does not ask
+  ## whether a conditional one applies to the lock: ``reproRepinVerdict``
+  ## decides that, per dependency, against the lock (§16.3 H1).
   let path = root / "repro.nim"
   if not fileExists(extendedPath(path)): return false
   try:
     for d in scanReproUsesDeclarations(readFile(extendedPath(path)), path):
-      if not d.conditional and d.constraint.kind == uckExact: return true
+      if d.constraint.kind == uckExact: return true
   except CatchableError:
     discard
   false
@@ -62659,11 +62681,13 @@ proc preCommitConsistencyOutsideWorkspace(repoRoot: string): int =
     return 0
   for d in consistency.diagnostics:
     stderr.writeLine("repro pre-commit: note: " & d)
-  if not consistency.hasViolations:
-    return 0
+  # Listed whatever the verdict: a constraint the check could not evaluate is
+  # neither a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3).
   for n in consistency.notChecked:
     stderr.writeLine("repro pre-commit: note: recipe/lock consistency not " &
       "checked: " & n)
+  if not consistency.hasViolations:
+    return 0
   stderr.writeLine("repro pre-commit: commit REFUSED: the recipe and the " &
     "locks this commit carries are inconsistent; nothing was written or " &
     "staged.")
@@ -63780,7 +63804,19 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
     result.add("repro check: lock update FAILED: " &
       report.lockUpdate.diagnostic)
   if report.exitCode == 0 and report.failures.len == 0:
-    result.add("repro check: OK")
+    # A recipe constraint the consistency check could not evaluate is neither
+    # a pass nor a refusal (Unified-Locking-And-Hooks.md §16.3), so the
+    # verdict line must not read as if every constraint had been checked.
+    var notChecked = 0
+    for notice in report.notices:
+      if notice.startsWith(ConsistencyNotCheckedNotice): inc notChecked
+    if notChecked == 0:
+      result.add("repro check: OK")
+    else:
+      result.add("repro check: OK, except that " & $notChecked &
+        " recipe constraint" & (if notChecked == 1: " was" else: "s were") &
+        " not checked against the lock (listed above as `" &
+        ConsistencyNotCheckedNotice.strip() & "`)")
 
 type
   CheckArgs* = object
@@ -65455,8 +65491,18 @@ type
     keys*: seq[RegisteredKey]
 
 const
-  registeredKeysSchemaV1* = "reprobuild.registered-keys.v1"
-    ## ``schema`` value the registered-keys store file carries.
+  registeredKeysSchemaV1* = "registered-keys.v1"
+    ## ``schema`` value the registered-keys store file carries: the id the
+    ## test-certificate standard fixes for a registered-key store
+    ## (test-certificates-spec, Verification.md §3.1 "Key stores",
+    ## https://github.com/metacraft-labs/test-certificates-spec/blob/latest/Verification.md#31-key-stores).
+    ## A conforming verifier rejects a store under any other id, so a store
+    ## written under one is not a store another implementation can read.
+    ##
+    ## Stores reprobuild wrote before it used the standard's id carry
+    ## ``reprobuild.registered-keys.v1``. ``parseRegisteredKeyStoreStrict``
+    ## does not consult ``schema``, so those stores keep reading with the same
+    ## signers and need no migration; the next write records the standard id.
 
 proc resolveSigner*(store: RegisteredKeyStore;
                     keyId: string): tuple[found: bool; publicKey: string;
@@ -65509,13 +65555,16 @@ proc serializeRegisteredKeyStore*(store: RegisteredKeyStore): string =
 proc registeredKeyStorePath*(workspaceRoot: string): string =
   ## Where the allowed-signers store lives for a workspace. CI / the server
   ## owns this set (Test-Certificates.md: "CI/server registers trusted public
-  ## keys"); we colocate it with the workspace's daemon-owned ``.repo`` tree so
-  ## both the issuance path and the pre-push gate read the SAME registry.
+  ## keys"); we colocate it with the workspace's daemon-owned
+  ## ``.repro/workspace/`` tree so both the issuance path and the pre-push
+  ## gate read the SAME registry.
   workspaceRoot / ".repro" / "workspace" / "certificates" / "registered-keys.toml"
 
 proc parseRegisteredKeyStoreStrict*(content: string): RegisteredKeyStore =
   ## STRICT reader: raises ``ValueError`` on content that is not well-formed
-  ## TOML in the store's shape.
+  ## TOML in the store's shape. ``schema`` is not consulted, so a store
+  ## written under the earlier ``reprobuild.registered-keys.v1`` id still
+  ## reads (see ``registeredKeysSchemaV1``).
   ##
   ## Strictness is the whole point. A tolerant reader turns a CORRUPT store
   ## into an EMPTY one, and an empty store is fail-closed — so the operator is
@@ -65623,7 +65672,7 @@ proc reproSigningKeyPath*(workspaceRoot: string): string =
   ##      privileged ``reprostored`` (or a remote signer) would hand the signing
   ##      capability to the issuance step WITHOUT the key ever being readable by
   ##      the unprivileged agent. Tests set it to a hermetic key.
-  ##   2. Otherwise a workspace-local daemon key under ``.repo/workspace/
+  ##   2. Otherwise a workspace-local daemon key under ``.repro/workspace/
   ##      certificates/signing-key`` (the colocated daemon-state default).
   ## DEFER-TC5-PRIV-DAEMON: in this implementation the key at either location
   ## is a plain file readable by whoever runs issuance; standing up the actual
@@ -68071,7 +68120,7 @@ type
   GatewayConfig* = object
     ## The daemon-owned configuration the gateway bare repo carries: where the
     ## lock a certificate is checked against lives, the registered-keys
-    ## (allowed-signers) store, and the real upstream the ``post-receive``
+    ## (allowed-signers) store, and the real upstream the ``pre-receive``
     ## forwards a verified push to. It is written by ``wirePushGateway`` and
     ## read by the hooks.
     ##
@@ -68100,7 +68149,8 @@ type
       ## ``pre-receive`` reads it to verify each cert's signature.
     upstreamUrl*: string
       ## The real upstream (a second bare repo standing in for GitHub) the
-      ## ``post-receive`` forwards the push to on success.
+      ## ``pre-receive`` forwards an accepted push to, before the gateway's
+      ## own refs move (so an upstream refusal rejects the push).
     # TC-8c (operator decision D12): there is no certificate-store setting.
     # The gateway reads certificates ONLY from the notes that arrive with the
     # push; its former read of ``.repro/workspace/certificates`` is gone and
@@ -68247,8 +68297,9 @@ proc wirePushGateway*(gitBin, repoPath, gatewayBareDir, upstreamUrl: string;
   ## upstream. Concretely:
   ##   1. ``git init --bare`` the gateway if absent.
   ##   2. Install the gateway's ``pre-receive`` + ``post-receive`` hooks.
-  ##   3. Write the daemon-owned ``GatewayConfig`` (policy + lock + registered
-  ##      keys + the real upstream to forward to) under the bare dir.
+  ##   3. Write the daemon-owned ``GatewayConfig`` (lock records dir +
+  ##      registered keys + the real upstream to forward to; no policy, TC-9d)
+  ##      under the bare dir.
   ##   4. Set ``remote.<remoteName>.pushurl`` of ``repoPath`` to the gateway bare,
   ##      while ``remote.<remoteName>.url`` (FETCH) stays the real upstream — so the
   ##      developer still fetches from upstream but PUSHES through the gateway.
@@ -71513,7 +71564,7 @@ proc executeCheckPrePush(parsed: CheckArgs;
     for d in consistency.diagnostics: result.notices.add(d)
     # What the check could not evaluate is named, not left to read as a pass.
     for n in consistency.notChecked:
-      result.notices.add("recipe/lock consistency not checked: " & n)
+      result.notices.add(ConsistencyNotCheckedNotice & n)
     # §16.6 — wording only; the verdict below is already fixed by the check.
     if consistency.hasViolations:
       annotateSiblingGuidance(parsed.currentRepo, consistency.violations)
@@ -77353,31 +77404,16 @@ type
       ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
       ## each with the URL ``--fix`` re-creates its pool from.
 
-proc parseHealthArgs(args: openArray[string]): HealthArgs =
+proc healthArgsOf(c: ReproCommandLineHealth): HealthArgs =
+  ## What `repro health` was given, from its configuration object (repro's
+  ## description, `repro_cli_support/cli_description`).
   result.forgeCache = newRepositoryIdentityCache()
-  result.workspaceRoot = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--offline":
-      result.offline = true
-    elif arg == "--fix":
-      result.fix = true
-    elif arg == "--verbose" or arg == "-v":
-      result.verbose = true
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro health` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro health`: " & arg)
-    inc i
+  result.workspaceRoot = c.workspaceRoot
+  result.json = c.json
+  result.offline = c.offline
+  result.fix = c.fix
+  result.verbose = c.verbose
+  result.projectName = c.project
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -78891,8 +78927,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       proc staleDetailFor(full: bool): string =
         $stale.len & " managed hook(s) STALE — present, carrying " &
           "every marker a generated body carries, and demanding a contract " &
-          "THIS build does not generate, so each fire refuses (pre-push) or " &
-          "fails open in silence (the four observational hooks): " &
+          "THIS build does not generate, so each fire refuses (pre-push, " &
+          "and pre-commit's certificate gate where one is installed) or " &
+          "fails open in silence (the observational hooks): " &
           (if full: stale.join(", ")
            else: formatFindingList(stale, parsed.verbose)) & ". " & census &
           (if writers.len > 0:
@@ -80232,17 +80269,14 @@ proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
     result.add("fix: could NOT migrate the workspace state file: " &
       getCurrentExceptionMsg())
 
-proc runHealthCommand*(args: openArray[string]): int =
-  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--offline]``.
+proc runHealthCommand*(c: ReproCommandLineHealth): int =
+  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json]
+  ## [--offline] [--verbose]``.
   ##
   ## Diagnose every layer and pair each failure with the exact remedy
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
-  if "--help" in args or "-h" in args:
-    stdout.writeLine("Usage: repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--verbose] [--offline]")
-    stdout.writeLine("  --offline  Skip forge identity API probes; other checks retain their existing fetch behavior.")
-    return 0
-  let parsed = parseHealthArgs(args)
+  let parsed = healthArgsOf(c)
   let stateFixActions =
     if parsed.fix: applyStateFileMigrationFix(parsed.workspaceRoot)
     else: @[]
@@ -92684,30 +92718,53 @@ type UnreachedDevelopSibling = object
     ## committed lock then knows it, and `repro sync` / `repro ws enable` act
     ## on declared repos only, so the usual remedy cannot work.
 
+proc workspaceDeclaredCheckout(projectDir, name: string):
+    tuple[inWorkspace, declared: bool; checkout: string] =
+  ## Where the workspace enclosing ``projectDir`` keeps the repo it declares
+  ## as ``name`` — its resolved membership first, then any ``repos/*.toml``
+  ## fragment, enabled or not, the precedence ``declaredDevelopSet`` uses —
+  ## as an absolute, normalized checkout path. ``inWorkspace`` is false when
+  ## ``projectDir`` is in no resolved workspace (then nothing is declared);
+  ## ``declared`` is false when the workspace names no such repo.
+  let membership = manifestMembershipOf(projectDir)
+  if not membership.resolved: return (false, false, "")
+  result.inWorkspace = true
+  proc at(path: string): string =
+    os.normalizedPath(absolutePath(membership.workspaceRoot / path))
+  for r in membership.repos:
+    if r.name == name:
+      return (true, true, at(if r.path.len > 0: r.path else: name))
+  let fragments = manifestsRoot(membership.workspaceRoot) / "repos"
+  if dirExists(extendedPath(fragments)):
+    for file in walkFiles(fragments / "*.toml"):
+      var fragment: RepoFragment
+      try: fragment = readRepoFragment(file)
+      except CatchableError: continue
+      if fragment.repo.name == name:
+        let path =
+          if fragment.repo.path.len > 0: fragment.repo.path else: name
+        return (true, true, at(path))
+
 proc workspaceDeclaresRepo(projectDir, name: string): bool =
   ## Whether the workspace enclosing ``projectDir`` declares a repo called
   ## ``name`` (resolved membership or any ``repos/*.toml`` fragment, enabled
   ## or not). True outside a workspace: with no manifests there is nothing
   ## whose absence could be reported.
-  let membership = manifestMembershipOf(projectDir)
-  if not membership.resolved: return true
-  for r in membership.repos:
-    if r.name == name: return true
-  let fragments = manifestsRoot(membership.workspaceRoot) / "repos"
-  if dirExists(extendedPath(fragments)):
-    for file in walkFiles(fragments / "*.toml"):
-      try:
-        if readRepoFragment(file).repo.name == name: return true
-      except CatchableError: continue
-  false
+  let declaration = workspaceDeclaredCheckout(projectDir, name)
+  declaration.declared or not declaration.inWorkspace
 
-type DevelopSetMember = tuple[name, checkout: string; lockRecorded: bool]
+type DevelopSetMember = tuple[name, checkout: string;
+    lockRecorded, workspaceDeclared: bool]
   ## One repo ``declaredDevelopSet`` names. ``lockRecorded``: the committed
   ## lock pins it, so a previous refresh read its recipe through ``uses:``
-  ## and the name is a repository of ours whatever its path. A member only the
-  ## workspace manifest declares is a finding only for an owner from which
-  ## ``uses:`` discovery can reach its checkout path
-  ## (``usesDiscoveryCanReach``).
+  ## and the name is a repository of ours whatever its path — unless the
+  ## workspace declares it too (``workspaceDeclared``): the workspace then
+  ## says where the repo is kept, and a member the workspace declares, pinned
+  ## or not, is a finding only for an owner from which ``uses:`` discovery
+  ## can reach its checkout path (``usesDiscoveryCanReach``). A pin shares
+  ## the repo's NAME with the selector, nothing more; the repo ``nim`` kept
+  ## at ``codetracer-nim`` is not what ``uses: "nim"`` means however the
+  ## lock came to pin it (reprobuild-pm issue 2026-11-15).
 
 proc usesDiscoveryCanReach(selector, owner, checkout: string): bool =
   ## Whether ``uses: "<selector>"`` in the recipe directory ``owner`` can ever
@@ -92751,6 +92808,55 @@ proc usesDiscoveryCanReach(selector, owner, checkout: string): bool =
     try: os.normalizedPath(committedLockPathBase(ownerAbs))
     except CatchableError: ownerAbs
   cmpPaths(mainBase, ownerAbs) != 0 and walkReaches(mainBase)
+
+proc workspaceKeepsNamesakeOutOfReach(selector, owner: string): bool =
+  ## Whether ``uses: "<selector>"`` in the recipe directory ``owner`` names a
+  ## TOOL although the enclosing workspace declares a repo of that name: the
+  ## workspace keeps that repo at a checkout path ``uses:`` discovery from
+  ## ``owner`` cannot reach (``usesDiscoveryCanReach``), and discovery finds
+  ## no recipe where it does look (``discoverProducerSourceRoot``). A lock
+  ## pin of that name then records the repository, not a producer of the
+  ## selector, and must not be taken as one — not carried forward by a
+  ## refresh (``usesProducerLockedDep``), not counted as a develop-set
+  ## sibling (``unreachedDevelopSiblings``), not spliced by a build
+  ## (``resolveProducerBinding``).
+  ##
+  ## The case it exists for: the metacraft workspace keeps a repo ``nim`` at
+  ## ``codetracer-nim``, and codetracer-trace-format declares the Nim tool
+  ## with ``uses: "nim"``. Once its lock pinned ``nim`` (through a fragment
+  ## ``depends`` edge, before those stopped declaring anything), the refresh
+  ## refused for good and the CI build tried to splice the compiler fork as
+  ## the ``nim`` producer (reprobuild-pm issue 2026-11-15, "a workspace repo
+  ## named like a tool is taken as that tool's producer";
+  ## Unified-Locking-And-Hooks.md §14.3 "A lock pin named like a tool").
+  ##
+  ## False whenever the answer is not proven: outside a workspace (the lock
+  ## is then the only record of what the name means), when the workspace
+  ## declares no such repo, or when discovery reaches a recipe for the
+  ## selector. The on-disk probe runs first, so a sibling that is checked
+  ## out where ``uses:`` finds it — the common case for a real lock-pinned
+  ## producer — costs no manifest resolution.
+  ##
+  ## The probe is ``discoverProducerSourceRoot``'s walk WITHOUT its develop
+  ## override step, which goes through ``resolveProducerBinding`` and would
+  ## recurse back here. Nothing is lost: ``resolveProducerBinding`` consults
+  ## the overrides before the lock, ``usesProducerLockedDep`` asks only after
+  ## a full discovery found nothing, and ``usesDiscoveryCanReach`` below
+  ## counts an override pointing at the declared checkout as reachable.
+  if selector.len == 0 or owner.len == 0: return false
+  let ownerAbs = os.normalizedPath(absolutePath(owner))
+  if findSiblingProjectFile(selector, ownerAbs).len > 0: return false
+  let mainBase =
+    try: os.normalizedPath(committedLockPathBase(ownerAbs))
+    except CatchableError: ownerAbs
+  if cmpPaths(mainBase, ownerAbs) != 0 and
+      findSiblingProjectFile(selector, mainBase).len > 0:
+    return false
+  let declaration =
+    try: workspaceDeclaredCheckout(ownerAbs, selector)
+    except CatchableError: (false, false, "")
+  declaration.declared and
+    not usesDiscoveryCanReach(selector, ownerAbs, declaration.checkout)
 
 proc declaredDevelopSet(projectDir, lockPath: string):
     seq[DevelopSetMember] =
@@ -92796,7 +92902,7 @@ proc declaredDevelopSet(projectDir, lockPath: string):
         member.lockRecorded = member.lockRecorded or lockRecorded
         return
     members.add((name, os.normalizedPath(absolutePath(checkout)),
-      lockRecorded))
+      lockRecorded, not lockRecorded))
   let membership = manifestMembershipOf(projectDir)
   if membership.resolved:
     for r in membership.repos:
@@ -92863,7 +92969,9 @@ proc unreachedDevelopSiblings(projectDir, lockPath: string;
       if member.name == miss.selector:
         # Not recorded in `reported`: another owner of the same selector may
         # sit where discovery does reach this checkout.
-        if member.lockRecorded or
+        # A pin counts wherever it is only when no manifest says where the
+        # repo is kept; a declared repo counts only where discovery reaches.
+        if (member.lockRecorded and not member.workspaceDeclared) or
             usesDiscoveryCanReach(miss.selector, miss.owner, member.checkout):
           checkout = member.checkout
         break
@@ -95089,34 +95197,24 @@ proc renderPromptSegment(state: PromptState; args: PromptArgs): string =
   of pfJson: renderPromptJson(state)
   of pfTemplate: renderPromptTemplate(state, args.templateStr)
 
-proc parsePromptArgs(args: openArray[string]): PromptArgs =
-  ## ``repro prompt [--format <plain|ansi|json|<template>>]
-  ## [--workspace-root=PATH]``. ``--format`` accepts the three named modes
-  ## or, for any other value, treats the value as a template string
-  ## (matching the spec's ``<template>`` form).
+proc promptArgsOf(conf: ReproCommandLinePromptCall): PromptArgs =
+  ## ``repro prompt``'s typed configuration (parsed from repro's
+  ## description). ``--format`` takes the three named modes or, for any
+  ## other value, treats the value as a template string (the spec's
+  ## ``<template>`` form). A ``--workspace-root`` is used as given; without
+  ## one, the workspace is looked for above the current directory.
   result.format = pfPlain
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--format" or arg.startsWith("--format="):
-      let value = valueFromFlag(args, i, "--format")
-      case value
-      of "plain": result.format = pfPlain
-      of "ansi": result.format = pfAnsi
-      of "json": result.format = pfJson
-      else:
-        result.format = pfTemplate
-        result.templateStr = value
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-      result.explicitWorkspaceRoot = true
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro prompt` flag: " & arg)
+  if conf.format.isSome:
+    case conf.format.get
+    of "plain": result.format = pfPlain
+    of "ansi": result.format = pfAnsi
+    of "json": result.format = pfJson
     else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro prompt`: " & arg)
-    inc i
+      result.format = pfTemplate
+      result.templateStr = conf.format.get
+  if conf.workspaceRoot.isSome:
+    result.workspaceRoot = conf.workspaceRoot.get
+    result.explicitWorkspaceRoot = true
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -95132,7 +95230,7 @@ proc promptRootIsInitialized(root: string): bool =
   except WorkspaceManifestParseError:
     true
 
-proc runPromptCommand*(args: openArray[string]): int =
+proc runPromptCommand*(conf: ReproCommandLinePromptCall): int =
   ## ``repro prompt`` — print a compact ambient workspace-state segment for
   ## a shell prompt / statusline. Reads ONLY cheap cached state (no
   ## per-render git fan-out). Silent + exit 0 outside a workspace so it is
@@ -95153,7 +95251,7 @@ proc runPromptCommand*(args: openArray[string]): int =
   ## loudly, naming it and the key; the prompt is the one place that must not,
   ## because it runs on every shell render (CLI/prompt.md: "each read is
   ## defensive").
-  let parsed = parsePromptArgs(args)
+  let parsed = promptArgsOf(conf)
   withoutWorkspaceNotices:
     let root =
       if parsed.explicitWorkspaceRoot:
@@ -95224,22 +95322,19 @@ proc renderPromptInitSnippet(shell: string; reproBin: string): string =
   else:
     ""
 
-proc renderPromptInitUsage(programName: string): string =
-  programName & " prompt init <bash|zsh|fish|starship|p10k|oh-my-zsh|prezto>"
-
-proc runPromptInitCommand*(programName: string; args: openArray[string];
-                           reproBin: string): int =
+proc runPromptInitCommand*(shell: string; reproBin: string): int =
   ## ``repro prompt init <shell>`` — print the integration snippet for the
-  ## named shell/prompt framework. Opt-in: it only PRINTS a snippet for the
-  ## user to add; it never edits any rc file or mutates the live prompt.
-  if args.len == 0 or args[0] in ["--help", "-h", "help"]:
-    echo renderPromptInitUsage(programName)
-    return (if args.len == 0: 2 else: 0)
-  let shell = args[0].toLowerAscii()
-  let snippet = renderPromptInitSnippet(shell, reproBin)
+  ## named shell/prompt framework (any letter case). Opt-in: it only PRINTS
+  ## a snippet for the user to add; it never edits any rc file or mutates
+  ## the live prompt. ``repro prompt init help`` is its help, as it always
+  ## was.
+  if shell == "help":
+    stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
+    return 0
+  let snippet = renderPromptInitSnippet(shell.toLowerAscii(), reproBin)
   if snippet.len == 0:
-    stderr.writeLine("repro prompt init: unsupported shell '" & args[0] &
-      "'\n" & renderPromptInitUsage(programName))
+    stderr.writeLine("repro prompt init: unsupported shell '" & shell &
+      "'; run `repro help prompt init` for the shells it knows")
     return 2
   stdout.write(snippet)
   0
@@ -99074,8 +99169,8 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 # gate only verifies), §13.2 (two mechanisms, not alike), §13.3 (write the
 # sibling pins from observed local state, and only when they actually change),
 # §13.6 (`flake.lock` is a committed lock too);
-# reprobuild-specs/Workspace-And-Develop-Mode.md §"Reproducibility And `repro
-# check`" for the dirty-sibling policy inherited verbatim.
+# Nix-Flake-Coexistence.md §4 "Dirty siblings" for the dirty-sibling policy
+# (the refresh is skipped as a whole).
 #
 # The hook is `pre-commit` — see `VcsHookNames` and `runPreCommitLockCommand`
 # for why that is a backend-class consequence of §13.1 and not a preference.
@@ -100103,10 +100198,9 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
   ## The repos whose uncommitted work suppresses this refresh, each with the
   ## checkout to probe.
   ##
-  ## Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" is
-  ## inherited VERBATIM here — "if a develop-mode dependency has uncommitted
-  ## modifications, the project lock file must not be updated" — and so is its
-  ## SCOPE: the committed repo's DEPENDENCY CLOSURE, never the workspace, since
+  ## Nix-Flake-Coexistence.md §4 "Dirty siblings" states the rule (a dirty
+  ## sibling in scope skips the whole `flake.lock` refresh) and this SCOPE:
+  ## the committed repo's DEPENDENCY CLOSURE, never the workspace, since
   ## "an unrelated dirty repo elsewhere in the workspace MUST NOT block a push
   ## of R". The closure comes from RA-21's existing ``developSetClosure``, the
   ## same walk the pre-push gate uses, rather than from a second implementation
@@ -100369,10 +100463,13 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       "sibling revision to record"
     return
 
-  # (2) The inherited dirty-sibling policy. Workspace-And-Develop-Mode.md
-  # §"Reproducibility And `repro check`": "if a develop-mode dependency has
-  # uncommitted modifications, the project lock file must not be updated".
-  # `flake.lock` is a project lock file (§13.6), so it inherits this VERBATIM.
+  # (2) The dirty-sibling policy of `flake.lock`, Nix-Flake-Coexistence.md §4
+  # "Dirty siblings": a dirty sibling in scope skips the whole refresh. It was
+  # first inherited from a Workspace-And-Develop-Mode.md sentence that forbade
+  # updating "the project lock file" while a develop-mode dependency was dirty;
+  # that sentence was withdrawn because `repro.lock` is re-pinned at commit
+  # even then (Unified-Locking-And-Hooks.md §13.3 records a dirty sibling's
+  # HEAD and says so), and §4 now states this skip as `flake.lock`'s own rule.
   #
   # Note precisely what that does NOT say: it does not refuse the commit. The
   # refresh is skipped, the lock stays as it was, and the pre-push gate (NF-3)
@@ -101189,10 +101286,9 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         "resolve it in; pass the commit id; nothing was written")
     targetSource = "--to"
   elif checkoutHead.len > 0:
-    # The inherited dirty-sibling policy (Workspace-And-Develop-Mode.md
-    # §"Reproducibility And `repro check`": "if a develop-mode dependency has
-    # uncommitted modifications, the project lock file must not be
-    # updated"), which the per-input `flake.lock` refresh also obeys. A
+    # The reason the `flake.lock` refresh skips a dirty sibling
+    # (Nix-Flake-Coexistence.md §4 "Dirty siblings"): a pin names a revision
+    # and cannot describe modified working-tree content. A
     # DEFAULT target is "what the checkout is", and a modified checkout is
     # not its `HEAD`: recording `HEAD` would describe content the developer
     # is not building. An explicit `--to` names a commit, not the checkout,
@@ -101445,6 +101541,11 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       var depOf = initTable[string, LockedDep]()
       for i in reproOfRepo: depOf[ld.deps[i].name] = ld.deps[i]
       var edits: seq[tuple[line: int; raw, exact, version: string]]
+      # The arms that apply to this lock are decided from what it records
+      # (its platform and variant values), as H1 decides them: an entry
+      # whose arms apply constrains the move like an unconditional one, so
+      # an exact pin under it is rewritten too, and H1 then passes.
+      let armFacts = armFactsOf(ld)
       for decl in scanReproUsesDeclarations(inputs.reproNim.text,
           reproNimPath):
         let c = decl.constraint
@@ -101452,10 +101553,20 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         if c.kind notin {uckRange, uckExact}: continue
         let where = reproNimPath & ":" & $c.line
         if decl.conditional:
-          result.notes.add(where & ": '" & decl.rawConstraint & "' is under " &
-            "a when/if/case arm, so whether it constrains '" & c.selector &
-            "' is not decidable without compiling the recipe; left alone")
-          continue
+          let arm = armApplicability(decl, armFacts)
+          case arm.applicability
+          of aaApplies:
+            discard
+          of aaExcluded:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so it does not constrain '" & c.selector &
+              "' in this lock; left alone")
+            continue
+          of aaUndecidable:
+            result.notes.add(where & ": '" & decl.rawConstraint & "' is " &
+              arm.reason & ", so whether it constrains '" & c.selector &
+              "' is not decidable without compiling the recipe; left alone")
+            continue
         let dep = depOf[c.selector]
         let depAbs = os.normalizedPath(absolutePath(pathBase / dep.path))
         let at = versionMappedTo(inputs, c, depAbs, dep.coordinates.url,
@@ -104868,26 +104979,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len >= 3 and args[0] == "debug" and
-      args[1] == "io" and args[2] == "monitor":
-    let monitorArgs =
-      if args.len > 3:
-        args[3 .. ^1]
-      else:
-        @[]
-    return runIoMonitorCli("repro debug io monitor", monitorArgs)
-  if programName == "repro" and args.len >= 2 and args[0] == "debug" and
-      args[1] == "artifact":
-    try:
-      let artifactArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runDebugArtifactCommand(artifactArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro debug artifact: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:
       let buildArgs =
@@ -105037,131 +105128,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "run":
-    try:
-      let runArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproRunCommand(runArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro run: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "exec":
-    try:
-      let execArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproExecCommand(execArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro exec: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "shell" and
-      args[1] == "hook":
-    # M76 — ``repro shell hook <shell>``. Distinct from ``repro hooks``
-    # (rc-file entry management) and from ``repro shell`` (the M3/M4
-    # selector-then-flags activated-subshell). The dispatch order
-    # matters: we MUST match ``shell hook`` BEFORE the generic
-    # ``shell`` arm below, otherwise ``runReproShellCommand`` would
-    # interpret ``hook`` as a selector and explode.
-    let hookArgs =
-      if args.len > 2:
-        args[2 .. ^1]
-      else:
-        @[]
-    return runShellHookCommand(hookArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "shell":
-    try:
-      let shellArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproShellCommand(shellArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro shell: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "allow":
-    let allowArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runReproAllowCommand(allowArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "deny":
-    let denyArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runReproDenyCommand(denyArgs)
-  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
-      args[1] == "export":
-    # M74 — ``repro dev-env export <shell>``. New parent command
-    # ``dev-env`` for the Shell-Direnv-Hook plan (M74-M77). The
-    # ``export`` arm uses its own argv parser (positional ``<shell>``
-    # first, then ``--project-root`` / ``--activity`` /
-    # ``--develop-overrides`` / ``--allow-stale``), distinct from the
-    # legacy ``repro shell --print-env=...`` surface which lives off
-    # the ``shell`` parent and keeps its M3/M4 selector-then-flags
-    # idiom.
-    let exportArgs =
-      if args.len > 2:
-        args[2 .. ^1]
-      else:
-        @[]
-    return runDevEnvExportCommand(exportArgs, publicCliPath)
-  if programName == "repro" and args.len >= 2 and args[0] == "dev-env" and
-      args[1] == "deactivate":
-    # M75 — ``repro dev-env deactivate <rollback-manifest>``. Reads
-    # the manifest written by the matching ``export`` invocation and
-    # emits the per-shell rollback script. Tamper-detection: if the
-    # manifest's ``activation_script_hash`` differs from what the arm
-    # would re-derive from the same RBDE artifact, exit 3 with a
-    # no-op script + stderr diagnostic. The shell hook (M76) treats
-    # exit 3 as "leave env as-is and move on" per the spec.
-    let deactivateArgs =
-      if args.len > 2:
-        args[2 .. ^1]
-      else:
-        @[]
-    return runDevEnvDeactivateCommand(deactivateArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "up":
-    try:
-      let upArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runUpOrDevCommand(upArgs, publicCliPath, dsmUp)
-    except CatchableError as err:
-      stderr.writeLine("repro up: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "down":
-    try:
-      let downArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runDownCommand(downArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro down: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "dev":
-    try:
-      let devArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runUpOrDevCommand(devArgs, publicCliPath, dsmDev)
-    except CatchableError as err:
-      stderr.writeLine("repro dev: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "hooks":
     try:
       let hookArgs =
@@ -105239,8 +105205,9 @@ proc runLegacyCommand(programName: string; args: seq[string];
   if programName == "repro" and args.len > 0 and args[0] == "gateway":
     # TC-6 — the receiving-side push gateway. The bare gateway repo's
     # ``pre-receive`` / ``post-receive`` hooks invoke ``repro gateway
-    # <phase>`` so the AUTHORITATIVE certificate verify (pre-receive) and the
-    # forward-to-upstream (post-receive) live here, not in shell. This is the
+    # <phase>`` so the AUTHORITATIVE certificate verify and the
+    # forward-to-upstream (both pre-receive; post-receive does nothing) live
+    # here, not in shell. This is the
     # ``--no-verify``-proof enforcement point (Test-Certificates.md
     # §"Enforcement").
     try:
@@ -105253,23 +105220,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro gateway: error: " & err.msg &
         "; REJECTING (fail closed)")
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "health":
-    # RA-30 — top-level `repro health` (the environment doctor) per
-    # CLI/health.md. Diagnoses every layer and pairs each failure with the
-    # exact remedy (Interactive-UX Principle 2); ``--fix`` performs only
-    # the safe remediations; ``--json`` for agents/CI; non-zero exit on any
-    # ``fail``. Same dispatch convention as the M14/M15 top-level commands;
-    # implementation in ``runHealthCommand``.
-    try:
-      let healthArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runHealthCommand(healthArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro health: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "restore":
@@ -105775,17 +105725,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro watch: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "hcr":
-    try:
-      let hcrArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runHcrCoordinateCommand(hcrArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro hcr: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "develop":
     try:
       let developArgs =
@@ -105797,104 +105736,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "__remote-activate":
-    let remoteArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHomeCommand(@["__remote-activate"] & remoteArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "home":
-    let homeArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHomeCommand(homeArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "infra":
-    let infraArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runInfraCommand(infraArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "anywhere":
-    when defined(linux):
-      return cli_anywhere.runAnywhereCli(if args.len > 1: args[1 .. ^1] else: @[])
-    else:
-      stderr.writeLine("repro anywhere --mode addon runs on Linux only")
-      return 2
-  if programName == "repro" and args.len > 0 and args[0] == "system":
-    let systemArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runSystemCommand(systemArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "deploy-agent":
-    # Windows-Runner-Binary-Cache-Deploy M5: one tick of the signed
-    # desired-state manifest pull loop (poll → verify against the
-    # allowed-signers set → apply the highest valid sequence for this
-    # target via the M4 runInfraApply path).
-    let deployArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return cli_deploy_agent.runDeployAgentCommand(deployArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "hardware":
-    # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
-    # from the live system. The dispatcher lives in
-    # `repro_cli_support/hardware.nim`; see
-    # `reprobuild-specs/ReproOS-Configuration-Architecture.md` §3 for
-    # the surface contract.
-    let hardwareArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHardwareCommand(hardwareArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "prompt":
-    # RA-26 — `repro prompt` ambient workspace-state segment (+ `prompt
-    # init <shell>`) per CLI/prompt.md. Reads only cheap cached state (no
-    # per-render git fan-out); silent + exit 0 outside a workspace.
-    try:
-      let promptArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      if promptArgs.len > 0 and promptArgs[0] == "init":
-        let initArgs =
-          if promptArgs.len > 1:
-            promptArgs[1 .. ^1]
-          else:
-            @[]
-        return runPromptInitCommand(programName, initArgs, publicCliPath)
-      return runPromptCommand(promptArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro prompt: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "disk":
-    # M9.R.22.4: `repro disk` subcommand surface (plan/apply/mount/...)
-    # per `reprobuild-specs/ReproOS-Disko-Port.md` §4. The dispatcher
-    # lives in `repro_cli_support/disk.nim`.
-    let diskArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runDiskCommand(diskArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "cargo":
-    # `repro cargo gc|record-live`: the cargo target-directory janitor. The
-    # dispatcher lives in `repro_cli_support/cargo_gc.nim`; the logic in the
-    # `repro_cargo_gc` library.
-    let cargoArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return cli_cargo_gc.runCargoCommand(cargoArgs)
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
     # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
@@ -106027,7 +105868,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
     resolveActionCacheRoot: proc (explicit: string): string =
       resolveActionCacheRoot(explicit),
     allowProject: proc (projectRoot: string): int =
-      runReproAllowCommand([projectRoot]),
+      runReproAllowCommand(projectRoot),
     workspaceRootFor: proc (startPath: string): string =
       enclosingWorkspaceRoot(startPath))
   case conf.command
@@ -106081,24 +105922,15 @@ proc runReapCommand(conf: ReproCommandLineReap): int =
     stderr.writeLine("repro reap: error: " & err.msg)
     return 1
 
-proc reportReproUsageError(e: ref CliUsageError): int =
-  ## A command line the generated parser rejected: its one-line message
-  ## (clispec's error taxonomy, naming the command) and where to look next,
-  ## on stderr; the usage exit code (2).
-  stderr.writeLine("repro: " & e.msg)
-  stderr.writeLine("Run `repro --help` for the list of commands, or " &
-    "`repro help <command>` for one of them.")
-  e.exitCode
-
 const LegacyVerbsAnsweringHelp = [
   # The unmigrated commands whose own parser answers `--help` with their
   # usage (exit 0), so `repro help <command> [<word>...]` can ask it. Any
   # other unmigrated parser does not know `--help`: it rejects it, or worse,
-  # takes it as an operand (`repro allow --help` trusts a directory named
-  # `--help`), so `repro help` must never hand it one. An entry goes when its
-  # command moves onto the description.
-  "anywhere", "branch", "cargo", "clean", "health", "hooks", "switch",
-  "sync", "workspace"]
+  # takes it as an operand (`repro allow --help` trusted a directory named
+  # `--help` until `allow` moved onto the description), so `repro help` must
+  # never hand it one. An entry goes when its command moves onto the
+  # description.
+  "branch", "clean", "hooks", "switch", "sync", "workspace"]
 
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string): int =
@@ -106149,18 +105981,9 @@ proc runReproCommandLine(programName: string; args: seq[string];
   ## its typed configuration; any other is handed to ``runLegacyCommand``
   ## with its unparsed arguments.
   var conf: ReproCommandLine
-  try:
-    conf = ReproCommandLine.load(reproArgvForParser(args),
-      CliSources(env: cliProcessEnv()))
-  except CliHelpRequest as e:
-    # `CliCompletionRequest` too: its text is the completion reply.
-    stdout.write(e.text)
-    return 0
-  except CliUsageError as e:
-    return reportReproUsageError(e)
-  except CliConfigError as e:
-    stderr.writeLine("repro: " & e.msg)
-    return 2
+  let answered = loadReproCommandLine(args, conf)
+  if answered >= 0:
+    return answered
   case conf.command
   of ReproCommandLineCommand.call:
     if conf.call.version:
@@ -106265,6 +106088,151 @@ proc runReproCommandLine(programName: string; args: seq[string];
       return 1
   of ReproCommandLineCommand.self:
     return runSelfCommand(conf.self)
+  of ReproCommandLineCommand.home:
+    return runHomeCommand(conf.home)
+  of ReproCommandLineCommand.remoteActivate:
+    return runRemoteActivateCommand(conf.remoteActivate)
+  of ReproCommandLineCommand.system:
+    return runSystemCommand(conf.system)
+  of ReproCommandLineCommand.infra:
+    return runInfraCommand(conf.infra)
+  of ReproCommandLineCommand.anywhere:
+    when defined(linux):
+      return cli_anywhere.runAnywhereCli(conf.anywhere)
+    else:
+      stderr.writeLine("repro anywhere --mode addon runs on Linux only")
+      return 2
+  of ReproCommandLineCommand.deployAgent:
+    # Windows-Runner-Binary-Cache-Deploy M5: one tick of the signed
+    # desired-state manifest pull loop (poll → verify against the
+    # allowed-signers set → apply the highest valid sequence for this
+    # target via the M4 runInfraApply path).
+    return cli_deploy_agent.runDeployAgentCommand(conf.deployAgent)
+  of ReproCommandLineCommand.hardware:
+    # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
+    # from the live system (`repro_cli_support/hardware.nim`).
+    return runHardwareCommand(conf.hardware)
+  of ReproCommandLineCommand.disk:
+    # M9.R.22.4: `repro disk plan|apply|mount|...` (`repro_cli_support/disk`).
+    return runDiskCommand(conf.disk)
+  of ReproCommandLineCommand.cargo:
+    # `repro cargo gc|record-live|run`: the cargo target-directory janitor
+    # and the thin cargo edge (`repro_cli_support/cargo_gc.nim`).
+    return cli_cargo_gc.runCargoCommand(conf.cargo)
+  of ReproCommandLineCommand.pressure:
+    # Build-wait pressure from the RunQuota daemon this build would use;
+    # the command lives in `repro_runquota` beside the reports the engine
+    # sends (`repro_runquota/build_pressure`).
+    try:
+      return runPressureCommand(conf.pressure.group, conf.pressure.json)
+    except CatchableError as err:
+      stderr.writeLine("repro pressure: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.health:
+    # RA-30 — top-level `repro health` (the environment doctor): every
+    # layer diagnosed, each failure paired with the exact remedy; `--fix`
+    # performs only the safe remediations; non-zero exit on any `fail`.
+    try:
+      return runHealthCommand(conf.health)
+    except CatchableError as err:
+      stderr.writeLine("repro health: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.exec:
+    try:
+      return runReproExecCommand(conf.exec, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro exec: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.run:
+    try:
+      return runReproRunCommand(conf.run, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro run: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.shell:
+    case conf.shell.command
+    of ReproCommandLineShellCommand.hook:
+      # M76 — ``repro shell hook <shell>``. Distinct from ``repro hooks``
+      # (rc-file entry management) and from ``repro shell`` (the activated
+      # subshell, whose selector a word other than ``hook`` is).
+      return runShellHookCommand(conf.shell.hook)
+    of ReproCommandLineShellCommand.call:
+      try:
+        return runReproShellCommand(conf.shell.call, publicCliPath)
+      except CatchableError as err:
+        stderr.writeLine("repro shell: error: " & err.msg)
+        return 1
+  of ReproCommandLineCommand.allow:
+    return runReproAllowCommand(conf.allow.directory)
+  of ReproCommandLineCommand.deny:
+    return runReproDenyCommand(conf.deny.directory)
+  of ReproCommandLineCommand.devEnv:
+    case conf.devEnv.command
+    of ReproCommandLineDevEnvCommand.`export`:
+      # M74 — ``repro dev-env export <shell>``, which the shell hook (M76)
+      # evaluates on entering a project.
+      return runDevEnvExportCommand(conf.devEnv.`export`, publicCliPath)
+    of ReproCommandLineDevEnvCommand.deactivate:
+      # M75 — ``repro dev-env deactivate <rollback-manifest>``: the rollback
+      # script of the matching ``export``, or exit 3 with a no-op script when
+      # the activation was tampered with (the hook then leaves the
+      # environment as it is).
+      return runDevEnvDeactivateCommand(conf.devEnv.deactivate)
+  of ReproCommandLineCommand.up, ReproCommandLineCommand.dev:
+    let isDev = conf.command == ReproCommandLineCommand.dev
+    let verb = if isDev: "dev" else: "up"
+    try:
+      let parsed =
+        if isDev: devSessionStartOf(conf.dev, dsmDev)
+        else: devSessionStartOf(conf.up, dsmUp)
+      return runUpOrDevCommand(parsed, publicCliPath,
+        if isDev: dsmDev else: dsmUp)
+    except CatchableError as err:
+      stderr.writeLine("repro " & verb & ": error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.down:
+    try:
+      return runDownCommand(conf.down)
+    except CatchableError as err:
+      stderr.writeLine("repro down: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.hcr:
+    try:
+      case conf.hcr.command
+      of ReproCommandLineHcrCommand.coordinate:
+        return runHcrCoordinateCommand(conf.hcr.coordinate)
+      of ReproCommandLineHcrCommand.prepareObject:
+        return runHcrPrepareObjectCommand(conf.hcr.prepareObject)
+    except CatchableError as err:
+      stderr.writeLine("repro hcr: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.prompt:
+    # `repro prompt`: the ambient workspace-state segment (and `prompt init
+    # <shell>`). Reads only cheap cached state (no per-render git fan-out);
+    # silent + exit 0 outside a workspace.
+    try:
+      case conf.prompt.command
+      of ReproCommandLinePromptCommand.init:
+        return runPromptInitCommand(conf.prompt.init.shell, publicCliPath)
+      of ReproCommandLinePromptCommand.call:
+        return runPromptCommand(conf.prompt.call)
+    except CatchableError as err:
+      stderr.writeLine("repro prompt: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.debug:
+    case conf.debug.command
+    of ReproCommandLineDebugCommand.io:
+      case conf.debug.io.command
+      of ReproCommandLineDebugIoCommand.monitor:
+        # The monitor's own command line (io-mon's), unparsed.
+        return runIoMonitorCli("repro debug io monitor",
+          conf.debug.io.monitor.args)
+    of ReproCommandLineDebugCommand.artifact:
+      try:
+        return runDebugArtifactCommand(conf.debug.artifact)
+      except CatchableError as err:
+        stderr.writeLine("repro debug artifact: error: " & err.msg)
+        return 1
   else:
     let passed = reproPassThrough(conf)
     if not passed.found:
@@ -106286,6 +106254,9 @@ proc runThinAppDispatch(programName: string): int =
   # every nested interface/resource compiler boundary. Explicit caller
   # overrides remain authoritative; this only fills missing environment keys.
   ensureBuiltSourcePackageEnvironment()
+  # darwin release archive: its own non-SIP tools bundle, when the caller set
+  # no tools root (a no-op elsewhere).
+  ensureShippedMacosToolsEnvironment()
   # There is no provider-nimcache session token to seed. It existed so the
   # ~84 from-source recipes of one `repro build` would meet in ONE shared
   # nimcache while two concurrent `repro` sessions would not -- a scope that

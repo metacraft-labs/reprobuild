@@ -52,6 +52,7 @@ import repro_profile/disk_apply
 import repro_profile/types
 import repro_profile/hardware_probe  # childEnvWithoutLdLibPath
 import repro_cli_support/disk        # DiskPlanOutcome / loadDiskoFromSource
+import repro_cli_support/cli_program
 
 type
   InstallRootOptions* = object
@@ -69,7 +70,6 @@ type
     dryRun*: bool           ## --dry-run (print would-do, run nothing)
 
   InstallRootFailureKind* = enum
-    irfBadFlag
     irfMissingTarget
     irfMissingSource
     irfRsyncFailed
@@ -103,53 +103,15 @@ const DefaultExcludes* = @[
   "/mnt", "/media",
 ]
 
-proc parseInstallRootArgs*(args: seq[string]): InstallRootOptions =
-  ## Parse ``repro infra install-root`` flags.  Throws ``ValueError`` on
-  ## an unknown flag (matching the rest of the infra surface).
-  result.target = "/mnt"
-  result.source = "/"
-  result.hostName = "reproos"
-  var i = 0
-  template valueOf(): string =
-    if i + 1 >= args.len:
-      raise newException(ValueError, args[i] & " requires a value")
-    else:
-      inc i
-      args[i]
-  while i < args.len:
-    let a = args[i]
-    if a == "--target": result.target = valueOf()
-    elif a.startsWith("--target="): result.target = a["--target=".len .. ^1]
-    elif a == "--source": result.source = valueOf()
-    elif a.startsWith("--source="): result.source = a["--source=".len .. ^1]
-    elif a == "--device": result.device = valueOf()
-    elif a.startsWith("--device="): result.device = a["--device=".len .. ^1]
-    elif a == "--disko": result.diskoSource = valueOf()
-    elif a.startsWith("--disko="):
-      result.diskoSource = a["--disko=".len .. ^1]
-    elif a == "--hostname": result.hostName = valueOf()
-    elif a.startsWith("--hostname="):
-      result.hostName = a["--hostname=".len .. ^1]
-    elif a == "--kernel": result.kernelSource = valueOf()
-    elif a.startsWith("--kernel="):
-      result.kernelSource = a["--kernel=".len .. ^1]
-    elif a == "--initrd": result.initrdSource = valueOf()
-    elif a.startsWith("--initrd="):
-      result.initrdSource = a["--initrd=".len .. ^1]
-    elif a == "--exclude": result.extraExcludes.add valueOf()
-    elif a.startsWith("--exclude="):
-      result.extraExcludes.add a["--exclude=".len .. ^1]
-    elif a == "--no-rsync": result.skipRsync = true
-    elif a == "--no-grub":  result.skipGrub  = true
-    elif a == "--no-fstab": result.skipFstab = true
-    elif a == "--dry-run":  result.dryRun    = true
-    elif a.startsWith("--"):
-      raise newException(ValueError,
-        "unknown `repro infra install-root` flag: " & a)
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument: " & a)
-    inc i
+proc installRootOptionsOf*(c: ReproCommandLineInfraInstallRoot):
+    InstallRootOptions =
+  ## What ``repro infra install-root`` was given, its command line parsed
+  ## from repro's description (``repro_cli_support/cli_description``, which
+  ## holds the defaults: ``/mnt``, ``/``, ``reproos``).
+  InstallRootOptions(target: c.target, source: c.source, device: c.device,
+    diskoSource: c.disko, hostName: c.hostname, kernelSource: c.kernel,
+    initrdSource: c.initrd, skipRsync: c.noRsync, skipGrub: c.noGrub,
+    skipFstab: c.noFstab, extraExcludes: c.exclude, dryRun: c.dryRun)
 
 # ---------------------------------------------------------------------
 # rsync invocation.
@@ -474,15 +436,8 @@ proc writeGrubCfg(layout: DiskLayout;
 type
   DiskoLoader* = proc(path: string): DiskPlanOutcome
 
-proc runInstallRoot*(args: seq[string];
+proc runInstallRoot*(opts: InstallRootOptions;
                      loader: DiskoLoader): InstallRootOutcome =
-  let opts =
-    try: parseInstallRootArgs(args)
-    except ValueError as e:
-      result.failure = true
-      result.failureKind = irfBadFlag
-      result.failureMsg = e.msg
-      return
   if opts.target.len == 0:
     result.failure = true
     result.failureKind = irfMissingTarget

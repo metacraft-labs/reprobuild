@@ -57,6 +57,10 @@ when defined(posix):
 
 import blake3
 import repro_core
+when defined(windows):
+  # POSIX writes these markers itself, with temp names add-on recovery knows.
+  from repro_core/durable_replace import replaceFileDurably,
+    removeStaleDurableTemps
 
 import ./errors
 import ./state_dir
@@ -205,10 +209,10 @@ proc writeGenerationEnvelope*(pointerFilePath: string;
     moveFile(tmp, pointerFilePath)    # rename(2) over the old envelope
     if parent.len > 0: fsyncDirPath(parent)
   else:
-    writeFile(tmp, s)
-    if fileExists(pointerFilePath):
-      removeFile(pointerFilePath)
-    moveFile(tmp, pointerFilePath)
+    # Never remove the old envelope before the new one is in place: a write-
+    # through rename of a synced temporary file replaces it in one step.
+    discard removeStaleDurableTemps(pointerFilePath)
+    replaceFileDurably(pointerFilePath, s)
 
 proc readGenerationEnvelope*(pointerFilePath: string): GenerationEnvelope =
   if not fileExists(pointerFilePath):

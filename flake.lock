@@ -1332,34 +1332,34 @@
     "nim-cli-spec-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794693111,
-        "narHash": "sha256-k09Pe0+9Ue0+OK7nt/aULCRPW3MXMcK34btX65kMJAM=",
+        "lastModified": 1794810743,
+        "narHash": "sha256-1VQKhrGdO+P0IrVm401eya21FGLAjos9L08t86/jUpQ=",
         "owner": "metacraft-labs",
         "repo": "nim-cli-spec",
-        "rev": "a9684dfc1e659af309acf646915dbfe400896b65",
+        "rev": "e6f976ca24fce6f9d794e334372d01d6b2f21790",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-cli-spec",
-        "rev": "a9684dfc1e659af309acf646915dbfe400896b65",
+        "rev": "e6f976ca24fce6f9d794e334372d01d6b2f21790",
         "type": "github"
       }
     },
     "nim-confutils-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794656412,
-        "narHash": "sha256-P20Zi4iwayGpeDyH1zG619F9eLuRgJolm5Zcv1Z564A=",
+        "lastModified": 1794803824,
+        "narHash": "sha256-7VIYJo4s5NNnvLmzn9I3KpsojBzJBq66D1WjqHKXseI=",
         "owner": "metacraft-labs",
         "repo": "nim-confutils",
-        "rev": "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb",
+        "rev": "dcad14dd0f41e06dc61e8c01386923e6d5103dc3",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-confutils",
-        "rev": "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb",
+        "rev": "dcad14dd0f41e06dc61e8c01386923e6d5103dc3",
         "type": "github"
       }
     },
@@ -1383,17 +1383,17 @@
     "nim-fork-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794131186,
-        "narHash": "sha256-p8Ea5ODLI1Bs6NFTC/jr1OjnCXbMuRembJdSRhdzBpw=",
+        "lastModified": 1794758457,
+        "narHash": "sha256-91/nyQHJF9xQWiDcGELCb6UFQq2BhiT48kl7gJdvzKA=",
         "ref": "codetracer",
-        "rev": "8384ff3fecfdbd8772d46c79054967769915d6fd",
-        "revCount": 23175,
+        "rev": "bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654",
+        "revCount": 23176,
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       },
       "original": {
         "ref": "codetracer",
-        "rev": "8384ff3fecfdbd8772d46c79054967769915d6fd",
+        "rev": "bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654",
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       }
@@ -2655,11 +2655,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1794684499,
-        "narHash": "sha256-OdmI3Fmmf40K0OJSqKVRpAxH+VQtOouc3AVESw5ddBg=",
+        "lastModified": 1794797954,
+        "narHash": "sha256-dP15GNERcepYJSACH3DZeleVJgSFJpciq8yA9kdwc00=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "9dd3d5fe09293c51865a0b23c038f9b6fb335a91",
+        "rev": "98ea3e58df67f736a8527788d1563e31291a4881",
         "type": "github"
       },
       "original": {

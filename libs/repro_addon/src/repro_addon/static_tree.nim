@@ -743,6 +743,30 @@ proc readPendingMarker*(stateDir: string): PendingMarker =
 proc hasPendingMarker*(stateDir: string): bool =
   fileExists(pendingMarkerPath(stateDir))
 
+proc bootHoldRecordPath*(stateDir: string): string =
+  ## The start holds of the pending switch, one drop-in directory name per
+  ## line (``boot_holds``; §13 decision 159): written before its marker,
+  ## removed with it.
+  stateDir / "addon" / "boot-holds"
+
+proc bootHoldTextPath*(stateDir: string): string =
+  ## The start hold's text beside the record, which the boot-hold unit's
+  ## shell copies into place (``generation0.bootHoldScript``).
+  stateDir / "addon" / "boot-hold.conf"
+
+proc bootConfirmFlagPath*(stateDir: string): string =
+  ## Left by a boot re-assertion that leaves a pending switch to the
+  ## boot-confirm unit (§13 decision 157); the unit removes it.
+  stateDir / "addon" / "boot-confirm"
+
+proc clearBootHoldRecord*(stateDir: string) =
+  ## The record goes once the switch's start holds are lifted, or with its
+  ## marker: a boot then puts back nothing the switch no longer holds.
+  discard removeLeafNoFollow(bootHoldRecordPath(stateDir))
+
 proc clearPendingMarker*(stateDir: string) =
-  ## Step 9's last act.
+  ## Step 9's last act. The pending switch's record of its start holds goes
+  ## first: a record without a marker is never read, a marker without a
+  ## record holds nothing at boot.
+  clearBootHoldRecord(stateDir)
   discard removeLeafNoFollow(pendingMarkerPath(stateDir))

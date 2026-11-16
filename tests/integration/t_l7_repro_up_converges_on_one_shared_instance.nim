@@ -299,10 +299,15 @@ proc checkGatedReadiness(c: L7Case; project: string): string =
   var process = startProcess(c.reproBin, args = @["up"],
     workingDir = project, env = c.envFor(),
     options = {poUsePath, poStdErrToStdOut})
+  # Read the output from the start: dev-env progress can fill the pipe
+  # before `service.readiness.waiting`, and a blocked `repro up` never
+  # writes the event the loop below is waiting for.
+  let drain = startOutputDrain(process)
   defer:
     if process.running():
       process.terminate()
       discard process.waitForExit()
+    discard drain.collect()
     process.close()
   var waiting = false
   while process.running():
@@ -318,9 +323,9 @@ proc checkGatedReadiness(c: L7Case; project: string): string =
   # Release even on failure so teardown cannot strand an instance.
   createDir(project / "state")
   writeFile(project / "state" / "release", "ready\n")
-  let output = process.outputStream.readAll()
-  checkpoint(output)
-  check process.waitForExit() == 0
+  let exitCode = process.waitForExit()
+  checkpoint(drain.collect())
+  check exitCode == 0
   check fileExists(project / "state" / "sso.ready")
   doAssert fileExists(eventsPath)
   result = readFile(eventsPath)
@@ -482,10 +487,11 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
     check result.exitCode == 1
     check result.output.contains("--force has no effect on `repro up`")
     check result.output.contains("without --replace")
-    # And `--replace` is refused by `down`, which takes nothing over.
+    # And `--replace` is refused by `down`, which takes nothing over: `down`
+    # does not declare it, so the parser refuses it (exit 2).
     let onDown = runRepro(c, c.projects[0], @["down", "--replace"])
-    check onDown.exitCode == 1
-    check onDown.output.contains("unsupported down flag: --replace")
+    check onDown.exitCode == 2
+    check onDown.output.contains("unknown flag '--replace' for 'repro down'")
 
 
   test "a shared service without registrations refuses an unsatisfied probe":
@@ -623,7 +629,14 @@ suite "L7 §4.5 — `repro up` in three projects converges on one instance":
       # A stop error stays an error, including the force-file timeout.
       check stopped.exitCode == 1
       if index == 1:
-        check stopped.output.toLowerAscii().contains("refused")
+        # The listener has exited. It removed its session token on the way
+        # out (Development-Environments-And-Control-API.md §"Control API
+        # Access Control"), so `down` reports the token it cannot read; a
+        # listener killed before that cleanup leaves the token and the
+        # connection is refused instead. Either is the unreachable session.
+        let lowered = stopped.output.toLowerAscii()
+        check lowered.contains("refused") or
+          lowered.contains("cannot read the dev-session control token")
       else:
         check stopped.output.contains("HTTP stop failed; wrote stop request file")
         check stopped.output.contains("did not stop:")

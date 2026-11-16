@@ -3474,27 +3474,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             for mb in prevManifest.managedBlocks:
               let k = mb.hostFilePath & "\x1a" & mb.blockId
               if k notin newBlockKeys and blocksApplied:
-                # Strip the sentinel-delimited region from the host file.
-                if fileExists(extendedPath(mb.hostFilePath)):
-                  let existing = readFile(extendedPath(mb.hostFilePath))
-                  let openS = OpenSentinelPrefix & mb.blockId &
-                    OpenSentinelSuffix
-                  let closeS = CloseSentinelPrefix & mb.blockId &
-                    CloseSentinelSuffix
-                  let openIdx = existing.find(openS)
-                  let closeIdx = existing.find(closeS)
-                  if openIdx >= 0 and closeIdx >= 0 and closeIdx > openIdx:
-                    var openLineStart = openIdx
-                    while openLineStart > 0 and
-                        existing[openLineStart - 1] != '\n':
-                      dec openLineStart
-                    var closeLineEnd = closeIdx + closeS.len
-                    if closeLineEnd < existing.len and
-                        existing[closeLineEnd] == '\n':
-                      inc closeLineEnd
-                    let rewritten = existing[0 ..< openLineStart] &
-                      existing[closeLineEnd .. ^1]
-                    writeFile(extendedPath(mb.hostFilePath), rewritten)
+                # Strip the sentinel-delimited region from the host file,
+                # keeping everything around it and deleting the file only
+                # if nothing else is left (the shared removal path).
+                destroyManagedBlockResource(mb.hostFilePath, mb.blockId)
           except CatchableError:
             # The previous manifest may be unreadable in pathological
             # cases (manifest in CAS was GC'd by another tool, etc.).

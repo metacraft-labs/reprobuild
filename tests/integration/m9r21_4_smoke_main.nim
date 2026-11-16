@@ -14,7 +14,7 @@ import repro_cli_support/hardware as cli_hw
 proc main(): int =
   let p = probeAll()
   let spec = toSystemHardwareSpec(p)
-  let opts = parseHardwareProbeArgs(@["--dry-run"])
+  let opts = HardwareProbeOptions(dryRun: true)
   let outcome = runHardwareProbeFromSpec(spec, opts)
   if outcome.failure:
     stderr.writeLine("m9r21_4_smoke: render failed: " & outcome.failureMsg)

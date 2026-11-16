@@ -577,10 +577,10 @@ anyway, refresh on a host of the lock's platform, or pass
 
 `repro lock refresh` also **refuses to write a lock from an incomplete
 solve**. A recipe's `uses:` pulls sibling recipes into the solve
-transitively; when a `uses:` names a develop-set sibling (one the
-workspace manifest's `depends` declare, even when the project containing
-it is not enabled in this workspace, or one the committed lock already
-pins) whose recipe the refresh cannot read — the sibling is
+transitively; when a `uses:` names a develop-set sibling (a repo the
+workspace declares at a path `uses:` discovery can reach, even when the
+project containing it is not enabled in this workspace, or one the
+committed lock already pins) whose recipe the refresh cannot read — the sibling is
 not checked out, or is checked out where `uses:` discovery does not find
 it — that recipe's version constraints would be missing from the solve,
 and the lock would pin versions the next build in a complete workspace
@@ -590,6 +590,22 @@ sibling out (`repro sync`, or `repro ws enable` the project that declares
 it) and refresh again. A sibling checked out without any recipe declares
 no constraints and is not a reason to refuse. `repro lock solve` without
 `--write` prints the same finding as a warning.
+
+**A repo that shares a tool's name does not provide that tool.** `uses:`
+discovery looks for a sibling recipe in two places only: at
+`<ancestor>/<selector>` for each directory above the recipe, and at a
+develop override registered for the selector (`repro develop`). Those are
+the ways to say that a sibling provides a tool. A workspace can still
+declare a repo whose name equals a tool selector while keeping it
+elsewhere, for example a Nim compiler fork declared as `nim` but checked out
+at `codetracer-nim`, beside recipes that declare the Nim tool with
+`uses: "nim"`. Such a repo is not what the selector means. That holds even
+when the committed lock pins a repo of that name, as an older lock may.
+`repro lock refresh` does not count the pin as a sibling and drops it,
+naming it on stderr. The pre-push gate reports a lock that still carries it
+as stale. `repro build` resolves the selector as the tool it is, instead of
+building and splicing the repo. Outside a workspace nothing says where a
+repo is kept, so the committed lock's pin is taken as written.
 
 #### `ELockConflict`: re-pin one package, not the whole lock
 
@@ -774,9 +790,12 @@ the dependency was selected:
   override documents (`repro develop <dependency> --into`) of the workspace
   root and of `--project-root` (default: the project you are in). It matches
   an entry by the dependency's name or by its checkout, as the hooks do. It
-  touches no checkout and no lock, and naming a dependency with no override
-  is a reported no-op. The H3 refusal prints this command, with the right
-  roots, as its "temporary experiment" remedy.
+  writes neither a checkout nor a lock, and naming a dependency with no
+  override is a reported no-op. It does not undo a pin an earlier commit
+  recorded: the next commit still re-pins every sibling entry the committed
+  `repro.lock` carries to its checkout's `HEAD`, and only `repro lock
+  refresh` changes which entries the lock carries. The H3 refusal prints
+  this command, with the right roots, as its "temporary experiment" remedy.
 
 Which kind of selection recorded an override is kept in its `provenance`:
 `repro develop --only=<dependency>` for an explicit one, `repro develop --all`

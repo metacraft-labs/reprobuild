@@ -2363,6 +2363,15 @@ proc escapedCodeList(items: openArray[string]): string =
     parts.add(escForCode(item))
   parts.join(", ")
 
+proc inputCheckPolicyCode(policy: ActionCacheFingerprintPolicy): string =
+  ## The source text of a typed wrapper's ``actionCachePolicy`` default
+  ## (Caching-Architecture D2): the declared policy, or the unstated default.
+  case policy
+  of acfpUnstated: "defaultActionCachePolicy()"
+  of acfpTimestamp: "acfpTimestamp"
+  of acfpChecksum: "acfpChecksum"
+  of acfpHybrid: "acfpHybrid"
+
 proc dependencyPolicyCode(policy: BuildActionDependencyPolicy): string =
   proc ignoredCode(): string =
     if policy.ignoredInputPrefixes.len == 0:
@@ -3123,7 +3132,11 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     formals.add("extraEnv: openArray[(string, string)] = []")
     formals.add("depfile = \"\"")
     formals.add("cacheable = true")
-    formals.add("actionCachePolicy = defaultActionCachePolicy()")
+    # Caching-Architecture D2: the tool's declared input-check policy is the
+    # DEFAULT of the formal, so a call site that states none takes it and
+    # one that states a policy (``timestamp`` included) keeps its own.
+    formals.add("actionCachePolicy = " &
+      inputCheckPolicyCode(cmd.ext.inputCheckPolicy))
     formals.add("commandStatsId = \"\"")
     formals.add("dependencyPolicy = " &
       dependencyPolicyCode(cmd.ext.dependencyPolicy))
@@ -5137,7 +5150,9 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     formals.add("extraEnv: openArray[(string, string)] = []")
     formals.add("depfile = \"\"")
     formals.add("cacheable = true")
-    formals.add("actionCachePolicy = defaultActionCachePolicy()")
+    # Caching-Architecture D2: see the package-block wrapper above.
+    formals.add("actionCachePolicy = " &
+      inputCheckPolicyCode(command.ext.inputCheckPolicy))
     formals.add("commandStatsId = \"\"")
     formals.add("dependencyPolicy = " &
       dependencyPolicyCode(command.ext.dependencyPolicy))

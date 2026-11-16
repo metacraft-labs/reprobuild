@@ -67,8 +67,8 @@ The add-on handles this in four ways:
   were installed.
 - **Before anything starts, systemd's own view is checked.** From just
   before the switch reloads systemd until this check passes, the switch
-  holds every floored unit, so no socket, timer or other start request can
-  run it. The hold is an assertion that `/` does not exist, so nothing a
+  holds every floored unit, and the socket, timer and path units that start
+  one, so no socket, timer or other start request can run it. The hold is an assertion that `/` does not exist, so nothing a
   unit creates or removes can lift it. The add-on then reads everything `systemctl show` reports for
   each floored unit and compares it with the floor the unit was written
   under, minus its named exceptions. A property the floor neither checks
@@ -132,9 +132,11 @@ The add-on handles this in four ways:
     reported start (8 s on arm64 and armhf) (systemd makes a unit's directories as it starts the
     run's first command, which may be an `ExecStartPre=` that runs long
     before the main process; a tree made later in the run, by the unit or
-    by anything else, is not the one systemd made for it); for
-    a unit that is not running, it must also have been born before that
-    run ended. A template's directory is
+    by anything else, is not the one systemd made for it). After an
+    automatic restart (`Restart=`), the run starts when the restart delay
+    (`RestartSec=`) has passed, not when systemd scheduled the restart. For
+    a unit that is not running, the directory must also have been born
+    before that run ended. A template's directory is
     judged by the instances that can have run: the one recorded, any that
     systemd reports running, and any the profile names. Every instance of
     the template reaches the same verdict. The apply records such a
@@ -181,6 +183,27 @@ The add-on handles this in four ways:
     re-assertion would not start. The refusal names the chain of units.
     A unit that must run that early has to waive the whole hardening
     (`serviceFloor: <why>`).
+    The socket, path and timer units that start a held service are
+    held with it, and the step back stops whatever it holds, so a held
+    socket stops listening. These start too early in boot to wait for the
+    re-assertion, so a small boot unit, `repro-addon-boot-hold.service`,
+    puts the holds of a step back that is still pending in place before
+    any of them can start. It runs only while a switch is pending, so a
+    normal boot skips it. A host installed by an add-on version without
+    that unit gets it at its next apply. That apply also points the
+    add-on's boot-time re-assertion at the add-on version doing the apply,
+    so the next boot recovers with the current rules; nothing else the
+    add-on installed changes. If a file is already at one of those paths
+    and it is not exactly what the add-on put there, the apply refuses
+    and changes nothing until you move it away. A socket, path or timer
+    unit that starts a hardened service must start after
+    `sysinit.target`: one with `DefaultDependencies=no` and no
+    `After=sysinit.target`, or ordered before an early boot unit, is
+    refused. If a switch whose profile has a hardened unit with a health
+    check is interrupted, the next boot finishes it in a separate unit,
+    `repro-addon-boot-confirm.service`, after the re-assertion, so the
+    health check can see the unit start; the boot itself does not wait
+    for it.
   - **a unit that only a timer or a path unit starts** never has its
     directories recorded by an apply, because no apply starts it. After
     the first run its timer starts, the next apply refuses the unit's
@@ -260,6 +283,41 @@ group such as `adm` or `shadow`, needs the whole-floor waiver
 `serviceFloor`: no narrower exception allows it. `PAMName=` cannot be
 waived, because a PAM session can run code as root outside the unit's
 sandbox.
+
+## Weakening the floor is an operator's apply
+
+The deploy agent never applies a generation that loosens the
+confinement of a unit the profile defines. Every plan lists such units
+under `service floor weakened`, and the agent reports the generation as
+an operator action instead of applying it. A unit is listed when the
+generation:
+
+- waives the whole floor (`serviceFloor: <why>`) of a new unit, of a
+  unit the current generation installed under the floor, or of a unit
+  that ran no command before (a socket or timer without a command line);
+- names a floor exception the unit did not have before, including every
+  exception of a new unit and a new value in an exception that adds to a
+  setting (`AmbientCapabilities+<capability>: <why>`);
+- gives a unit that already runs without the floor (waived, or installed
+  before the floor existed) more privilege: it now runs as root, with
+  gid 0, in a privileged group, as an account the profile itself does not
+  show to be unprivileged, with a command run as root (the `+` or `!`
+  prefix, or `PermissionsStartOnly=yes`), or with ambient capabilities.
+  The unit's drop-ins in the profile count, as systemd reads them.
+
+So a service that runs as root needs one operator apply for its first
+deployment. Run `repro system addon plan`, read the list, and apply from
+the operator's shell. After that, the agent applies later generations of
+that unit, including changes to its command lines, as long as they keep
+its waiver and its account. A waived unit has no floor, so whoever signs
+the profile still decides what such a unit runs. The operator's review is
+of the decision to run the unit unconfined.
+
+A drop-in over a distribution package's unit (`collision = "dropIn"`,
+or a `systemd.systemDropIn` for a unit the profile does not define) is
+not under the floor: the package's unit runs as the package installed
+it, and the agent applies such a drop-in without listing it here. Review
+those drop-ins when you review who may sign the profile.
 
 ## Running a validator safely
 

@@ -535,6 +535,10 @@ proc triggeredUnitIndex(profile: SystemProfile; target: string): int =
   ## (systemd.unit(5): an instance without a file of its own is loaded from
   ## its template). -1 when the profile defines neither.
   result = findResourceIndex(profile, $srkSystemdSystemUnit, target)
+  when PlannerMutation == "trigger-instance-unmapped":
+    # FALSIFYING MUTATION (§13 decision 154): an instance is not mapped to
+    # the template it is loaded from.
+    return
   if result < 0:
     let tmpl = templateOf(target)
     if tmpl.len > 0:

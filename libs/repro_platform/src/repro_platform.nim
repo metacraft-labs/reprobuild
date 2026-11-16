@@ -39,18 +39,23 @@ type
   MsvcDevEnv* = object
     available*: bool
     env*: Table[string, string]
-      ## Key/value diff produced by ``VsDevCmd.bat``. Empty when
-      ## ``available`` is ``false`` (no VS Build Tools detected or
-      ## activation failed). Callers should merge this on top of their
-      ## desired base env, allowing their own overrides to win.
+      ## The variables ``VsDevCmd.bat`` SET OR CHANGED, with the values it
+      ## gave them (``msvcDevEnvFromActivation``), plus the engine's
+      ## ``CC`` / ``CXX`` / ``AR`` / linker overrides. Never the rest of the
+      ## environment the activation ran in: that would be a snapshot of the
+      ## host taken once per process, layered over every later launch. Empty
+      ## when ``available`` is ``false`` (no VS Build Tools detected or
+      ## activation failed) and for an inherited activation. Callers merge
+      ## this under their own entries, which win.
     ownedLists*: Table[string, seq[string]]
       ## Search-list entries that belong to the MSVC / Windows SDK install,
       ## keyed by the upper-cased list variable (``PATH``, ``LIB``,
-      ## ``INCLUDE``, ``LIBPATH``). Filled for an INHERITED activation, where
-      ## ``env`` is empty; for a fresh one it is derived from ``env`` on
-      ## demand. ``mergeActionEnvWithMsvcEnv`` appends these to an action's
-      ## own value of the same variable instead of letting either replace
-      ## the other.
+      ## ``INCLUDE``, ``LIBPATH``). Filled for an INHERITED activation and
+      ## for a captured one (whose ``env`` then carries no search list); for
+      ## a table built some other way it is derived from ``env`` on demand.
+      ## ``mergeActionEnvWithMsvcEnv`` combines these with the value of the
+      ## same variable the action declares or would inherit, instead of
+      ## letting either replace the other.
 
 const
   MsvcListKeys* = ["PATH", "LIB", "INCLUDE", "LIBPATH"]
@@ -308,6 +313,92 @@ proc msvcEnvTableFromSetLines*(envLines: openArray[string];
       continue
     result[key] = entry[eq + 1 .. ^1]
 
+proc msvcListKey(key: string): string =
+  ## The ``MsvcListKeys`` spelling of ``key`` (matched case-insensitively,
+  ## as Windows matches variable names), or "" when it is not a search list.
+  for k in MsvcListKeys:
+    if cmpIgnoreCase(k, key) == 0:
+      return k
+  ""
+
+proc lookupPairIgnoreCase(pairs: openArray[(string, string)]; key: string):
+    tuple[present: bool, value: string] =
+  for (name, value) in pairs:
+    if cmpIgnoreCase(name, key) == 0:
+      return (true, value)
+  (false, "")
+
+proc msvcRootKey(key: string): bool =
+  for k in MsvcRootKeys:
+    if cmpIgnoreCase(k, key) == 0:
+      return true
+  false
+
+proc msvcDevEnvFromActivation*(captured: Table[string, string];
+                               baseline: openArray[(string, string)];
+                               overrides: openArray[(string, string)] = []):
+    MsvcDevEnv =
+  ## The dev env a VsDevCmd activation contributes: what the activation shell
+  ## ended with (``captured``, the ``set`` dump) compared with what it started
+  ## with (``baseline``, this process's environment when the shell was
+  ## launched), plus the engine's own ``overrides`` (``CC=cl.exe`` and the
+  ## pinned linker), which are layered unconditionally: they are the engine's
+  ## choice, not the activation's, and must hold even where the host happens
+  ## to carry the same value (an isolated launch inherits none of it).
+  ##
+  ## * A variable whose captured value equals its baseline value is NOT part
+  ##   of the activation and is left out. The activation is computed once per
+  ##   process and layered over every action launched afterwards
+  ##   (``mergeActionEnvWithMsvcEnv``); a full ``set`` dump would therefore
+  ##   hand every later launch the host's environment AS IT WAS at the first
+  ##   activation. That is what reprobuild-pm issue
+  ##   2026-11-15-windows-profile-compile-edge-is-not-invalidated-when-appdata-changes
+  ##   measured: ``APPDATA`` pointed somewhere new, and both the profile
+  ##   compile's child (``nim``, which reads ``%APPDATA%\nim\nim.cfg``) and
+  ##   the action-cache key (``actionEnvResolver`` mirrors the launch) still
+  ##   saw the old value, so the compile was answered from the cache with the
+  ##   user's configuration change ignored. Leaving such a variable out lets
+  ##   the launch pass the value the host holds NOW, and the key read it.
+  ## * A search list (``MsvcListKeys``) is never carried whole. VsDevCmd
+  ##   prepends the toolchain to the value it inherited, so the captured value
+  ##   is the toolchain PLUS a snapshot of the host's list. Only its
+  ##   MSVC-owned entries (``msvcOwnedEntries`` under the activation's own
+  ##   roots) are kept, in ``ownedLists``; the merge puts them in front of
+  ##   the list the launch inherits, or after the one the action declares.
+  ## * An install-root variable (``MsvcRootKeys``: ``VSINSTALLDIR``,
+  ##   ``VCToolsInstallDir``, ``WindowsSdkDir``, ...) is kept even when the
+  ##   host already held the same value. It names the install the owned
+  ##   search-list entries were taken from, so it belongs to the activation
+  ##   whatever the host held, and an isolated launch, which inherits none of
+  ##   the host, still needs it (the Rust ``cc`` crate trusts
+  ##   ``VCINSTALLDIR``).
+  ## * Every other variable the activation set or changed is kept verbatim.
+  ##   One the activation set to the value the host already held is
+  ##   indistinguishable from a host variable it never touched, and is left
+  ##   to the inherited environment.
+  ##
+  ## A variable the activation REMOVED cannot be expressed in a
+  ## ``KEY=VALUE`` layer and was never applied; VsDevCmd removes none that
+  ## the toolchain depends on.
+  ##
+  ## Pure, so the rule is tested on every host
+  ## (``test_msvc_activation_tracks_the_host_environment``).
+  result = MsvcDevEnv(available: true)
+  let roots = msvcRootsOf(captured)
+  for key, value in captured.pairs:
+    let listKey = msvcListKey(key)
+    if listKey.len > 0:
+      let owned = msvcOwnedEntries(value, roots)
+      if owned.len > 0:
+        result.ownedLists[listKey] = owned
+      continue
+    let before = lookupPairIgnoreCase(baseline, key)
+    if before.present and before.value == value and not msvcRootKey(key):
+      continue
+    result.env[key] = value
+  for (key, value) in overrides:
+    result.env[key] = value
+
 when defined(windows):
   proc readSetOutputFile(path: string): seq[string] =
     ## Read the ``set`` dump that ``VsDevCmd.bat`` writes via ``> tempFile``.
@@ -351,8 +442,8 @@ when defined(windows):
         return stripped
     ""
 
-  proc invokeVsDevCmd(vsDevCmd: string; injected: var seq[string]):
-      seq[string] =
+  proc invokeVsDevCmd(vsDevCmd: string; injected: var seq[string];
+                      parent: var seq[(string, string)]): seq[string] =
     ## Write a tiny ``.bat`` wrapper that invokes ``VsDevCmd.bat`` then
     ## dumps ``set`` to ``tmpFile`` (with VsDevCmd's own stdout / stderr
     ## routed to ``vsdevcmdLog``), and execute the wrapper via
@@ -369,7 +460,9 @@ when defined(windows):
     ##
     ## ``injected`` receives the ``VsDevCmdQuietEnv`` names the shell was
     ## given on top of this process's environment; the caller drops them from
-    ## the captured table.
+    ## the captured table. ``parent`` receives this process's environment as
+    ## the shell inherited it: the baseline the caller compares the capture
+    ## with (``msvcDevEnvFromActivation``).
     let cmdExe = getEnv("SystemRoot") / "System32" / "cmd.exe"
     if not fileExists(cmdExe):
       warnOnce("MSVC dev-env activation skipped: " & cmdExe & " not found")
@@ -404,7 +497,7 @@ when defined(windows):
       return @[]
     var process: Process
     try:
-      var parent: seq[(string, string)] = @[]
+      parent.setLen(0)
       for key, value in envPairs():
         parent.add((key, value))
       let shellEnv = newStringTable(modeCaseInsensitive)
@@ -477,11 +570,12 @@ when defined(windows):
       return MsvcDevEnv(available: false)
 
     var injected: seq[string] = @[]
-    let envLines = invokeVsDevCmd(vsDevCmd, injected)
+    var parent: seq[(string, string)] = @[]
+    let envLines = invokeVsDevCmd(vsDevCmd, injected, parent)
     if envLines.len == 0:
       return MsvcDevEnv(available: false)
 
-    var table = msvcEnvTableFromSetLines(envLines, injected)
+    let table = msvcEnvTableFromSetLines(envLines, injected)
     if table.len == 0:
       warnOnce("MSVC dev-env activation: VsDevCmd.bat produced no " &
         "usable variables.")
@@ -498,9 +592,7 @@ when defined(windows):
     # exact failure the MR8 LNK2001 ``___chkstk_ms`` trace pointed
     # at. ``cl.exe`` / ``lib.exe`` resolve through the PATH entries
     # VsDevCmd added (``VC\Tools\MSVC\*\bin\HostX64\x64``).
-    table["CC"] = "cl.exe"
-    table["CXX"] = "cl.exe"
-    table["AR"] = "lib.exe"
+    var overrides = @[("CC", "cl.exe"), ("CXX", "cl.exe"), ("AR", "lib.exe")]
     # MR11: pin the MSVC linker via the absolute path published by
     # VsDevCmd (``VCToolsInstallDir``) instead of trusting bare
     # ``link.exe`` PATH resolution. rustc's host-target link step
@@ -524,7 +616,7 @@ when defined(windows):
     if vcToolsDir.len > 0:
       let msvcLink = vcToolsDir / "bin" / "Hostx64" / "x64" / "link.exe"
       if fileExists(msvcLink):
-        table["CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"] = msvcLink
+        overrides.add(("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER", msvcLink))
       else:
         warnOnce("MSVC dev-env activation: VCToolsInstallDir=" &
           vcToolsDir & " did not contain bin\\Hostx64\\x64\\link.exe; " &
@@ -533,7 +625,7 @@ when defined(windows):
       warnOnce("MSVC dev-env activation: VsDevCmd did not publish " &
         "VCToolsInstallDir; CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER " &
         "not pinned. cargo may pick up a foreign link.exe from PATH.")
-    MsvcDevEnv(available: true, env: table)
+    msvcDevEnvFromActivation(table, parent, overrides)
 
 proc activateMsvcDevEnv*(): MsvcDevEnv =
   ## Resolve the MSVC dev-env diff once per host process and return the
@@ -584,8 +676,30 @@ proc combineSearchList(actionValue: string; owned: seq[string]): string =
       parts.add(entry)
   parts.join(";")
 
+proc prependOwnedEntries(owned: seq[string]; value: string): string =
+  ## The MSVC-owned entries ``value`` does not already carry, in order, then
+  ## ``value`` verbatim: what ``VsDevCmd.bat`` does to an inherited search
+  ## list (the toolchain goes in front). A value that already carries every
+  ## owned entry -- an inherited activation's -- is returned unchanged.
+  var present: seq[string] = @[]
+  for part in value.split(';'):
+    if part.len > 0: present.add(normalizedWinPath(part))
+  var parts: seq[string] = @[]
+  for entry in owned:
+    let n = normalizedWinPath(entry)
+    if n notin present:
+      present.add(n)
+      parts.add(entry)
+  if parts.len == 0:
+    return value
+  if value.len > 0:
+    parts.add(value)
+  parts.join(";")
+
 proc mergeActionEnvWithMsvcEnv*(devEnv: MsvcDevEnv;
-                                actionEnv: openArray[string]): seq[string] =
+                                actionEnv: openArray[string];
+                                inheritedLists: openArray[(string, string)] = []):
+    seq[string] =
   ## Layer the MSVC dev env under ``actionEnv`` (argv-style ``KEY=VALUE``,
   ## consumed rightmost-wins by ``envTableFromArgvStyle`` and the runquota
   ## helper's ``--env`` flags).
@@ -606,31 +720,48 @@ proc mergeActionEnvWithMsvcEnv*(devEnv: MsvcDevEnv;
   ## ``actionUsesMsvcToolchain``). Every other declared PATH — a hermetic
   ## one, or an empty one — is the PATH the action runs with.
   ##
+  ## A search list the action does NOT declare is given the activation's
+  ## MSVC-owned entries (``ownedLists``) in front of the value it would
+  ## otherwise have: ``inheritedLists`` holds the current values the launched
+  ## process inherits (an absent name means unset, so an isolated launch
+  ## passes none and gets the owned entries alone). This is what VsDevCmd does
+  ## to the shell it runs in, applied to the value the host holds AT LAUNCH
+  ## rather than to the one it held when the activation was captured. Nothing
+  ## is emitted when the inherited value already carries every owned entry,
+  ## which is the case for an inherited activation.
+  ##
   ## Pure, and Windows-semantic on every host, so it is unit-tested anywhere.
   if not devEnv.available:
     return @actionEnv
   result = msvcDevEnvAsArgvStyle(devEnv)
+  var declaredLists: seq[string] = @[]
   for entry in actionEnv:
     let eq = entry.find('=')
     if eq > 0:
       let key = entry[0 ..< eq]
-      var listKey = ""
-      for k in MsvcListKeys:
-        if cmpIgnoreCase(k, key) == 0:
-          listKey = k
-          break
+      let listKey = msvcListKey(key)
       if listKey.len > 0:
+        declaredLists.add(listKey)
         let owned = ownedListFor(devEnv, listKey)
         if owned.len > 0:
           result.add(key & "=" & combineSearchList(entry[eq + 1 .. ^1], owned))
           continue
     result.add(entry)
+  for listKey in MsvcListKeys:
+    if listKey in declaredLists or not devEnv.ownedLists.hasKey(listKey):
+      continue
+    let inherited = lookupPairIgnoreCase(inheritedLists, listKey).value
+    let combined = prependOwnedEntries(devEnv.ownedLists[listKey], inherited)
+    if combined != inherited:
+      result.add(listKey & "=" & combined)
 
-proc mergeActionEnvWithMsvc*(actionEnv: openArray[string]):
+proc mergeActionEnvWithMsvc*(actionEnv: openArray[string];
+                             inheritedLists: openArray[(string, string)] = []):
     seq[string] =
   ## ``mergeActionEnvWithMsvcEnv`` over the host's cached activation. No-op
   ## on non-Windows hosts.
   when defined(windows):
-    result = mergeActionEnvWithMsvcEnv(activateMsvcDevEnv(), actionEnv)
+    result = mergeActionEnvWithMsvcEnv(activateMsvcDevEnv(), actionEnv,
+      inheritedLists)
   else:
     result = @actionEnv

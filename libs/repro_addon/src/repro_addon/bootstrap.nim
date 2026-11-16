@@ -42,6 +42,7 @@ import repro_peer_cache/types
 import repro_deploy_agent/secrets
 
 import ./addon_apply
+import ./uninstall
 import ./attestation
 import ./evidence
 import ./evidence_keys
@@ -154,7 +155,11 @@ proc rootEntry(path, kindHint, replaced: string): LedgerEntry =
   let st = statOwner(path)
   LedgerEntry(class: lcRoot, path: path, mode: st.mode, owner: st.owner,
               kindHint: kindHint, replaced: replaced,
-              collision: (if replaced.len > 0: "adopt" else: ""))
+              collision: (if replaced.len > 0: "adopt" else: ""),
+              # A takeover's prior value is read before the takeover
+              # (§13 decision 167): the marker says so to uninstall.
+              observation: (if replaced.len > 0: PriorCapturedBeforeTakeover
+                            else: ""))
 
 proc baseRootValue(path: string): string =
   if path == "/etc" or path.startsWith("/etc/"): etcEntryValue(path)
@@ -254,6 +259,22 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   for p in [opts.deploySignersPath, opts.cachePublishersPath]:
     if p.len > 0:
       discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
+  # A state-removal token an earlier uninstall left (§13 decision 165)
+  # belongs to that uninstall, not to this install: a later re-run must
+  # never act on it. Removed durably, and the directory that holds the
+  # add-on's uninstall records made root's 0700 through a descriptor that
+  # does not follow a link (§13 decision 178), before anything else is
+  # written.
+  try:
+    clearStateRemovalToken()
+    when not mutated("bootstrap-leaves-log-dir"):
+      ensureUninstallLogDir()
+  except OSError as e:
+    raise newException(AddonBootstrapError, UninstallOverrideDir &
+      " cannot hold the add-on's uninstall records (" & e.msg & "). It " &
+      "is not one this add-on made: inspect it, remove it (or the entry " &
+      "named " & StateRemovalTokenName & " in it), and run bootstrap " &
+      "again; nothing was written")
 
   # 2. Roots: created, or taken over where the plan says they are
   # pre-bootstrap inputs. The directories the plan lists beyond the
@@ -277,7 +298,14 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       if mode < 0:
         raise newException(AddonBootstrapError, "the plan lists " & p &
           " as a pre-bootstrap input, which bootstrap has no mode for")
-      entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
+      # The prior value first: rootEntry's arguments are evaluated left to
+      # right, and the takeover changes the mode and owner it records
+      # (§13 decision 167).
+      when mutated("prior-mode-captured-after-takeover"):
+        entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
+      else:
+        let before = baseRootValue(p)
+        entries.add(rootEntry(p, takeOverRootDir(p, mode), before))
   ensureSystemStateDir(stateDir)
   # Every apply's pending-switch check finds the add-on's state through
   # this, whatever --state-dir it was itself given (§7.7).

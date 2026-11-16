@@ -434,7 +434,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/a9684dfc1e659af309acf646915dbfe400896b65";
+      url = "github:metacraft-labs/nim-cli-spec/e6f976ca24fce6f9d794e334372d01d6b2f21790";
       flake = false;
     };
     nim-confutils-src = {
@@ -447,7 +447,7 @@
       # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
+      url = "github:metacraft-labs/nim-confutils/dcad14dd0f41e06dc61e8c01386923e6d5103dc3";
       flake = false;
     };
     nimcrypto-src = {
@@ -900,8 +900,14 @@
     # bits (wasm32, i386, JS) instead of raising a RangeDefect. 259a2595
     # rides along: `std/osproc` applies `workingDir` in the child process
     # instead of changing the parent's directory around the spawn.
+    #
+    # Advanced from 8384ff3f to bb0e8943: `std/osproc` creates the child's
+    # pipes close-on-exec, so a child started with `startProcess` holds the
+    # pipes only on fd 0, 1 and 2 and its own children inherit no further
+    # copies; a grandchild that outlives the child no longer delays the
+    # parent's end-of-file.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=8384ff3fecfdbd8772d46c79054967769915d6fd";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654";
       flake = false;
     };
     nim-csources-src = {
@@ -2965,6 +2971,13 @@
               # B build (grub-install reached ``modinfo.sh`` search
               # only after the switch to ``grub2_efi``).
               pkgs.qemu
+              # The add-on VM gates' restricted-guest mirror relay
+              # (`tests/e2e/addon/addon_testbed.nim`, `relayPort`): a guest
+              # booted with QEMU `restrict=on` reaches the time-shifted
+              # snapshot mirror only through a `guestfwd` that runs
+              # `socat STDIO TCP:127.0.0.1:<port>`, and
+              # `scripts/run_addon_gate.sh` refuses to start without it.
+              pkgs.socat
               pkgs.grub2_efi
               pkgs.kmod
               # ReproOS add-on mode A16 (`repro infra image`, spec §6.5.2):

@@ -603,8 +603,9 @@ proc computeOutputRealizationHash*(packageName, version, adapter,
   ## ``payload`` is hashed in-line into the realization-hash; the
   ## caller is responsible for supplying the canonical byte
   ## representation of the per-output staging tree. Multi-output
-  ## realize uses the BLAKE3 digest of the staging tree manifest
-  ## (sorted ``path\0size\0blake3-digest\n`` lines) as the payload.
+  ## realize uses the staging tree's canonical ``storeTreeDigest``
+  ## (``tree-v2:``: file content and executable bit, symbolic link
+  ## target text, directory presence) as the payload.
   var buf: seq[byte] = @[]
   buf.writeString("reprobuild.realization.v1.multi")
   buf.writeString(adapter)
@@ -3602,40 +3603,20 @@ proc realizeDirectoryAsPrefix*(s: var Store; sourceDir: string;
 # ---------------------------------------------------------------------------
 
 proc stagingTreeManifestDigest(dir: string): seq[byte] =
-  ## BLAKE3-256 of a deterministic manifest of `dir`'s file tree
-  ## (sorted relative paths + per-file sizes + per-file BLAKE3
-  ## digests). Used by :proc:`computeOutputRealizationHash` so each
-  ## per-output prefix is independently content-addressable.
+  ## The per-output payload :proc:`computeOutputRealizationHash` folds into
+  ## an output's realization id: the bytes of ``storeTreeDigest(dir)``, the
+  ## canonical ``tree-v2:`` digest (file content AND executable bit, symbolic
+  ## link target text, directory presence). The id must determine the
+  ## prefix's bytes (Local-Content-Addressed-Store.md §"Realization Hash
+  ## (normative)"); a digest of regular-file content alone gave two outputs
+  ## differing only in a mode or a link target one id, and the index row for
+  ## it served the first output's prefix for the second.
   if not dirExists(extendedPath(dir)):
     return @[]
-  var entries: seq[tuple[path: string; size: int64;
-                          digest: PrefixIdBytes]] = @[]
-  for entry in walkDirRec(extendedPath(dir),
-                          yieldFilter = {pcFile, pcLinkToFile},
-                          relative = true):
-    let abs = dir / entry
-    let size = getFileSize(extendedPath(abs))
-    let raw = readFile(extendedPath(abs))
-    var buf = newSeq[byte](raw.len)
-    for i, ch in raw:
-      buf[i] = byte(ord(ch))
-    let d = blake3.digest(buf)
-    entries.add((path: toForwardSlash(entry), size: size, digest: d))
-  entries.sort(proc (a, b: tuple[path: string; size: int64;
-                                 digest: PrefixIdBytes]): int =
-    cmp(a.path, b.path))
-  var manifest: seq[byte] = @[]
-  manifest.writeString("reprobuild.staging-tree.v1")
-  manifest.writeU32Le(uint32(entries.len))
-  for e in entries:
-    manifest.writeString(e.path)
-    manifest.writeU64Le(uint64(e.size))
-    for b in e.digest:
-      manifest.add(b)
-  let h = blake3.digest(manifest)
-  result = newSeq[byte](32)
-  for i in 0 ..< 32:
-    result[i] = h[i]
+  let digest = storeTreeDigest(dir)
+  result = newSeq[byte](digest.len)
+  for i, ch in digest:
+    result[i] = byte(ord(ch))
 
 proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
                          outputs: openArray[MultiOutputSpec];

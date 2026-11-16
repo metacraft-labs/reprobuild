@@ -51,6 +51,10 @@ from ./fingerprint import sha256OfFile
 
 import repro_infra/service_floor
 import repro_infra/service_account
+import repro_infra/addon_diagnostics
+
+const FloorRefusalPrefix = $adFloorNotEffective & ":"
+  ## How an ``EAddOnFloorNotEffective`` refusal's first line starts.
 
 type
   ShowProps* = Table[string, string]
@@ -724,6 +728,10 @@ type
     invocationStart*: int64
       ## when its current invocation began (``InactiveExitTimestamp``),
       ## nanoseconds since the epoch; 0 when unknown
+    nRestarts*: int
+      ## ``NRestarts``, read in the same call (§13 decision 156)
+    restartDelay*: int64
+      ## the ``Restart=`` delay in nanoseconds, read in the same call
     mainStart*: int64
       ## when the main process of its current or last run started
       ## (``ExecMainStartTimestamp``), nanoseconds since the epoch; 0 when
@@ -984,6 +992,23 @@ const RunStartToleranceNs* = (when hostCPU == "amd64": 1_000_000_000'i64
   ## The residual: a tree a root process makes at the path within this long
   ## after a run of the unit begins is taken as systemd's.
 
+proc runStartOf*(v: SystemdView): int64 =
+  ## When the unit's current or last run really began (§13 decision 156).
+  ## ``InactiveExitTimestamp``, except after an automatic restart
+  ## (``NRestarts`` above 0): systemd 257 stamps that when the unit leaves
+  ## ``failed`` for its ``RestartSec=`` wait, so the run itself begins the
+  ## delay later, and it is ``InactiveExitTimestamp`` plus the delay --
+  ## never later than the main process's start, which no run follows, so
+  ## that on systemd 252, which stamps the new run's start itself, the
+  ## bound does not move out by the delay.
+  result = v.invocationStart
+  when mutated("recreated-bound-from-inactive-exit-only"):
+    return
+  if v.nRestarts > 0 and v.restartDelay > 0:
+    var s = v.invocationStart + v.restartDelay
+    if v.mainStart > 0: s = min(s, v.mainStart)
+    result = max(result, s)
+
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
                        v: SystemdView): string =
@@ -1037,7 +1062,13 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
     if v.invocationStart <= 0:
       return "systemd reports no start for the unit's last run"
     let window = (when mutated("recreated-window-exact"): 0'i64 else: RestartWindowNs)
-    if v.btime < v.invocationStart - window:
+    # The run's real start (``runStartOf``) bounds it from below too:
+    # after a Restart= restart, a tree born during the RestartSec= wait,
+    # before the run began, is not the run's (A9 review round 16).
+    let lower = (when mutated("restart-lower-bound-from-inactive-exit"):
+                   v.invocationStart
+                 else: runStartOf(v))
+    if v.btime < lower - window:
       return "it was born more than " & $(window div 1_000_000) &
         " ms before the unit's last run began"
     if v.stopped:
@@ -1066,7 +1097,7 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
         return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
           " ms after the main process of the unit's last run started"
     elif not mutated("recreated-no-upper-bound"):
-      if v.btime > v.invocationStart + RunStartToleranceNs:
+      if v.btime > runStartOf(v) + RunStartToleranceNs:
         return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
           " ms after the unit's last run began, so that run, not systemd " &
           "setting it up, made it (§13 decisions 141 and 145)"
@@ -1174,10 +1205,10 @@ proc refusalRuleCodes*(output, stem: string): seq[string] =
   for raw in output.splitLines():
     var l = raw.strip()
     if not inBlock:
-      let at = l.find("EAddOnFloorNotEffective:")
+      let at = l.find(FloorRefusalPrefix)
       if at < 0: continue
       inBlock = true
-      l = l[at + "EAddOnFloorNotEffective:".len .. ^1].strip()
+      l = l[at + FloorRefusalPrefix.len .. ^1].strip()
       if l.len == 0: continue
     if l == "nothing was started":
       inBlock = false
@@ -1396,8 +1427,8 @@ proc isAddonHold*(path, content: string): bool =
   ## A file of that name with other content is judged like any drop-in,
   ## and so is a start hold that is not exactly ``StartHoldText`` in a
   ## regular file under the runtime unit directory: the hold the switch
-  ## writes on an activator (§13 decision 151) is exempt, a file planted
-  ## under its name is not.
+  ## writes on an activator (§13 decisions 151 and 155) is exempt, a file
+  ## planted under its name is not.
   if path.endsWith("/" & StartHoldName):
     when mutated("start-hold-any-content"):
       # Falsifying build: a start hold exempted by its name alone.
@@ -1454,6 +1485,14 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
   block:
     let bn = baseTreeActivatorRefusal(unit)
     if bn.len > 0: problem2("unit-name", "Id", bn)
+  # §13 decision 163: ordered after sysinit.target as systemd reports it
+  # (its After= carries the default dependencies' sysinit.target), and
+  # never before a unit the boot-hold unit runs before.
+  when not mutated("activator-boot-order-effective-unchecked"):
+    block:
+      let why = activatorBootOrderRefusal(unit, defaultDeps = false,
+        words(show.getOrDefault("After")), words(show.getOrDefault("Before")))
+      if why.len > 0: problem2("boot-order", "After,Before,DefaultDependencies", why)
   if show.getOrDefault("FragmentPath") != fragment:
     problem2("provenance", "FragmentPath", "FragmentPath=" & show.getOrDefault("FragmentPath") &
             ", not a unit file the add-on wrote (" & fragment & ")")

@@ -90,8 +90,12 @@ suite "sync and hooks help":
     var topics: seq[seq[string]] = @[]
     for word in ShownCommands:
       topics.add(@[word])
-    # A deeper word of a command whose parser does not know `--help`.
-    topics.add(@["allow", "somewhere"])
+    # A deeper word of a command whose parser does not know `--help`, and
+    # has no usage synopsis. (`allow`, the example until it moved onto the
+    # description, now has a generated help of its own, and a word after it
+    # in `repro help`'s topic is an unknown command, as for every command
+    # parsed from the description.)
+    topics.add(@["gateway", "somewhere"])
     for topic in topics:
       let res = runShell(shellCommand(@[repro, "help"] & topic, env),
         cwd = empty, timeoutMs = 60_000)
@@ -99,9 +103,16 @@ suite "sync and hooks help":
         "\n" & res.output)
       check res.code == 0
       check res.output.strip().len > 0
-      # What `repro allow --help` and `repro deny --help` print: the
-      # command ran, with `--help` as its directory.
+      # What `repro allow --help` and `repro deny --help` printed before
+      # they moved onto the description: the command ran, with `--help` as
+      # its directory.
       check "Allowed repro dev-env" notin res.output
       check "was not trusted" notin res.output
+    let deeper = runShell(shellCommand(@[repro, "help", "allow", "somewhere"],
+      env), cwd = empty, timeoutMs = 60_000)
+    checkpoint("repro help allow somewhere -> exit " & $deeper.code & "\n" &
+      deeper.output)
+    check deeper.code == 2
+    check "unknown command 'allow somewhere'" in deeper.output
     check entriesUnder(empty).len == 0
     check entriesUnder(home).len == 0
