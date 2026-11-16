@@ -109,6 +109,7 @@ import repro_addon/ledger
 import repro_addon/evidence as addonEvidence
 import repro_addon/store_custody
 import repro_addon/uninstall
+import repro_addon/record_dir
 
 import ./spec_citations
 
@@ -793,6 +794,92 @@ suite "A11 code review round 19: the records are read, listed and probed by desc
     var intents = 0
     for f in walkFiles(log / "*-discard-intent.json"): inc intents
     check intents == 0
+
+suite "A11 code review round 20: a record read never blocks and is bounded":
+  ## Falsifiers ``record-read-blocking`` (the checked read opened without
+  ## O_NONBLOCK), ``record-read-unbounded`` (no 1 MiB cap) and
+  ## ``operator-read-blocking`` (verify-discard-record reads its path with
+  ## a blocking, unbounded read). A FIFO with no writer blocks a blocking
+  ## open for ever, so each read runs in a child process, killed after
+  ## 10 s; round 19's FIFO under an intent's name never reached a read
+  ## (the listing skips what is not a regular file), so these put the FIFO
+  ## at the names that are read directly: an intent's .sig and its
+  ## completion.
+  let failWriter20 = proc (path, text: string) =
+    raise newException(IOError, "Operation not permitted")
+  proc resumable20(name: string): Scene =
+    result = scene(name)
+    removeDir(result.aside)
+    let st = parentDir(parentDir(result.key)) / "state"
+    writeLedger(ledgerCopyPath(st), Ledger(generation: "g0"))
+    var signer = loadTextSigner(result.key)
+    var r = resultOf(result)
+    doAssert completeDiscardBeforeKeys(r, Ledger(generation: "g0"), st,
+      result.site, signer, result.gate.pending, failWriter20)
+    signer.wipe()
+  proc finishesWithin10s(body: proc ()): bool =
+    let pid = fork()
+    if pid == 0:
+      try: body()
+      except CatchableError: discard
+      quit(0)
+    var status: cint
+    for _ in 0 ..< 100:
+      if waitpid(pid, status, WNOHANG) == pid: return true
+      sleep(100)
+    discard kill(pid, SIGKILL)
+    discard waitpid(pid, status, 0)
+    false
+
+  test "a FIFO at an intent's .sig does not block the gate":
+    let s = resumable20("r20-fifo-sig")
+    let sig = s.gate.overrideRecord & DiscardRecordSigExt
+    removeFile(sig)
+    check mkfifo(sig.cstring, Mode(0o600)) == 0
+    check finishesWithin10s(proc () =
+      discard storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = parentDir(s.gate.overrideRecord)))
+    check finishesWithin10s(proc () =
+      discard readInCheckedDir(sig))
+
+  test "a FIFO at an intent's completion name does not block the gate":
+    let s = resumable20("r20-fifo-done")
+    let done = completionPathOf(s.gate.overrideRecord)
+    removeFile(done)
+    check mkfifo(done.cstring, Mode(0o600)) == 0
+    check finishesWithin10s(proc () =
+      discard storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = parentDir(s.gate.overrideRecord)))
+    check finishesWithin10s(proc () =
+      discard readInCheckedDir(done))
+
+  test "a record over 1 MiB is refused, by descriptor and by path":
+    let dir = root / "r20-big"
+    ensureCheckedDir(dir)
+    writeFile(dir / "big.json", newString(MaxRecordBytes + 1))
+    expect OSError:
+      discard readInCheckedDir(dir / "big.json")
+    expect OSError:
+      discard readBoundedByPath(dir / "big.json")
+    writeFile(dir / "fits.json", newString(MaxRecordBytes))
+    check readInCheckedDir(dir / "fits.json").len == MaxRecordBytes
+
+  test "verify-discard-record on a FIFO neither blocks nor verifies":
+    let s = scene("r20-verify-fifo")
+    let fifo = root / "r20-verify-fifo" / "x-discard-intent.json"
+    check mkfifo(fifo.cstring, Mode(0o600)) == 0
+    check finishesWithin10s(proc () =
+      discard verifyDiscardRecord(fifo, s.pub))
+    check finishesWithin10s(proc () =
+      discard readBoundedByPath(fifo))
+    let sig = s.gate.overrideRecord & DiscardRecordSigExt
+    removeFile(sig)
+    check mkfifo(sig.cstring, Mode(0o600)) == 0
+    let finished = finishesWithin10s(proc () =
+      discard verifyDiscardRecord(s.gate.overrideRecord, s.pub))
+    check finished
+    if finished:
+      check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsInvalid
 
 suite "A11 code review round 12: §13 decision 56, amended":
   test "18: records no run can ship are never waited for":
