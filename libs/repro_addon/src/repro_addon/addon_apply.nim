@@ -2244,9 +2244,9 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
         when not mutated("fixing-start-unreadable-skipped"):
           # FALSIFYING MUTATION (when absent): a unit systemd cannot be
           # asked about is skipped, and the commit clears its entry.
-          result.add("systemctl show " & e.unit & " (on record as one a " &
-            "revert could not start; this generation changes it, so it " &
-            "must be started and confirmed, §13 decision 160): systemd " &
+          result.add("systemctl show " & e.unit & " (on the record of " &
+            "triggers to restart; this generation changes it, so its " &
+            "restart must be confirmed, §13 decision 160): systemd " &
             "could not be asked: " & ex.msg)
         continue
       if props.getOrDefault("LoadState") != "loaded": continue
@@ -2256,8 +2256,8 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
         let q = if host.startNoBlock != nil: host.startNoBlock(e.unit)
                 else: (ok: false, output: "no queued start on this host")
         if not q.ok:
-          result.add("systemctl start --no-block " & e.unit & " (on record " &
-            "as one a revert could not start, §13 decision 160): " &
+          result.add("systemctl start --no-block " & e.unit & " (on the " &
+            "record of triggers to restart, §13 decision 160): " &
             q.output.strip())
         continue
       let s = startConfirmed(host, e.unit, mustStayActive = pass == 0)
