@@ -45,7 +45,51 @@ differ, and says when Nix remains the better tool.
 | generations | [generations](../reference/glossary.md#generation) |
 | substituters | binary caches (`repro cache`) |
 
+## Before and after
+
+A `flake.nix` that builds a Rust binary and defines a development shell:
+
+```nix
+{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  outputs = { self, nixpkgs }:
+    let pkgs = nixpkgs.legacyPackages.x86_64-linux; in {
+      packages.x86_64-linux.default = pkgs.rustPlatform.buildRustPackage {
+        pname = "cli-tool";
+        version = "0.1.0";
+        src = ./.;
+        cargoLock.lockFile = ./Cargo.lock;
+      };
+      devShells.x86_64-linux.default = pkgs.mkShell {
+        packages = [ pkgs.rustc pkgs.cargo ];
+      };
+    };
+}
+```
+
+becomes a `repro.nim` next to the existing `Cargo.toml`:
+
+```nim
+import repro_project_dsl
+
+package cli_tool:
+  uses:
+    "rustc >=1.80 <2.0"
+    "cargo >=1.80 <2.0"
+
+  executable cli_tool:
+    discard
+```
+
+`repro build` compiles it across Linux, macOS and Windows, and `repro shell`
+opens the development environment with the same resolved toolchain.
+
 ## What works differently
+
+Windows is a first-class target alongside Linux and macOS. Nix targets Linux
+and macOS; reprobuild runs natively on Windows as well, resolving tools from
+Scoop, release archives or source and reconciling Windows registry values,
+services and optional features in `system.nim`.
 
 The project file is a compiled, typed program. `repro.nim` is Nim. A
 misspelt option or a value of the wrong type is a compile error, reported with a

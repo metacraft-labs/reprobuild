@@ -27,8 +27,9 @@ unverified:
 # Glossary
 
 This page defines the one name the documentation uses for each reprobuild
-concept. The style check reads it: every Do not use entry is rejected in
-user pages, except inside code.
+concept. The style check reads it: every Do not use entry is case-sensitive and
+is rejected in user pages when used for a reprobuild concept, except inside code
+and when naming another tool for comparison (such as `devenv`).
 
 ## Action
 
@@ -253,19 +254,19 @@ also reads the older name `reprobuild.nim`.
 
 Do not use: project DSL, DSL file, build file, recipe (for a project file).
 
-## Reproducible
-
-An output is reproducible when building the same inputs again produces the same
-bytes. The documentation uses the word in no weaker sense.
-
-Do not use: consistent, deterministic-ish (for reproducible).
-
 ## Repository fragment
 
 A file under a workspace's `repos/` directory that declares one repository: its
 name, its checkout path, its remote and its [branch roles](#branch-role).
 
 Do not use: repo manifest, repo entry.
+
+## Reproducible
+
+An output is reproducible when building the same inputs again produces the same
+bytes. The documentation uses the word in no weaker sense.
+
+Do not use: consistent, deterministic-ish (for reproducible).
 
 ## Resource
 
@@ -353,8 +354,11 @@ Do not use: toolchain resolution, adapter (in prose).
 
 Your permission for reprobuild to activate a directory's
 [development environment](#development-environment) automatically. `repro allow`
-grants it for a directory and `repro deny` withdraws it. Trust is recorded
-against the directory's path, not against its contents.
+grants it for the current contents of the directory's [project file](#project-file),
+the local Nim modules it imports, `config.nims`, `nim.cfg` and the dev-env lock,
+and `repro deny` withdraws it. When any of those files changes, such as after
+`git pull`, trust stops applying until you review the change and run
+`repro allow` again.
 
 Do not use: allow-list, approval, whitelist.
 

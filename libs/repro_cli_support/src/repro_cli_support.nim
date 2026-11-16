@@ -80688,6 +80688,29 @@ type
     prunedRefs*: seq[string]
     lastFetch*: string
       ## When the pool last fetched (UTC), "" when never or absent.
+    gateway*: string
+      ## §7.6.6's ``gateway`` column: §7.3's verdict for this repo's push path
+      ## (``wired`` / ``stale-gateway`` / ``foreign`` / ``opted-out`` /
+      ## ``not-wired``), "" when the observation was not taken for this verb.
+      ##
+      ## A BOOLEAN WAS NOT ENOUGH, which is why this exists beside ``wired``.
+      ## ``wired`` answers "is the pushurl the expected one"; it cannot
+      ## distinguish a gateway this workspace can repair by repointing
+      ## (``stale-gateway``) from a developer's own mirror that must never be
+      ## overwritten (``foreign``), and it reports an opted-out repo as simply
+      ## unwired. §7.4 is explicit that an opt-out suppresses WIRING and never
+      ## REPORTING, so that distinction has to reach the reader.
+    gatewayReason*: string
+      ## Why, for the states that carry a why (``not-wired`` especially), ""
+      ## otherwise. Kept apart from ``gateway`` so the JSON stays machine-read
+      ## while the human line can print ``not-wired:<reason>`` as §7.6.6
+      ## spells it.
+    gateMode*: string
+      ## §7.6.6's ``gate_mode`` column: the certificate policy that WOULD apply
+      ## to a push of THIS repo now, read from its checked-out ``repro.lock``
+      ## and the rule for its checked-out branch (Test-Certificates TC-9d), so
+      ## ``required`` beside a ``not-wired`` gateway is visible as the
+      ## contradiction it is. "" when not observed for this verb.
     diagnostic*: string
 
   SharedClonesReport* = object
@@ -80706,6 +80729,12 @@ type
     otherBares*: seq[MaintenanceResult]
       ## ``gc`` only: the passes over bares no repo of the resolved project
       ## names, each one due (or forced). Their ``refs/cache/*`` are kept.
+    gatewaySummary*: string
+      ## §7.6.6's summary line: the gateway counts over the population swept,
+      ## beside the gate_mode that would apply now. Built by
+      ## ``describeWorkspaceGatewayObservation`` — the same producer
+      ## ``health``'s ``push-gateway`` row uses, so the two surfaces cannot
+      ## drift into reporting different numbers for one condition.
     warnings*: seq[string]
       ## Conditions that did not stop the verb, such as a sibling workspace
       ## whose state cannot be read and is therefore counted live.
@@ -80728,6 +80757,9 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["barePresent"] = %entry.barePresent
     obj["wired"] = %entry.wired
     obj["verdict"] = %entry.verdict
+    obj["gateway"] = %entry.gateway
+    obj["gatewayReason"] = %entry.gatewayReason
+    obj["gateMode"] = %entry.gateMode
     obj["rewired"] = %entry.rewired
     obj["maintenanceRan"] = %entry.maintenanceRan
     obj["looseBefore"] = %entry.looseBefore
@@ -80766,6 +80798,7 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
       "maintenanceRan": m.ran, "looseBefore": m.looseBefore,
       "looseAfter": m.looseAfter, "diagnostic": m.diagnostic})
   result["otherBares"] = others
+  result["gatewaySummary"] = %report.gatewaySummary
   result["warnings"] = %report.warnings
   result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
@@ -80801,6 +80834,14 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       " wired=" & $entry.wired
     if entry.verdict.len > 0:
       line.add(" verdict=" & entry.verdict)
+    if entry.gateway.len > 0:
+      # §7.6.6 spells the reason into the value (``not-wired:<reason>``) rather
+      # than giving it a column of its own, so a reader sees WHY without
+      # correlating two fields. The JSON keeps them apart.
+      line.add(" gateway=" & entry.gateway &
+        (if entry.gatewayReason.len > 0: ":" & entry.gatewayReason else: ""))
+    if entry.gateMode.len > 0:
+      line.add(" gate_mode=" & entry.gateMode)
     if entry.barePresent:
       line.add(" lastFetch=" &
         (if entry.lastFetch.len > 0: entry.lastFetch else: "never"))
@@ -80841,6 +80882,11 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       if m.diagnostic.len > 0:
         line.add(" diagnostic=" & m.diagnostic)
       result.add(line)
+  if report.gatewaySummary.len > 0:
+    # §7.6.6's summary line: "the answer to the question" the row exists for,
+    # printed last so it reads as the conclusion of the per-repo lines above
+    # rather than a header nobody correlates with them.
+    result.add("workspace shared-clones: " & report.gatewaySummary)
   for w in report.warnings:
     result.add("workspace shared-clones: warning: " & w)
   for d in report.diagnostics:
@@ -81000,6 +81046,42 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         result.diagnostics.add(e.path & ": " & e.diagnostic)
         result.exitCode = 1
 
+  # §7.6.6's gateway half of PG-0's reporting deliverable. Observed ONCE for
+  # the whole pass and indexed by repo name, because `observeWorkspaceGateways`
+  # classifies every participating repo in one walk and calling it per repo
+  # would re-read the same configs N times.
+  #
+  # The same producer `health`'s `push-gateway` row uses, deliberately: §7.6.6
+  # says migration wires its status into this deliverable "rather than
+  # inventing a second surface", and two independent computations of one
+  # condition are exactly how the two surfaces would come to disagree.
+  var gatewayByRepo = initTable[string, GatewayRepoObservation]()
+  var gateModeByRepo = initTable[string, string]()
+  if parsed.verb in ["list", "rewire", "gc"]:
+    let obs = observeWorkspaceGateways(parsed.workspaceRoot, result.cacheRoot)
+    var gatingRepos: seq[string]
+    for one in obs.repos:
+      gatewayByRepo[one.repo] = one
+      # The mode that would apply to a push of THIS repo now, not a
+      # workspace-wide one: since TC-9d it is per repo, read from the
+      # checked-out `repro.lock` and the rule for the checked-out branch.
+      let policy = checkedOutPushPolicy(one.repoPath)
+      gateModeByRepo[one.repo] = $policy.mode
+      if policy.mode != cgmOff:
+        gatingRepos.add(one.repo & " (" & $policy.mode & ": " &
+          policy.detail & ")")
+    result.gatewaySummary = describeWorkspaceGatewayObservation(obs) & "; " &
+      (if gatingRepos.len == 0:
+        "no participating repo's checked-out repro.lock records a " &
+          "certificate policy that gates a push of its current branch"
+      else:
+        "gate_mode that would apply to a push now, per repo's own " &
+          "certificate policy: " & gatingRepos.join(", ")) &
+      (if obs.optOutScope.len > 0:
+        "; a per-" & obs.optOutScope & " opt-out is in force (§7.4), which " &
+        "suppresses WIRING and not REPORTING"
+      else: "")
+
   var sharedBareByUrl = initTable[string, SharedCloneResult]()
   # RA-15: maintain each unique shared bare at most once per pass.
   var maintainedBares = initHashSet[string]()
@@ -81011,7 +81093,11 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     var entry = SharedClonesRepoReport(
       name: repo.name,
       path: repo.path,
-      fetchUrl: cloneUrl)
+      fetchUrl: cloneUrl,
+      gateMode: gateModeByRepo.getOrDefault(repo.name))
+    if gatewayByRepo.hasKey(repo.name):
+      entry.gateway = $gatewayByRepo[repo.name].state
+      entry.gatewayReason = gatewayByRepo[repo.name].reason
     let info = inspectRepoWiring(parsed.workspaceRoot, result.cacheRoot,
       repo.path, cloneUrl)
     entry.sharedBarePath = info.sharedBarePath
