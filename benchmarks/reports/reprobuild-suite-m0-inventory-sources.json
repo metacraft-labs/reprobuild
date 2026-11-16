@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2871,
+    "nimTestBinaries": 2872,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 776,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2918
+    "testEntries": 2919
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1641,7 +1641,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1584,
+      "integration": 1585,
       "platform/destructive": 186,
       "pure unit": 776,
       "unclassified": 349
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2871,
+    "nimTestBinaryCount": 2872,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2918
+    "testEntryCount": 2919
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21070,6 +21070,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_materiality_covers_unselected_and_dormant_constraints",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock_gen",
+        "repro_solver"
+      ],
+      "owner": "libs/repro_lock_gen",
+      "requiresReproBinary": true,
+      "source": "libs/repro_lock_gen/tests/t_materiality_covers_unselected_and_dormant_constraints.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_materiality_interval_covers_the_gap",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -27539,7 +27557,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31380,7 +31398,7 @@
       "requiresReproBinary": false,
       "source": "tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim",
       "sourceSuiteCount": 16,
-      "staticCaseCount": 115,
+      "staticCaseCount": 116,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

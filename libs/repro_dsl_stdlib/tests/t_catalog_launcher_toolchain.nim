@@ -26,7 +26,7 @@
 ## executable is the network conformance sweep's job, and these modules are
 ## enrolled for it in `catalog_tarball_packages`.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
 import repro_interface_artifacts
 import repro_dsl_stdlib/package_registry
@@ -127,3 +127,32 @@ suite "launcher toolchain catalog entries":
     check avail.declared
     for p in avail.platforms:
       check p.os == poLinux
+
+  test "llvm-mingw's windows/aarch64 arm is the cold start's arm64 C toolchain pin":
+    # reprobuild-pm Distribution-And-Packaging.md §7.1, W1: the catalog row and
+    # windows/toolchain-versions.env name one archive, so the engine's
+    # windows-aarch64 C compiler and the cold start's cannot drift apart.
+    const pinFile = currentSourcePath().parentDir.parentDir.parentDir.parentDir /
+      "windows" / "toolchain-versions.env"
+    const pinText = staticRead(pinFile)
+    var pins: seq[(string, string)]
+    for line in pinText.splitLines:
+      let t = line.strip
+      if t.len == 0 or t.startsWith("#") or '=' notin t: continue
+      let i = t.find('=')
+      pins.add((t[0 ..< i].strip, t[i + 1 .. ^1].strip))
+    proc pin(key: string): string =
+      for (k, v) in pins:
+        if k == key: return v
+      ""
+    let release = pin("LLVM_MINGW_WIN_ARM64_RELEASE")
+    check release.len == 8
+    let p = pick("llvm-mingw", release, pcAArch64, poWindows)
+    check p.ok
+    if p.ok:
+      check p.record.url == "https://github.com/mstorsjo/llvm-mingw/releases/download/" &
+        release & "/llvm-mingw-" & release & "-ucrt-aarch64.zip"
+      check p.record.sha256 == pin("LLVM_MINGW_WIN_ARM64_SHA256")
+      check p.record.detail.extractPath == "llvm-mingw-" & release & "-ucrt-aarch64"
+      check "bin/gcc.exe" in p.record.detail.extraExecutables
+
