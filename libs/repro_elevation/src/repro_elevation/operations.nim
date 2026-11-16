@@ -892,12 +892,21 @@ type
       ##                            "operation succeeded; reboot
       ##                            required" code Windows installers
       ##                            return).
+      ## * `iecTimeoutSeconds`    — the action's own deadline, from the
+      ##                            profile edge's `timeoutSeconds`. `0`
+      ##                            means "the default"
+      ##                            (`effectiveInlineExecTimeoutSeconds`).
+      ##                            In-process only: the broker wire frame
+      ##                            does not carry it, so an operation that
+      ##                            crosses to a forked broker runs under
+      ##                            the default deadline, never under none.
       iecExecutable*: string
       iecArguments*: seq[string]
       iecWorkingDirectory*: string
       iecEnvironment*: seq[string]
       iecToolIdentityRefs*: seq[string]
       iecAcceptExitCodes*: seq[int]
+      iecTimeoutSeconds*: int
 
 # ---------------------------------------------------------------------------
 # linux.fhsSandbox — closed-set charset / shape helpers.
