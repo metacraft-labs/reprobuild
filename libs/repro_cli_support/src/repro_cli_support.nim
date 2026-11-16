@@ -69203,8 +69203,13 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
   # Only an absent record is back-filled: a record that disagrees (another
   # value, another workspace) is reprobuild's own stale belief, and §7.6.3
   # leaves resolving that to repointing, not to a silent rewrite here.
-  let needsRecord =
-    gatewayConfigValue(gitBin, repoPath, gatewayProvenanceSetByKey).len == 0
+  # "No record" means none of its four keys: a partial record is still a
+  # record, and is neither overwritten nor removed by this run.
+  var needsRecord = true
+  for key in [gatewayProvenanceSetByKey, gatewayProvenanceValueKey,
+              gatewayProvenanceWorkspaceKey, gatewayProvenanceAtKey]:
+    if gatewayConfigValue(gitBin, repoPath, key).len > 0:
+      needsRecord = false
   if preexisting.len > 0:
     let current = preexisting
     if current == absolutePath(result.gatewayDir):
@@ -69220,15 +69225,19 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       # so for now every other value is reported and left alone. Erring toward
       # not clobbering a developer's own mirror is the right side to err on.
       result.outcome = gwoForeignPushurl
-      let recorded =
-        gatewayConfigValue(gitBin, repoPath, gatewayProvenanceSetByKey) ==
-          "reprobuild" and
+      let byUs = gatewayConfigValue(gitBin, repoPath,
+        gatewayProvenanceSetByKey) == "reprobuild"
+      let recorded = byUs and
         gatewayConfigValue(gitBin, repoPath, gatewayProvenanceValueKey) ==
-          current
+          current and
+        gatewayConfigValue(gitBin, repoPath, gatewayProvenanceWorkspaceKey) ==
+          absolutePath(workspaceRoot)
       result.diagnostic = "remote." & remoteName & ".pushurl is already '" &
         current & "'; left untouched (" &
         (if recorded: "reprobuild set it, but it is not this workspace's " &
            "gateway for the upstream; migrate does not repoint it"
+         elif byUs: "the provenance record names a different value or " &
+           "workspace, so reprobuild cannot vouch for this one"
          else: "no provenance record says reprobuild set it") & ")"
       return
   try:
@@ -69240,7 +69249,9 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
         if alreadyWired:
           "dry-run: would refresh gateway configuration for " & repoPath &
             (if needsRecord: " and record its provenance" else: "")
-        else: "dry-run: would wire " & repoPath & " -> " & result.gatewayDir
+        else: "dry-run: would wire " & repoPath & " -> " & result.gatewayDir &
+          (if preexisting.len > 0 and needsRecord:
+             " and record its provenance" else: "")
       return
     if alreadyWired:
       # Older migrations omitted the record-store source. Repair those
@@ -69280,6 +69291,15 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     # pushurl is taken back out — a pushurl with no record could never be
     # told apart from a hand-set one again, and a plain-git opt-out of it
     # would be re-wired.
+    #
+    # When the pushurl already named this gateway before the run (an
+    # incomplete gateway was just rebuilt behind it), an existing record —
+    # even one that disagrees — is left exactly as it is, as on the
+    # already-wired path; only an absent record is written (the §7.6.3
+    # back-fill, the gateway now being complete).
+    if preexisting.len > 0 and not needsRecord:
+      result.outcome = gwoWired
+      return
     let recorded = recordGatewayProvenance(gitBin, workspaceRoot, repoPath,
       absolutePath(result.gatewayDir))
     if recorded.len > 0:
@@ -69294,11 +69314,18 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
             "remote." & remoteName & ".pushurl was unset again"
           else: "remote." & remoteName & ".pushurl could NOT be unset: " &
             unset.output.strip())
+      # Remove only a record this run started. A record that was there
+      # before (possible only on a fresh wire, where a non-reprobuild or
+      # partial record is overwritten) is beyond restoring key by key, so
+      # its loss is named rather than hidden.
       let cleared = gitNoteRun(gitBin, ["-C", repoPath, "config",
         "--remove-section", gatewayProvenanceSection])
       if cleared.code != 0:
         rollback.add("the partial record could not be removed: " &
           cleared.output.strip())
+      elif not needsRecord:
+        rollback.add("the provenance record that was present before this " &
+          "run was removed with it")
       result.outcome = gwoFailed
       result.diagnostic = recorded &
         (if rollback.len > 0: "; " & rollback.join("; ") else: "")
