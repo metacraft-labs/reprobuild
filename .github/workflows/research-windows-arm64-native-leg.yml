@@ -107,6 +107,15 @@ jobs:
         with:
           env-flavor: windows-diy
           gh-token: ${{ steps.ci_token.outputs.token }}
+      # The ARM64 monitor backend is on the agents branches of these two
+      # siblings and not yet in this commit's repro.lock pins.
+      - name: Use the ARM64 monitor backend siblings
+        run: |
+          foreach ($r in @('io-mon', 'nim-stackable-hooks')) {
+            git -C "../$r" fetch -q origin agents
+            git -C "../$r" checkout -q FETCH_HEAD
+            "$r at $(git -C "../$r" rev-parse --short HEAD)"
+          }
       - name: Toolchain qualification
         run: |
           $ErrorActionPreference = 'Stop'
@@ -129,6 +138,46 @@ jobs:
             "{0,-40} 0x{1:X4}" -f $_.Name, (Get-PeMachine $_.FullName)
           }
           if ($rc) { throw "build_apps.sh exit $rc" }
+      - name: Windows gates
+        id: gates
+        continue-on-error: true
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failed = @()
+          & build/bin/repro.exe --version
+          if ($LASTEXITCODE) { $failed += 'repro --version' }
+          foreach ($t in @('tests/windows/windows_expand_archive_execution_boundary.nim',
+                           'tests/windows/windows_release_dll_staging_boundary.nim',
+                           'tests/integration/t_compiler_args_transport.nim')) {
+            $stem = [IO.Path]::GetFileNameWithoutExtension($t)
+            Write-Host "::group::$stem"
+            nim c -r --threads:on --hints:off --warnings:off "--nimcache:build/nimcache/$stem" "--out:build/test-bin/$stem.exe" $t
+            $rc = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            "$stem exit=$rc"
+            if ($rc) { $failed += $stem }
+          }
+          if ($failed.Count) { throw "failed: $($failed -join ', ')" }
+      - name: Stage release DLLs and audit the closure
+        id: stage
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & ./windows/stage-release-dlls.ps1
+      - name: Package and verify the release archive
+        id: package
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $out = @(./scripts/release/package_windows_release.ps1 -Zip -Platform windows -Arch aarch64)
+          $out
+          bash ./scripts/verify_release.sh $out[1] 2>&1 | Select-Object -Last 60
+          if ($LASTEXITCODE) { throw "verify_release.sh exit $LASTEXITCODE" }
+      - name: Outcomes
+        if: always()
+        run: |
+          "gates=${{ steps.gates.outcome }} stage=${{ steps.stage.outcome }} package=${{ steps.package.outcome }}"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

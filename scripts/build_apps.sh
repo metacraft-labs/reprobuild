@@ -955,6 +955,56 @@ windows_dll_staging_problem() {
   echo "warning: $1" >&2
 }
 
+# The Windows architecture the images this build produces are for, read from
+# the compiler that builds them ("Nim Compiler Version x [Windows: arm64]").
+# Not from $PROCESSOR_ARCHITECTURE: Git for Windows' bash runs as x64 under
+# emulation on Windows on Arm and reports AMD64 there (measured on the hosted
+# windows-11-arm image, 2026-11-16). reprobuild-pm Distribution-And-Packaging.md
+# §7.1.
+windows_target_arch() {
+  case "${WINDOWS_DIY_ARCH_OVERRIDE:-}" in
+    x64|X64) echo x64; return ;;
+    arm64|ARM64) echo arm64; return ;;
+  esac
+  if nim --version 2>/dev/null | head -n 1 | grep -q '\[Windows: arm64\]'; then
+    echo arm64
+  else
+    echo x64
+  fi
+}
+
+# The PE/COFF Machine field of $1 as four hex digits (8664 x64, aa64 ARM64),
+# or empty when it is not a PE image.
+# https://learn.microsoft.com/windows/win32/debug/pe-format#machine-types
+windows_pe_machine() {
+  local lfanew sig
+  lfanew="$(od -An -tu4 -j 60 -N 4 "$1" 2>/dev/null | tr -d ' ')"
+  [ -n "${lfanew}" ] || return 0
+  sig="$(od -An -tx4 -j "${lfanew}" -N 4 "$1" 2>/dev/null | tr -d ' ')"
+  [ "${sig}" = "00004550" ] || return 0
+  od -An -tx2 -j "$((lfanew + 4))" -N 2 "$1" 2>/dev/null | tr -d ' '
+}
+
+# Copy a runtime DLL into build/bin only when it is of the build's own machine:
+# an x64 libzstd.dll beside ARM64 images loads nowhere, and a silent wrong-arch
+# copy is worse than a missing one. Returns non-zero (after reporting) when the
+# source is of another machine.
+stage_windows_dll() {
+  local src="$1" dest="$2" want got
+  case "$(windows_target_arch)" in
+    arm64) want=aa64 ;;
+    *) want=8664 ;;
+  esac
+  got="$(windows_pe_machine "${src}")"
+  if [ "${got}" != "${want}" ]; then
+    windows_dll_staging_problem "${src} is a PE image for machine ${got:-?}, not this build's ${want}; not staged as ${dest}"
+    return 1
+  fi
+  if [ ! "${src}" -ef "${dest}" ]; then
+    cp -f "${src}" "${dest}"
+  fi
+}
+
 # MR4 -- Windows self-containment: stage clingo.dll next to repro.exe
 # so the Nim ``{.dynlib: "clingo.dll".}`` FFI in
 # ``libs/repro_solver/src/repro_solver/clingo_bindings.nim`` resolves
@@ -1015,7 +1065,7 @@ case "${REPRO_HOST_PLATFORM}" in
       echo "       REPRO_WINDOWS_CLINGO_DIR at a directory containing clingo.dll." >&2
       exit 1
     fi
-    cp -f "${clingo_src_dll}" build/bin/clingo.dll
+    stage_windows_dll "${clingo_src_dll}" build/bin/clingo.dll || exit 1
     echo "Staged clingo.dll from ${clingo_src_dll} -> build/bin/clingo.dll"
     ;;
 esac
@@ -1057,8 +1107,9 @@ case "${REPRO_HOST_PLATFORM}" in
         zstd_src_dll="${zstd_src_dir}/dll/libzstd.dll"
       fi
       if [ -n "${zstd_src_dll}" ]; then
-        cp -f "${zstd_src_dll}" build/bin/libzstd.dll
-        echo "Staged libzstd.dll from ${zstd_src_dll} -> build/bin/libzstd.dll"
+        if stage_windows_dll "${zstd_src_dll}" build/bin/libzstd.dll; then
+          echo "Staged libzstd.dll from ${zstd_src_dll} -> build/bin/libzstd.dll"
+        fi
       else
         windows_dll_staging_problem "zstd.exe on PATH at ${zstd_exe} but no sibling libzstd.dll (checked ${zstd_src_dir}/libzstd.dll and ${zstd_src_dir}/dll/libzstd.dll); repro.exe cache substitute will fail to decompress payloads in a clean shell"
       fi
@@ -1136,8 +1187,8 @@ case "${REPRO_HOST_PLATFORM}" in
     fi
     if [ -n "${sqlite_src_dll}" ]; then
       if [ ! "${sqlite_src_dll}" -ef build/bin/sqlite3_64.dll ]; then
-        cp -f "${sqlite_src_dll}" build/bin/sqlite3_64.dll
-        cp -f "${sqlite_src_dll}" build/bin/sqlite3.dll
+        stage_windows_dll "${sqlite_src_dll}" build/bin/sqlite3_64.dll || true
+        stage_windows_dll "${sqlite_src_dll}" build/bin/sqlite3.dll || true
         echo "Staged sqlite3_64.dll and sqlite3.dll from ${sqlite_src_dll} -> build/bin/"
       fi
     else
@@ -1184,22 +1235,11 @@ esac
 #   4. the DLLs themselves on PATH.
 #
 # The DLL names carry the Windows architecture (OpenSSL's mingw targets name
-# them libssl-3-x64.dll / libssl-3-arm64.dll); windows_openssl_arch picks the
-# suffix the same way windows/toolchain-utils.ps1's Get-WindowsArch does
-# (reprobuild-pm Distribution-And-Packaging.md §7.1, W4).
-windows_openssl_arch() {
-  case "${WINDOWS_DIY_ARCH_OVERRIDE:-}" in
-    x64|X64) echo x64; return ;;
-    arm64|ARM64) echo arm64; return ;;
-  esac
-  case "${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-}}" in
-    ARM64|arm64) echo arm64 ;;
-    *) echo x64 ;;
-  esac
-}
+# them libssl-3-x64.dll / libssl-3-arm64.dll); windows_target_arch reads it
+# from the compiler (reprobuild-pm Distribution-And-Packaging.md §7.1, W4).
 case "${REPRO_HOST_PLATFORM}" in
   windows)
-    ssl_arch="$(windows_openssl_arch)"
+    ssl_arch="$(windows_target_arch)"
     libssl_dll="libssl-3-${ssl_arch}.dll"
     libcrypto_dll="libcrypto-3-${ssl_arch}.dll"
     openssl_bin_dir=""
@@ -1230,7 +1270,7 @@ case "${REPRO_HOST_PLATFORM}" in
     if [ -n "${openssl_bin_dir}" ]; then
       for dll in ${libssl_dll} ${libcrypto_dll}; do
         if [ ! "${openssl_bin_dir}/${dll}" -ef "build/bin/${dll}" ]; then
-          cp -f "${openssl_bin_dir}/${dll}" "build/bin/${dll}"
+          stage_windows_dll "${openssl_bin_dir}/${dll}" "build/bin/${dll}" || true
         fi
       done
       echo "Staged ${libssl_dll} and ${libcrypto_dll} from ${openssl_bin_dir} -> build/bin/"
