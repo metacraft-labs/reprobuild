@@ -10,10 +10,11 @@
 ##
 ## Both drivers implement the spec's mandated contract: before
 ## mutating, **re-observe** the resource's current real-world state
-## and drift-check it against the value the non-elevated plan
-## recorded. State can change between the non-elevated plan and the
-## elevated execution; the broker re-validates rather than blindly
-## trusting the parent. A drift is fail-closed (`EBrokerDrift`).
+## and compute the delta from it rather than from the value the
+## non-elevated plan recorded, so the broker never trusts the parent's
+## observation. It does not compare the two: M82 Phase A removed that
+## drift gate (see `dispatch.dispatchOperation` step 3), so a change
+## made after the plan is overwritten with the desired value.
 ##
 ## `pokFixtureFile` writes under a caller-supplied sandbox prefix
 ## (the gate points it at a temp dir). `pokFixtureRegistry` writes

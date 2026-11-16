@@ -402,8 +402,10 @@ proc plannedOperationsFor*(profileText: string;
                            env: PlanEnvelope): seq[PlannedOperation] =
   ## Build the typed `PlannedOperation` list for the EFFECTIVE
   ## (non-no-op) operations of a plan. Each carries the plan's
-  ## recorded baseline digest so the broker's drift gate can tell a
-  ## safe update from a mid-flight drift.
+  ## recorded baseline digest on the wire; the broker does not consult
+  ## it (M82 Phase A removed the drift gate that did, see
+  ## `dispatch.dispatchOperation` step 3), and diffs against its own
+  ## live re-observation instead.
   ##
   ## A record the planner marked `DependencyRestartAction` (a unit whose
   ## own bytes are unchanged but whose `depends_on` resource changes in
@@ -1734,8 +1736,9 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
 
   # Fold in any `repro system rollback` destroy operations: each
   # removed resource becomes a typed destroy operation whose baseline
-  # digest is the resource's live observed state, so the broker's
-  # drift gate treats it uniformly. An already-reverted resource
+  # digest is the resource's live observed state, so it travels the
+  # same wire shape as a planned operation (the broker does not consult
+  # the baseline). An already-reverted resource
   # (observe says absent) is dispatched as a destroy no-op.
   var destroys: seq[PlannedOperation]
   var destroyed: seq[string]
