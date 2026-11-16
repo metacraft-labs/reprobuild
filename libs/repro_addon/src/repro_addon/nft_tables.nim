@@ -15,6 +15,8 @@
 
 import std/strutils
 
+import repro_infra/addon_diagnostics
+
 import ./host_exec
 
 const
@@ -23,7 +25,7 @@ const
   EgressTableKey* = EgressTableFamily & " " & EgressTableName
     ## The ledger path and the fingerprint key of the table.
   NftCandidates* = ["/usr/sbin/nft", "/sbin/nft"]
-  EgressObserverUnavailable* = "EAddOnEgressObserverUnavailable"
+  EgressObserverUnavailable* = $adEgressObserverUnavailable
     ## Bootstrap's refusal of a base that cannot carry the observer.
 
 proc nftBinary*(): string =

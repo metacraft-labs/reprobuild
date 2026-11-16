@@ -598,6 +598,7 @@ proc streamDaemonBuild(fullCli: string; args: seq[string]): int =
     publicCliPath: fullCli,
     rawArgs: args[1 .. ^1],
     environment: daemonCarriedEnvironment(),
+    environmentIsComplete: true,
     attached: true,
     cancelOnDisconnect: true)
   let daemonResult = requestUserDaemonBuild(request, config.endpoint,

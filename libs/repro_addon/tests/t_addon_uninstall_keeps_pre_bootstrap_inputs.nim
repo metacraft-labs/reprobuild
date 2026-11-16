@@ -459,6 +459,8 @@ suite "only the add-on's own empty directories follow the ledger copy":
     writeFile(s.st / "system" / "late", "x")
     writeFile(s.token, $(%*{"schema": StateRemovalTokenSchema, "root": s.st,
       "ledgerCopy": s.lc, "chain": [s.st / "system", s.st],
+      "chainIdentity": {s.st / "system": stateDirIdentity(s.st / "system"),
+                        s.st: stateDirIdentity(s.st)},
       "preBootstrapRoots": newSeq[string]()}))
     var again: UninstallResult
     check finishEmptyStateRoot(again, s.st, s.lc, s.token)
@@ -761,3 +763,41 @@ suite "round 16":
     check r.errors.len == 0
     check readFile(victim) == "untouched\n"
     check not fileExists(sc.token) and not symlinkExists(sc.token & ".tmp")
+
+# ---------------------------------------------------------------------------
+# A11 code review round 17 (§13 decisions 165 and 166): the token binds the
+# install whose uninstall wrote it, and a corrupt record of a pre-bootstrap
+# input stops the uninstall before step 1. Falsifiers
+# ``token-not-bound-to-install`` and ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+suite "round 17":
+  test "a token whose directories are another install's is refused, nothing removed":
+    let s = v2Scene("rebound")
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token)
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    check r.errors.len == 1 and fileExists(s.token)
+    # A new install's state at the same path: another directory.
+    let saved = readFile(s.token)
+    removeDir(s.st)
+    createDir(s.st)
+    writeFile(s.token, saved)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of a pre-bootstrap input stops the uninstall, with its remedy":
+    let e = LedgerEntry(class: lcRoot, path: "/var/lib/repro/agent",
+      mode: "0700", owner: "0:0", replaced: "dir 0750 1000:1000",
+      collision: "adopt", observation: PriorCapturedBeforeTakeover)
+    let pb = preBootstrapInputs(Ledger(entries: @[e]))
+    var r: UninstallResult
+    check refuseCorruptInputs(r, pb, "/x/addon-ledger")
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check "restore it from the generation" in r.errors[1]
+    var fine: UninstallResult
+    check not refuseCorruptInputs(fine, preBootstrapInputs(Ledger()), "/x")
