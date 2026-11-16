@@ -2973,6 +2973,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let root = createTempDir(\"repro-publish-unit-\", \"\")"),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_cli_parse_reads_only_declared_env.nim",
+    binary: "build/test-bin/t_cli_parse_reads_only_declared_env",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: cliConfiguration(EnvProbeCli, \"envprobe\"):"),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_connection_ends_with_its_leaf.nim",
     binary: "build/test-bin/t_connection_ends_with_its_leaf",
     defines: @[],
