@@ -1984,9 +1984,10 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     opts.stateDir & ")", privileged = isProcessElevated())
   defer: hostLock.release()
   # Before anything at all -- the pending-switch recovery, any action edge,
-  # the plan file: an essential unit the carried-state check would hold
-  # refuses the apply (§13 decisions 171 and 177 as the owner decided them;
-  # A13 review round 12). ``beginLiveCheck`` checks the set it actually
+  # the plan file: an essential unit the carried-state check would hold --
+  # judged, a trigger, or a requirer held with the judged units (§13
+  # decisions 171 and 177 as the owner decided them; A13 review round 12)
+  # -- refuses the apply. ``beginLiveCheck`` checks the set it actually
   # holds again, before it stops or holds anything.
   when defined(posix):
     let essDir = if opts.carriedStateDir.len > 0: opts.carriedStateDir
