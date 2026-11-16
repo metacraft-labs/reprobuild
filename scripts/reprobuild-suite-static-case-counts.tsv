@@ -682,6 +682,7 @@ libs/repro_lock_gen/tests/t_hidden_lock_shares_with_committed.nim	nim	3
 libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim	nim	10
 libs/repro_lock_gen/tests/t_lock_refresh_carries_catalog_import_pins_forward.nim	nim	4
 libs/repro_lock_gen/tests/t_lock_refresh_carries_provisioning_forward.nim	nim	4
+libs/repro_lock_gen/tests/t_materiality_covers_unselected_and_dormant_constraints.nim	nim	5
 libs/repro_lock_gen/tests/t_materiality_interval_covers_the_gap.nim	nim	5
 libs/repro_lock_gen/tests/t_materiality_irrelevant_metadata_no_invalidation.nim	nim	3
 libs/repro_lock_gen/tests/t_materiality_relevant_metadata_invalidates.nim	nim	3

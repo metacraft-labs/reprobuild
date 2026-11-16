@@ -7428,6 +7428,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_lock_gen_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_lock_gen/tests/t_materiality_covers_unselected_and_dormant_constraints.nim",
+    binary: "build/test-bin/t_materiality_covers_unselected_and_dormant_constraints",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for strategy in [lsDefault, lsLowest, lsHighest, lsLowestDir..."),
+  TestSpec(
     source: "libs/repro_lock_gen/tests/t_materiality_interval_covers_the_gap.nim",
     binary: "build/test-bin/t_materiality_interval_covers_the_gap",
     defines: @[],
