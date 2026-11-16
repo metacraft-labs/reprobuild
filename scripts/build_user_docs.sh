@@ -52,7 +52,7 @@ checkout_at() {
 fetch() {
   mkdir -p "${sibling_root}"
   echo "build_user_docs.sh: framework checkouts in ${sibling_root}"
-  local framework_ref="${REPRO_DOCS_ISONIM_DOCS_REF:-0e7c00e6f0ee8c255c7d17d4428d711d0350461e}"
+  local framework_ref="${REPRO_DOCS_ISONIM_DOCS_REF:-4e7041386d5cf319c68628cc49063b76391b7f8a}"
   checkout_at isonim-docs "${framework_ref}"
   local lock="${sibling_root}/isonim-docs/repro.lock"
   [[ -f "${lock}" ]] || die "${lock} is missing; isonim-docs records its dependencies there"
