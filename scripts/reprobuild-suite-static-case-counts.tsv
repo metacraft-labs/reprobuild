@@ -849,6 +849,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim	nim	9
 libs/repro_project_dsl/tests/dsl_port/t_dsl_uses_staged.nim	nim	16
 libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim	nim	3
+libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_conditioned_deps_are_enumerable.nim	nim	9
 libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim	nim	7
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim	nim	4
@@ -2376,7 +2377,7 @@ tests/integration/t_shared_bare_refresh_keeps_objects_borrowers_reference.nim	ni
 tests/integration/t_shared_clone_alternates_skip_redownload.nim	nim	1
 tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	nim	2
 tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	nim	1
-tests/integration/t_shared_clones_sweep_repairs_every_bare_in_the_cache.nim	nim	5
+tests/integration/t_shared_clones_sweep_repairs_every_bare_in_the_cache.nim	nim	4
 tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim	nim	1
 tests/integration/t_shorthand_equals_to.nim	nim	1
 tests/integration/t_sibling_exact_pin_guidance.nim	nim	4
@@ -2588,7 +2589,7 @@ tests/integration/t_workspace_restore_lock_pins.nim	nim	2
 tests/integration/t_workspace_root_discovered_from_settings_file.nim	nim	1
 tests/integration/t_workspace_routes_repo_sets_to_distinct_backends.nim	nim	2
 tests/integration/t_workspace_sets_resolve_reports_closure.nim	nim	7
-tests/integration/t_workspace_shared_clones_list_and_rewire.nim	nim	11
+tests/integration/t_workspace_shared_clones_list_and_rewire.nim	nim	12
 tests/integration/t_workspace_status_shows_active_branch_and_drift.nim	nim	11
 tests/integration/t_workspace_switch_switches_all_repos.nim	nim	6
 tests/integration/t_workspace_sync_does_not_rewrite_a_force_pushed_checkout_unasked.nim	nim	5
@@ -2815,7 +2816,7 @@ tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	6
 tests/unit/t_recipe_constraint_reader.nim	nim	34
-tests/unit/t_recipe_lock_consistency_check.nim	nim	35
+tests/unit/t_recipe_lock_consistency_check.nim	nim	36
 tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim	nim	3
 tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
