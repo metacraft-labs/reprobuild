@@ -508,11 +508,11 @@ def render_llms_txt(pages: list[DocPageMeta], version: str, *, local_repo: bool)
         "",
         arch_body,
         "",
-        "## Non-Interactive CLI Rules for Agents",
+        "**Non-interactive CLI rules for agents:**",
         "",
         cli_rules_body,
         "",
-        "## Agent Topic Guides (Load Only the Topic You Need)",
+        "## Agent Topic Guides",
         "",
         *[agent_item(*entry) for entry in AGENT_TOPIC_GUIDES],
         "",
@@ -548,9 +548,11 @@ def render_llms_txt(pages: list[DocPageMeta], version: str, *, local_repo: bool)
     return "\n".join(lines)
 
 
-def _rewrite_agent_guide_links_for_web(md_text: str, repo_rel: str) -> str:
-    """Rewrite intra-repo Markdown links inside docs/agents/* to published `/agents/*.md` URLs."""
+def _rewrite_agent_guide_links_for_web(md_text: str, repo_rel: str, pages: list[DocPageMeta]) -> str:
+    """Rewrite intra-repo Markdown links inside docs/agents/* to published `.md` URLs on docs.reprobuild.com."""
     mapping = {r_rel: f"{DOCS_ORIGIN}{w_md}" for r_rel, w_md, _, _ in AGENT_TOPIC_GUIDES}
+    for p in pages:
+        mapping[f"docs/users/content/{p.rel_path}"] = p.url
     src_dir = (ROOT / repo_rel).parent
 
     def repl(match: re.Match[str]) -> str:
@@ -586,7 +588,7 @@ def emit_web_llms_bundle(public_dir: pathlib.Path, staged_content_dir: pathlib.P
 
     for repo_rel, web_md, title, desc in AGENT_TOPIC_GUIDES:
         raw = (ROOT / repo_rel).read_text(encoding="utf-8")
-        rewritten = _rewrite_agent_guide_links_for_web(_strip_frontmatter(raw), repo_rel) + "\n"
+        rewritten = _rewrite_agent_guide_links_for_web(_strip_frontmatter(raw), repo_rel, pages) + "\n"
         if re.search(r"\b[a-z0-9-]+-(?:specs|pm)/", rewritten):
             raise RuntimeError(f"Public boundary violation: {repo_rel} references a private specification repository")
         out_path = public_dir / web_md.lstrip("/")

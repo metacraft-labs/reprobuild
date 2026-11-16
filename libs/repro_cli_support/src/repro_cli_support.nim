@@ -69261,6 +69261,75 @@ proc hookWriterRunnerSkewDiagnostic*(skew: HookWriterRunnerSkew): seq[string] =
 
 # ---- the per-repo wiring entry point --------------------------------------
 
+const
+  gatewayOptOutRepoConfigKey = "reprobuild.pushGateway.optOut"
+    ## §7.4's explicit per-REPO opt-out marker. Its WRITER is ``unwire``
+    ## (§7.6.7), which has no CLI verb yet; both the wiring entry point and the
+    ## health observation read it.
+  gatewayProvenanceSection = "reprobuild.pushGateway"
+  gatewayProvenanceSetByKey = gatewayProvenanceSection & ".setBy"
+  gatewayProvenanceValueKey = gatewayProvenanceSection & ".value"
+  gatewayProvenanceWorkspaceKey = gatewayProvenanceSection & ".workspace"
+  gatewayProvenanceAtKey = gatewayProvenanceSection & ".at"
+    ## §7.6.3's provenance record, written by ``ensureGatewayForRepo`` beside
+    ## the ``pushurl`` it sets, in the repo's own ``.git/config``. It is what
+    ## makes the plain-git opt-out decidable: ``git config --unset
+    ## remote.origin.pushurl`` leaves the record behind, and §7.3 reads "record
+    ## present, ``pushurl`` absent" as ``opted-out``. A repo wired by a build
+    ## that predates the record has none, and is deliberately NOT back-filled:
+    ## a ``pushurl`` equal to the expected gateway path is path shape, and
+    ## §7.6.3 rules that path shape is not provenance.
+
+proc perRepoGatewayOptOut*(gitBin, repoPath: string;
+                           remoteName = "origin"): string =
+  ## §7.3/§7.4's per-repo ``opted-out`` verdict, shared by the writer
+  ## (``ensureGatewayForRepo``) and the observer (``observeWorkspaceGateways``)
+  ## so the two cannot disagree about it. Returns the reason, or "" when the
+  ## repo has not opted out. Two forms count:
+  ##
+  ##   * the explicit marker ``reprobuild.pushGateway.optOut`` set to a true
+  ##     boolean (``unwire``'s marker, or set by hand);
+  ##   * the §7.6.3 provenance record present (``setBy = reprobuild``) with
+  ##     ``remote.<name>.pushurl`` absent: reprobuild wired this repo and its
+  ##     owner removed the ``pushurl`` with plain git, which cannot write a
+  ##     marker. Without this rule the next wiring run would silently undo the
+  ##     opt-out §6.4 and §7.4 document.
+  ##
+  ## A repo with no record and no ``pushurl`` is NOT opted out: it was never
+  ## wired, or its foreign ``pushurl`` was removed, and §7.6.4 wires it.
+  proc cfg(key: string): string =
+    let res = gitNoteQuery(gitBin, ["-C", repoPath, "config", "--get", key])
+    if res.code == 0: res.output.strip() else: ""
+  # Strict booleans only. ``optOut = off`` is NOT accepted as an opt-out even
+  # though an operator might mean "the gateway is off" by it: the key names
+  # the MARKER, so reading ``off`` as "opted out" would invert the one
+  # spelling that most plainly says the opposite.
+  if cfg(gatewayOptOutRepoConfigKey).toLowerAscii() in
+      ["true", "yes", "1", "on"]:
+    return "per-repo opt-out marker (" & gatewayOptOutRepoConfigKey & ")"
+  if cfg(gatewayProvenanceSetByKey) == "reprobuild" and
+      cfg("remote." & remoteName & ".pushurl").len == 0:
+    return "per-repo opt-out: remote." & remoteName & ".pushurl was removed " &
+      "after reprobuild wired it (the " & gatewayProvenanceSection &
+      ".* provenance record remains; `git config --remove-section " &
+      gatewayProvenanceSection & "` opts back in)"
+  ""
+
+proc recordGatewayProvenance(gitBin, workspaceRoot, repoPath,
+                             pushurl: string): string =
+  ## Write §7.6.3's record for the ``pushurl`` just set. Returns "" on success,
+  ## otherwise the diagnostic.
+  let at = getTime().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+  for (key, value) in [(gatewayProvenanceSetByKey, "reprobuild"),
+                       (gatewayProvenanceValueKey, pushurl),
+                       (gatewayProvenanceWorkspaceKey,
+                        absolutePath(workspaceRoot)),
+                       (gatewayProvenanceAtKey, at)]:
+    let res = gitNoteRun(gitBin, ["-C", repoPath, "config", key, value])
+    if res.code != 0:
+      return "could not record " & key & ": " & res.output.strip()
+  ""
+
 type
   GatewayWireOutcome* = enum
     ## Per-repo verdict of ``ensureGatewayForRepo``.
@@ -69270,6 +69339,8 @@ type
     gwoAlreadyWired     ## pushurl already correct; configuration refreshed
     gwoForeignPushurl   ## a pushurl this tool did not set: REPORTED, never
                         ## overwritten (§7.3)
+    gwoOptedOut         ## a per-repo opt-out (§7.3, §7.4): reported, never
+                        ## wired; nothing was written
     gwoNoUpstream       ## no ``remote.<name>.url`` to forward to
     gwoSkewRefused      ## the §7.6.5 refusal reached this repo
     gwoFailed           ## git refused the write
@@ -69452,6 +69523,13 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     result.outcome = gwoSkewRefused
     result.diagnostic = "refused: binary skew (spec §7.6.5)"
     return
+  # §7.6.2 step 1: classify BEFORE anything is created, so an opted-out repo
+  # costs nothing and is never written to (not even under --dry-run).
+  let optOut = perRepoGatewayOptOut(gitBin, repoPath, remoteName)
+  if optOut.len > 0:
+    result.outcome = gwoOptedOut
+    result.diagnostic = optOut
+    return
   let upstream = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
   if upstream.code != 0 or upstream.output.strip().len == 0:
@@ -69477,9 +69555,9 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       alreadyWired = gatewayIsComplete(result.gatewayDir)
     else:
       # §7.3 — a pushurl this tool did not set is never overwritten. Stricter
-      # here than PG-9 will be: without the provenance record (PG-9's
-      # deliverable) this cannot tell "reprobuild set it, to a stale value" from
-      # "the operator set it", so it reports and leaves it alone. Erring toward
+      # here than PG-9 will be: §7.3 lets a ``stale-gateway`` (the provenance
+      # record names the live value) be repointed, and repointing is PG-9's,
+      # so for now every other value is reported and left alone. Erring toward
       # not clobbering a developer's own mirror is the right side to err on.
       result.outcome = gwoForeignPushurl
       result.diagnostic = "remote." & remoteName & ".pushurl is already '" &
@@ -69510,6 +69588,23 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     if not wired.ok:
       result.outcome = gwoFailed
       return
+    # §7.6.2 step 4: the record follows the pushurl. Written after it, never
+    # before: a record with no pushurl reads as an opt-out (§7.3), so a failed
+    # pushurl write must not leave one. If the record cannot be written, the
+    # pushurl is taken back out — a pushurl with no record could never be
+    # told apart from a hand-set one again, and a plain-git opt-out of it
+    # would be re-wired.
+    let recorded = recordGatewayProvenance(gitBin, workspaceRoot, repoPath,
+      absolutePath(result.gatewayDir))
+    if recorded.len > 0:
+      discard gitNoteRun(gitBin, ["-C", repoPath, "config", "--unset",
+        "remote." & remoteName & ".pushurl"])
+      discard gitNoteRun(gitBin, ["-C", repoPath, "config", "--remove-section",
+        gatewayProvenanceSection])
+      result.outcome = gwoFailed
+      result.diagnostic = recorded & "; remote." & remoteName &
+        ".pushurl was unset again"
+      return
     result.outcome = gwoWired
   except CatchableError as err:
     result.outcome = gwoFailed
@@ -69531,6 +69626,12 @@ proc unwireGatewayForRepo*(gitBin, workspaceRoot, repoPath: string;
   ## touches the pool. A ``pushurl`` that does not name this workspace's
   ## gateway is not ours and is left exactly as found. A second call is a
   ## no-op.
+  ##
+  ## The provenance record ``ensureGatewayForRepo`` wrote is left in place, so
+  ## afterwards ``perRepoGatewayOptOut`` reads the repo as ``opted-out`` and the
+  ## next wiring run does not undo this. That is the outcome spec §7.6.7 asks
+  ## of ``unwire``; its own steps reach it by swapping the record for the
+  ## explicit marker instead.
   let upstream = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
   if upstream.code != 0 or upstream.output.strip().len == 0:
@@ -69604,6 +69705,9 @@ proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
     of gwoForeignPushurl:
       lines.add("reprobuild gateway: " & repo.name & ": foreign — " &
         res.diagnostic)
+    of gwoOptedOut:
+      lines.add("reprobuild gateway: " & repo.name & ": opted-out — " &
+        res.diagnostic)
     of gwoNoUpstream:
       lines.add("reprobuild gateway: " & repo.name & ": skipped — " &
         res.diagnostic)
@@ -69646,17 +69750,18 @@ proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
 # ``wired`` is computed from the SAME expression ``ensureGatewayForRepo`` writes
 # with (``gatewayBarePathFor(root, lastPathPart(workspaceRoot), upstreamUrl)``),
 # so the report and the writer cannot disagree about what "wired" means. The
-# three OPT-OUTS below are a different matter: §7.4 defines all three, and
-# NOTHING on the writing side honours any of them yet — ``ensureGatewayForRepo``
-# consults neither ``REPRO_PUSH_GATEWAY``, nor the workspace's
-# ``push_gateway``, nor the per-repo marker, so ``gateway migrate`` would wire a
-# repo this reports as ``opted-out``. That asymmetry is deliberate in this
-# direction only: §7.4 is explicit that an opt-out suppresses WIRING and never
-# REPORTING, so the reporting side arriving first costs an operator a
-# diagnostic they can act on, while the reverse would have cost them a silent
-# gateway. PG-11 owns the writer half (and PG-9 ``unwire``, the marker's
-# writer); until it lands, a reader of this row should not infer that
-# ``migrate`` will respect what it says.
+# three OPT-OUTS below are a different matter. The PER-REPO one is decided by
+# ``perRepoGatewayOptOut``, which ``ensureGatewayForRepo`` calls too, so a repo
+# this reports as ``opted-out`` for that reason is never wired by ``gateway
+# migrate``. The per-machine (``REPRO_PUSH_GATEWAY``) and per-workspace
+# (``push_gateway``) scopes are NOT consulted by the writer yet, so ``gateway
+# migrate`` would wire a repo this reports as ``opted-out`` for one of those.
+# That asymmetry is deliberate in this direction only: §7.4 is explicit that an
+# opt-out suppresses WIRING and never REPORTING, so the reporting side arriving
+# first costs an operator a diagnostic they can act on, while the reverse would
+# have cost them a silent gateway. PG-11 owns that writer half; until it lands,
+# a reader of this row should not infer that ``migrate`` respects a machine- or
+# workspace-scoped opt-out.
 
 type
   GatewayObservedState* = enum
@@ -69696,18 +69801,6 @@ const
   gatewayOptOutEnvVar = "REPRO_PUSH_GATEWAY"
     ## §7.4's per-MACHINE opt-out. Intended for CI images and for bisecting a
     ## gateway-related failure.
-  gatewayOptOutRepoConfigKey = "reprobuild.pushGateway.optOut"
-    ## §7.4's per-REPO opt-out marker. Its WRITER is ``unwire`` (§7.6.7), which
-    ## does not exist yet; the reader is implemented now because an opt-out
-    ## suppresses wiring and never reporting, so the reporting side must be able
-    ## to say ``opted-out`` the day the writer lands rather than a release
-    ## later.
-  gatewayProvenanceSetByKey = "reprobuild.pushGateway.setBy"
-  gatewayProvenanceValueKey = "reprobuild.pushGateway.value"
-  gatewayProvenanceWorkspaceKey = "reprobuild.pushGateway.workspace"
-    ## §7.6.3's provenance record. Also written by PG-9 rather than by anything
-    ## here, and read defensively for the same reason: its absence is the normal
-    ## state today and must not be reported as a defect.
 
 proc workspaceDeclaresGatewayOff(workspaceRoot: string): bool =
   ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` at the top level of
@@ -69788,21 +69881,15 @@ proc observeWorkspaceGateways*(workspaceRoot: string; cacheRoot = "";
 
     one.pushurl = cfg("remote." & remoteName & ".pushurl")
     one.upstreamUrl = cfg("remote." & remoteName & ".url")
-    # Strict booleans only. ``optOut = off`` is NOT accepted as an opt-out even
-    # though an operator might mean "the gateway is off" by it: the key names
-    # the MARKER, so reading ``off`` as "opted out" would invert the one
-    # spelling that most plainly says the opposite.
-    let repoOptOut = cfg(gatewayOptOutRepoConfigKey).toLowerAscii() in
-      ["true", "yes", "1", "on"]
+    let repoOptOut = perRepoGatewayOptOut(gitBin, repoPath, remoteName)
 
-    if result.optOutScope.len > 0 or repoOptOut:
+    if result.optOutScope.len > 0 or repoOptOut.len > 0:
       # §7.4 — an opt-out suppresses WIRING, never REPORTING. The repo is still
       # counted and still named, so a project at ``gate_mode = required`` that
       # opted its repos out reads as the contradiction it is.
       one.state = gosOptedOut
       one.reason =
-        if repoOptOut: "per-repo opt-out marker (" &
-          gatewayOptOutRepoConfigKey & ")"
+        if repoOptOut.len > 0: repoOptOut
         elif result.optOutScope == "machine": "per-machine opt-out (" &
           gatewayOptOutEnvVar & ")"
         else: "per-workspace opt-out (push_gateway in " &
@@ -95334,11 +95421,21 @@ proc runPromptCommand*(conf: ReproCommandLinePromptCall): int =
     stdout.writeLine(renderPromptSegment(state, parsed))
   0
 
-proc renderPromptInitSnippet(shell: string; reproBin: string): string =
+proc renderPromptInitSnippet(shell: string): string =
   ## Emit the per-shell integration snippet (``repro prompt init <shell>``).
   ## Like ``starship init zsh`` / ``direnv hook bash``: prints a snippet for
   ## the user to add to their rc — it NEVER mutates the prompt itself. The
   ## segment is appended (opt-in) so an existing prompt is preserved.
+  ##
+  ## The snippet runs the bare command ``repro``, found on ``PATH`` when the
+  ## prompt renders, as ``repro shell hook`` and the ``repro hooks ensure
+  ## --shell`` blocks do. It never embeds the path of the running image: that
+  ## is the engine (``reprobuild``), not the command a user runs, and on a
+  ## Nix install it is a store path that an upgrade followed by garbage
+  ## collection deletes, which would leave a prompt calling a missing binary
+  ## on every render. The thin client costs one ``execv`` (about a
+  ## millisecond) on its way to the engine, well inside the prompt's budget.
+  const reproBin = ReproThinClientName
   case shell
   of "bash":
     "# repro prompt — add to ~/.bashrc (opt-in; does not replace your prompt)\n" &
@@ -95387,7 +95484,7 @@ proc renderPromptInitSnippet(shell: string; reproBin: string): string =
   else:
     ""
 
-proc runPromptInitCommand*(shell: string; reproBin: string): int =
+proc runPromptInitCommand*(shell: string): int =
   ## ``repro prompt init <shell>`` — print the integration snippet for the
   ## named shell/prompt framework (any letter case). Opt-in: it only PRINTS
   ## a snippet for the user to add; it never edits any rc file or mutates
@@ -95396,7 +95493,7 @@ proc runPromptInitCommand*(shell: string; reproBin: string): int =
   if shell == "help":
     stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
     return 0
-  let snippet = renderPromptInitSnippet(shell.toLowerAscii(), reproBin)
+  let snippet = renderPromptInitSnippet(shell.toLowerAscii())
   if snippet.len == 0:
     stderr.writeLine("repro prompt init: unsupported shell '" & shell &
       "'; run `repro help prompt init` for the shells it knows")
@@ -106278,7 +106375,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
     try:
       case conf.prompt.command
       of ReproCommandLinePromptCommand.init:
-        return runPromptInitCommand(conf.prompt.init.shell, publicCliPath)
+        return runPromptInitCommand(conf.prompt.init.shell)
       of ReproCommandLinePromptCommand.call:
         return runPromptCommand(conf.prompt.call)
     except CatchableError as err:

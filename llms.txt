@@ -4,7 +4,7 @@
 
 Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checked actions defined in the **`repro.nim`** DSL. Sibling repositories declared as **`repos/*.toml`** fragments in the workspace root (whose policy lives in **`repro-workspace.toml`**) are routed dynamically using **`repro develop`** (develop-mode). Build hermeticity is enforced using the **`librepro_monitor_shim`** user-space filesystem interceptor, and execution is cached locally through a per-edge disk store fronted by a host-wide **shared-memory grow-only index** that every engine inserts into directly. Package toolchains are concretized using a **`clingo`** solver, and background services are orchestrated using **`servicePlaceholder`** declarations.
 
-## Non-Interactive CLI Rules for Agents
+**Non-interactive CLI rules for agents:**
 
 When invoking `repro` from an automated tool call (with no interactive TTY):
 
@@ -13,7 +13,7 @@ When invoking `repro` from an automated tool call (with no interactive TTY):
 - **Preview host or account changes before applying**: run `repro infra plan` before `repro infra apply --plan <id>`, and `repro home plan` before `repro home apply`.
 - **Never hand-edit generated lock or scan files**: update `repro.lock` with `repro lock update [<dep>]` or `repro lock refresh`, and update `repro.scanned-deps.nim` with `repro deps refresh`.
 
-## Agent Topic Guides (Load Only the Topic You Need)
+## Agent Topic Guides
 
 - [Reprobuild Intro for Agents (Start Here)](https://docs.reprobuild.com/agents/intro.md): Core architecture keywords, non-interactive CLI rules (`repro exec`, `--json`), binary pair (`repro` + `reprobuild`), and lock-pin refusal guardrails. (local checkout: `docs/agents/Repro-Intro-for-Agents.md`)
 - [Idiomatic Reprobuild (Before Editing `repro.nim`)](https://docs.reprobuild.com/agents/idiomatic-reprobuild.md): Action granularity, narrow declared inputs vs `io-mon` observation, collections, non-determinism, and common agent anti-patterns. (local checkout: `docs/user-guide/idiomatic-reprobuild.md`)
