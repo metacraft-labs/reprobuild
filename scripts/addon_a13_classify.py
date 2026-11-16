@@ -294,6 +294,19 @@ EXPECT.update({
     # released.
     "mutunjudgedreq": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                        "engine build unjudged-requirers-released"),
+    # A13 review round 11. H2: the fixing switch starts nothing it resolved.
+    "mutfixstart": ("e2e_addon_adopt_hand_configured_service", "red",
+                    "add-on build fixing-switch-skips-starts"),
+    # M1: a recorded dependant does not block.
+    "mutdepblock": ("e2e_addon_adopt_hand_configured_service", "red",
+                    "add-on build dependants-do-not-block"),
+    # H1: the next full apply restarts the recorded triggers under the dead
+    # apply's hold.
+    "mutstaleorder": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                      "engine build live-check-restart-before-stale-holds-cleared"),
+    # Decision 171 as the owner decided it: an essential unit is held.
+    "mutessential": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                     "engine build essential-requirers-held"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -306,6 +319,10 @@ TARGET.update({
     "mutdependants": "decision 160: a trigger that cannot start again fails the switch, and its revert commits",
     "mutswitchrecord": "decision 160: while a trigger is on record, an add-on switch",
     "mutunjudgedreq": "decision 153: a unit the live check does not judge that requires",
+    "mutfixstart": "the fixing switch: a switch whose generation changes",
+    "mutdepblock": "dependants block like triggers:",
+    "mutstaleorder": "H1: the next full apply clears a dead apply's stale hold",
+    "mutessential": "decision 171: an apply in which an essential requirer would be held",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -399,6 +416,31 @@ def on_target_rec(kind, rec):
         u = rec.get("decision160Revert", {})
         return (on_target(kind, steps) and u.get("exit", 0) != 0 and
                 u.get("blocked") == "active" and u.get("revertFailed") is True)
+    if kind == "mutfixstart":
+        # Red because the fixing switch passed with the port still taken
+        # and its commit cleared the record, not for another reason.
+        u = rec.get("fixingSwitch", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                "a13r10.socket\t" not in u.get("after", "x a13r10.socket\t") and
+                "marker" not in u.get("after", "marker"))
+    if kind == "mutdepblock":
+        # Red because the switch went through with the dependant on record.
+        u = rec.get("dependantsBlock", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                "generation 4m" in u.get("after", ""))
+    if kind == "mutstaleorder":
+        # Red because the recorded trigger stayed down with its record,
+        # after a staged stale hold, not for another reason.
+        u = rec.get("decisionH1", {})
+        return (on_target(kind, steps) and u.get("staged") not in (None, "active") and
+                u.get("active") not in (None, "active") and
+                "eth-r11-sock.socket" in u.get("recordLeft", ""))
+    if kind == "mutessential":
+        # Red because the apply wrote the essential unit's drop-in and was
+        # not refused.
+        u = rec.get("decisionEssential", {})
+        return (on_target(kind, steps) and u.get("refused") is False and
+                u.get("dropInWritten") is True)
     if kind == "mutdependants":
         # Red because the revert failed on the unit that requires the
         # trigger, started at its step 7, not for another reason: the port
@@ -437,9 +479,11 @@ def on_target_rec(kind, rec):
     if kind == "mutunjudgedreq":
         # Red because the unjudged requirer was released, not for another
         # reason: the judged requirer stayed held, the premise held.
+        # The target step's own evidence (A13 review round 11, L6): the
+        # requirer was not held in /etc and is active, not merely unreported.
         d = rec.get("decision153Unjudged", {})
         return (on_target(kind, steps) and isinstance(d, dict) and
-                not unjudged_held(d) and
+                d.get("heldInEtc") is False and d.get("active") == "active" and
                 held_requirer(rec.get("decision153", {})) and
                 premise_measured(rec.get("decision153Premise", {})))
     if kind == "muttrigheld":
@@ -559,7 +603,11 @@ def on_target_rec(kind, rec):
                 triggers_up(rec.get("decision151", {})) and
                 held_requirer(rec.get("decision153", {})) and
                 unjudged_held(rec.get("decision153Unjudged", {})) and
-                premise_measured(rec.get("decision153Premise", {})))
+                premise_measured(rec.get("decision153Premise", {})) and
+                rec.get("decisionH1", {}).get("ok") is True and
+                rec.get("decisionEssential", {}).get("exit", 0) != 0 and
+                rec.get("decisionEssential", {}).get("refused") is True and
+                rec.get("decisionEssential", {}).get("dropInWritten") is False)
     if kind == "mutreceipt":
         # At receipt-before-dir-fsync the receipt on the disk is empty (the
         # rename committed, the data not); before the rename the old receipt
@@ -876,6 +924,7 @@ def green_incomplete(kind, rec):
                            ("decision151Refused", "refusedForReason"),
                            ("decision151Recovered", "ok"),
                            ("decision160Revert", "ok"), ("decision160Guard", "ok"),
+                           ("fixingSwitch", "ok"), ("dependantsBlock", "ok"),
                            ("decision160", "ok"), ("decision160Done", "ok")):
             d = rec.get(key)
             if not isinstance(d, dict) or d.get(field) is not True:
