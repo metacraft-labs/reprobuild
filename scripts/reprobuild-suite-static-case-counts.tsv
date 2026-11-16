@@ -2414,6 +2414,7 @@ tests/integration/t_stdlib_python_tarball_arms_realize.nim	nim	1
 tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	nim	1
 tests/integration/t_store_bundle_cli.nim	nim	1
 tests/integration/t_store_copy_cli.nim	nim	1
+tests/integration/t_store_daemon_client_refuses_a_daemon_of_another_user.nim	nim	5
 tests/integration/t_store_daemon_m66_dev.nim	nim	6
 tests/integration/t_store_roots_resolve_or_report_unresolved.nim	nim	1
 tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim	nim	6
@@ -2651,7 +2652,7 @@ tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
-tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	5
+tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	6
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
 tests/unit/t_dev_env_large_values.nim	nim	5

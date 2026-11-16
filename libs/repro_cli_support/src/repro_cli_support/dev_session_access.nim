@@ -28,6 +28,7 @@
 import std/[net, os, strutils, sysrand]
 import blake3
 import repro_core
+import repro_core/owned_directory
 
 when defined(posix):
   import std/posix
@@ -107,48 +108,14 @@ proc controlSocketPath*(endpointDir: string): string =
 proc controlTokenPath*(endpointDir: string): string =
   endpointDir / ControlTokenName
 
-when defined(posix):
-  proc verifyOwnedDirectory(path: string; privateDir: bool) =
-    ## Refuse ``path`` unless it is a real directory (not a symlink) owned
-    ## by this user. ``privateDir`` additionally refuses ANY group or other
-    ## permission (the endpoint directory itself); otherwise only group or
-    ## other WRITE is refused, which is what lets another account replace
-    ## an entry below it.
-    var st: Stat
-    if lstat(path.cstring, st) != 0:
-      raiseOSError(osLastError(),
-        "cannot inspect the dev-session control directory " & path)
-    if not S_ISDIR(st.st_mode):
-      raise newException(IOError,
-        "refusing the dev-session control directory " & path &
-        ": it is not a directory (a symlink or another file is in its place)")
-    if int(st.st_uid) != currentUserId():
-      raise newException(IOError,
-        "refusing the dev-session control directory " & path &
-        ": it is owned by uid " & $st.st_uid & ", not by this user (uid " &
-        $currentUserId() & "), so another account could read the session " &
-        "token or replace the control socket")
-    let mode = int(st.st_mode) and 0o777
-    let forbidden = if privateDir: 0o077 else: 0o022
-    if (mode and forbidden) != 0:
-      raise newException(IOError,
-        "refusing the dev-session control directory " & path & ": its mode " &
-        "is 0" & toOct(mode, 3) & ", and it must grant " &
-        (if privateDir: "no group or other permissions (0700)"
-         else: "no group or other write permission") &
-        "; remove it or fix its mode and start the session again")
-
-  proc ensureOwnedDirectory(path: string; privateDir: bool) =
-    ## Create ``path`` as ``0700`` when it is missing; then verify it,
-    ## whoever created it.
-    if mkdir(path.cstring, Mode(0o700)) == 0:
-      # mkdir's mode is narrowed by the umask; set it exactly.
-      if chmod(path.cstring, Mode(0o700)) != 0:
-        raiseOSError(osLastError(), path)
-    elif errno != EEXIST:
-      raiseOSError(osLastError(),
-        "cannot create the dev-session control directory " & path)
-    verifyOwnedDirectory(path, privateDir)
+const DevSessionDirRole = OwnedDirectoryRole(
+  noun: "dev-session control directory",
+  exposure: "another account could read the session token or replace the " &
+    "control socket",
+  remedy: "remove it or fix its mode and start the session again")
+  ## How a refusal is worded. The check itself is
+  ## ``repro_core/owned_directory``, shared with the dev store daemon's
+  ## endpoint directory.
 
 proc ensurePrivateEndpointDir*(endpointDir: string) =
   ## Create (or admit) ``endpointDir`` and every directory between the
@@ -173,7 +140,8 @@ proc ensurePrivateEndpointDir*(endpointDir: string) =
     let sessionsDir = parentDir(endpointDir)
     let chain = @[parentDir(sessionsDir), sessionsDir, endpointDir]
     for i, dir in chain:
-      ensureOwnedDirectory(dir, privateDir = i == chain.high)
+      ensureOwnedDirectory(dir, privateDir = i == chain.high,
+        DevSessionDirRole)
   else:
     createDir(extendedPath(endpointDir))
 

@@ -26480,6 +26480,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/integration/t_store_daemon_client_refuses_a_daemon_of_another_user.nim",
+    binary: "build/test-bin/t_store_daemon_client_refuses_a_daemon_of_another_user",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/integration/t_store_daemon_m66_dev.nim",
     binary: "build/test-bin/t_store_daemon_m66_dev",
     defines: @[],
