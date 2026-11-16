@@ -104,10 +104,14 @@ proc originUrl*(fx: RenameFixture; name: string): string =
   fileUrl(fx.originsDir) & "/" & name
 
 proc seedOrigin*(fx: RenameFixture; gitBin, name: string;
-                 branch = "main"): tuple[initialSha, tipSha, seedPath: string] =
+                 branch = "main";
+                 extraFiles: openArray[tuple[path, content: string]] = []):
+                 tuple[initialSha, tipSha, seedPath: string] =
   ## A bare origin at `<originsDir>/<name>` with two commits, plus the working
   ## clone that produced it (kept, so a test can force-push a rewritten history
-  ## through it later).
+  ## through it later). `extraFiles` (paths relative to the repository root)
+  ## are committed together with the payload, so a test can give two unrelated
+  ## origins byte-identical files.
   let bare = fx.originsDir / name
   let work = fx.scratch / ("seed-" & name)
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " & q(bare))
@@ -128,6 +132,11 @@ proc seedOrigin*(fx: RenameFixture; gitBin, name: string;
   writeFile(work / "src" / "payload.txt",
     "payload for " & name & " — a blob no other fixture repo has\n")
   discard requireGit(q(gitBin) & " -C " & q(work) & " add src/payload.txt")
+  for (relPath, content) in extraFiles:
+    let target = work / relPath
+    createDir(target.parentDir)
+    writeFile(target, content)
+    discard requireGit(q(gitBin) & " -C " & q(work) & " add -- " & q(relPath))
   discard requireGit(q(gitBin) & " -C " & q(work) & " commit -m payload")
   discard requireGit(q(gitBin) & " -C " & q(work) &
     " remote add origin " & q(bare))
