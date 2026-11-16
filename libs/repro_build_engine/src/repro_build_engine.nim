@@ -14704,6 +14704,30 @@ proc resolveMonitorShimLibForInstall*(): string =
     shimLibMemoKey = key
     shimLibMemoValue = result
 
+proc msvcInheritedSearchLists(action: BuildAction;
+                              config: BuildEngineConfig):
+    seq[(string, string)] =
+  ## The MSVC search lists (``MsvcListKeys``) the launched process inherits
+  ## from this one, with their values NOW: what ``mergeActionEnvWithMsvc``
+  ## puts the activation's MSVC-owned entries in front of when the action
+  ## does not declare the list itself. An isolated launch, or one under an
+  ## allowlisted environment, inherits none of them, so none is returned and
+  ## such an action gets the owned entries alone.
+  ##
+  ## Read per launch rather than taken from the activation, which is
+  ## captured once per process: the activation's own copy of ``PATH`` is the
+  ## host's ``PATH`` at that moment, and layering it would hide every later
+  ## change from both the launch and the key (``actionEnvResolver`` mirrors
+  ## this composition). See ``msvcDevEnvFromActivation``.
+  when defined(windows):
+    if config.hermeticEnv or action.isolateHostEnvironment:
+      return @[]
+    for name in MsvcListKeys:
+      if existsEnv(name):
+        result.add((name, getEnv(name)))
+  else:
+    discard
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -15187,7 +15211,7 @@ proc preparedActionEnv(action: BuildAction;
   let childEnv = launchChildEnv(action, config)
   let mergedEnv =
     if actionUsesMsvcToolchain(action, monitorCliPath(config)):
-      mergeActionEnvWithMsvc(childEnv)
+      mergeActionEnvWithMsvc(childEnv, msvcInheritedSearchLists(action, config))
     else:
       childEnv
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
@@ -21504,7 +21528,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return true
     false
 
+  # BUILD-WAIT PRESSURE (see ``repro_runquota/build_pressure``): how much
+  # of this build's wall time its leased actions spent held up -- queued at
+  # RunQuota, or running slower than the daemon expects of them -- reported
+  # to the daemon on the build's session at most once a second and once
+  # more before it closes. The ``pressure-reports``
+  # measurement (off by default); with it off the tracker does nothing.
+  proc pressureNowMicros(): int64 = monotonicNowNs() div 1000
+  var buildPressure = initBuildPressure(buildPressureEnabled(),
+    pressureNowMicros(), int64(epochTime() * 1000.0))
+
+  proc reportBuildPressure(force: bool) =
+    if not buildPressure.enabled or not inlineRunQuotaSessionOpen:
+      return
+    let now = pressureNowMicros()
+    if not force and not buildPressure.reportDue(now):
+      return
+    discard sendPressureReport(inlineRunQuotaSession,
+      buildPressure.takeReport(now))
+
   proc failRunningAction(index: int; message: string) =
+    buildPressure.noteWithdrawn(running[index].id, pressureNowMicros())
     running[index].inlineFailure = inlineRunQuotaFailureResult(
       running[index].id, message)
     running[index].processKind = rpkInlineRunQuotaFailed
@@ -21526,6 +21570,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # while grants come back as fast as the build offers and halves once a
   # queued candidate waits past the threshold, within ``maxParallel``.
   var frontier = initFrontierSizer(int(maxParallel), frontierWaitMillis())
+
 
   proc pendingInlineCount(): int =
     for item in running:
@@ -21566,6 +21611,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               grant.diagnostic)
             return j
           frontier.noteQueuedGrant(engineNowMs() - running[j].queuedAtMs)
+          buildPressure.noteGranted(running[j].id, pressureNowMicros())
           try:
             var queued = running[j].queuedRunQuotaProcess
             running[j].runQuotaProcess = startGrantedWithRunQuota(
@@ -23724,10 +23770,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             var processKind: RunningProcessKind
             var runQuotaProcess: ReproRunQuotaRunningProcess
             var queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
+            buildPressure.noteReady(staged.id, pressureNowMicros())
             case offer.kind
             of rqokStarted:
               runQuotaProcess = offer.running
               processKind = rpkInlineRunQuota
+              buildPressure.noteGranted(staged.id, pressureNowMicros())
               inc grantedAtOnce
             of rqokQueued:
               queuedRunQuotaProcess = offer.queued
@@ -23820,6 +23868,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runIndex = tickRunQuotaQueue()
           if runIndex >= 0:
             break
+        reportBuildPressure(force = false)
         # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose
         # root has exited before choosing which action to reap, and settle
         # them in their own pass so the choice cannot skip any.
@@ -23951,6 +24000,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         raiseEngine("internal missing running action: " & finished.id)
       if runningItem.processKind == rpkHelperProcess:
         closeProcessOnce(runningItem.process)
+      # The finish is where a running action's slowdown becomes known: the
+      # launcher's duration against the daemon's expected uncontended one,
+      # which the finish's acknowledgement carried. Any other way out of the
+      # running set (a denial, a failed launch) only ends its wait.
+      if runningItem.processKind == rpkInlineRunQuota and
+          runningItem.runQuotaProcess.completed:
+        buildPressure.noteFinished(runningItem.id, pressureNowMicros(),
+          runningItem.runQuotaProcess.execution.elapsedMillis,
+          runningItem.runQuotaProcess.execution.expectedUncontendedMillis)
+      else:
+        buildPressure.noteWithdrawn(runningItem.id, pressureNowMicros())
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
         if finishedUsed > runningItem.poolUnits:
@@ -24203,6 +24263,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         teardownFailures.add("stopping action " & item.id & identities &
           ": " & err.msg)
     if inlineRunQuotaSessionOpen:
+      # The last build-wait pressure report, before the session closes:
+      # whatever is still in flight ends here.
+      try:
+        for item in running:
+          buildPressure.noteWithdrawn(item.id, pressureNowMicros())
+        reportBuildPressure(force = true)
+      except CatchableError:
+        discard
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       # The daemon refuses to close a session that still owns leases, and
       # that refusal is correct: it is kept verbatim in the collected text,

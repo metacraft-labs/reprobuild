@@ -299,6 +299,24 @@ proc preBootstrapInputs*(l: Ledger; expectedOwner = (0, 0)):
       result.errors.add(e.path & ": the ledger's record of this " &
         "pre-bootstrap input cannot be read (" & ex.msg & ")")
 
+proc refuseCorruptInputs*(r: var UninstallResult;
+                          pb: tuple[inputs: seq[PreBootstrapInput];
+                                    drift, errors, notes: seq[string]];
+                          ledgerPath: string): bool =
+  ## True, with the errors and their remedy reported, when the ledger's
+  ## record of a pre-bootstrap input is corrupt (``preBootstrapInputs``):
+  ## the uninstall must then stop before step 1, with nothing removed.
+  if pb.errors.len == 0: return false
+  when mutated("corrupt-input-record-continues"):
+    for e in pb.errors: r.errors.add(e)
+    return false        # FALSIFIER: the run goes on with a corrupt ledger
+  for e in pb.errors: r.errors.add(e)
+  r.errors.add("nothing was removed: the ledger " & ledgerPath & " records " &
+    "a pre-bootstrap input in a way the preflight cannot have; restore it " &
+    "from the generation it came from (<state>/generations/<id>/" &
+    "addon-ledger) or correct that entry, then run uninstall again")
+  true
+
 proc inputPaths*(inputs: seq[PreBootstrapInput]): seq[string] =
   for i in inputs: result.add(i.path)
 
@@ -1305,18 +1323,28 @@ proc stateDirChain*(root, ledgerCopy: string; preBootstrap: seq[string]):
     if d == root: break
     d = parentDir(d)
 
-proc tokenDirRefusal*(dir: string): string =
-  ## "" when ``dir``, the token's directory, may hold the token: a real
-  ## directory (not a link), owned by the user running uninstall (root),
-  ## and writable by no group or other (§13 decision 165, A11 round 16
-  ## R16-5). Anything else could let another user plant or swap the token
-  ## that tells a re-run what to remove.
+proc openatC(dirfd: cint; path: cstring; flags: cint): cint
+  {.importc: "openat", header: "<fcntl.h>", varargs.}
+proc mkdiratC(dirfd: cint; path: cstring; mode: Mode): cint
+  {.importc: "mkdirat", header: "<sys/stat.h>".}
+proc unlinkatC(dirfd: cint; path: cstring; flags: cint): cint
+  {.importc: "unlinkat", header: "<unistd.h>".}
+proc renameatC(olddirfd: cint; oldpath: cstring; newdirfd: cint;
+               newpath: cstring): cint
+  {.importc: "renameat", header: "<stdio.h>".}
+proc fstatatC(dirfd: cint; path: cstring; buf: var Stat; flags: cint): cint
+  {.importc: "fstatat", header: "<sys/stat.h>".}
+var AtSymlinkNoFollow {.importc: "AT_SYMLINK_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+proc fdDirRefusal(fd: cint; dir: string): string =
+  ## "" when the directory open at ``fd`` may hold the token: a directory
+  ## owned by the user running uninstall (root) and writable by no group or
+  ## other (§13 decision 165, A11 rounds 16 and 17). Judged on the open
+  ## descriptor, so a rename of the path after the check cannot swap it.
   when mutated("token-dir-unchecked"):
     return ""          # FALSIFIER: any directory may hold the token
   var st: Stat
-  if lstat(dir.cstring, st) != 0:
-    return dir & ": " & $strerror(errno)
-  if S_ISLNK(st.st_mode): return dir & " is a symbolic link"
+  if fstat(fd, st) != 0: return dir & ": " & $strerror(errno)
   if not S_ISDIR(st.st_mode): return dir & " is not a directory"
   if st.st_uid != geteuid():
     return dir & " is owned by uid " & $st.st_uid & ", not " & $geteuid()
@@ -1325,24 +1353,66 @@ proc tokenDirRefusal*(dir: string): string =
       toOct(int(st.st_mode) and 0o7777, 4) & ")"
   ""
 
-proc ensureTokenDir(dir: string) =
-  ## The token's directory, created 0700 (and synced into its parent) when
-  ## absent, then checked; raises ``OSError`` when it may not hold a token.
-  if not dirExists(dir) and not symlinkExists(dir):
-    createDir(dir)
-    discard posix.chmod(dir.cstring, Mode(0o700))
-    syncDirFd(parentDir(dir))
-  let why = tokenDirRefusal(dir)
+proc openTokenDir(dir: string; create: bool): cint =
+  ## The token's directory, opened once: its parent by path, then the
+  ## directory itself by ``openat(O_DIRECTORY|O_NOFOLLOW)``, created 0700
+  ## (and the parent fsynced) when absent and ``create``. The checks are
+  ## made on that descriptor (``fdDirRefusal``) and every later step goes
+  ## through it, so no rename of the path in between -- Ubuntu's
+  ## ``/var/log`` is ``root:syslog 0775`` -- can change which directory is
+  ## used. -1 when the directory is absent and not ``create``; raises
+  ## ``OSError`` when it may not hold the token.
+  let parent = parentDir(dir)
+  let name = extractFilename(dir)
+  let pfd = posix.open(parent.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+  if pfd < 0: raiseOSError(osLastError(), "open " & parent)
+  defer: discard posix.close(pfd)
+  var fd = openatC(pfd, name.cstring, O_RDONLY or ODirectory or ONoFollow or
+                   O_CLOEXEC)
+  if fd < 0 and errno == ENOENT:
+    if not create: return -1
+    if mkdiratC(pfd, name.cstring, Mode(0o700)) != 0 and errno != EEXIST:
+      raiseOSError(osLastError(), "mkdir " & dir)
+    if fsync(pfd) != 0: raiseOSError(osLastError(), "fsync " & parent)
+    fd = openatC(pfd, name.cstring, O_RDONLY or ODirectory or ONoFollow or
+                 O_CLOEXEC)
+  if fd < 0:
+    raise newException(OSError, "refusing the state-removal token's " &
+      "directory " & dir & ": " & $strerror(errno) &
+      " (a symbolic link, or not a directory)")
+  let why = fdDirRefusal(fd, dir)
   if why.len > 0:
-    raise newException(OSError, "refusing to write the state-removal " &
-      "token: " & why)
+    discard posix.close(fd)
+    raise newException(OSError, "refusing the state-removal token's " &
+      "directory: " & why)
+  fd
+
+proc tokenDirRefusal*(dir: string): string =
+  ## "" when ``dir`` may hold the token (``openTokenDir``'s checks), else
+  ## why not. An absent directory is not refused.
+  try:
+    let fd = openTokenDir(dir, create = false)
+    if fd >= 0: discard posix.close(fd)
+    ""
+  except OSError as ex: ex.msg
+
+proc unlinkTokenAt(dfd: cint; name, dir: string) =
+  ## Unlink ``name`` in the open directory and fsync it, so a crash cannot
+  ## bring the token back for a re-run to act on.
+  var st: Stat
+  if fstatatC(dfd, name.cstring, st, AtSymlinkNoFollow) != 0:
+    if errno == ENOENT: return
+    raiseOSError(osLastError(), "stat " & dir / name)
+  if unlinkatC(dfd, name.cstring, 0) != 0:
+    raiseOSError(osLastError(), "unlink " & dir / name)
+  if fsync(dfd) != 0: raiseOSError(osLastError(), "fsync " & dir)
 
 proc removeTokenDurably(path: string) =
-  ## Unlink the token, then fsync its directory, so a crash cannot bring it
-  ## back for a re-run to act on.
-  if fileExists(path) or symlinkExists(path):
-    removeFile(path)
-    syncDirFd(parentDir(path))
+  let dir = parentDir(path)
+  let dfd = openTokenDir(dir, create = false)
+  if dfd < 0: return
+  defer: discard posix.close(dfd)
+  unlinkTokenAt(dfd, extractFilename(path), dir)
 
 proc clearStateRemovalToken*(logDir = UninstallOverrideDir) =
   ## Bootstrap's step (§13 decision 165, R16-5): a token an earlier
@@ -1350,52 +1420,84 @@ proc clearStateRemovalToken*(logDir = UninstallOverrideDir) =
   ## anything, so no later re-run acts on a removal of another install.
   let path = stateRemovalTokenPath(logDir)
   if fileExists(path) or symlinkExists(path):
-    let why = tokenDirRefusal(logDir)
-    if why.len > 0:
-      raise newException(OSError, "a state-removal token is at " & path &
-        ", and its directory may not be trusted: " & why)
     removeTokenDurably(path)
+
+proc stateDirIdentity*(d: string): string =
+  ## ``<dev>:<ino>`` of a directory, not following a link; "" when absent.
+  var st: Stat
+  if lstat(d.cstring, st) != 0 or not S_ISDIR(st.st_mode): return ""
+  $uint64(st.st_dev) & ":" & $uint64(st.st_ino)
 
 proc writeStateRemovalToken(path, root, ledgerCopy: string;
                             chain, preBootstrap: seq[string]) =
-  ## Durably (a temporary file created exclusively without following a
-  ## link, fsynced, renamed, its directory fsynced, and a directory this
-  ## creates synced into its parent): the token must be on disk before the
-  ## ledger copy goes, or a crash between the two leaves a state no re-run
-  ## may finish. Its directory is checked first (``tokenDirRefusal``).
+  ## Durably, all through the directory's descriptor (``openTokenDir``): a
+  ## temporary name unlinked if stale, then created exclusively without
+  ## following a link, fsynced, renamed over the token, the directory
+  ## fsynced. The token must be on disk before the ledger copy goes, or a
+  ## crash between the two leaves a state no re-run may finish. It binds
+  ## this install: the device and inode of each directory of the chain
+  ## (A11 round 17), which a re-run must find unchanged.
   let dir = parentDir(path)
-  ensureTokenDir(dir)
+  let name = extractFilename(path)
+  let dfd = openTokenDir(dir, create = true)
+  defer: discard posix.close(dfd)
+  var ids = newJObject()
+  for d in chain: ids[d] = %stateDirIdentity(d)
   let text = pretty(%*{"schema": StateRemovalTokenSchema, "root": root,
-    "ledgerCopy": ledgerCopy, "chain": chain,
+    "ledgerCopy": ledgerCopy, "chain": chain, "chainIdentity": ids,
     "preBootstrapRoots": preBootstrap}) & "\n"
-  let tmp = path & ".tmp"
-  if fileExists(tmp) or symlinkExists(tmp): removeFile(tmp)   # a stale one
-  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
-                      O_CLOEXEC or ONoFollow, 0o600)
-  if fd < 0: raiseOSError(osLastError(), "create " & tmp)
+  let tmp = name & ".tmp"
+  unlinkTokenAt(dfd, tmp, dir)                          # a stale one
+  let fd = openatC(dfd, tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
+                   O_CLOEXEC or ONoFollow, Mode(0o600))
+  if fd < 0: raiseOSError(osLastError(), "create " & dir / tmp)
   try:
     var off = 0
     while off < text.len:
       let n = posix.write(fd, unsafeAddr text[off], text.len - off)
-      if n < 0: raiseOSError(osLastError(), "write " & tmp)
+      if n < 0: raiseOSError(osLastError(), "write " & dir / tmp)
       off += n
-    if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & tmp)
+    if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & dir / tmp)
   finally:
     discard posix.close(fd)
-  moveFile(tmp, path)   # rename(2): same directory, replaces atomically
-  syncDirFd(dir)
+  if renameatC(dfd, tmp.cstring, dfd, name.cstring) != 0:
+    raiseOSError(osLastError(), "rename " & dir / tmp & " to " & name)
+  if fsync(dfd) != 0: raiseOSError(osLastError(), "fsync " & dir)
+
+proc readTokenAt(path: string): string =
+  ## The token's bytes, read through its directory's descriptor without
+  ## following a link; raises ``OSError`` when it cannot be.
+  let dir = parentDir(path)
+  let dfd = openTokenDir(dir, create = false)
+  if dfd < 0: raise newException(OSError, dir & " is absent")
+  defer: discard posix.close(dfd)
+  let fd = openatC(dfd, extractFilename(path).cstring,
+                   O_RDONLY or O_CLOEXEC or ONoFollow)
+  if fd < 0: raiseOSError(osLastError(), "open " & path)
+  defer: discard posix.close(fd)
+  var st: Stat
+  if fstat(fd, st) != 0 or not S_ISREG(st.st_mode):
+    raise newException(OSError, path & " is not a regular file")
+  var buf = newString(4096)
+  while true:
+    let n = posix.read(fd, addr buf[0], buf.len)
+    if n < 0: raiseOSError(osLastError(), "read " & path)
+    if n == 0: break
+    result.add(buf[0 ..< n])
 
 proc readStateRemovalToken(path, root: string):
     tuple[ok: bool; why: string; chain: seq[string]] =
-  ## The chain a token names, checked: its schema, its root, and every
+  ## The chain a token names, checked: its schema, its root, every
   ## directory in it ``root`` or below it and none of them a pre-bootstrap
-  ## root it names. A token is root-only (``/var/log/repro-addon``); the
-  ## checks keep a damaged one from naming anything else.
-  let why = tokenDirRefusal(parentDir(path))
-  if why.len > 0: return (false, "its directory may not be trusted: " & why, @[])
-  if symlinkExists(path): return (false, "it is a symbolic link", @[])
+  ## root it names, and each one that still exists the very directory this
+  ## install's run recorded (its device and inode; A11 round 17), so an old
+  ## token hidden and restored after a new install is refused.
+  var text: string
+  try: text = readTokenAt(path)
+  except OSError as e:
+    return (false, "it may not be trusted: " & e.msg, @[])
   var j: JsonNode
-  try: j = parseJson(readFile(path))
+  try: j = parseJson(text)
   except CatchableError as e: return (false, e.msg, @[])
   if j.kind != JObject or j{"schema"}.getStr != StateRemovalTokenSchema:
     return (false, "not a " & StateRemovalTokenSchema & " record", @[])
@@ -1403,12 +1505,18 @@ proc readStateRemovalToken(path, root: string):
     return (false, "it names the state " & j{"root"}.getStr & ", not " & root, @[])
   var keep: seq[string]
   for k in j{"preBootstrapRoots"}.getElems: keep.add(k.getStr)
+  let ids = j{"chainIdentity"}
   for c in j{"chain"}.getElems:
     let d = c.getStr
     if not (d == root or d.startsWith(root & "/")) or d.contains("/../") or
         d.endsWith("/..") or d in keep:
       return (false, "its chain names " & d & ", which is not one of the " &
         "add-on's own directories under " & root, @[])
+    when not mutated("token-not-bound-to-install"):
+      let now = stateDirIdentity(d)
+      if now.len > 0 and (ids == nil or ids{d}.getStr != now):
+        return (false, d & " is not the directory the uninstall that wrote " &
+          "the token recorded (another install's token)", @[])
     result.chain.add(d)
   result.chain.sort(proc (a, b: string): int = cmp(b.len, a.len))
   result.ok = true
@@ -1709,8 +1817,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # back to what they were, before the ledger copy goes. A changed
   # content-pinned input is drift like any other.
   let pb = preBootstrapInputs(l)
+  # A corrupt record of an input stops the run before step 1, with
+  # nothing removed (§13 decision 166, amended in round 16; A11 round 17).
+  if refuseCorruptInputs(result, pb, ledgerCopyPath(stateDir)): return
   for d in pb.drift: result.drift.add(d)
-  for e in pb.errors: result.errors.add(e)
   for n in pb.notes: result.notes.add(n)
   # With the key, every sequence floor stays, later ones too (§13 decision
   # 168): read now, before anything is removed.

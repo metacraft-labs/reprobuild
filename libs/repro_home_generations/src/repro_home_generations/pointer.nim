@@ -36,6 +36,7 @@ import std/[os]
 
 import blake3
 import repro_core
+from repro_core/durable_replace import replaceFileDurably
 
 import ./errors
 
@@ -146,18 +147,19 @@ proc stringToBytes(text: string): seq[byte] =
     result[i] = byte(ord(ch))
 
 proc writePointerFile*(pointerFilePath: string; envelope: PointerEnvelope) =
-  ## Atomically writes the envelope to `pointerFilePath` via the
-  ## standard tmp-then-rename protocol. The directory containing the
-  ## final file must already exist.
+  ## Write the envelope to `pointerFilePath`, atomically and durably
+  ## (`repro_core/durable_replace`): a synced temporary file renamed over
+  ## the old pointer, never a removal of the old pointer first. The pointer
+  ## is authoritative operational state, the only record of what its
+  ## generation realized, so at every instant either the old envelope or
+  ## the new one is in place (reprobuild-pm
+  ## `spec/Configuration-Storage-Principles.md` §"Authoritative Operational
+  ## State"). Creates the containing directory if it is missing.
   let bytes = encodePointer(envelope)
   let parent = parentDir(pointerFilePath)
   if parent.len > 0:
     createDir(extendedPath(parent))
-  let tmpPath = pointerFilePath & ".tmp"
-  writeFile(extendedPath(tmpPath), bytesToString(bytes))
-  if fileExists(extendedPath(pointerFilePath)):
-    removeFile(extendedPath(pointerFilePath))
-  moveFile(extendedPath(tmpPath), extendedPath(pointerFilePath))
+  replaceFileDurably(pointerFilePath, bytesToString(bytes))
 
 # ---------------------------------------------------------------------------
 # Decoding.
