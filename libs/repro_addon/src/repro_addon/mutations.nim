@@ -1171,6 +1171,21 @@
 ##                                            (decision 178)
 ## ``verify-skips-log-dir``                   verify does not check that
 ##                                            directory (decision 178)
+## ``record-read-by-path``                   the uninstall records are read,
+##                                            enumerated and probed by path
+##                                            (decision 178)
+## ``records-dir-identity-unchecked``         a records directory put in the
+##                                            place of the one bootstrap
+##                                            made is used (decision 178)
+## ``records-dir-left-open``                  bootstrap keeps an existing
+##                                            directory's mode (decision 178)
+## ``token-cleared-before-anchors``           bootstrap clears a stale token
+##                                            before it validates the trust
+##                                            anchors (decision 178)
+## ``corrupt-check-after-gate``               the stop on a corrupt record of
+##                                            a pre-bootstrap input comes
+##                                            after the store-evidence gate
+##                                            (decision 166)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -2083,6 +2098,11 @@ const
                           "token-binds-inode-only",
                           "bootstrap-leaves-log-dir",
                           "verify-skips-log-dir",
+                          "record-read-by-path",
+                          "records-dir-identity-unchecked",
+                          "records-dir-left-open",
+                          "token-cleared-before-anchors",
+                          "corrupt-check-after-gate",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
@@ -2095,7 +2115,14 @@ const
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
-                          "fresh-accepts-user-config"]
+                          "fresh-accepts-user-config",
+                          # An agent apply may weaken a unit's confinement
+                          # (a new whole-floor waiver, a new exception, a
+                          # waived unit moved onto root) unattended: the
+                          # asymmetry spec §10.1 *An agent apply never
+                          # weakens the floor* closed
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-weaken-floor"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

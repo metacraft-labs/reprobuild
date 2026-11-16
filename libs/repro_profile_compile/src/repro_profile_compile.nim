@@ -47,6 +47,7 @@ export sources.resolveProfileRoot
 export sources.profileCacheDir
 export sources.cachedRbpiPath
 export sources.cachedNimcacheDir
+export sources.ProfileNimcacheKeyChars
 export sources.cachedProfileBinaryPath
 export sources.cachedIntentDocumentPath
 export sources.cachedProfileLockPath
