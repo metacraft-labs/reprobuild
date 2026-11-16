@@ -263,6 +263,7 @@ libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	nim	10
 libs/repro_cas_store/tests/t_link_capability_facts.nim	nim	40
 libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
+libs/repro_cli_support/tests/t_a_bare_selector_is_a_name_beside_a_same_named_path.nim	nim	6
 libs/repro_cli_support/tests/t_a_failing_producer_fetch_reports_why.nim	nim	1
 libs/repro_cli_support/tests/t_a_lock_rewrite_that_does_not_parse_is_refused.nim	nim	6
 libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim	nim	4
