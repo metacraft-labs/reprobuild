@@ -774,9 +774,12 @@ the dependency was selected:
   override documents (`repro develop <dependency> --into`) of the workspace
   root and of `--project-root` (default: the project you are in). It matches
   an entry by the dependency's name or by its checkout, as the hooks do. It
-  touches no checkout and no lock, and naming a dependency with no override
-  is a reported no-op. The H3 refusal prints this command, with the right
-  roots, as its "temporary experiment" remedy.
+  writes neither a checkout nor a lock, and naming a dependency with no
+  override is a reported no-op. It does not undo a pin an earlier commit
+  recorded: the next commit still re-pins every sibling entry the committed
+  `repro.lock` carries to its checkout's `HEAD`, and only `repro lock
+  refresh` changes which entries the lock carries. The H3 refusal prints
+  this command, with the right roots, as its "temporary experiment" remedy.
 
 Which kind of selection recorded an override is kept in its `provenance`:
 `repro develop --only=<dependency>` for an explicit one, `repro develop --all`
