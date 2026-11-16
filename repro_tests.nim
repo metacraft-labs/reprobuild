@@ -245,6 +245,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_agent_cannot_weaken_the_floor.nim",
+    binary: "build/test-bin/t_addon_agent_cannot_weaken_the_floor",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_agent_install_staged_outputs.nim",
     binary: "build/test-bin/t_addon_agent_install_staged_outputs",
     defines: @[],
