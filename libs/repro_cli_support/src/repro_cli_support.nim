@@ -65772,8 +65772,18 @@ type
     keys*: seq[RegisteredKey]
 
 const
-  registeredKeysSchemaV1* = "reprobuild.registered-keys.v1"
-    ## ``schema`` value the registered-keys store file carries.
+  registeredKeysSchemaV1* = "registered-keys.v1"
+    ## ``schema`` value the registered-keys store file carries: the id the
+    ## test-certificate standard fixes for a registered-key store
+    ## (test-certificates-spec, Verification.md §3.1 "Key stores",
+    ## https://github.com/metacraft-labs/test-certificates-spec/blob/latest/Verification.md#31-key-stores).
+    ## A conforming verifier rejects a store under any other id, so a store
+    ## written under one is not a store another implementation can read.
+    ##
+    ## Stores reprobuild wrote before it used the standard's id carry
+    ## ``reprobuild.registered-keys.v1``. ``parseRegisteredKeyStoreStrict``
+    ## does not consult ``schema``, so those stores keep reading with the same
+    ## signers and need no migration; the next write records the standard id.
 
 proc resolveSigner*(store: RegisteredKeyStore;
                     keyId: string): tuple[found: bool; publicKey: string;
@@ -65826,13 +65836,16 @@ proc serializeRegisteredKeyStore*(store: RegisteredKeyStore): string =
 proc registeredKeyStorePath*(workspaceRoot: string): string =
   ## Where the allowed-signers store lives for a workspace. CI / the server
   ## owns this set (Test-Certificates.md: "CI/server registers trusted public
-  ## keys"); we colocate it with the workspace's daemon-owned ``.repo`` tree so
-  ## both the issuance path and the pre-push gate read the SAME registry.
+  ## keys"); we colocate it with the workspace's daemon-owned
+  ## ``.repro/workspace/`` tree so both the issuance path and the pre-push
+  ## gate read the SAME registry.
   workspaceRoot / ".repro" / "workspace" / "certificates" / "registered-keys.toml"
 
 proc parseRegisteredKeyStoreStrict*(content: string): RegisteredKeyStore =
   ## STRICT reader: raises ``ValueError`` on content that is not well-formed
-  ## TOML in the store's shape.
+  ## TOML in the store's shape. ``schema`` is not consulted, so a store
+  ## written under the earlier ``reprobuild.registered-keys.v1`` id still
+  ## reads (see ``registeredKeysSchemaV1``).
   ##
   ## Strictness is the whole point. A tolerant reader turns a CORRUPT store
   ## into an EMPTY one, and an empty store is fail-closed — so the operator is
@@ -65940,7 +65953,7 @@ proc reproSigningKeyPath*(workspaceRoot: string): string =
   ##      privileged ``reprostored`` (or a remote signer) would hand the signing
   ##      capability to the issuance step WITHOUT the key ever being readable by
   ##      the unprivileged agent. Tests set it to a hermetic key.
-  ##   2. Otherwise a workspace-local daemon key under ``.repo/workspace/
+  ##   2. Otherwise a workspace-local daemon key under ``.repro/workspace/
   ##      certificates/signing-key`` (the colocated daemon-state default).
   ## DEFER-TC5-PRIV-DAEMON: in this implementation the key at either location
   ## is a plain file readable by whoever runs issuance; standing up the actual
