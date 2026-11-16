@@ -261,7 +261,11 @@ suite "TC-9c — the gateway reads the policy from the pushed tree":
     check "cannot read locking backend 'git-notes'" in failed.diagnostic
     check readFile(gatewayConfigPath(wired.gatewayDir)) == beforeFailure
     # A first wiring must also refuse before creating a gateway or push URL.
+    # A never-wired repo has neither a push URL nor the provenance record that
+    # wiring wrote above; removing only the push URL would leave the record,
+    # which spec §7.3 reads as a per-repo opt-out rather than as unwired.
     discard fx.mustGit("config", "--unset", "remote.origin.pushurl")
+    discard fx.mustGit("config", "--remove-section", "reprobuild.pushGateway")
     let firstCache = fx.scratch / "first-cache" / "clones"
     let firstFailed = ensureGatewayForRepo("git", fx.workspaceRoot, "lib-a",
       fx.libAPath, cacheRoot = firstCache)
