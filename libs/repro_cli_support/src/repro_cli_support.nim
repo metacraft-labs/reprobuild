@@ -106502,6 +106502,9 @@ proc runThinAppDispatch(programName: string): int =
   # every nested interface/resource compiler boundary. Explicit caller
   # overrides remain authoritative; this only fills missing environment keys.
   ensureBuiltSourcePackageEnvironment()
+  # darwin release archive: its own non-SIP tools bundle, when the caller set
+  # no tools root (a no-op elsewhere).
+  ensureShippedMacosToolsEnvironment()
   # There is no provider-nimcache session token to seed. It existed so the
   # ~84 from-source recipes of one `repro build` would meet in ONE shared
   # nimcache while two concurrent `repro` sessions would not -- a scope that

@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/source_root
 import repro_core/arg_files
 import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
@@ -14132,6 +14133,54 @@ proc monitorPayloadArgIndex(argv: openArray[string]): int =
     inc i
   -1
 
+const
+  ShippedMacosToolsEnvVar* = "STACKABLE_HOOKS_TOOLS_DIR"
+    ## The variable the stackable-hooks resolver (`resolveSipReplacement`)
+    ## reads for a tools root, after the invocation's own sandbox directory and
+    ## before the build-embedded store path.
+  ShippedMacosToolsSubdir* = "libexec" / "stackable-hooks-macos-tools"
+    ## Where a darwin release archive carries the non-SIP tools bundle,
+    ## relative to its prefix (`scripts/release/stage_release_macos_tools.sh`).
+
+proc shippedMacosToolsDirFor*(prefixes: openArray[string];
+                              validShell: proc(sh: string): bool): string =
+  ## The first ``<prefix>/libexec/stackable-hooks-macos-tools`` whose
+  ## ``bin/sh`` ``validShell`` accepts, or "". Pure apart from ``validShell``,
+  ## so a test can drive it on any host.
+  for prefix in prefixes:
+    if prefix.len == 0:
+      continue
+    let dir = prefix / ShippedMacosToolsSubdir
+    if validShell(dir / "bin" / "sh"):
+      return dir
+  ""
+
+when defined(macosx):
+  proc ensureShippedMacosToolsEnvironmentImpl()
+
+proc ensureShippedMacosToolsEnvironment*() =
+  ## Point the stackable-hooks resolver at the non-SIP tools bundle a darwin
+  ## release archive ships beside this image, when the caller has not chosen a
+  ## tools root (Distribution-And-Packaging.md §5.1, "The darwin non-SIP tools
+  ## bundle").
+  ##
+  ## A monitored action on macOS must start under a non-SIP shell. The
+  ## resolver's last fallback is the bundle's build-host store path, compiled
+  ## in, which a Mac without Nix does not have, so an unpacked release failed
+  ## every monitored launch with "SIP-safe monitored launch requires a non-SIP
+  ## shell". The archive carries the bundle at
+  ## ``<prefix>/libexec/stackable-hooks-macos-tools``, where ``<prefix>`` is
+  ## the parent of the running image's ``bin/``.
+  ##
+  ## Only an unset variable is filled: a caller's value always wins. It is set
+  ## in the process environment because that reaches every reader: this
+  ## engine's wrapper shell, the in-process monitor host, a ``repro internal
+  ## io monitor`` child and the shim in each monitored process, which all
+  ## resolve through the same stackable-hooks resolver. A Nix-installed engine
+  ## has no such directory and keeps the build-embedded path. A no-op off macOS.
+  when defined(macosx):
+    ensureShippedMacosToolsEnvironmentImpl()
+
 when defined(macosx):
   proc resolveNonSipShell*(): string
 
@@ -14958,6 +15007,27 @@ when defined(macosx):
   # spec's "reuse io-mon's existing population rather than re-implementing it".
   import stackable_hooks/propagation as sip_propagation
 
+  proc describeMacosToolsRoot*(root: string): string =
+    ## ``<root> (usable)``, ``<root> (no usable <root>/bin/sh)`` or
+    ## ``<root> (does not exist)``; ``(unset)`` for an empty root.
+    if root.len == 0:
+      return "(unset)"
+    if not dirExists(root):
+      return root & " (does not exist)"
+    let sh = root / "bin" / "sh"
+    if sip_propagation.isValidSipReplacement(sh):
+      root & " (usable)"
+    else:
+      root & " (no usable " & sh & ")"
+
+  proc ensureShippedMacosToolsEnvironmentImpl() =
+    if existsEnv(ShippedMacosToolsEnvVar):
+      return
+    let dir = shippedMacosToolsDirFor(runningImagePrefixCandidates(),
+      proc(sh: string): bool = sip_propagation.isValidSipReplacement(sh))
+    if dir.len > 0:
+      putEnv(ShippedMacosToolsEnvVar, dir)
+
   const nonSipShellCandidateNames* = ["sh", "bash", "dash", "ash", "zsh"]
     ## Executable names accepted as the non-SIP wrapper shell, most-preferred
     ## first. ``sh`` stays first so a host that does expose one keeps its
@@ -15040,7 +15110,13 @@ when defined(macosx):
         let candidate = entry / name
         if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
           rejected.add(candidate)
-    parts.add("shipped tools=" & sip_propagation.StackableHooksBuiltToolsDir)
+    # Every tools root the shared resolver consults after PATH, with its
+    # state, rather than the build-embedded path alone as if it were shipped
+    # (Distribution-And-Packaging.md §5.1, the darwin tools bundle).
+    for (label, root) in [
+        ("STACKABLE_HOOKS_TOOLS_DIR", getEnv(ShippedMacosToolsEnvVar)),
+        ("build-embedded tools", sip_propagation.StackableHooksBuiltToolsDir)]:
+      parts.add(label & "=" & describeMacosToolsRoot(root))
     parts.add("searched " & $pathDirs & " PATH dir(s) for " &
       nonSipShellCandidateNames.join("/"))
     if rejected.len == 0:

@@ -2178,7 +2178,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g02",
+    group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim",
@@ -2282,6 +2282,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
     binary: "build/test-bin/t_self_written_set_is_derived",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "libs/repro_build_engine/tests/t_shipped_macos_tools.nim",
+    binary: "build/test-bin/t_shipped_macos_tools",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
