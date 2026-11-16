@@ -996,6 +996,58 @@ proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
       result.add("systemctl start " & t & " (a trigger stopped for the " &
         "carried-state check's hold, §13 decision 151): " & s.output.strip())
 
+proc unitRequirements*(texts: openArray[string]): seq[string] =
+  ## The units a unit's ``[Unit]`` section ``Requires=`` or ``BindsTo=``,
+  ## read from its file and then its drop-ins as systemd reads them
+  ## (``systemd_syntax.systemdLogicalLines``; an empty assignment resets
+  ## the list, systemd.unit(5)).
+  for text in texts:
+    var section = ""
+    for line in systemdLogicalLines(text):
+      let t = line.strip()
+      if t.len == 0 or t[0] in {'#', ';'}: continue
+      if t[0] == '[':
+        section = if t.endsWith("]"): t[1 ..< t.len - 1] else: ""
+        continue
+      if section != "Unit": continue
+      let eq = t.find('=')
+      if eq <= 0: continue
+      let k = t[0 ..< eq].strip()
+      if k notin ["Requires", "BindsTo"]: continue
+      let v = t[eq + 1 .. ^1].strip()
+      if v.len == 0:
+        result.setLen(0)
+        continue
+      for u in v.splitWhitespace():
+        if u notin result: result.add(u)
+
+proc profileRequirersOf*(p: SystemProfile; units: openArray[string]): seq[string] =
+  ## The units of the generation ``p``, outside ``units`` (the judged ones),
+  ## that ``Requires=`` or ``BindsTo=`` one of ``units``, directly or
+  ## through another such unit (§13 decision 153 as the owner decided it
+  ## in A13 review round 10, every requirer): a refused unit's start is
+  ## skipped by its condition hold, which systemd counts as satisfied, so
+  ## such a unit would start without it. The full apply holds them with
+  ## the judged units and keeps held those that require a refused one.
+  when ApplyMutation == "unjudged-requirers-released":
+    # FALSIFYING MUTATION: only judged units are held as requirers.
+    return
+  var reached = @units
+  var changed = true
+  while changed:
+    changed = false
+    for r in p.resources:
+      if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+      let n = r.suName
+      if isTemplateUnit(n) or heldBy(n, reached): continue
+      for d in unitRequirements(@[renderedSystemUnitContent(r)] &
+                                profileDropInsOf(p, n)):
+        if heldBy(d, reached):
+          reached.add(n)
+          result.add(n)
+          changed = true
+          break
+
 proc restartRecordedLiveCheckTriggers*(stateDir: string; host: LiveHost):
     seq[string] =
   ## Start again the triggers an earlier full apply recorded and never
@@ -1084,6 +1136,11 @@ when defined(posix):
       ## them (§13 decision 151): none fires while its unit is held.
     triggersActive: seq[string]
       ## Those the hold stopped (``triggersToStop``).
+    requirers: seq[string]
+      ## The generation's units outside ``units`` that require one of them
+      ## (``profileRequirersOf``), held with them: one that requires a
+      ## refused unit stays held (§13 decision 153, extended to every
+      ## requirer in A13 review round 10).
     remembered: seq[string]
       ## Every one active before the hold, stopped or left alone
       ## (``rememberedTriggers``), on record in ``stateDir`` until released.
@@ -1153,6 +1210,10 @@ when defined(posix):
     result.stateDir = stateDir
     result.units = liveReachUnits(p, dir, root)
     if result.units.len == 0: return
+    result.requirers = profileRequirersOf(p, result.units)
+    for u in result.requirers:
+      if runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0:
+        result.wasActive.add(u)
     for u in result.units:
       if isTemplateUnit(u):
         # A template never runs; its running instances do (§13 decision
@@ -1188,7 +1249,7 @@ when defined(posix):
         if host.isActive(u): stopping.add(u)
       stopTriggers(result, result.triggers, stopping, host, p)
     result.holdStampUsec = getMonoTime().ticks div 1000
-    result.holds = writeHolds(result.units & result.triggers,
+    result.holds = writeHolds(result.units & result.requirers & result.triggers,
                               CarriedCheckHoldName, liveCheckHoldText())
     systemctlOrRaise(["daemon-reload"])
 
@@ -1234,6 +1295,11 @@ when defined(posix):
     var passed: seq[string]
     for u in c.units:
       if u notin refused: passed.add(u)
+    # The generation's units that require a judged one were held with them
+    # and one that requires a refused unit stays held (§13 decision 153,
+    # every requirer): they go with the units they require.
+    for u in c.requirers:
+      if u notin passed: passed.add(u)
     # §13 decision 153: a passed unit that requires a refused one stays
     # held with it, and is reported so.
     if refused.len > 0:

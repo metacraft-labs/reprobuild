@@ -289,6 +289,11 @@ EXPECT.update({
     # the unit that requires the recorded trigger, and fails on it.
     "mutdependants": ("e2e_addon_adopt_hand_configured_service", "red",
                       "add-on build dependants-started"),
+    # §13 decision 153 as the owner extended it (A13 review round 10): a
+    # unit the live check does not judge that requires a refused unit is
+    # released.
+    "mutunjudgedreq": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                       "engine build unjudged-requirers-released"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -300,6 +305,7 @@ TARGET.update({
     "mutrevertstarts": "decision 160: a trigger that cannot start again fails the switch, and its revert commits",
     "mutdependants": "decision 160: a trigger that cannot start again fails the switch, and its revert commits",
     "mutswitchrecord": "decision 160: while a trigger is on record, an add-on switch",
+    "mutunjudgedreq": "decision 153: a unit the live check does not judge that requires",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -413,9 +419,29 @@ def on_target_rec(kind, rec):
     if kind == "mutrestartignored":
         # Red because the switch passed with the trigger down, not for
         # another reason: the port was taken.
-        u = rec.get("decision160Revert", {})
-        return (on_target(kind, steps) and u.get("exit") == 0 and
-                u.get("blocked") == "active")
+        # Two shapes, both with the failure ignored: the switch passes with
+        # the trigger down, or it goes on and fails later on the dependant
+        # whose start pulls in the socket the blocker holds (A13 review
+        # round 10). Either way the run reached the decision-160 point with
+        # the port taken and the trigger not on the record of triggers to
+        # restart; any other failure is not this falsifier's red.
+        u = rec.get("decision160Revert")
+        if not isinstance(u, dict) or not on_target(kind, steps):
+            return False
+        if u.get("blocked") != "active" or "a13r10.socket" in u.get("pending", "x a13r10.socket"):
+            return False
+        if u.get("exit") == 0:
+            return True
+        return (u.get("dependantJobFailed") is True and
+                u.get("socketBindFailed") is True)
+    if kind == "mutunjudgedreq":
+        # Red because the unjudged requirer was released, not for another
+        # reason: the judged requirer stayed held, the premise held.
+        d = rec.get("decision153Unjudged", {})
+        return (on_target(kind, steps) and isinstance(d, dict) and
+                not unjudged_held(d) and
+                held_requirer(rec.get("decision153", {})) and
+                premise_measured(rec.get("decision153Premise", {})))
     if kind == "muttrigheld":
         # Red because both triggers fired at their held units in the
         # window, each by its own observable, not for another reason: the
@@ -531,7 +557,9 @@ def on_target_rec(kind, rec):
                     rec.get("decision137Unheld", {}).get(l, {}).get("serviceJudged") is False
                     for l in ("socket", "timer")) and
                 triggers_up(rec.get("decision151", {})) and
-                held_requirer(rec.get("decision153", {})))
+                held_requirer(rec.get("decision153", {})) and
+                unjudged_held(rec.get("decision153Unjudged", {})) and
+                premise_measured(rec.get("decision153Premise", {})))
     if kind == "mutreceipt":
         # At receipt-before-dir-fsync the receipt on the disk is empty (the
         # rename committed, the data not); before the rename the old receipt
@@ -581,6 +609,21 @@ def held_requirer(d153):
     return (isinstance(d153, dict) and d153.get("exit", 0) != 0 and
             d153.get("reported") is True and d153.get("heldInEtc") is True and
             d153.get("started") is False)
+
+
+def unjudged_held(d):
+    """§13 decision 153 as the owner extended it in A13 review round 10:
+    the unit outside the judged set that requires a refused unit stayed
+    held, not active, and the apply said why."""
+    return (isinstance(d, dict) and d.get("reported") is True and
+            d.get("heldInEtc") is True and d.get("active") not in (None, "active"))
+
+
+def premise_measured(d):
+    """The measured premise: a unit that requires a condition-held unit
+    starts on this systemd, the held unit's start skipped."""
+    return (isinstance(d, dict) and d.get("requirerRan") is True and
+            d.get("heldSkipped") is True)
 
 
 def on_target(kind, steps):

@@ -5456,9 +5456,15 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     for a in args:
       cmd.add(" ")
       cmd.add(quoteShell(a))
-    let r = execCmdEx(cmd, options = {poUsePath}, workingDir = cwd,
-      env = scrubbedGitRepositoryEnv())
-    (code: r.exitCode, output: r.output)
+    # ``poStdErrToStdOut`` is what puts git's reason in ``output``: every
+    # failure below quotes it, and git reports a failure only on stderr
+    # (``--quiet`` silences the rest). ``execCmdEx``'s default carries it;
+    # an explicit option set without it discards stderr, and a CI fetch
+    # failure then read "fetch failed from <url> at pinned revision <rev>: "
+    # with no cause at all.
+    let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+      workingDir = cwd, env = scrubbedGitRepositoryEnv())
+    (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
 
   proc verifyRevisionIntegrity() =
     verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
@@ -5516,12 +5522,16 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # back to fetching every branch and tag, then checking out the pinned
     # revision. A bare ``fetch <url>`` takes only the remote's HEAD, which
     # misses a pin that only a non-default branch reaches.
+    let byRevision = step.output.strip()
     step = git(["-C", checkoutRoot, "fetch", "--quiet", url,
       "+refs/heads/*:refs/remotes/pinned-source/*",
       "+refs/tags/*:refs/tags/*"])
     if step.code != 0:
+      # Both attempts' reasons: the by-revision fetch is the one expected
+      # to work, and its failure is usually the one that explains this.
       fail("fetch failed from " & url & " at pinned revision " & revision &
-        ": " & step.output.strip())
+        ": by revision: " & byRevision & "; all branches and tags: " &
+        step.output.strip())
   step = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
     "--end-of-options", revision & "^{commit}"])
   if step.code != 0:
@@ -50569,9 +50579,12 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     # at the declared previous path was RELOCATED, which is the single
     # outcome this check exists to prevent.
     #
-    # So the move requires URL evidence (or a checkout with no remote at all,
-    # which has no URL to disagree with and leans entirely on the
-    # shared-object half below).
+    # So the move requires URL evidence. A checkout with NO remote is refused
+    # too (below): it has no URL to agree with, so accepting it would leave the
+    # verdict resting on the shared-object half alone, and an unrelated,
+    # never-published repository holding a byte-identical empty file or stock
+    # LICENSE would be moved (reprobuild-pm Declared-Repository-Renames.md
+    # §3.3a).
     if agreement.verdict == raPinnedRevision:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
         "the checkout at '" & prior.path & "' has remote URL(s) " &
@@ -50584,6 +50597,17 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
           "it cannot authorise moving the directory. Point its remote at one " &
           "of the accepted URLs if it really is '" & repo.name &
           "', or move it aside. Nothing was moved.")
+      continue
+    if agreement.verdict == raNoRemotes:
+      result[repoIdx] = relocationRefusal("previous_remote_mismatch",
+        "the checkout at '" & prior.path & "' has no remote configured, so " &
+          "nothing identifies it as '" & repo.name & "': a move needs its " &
+          "remote URL to match the URL this fragment resolves to or one " &
+          "derived from a declared previous identity (accepted URLs are " &
+          agreement.acceptedUrls.join(", ") & "). If it really is '" &
+          repo.name & "', run `git -C " & prior.path &
+          " remote add origin <url>` with one of them and re-run; otherwise " &
+          "move it aside. Nothing was moved.")
       continue
     if agreement.verdict == raCaseOnly:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
@@ -50692,6 +50716,11 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
         # rewrites commits and trees but carries BLOBS across, so blob
         # presence survives a rewrite where every commit id does not. This
         # fallback is the whole reason the renamed-AND-rewritten case works.
+        #
+        # The sample holds DISTINCTIVE blobs only and a quorum of them must be
+        # present (`sampleBlobIds`, `blobSampleSatisfied`): the empty blob, a
+        # stock LICENSE or a template `.gitignore` are shared by unrelated
+        # repositories, and finding one says nothing about lineage.
         let sample = sampleBlobIds(probe, tipRepo, tipRef)
         var present = 0
         var firstPresent = ""
@@ -50700,20 +50729,27 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
             inc present
             if firstPresent.len == 0:
               firstPresent = oid
-        if present > 0:
+        let required = min(relocationBlobQuorum, sample.len)
+        if blobSampleSatisfied(present, sample.len):
           sharedEvidence = $present & "/" & $sample.len &
             " sampled blob(s) from " & tipRef[0 ..< min(12, tipRef.len)] &
-            " present in the candidate (first: " &
+            " present in the candidate (distinctive blobs only, " &
+            $required & " required; first: " &
             firstPresent[0 ..< min(12, firstPresent.len)] & ")"
         else:
           result[repoIdx] = relocationRefusal("no_shared_history",
             "the checkout at '" & prior.path &
-              "' has a matching remote, but shares no object with '" &
+              "' has a matching remote, but no evidence of shared history with '" &
               repo.name & "' as published at " & newCloneUrl &
               ": merge-base(HEAD " &
               (if candidateHead.len > 0: candidateHead else: "<none>") &
-              ", tip " & tipRef & ") is empty AND none of " & $sample.len &
-              " sampled blob(s) from that tip is present. Evidence was read " &
+              ", tip " & tipRef & ") is empty AND only " & $present & " of " &
+              $sample.len & " sampled blob(s) from that tip is present " &
+              "(distinctive blobs only; required: " & $max(required, 1) & ")" &
+              (if sample.len == 0: " (the tip has no distinctive blob: " &
+                "empty, very short, licence and template files are not " &
+                "evidence of shared history)" else: "") &
+              ". Evidence was read " &
               "from " & evidenceSource &
               ". Nothing was moved and nothing was cloned over it.")
           continue
@@ -50730,9 +50766,6 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
 
     let identityEvidence = "remote agreement via " &
       (case agreement.verdict
-       of raNoRemotes:
-         "no remotes configured in the candidate (so this verdict rests " &
-           "entirely on the shared object below)"
        of raCurrentUrl: "the current URL (" & agreement.foundUrl & ")"
        of raPreviousUrl: "a declared previous URL (" & agreement.foundUrl & ")"
        else: "an accepted URL") &

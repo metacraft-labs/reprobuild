@@ -1121,6 +1121,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "&& break; systemctl stop a13r10-blocker.socket a13r10-blocker.service " &
       ">/dev/null 2>&1; systemctl reset-failed a13r10-blocker.socket " &
       "a13r10-blocker.service >/dev/null 2>&1; sleep 0.1; done' >/dev/null 2>&1 &")
+    let t4Since = g.exec("date +%s").stdout.strip()
     let t4 = g.applyProfile(repro, "trig4", trigProfile.replace("@GEN@", "4") &
                             trigDep.replace("@DEPGEN@", "4"))
     let t4Out = t4.stdout & t4.stderr
@@ -1140,10 +1141,18 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let t4Revert = t4.exitCode != 0 and blocked == "active" and
       "could not be rolled back" notin t4Out and
       "a13r10.socket" in pendingFile and depRecorded
+    # Why a start of the socket failed while the blocker held its port, in
+    # the socket's journal since the switch began: a failure the classifier
+    # attributes to the socket is this one, nothing else (A13 review round 10).
+    let socketBindFailed = "Address already in use" in g.exec("journalctl " &
+      "-b --no-pager -u a13r10.socket --since @" & t4Since & " 2>&1").stdout
     record["decision160Revert"] = %*{"exit": t4.exitCode, "blocked": blocked,
       "revertFailed": "could not be rolled back" in t4Out,
       "pending": pendingFile, "dependantRecorded": depRecorded,
-      "dependantInOutput": "a13r10-dep.service" in t4Out, "ok": t4Revert}
+      "dependantInOutput": "a13r10-dep.service" in t4Out,
+      "dependantJobFailed":
+        "A dependency job for a13r10-dep.service failed" in t4Out,
+      "socketBindFailed": socketBindFailed, "ok": t4Revert}
     step("decision 160: a trigger that cannot start again fails the switch, " &
          "and its revert commits with the trigger, and the unit that " &
          "requires it, on record", t4Revert, t4Out & "\npending: " &

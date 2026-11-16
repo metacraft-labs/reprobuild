@@ -631,12 +631,20 @@
 ##                                           refused unit is shown by name,
 ##                                           which systemd refuses (decision
 ##                                           153, round 10)
+## ``unjudged-requirers-released``         a unit the live check does not
+##                                           judge that requires a refused
+##                                           unit is not held (decision 153,
+##                                           round 10)
 ## ``switch-ignores-restart-record``       an add-on switch does not check
 ##                                           the record of triggers to
 ##                                           restart (decision 160, round 10)
 ## ``fixing-apply-refused``                no generation resolves an entry
 ##                                           of the record of triggers to
 ##                                           restart (round-10 owner decision)
+## ``partial-fix-accepted``                a generation that resolves one
+##                                           recorded trigger goes through
+##                                           with others still on record
+##                                           (decision 170)
 ## ``restart-record-after-held``           a revert drops a trigger from the
 ##                                           held record before it is on the
 ##                                           restart record (round 10)
@@ -1103,6 +1111,25 @@
 ##                                            after the ledger copy goes, so
 ##                                            a crash between them is never
 ##                                            finished (decision 166)
+## ``etc-input-rewritten-in-step-4``         step 4 writes an input /etc
+##                                            file's preserved bytes back
+##                                            (decision 166)
+## ``etc-sweep-rewrites-inputs``              the /etc/repro sweep removes
+##                                            the inputs and writes them back
+## ``run-repro-rewrites-inputs``              /run/repro's removal does
+## ``store-remover-rewrites-inputs``          /repro's removal does
+## ``new-floors-removed``                     a sequence floor the add-on's
+##                                            agent wrote goes while its key
+##                                            stays (decision 168)
+## ``prior-mode-captured-after-takeover``     bootstrap records a takeover
+##                                            root's prior mode after the
+##                                            takeover (decision 167)
+## ``unmarked-prior-trusted``                 uninstall takes an unmarked
+##                                            ledger's prior mode as captured
+##                                            and says nothing (decision 167)
+## ``token-dir-unchecked``                    the state-removal token is
+##                                            written to and read from any
+##                                            directory (decision 165)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1675,6 +1702,25 @@ const
                           # a listener the switch's restart of its
                           # activator makes again keeps its stale record.
                           "restarted-listener-not-rerecorded",
+                          # a restart's delay is read as the next one's.
+                          "restart-delay-from-next",
+                          # the restart window's lower bound stays at
+                          # InactiveExitTimestamp.
+                          "restart-lower-bound-from-inactive-exit",
+                          # an activator ordered before the boot-hold
+                          # unit passes the effective half.
+                          "activator-boot-order-effective-unchecked",
+                          # ... and the parse half.
+                          "activator-boot-order-parse-unchecked",
+                          # what a revert stopped is not started again
+                          # once its hold is cleared.
+                          "revert-stopped-not-restarted",
+                          # a host an earlier engine bootstrapped keeps
+                          # its re-assert unit on that engine.
+                          "reassert-not-repointed",
+                          # the boot re-assertion replays and confirms
+                          # a health-checked floored unit's switch itself.
+                          "boot-confirm-in-reassert",
                           # a start hold is the add-on's by its name alone.
                           "start-hold-any-content",
                           # A13: a state backup or restore runs while a
@@ -1801,8 +1847,10 @@ const
                           "template-trigger-instances-unlisted",
                           "live-check-triggers-in-memory",
                           "template-requirer-shown-by-name",
+                          "unjudged-requirers-released",
                           "switch-ignores-restart-record",
                           "fixing-apply-refused",
+                          "partial-fix-accepted",
                           "restart-record-after-held",
                           "dependants-started",
                           # §13 decision 154: one falsifier per spelling.
@@ -1970,6 +2018,14 @@ const
                           "inputs-removed-and-restored",
                           "input-mode-owner-not-restored",
                           "input-metadata-after-ledger-copy",
+                          "etc-input-rewritten-in-step-4",
+                          "etc-sweep-rewrites-inputs",
+                          "run-repro-rewrites-inputs",
+                          "store-remover-rewrites-inputs",
+                          "new-floors-removed",
+                          "prior-mode-captured-after-takeover",
+                          "unmarked-prior-trusted",
+                          "token-dir-unchecked",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
