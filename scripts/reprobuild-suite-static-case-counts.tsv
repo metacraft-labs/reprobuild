@@ -849,6 +849,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_shell_action.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_tool_provisioning_staged.nim	nim	9
 libs/repro_project_dsl/tests/dsl_port/t_dsl_uses_staged.nim	nim	16
 libs/repro_project_dsl/tests/dsl_port/t_dsl_validate.nim	nim	3
+libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_conditioned_deps_are_enumerable.nim	nim	9
 libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim	nim	7
 libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim	nim	4
@@ -2816,7 +2817,7 @@ tests/unit/t_python3_provides_its_own_name.nim	nim	2
 tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	6
 tests/unit/t_recipe_constraint_reader.nim	nim	34
-tests/unit/t_recipe_lock_consistency_check.nim	nim	35
+tests/unit/t_recipe_lock_consistency_check.nim	nim	36
 tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim	nim	3
 tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	6

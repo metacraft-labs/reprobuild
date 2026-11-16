@@ -9265,6 +9265,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_project_dsl_tests_dsl_port_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_conditioned_deps_are_enumerable.nim",
+    binary: "build/test-bin/t_dsl_variant_conditioned_deps_are_enumerable",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for p in Probes:"),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
     binary: "build/test-bin/t_dsl_variant_uses",
     defines: @[],
