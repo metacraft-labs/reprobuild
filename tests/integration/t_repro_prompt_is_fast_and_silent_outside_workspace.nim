@@ -22,7 +22,9 @@
 ##   * Inside-segment: removing the cached-state read (so the segment is empty
 ##     inside a real workspace) fails the non-empty + JSON assertions.
 ##   * Init snippet: emitting nothing / not referencing ``repro prompt`` fails
-##     the init assertions.
+##     the init assertions, and embedding the path of the running image (the
+##     engine, ``reprobuild``) instead of the bare ``repro`` fails them for
+##     every shell.
 
 import std/[json, os, sequtils, strutils, tempfiles, times, unittest]
 
@@ -178,16 +180,32 @@ suite "RA-26 — repro prompt is fast and silent outside a workspace":
 
     # ========================================================================
     # Part 5 — ``repro prompt init <shell>`` prints a non-empty snippet that
-    # references ``repro prompt`` and mutates nothing. Check two shells.
+    # runs the bare command ``repro prompt`` and mutates nothing. Every
+    # supported shell and framework is checked: the snippet goes into an rc
+    # file that outlives this binary, so it names the command a user runs
+    # (found on PATH at render time, as ``repro shell hook`` does), never the
+    # path of the image that printed it -- that is the engine
+    # (``reprobuild``), and on a Nix install a store path that garbage
+    # collection deletes after an upgrade.
     # ========================================================================
     let snapBefore = walkDirRec(wsRoot).toSeq().len
-    for shell in ["bash", "fish"]:
+    let engineDir = reproBin.parentDir()
+    for shell in ["bash", "zsh", "fish", "starship", "p10k", "oh-my-zsh",
+                  "prezto"]:
       let initRes = runShell(
         shellCommand(@[reproBin, "prompt", "init", shell]), cwd = wsRoot)
+      checkpoint(shell & " snippet:\n" & initRes.output)
       check initRes.code == 0
       check initRes.output.strip().len > 0
-      check initRes.output.contains("repro")
-      check initRes.output.contains("prompt")
+      # The command the snippet RUNS (not its ``# repro prompt`` comment
+      # header), in each of the forms the snippets invoke it: a function body,
+      # a fish function line, a command substitution, a starship command.
+      check initRes.output.contains("{ repro prompt 2>") or
+        initRes.output.contains("\n    repro prompt 2>") or
+        initRes.output.contains("$(repro prompt 2>") or
+        initRes.output.contains("command = \"repro prompt\"")
+      check not initRes.output.contains(engineDir)
+      check not initRes.output.contains("reprobuild")
     # init only PRINTS a snippet — it must not create or remove any file.
     let snapAfter = walkDirRec(wsRoot).toSeq().len
     check snapAfter == snapBefore

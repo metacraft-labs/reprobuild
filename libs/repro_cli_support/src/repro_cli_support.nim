@@ -95260,11 +95260,21 @@ proc runPromptCommand*(conf: ReproCommandLinePromptCall): int =
     stdout.writeLine(renderPromptSegment(state, parsed))
   0
 
-proc renderPromptInitSnippet(shell: string; reproBin: string): string =
+proc renderPromptInitSnippet(shell: string): string =
   ## Emit the per-shell integration snippet (``repro prompt init <shell>``).
   ## Like ``starship init zsh`` / ``direnv hook bash``: prints a snippet for
   ## the user to add to their rc — it NEVER mutates the prompt itself. The
   ## segment is appended (opt-in) so an existing prompt is preserved.
+  ##
+  ## The snippet runs the bare command ``repro``, found on ``PATH`` when the
+  ## prompt renders, as ``repro shell hook`` and the ``repro hooks ensure
+  ## --shell`` blocks do. It never embeds the path of the running image: that
+  ## is the engine (``reprobuild``), not the command a user runs, and on a
+  ## Nix install it is a store path that an upgrade followed by garbage
+  ## collection deletes, which would leave a prompt calling a missing binary
+  ## on every render. The thin client costs one ``execv`` (about a
+  ## millisecond) on its way to the engine, well inside the prompt's budget.
+  const reproBin = ReproThinClientName
   case shell
   of "bash":
     "# repro prompt — add to ~/.bashrc (opt-in; does not replace your prompt)\n" &
@@ -95313,7 +95323,7 @@ proc renderPromptInitSnippet(shell: string; reproBin: string): string =
   else:
     ""
 
-proc runPromptInitCommand*(shell: string; reproBin: string): int =
+proc runPromptInitCommand*(shell: string): int =
   ## ``repro prompt init <shell>`` — print the integration snippet for the
   ## named shell/prompt framework (any letter case). Opt-in: it only PRINTS
   ## a snippet for the user to add; it never edits any rc file or mutates
@@ -95322,7 +95332,7 @@ proc runPromptInitCommand*(shell: string; reproBin: string): int =
   if shell == "help":
     stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
     return 0
-  let snippet = renderPromptInitSnippet(shell.toLowerAscii(), reproBin)
+  let snippet = renderPromptInitSnippet(shell.toLowerAscii())
   if snippet.len == 0:
     stderr.writeLine("repro prompt init: unsupported shell '" & shell &
       "'; run `repro help prompt init` for the shells it knows")
@@ -106204,7 +106214,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
     try:
       case conf.prompt.command
       of ReproCommandLinePromptCommand.init:
-        return runPromptInitCommand(conf.prompt.init.shell, publicCliPath)
+        return runPromptInitCommand(conf.prompt.init.shell)
       of ReproCommandLinePromptCommand.call:
         return runPromptCommand(conf.prompt.call)
     except CatchableError as err:
