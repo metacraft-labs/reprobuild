@@ -29208,6 +29208,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_dev_session_ready_file_is_never_seen_partial.nim",
+    binary: "build/test-bin/t_dev_session_ready_file_is_never_seen_partial",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_electron_builder_binaries.nim",
     binary: "build/test-bin/t_electron_builder_binaries",
     defines: @[],
@@ -29359,7 +29370,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
+    group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_git_separated_drains_both_streams.nim",
@@ -30052,7 +30063,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15o_1_qt6_transitive_cmake_deps.nim",
@@ -30657,7 +30668,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_missing_json_evidence.nim",
