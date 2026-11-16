@@ -166,7 +166,7 @@ const
     "local-fs-pre.target", "swap.target", "cryptsetup.target",
     "-.slice", "system.slice", "repro-store.mount",
     "repro-addon-secrets.service", "repro-addon-egress.service",
-    "system-reproagent.slice"]
+    "system-reproagent.slice", "repro-addon-boot-hold.service"]
     ## Units the boot re-assertion is ordered after on every base, which
     ## the parse-time half can name without the host (spec §10.1, "A
     ## floored unit's own ordering"): the boot targets its default
@@ -177,7 +177,9 @@ const
     ## ``local-fs.target``, ``swap.target`` and ``cryptsetup.target``), its
     ## slice, and the add-on's own units ordered before it: the store
     ## mount and the secrets unit (its ``After=``), the egress observer
-    ## (``Before=`` it) and the egress observer's slice (its ``After=``).
+    ## (``Before=`` it) and the egress observer's slice (its ``After=``),
+    ## and the boot-hold unit, which is ``Before=sysinit.target`` (§13
+    ## decision 159; A9 review round 16, finding 6).
     ## ``repro_addon``'s ``t_addon_floor_boot_ordering_cycle`` holds this
     ## list to the order generation 0 writes, followed transitively. The
     ## effective half reads the whole order from systemd.
@@ -1811,6 +1813,66 @@ proc baseTreeActivatorRefusal*(unitName: string): string =
       ", a tree the base system owns; such a unit is never named after one " &
       "(§13 decision 78)"
   ""
+
+const
+  ActivatorEarlyUnits* = ["sysinit.target", "local-fs.target",
+    "local-fs-pre.target", "swap.target", "cryptsetup.target",
+    "repro-addon-boot-hold.service"]
+    ## What an activator of a floored service may not be ordered before:
+    ## the boot-hold unit puts a pending switch's holds back before
+    ## ``sysinit.target`` (§13 decision 159), so an activator that can start
+    ## before or beside it starts with no hold (A9 review round 16,
+    ## finding 3).
+  ActivatorLateEnough* = ["sysinit.target", "basic.target"]
+    ## An ``After=`` naming one of these orders an activator without
+    ## default dependencies after ``sysinit.target`` (``basic.target`` is
+    ## after it; bootup(7)).
+
+proc activatorBootOrderRefusal*(unitName: string; defaultDeps: bool;
+                                after, before: openArray[string]): string =
+  ## Why the activator ``unitName`` of a floored service can start before
+  ## the boot-hold unit has put a pending switch's holds back, or "" (§13
+  ## decision 163): it must be ordered after ``sysinit.target`` -- by its
+  ## default dependencies (systemd.socket(5), systemd.timer(5),
+  ## systemd.path(5): ``After=sysinit.target``), or by an explicit
+  ## ``After=`` -- and never before one of ``ActivatorEarlyUnits``. Shared by
+  ## the parse half (the profile's files) and the effective half (what
+  ## systemd reports).
+  when FloorMutation == "activator-boot-order-unchecked":
+    return ""
+  for b in before:
+    if b in ActivatorEarlyUnits:
+      return unitName & " is ordered before " & b & ", so at boot it can " &
+        "start before a pending switch's holds are back"
+  if defaultDeps: return ""
+  for a in after:
+    if a in ActivatorLateEnough: return ""
+  unitName & " has no default dependencies and no After=sysinit.target, " &
+    "so at boot it can start before a pending switch's holds are back " &
+    "(DefaultDependencies=no)"
+
+proc activatorBootOrderOfFiles*(unitName: string; files: openArray[string]): string =
+  ## ``activatorBootOrderRefusal`` over the activator's unit file and its
+  ## drop-ins, in the order systemd reads them: the last
+  ## ``DefaultDependencies=`` wins, ``After=`` / ``Before=`` accumulate,
+  ## and an empty assignment resets them (systemd.unit(5)).
+  var defaultDeps = true
+  var after, before: seq[string]
+  for f in files:
+    for d in sectionDirectives(f, ["Unit"]):
+      case d.key
+      of "DefaultDependencies":
+        let v = d.value.strip().toLowerAscii()
+        if v in ["0", "no", "n", "false", "f", "off"]: defaultDeps = false
+        elif v in ["1", "yes", "y", "true", "t", "on"]: defaultDeps = true
+      of "After":
+        if d.value.strip().len == 0: after.setLen(0)
+        else: after.add(d.value.splitWhitespace())
+      of "Before":
+        if d.value.strip().len == 0: before.setLen(0)
+        else: before.add(d.value.splitWhitespace())
+      else: discard
+  activatorBootOrderRefusal(unitName, defaultDeps, after, before)
 
 proc activatorRefusal*(unitName, content: string; dropIn: bool;
                        half = fhParse; service = "";

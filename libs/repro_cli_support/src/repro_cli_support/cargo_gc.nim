@@ -9,71 +9,23 @@
 ##   repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID]
 ##                   [--relative-to DIR] [--libs] -- cargo ARGS...
 ##
-## Arguments are parsed here; everything else is `repro_cargo_gc`.
+## The command line is parsed from repro's description
+## (`repro_cli_support/cli_description`); everything else is
+## `repro_cargo_gc` and `repro_cargo_edge`.
 ##
 ## Exit codes: 0 success, 1 failure, 2 usage, 75 (EX_TEMPFAIL) a cargo build
 ## or another janitor holds a lock, so nothing was touched and the caller may
 ## simply try again later.
 
-import std/[os, strutils]
+import std/[options, os]
 import repro_cargo_gc
+import repro_cargo_edge/edge
 import repro_cargo_edge/edge_cli as cargo_edge_cli
 
+import ./cli_program
+
 const
-  CargoUsage* =
-    "usage: repro cargo gc [--target-dir DIR] [--keep-sets N] " &
-    "[--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n" &
-    "       repro cargo record-live [--target-dir DIR] [--from FILE|-] " &
-    "[--tee] [--keep-sets N]\n" &
-    "       repro cargo run [-j N] [--products FILE] " &
-    "[--fragment FILE --action-id ID] [--relative-to DIR] [--libs] " &
-    "-- cargo ARGS...\n"
   ExitBusy* = 75
-
-proc cargoHelp(): string =
-  CargoUsage & """
-
-gc            Delete cargo build units that no recent cargo invocation used.
-              A unit goes when it is in none of the last N live sets of its
-              profile directory AND nothing in it was written for DURATION,
-              or when it was built by a toolchain none of those live sets
-              used. Only the cargo-owned parts of profile directories are
-              touched (deps/, .fingerprint/, build/, incremental/ and the
-              final artifacts hard-linked from deps/); test-logs/, nextest/,
-              flycheck*/ and every other name are left alone. Refuses, with
-              exit code 75, while cargo holds the target directory's lock.
-              A target directory with no recorded live set is left alone.
-record-live   Read `cargo ... --message-format=json` output (stdin, or the
-              file given to --from) and store which units the invocation
-              used. Run it after every cargo invocation of a target
-              directory, e.g.
-                cargo build --message-format=json | repro cargo record-live --tee
-              --tee copies the stream to stdout so the pipe stays usable.
-
-run           The thin cargo edge: run the cargo command after `--` with
-              `--message-format=json-render-diagnostics`, read the final
-              products (executables, cdylib/staticlib outputs of the project's
-              own packages) from cargo's JSON, and write them to --products
-              (one path per line) and/or --fragment (a dynamic-graph fragment
-              declaring them as the outputs of --action-id). cargo's target
-              directory is left to cargo: it is a cache, not an output. -j N
-              is passed on to cargo. A failed build leaves no answer behind.
-              --libs also lists the project's rlibs.
-
---target-dir  the target directory (default: $CARGO_TARGET_DIR, else ./target).
-              Under `build.build-dir` split layouts pass the build directory.
---keep-sets   N >= 1 recent live sets protect their units.
-              Default 3. [PROVISIONAL: not yet tuned.]
-              Also $REPRO_CARGO_GC_KEEP_SETS, `keep_sets` under [cargo_gc]
-              in $XDG_CONFIG_HOME/reprobuild/config.toml.
---min-age     DURATION such as 30m, 36h, 14d, 2w or 0.
-              Default 14d. [PROVISIONAL: not yet tuned.]
-              Also $REPRO_CARGO_GC_MIN_AGE, `min_age` under [cargo_gc].
---dry-run     Print what would be deleted, with byte counts; delete nothing.
---cargo-home  Also sweep CARGO_HOME/registry/src (extracted crates whose
-              .crate download is still cached), older than --min-age.
-"""
-
 proc envReader(name: string): string = getEnv(name)
 
 proc targetDirFrom(flag: string): string =
@@ -83,41 +35,13 @@ proc targetDirFrom(flag: string): string =
 
 proc humanBytes(n: int64): string = $n & " B"
 
-proc runGc(args: seq[string]): int =
-  var targetFlag, keepFlag, ageFlag: string
-  var dryRun = false
-  var sweepHome = false
-  var homeDir = ""
-  var i = 0
-  proc value(name: string; arg: string; into: var string): bool =
-    ## `--name=v` or `--name v`.
-    if arg == name:
-      if i + 1 >= args.len: return false
-      inc i
-      into = args[i]
-      return true
-    if arg.startsWith(name & "="):
-      into = arg[name.len + 1 .. ^1]
-      return true
-    false
-  while i < args.len:
-    let a = args[i]
-    if a == "--dry-run": dryRun = true
-    elif a == "--cargo-home": sweepHome = true
-    elif a.startsWith("--cargo-home="):
-      sweepHome = true
-      homeDir = a["--cargo-home=".len .. ^1]
-    elif a in ["-h", "--help"]:
-      stdout.write cargoHelp()
-      return 0
-    elif value("--target-dir", a, targetFlag) or
-        value("--keep-sets", a, keepFlag) or value("--min-age", a, ageFlag):
-      discard
-    else:
-      stderr.writeLine "repro cargo gc: unexpected argument '" & a & "'"
-      stderr.write CargoUsage
-      return 2
-    inc i
+proc runGc(c: ReproCommandLineCargoGc): int =
+  let targetFlag = c.targetDir
+  let keepFlag = c.keepSets
+  let ageFlag = c.minAge
+  let dryRun = c.dryRun
+  let sweepHome = c.cargoHome.isSome
+  let homeDir = c.cargoHome.get("")
   let resolved = resolveGcConfig(envReader, keepFlag, ageFlag)
   for problem in resolved.problems:
     stderr.writeLine "repro cargo gc: warning: " & problem
@@ -160,34 +84,11 @@ proc runGc(args: seq[string]): int =
     stderr.writeLine "repro cargo gc: " & err.msg
     return 1
 
-proc runRecordLive(args: seq[string]): int =
-  var targetFlag, fromFlag, keepFlag: string
-  var tee = false
-  var i = 0
-  proc value(name: string; arg: string; into: var string): bool =
-    if arg == name:
-      if i + 1 >= args.len: return false
-      inc i
-      into = args[i]
-      return true
-    if arg.startsWith(name & "="):
-      into = arg[name.len + 1 .. ^1]
-      return true
-    false
-  while i < args.len:
-    let a = args[i]
-    if a == "--tee": tee = true
-    elif a in ["-h", "--help"]:
-      stdout.write cargoHelp()
-      return 0
-    elif value("--target-dir", a, targetFlag) or value("--from", a, fromFlag) or
-        value("--keep-sets", a, keepFlag):
-      discard
-    else:
-      stderr.writeLine "repro cargo record-live: unexpected argument '" & a & "'"
-      stderr.write CargoUsage
-      return 2
-    inc i
+proc runRecordLive(c: ReproCommandLineCargoRecordLive): int =
+  let targetFlag = c.targetDir
+  let fromFlag = c.fromFile
+  let keepFlag = c.keepSets
+  let tee = c.tee
   let resolved = resolveGcConfig(envReader, keepFlag, "")
   for problem in resolved.problems:
     stderr.writeLine "repro cargo record-live: warning: " & problem
@@ -219,20 +120,21 @@ proc runRecordLive(args: seq[string]): int =
     stderr.writeLine "repro cargo record-live: " & err.msg
     return 1
 
-proc runCargoCommand*(args: seq[string]): int =
+proc runCargoCommand*(conf: ReproCommandLineCargo): int =
   ## `repro cargo <sub> ...`.
-  if args.len == 0:
-    stderr.write CargoUsage
-    return 2
-  let rest = if args.len > 1: args[1 .. ^1] else: @[]
-  case args[0]
-  of "gc": runGc(rest)
-  of "record-live": runRecordLive(rest)
-  of "run": cargo_edge_cli.runEdge(rest)
-  of "-h", "--help", "help":
-    stdout.write cargoHelp()
+  case conf.command
+  of ReproCommandLineCargoCommand.gc: runGc(conf.gc)
+  of ReproCommandLineCargoCommand.recordLive: runRecordLive(conf.recordLive)
+  of ReproCommandLineCargoCommand.run:
+    let c = conf.run
+    cargo_edge_cli.runCargoEdgeCommand(CargoEdgeOptions(width: c.width,
+      productsFile: c.products, fragmentFile: c.fragment,
+      actionId: c.actionId, relativeTo: c.relativeTo, includeRlibs: c.libs,
+      cargo: c.cargo), "repro cargo run")
+  of ReproCommandLineCargoCommand.help:
+    # `repro cargo help [<word>...]` is `repro help cargo [<word>...]`.
+    try:
+      stdout.write(ReproCommandLine.helpText(@["cargo"] & conf.help.topic))
+    except CliUsageError:
+      stdout.write(ReproCommandLine.helpText(["cargo"]))
     0
-  else:
-    stderr.writeLine "repro cargo: unknown subcommand: " & args[0]
-    stderr.write CargoUsage
-    2

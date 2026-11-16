@@ -1349,8 +1349,9 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
       elif isSocket and k == "Accept":
         let b = systemdBoolean(v)
         when InfraAddonMutation != "trigger-accept-unread":
-          # FALSIFYING MUTATION (when absent, §13 decision 154): Accept=
-          # is not read, so the socket triggers its namesake.
+          # FALSIFYING MUTATION (when absent, §13 decision 154): an
+          # Accept=yes spelling is not read, so the socket triggers its
+          # namesake instead of its template.
           if b >= 0: accept = b == 1
       elif isSocket and k.startsWith("Listen"):
         if v.len == 0: listeners.setLen(0)
@@ -1559,6 +1560,13 @@ proc checkFloorActivators*(p: SystemProfile) =
       if why.len > 0:
         raiseSystemProfileInvalid($r.kind & " '" & name &
           "' activates a floored service: " & why)
+      # §13 decision 163: ordered after sysinit.target, its file and the
+      # profile's drop-ins onto it read together.
+      when InfraAddonMutation != "activator-boot-order-parse-unchecked":
+        let early = activatorBootOrderOfFiles(name, activatorFilesOf(p, name))
+        if early.len > 0:
+          raiseSystemProfileInvalid($r.kind & " '" & name &
+            "' activates a floored service: " & early)
   for d in p.resources:
     var target, content = ""
     if d.kind == srkSystemdSystemDropIn:

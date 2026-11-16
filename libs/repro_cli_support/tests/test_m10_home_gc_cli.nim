@@ -87,7 +87,8 @@ suite "M10 — repro home gc CLI":
   test "test_m10_cli_help_documents_all_flags":
     let r = runRepro(@["home", "gc", "--help"])
     check r.exit == 0
-    check r.outStr.contains("usage: repro home gc")
+    # repro's help, generated from its command-line description.
+    check r.outStr.contains("Usage: repro home gc")
     check r.outStr.contains("--dry-run")
     check r.outStr.contains("--force")
     check r.outStr.contains("--keep-generations")
@@ -105,7 +106,7 @@ suite "M10 — repro home gc CLI":
   test "test_m10_cli_unexpected_positional_is_a_usage_error":
     let r = runRepro(@["home", "gc", "extra-positional"])
     check r.exit == 2
-    check r.outStr.contains("unexpected positional")
+    check r.outStr.contains("unexpected argument 'extra-positional'")
 
   test "test_m10_cli_keep_generations_must_be_positive":
     let r = runRepro(@["home", "gc", "--keep-generations", "0"])
@@ -115,7 +116,8 @@ suite "M10 — repro home gc CLI":
   test "test_m10_cli_keep_generations_must_be_integer":
     let r = runRepro(@["home", "gc", "--keep-generations", "abc"])
     check r.exit == 2
-    check r.outStr.contains("expects an integer")
+    check r.outStr.contains("invalid value 'abc' for '--keep-generations'")
+    check r.outStr.contains("expected an integer")
 
   test "test_m10_cli_dry_run_on_empty_store_is_clean":
     ## Empty store + empty state dir → "store is clean" + exit 0.

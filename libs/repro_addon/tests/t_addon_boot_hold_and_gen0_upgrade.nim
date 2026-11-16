@@ -13,7 +13,8 @@
 ##   those once it is resolved.
 ##
 ## Falsifying builds, red here: ``boot-hold-after-sysinit`` (the unit's
-## order) and ``gen0-not-upgraded`` (no upgrade). ``boot-holds-unrecorded``
+## order), ``gen0-not-upgraded`` (no upgrade) and ``reassert-not-repointed``
+## (§13 decision 164: the re-assert unit keeps the bootstrap engine). ``boot-holds-unrecorded``
 ## acts at the switch's call site and is red in the VM gate
 ## ``t_e2e_addon_floor_reapplies_after_restarts``.
 ##
@@ -41,8 +42,9 @@ proc gen0(): seq[OwnObject] =
   generation0Objects(Gen0Inputs(reproExe: Exe))
 
 proc withoutBootHold(objs: seq[OwnObject]): seq[OwnObject] =
+  ## Generation 0 as an engine before decisions 157 and 159 rendered it.
   for o in objs:
-    if o.kind != ookUnit or o.unit != BootHoldUnit: result.add(o)
+    if o.kind != ookUnit or o.unit notin [BootHoldUnit, BootConfirmUnit]: result.add(o)
 
 let current = renderOwnProfile(gen0(), "/f")
 let previousEngine = renderOwnProfile(withoutBootHold(gen0()), "/f")
@@ -77,9 +79,11 @@ suite "§13 decision 159: the boot-hold unit":
 suite "§13 decision 159: generation 0's upgrade path":
   test "an own profile without the unit gets it, rendered as a bootstrap would":
     let miss = missingGeneration0Objects(previousEngine)
-    check miss.len == 1
+    check miss.len == 2
     check miss[0].unit == BootHoldUnit
     check miss[0].content == bootHoldUnit()
+    check miss[1].unit == BootConfirmUnit
+    check miss[1].content == bootConfirmUnit(Exe)
     let up = addMissingGeneration0(previousEngine, miss, absent, unrecorded)
     check up == current
   test "it only adds: every other block is unchanged":
@@ -94,10 +98,12 @@ suite "§13 decision 159: generation 0's upgrade path":
                                 absent, unrecorded) == current
   test "present and matching: the ledger records exactly those bytes":
     let miss = missingGeneration0Objects(previousEngine)
-    let sha = sha256Hex(miss[0].content)
+    proc shaAt(p: string): string =
+      for o in miss:
+        if o.path == p: return sha256Hex(o.content)
     let up = addMissingGeneration0(previousEngine, miss,
-      proc (p: string): tuple[present: bool; sha256: string] = (true, sha),
-      proc (p: string): string = sha)
+      proc (p: string): tuple[present: bool; sha256: string] = (true, shaAt(p)),
+      proc (p: string): string = shaAt(p))
     check up == current
   test "present and foreign: refused, never written over":
     let miss = missingGeneration0Objects(previousEngine)
@@ -132,7 +138,7 @@ suite "§13 decision 159: generation 0's upgrade path":
       raised = true
       check "repro-addon-later.service" in e.msg
     check raised
-    check probed.len == 2
+    check probed.len == 3
 
 suite "§13 decision 159: the start holds across a reboot":
   type Sandbox = tuple[state, root, written, bin, log: string]
@@ -156,6 +162,9 @@ suite "§13 decision 159: the start holds across a reboot":
       .replace(BootHoldsWrittenList, s.written)
       .replace("/run/repro-addon", parentDir(s.written))
       .replace(RuntimeUnitDirPath, s.root)
+      # The host's tools by absolute path; the test's from PATH, with the
+      # systemctl stand-in first.
+      .replace("/usr/bin/", "")
     let f = parentDir(s.root) / "script.sh"
     writeFile(f, script)
     # The stand-in first, then the test's own tools (mkdir, cp).
@@ -204,6 +213,34 @@ suite "§13 decision 159: the start holds across a reboot":
     check runScript(s) == 0
     check not dirExists(s.root)
     check "daemon-reload" notin readFile(s.log)
+  test "the script names every tool by absolute path":
+    let sc = bootHoldScript()
+    for tool in ["/usr/bin/systemctl is-active", "/usr/bin/mkdir -p",
+                 "/usr/bin/cp ", "/usr/bin/sha256sum ", "/usr/bin/systemctl daemon-reload"]:
+      check tool in sc
+    check "set -f;" in sc
+  test "a hold text that is not the start hold's: a minimal hold on every recorded unit":
+    # A9 review round 16, finding 10: fail closed.
+    let s = setup()
+    writeBootHoldRecord(s.state, ["/run/systemd/system/a.socket.d/" & StartHoldName])
+    writeFile(bootHoldTextPath(s.state), "[Unit]\nDescription=planted\n")
+    check runScript(s) == 0
+    let h = readFile(s.root / "a.socket.d" / StartHoldName)
+    check "AssertPathExists=!/" in h
+    check "planted" notin h
+  test "a record that is a link is refused; a drop-in directory that is a link is skipped":
+    let s = setup()
+    writeBootHoldRecord(s.state, ["/run/systemd/system/a.socket.d/" & StartHoldName,
+                                  "/run/systemd/system/b.socket.d/" & StartHoldName])
+    createDir(s.root)
+    createSymlink("/tmp", s.root / "b.socket.d")
+    check runScript(s) == 0
+    check fileExists(s.root / "a.socket.d" / StartHoldName)
+    check not fileExists("/tmp/" & StartHoldName)
+    let rec = bootHoldRecordPath(s.state)
+    moveFile(rec, rec & ".real")
+    createSymlink(rec & ".real", rec)
+    check runScript(s) != 0
   test "the re-assertion lifts the boot's holds only once the switch is resolved":
     let s = setup()
     writeBootHoldRecord(s.state, ["/run/systemd/system/a.service.d/" & StartHoldName,
@@ -223,3 +260,35 @@ suite "§13 decision 159: the start holds across a reboot":
     check not fileExists(s.root / "a.service.d" / StartHoldName)
     check readFile(s.root / "b.service.d" / StartHoldName) == "operator\n"
     check not fileExists(s.written)
+
+suite "§13 decision 164: the re-assert unit is pointed at the upgrading engine":
+  const NewExe = "/repro/store/prefixes/repro-addon/0.2.99-new/bin/repro"
+  let curUnit = unitContentOf(current, ReassertUnit)
+  let sha = sha256Hex(curUnit)
+  test "the add-on's own unit, on disk and in the ledger, is re-rendered":
+    let r = repointReassert(current, NewExe,
+      proc (p: string): tuple[present: bool; sha256: string] = (true, sha),
+      proc (p: string): string = sha)
+    check r.changed
+    check reassertExeOf(unitContentOf(r.own, ReassertUnit)) == NewExe
+    check unitContentOf(r.own, ReassertUnit) == reassertUnit(NewExe)
+    # The boot-confirm unit moves with it (§13 decision 157); nothing else
+    # of generation 0 changes.
+    check unitContentOf(r.own, BootConfirmUnit) == bootConfirmUnit(NewExe)
+    check r.own.replace(unitContentOf(r.own, ReassertUnit), "").replace(
+            unitContentOf(r.own, BootConfirmUnit), "") ==
+          current.replace(curUnit, "").replace(unitContentOf(current, BootConfirmUnit), "")
+  test "idempotent: a unit that already runs this engine is left alone":
+    check not repointReassert(current, Exe,
+      proc (p: string): tuple[present: bool; sha256: string] = (true, sha),
+      proc (p: string): string = sha).changed
+  test "a foreign unit, or one the ledger does not record, is refused":
+    for (onDisk, rec) in [(sha256Hex("operator's"), sha), (sha, ""), ("", "")]:
+      let d = onDisk
+      let rc = rec
+      expect ValueError:
+        discard repointReassert(current, NewExe,
+          proc (p: string): tuple[present: bool; sha256: string] = (true, d),
+          proc (p: string): string = rc)
+  test "no unit installed: nothing to re-point":
+    check not repointReassert(current, NewExe, absent, unrecorded).changed

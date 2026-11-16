@@ -644,7 +644,7 @@
 ## ``partial-fix-accepted``                a generation that resolves one
 ##                                           recorded trigger goes through
 ##                                           with others still on record
-##                                           (decision 168)
+##                                           (decision 170)
 ## ``restart-record-after-held``           a revert drops a trigger from the
 ##                                           held record before it is on the
 ##                                           restart record (round 10)
@@ -1130,6 +1130,14 @@
 ## ``token-dir-unchecked``                    the state-removal token is
 ##                                            written to and read from any
 ##                                            directory (decision 165)
+## ``token-not-bound-to-install``            a re-run takes a token whose
+##                                            directories are not the ones
+##                                            its uninstall recorded
+##                                            (decision 165)
+## ``corrupt-input-record-continues``         an uninstall goes on past a
+##                                            corrupt record of a
+##                                            pre-bootstrap input
+##                                            (decision 166)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1702,6 +1710,25 @@ const
                           # a listener the switch's restart of its
                           # activator makes again keeps its stale record.
                           "restarted-listener-not-rerecorded",
+                          # a restart's delay is read as the next one's.
+                          "restart-delay-from-next",
+                          # the restart window's lower bound stays at
+                          # InactiveExitTimestamp.
+                          "restart-lower-bound-from-inactive-exit",
+                          # an activator ordered before the boot-hold
+                          # unit passes the effective half.
+                          "activator-boot-order-effective-unchecked",
+                          # ... and the parse half.
+                          "activator-boot-order-parse-unchecked",
+                          # what a revert stopped is not started again
+                          # once its hold is cleared.
+                          "revert-stopped-not-restarted",
+                          # a host an earlier engine bootstrapped keeps
+                          # its re-assert unit on that engine.
+                          "reassert-not-repointed",
+                          # the boot re-assertion replays and confirms
+                          # a health-checked floored unit's switch itself.
+                          "boot-confirm-in-reassert",
                           # a start hold is the add-on's by its name alone.
                           "start-hold-any-content",
                           # A13: a state backup or restore runs while a
@@ -2007,6 +2034,8 @@ const
                           "prior-mode-captured-after-takeover",
                           "unmarked-prior-trusted",
                           "token-dir-unchecked",
+                          "token-not-bound-to-install",
+                          "corrupt-input-record-continues",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",

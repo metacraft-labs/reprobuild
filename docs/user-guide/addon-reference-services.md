@@ -190,10 +190,20 @@ The add-on handles this in four ways:
     puts the holds of a step back that is still pending in place before
     any of them can start. It runs only while a switch is pending, so a
     normal boot skips it. A host installed by an add-on version without
-    that unit gets it at its next apply, which changes nothing else the
-    add-on installed; if a file is already at the unit's path and the
-    add-on did not put it there, the apply refuses and changes nothing
-    until you move it away.
+    that unit gets it at its next apply. That apply also points the
+    add-on's boot-time re-assertion at the add-on version doing the apply,
+    so the next boot recovers with the current rules; nothing else the
+    add-on installed changes. If a file is already at one of those paths
+    and it is not exactly what the add-on put there, the apply refuses
+    and changes nothing until you move it away. A socket, path or timer
+    unit that starts a hardened service must start after
+    `sysinit.target`: one with `DefaultDependencies=no` and no
+    `After=sysinit.target`, or ordered before an early boot unit, is
+    refused. If a switch whose profile has a hardened unit with a health
+    check is interrupted, the next boot finishes it in a separate unit,
+    `repro-addon-boot-confirm.service`, after the re-assertion, so the
+    health check can see the unit start; the boot itself does not wait
+    for it.
   - **a unit that only a timer or a path unit starts** never has its
     directories recorded by an apply, because no apply starts it. After
     the first run its timer starts, the next apply refuses the unit's
