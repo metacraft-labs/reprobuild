@@ -20637,6 +20637,13 @@ const
     ## TC-8g — follows ``PreCommitGatePhaseArg`` as ``=1`` when the dispatcher
     ## is running as ``pre-commit.legacy`` under another hook manager, ``=0``
     ## otherwise.
+  PreCommitGateUnservicedRefusal* = "the certificate gate REFUSES this commit"
+    ## The verdict the certificate-gate phase prints when no ``repro`` it can
+    ## trust answered (a failed contract handshake, or none resolvable). It
+    ## refuses: a gate an unidentified build decides is not a gate.
+  PreCommitGateNotEvaluated* = "the certificate gate was not evaluated"
+    ## The same condition under a displaced dispatcher, where the gate is
+    ## advisory and the commit proceeds.
 
 type
   HookActionKind = enum
@@ -22329,9 +22336,10 @@ proc managedHookRefusalRecordName*(hookName: string): string =
   ##     timestamps can see which happened last, which is a question neither
   ##     of the other two shapes can answer at all.
   ##
-  ## Keyed BY HOOK because five hook types can refuse independently and the
-  ## four observational ones fail open while ``pre-push`` fails closed: one
-  ## shared file would be overwritten by whichever fired last and would lose
+  ## Keyed BY HOOK because five hook types can refuse independently, and the
+  ## observational ones fail open while ``pre-push`` (and ``pre-commit``'s
+  ## certificate-gate phase) fail closed: one shared file would be
+  ## overwritten by whichever fired last and would lose
   ## the one distinction that changes what the operator does.
   ##
   ## Four of the five hooks have no dispatch report to overwrite in any case
@@ -22493,7 +22501,7 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # dates are kept deliberately: the date moved while the finding did not, so
   # quoting only the first would date a defect that is still live.
   #
-  # Stderr alone cannot carry this. The four observational hooks exit 0, git
+  # Stderr alone cannot carry this. The observational hooks exit 0, git
   # relays their stderr to a terminal that may not exist (a CI step, an editor
   # subprocess, an agent harness — §1.6b measures that those are exactly the
   # shells in which the refusal happens), and nothing afterwards can be asked
@@ -22784,6 +22792,57 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("  echo \"repro hooks: " & hookName & " above was produced by " &
     "$REPRO_CMD (resolved from $REPRO_CMD_SOURCE).\" >&2\n")
   result.add("}\n\n")
+  if hookName == "pre-commit":
+    # The certificate-gate phase when no build it can trust answered: either
+    # the resolved `repro` failed the contract handshake (argument
+    # `resolved`), or none could be resolved at all (`unresolved`).
+    #
+    # It FAILS CLOSED, unlike the lock refresh before it. The two phases look
+    # alike and are opposite in kind. The refresh's one refusal (a pin moving
+    # backward) guards a write the refresh itself makes; under a mismatch it
+    # makes no write, so the commit carries the lock it already had and the
+    # pre-push gate still judges it — announcing and exiting 0 loses nothing.
+    # The gate phase writes nothing and exists only to refuse: under
+    # `commit_gate = required` an uncovered commit must not be recorded. A
+    # gate an unidentified build decides is not a gate (CLI/hooks.md
+    # §"Contract Handshake And Stand-Down", the rule `pre-push` already
+    # follows), and an ambiguous correctness failure fails closed
+    # (Failure-Semantics.md). The body cannot tell whether the branch's rule
+    # is `required`, `advisory` or absent — that is read by the very binary
+    # that did not answer — so it refuses whatever the rule would have said.
+    #
+    # Except when the dispatcher was displaced to `pre-commit.legacy`: there
+    # the gate is advisory in every case (it cannot know it ran last), so it
+    # says it was not evaluated and lets the commit through, exactly as an
+    # evaluated advisory gate would.
+    #
+    # Pinned by t_pre_commit_gate_refuses_when_its_repro_cannot_service_it.
+    result.add("repro_certificate_gate_unserviced() {\n")
+    result.add("  if [ \"$1\" = resolved ]; then\n")
+    result.add("    REPRO_GATE_WHO=\"the 'repro' it resolved, $REPRO_CMD " &
+      "(resolved from $REPRO_CMD_SOURCE), cannot service this hook\"\n")
+    result.add("  else\n")
+    result.add("    REPRO_GATE_WHO=\"no 'repro' could be resolved " &
+      "(REPROBUILD_REPRO names nothing executable, or none is on PATH)\"\n")
+    result.add("  fi\n")
+    result.add("  if [ \"$REPRO_HOOK_DISPLACED\" = 1 ]; then\n")
+    result.add("    echo \"repro hooks: pre-commit: " & PreCommitGateNotEvaluated &
+      ": $REPRO_GATE_WHO.\" >&2\n")
+    result.add("    echo \"repro hooks: This dispatcher runs as " &
+      "pre-commit.legacy, so the gate is advisory and the commit " &
+      "proceeds.\" >&2\n")
+    result.add("    exit 0\n")
+    result.add("  fi\n")
+    result.add("  echo \"repro hooks: pre-commit: " & PreCommitGateUnservicedRefusal &
+      ": $REPRO_GATE_WHO.\" >&2\n")
+    result.add("  echo \"repro hooks: A gate that cannot be evaluated does " &
+      "not pass: whether trusted certificates\" >&2\n")
+    result.add("  echo \"repro hooks: cover this commit was never decided. " &
+      "Make the repro this repository\" >&2\n")
+    result.add("  echo \"repro hooks: runs resolvable (refresh your shell, " &
+      "or set REPROBUILD_REPRO), then commit again.\" >&2\n")
+    result.add("  exit 1\n")
+    result.add("}\n\n")
   result.add("REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)\n")
   result.add("cd \"$REPO_ROOT\"\n")
   if hookName == "pre-commit":
@@ -22901,20 +22960,25 @@ proc vcsManagedHookBody(hookName, hookContract: string;
       " || REPRO_STATUS=$?\n")
   else:
     # The non-blocking hooks announce and keep going: failing a commit after
-    # the fact would be worse than the mismatch being reported.
+    # the fact would be worse than the mismatch being reported. The one
+    # exception is `pre-commit`'s certificate-gate phase, which runs BEFORE
+    # the fact and exists to refuse; it fails closed (below).
     result.add("  REPRO_PROBE_STATUS=0\n")
     # Captured for the same reason as in `pre-push` above, and it matters MORE
-    # here: these four hooks exit 0, so the terminal is the only thing that
-    # ever saw the refusal and §1.6b measures that the shells which refuse are
-    # precisely the ones with no terminal attached.
+    # here: these hooks exit 0 (all but `pre-commit`'s gate phase), so the
+    # terminal is the only thing that ever saw the refusal, and §1.6b
+    # measures that the shells which refuse are precisely the ones with no
+    # terminal attached.
     result.add("  REPRO_PROBE_DIAGNOSTIC=$(\"$REPRO_CMD\" hooks protocol " &
       "--require=2 --hook-contract=" & hookContract & " 2>&1) || " &
       "REPRO_PROBE_STATUS=$?\n")
     result.add("  if [ \"$REPRO_PROBE_STATUS\" -ne 0 ]; then\n")
     if hookName == "pre-commit":
       # The refresh phase of this same commit has already printed (and
-      # recorded) the refusal; saying it twice per commit adds nothing.
-      result.add("    [ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
+      # recorded) the full refusal; the gate phase adds only its verdict,
+      # and that verdict refuses (see `repro_certificate_gate_unserviced`).
+      result.add("    [ \"$REPRO_HOOK_PHASE\" = refresh ] || " &
+        "repro_certificate_gate_unserviced resolved\n")
     result.add("    repro_contract_refusal\n")
     result.add("    exit 0\n")
     result.add("  fi\n")
@@ -22955,8 +23019,11 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("exit 1\n")
   else:
     if hookName == "pre-commit":
-      # Said once per commit, by the refresh phase.
-      result.add("[ \"$REPRO_HOOK_PHASE\" = refresh ] || exit 0\n")
+      # The "not found" notice is said once per commit, by the refresh
+      # phase; the gate phase refuses, for the reason given on
+      # `repro_certificate_gate_unserviced`.
+      result.add("[ \"$REPRO_HOOK_PHASE\" = refresh ] || " &
+        "repro_certificate_gate_unserviced unresolved\n")
     result.add("echo \"repro hooks: repro CLI not found on PATH; skipping " &
       hookName & "\" >&2\n")
     result.add("exit 0\n")
@@ -79132,8 +79199,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       proc staleDetailFor(full: bool): string =
         $stale.len & " managed hook(s) STALE — present, carrying " &
           "every marker a generated body carries, and demanding a contract " &
-          "THIS build does not generate, so each fire refuses (pre-push) or " &
-          "fails open in silence (the four observational hooks): " &
+          "THIS build does not generate, so each fire refuses (pre-push, " &
+          "and pre-commit's certificate gate where one is installed) or " &
+          "fails open in silence (the observational hooks): " &
           (if full: stale.join(", ")
            else: formatFindingList(stale, parsed.verbose)) & ". " & census &
           (if writers.len > 0:

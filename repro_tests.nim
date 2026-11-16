@@ -23983,6 +23983,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_pre_commit_gate_refuses_when_its_repro_cannot_service_it.nim",
+    binary: "build/test-bin/t_pre_commit_gate_refuses_when_its_repro_cannot_service_it",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_pre_commit_gate_requires_what_the_branch_rule_names.nim",
     binary: "build/test-bin/t_pre_commit_gate_requires_what_the_branch_rule_names",
     defines: @[],
@@ -24398,7 +24409,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_project_extension_target_rehomed_and_toggles_without_force_rebuild.nim",
@@ -25014,7 +25025,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim",
@@ -25795,7 +25806,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim",
@@ -26620,7 +26631,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_mainline_reconcile.nim",
@@ -27313,7 +27324,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unobserved_consumer_key_follows_producer_channel_content.nim",
@@ -27962,7 +27973,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_variant_overrides_revision.nim",
