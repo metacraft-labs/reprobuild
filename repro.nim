@@ -925,7 +925,15 @@ package reprobuild:
     # zig declared here. A native build never runs it. Declaring zig also
     # declares the wrapper edge's `sh` and coreutils
     # (Reprobuild-Standard-Library.md, `cross_zig`).
-    "zig >=0.13 <0.14"
+    #
+    # The range admits 0.14 as well as 0.13. This entry is part of every
+    # consumer's solve, not only of reprobuild's own cross build: a recipe
+    # that `uses:` reprobuild solves one zig for its whole closure, and
+    # codetracer-launcher, which such a recipe (codetracer) also uses,
+    # requires `zig >=0.14 <0.15`. A `<0.14` cap left the two with no common
+    # version and made that solve unsatisfiable. The stdlib zig package
+    # carries 0.14.1 on every platform it carries 0.13.0.
+    "zig >=0.13 <0.15"
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
     # are the PATH-resolvable binaries the reprobuild build needs;
     # they're sufficient for the path-mode tool resolver to succeed

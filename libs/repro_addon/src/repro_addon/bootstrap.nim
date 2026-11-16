@@ -203,7 +203,7 @@ const
   ]
 
 proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
-                        logDir = UninstallOverrideDir) =
+                        logDir = UninstallOverrideDir): string {.discardable.} =
   ## The trust anchors validated first (strict: a bad file raises and
   ## nothing is written, a stale token included); then a state-removal
   ## token an earlier uninstall left (§13 decision 165), which belongs to
@@ -211,24 +211,52 @@ proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
   ## directory of the add-on's uninstall records made root's 0700 through
   ## a descriptor that does not follow a link (§13 decision 178: an
   ## existing root directory that passes the checks is tightened to 0700,
-  ## anything else is refused). Raises ``AddonBootstrapError`` naming the
-  ## remedy when the directory cannot be used.
+  ## anything else is refused). Returns the directory's identity, taken on
+  ## the descriptor that made or tightened it, which bootstrap records.
+  ## Raises ``AddonBootstrapError`` naming the remedy when the directory
+  ## cannot be used -- including, with nothing written, when its file
+  ## system reports no birth time (§13 decision 178, amended 2026-11-16:
+  ## the owner's "Refuse at bootstrap").
   when mutated("token-cleared-before-anchors"):
     try: clearStateRemovalToken(logDir)     # FALSIFIER: before the anchors
     except OSError: discard
   for p in [deploySignersPath, cachePublishersPath]:
     if p.len > 0:
       discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
+  var noBirthTime = false
   try:
-    clearStateRemovalToken(logDir)
-    when not mutated("bootstrap-leaves-log-dir"):
-      ensureCheckedDir(logDir, tighten = true)
+    when not mutated("unbound-when-no-birth-time"):
+      noBirthTime = birthTimeProbe(logDir).len == 0
+    if not noBirthTime:
+      clearStateRemovalToken(logDir)
+      when not mutated("bootstrap-leaves-log-dir"):
+        result = ensureCheckedDir(logDir, tighten = true)
+        when not mutated("unbound-when-no-birth-time"):
+          noBirthTime = result.len == 0
   except OSError as e:
     raise newException(AddonBootstrapError, logDir &
       " cannot hold the add-on's uninstall records (" & e.msg & "). It " &
       "is not one this add-on made: inspect it, remove it (or the entry " &
       "named " & StateRemovalTokenName & " in it), and run bootstrap " &
       "again; nothing was written")
+  if noBirthTime:
+    raise newException(AddonBootstrapError, "the file system holding " &
+      logDir & " reports no birth time (statx STATX_BTIME), so the add-on " &
+      "cannot record an identity that tells its uninstall records' " &
+      "directory from another one put in its place, and it never uses " &
+      "that directory unbound. Put /var/log on a file system that records " &
+      "birth times (ext4, xfs, btrfs on a current kernel) and run " &
+      "bootstrap again; nothing was written")
+
+proc recordRecordsDirIdentity*(stateDir, ident: string) =
+  ## Bootstrap's record of the identity ``prepareRecordsDir`` took (§13
+  ## decision 178, amended), atomic, 0600 and durable in the root-only
+  ## state, so every later checked open refuses another directory put in
+  ## the place of the one it made.
+  when not mutated("bootstrap-identity-not-recorded"):
+    let path = recordsDirIdentityPath(stateDir)
+    createDir(parentDir(path))
+    writeFileAtomic(path, ident & "\n", 0o600)
 
 proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -285,7 +313,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       "inputs under /var/lib/repro, which the preflight inspected at the " &
       "default state directory " & DefaultStateDir & "; --state-dir " &
       stateDir & " is refused; nothing was written")
-  prepareRecordsDir(opts.deploySignersPath, opts.cachePublishersPath)
+  let recordsDirIdentity =
+    prepareRecordsDir(opts.deploySignersPath, opts.cachePublishersPath)
 
   # 2. Roots: created, or taken over where the plan says they are
   # pre-bootstrap inputs. The directories the plan lists beyond the
@@ -322,10 +351,7 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   # above, recorded in the root-only state, so every later checked open
   # refuses another directory put in its place.
   when not mutated("bootstrap-leaves-log-dir"):
-    let ident = identityOfCheckedDir(UninstallOverrideDir)
-    if ident.len > 0:
-      createDir(parentDir(recordsDirIdentityPath(stateDir)))
-      writeFileAtomic(recordsDirIdentityPath(stateDir), ident & "\n", 0o600)
+    recordRecordsDirIdentity(stateDir, recordsDirIdentity)
   # Every apply's pending-switch check finds the add-on's state through
   # this, whatever --state-dir it was itself given (§7.7).
   writeAddonStateDirPointer(stateDir)
