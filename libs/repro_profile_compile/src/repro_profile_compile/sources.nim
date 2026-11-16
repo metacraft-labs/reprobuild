@@ -177,7 +177,7 @@ proc resolveProfileRoot*(profileDir: string;
   ""
 
 # ---------------------------------------------------------------------------
-# Cache-layout helpers (state-dir/profile-cache/<profile-key>.rbpi, nimcache/<profile-key>).
+# Cache-layout helpers (state-dir/profile-cache/<profile-key>.rbpi, nimcache/<profile-key prefix>).
 # ---------------------------------------------------------------------------
 
 const ProfileCacheDirName* = "profile-cache"
@@ -213,10 +213,43 @@ proc cachedIntentDocumentPath*(stateDir, profileKey: string): string =
   ## encodes it as the `.rbpi` envelope every consumer reads.
   profileCacheDir(stateDir) / (profileKey & ".intent.json")
 
+const ProfileNimcacheKeyChars* = 16
+  ## How much of the profile key names the profile's nimcache directory:
+  ## 64 bits, enough to keep the few profiles of one state directory apart.
+  ## A collision is not a harmless rebuild: a nimcache is keyed by position
+  ## (module paths), so two profiles sharing one would overwrite each
+  ## other's files, and the profile lock (`cachedProfileLockPath`, full key)
+  ## would not serialise them. Two keys in one state directory sharing a
+  ## 64-bit prefix is a birthday bound of about n^2 / 2^65 for n profiles,
+  ## which is negligible for the handful of profiles one state directory
+  ## holds. Every other profile-cache path keeps the full key.
+
 proc cachedNimcacheDir*(stateDir, profileKey: string): string =
   ## The per-profile Nim cache: derived state, excluded from the edge's
   ## recorded inputs.
-  profileCacheDir(stateDir) / "nimcache" / profileKey
+  ##
+  ## WHY ONLY A PREFIX OF THE KEY. Nim writes `<nimcache>/<mangled module>.c`
+  ## and its `.o` through Win32 calls bound by `MAX_PATH` (260), and the
+  ## mangled names of reprobuild's own modules reach about 70 characters
+  ## (`@prepro_dsl_stdlib@spackages@s<module>.nim.c.o`). The extended-length
+  ## `\\?\` form does not lift the limit for the whole compile: `nim` writes
+  ## the C files through it, but the C compiler it starts cannot open them
+  ## (MinGW gcc's `cc1` fails on `\\?\C:\...\@m<module>.nim.c`; measured on
+  ## eli-pc, 2026-11-16). With the full 64-hex key the directory alone took
+  ## 88 characters past the state directory, and a profile compile under a
+  ## 121-character state directory failed to open a 260-character C file
+  ## (reprobuild-pm issue
+  ## 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d). The
+  ## prefix gives that room back: the directory is 40 characters past the
+  ## state directory, so a state directory of up to 148 characters leaves
+  ## room for the longest mangled name. `t_smoke_repro_profile_compile`
+  ## asserts that budget against the module names of this source tree.
+  let short =
+    if profileKey.len > ProfileNimcacheKeyChars:
+      profileKey[0 ..< ProfileNimcacheKeyChars]
+    else:
+      profileKey
+  profileCacheDir(stateDir) / "nimcache" / short
 
 proc cachedProfileLockPath*(stateDir, profileKey: string): string =
   ## The lock file that serialises every compile and platform probe of the
