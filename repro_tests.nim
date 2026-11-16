@@ -28669,6 +28669,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/unit/t_blob_gc_help_names_the_unrecoverable_loss.nim",
+    binary: "build/test-bin/t_blob_gc_help_names_the_unrecoverable_loss",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_bootstrap_nim_monitoring.nim",
     binary: "build/test-bin/t_bootstrap_nim_monitoring",
     defines: @[],
