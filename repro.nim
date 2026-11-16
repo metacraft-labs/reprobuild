@@ -2557,7 +2557,11 @@ package reprobuild:
           @["scripts/release/smoke_release_dev_exec.sh",
             "scripts/release/with_windows_archive_runquota.ps1",
             ".github/workflows/release.yml",
-            "scripts/verify_release.sh", "repro.nim"]
+            "scripts/verify_release.sh", "repro.nim",
+            # The Windows monitor-shim snapshot it runs, and the artefact
+            # names it checks that snapshot against.
+            "scripts/release/snapshot_windows_monitor_stack.ps1",
+            "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/monitor_shim_artifacts.nim"]
         elif releaseTagTest:
           # The guard, and the workflow whose publish-job steps the test runs.
           # It copies the guard into the runner clone it builds.
