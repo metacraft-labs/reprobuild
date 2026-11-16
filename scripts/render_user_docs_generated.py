@@ -484,17 +484,13 @@ def render_llms_txt(pages: list[DocPageMeta], version: str, *, local_repo: bool)
     arch_body = _extract_h2_section(intro_text, "Architecture & Grepable Keywords")
     cli_rules_body = _extract_h2_section(intro_text, "Non-Interactive CLI Execution for Agents")
 
-    def doc_url(p: DocPageMeta) -> str:
-        if local_repo:
-            return f"./docs/users/content/{p.rel_path}"
-        return p.url
-
     def item(p: DocPageMeta) -> str:
-        return f"- [{p.title}]({doc_url(p)}): {p.description}"
+        loc_note = f" (local checkout: `docs/users/content/{p.rel_path}`)" if local_repo else ""
+        return f"- [{p.title}]({p.url}): {p.description}{loc_note}"
 
     def agent_item(repo_rel: str, web_md: str, title: str, desc: str) -> str:
-        href = f"./{repo_rel}" if local_repo else f"{DOCS_ORIGIN}{web_md}"
-        return f"- [{title}]({href}): {desc}"
+        loc_note = f" (local checkout: `{repo_rel}`)" if local_repo else ""
+        return f"- [{title}]({DOCS_ORIGIN}{web_md}): {desc}{loc_note}"
 
     def group(prefix: str) -> list[DocPageMeta]:
         matched = [
