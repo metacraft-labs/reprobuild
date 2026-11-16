@@ -318,6 +318,13 @@ type
       ## or under an older floor version (``floorIntroducedUnits``): each
       ## is a changed unit file and a restart, listed apart in the plan;
       ## an agent apply refuses them (spec §10.1).
+    floorWeakened*: seq[string]
+      ## Units whose confinement this generation weakens against the
+      ## stored current generation (``floorWeakenedUnits``): a new
+      ## whole-floor waiver, a new named exception, or a waived unit moved
+      ## onto root, gid 0 or a privileged group. Listed apart in the plan;
+      ## an agent apply refuses them (spec §10.1, *An agent apply never
+      ## weakens the floor*).
     liveJudged*: seq[string]
       ## The units step 6's carried-state live check read from systemd, by
       ## the name it read them under (a template through its instances,
@@ -568,6 +575,37 @@ proc effectiveFloor*(r: SystemResource): string =
     if e.strip().startsWith(WholeFloorException & ":"): return ""
   if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
 
+proc unitFiles(p: SystemProfile; r: SystemResource): seq[string] =
+  ## The files systemd reads for the unit ``r`` of ``p``, in order: the
+  ## unit as the add-on renders it (a floored unit without an account gets
+  ## the floor's ``DynamicUser=yes``; a waived one is rendered as written),
+  ## then the profile's drop-ins onto it -- ``systemDropIn``s and
+  ## ``collision = "dropIn"`` units.
+  result = @[renderedSystemUnitContent(r)]
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, r.suName):
+      result.add(d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
+        dropInApplies(d.suName, r.suName):
+      result.add(d.suContent)
+
+proc unitAccountSettings(p: SystemProfile; r: SystemResource):
+    tuple[user, group, dynamic: string; supplementary: seq[string]] =
+  ## The account settings the unit ``r`` of ``p`` runs with, as systemd
+  ## reads them from its files (``unitFiles``): the last ``User=``,
+  ## ``Group=`` and ``DynamicUser=`` winning and ``SupplementaryGroups=``
+  ## accumulating (an empty one resets it).
+  for f in unitFiles(p, r):
+    for (k, v) in serviceDirectives(f):
+      case k
+      of "User": result.user = v.strip()
+      of "Group": result.group = v.strip()
+      of "DynamicUser": result.dynamic = v.strip().toLowerAscii()
+      of "SupplementaryGroups":
+        if v.strip().len == 0: result.supplementary.setLen(0)
+        else: result.supplementary.add(v.splitWhitespace())
+      else: discard
+
 proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
   ## Why the account the floored unit ``r`` of ``p`` runs as breaks the
   ## floor, as far as the profile alone says (A9 review round 6, finding
@@ -585,27 +623,7 @@ proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
   ## on every host.
   when mutated("floor-static-r3-disabled") or mutated("floor-unchecked"):
     return ""
-  # The unit as the floor renders it: a unit without an account gets the
-  # floor's DynamicUser=yes.
-  var files = @[renderedSystemUnitContent(r)]
-  for d in p.resources:
-    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, r.suName):
-      files.add(d.diContent)
-    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
-        dropInApplies(d.suName, r.suName):
-      files.add(d.suContent)
-  var user, group, dynamic = ""
-  var supplementary: seq[string]
-  for f in files:
-    for (k, v) in serviceDirectives(f):
-      case k
-      of "User": user = v.strip()
-      of "Group": group = v.strip()
-      of "DynamicUser": dynamic = v.strip().toLowerAscii()
-      of "SupplementaryGroups":
-        if v.strip().len == 0: supplementary.setLen(0)
-        else: supplementary.add(v.splitWhitespace())
-      else: discard
+  let (user, group, dynamic, supplementary) = unitAccountSettings(p, r)
   for (k, v) in [("User", user), ("Group", group)]:
     var ok: bool
     discard expandSpecifiers(v, r.suName, ok)
@@ -747,6 +765,188 @@ proc floorIntroducedUnits*(previousUser: SystemProfile; previous: Ledger;
         g.sort()
         result.add(r.suName & " (floor version " & now & ", exception " &
           g.join(", ") & " removed)")
+
+proc waivedAccountPrivilege(p: SystemProfile; r: SystemResource): string =
+  ## Why the unconfined unit ``r`` of ``p`` may run privileged -- as root
+  ## (uid 0), with gid 0, a command as root (the ``+`` or ``!`` prefix,
+  ## ``PermissionsStartOnly=``), with ambient capabilities, in a privileged
+  ## group (``PrivilegedGroups``, directly or through a membership the
+  ## profile gives its account), or as an account the profile alone cannot
+  ## resolve -- or "" when the profile shows it does none of them. Judged on the profile alone
+  ## (``profileAccountLookup``), as the parse-time floor is, so the plan
+  ## decides the same on every host; an account the profile does not
+  ## create is therefore not shown unprivileged.
+  let (user, group, dynamic, supplementary) = unitAccountSettings(p, r)
+  let a = resolveServiceAccount(user, group, supplementary.join(" "),
+    dynamic in ["yes", "true", "1", "on"], r.suName,
+    profileAccountLookup(p))
+  if a.uid == 0: return "runs as root"
+  if 0 in a.allGids: return "runs with gid 0"
+  # A command line can leave the account behind (systemd.service(5),
+  # "Command lines"): the '+' prefix runs it with full privileges and
+  # '!' without the user change, both as root, and so does every command
+  # but ExecStart= under ``PermissionsStartOnly=yes``. Ambient
+  # capabilities hand the account root's powers by name.
+  var caps: seq[string]
+  for f in unitFiles(p, r):
+    for (k, v) in serviceDirectives(f):
+      if k in FloorExecKeys:
+        for c in commands(v):
+          if '+' in c.prefixes or '!' in c.prefixes:
+            return "runs " & k & "=" & c.prefixes & c.path & " as root"
+      elif k == "PermissionsStartOnly" and
+          v.strip().toLowerAscii() in ["yes", "true", "1", "on"]:
+        return "runs its other commands as root (PermissionsStartOnly=)"
+      elif k == "AmbientCapabilities":
+        if v.strip().len == 0: caps.setLen(0)
+        else: caps.add(v.splitWhitespace())
+  if caps.len > 0:
+    return "runs with the ambient capabilities " & caps.join(" ")
+  var names = @[a.group]
+  for w in supplementary:
+    var ok: bool
+    names.add(expandSpecifiers(w, r.suName, ok))
+  for n in names:
+    if n in PrivilegedGroups and not (n == a.group and a.dynamicGroup):
+      return "runs in the privileged group " & n
+  if not a.dynamicUser:
+    for o in p.resources:
+      if o.kind == srkPasswdUser and o.puName == a.user:
+        for gn in o.puGroups:
+          if gn in PrivilegedGroups: return "runs in the privileged group " & gn
+      elif o.kind == srkPasswdGroup and a.user in o.pgMembers and
+          o.pgName in PrivilegedGroups:
+        return "runs in the privileged group " & o.pgName
+  if not a.known:
+    return "runs as an account the profile does not show unprivileged (" &
+      a.unknown.join("; ") & ")"
+  ""
+
+proc floorWeakenedUnits*(previousUser, target: SystemProfile): seq[string] =
+  ## The units whose confinement the generation ``target`` weakens against
+  ## the stored current generation ``previousUser``
+  ## (``parseStoredUserProfile``; empty on a host with none), each as
+  ## ``<unit> (<what>)`` (spec §10.1, *An agent apply never weakens the
+  ## floor*):
+  ##
+  ## - a whole-floor waiver (``serviceFloor: <why>``) on a unit that was
+  ##   not installed unconfined: a new unit, one the current generation
+  ##   floors, or one that ran no command (no ``[Service]``, no command
+  ##   line). A unit installed before the floor existed and now waived
+  ##   keeps the confinement it had (none), and is named only as below;
+  ## - a named exception (``Setting`` or ``Setting+values``) a floored unit
+  ##   did not have: every exception of a new unit, and of a unit the
+  ##   current generation floors those it did not name. A unit the current
+  ##   generation installed without the floor gets its first floor, which
+  ##   ``floorIntroducedUnits`` names;
+  ## - a unit that stays unconfined (waived before, or installed before
+  ##   the floor) but now runs privileged (``waivedAccountPrivilege``: as
+  ##   root, with gid 0, in a privileged group, as an account the profile
+  ##   does not show unprivileged, a command as root through the ``+`` or
+  ##   ``!`` prefix or ``PermissionsStartOnly=``, or with ambient
+  ##   capabilities), when that reason or its account settings change.
+  ##
+  ## Every plan lists them (``AddonApplyResult.floorWeakened``) and an
+  ## agent apply refuses them (``agentApplyRefusal``): a signed profile
+  ## widens what runs unconfined only through an operator's reviewed
+  ## apply, exactly as a stricter floor already reached a running service.
+  when mutated("agent-may-weaken-floor"):
+    # Falsifying build: the asymmetry before this rule -- nothing an agent
+    # apply weakens is named.
+    return
+  var before = initTable[string, SystemResource]()
+  for r in previousUser.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+      before[r.suName] = r
+  for r in target.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        r.suHardening != ServiceFloorHardening:
+      continue
+    let had = r.suName in before
+    let prev = if had: before[r.suName] else: SystemResource()
+    let prevFloored = had and effectiveFloor(prev).len > 0
+    # A unit that ran no command (a ``.socket`` or ``.timer`` with no
+    # command line and no ``[Service]``) was not unconfined, only idle.
+    let prevRanNothing = had and not hasServiceSection(prev.suContent) and
+                         not hasExecLines(prev.suContent)
+    if floorWaivedWhole(r):
+      let why = waivedAccountPrivilege(target, r)
+      if not had or prevFloored or prevRanNothing:
+        result.add(r.suName & " (whole floor waived" &
+          (if not had: " on a new unit" else: "") &
+          (if why.len > 0: "; " & why else: "") & ")")
+      elif why.len > 0:
+        # Unconfined before as well: waived, or installed before the floor
+        # existed. Only its privilege (``waivedAccountPrivilege``) can
+        # weaken.
+        let wasWhy = waivedAccountPrivilege(previousUser, prev)
+        let wasAcct = unitAccountSettings(previousUser, prev)
+        let nowAcct = unitAccountSettings(target, r)
+        if why != wasWhy or wasAcct != nowAcct:
+          result.add(r.suName & " (whole floor waived; account changes: " &
+            why & ")")
+      continue
+    if had and not prevFloored:
+      # Its first floor (or, waived before, a stricter one): a
+      # strengthening, which ``floorIntroducedUnits`` names.
+      continue
+    var added = exceptionHeads(r)
+    if had: added = added - exceptionHeads(prev)
+    if added.len > 0:
+      var g: seq[string]
+      for x in added: g.add(x)
+      g.sort()
+      result.add(r.suName & " (floor version " & effectiveFloor(r) &
+        ", exception " & g.join(", ") & " added" &
+        (if not had: " on a new unit" else: "") & ")")
+
+proc planFloorChanges*(r: var AddonApplyResult; previousUser: SystemProfile;
+                       previous: Ledger; target: SystemProfile) =
+  ## The plan's two lists of confinement changes (spec §10.1): the units
+  ## whose floor the generation ``target`` makes stricter
+  ## (``floorIntroducedUnits``) and those whose confinement it weakens
+  ## (``floorWeakenedUnits``), against the stored current generation
+  ## ``previousUser`` and its ledger ``previous``.
+  r.floorIntroduced = floorIntroducedUnits(previousUser, previous,
+                                           target.resources)
+  r.floorWeakened = floorWeakenedUnits(previousUser, target)
+
+proc agentApplyRefusal*(r: AddonApplyResult; migration = false): string =
+  ## Why an unattended (deploy-agent) apply of the planned generation ``r``
+  ## needs an operator, or "" when it may proceed (spec §10.1): a unit
+  ## whose floor the generation changes to a stricter one it was not
+  ## installed with (``floorIntroduced``), or whose confinement it weakens
+  ## (``floorWeakened``). ``runAddonApply`` raises ``AddonNeedsOperator``
+  ## with this text, which the agent reports as ``aoOperatorAction``.
+  ##
+  ## ``migration``: the switch commits the profile a legacy agent already
+  ## applied on this host (``agent_switch.migrationOptions``, whose
+  ## ``agentRecord.migratedFrom`` names the legacy generation) onto a host
+  ## with no stored add-on generation. The add-on has nothing of its own
+  ## to compare with, but the units already run as that agent installed
+  ## them and the switch changes none of them (it adopts the objects that
+  ## agent wrote and refuses one that differs:
+  ## ``agent_switch.migrateLegacyAgentState``), so nothing is weakened: the
+  ## weakening half does not apply, as for a pre-floor unit now waived.
+  ## The caller passes it only then: over a stored generation (an
+  ## operator's) the switch can rewrite that generation's units, and is
+  ## judged against it like any agent apply.
+  var parts: seq[string]
+  if r.floorIntroduced.len > 0:
+    parts.add("the hardening floor (serviceFloor) would change " &
+      r.floorIntroduced.join(", ") & "; an agent apply does not restart a " &
+      "running service into a floor it was not installed with (waiving " &
+      "the unit's whole floor does not avoid this either: it weakens the " &
+      "unit's confinement, which an agent apply also refuses)")
+  if r.floorWeakened.len > 0 and not migration:
+    parts.add("the generation weakens service confinement: " &
+      r.floorWeakened.join(", ") & "; an agent apply never adds a " &
+      "whole-floor waiver or a floor exception, or moves an unconfined " &
+      "service onto a privileged account")
+  if parts.len == 0: return ""
+  "operator action required: " & parts.join("; and ") & ". Review " &
+    "`repro system addon plan` and apply this profile once as an " &
+    "operator. Nothing was changed"
 
 # ---------------------------------------------------------------------------
 # Scope (spec §4.1, §4.4; threat model G8).
@@ -6674,23 +6874,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   result.staticTree = staticTreePath(treeFiles)
 
   result.floorExceptions = floorExceptionPlanLines(user)
-  result.floorIntroduced = floorIntroducedUnits(previousUser, previous,
-                                                user.resources)
+  planFloorChanges(result, previousUser, previous, user)
   if opts.planOnly:
     return
-  # An unattended (agent) apply never gives a running service its first
-  # floor: the change is reviewed in an operator's plan (spec §10.1). A
-  # replay or a revert of a switch already under way is not refused.
-  if opts.agentSequence > 0'u64 and purpose == "apply" and not replaying and
-      result.floorIntroduced.len > 0:
-    raise newException(AddonNeedsOperator, "operator action required: the " &
-      "hardening floor (serviceFloor) would change " &
-      result.floorIntroduced.join(", ") & "; an agent apply does not " &
-      "restart a running service into a floor it was not installed with. " &
-      "Review `repro system addon plan` and apply this profile once " &
-      "as an operator, or waive the unit's whole floor (floorExceptions = " &
-      "[\"serviceFloor: <why>\"]); a named exception still changes the " &
-      "unit and does not avoid this. Nothing was changed")
+  # An unattended (agent) apply never changes a service's confinement:
+  # neither a running service's first (or a stricter) floor nor a weaker
+  # one -- a new waiver, a new exception, an unconfined unit moved onto a
+  # privileged account -- is applied without an operator's reviewed plan
+  # (spec §10.1). A replay or a revert of a switch already under way is
+  # not refused.
+  if opts.agentSequence > 0'u64 and purpose == "apply" and not replaying:
+    let why = agentApplyRefusal(result,
+      migration = opts.agentRecord.migratedFrom.len > 0 and
+                  previousUserText.len == 0)
+    if why.len > 0:
+      raise newException(AddonNeedsOperator, why)
 
   # Step 1 recomputes the store's hold from every unit, manifest and
   # hand-back record on the host; the plan checked they can be read, but
