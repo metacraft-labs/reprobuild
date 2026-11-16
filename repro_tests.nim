@@ -11135,6 +11135,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "libs/repro_test_support/tests/t_passthrough_monitor_parses_the_engine_wrapper_argv.nim",
+    binary: "build/test-bin/t_passthrough_monitor_parses_the_engine_wrapper_argv",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_test_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_test_support/tests/t_scoped_env_restores_in_any_order.nim",
     binary: "build/test-bin/t_scoped_env_restores_in_any_order",
     defines: @[],
