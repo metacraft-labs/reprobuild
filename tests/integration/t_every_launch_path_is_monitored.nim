@@ -896,6 +896,12 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "extNull", "extText", "extInt", "extReal",
                "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
                "denialDeadlockTimeoutMs",
+               # Build-wait pressure: the switch read, a one-way report on
+               # the session's existing connection, and `repro pressure`,
+               # which connects to the daemon and asks (`QueryPressure`).
+               # None starts a process.
+               "buildPressureEnabled", "sendPressureReport",
+               "runPressureCommand",
                # The bounded queue wait (e1c068066, "make a RunQuota queue
                # wait loud and bounded"). Read one by one: the grant poll,
                # the liveness probe and the lease-holder snapshot are

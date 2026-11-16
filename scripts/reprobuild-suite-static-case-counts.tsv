@@ -1711,6 +1711,7 @@ tests/integration/t_build_declares_its_pools_to_runquota.nim	nim	2
 tests/integration/t_build_honours_override_provenance_for_exact_pins.nim	nim	4
 tests/integration/t_build_machine_and_host_target_are_distinct.nim	nim	9
 tests/integration/t_build_progress_modes.nim	nim	1
+tests/integration/t_build_wait_pressure_reported.nim	nim	2
 tests/integration/t_build_write_report_on_lowered_provider_routes.nim	nim	7
 tests/integration/t_buildtype_drives_compile_flags.nim	nim	7
 tests/integration/t_buildtype_drives_output_dir.nim	nim	4
@@ -2620,6 +2621,7 @@ tests/unit/t_binary_decoder_resource_legacy_counts.nim	nim	1
 tests/unit/t_binary_decoder_secondary_counts.nim	nim	16
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim	nim	2
+tests/unit/t_build_wait_pressure_schedule.nim	nim	6
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	3
 tests/unit/t_cargo_deinherit.nim	nim	21
