@@ -5,7 +5,15 @@
 ## non-Windows hosts check precedence, inactive tools and the x64-only limit
 ## without installing proprietary tools or claiming native MSVC acceptance.
 ## The child control uses a real executable and environment, not a fake driver.
+##
+## The child's answer is read with `drainStream`, not `readAll`: the child
+## writes it in two `echo`s, and on Windows `readAll` stops at the first short
+## pipe read, so it returned `cl.exe` alone and the linker line was lost
+## (eli-pc, reprobuild-pm issue
+## 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d; the
+## defect class is `scripts/check_process_stream_readall.py`'s).
 import std/[os, osproc, streams, strtabs, strutils, tables, unittest]
+from repro_core/process_streams import drainStream
 import repro_dev_env_activation
 import repro_dev_env_artifacts
 import repro_platform
@@ -105,7 +113,7 @@ suite "development environment MSVC facility activation":
       environment, facility(), "amd64")
     let child = startProcess(getAppFilename(), args = @["--observe-msvc-env"],
       env = merged, options = {poStdErrToStdOut})
-    let output = child.outputStream.readAll().replace("\r\n", "\n")
+    let output = child.outputStream.drainStream().replace("\r\n", "\n")
     let exitCode = child.waitForExit()
     child.close()
     check exitCode == 0
