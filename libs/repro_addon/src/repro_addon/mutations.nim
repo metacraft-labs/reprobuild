@@ -635,6 +635,27 @@
 ##                                           judge that requires a refused
 ##                                           unit is not held (decision 153,
 ##                                           round 10)
+## ``restart-success-by-exit-code``        a restart's exit code is taken as
+##                                           its outcome (round 11, H1)
+## ``live-check-restart-before-stale-holds-cleared``
+##                                           the next apply restarts the
+##                                           recorded triggers under the dead
+##                                           apply's holds (round 11, H1)
+## ``empty-requires-resets``               an empty ``Requires=`` resets the
+##                                           list (round 11, M4)
+## ``template-requirers-skipped``          a template requirer is not held
+##                                           (round 11, M3)
+## ``requirers-from-files-only``           systemd's reverse dependencies are
+##                                           not read (decision 171, round 11)
+## ``essential-requirers-held``            an essential unit is held instead
+##                                           of the apply refused (round 11)
+## ``dependants-do-not-block``             a recorded dependant does not block
+##                                           an apply (round 11, M1)
+## ``fixing-switch-skips-starts``          the fixing switch starts nothing it
+##                                           resolved (round 11, H2)
+## ``record-outside-host-lock``            recover changes the record of
+##                                           triggers outside the host apply
+##                                           lock (round 11, M2)
 ## ``switch-ignores-restart-record``       an add-on switch does not check
 ##                                           the record of triggers to
 ##                                           restart (decision 160, round 10)
@@ -1856,6 +1877,16 @@ const
                           "live-check-triggers-in-memory",
                           "template-requirer-shown-by-name",
                           "unjudged-requirers-released",
+                          # A13 review round 11.
+                          "restart-success-by-exit-code",
+                          "live-check-restart-before-stale-holds-cleared",
+                          "empty-requires-resets",
+                          "template-requirers-skipped",
+                          "requirers-from-files-only",
+                          "essential-requirers-held",
+                          "dependants-do-not-block",
+                          "fixing-switch-skips-starts",
+                          "record-outside-host-lock",
                           "switch-ignores-restart-record",
                           "fixing-apply-refused",
                           "partial-fix-accepted",

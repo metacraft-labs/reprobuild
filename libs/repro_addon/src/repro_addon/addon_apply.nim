@@ -1908,49 +1908,70 @@ proc renderedUnitDigest*(p: SystemProfile; unit: string): string =
   sha256Hex(text)
 
 proc restartEntryResolvedBy*(e: TriggerRestartEntry; p: SystemProfile): bool =
-  ## Whether the generation ``p`` resolves the trigger entry ``e``: it
-  ## removes or changes the trigger or a unit it triggers -- one of the units
-  ## on record renders differently, or not at all where the record has a
-  ## rendering (removed), or at all where it has none. A dependant is
-  ## resolved with its trigger. An entry with nothing on record (an older
-  ## record) is resolved by no generation.
+  ## Whether the generation ``p`` resolves the entry ``e`` by its own
+  ## renderings (decision 170): a unit on record renders differently in
+  ## ``p``, or not at all where the record has a rendering (removed), or at
+  ## all where it has none. A trigger's renderings are its own and its
+  ## units'; a dependant's are its own (the owner decision "dependants block
+  ## like triggers", A13 review round 11). Any difference of the
+  ## rendered bytes counts, a comment included: the fixing switch must then
+  ## start what it resolved (the owner decision "the fixing switch starts
+  ## them"), so a cosmetic edit clears an
+  ## entry only by bringing the unit up. An entry with nothing on record
+  ## (an older record) is resolved by no generation.
   when mutated("fixing-apply-refused"):
     # FALSIFYING MUTATION: no generation resolves an entry.
     return false
-  if e.dependantOf.len > 0: return false
   for (u, d) in e.rendered:
     if renderedUnitDigest(p, u) != d: return true
   false
 
+proc resolvedRestartEntries*(entries: openArray[TriggerRestartEntry];
+                             p: SystemProfile): seq[string] =
+  ## The units of the entries ``p`` resolves: each trigger it resolves, with
+  ## the dependants recorded with it, and each dependant it resolves by its
+  ## own renderings, whether or not its trigger is still on record (an
+  ## orphan; "dependants block like triggers").
+  var triggers: seq[string]
+  for e in entries:
+    if e.dependantOf.len == 0 and restartEntryResolvedBy(e, p):
+      triggers.add(e.unit)
+      result.add(e.unit)
+  for e in entries:
+    if e.dependantOf.len == 0: continue
+    if e.dependantOf in triggers or restartEntryResolvedBy(e, p):
+      result.add(e.unit)
+
 proc unresolvedRestartEntries*(stateDir: string; p: SystemProfile):
     seq[TriggerRestartEntry] =
-  ## The record's trigger entries ``p`` does not resolve. An apply goes
-  ## through only when this is empty: a generation that resolves some of
-  ## the recorded triggers but not all is refused (decision 170).
-  var resolvedAny = false
-  for e in readTriggerRestartEntries(stateDir):
-    if e.dependantOf.len > 0: continue
-    if restartEntryResolvedBy(e, p): resolvedAny = true
-    else: result.add(e)
+  ## The record's entries ``p`` does not resolve, triggers and dependants
+  ## alike: a recorded dependant blocks like a trigger (the owner decision of A13
+  ## review round 11). An
+  ## apply goes through only when this is empty: a generation that resolves
+  ## some of them but not all is refused (decision 170).
+  let entries = readTriggerRestartEntries(stateDir)
+  let resolved = resolvedRestartEntries(entries, p)
+  for e in entries:
+    when mutated("dependants-do-not-block"):
+      # FALSIFYING MUTATION: a recorded dependant does not block.
+      if e.dependantOf.len > 0: continue
+    if e.unit notin resolved: result.add(e)
   when mutated("partial-fix-accepted"):
     # FALSIFYING MUTATION: resolving one recorded trigger is enough.
-    if resolvedAny: result.setLen(0)
+    if resolved.len > 0: result.setLen(0)
 
 proc clearResolvedRestartEntries*(stateDir: string; p: SystemProfile):
     seq[string] =
-  ## Once the generation ``p`` is committed, the entries it resolves leave
-  ## the record, each trigger with its dependants. Returns their units.
-  var keep: seq[TriggerRestartEntry]
-  var gone: seq[string]
+  ## Once the generation ``p`` is committed -- its switch has started what
+  ## it resolved (``startResolvedRestartEntries``) -- the entries it
+  ## resolves leave the record. Returns their units.
   let entries = readTriggerRestartEntries(stateDir)
-  for e in entries:
-    if e.dependantOf.len == 0 and restartEntryResolvedBy(e, p): gone.add(e.unit)
+  let gone = resolvedRestartEntries(entries, p)
   if gone.len == 0: return
+  var keep: seq[TriggerRestartEntry]
   for e in entries:
-    if e.unit in gone or e.dependantOf in gone:
-      result.add(e.unit)
-    else:
-      keep.add(e)
+    if e.unit in gone: result.add(e.unit)
+    else: keep.add(e)
   writeTriggerRestartEntries(stateDir, keep)
 
 proc addonLiveHost*(): LiveHost =
@@ -1998,8 +2019,9 @@ proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
       left.add(e)
       downDependants.add(e.unit)
       continue
-    if host.resetFailed != nil: host.resetFailed(e.unit)
-    let s = host.start(e.unit)
+    # Confirmed through systemd, not by the exit code (A13 review round
+    # 11, H1): a start a hold skips exits 0.
+    let s = startConfirmed(host, e.unit, mustStayActive = false)
     if s.ok:
       result.lines.add("unit " & e.unit & " (left out with " & e.dependantOf &
         ") started again")
@@ -2007,7 +2029,7 @@ proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
       left.add(e)
       downDependants.add(e.unit)
       result.lines.add("systemctl start " & e.unit & " (left out with " &
-        e.dependantOf & ", §13 decision 160): " & s.output.strip() &
+        e.dependantOf & ", §13 decision 160): " & s.why &
         " (still pending: run `repro system addon recover` once its cause " &
         "is cleared)")
   writeTriggerRestartEntries(stateDir, left)
@@ -2045,33 +2067,74 @@ proc step7Dependants*(candidates, excluded: openArray[string];
                       show: proc (u: string): Table[string, string]):
     seq[tuple[unit, root: string]] =
   ## The units among ``candidates`` (everything step 7 would start) that
-  ## ``Requires=``, ``BindsTo=`` or ``Sockets=`` one of ``excluded`` (the
-  ## triggers a revert recorded), directly or through another such unit
-  ## (the owner decision "leave dependants out", A13 review round 10):
-  ## starting one would start the recorded trigger with it, and fail the
-  ## revert the way the trigger did. In dependency order, each with the
-  ## recorded trigger it leads to.
+  ## depend on one of ``excluded`` (the triggers a revert recorded) as
+  ## systemd's effective dependencies say (decision 169, each dependant read from systemd
+  ## as the owner decided in A13 review round 11): a unit in the trigger's
+  ## ``RequiredBy=`` or ``BoundBy=`` -- which cover a unit file, a host
+  ## drop-in, a ``.requires/`` link and an enabled ``[Install]
+  ## RequiredBy=`` -- or, for a socket, in its ``Triggers=``: a service's
+  ## ``Sockets=`` shows on the service only as ``Wants=`` and ``After=``
+  ## on the socket, and on the socket as ``Triggers=`` the service
+  ## (systemd's ``service_add_socket``/``unit_add_dependency(UNIT_TRIGGERS)``,
+  ## src/core/service.c), as the socket's own ``Service=`` does. Then,
+  ## transitively, the ``RequiredBy=`` and ``BoundBy=`` of each found.
+  ## Starting one would start the recorded trigger with it and fail the
+  ## revert the way the trigger did. In dependency order: each after the
+  ## unit it depends on, breadth first from the trigger (finding L5), with
+  ## the recorded trigger it leads to.
   when mutated("dependants-started"):
     # FALSIFYING MUTATION: step 7 starts them.
     return
   var reached = initTable[string, string]()
-  for t in excluded: reached[t] = t
-  var changed = true
-  while changed:
-    changed = false
-    for u in candidates:
-      if u in reached: continue
+  var queue: seq[string]
+  for t in excluded:
+    reached[t] = t
+    queue.add(t)
+  var i = 0
+  while i < queue.len:
+    let u = queue[i]
+    inc i
+    var props: Table[string, string]
+    try: props = show(u)
+    except CatchableError: continue
+    var keys = @["RequiredBy", "BoundBy"]
+    if u in excluded and u.endsWith(".socket"): keys.add("Triggers")
+    for key in keys:
+      for d in props.getOrDefault(key).splitWhitespace():
+        if d in reached: continue
+        reached[d] = reached[u]
+        queue.add(d)
+        if d in candidates: result.add((unit: d, root: reached[u]))
+
+proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
+                                  host0: LiveHost = LiveHost()): seq[string] =
+  ## The fixing switch starts what it resolves (the owner decision "the
+  ## fixing switch starts them", A13 review round 11): each trigger on record its generation
+  ## ``p`` resolves that systemd still loads, then the dependants recorded
+  ## with it and every dependant it resolves by its own renderings, in the
+  ## order recorded; each confirmed through systemd (``startConfirmed``). A
+  ## unit the generation removed is not started. Returns the problems: any
+  ## fails the switch (decision 160: a trigger that does not restart), and the record keeps its entries,
+  ## since only the commit clears them.
+  when mutated("fixing-switch-skips-starts"):
+    # FALSIFYING MUTATION: the fixing switch starts nothing.
+    return
+  let host = if host0.start == nil: addonLiveHost() else: host0
+  let entries = readTriggerRestartEntries(stateDir)
+  let resolved = resolvedRestartEntries(entries, p)
+  for pass in 0 .. 1:
+    for e in entries:
+      if e.unit notin resolved: continue
+      if (pass == 0) != (e.dependantOf.len == 0): continue
       var props: Table[string, string]
-      try: props = show(u)
+      try: props = host.show(e.unit)
       except CatchableError: continue
-      var root = ""
-      for key in ["Requires", "BindsTo", "Sockets"]:
-        for d in props.getOrDefault(key).splitWhitespace():
-          if d in reached and root.len == 0: root = reached[d]
-      if root.len > 0:
-        reached[u] = root
-        result.add((unit: u, root: root))
-        changed = true
+      if props.getOrDefault("LoadState") != "loaded": continue
+      let s = startConfirmed(host, e.unit, mustStayActive = pass == 0)
+      if not s.ok:
+        result.add("systemctl start " & e.unit & " (on record as one a " &
+          "revert could not start; this generation changes it, so this " &
+          "switch must start it, §13 decision 160): " & s.why)
 
 proc switchTriggerRecordRefusal*(stateDir: string; target: SystemProfile;
                                  host: LiveHost = LiveHost()): string =
@@ -5195,6 +5258,20 @@ proc storeRecovery*(o: StoreObjectRef; resources: openArray[SystemResource];
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
   ## Defined below, after the switch it wraps with its evidence record.
 
+proc restartRecordProfile*(user: SystemProfile): SystemProfile =
+  ## What the record of triggers to restart is rendered against, at every
+  ## point that renders it -- the revert that records an entry, the
+  ## switch's check before its first write, the fixing switch's starts and
+  ## its commit (A13 review round 11, L3): the operator's generation as the
+  ## add-on carries it (``reshape``: a ``collision = dropIn`` unit as the
+  ## drop-in it writes, a timer as its unit), before any collision decision
+  ## of a switch changes a resource. The composition the switch builds
+  ## later also holds its own objects and the collision pass's results,
+  ## which exist only after that pass has written, so the record is not
+  ## rendered against it.
+  var dropIns = initHashSet[string]()
+  result = SystemProfile(addOn: user.addOn, resources: reshape(user, dropIns))
+
 proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   ## Apply one add-on generation (or, with ``planOnly``, decide and report
   ## it). Raises a typed refusal with nothing written when the scope or
@@ -5403,7 +5480,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       let target =
         if opts.storedTarget: parseStoredUserProfile(opts.userProfileText, stateDir)
         else: parseAddOnUserProfile(opts.userProfileText)
-      let why = switchTriggerRecordRefusal(stateDir, target)
+      let why = switchTriggerRecordRefusal(stateDir, restartRecordProfile(target))
       if why.len > 0:
         raise newException(AddonApplyError, why & "; nothing was written")
   # §13 decision 72: a host whose committed generation an engine without
@@ -7242,7 +7319,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           for (pt, target) in triggerTargets(composed):
             if pt == t and target notin units: units.add(target)
           for u in units:
-            e.rendered.add((unit: u, digest: renderedUnitDigest(composed, u)))
+            e.rendered.add((unit: u,
+              digest: renderedUnitDigest(restartRecordProfile(user), u)))
           toRestart.add(e)
           for f in failed:
             stderr.writeLine("repro-addon: " & f & "; the revert commits, " &
@@ -7929,7 +8007,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               if deps.len > 0:
                 var all = readTriggerRestartEntries(stateDir)
                 for (u, root) in deps:
-                  all.add(TriggerRestartEntry(unit: u, dependantOf: root))
+                  var de = TriggerRestartEntry(unit: u, dependantOf: root)
+                  de.rendered.add((unit: u,
+                    digest: renderedUnitDigest(restartRecordProfile(user), u)))
+                  all.add(de)
                   excluded.add(u)
                   stderr.writeLine("repro-addon: " & u & " is left out " &
                     "with " & root & ", which could not be started again; " &
@@ -7958,6 +8039,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                   not unitIsActive(r.suName) and
                   unitAliveness(r.suName) == uaEmpty:
                 startUnit(r.suName, opts.nonBlockingStarts)
+          # The fixing switch starts what it resolves of the record of
+          # triggers to restart, each confirmed active (the owner decision
+          # "the fixing switch starts them", A13 review round 11); a failure
+          # fails the switch and the record keeps the entry. A revert
+          # resolves none of its own record.
+          if not (purpose == "revert" or (replaying and opts.replayOf == "revert")) and
+              hasTriggersToRestart(stateDir):
+            for pr in startResolvedRestartEntries(stateDir,
+                                                  restartRecordProfile(user)):
+              problems.add("step 7 (start): " & pr)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
       marker.step = ssStart
@@ -8418,7 +8509,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # resolves -- it changes or removes the trigger or its units -- are done
   # with (the owner decision "allow the fixing apply"); a revert's own,
   # recorded against this generation, are not resolved by it.
-  for u in clearResolvedRestartEntries(stateDir, composed):
+  for u in clearResolvedRestartEntries(stateDir, restartRecordProfile(user)):
     stderr.writeLine("repro-addon: " & u & " leaves the record of triggers " &
       "to restart: this generation changes or removes it or the units it " &
       "triggers")

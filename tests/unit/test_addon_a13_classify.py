@@ -178,6 +178,10 @@ def green(kind, base="debian-13"):
                                     "dependantInOutput": True, "ok": True}
         rec["decision160Guard"] = {"exit": 1, "after": "a13r10.socket\n",
                                    "ok": True}
+        rec["fixingSwitch"] = {"exit": 1, "after": "a13r10.socket\trendered=x\nfailed\n",
+                               "ok": True}
+        rec["dependantsBlock"] = {"exit": 1, "after": "a13r10-dep.service\tof=a13r10.socket\n",
+                                  "ok": True}
         rec["decision160"] = {"recoverExit": 0, "ok": True}
         rec["decision160Done"] = {"exit": 0, "pending": "", "ok": True}
     elif kind in ("conv", "convseam"):
@@ -213,6 +217,10 @@ def green(kind, base="debian-13"):
                                           "active": "inactive"}
             rec["decision153Premise"] = {"startExit": 0, "requirerRan": True,
                                          "heldSkipped": True}
+            rec["decisionH1"] = {"staged": "inactive", "active": "active",
+                                 "recordLeft": "", "holdLeft": "", "ok": True}
+            rec["decisionEssential"] = {"exit": 1, "refused": True,
+                                        "dropInWritten": False}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -387,6 +395,46 @@ def red_record(kind, base="debian-13"):
                             "the trigger, and the unit that requires it, on "
                             "record"),
                         red("stopped at the first red step under the mutation")]
+    elif kind == "mutfixstart":
+        rec = base_record(ADOPT, base, mutation="fixing-switch-skips-starts")
+        rec["fixingSwitch"] = {"exit": 0, "after": "inactive\n", "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("the fixing switch: a switch whose generation "
+                            "changes the recorded trigger's unit must start "
+                            "the trigger, and fails, recorded, when it does "
+                            "not start"),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "mutdepblock":
+        rec = base_record(ADOPT, base, mutation="dependants-do-not-block")
+        rec["dependantsBlock"] = {"exit": 0, "after": "active\n"
+                                  "Description=A13 decision-151 probe: generation 4m\n",
+                                  "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("dependants block like triggers: a unit on record "
+                            "that still does not start refuses a switch that "
+                            "leaves it as it is"),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "mutstaleorder":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="live-check-restart-before-stale-holds-cleared")
+        rec["decisionH1"] = {"staged": "inactive", "active": "inactive",
+                             "recordLeft": "eth-r11-sock.socket", "holdLeft": "",
+                             "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("H1: the next full apply clears a dead apply's stale "
+                            "hold before it starts the triggers that apply "
+                            "left on record, and keeps the record until they "
+                            "are up")]
+    elif kind == "mutessential":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="essential-requirers-held")
+        rec["decisionEssential"] = {"exit": 0, "refused": False,
+                                    "dropInWritten": True}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 171: an apply in which an essential "
+                            "requirer would be held (a console getty that "
+                            "requires a judged unit) is refused before it "
+                            "writes anything")]
     elif kind == "mutunjudgedreq":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="unjudged-requirers-released")
@@ -511,6 +559,7 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutholdwin", "mutnoedges", "mutreissuetgt", "mutreissuesock",
              "muttrigconv", "muttrigheld", "mutrestartignored",
              "mutdependants", "mutswitchrecord", "mutunjudgedreq",
+             "mutfixstart", "mutdepblock", "mutstaleorder", "mutessential",
              "mutrevertstarts"]
 
 
@@ -1043,6 +1092,40 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutrestartignored")
         del rec["decision160Revert"]["pending"]
         self.assertRejected("mutrestartignored-debian-13", rec)
+        # A13 review round 11: each new falsifier red for its own reason.
+        rec = red_record("mutfixstart")
+        rec["fixingSwitch"]["exit"] = 1
+        self.assertRejected("mutfixstart-debian-13", rec)
+        rec = red_record("mutfixstart")
+        rec["fixingSwitch"]["after"] = "a13r10.socket\trendered=x\n"
+        self.assertRejected("mutfixstart-debian-13", rec)
+        rec = red_record("mutdepblock")
+        rec["dependantsBlock"]["after"] = "active\n"
+        self.assertRejected("mutdepblock-debian-13", rec)
+        rec = red_record("mutstaleorder")
+        rec["decisionH1"]["recordLeft"] = ""
+        self.assertRejected("mutstaleorder-debian-13", rec)
+        rec = red_record("mutstaleorder")
+        rec["decisionH1"]["staged"] = "active"
+        self.assertRejected("mutstaleorder-debian-13", rec)
+        rec = red_record("mutessential")
+        rec["decisionEssential"]["dropInWritten"] = False
+        self.assertRejected("mutessential-debian-13", rec)
+        for key, field, value in (("decisionH1", "ok", False),
+                                  ("decisionEssential", "refused", False),
+                                  ("decisionEssential", "dropInWritten", True)):
+            rec = green("conv")
+            rec[key][field] = value
+            self.assertRejected("conv-debian-13", rec)
+        for key in ("fixingSwitch", "dependantsBlock"):
+            rec = green("adopt")
+            rec[key]["ok"] = False
+            self.assertRejected("adopt-debian-13", rec)
+        # L6: the unjudged-requirer falsifier needs its step's own evidence.
+        rec = red_record("mutunjudgedreq")
+        rec["decision153Unjudged"] = {"reported": False, "heldInEtc": True,
+                                      "active": "inactive"}
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
         # §13 decision 153 extended: red because the unjudged requirer was
         # released, with the judged one held and the premise measured.
         rec = red_record("mutunjudgedreq")
