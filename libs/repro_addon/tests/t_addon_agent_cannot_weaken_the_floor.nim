@@ -3,14 +3,19 @@
 ## the floor*): a new whole-floor waiver, a new named exception, or a
 ## waived unit moved onto root, gid 0 or a privileged group is an
 ## operator's apply, exactly as a strengthening of the floor already was.
+## So is adding, changing or removing a drop-in over a unit the profile
+## does not define (a distribution package's, which the floor does not
+## cover and which may run as root).
 ##
 ## Before this rule the asymmetry was the defect recorded in reprobuild-pm
 ## ``issues/2026-11-12-agent-applies-can-weaken-confinement-unattended-but-cannot-strengthen-it-so-the-management.md``:
 ## an agent tick could add root units and new exceptions, printed only in
 ## a plan nobody reads, while removing an exception needed an operator.
 ##
-## Falsifying build: ``-d:reproAddonMutation=agent-may-weaken-floor``
-## (``scripts/run_addon_unit_mutation.sh``) turns the weakening cases red.
+## Falsifying builds (``scripts/run_addon_unit_mutation.sh``):
+## ``-d:reproAddonMutation=agent-may-weaken-floor`` turns every weakening
+## case red; ``agent-may-change-package-dropins`` turns the package
+## drop-in cases red.
 ##
 ## No mocks. The profiles are parsed by the production parsers the add-on
 ## plan uses -- the stored generation by ``parseStoredUserProfile``, the
@@ -200,6 +205,60 @@ suite "an agent apply cannot weaken the floor":
     check r.floorWeakened == @["f.service (floor version " & FloorVersion &
       ", exception AmbientCapabilities+CAP_NET_BIND_SERVICE CAP_NET_RAW added)"]
     check "f.service" in agentApplyRefusal(r)
+
+  test "a drop-in over a package's unit needs an operator":
+    # cron.service is the distribution's and runs as root; the floor does
+    # not cover it. A drop-in can give it a command line, an account or an
+    # environment (LD_PRELOAD) that runs with root's powers, so adding,
+    # changing or removing one is an operator's apply.
+    let dropIn = proc(service: string): string =
+      "systemd.systemDropIn {\n  unit = \"cron.service\"\n  name = \"tune\"\n" &
+        "  content = \"[Service]\n" & service & "\"\n}\n"
+    let collision = proc(service: string): string =
+      "systemd.systemUnit {\n  name = \"ssh-agent.service\"\n" &
+        "  content = \"[Service]\n" & service & "\"\n" &
+        "  collision = \"dropIn\"\n}\n"
+    let path = "/etc/systemd/system/cron.service.d/50-repro-tune.conf"
+    let base = Accounts & unitStanza("a.service", "User=svc\nExecStart=" &
+      Prefix & "/bin/a\n")
+    for (before, after, want) in [
+        ("", dropIn("ExecStartPre=" & Prefix & "/bin/x\n"),
+         "cron.service (drop-in over a unit the profile does not define " &
+           "added: " & path & ")"),
+        (dropIn("Nice=5\n"), dropIn("Environment=LD_PRELOAD=" & Prefix &
+           "/lib/x.so\n"),
+         "cron.service (drop-in over a unit the profile does not define " &
+           "changed: " & path & ")"),
+        (dropIn("User=nobody\n"), "",
+         "cron.service (drop-in over a unit the profile does not define " &
+           "removed: " & path & ")"),
+        ("", collision("User=root\n"),
+         "ssh-agent.service (drop-in over a unit the profile does not " &
+           "define added: collision = dropIn: ssh-agent.service)")]:
+      checkpoint after
+      let r = planOf(storedAs(base & before), base & after)
+      check r.floorWeakened == @[want]
+      let refused = agentApplyRefusal(r)
+      check refused.startsWith("operator action required")
+      check ("changes a drop-in over a unit the profile does not define") in
+        refused
+    # On a host with no generation, a profile's first such drop-in is an
+    # operator's apply too.
+    check planOf("", base & dropIn("Nice=5\n")).floorWeakened.len == 1
+
+  test "a drop-in that cannot change what a package's unit runs is not refused":
+    # The same drop-in again, and a drop-in with no [Service] and no
+    # command line (an ordering), change nothing that runs.
+    let base = Accounts & unitStanza("a.service", "User=svc\nExecStart=" &
+      Prefix & "/bin/a\n")
+    let same = base & "systemd.systemDropIn {\n  unit = \"cron.service\"\n" &
+      "  name = \"tune\"\n  content = \"[Service]\nNice=5\n\"\n}\n"
+    check planOf(storedAs(same), same).floorWeakened.len == 0
+    let ordering = base & "systemd.systemDropIn {\n  unit = \"cron.service\"\n" &
+      "  name = \"order\"\n  content = \"[Unit]\nAfter=a.service\n\"\n}\n"
+    let r = planOf(storedAs(base), ordering)
+    check r.floorWeakened.len == 0
+    check agentApplyRefusal(r) == ""
 
   test "a root service's first deployment is an operator's apply":
     # A host with no stored generation: every waiver is new.
