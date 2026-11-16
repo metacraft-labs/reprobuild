@@ -11,7 +11,8 @@
 ##      (``buildHardwareSpec`` recovers the original spec).
 ##
 ## The CLI is tested via the seam ``runHardwareProbeFromSpec`` +
-## ``parseHardwareProbeArgs`` because the LIVE probe path
+## ``parseHardwareProbeArgs`` (repro's generated command-line parser,
+## through the same options the command builds) because the LIVE probe path
 ## (``probeAll``) needs Linux /proc + /sys. The Linux-only end-to-end
 ## smoke is M9.R.21.4.
 
@@ -19,7 +20,14 @@ import std/[os, strutils, unittest]
 
 import repro_profile
 import repro_cli_support/hardware as cli_hw
+import repro_cli_support/cli_program
 from repro_test_support import testCaseScratchSlug
+
+proc parseHardwareProbeArgs(args: seq[string]): HardwareProbeOptions =
+  ## The options `repro hardware probe <args>` runs with, read by repro's
+  ## generated command-line parser (a rejected line raises CliUsageError).
+  hardwareProbeOptionsOf(ReproCommandLine.load(@["hardware", "probe"] & args,
+    CliSources()).hardware.probe)
 
 let TmpRoot = "build/m9r21_3_tmp" / testCaseScratchSlug()
 
@@ -176,7 +184,7 @@ suite "M9.R.21.3: `repro hardware probe` CLI":
     check emitSystemHardwareJson(recovered) == emitSystemHardwareJson(spec)
 
   test "Test#5: unknown argument raises a clean error":
-    expect ValueError:
+    expect CliUsageError:
       discard parseHardwareProbeArgs(@["--nope"])
-    expect ValueError:
+    expect CliUsageError:
       discard parseHardwareProbeArgs(@["--output"])  # missing value
