@@ -301,32 +301,28 @@ proc restoreWorkspace*(request: WorkspaceRestoreRequest;
   publishRestoredWorkspace(staging, destination)
   result.destination = destination
 
-proc runWorkspaceRestoreCommand*(args: openArray[string];
+proc runWorkspaceRestoreCommand*(source, destination, projects, at, record,
+    snapshot, recordStore, recordStoreAt: string;
     localRecordStore: proc(source: string): string = nil): int =
-  ## Parse a deliberately explicit input tuple; no invoking workspace state
-  ## or enabled-project defaults influence a restoration. The optional store
-  ## callback supplies conventional local discovery without coupling this
-  ## reusable materializer to the command dispatcher.
+  ## ``repro workspace restore <source> <destination> --projects=A,B
+  ## [--at=REV] (--record=... | --snapshot=NAME) [--record-store=SOURCE]
+  ## [--record-store-at=REV]``, its values read from the command line by
+  ## repro's parser. A deliberately explicit input tuple; no invoking
+  ## workspace state or enabled-project defaults influence a restoration. The
+  ## optional store callback supplies conventional local discovery without
+  ## coupling this reusable materializer to the command dispatcher.
   var request: WorkspaceRestoreRequest
-  var positional: seq[string]
-  for arg in args:
-    if arg in ["--help", "-h"]:
-      echo "usage: repro ws restore <source> <destination> --projects=A,B [--at=REV] (--record=PATH|PROJECT/REPO@SHA | --snapshot=NAME) [--record-store=SOURCE] [--record-store-at=REV]"
-      return 0
-    elif arg.startsWith("--projects="): request.projects = arg[11 .. ^1].split(',')
-    elif arg.startsWith("--at="): request.metadataRevision = arg[5 .. ^1]
-    elif arg.startsWith("--record="): request.record = arg[9 .. ^1]
-    elif arg.startsWith("--snapshot="): request.snapshot = arg[11 .. ^1]
-    elif arg.startsWith("--record-store="): request.recordStore = arg[15 .. ^1]
-    elif arg.startsWith("--record-store-at="): request.recordStoreRevision = arg[
-        18 .. ^1]
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unknown restore flag: " & arg)
-    else: positional.add(arg)
-  if positional.len != 2:
+  if projects.len > 0:
+    request.projects = projects.split(',')
+  request.metadataRevision = at
+  request.record = record
+  request.snapshot = snapshot
+  request.recordStore = recordStore
+  request.recordStoreRevision = recordStoreAt
+  if source.len == 0 or destination.len == 0:
     raise newException(ValueError, "restore requires <source> <destination>")
-  request.source = positional[0]
-  request.destination = positional[1]
+  request.source = source
+  request.destination = destination
   if request.recordStore.len == 0 and dirExists(request.source) and
       isRecordKey(request.record) and not localRecordStore.isNil:
     request.recordStore = localRecordStore(absolutePath(request.source))
