@@ -272,7 +272,7 @@ libs/repro_cli_support/tests/t_audit_holds_at_the_gate_rate.nim	nim	3
 libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim	nim	6
 libs/repro_cli_support/tests/t_build_source_trees_follow_a_membership_edit.nim	nim	2
 libs/repro_cli_support/tests/t_build_worker_holds_no_daemon_key.nim	nim	1
-libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim	nim	7
+libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim	nim	8
 libs/repro_cli_support/tests/t_catalog_publication.nim	nim	9
 libs/repro_cli_support/tests/t_connection_ends_with_its_leaf.nim	nim	3
 libs/repro_cli_support/tests/t_cross_target_flag.nim	nim	8
@@ -1385,7 +1385,7 @@ tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim	nim	6
 tests/e2e/gm4b/t_e2e_home_profile_resolves_just_for_darwin.nim	nim	3
 tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim	nim	6
 tests/e2e/gm4c/t_e2e_dmg_app_bundle_install_and_rollback.nim	nim	8
-tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	4
+tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim	nim	5
 tests/e2e/gm4c/t_e2e_installer_app_install_and_rollback.nim	nim	2
 tests/e2e/gm7/t_e2e_app_vendor_update_and_running_app.nim	nim	3
 tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim	nim	4
@@ -2049,6 +2049,7 @@ tests/integration/t_lock_foreign_coords.nim	nim	2
 tests/integration/t_lock_from_a_v3_host_resolves_on_a_v2_host.nim	nim	6
 tests/integration/t_lock_generation_records_the_root_once.nim	nim	4
 tests/integration/t_lock_is_read_from_the_content_under_evaluation.nim	nim	1
+tests/integration/t_lock_pinned_catalog_is_not_overridden_by_an_ambient_checkout.nim	nim	7
 tests/integration/t_lock_publish_hook_refusal_is_not_read_as_connectivity.nim	nim	1
 tests/integration/t_lock_publish_recovers_verified_ahead_chain.nim	nim	13
 tests/integration/t_lock_refresh_and_validate_without_building.nim	nim	6

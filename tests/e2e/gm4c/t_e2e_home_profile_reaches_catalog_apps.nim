@@ -26,10 +26,14 @@
 ##    profile selected — "exactly as `uses:` does".
 ##
 ## Where the catalog is looked for follows the profile, as it follows a
-## recipe: a `reprobuild-packages` checkout beside the PROFILE's directory
-## wins for the names it defines (a fixture catalog built in the test), and
-## a name it does not define still reaches the catalog beside the reprobuild
-## checkout.
+## recipe (Provisioning-Contributions.md §"Lookup"): a `reprobuild-packages`
+## checkout beside the PROFILE's directory, outside any repository, is the
+## profile's one external catalog -- it wins for the names it defines (a
+## fixture catalog built in the test), and a name it does not define is NOT
+## looked for in another catalog, so one profile never mixes two catalogs.
+## A fixture catalog INSIDE the profile's own repository is consulted per
+## name, and a name it does not define then reaches the external catalog
+## (here, the one beside the reprobuild checkout).
 ##
 ## Expected values are written out below, copied from
 ## `reprobuild-packages/packages/interfaces/{ghostty,iterm2}/repro.nim` at the
@@ -275,7 +279,30 @@ suite "GM4c: e2e_home_profile_reaches_catalog_apps":
           check recipeRecord.detail == profileRecord.detail
           check recipeRecord.location == profileRecord.location
 
-  test "a catalog beside the profile is found first, as for a recipe":
+  test "a catalog beside the profile is its only external catalog":
+    withCatalogRoot(""):
+      let root = createTempDir("repro-gm4c-catalog-ambient-", "")
+      defer:
+        try: removeDir(root) except OSError: discard
+      let fixtureDir = root / "reprobuild-packages" / "packages" /
+        "interfaces" / "gm4ccatalogfixture"
+      createDir(fixtureDir)
+      writeFile(fixtureDir / "repro.nim", FixtureCatalogApp)
+      let selections = librarySelections(root / "profile",
+        ["gm4ccatalogfixture", "ghostty"])
+      checkApp(selections.preview("gm4ccatalogfixture"),
+        "https://example.invalid/gm4c/Fixture-1.0.dmg",
+        "tarball:gm4ccatalogfixture@1.0:macos-any:sha256:5555",
+        "dev.reprobuild.gm4c.catalogfixture", "RPBTEST123", "dmg")
+      # The selected catalog does not define ghostty, and the lookup ends
+      # there: it is not taken from the catalog beside the reprobuild
+      # checkout, which would mix two catalogs in one profile.
+      let ghostty = selections.preview("ghostty")
+      checkpoint("ghostty: " & ghostty.detail)
+      check not ghostty.resolved
+      check ghostty.detail.startsWith("unknown-package: ")
+
+  test "a catalog inside the profile's repository is found first, as for a recipe":
     withCatalogRoot(""):
       let root = createTempDir("repro-gm4c-catalog-anchor-", "")
       defer:
@@ -284,6 +311,10 @@ suite "GM4c: e2e_home_profile_reaches_catalog_apps":
         "interfaces" / "gm4ccatalogfixture"
       createDir(fixtureDir)
       writeFile(fixtureDir / "repro.nim", FixtureCatalogApp)
+      # The profile and its fixture catalog are one repository.
+      let gitInit = execCmdEx(quoteShell(findExe("git")) & " init --quiet " &
+        quoteShell(root), options = {poUsePath, poStdErrToStdOut})
+      doAssert gitInit.exitCode == 0, gitInit.output
       let selections = librarySelections(root / "profile",
         ["gm4ccatalogfixture", "ghostty"])
       let fixture = selections.preview("gm4ccatalogfixture")
@@ -295,8 +326,8 @@ suite "GM4c: e2e_home_profile_reaches_catalog_apps":
         # `/tmp` on macOS).
         check fixture.resolution.selection.tarball.location.file.startsWith(
           expandFilename(root) / "reprobuild-packages")
-      # The fixture catalog does not define ghostty; the walk continues to
-      # the catalog beside the reprobuild checkout.
+      # The repository's fixture catalog does not define ghostty; the lookup
+      # continues to the external catalog, beside the reprobuild checkout.
       checkApp(selections.preview("ghostty"), GhosttyUrl, GhosttyLock,
         "com.mitchellh.ghostty", "24VZTF6M5V", "dmg")
 

@@ -22465,6 +22465,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_lock_pinned_catalog_is_not_overridden_by_an_ambient_checkout.nim",
+    binary: "build/test-bin/t_lock_pinned_catalog_is_not_overridden_by_an_ambient_checkout",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level putEnv"),
+  TestSpec(
     source: "tests/integration/t_lock_publish_hook_refusal_is_not_read_as_connectivity.nim",
     binary: "build/test-bin/t_lock_publish_hook_refusal_is_not_read_as_connectivity",
     defines: @[],

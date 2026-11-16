@@ -3408,6 +3408,19 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
 # `repro_project_dsl/reprobuild_packages_catalog`, imported by
 # `repro_project_dsl.nim` so the tool resolver can share the remedy text.
 
+proc catalogInterfaceModuleOfThisCompile(selector,
+    consumerSourceFile: string): string =
+  ## The catalog interface module for ``selector``, resolved while a
+  ## ``package`` block expands. One compile resolves every external catalog
+  ## interface from ONE catalog: a lookup that would take one from a second
+  ## catalog stops the compile with the error naming both
+  ## (`reprobuildPackagesInterfaceModuleInCompile`).
+  let found = reprobuildPackagesInterfaceModuleInCompile(selector,
+    consumerSourceFile)
+  if found.conflict.len > 0:
+    error(found.conflict)
+  found.module
+
 type
   ProducerResourceModuleDecl* = object
     ## TI2 — a producer's ``resourceModule "<path>": path "<dir>" …`` surface
@@ -4237,7 +4250,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # per-selector shim below, because every catalog interface module is
       # also named ``repro.nim``.
       let catalogModule =
-        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+        catalogInterfaceModuleOfThisCompile(selector, consumerSourceFile)
       if catalogModule.len > 0:
         let catalogAlias = selectorModuleName(selector) & "_packages_module"
         var catalogSeen = false
@@ -4284,7 +4297,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       if workspaceProducerModule(selector, consumerSourceFile).len > 0:
         continue
       let catalogModule =
-        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+        catalogInterfaceModuleOfThisCompile(selector, consumerSourceFile)
       if catalogModule.len == 0:
         continue
       let catalogAlias = selectorModuleName(selector) & "_packages_module"
