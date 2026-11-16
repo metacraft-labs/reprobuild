@@ -2432,6 +2432,7 @@ tests/integration/t_stackable_hooks_extracted_process_tree.nim	nim	3
 tests/integration/t_stale_repro_refusal_names_a_remedy_that_does_not_disarm_the_gate.nim	nim	1
 tests/integration/t_state_file_carries_no_layers.nim	nim	5
 tests/integration/t_state_file_skew_is_reported.nim	nim	2
+tests/integration/t_stats_and_pressure_report_store_state.nim	nim	1
 tests/integration/t_stats_reads_shared_store.nim	nim	5
 tests/integration/t_status_health_add_remove_use_unified_resolver.nim	nim	1
 tests/integration/t_stdlib_catalog_tarball_arms_realize.nim	nim	1
@@ -2866,6 +2867,7 @@ tests/unit/t_sibling_prefix_clone.nim	nim	4
 tests/unit/t_sibling_source_paths_are_spelled_relative.nim	nim	5
 tests/unit/t_source_fetch_tool_metadata.nim	nim	8
 tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
+tests/unit/t_stats_store_status_names_why_capture_is_off.nim	nim	5
 tests/unit/t_store_daemon_tarball_archive_detail_frame.nim	nim	9
 tests/unit/t_store_path_farm.nim	nim	4
 tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
