@@ -24,7 +24,12 @@
 ##
 ## Each control is checked twice: the record reaches the gate's sink (it
 ## left the host, DET-6), and the off-host check over the sink's store
-## raises the detector's alert. Before any control the check reports every
+## raises the detector's alert. The controls that run on the host every
+## time their detector runs (DET-4; spec §10.4 "Scheduled positive
+## controls") are checked under the real units and the base's real dpkg
+## database: the tick's DET-AO-1 control and the egress check's DET-AO-3
+## control before the baseline, the apt hook's DET-AO-6 control with the
+## DET-AO-6 control's package. Before any control the check reports every
 ## detector live-idle and no alert: "nothing detected" is a state the gate
 ## sees, distinct from the silence DET-AO-8's control produces (DET-5).
 ##
@@ -49,6 +54,7 @@ import std/[json, options, os, sequtils, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_deploy_agent/manifest
 import repro_peer_cache/auth as peerAuth
+import repro_peer_cache/evidence
 
 import repro_addon/evidence_check
 
@@ -124,6 +130,19 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   ship()
   discard sink.waitFor(host, "addon-agent-tick", "", 180)
   discard sink.waitFor(host, "addon-store", "", 180)
+  # DET-4 on the host: every tick runs DET-AO-1's control with the host's
+  # anchors, and every fetch sends DET-AO-3's control datagram, which the
+  # check that follows it must have seen counted.
+  proc controlTripped(detector: string; since: uint64; trigger = ""): bool =
+    sink.entries().anyIt(it.seq >= since and it.kind == ekRecord and
+      it.record.detector == detector and
+      (trigger.len == 0 or it.record.trigger == trigger) and
+      it.record.field("control") == "tripped")
+  step("DET-4: the tick's DET-AO-1 control tripped on the host",
+       controlTripped("addon-agent-tick", 0), "")
+  step("DET-4: the egress check's DET-AO-3 control tripped on the host",
+       controlTripped("addon-egress", 0),
+       g.exec("nft list set inet repro_addon_egress refused4").stdout)
   let base = sink.check(host, signers)
   record["baseline"] = toJson(base)
   step("baseline: nothing detected, every detector live-idle, no alert",
@@ -291,6 +310,9 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard g.exec("DEBIAN_FRONTEND=noninteractive apt-get install -y -q " &
     "-o Dpkg::Options::=--force-confnew " & deb, timeoutSec = 900)
   control("DET-AO-6", "addon-apt-hook", "hook-finding", since)
+  step("DET-4: the apt hook's DET-AO-6 control tripped over the base's " &
+       "dpkg database", controlTripped("addon-apt-hook", since, "hook-run"),
+       "")
   discard g.exec("DEBIAN_FRONTEND=noninteractive apt-get purge -y -q " &
                  "repro-a11-fixture", timeoutSec = 900)
 
