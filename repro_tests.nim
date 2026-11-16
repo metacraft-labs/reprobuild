@@ -3864,6 +3864,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_core_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_core/tests/t_lock_holder_lookup_names_the_holder_on_btrfs.nim",
+    binary: "build/test-bin/t_lock_holder_lookup_names_the_holder_on_btrfs",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_core_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_core/tests/t_n51_drain_process_stream.nim",
     binary: "build/test-bin/t_n51_drain_process_stream",
     defines: @[],

@@ -358,6 +358,7 @@ libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
 libs/repro_core/tests/t_installed_prefix_anchors.nim	nim	2
 libs/repro_core/tests/t_jsts_dep_scanner.nim	nim	19
 libs/repro_core/tests/t_link_target_reads_reparse_points.nim	nim	15
+libs/repro_core/tests/t_lock_holder_lookup_names_the_holder_on_btrfs.nim	nim	6
 libs/repro_core/tests/t_n51_drain_process_stream.nim	nim	11
 libs/repro_core/tests/t_n51_host_tar_resolution.nim	nim	5
 libs/repro_core/tests/t_nim_dep_scanner.nim	nim	19
