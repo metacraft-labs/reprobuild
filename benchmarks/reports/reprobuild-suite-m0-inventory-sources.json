@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2869,
+    "nimTestBinaries": 2871,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 776,
     "staticallyDetectedRuntimeCompilerFlowTests": 144,
-    "testEntries": 2916
+    "testEntries": 2918
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1641,7 +1641,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1582,
+      "integration": 1584,
       "platform/destructive": 186,
       "pure unit": 776,
       "unclassified": 349
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2869,
+    "nimTestBinaryCount": 2871,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2916
+    "testEntryCount": 2918
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11958,6 +11958,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_managed_file_writes_share_one_writer",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_managed_file_writes_share_one_writer.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 17,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_modified_output_restores_the_recorded_result",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -13202,7 +13220,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22919,7 +22937,8 @@
         "repro_infra",
         "repro_profile",
         "repro_profile_compile",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
@@ -27378,6 +27397,23 @@
       "source": "libs/repro_test_support/tests/t_owned_processes_stop_only_what_the_test_started.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_passthrough_monitor_parses_the_engine_wrapper_argv",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_passthrough_monitor_parses_the_engine_wrapper_argv.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

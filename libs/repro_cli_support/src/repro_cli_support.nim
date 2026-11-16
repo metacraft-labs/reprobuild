@@ -3471,9 +3471,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         else:
           argValue("text") & argValue("title"),
       entries = if payload.call.subcommand == "ensureSnippet":
-          @[argValue("openSentinel"), argValue("closeSentinel"),
-            argValue("openSearch"), argValue("closeSearch"),
-            argValue("snippet")]
+          # The block's key, not sentinel text: the engine renders the
+          # sentinels (fs-file-utilities.md §3).
+          ensureSnippetEntries(argValue("packageName"), argValue("blockId"),
+            argValue("snippet"), scope = argValue("scope"))
         else:
           argSeqValue("entries"))
 

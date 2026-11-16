@@ -1596,8 +1596,8 @@ template linuxNixosSystemModule*(targetResources: var seq[ResourceIntent];
   ##
   ## REPROBUILD DOES NOT RUN `nixos-rebuild switch` — the operator
   ## triggers the rebuild separately. The driver only converges the
-  ## file's bytes; the broker's drift gate covers a hand-edited
-  ## fragment. The constraint mirrors `linux.nixDaemonSetting`'s "Nix
+  ## file's bytes; a hand-edited fragment differs from desired and the
+  ## next apply rewrites it. The constraint mirrors `linux.nixDaemonSetting`'s "Nix
   ## re-reads on each invocation" model: the file is the source of
   ## truth; the realization step is downstream.
   ##
