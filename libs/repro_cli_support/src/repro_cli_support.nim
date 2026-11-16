@@ -9416,6 +9416,23 @@ type
     monitorDepfile*: string
       ## The io-mon depfile the action's monitored launch wrote ("" when it
       ## was not launched under the monitor).
+    declaredOutputs*: seq[string]
+      ## The action's declared output files (``outputs`` and
+      ## ``optionalOutputs``), resolved against its ``cwd``. A test that reads
+      ## one of these where the action is in the certified closure read
+      ## something the closure produced from the bound content, which the
+      ## untracked-inputs rule exempts (``judgeUntrackedInputs``).
+    declaredOutputTrees*: seq[string]
+      ## The outputs the engine removes before the action runs
+      ## (``optionalOutputs`` and ``removeBeforeRun``, the same set as the
+      ## engine's ``isRemovedOutputTreePath``), resolved against its ``cwd``:
+      ## everything under one was written by the action itself.
+    scratchTrees*: seq[string]
+      ## The action's scratch directories (``scratchDirs``), resolved against
+      ## its ``cwd``. The engine empties each before the action runs, so when
+      ## the action RAN, everything under one it wrote itself. A cache hit
+      ## does not empty or restore them: what is there then is left over
+      ## from an earlier run, and is exempt only when the action launched.
     startOrder*: int
       ## Position in the order the scheduler STARTED actions (0-based), or -1
       ## when it never started this one. Parallel actions have no other total
@@ -10460,6 +10477,22 @@ proc executedActionRecords(actions: openArray[BuildAction];
       record.kind = action.kind
       record.argv = action.argv
       record.keyCoversObservedReads = actionKeyCoversObservedReads(action)
+      for output in action.outputs & action.optionalOutputs:
+        record.declaredOutputs.add(
+          if output.isAbsolute or action.cwd.len == 0: output
+          else: action.cwd / output)
+      for tree in action.optionalOutputs & action.removeBeforeRun:
+        # An empty entry would resolve to the action's whole working
+        # directory and exempt everything under it.
+        if tree.len > 0:
+          record.declaredOutputTrees.add(
+            if tree.isAbsolute or action.cwd.len == 0: tree
+            else: action.cwd / tree)
+      for tree in action.scratchDirs:
+        if tree.len > 0:
+          record.scratchTrees.add(
+            if tree.isAbsolute or action.cwd.len == 0: tree
+            else: action.cwd / tree)
     result.add(record)
 
 proc emitFailedActionSummaries(buildResult: BuildRunResult;
@@ -87824,11 +87857,28 @@ type
       ## Absolute paths of the files read.
     source*: string
       ## Where the read set came from, or why there is none.
+    gaps*: seq[string]
+      ## Why the read set may lack reads the run made, one entry per cause:
+      ## an executed action with no capture, a capture that could not be
+      ## read, a capture the monitor graded incomplete (event loss). A read
+      ## set with gaps still withholds on what it did observe; what it may
+      ## have missed is reported, never assumed absent.
+    exemptOutputs*: seq[string]
+      ## Absolute paths of the declared outputs of the actions in the
+      ## certified closure. Reading one is reading something the closure
+      ## produced from the bound content, so it is not an untracked input.
+    exemptOutputTrees*: seq[string]
+      ## Absolute output directories of those actions that the engine empties
+      ## before they run, and the scratch directories of those that ran:
+      ## everything under one, the action wrote itself.
 
   UntrackedJudgement* = object
     withhold*: bool
     offending*: seq[string]
       ## Repository-relative untracked paths that caused the withholding.
+    read*: seq[string]
+      ## The subset of ``offending`` the captured read set shows the tests
+      ## read; the rest are present-only (``cuiStrict``).
     note*: string
       ## Shown when the certificate is issued with ``untracked = true``
       ## without a read set to judge by.
@@ -87974,38 +88024,123 @@ proc repositoryRelativePath(root, path: string): string =
     return ""
   full[base.len + 1 .. ^1].replace(DirSep, '/')
 
+proc isTrackedOrInsideTracked(relative: string;
+    tracked: HashSet[string]): bool =
+  ## ``relative`` is an index entry, or lies inside one. Only a gitlink (a
+  ## submodule) can have paths beneath it, and the content binds a
+  ## submodule's files through its commit (Content-Id §3 refuses one whose
+  ## content was modified).
+  var path = relative
+  while path.len > 0:
+    if path in tracked:
+      return true
+    let slash = path.rfind('/')
+    if slash < 0:
+      return false
+    path = path[0 ..< slash]
+  false
+
+proc isExemptOutputRead(path: string; readSet: CapturedReadSet): bool =
+  ## ``path`` (absolute) is a declared output of an action in the certified
+  ## closure, or lies in an output directory the engine empties before one
+  ## runs. Exact match for files, as the engine's own self-write filter
+  ## (``selfWrittenOutputKeys``) uses: lying NEXT TO an output, or in the
+  ## directory outputs go to, does not make a file an output.
+  let full = canonicalReadPath(path)
+  for output in readSet.exemptOutputs:
+    if canonicalReadPath(output) == full:
+      return true
+  for tree in readSet.exemptOutputTrees:
+    let root = canonicalReadPath(tree)
+    if full == root or (full.len > root.len + 1 and full.startsWith(root) and
+        full[root.len] in {DirSep, AltSep}):
+      return true
+  false
+
 proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
     repositoryRoot: string; untrackedPaths: openArray[string];
+    trackedPaths: HashSet[string];
     readSet: CapturedReadSet): UntrackedJudgement =
   ## The untracked-inputs rule as a pure decision over the repository's
-  ## untracked files (repository-relative, as ``git status`` lists them) and
-  ## the run's read set. It runs nothing and signs nothing.
+  ## untracked files (repository-relative, as ``git status`` lists them:
+  ## untracked and NOT ignored), its tracked paths (its index entries,
+  ## repository-relative) and the run's read set. It runs nothing and signs
+  ## nothing.
   ##
-  ## * ``cuiStrict`` withholds whenever any untracked file exists.
-  ## * ``cuiReadSet`` withholds only for an untracked file the captured read
-  ##   set names. With no read set it issues, and ``note`` says the files
-  ##   could not be judged — it never guesses which files were read.
-  case mode
-  of cuiStrict:
-    result.offending = @untrackedPaths
-    result.withhold = result.offending.len > 0
-  of cuiReadSet:
-    if not readSet.captured:
-      if untrackedPaths.len > 0:
-        result.note = "no read set was captured for this run (" &
-          readSet.source & "), so whether the tests read the untracked " &
-          "files could not be judged; the certificate reports untracked = true"
-      return
-    var seen = initHashSet[string]()
+  ## A read the captured set names is an untracked input when it is inside
+  ## the repository and is NOT
+  ##
+  ## * tracked (an index entry, or inside a submodule's gitlink);
+  ## * under the repository's ``.git``: VCS metadata, not a working-tree
+  ##   file, which no ``git add`` could put in the content;
+  ## * a directory (an enumeration reads names, not content);
+  ## * a declared output of an action in the certified closure, a file
+  ##   under an output the engine removes before such an action runs, or a
+  ##   file under the scratch directory of one that ran
+  ##   (``readSet.exemptOutputs`` / ``exemptOutputTrees``): the closure
+  ##   produced those from the bound content in this run.
+  ##
+  ## Nothing else is exempt. A file a test writes into the working tree and
+  ## reads back outside such a directory, or a tool cache an earlier run left
+  ## there (``__pycache__``, ``.pytest_cache``), withholds: the read set does
+  ## not say whether the bytes read were the ones this run wrote.
+  ##
+  ## IGNORED files are untracked inputs like any other: the content binds
+  ## them no more than an untracked file (Content-Id §2), so a test that
+  ## read ``.env`` ran against something no verifier can reconstruct
+  ## (test-certificates Standard §3.2). The ``.gitignore`` says what is not
+  ## worth committing, not what a test may depend on unseen.
+  ##
+  ## * ``cuiReadSet`` withholds for every untracked input the captured read
+  ##   set names. With no read set it issues, and ``note`` says the reads
+  ##   could not be judged (operator decision D5, 2026-10-09: "withhold only
+  ##   when a captured read set shows that the run read an untracked file");
+  ##   a read set with ``gaps`` likewise withholds only on what it observed,
+  ##   and ``note`` names the gaps. It never guesses which files were read.
+  ## * ``cuiStrict`` additionally withholds whenever any untracked,
+  ##   non-ignored file exists. It is the stricter mode, so it withholds
+  ##   everywhere the default does.
+  ##
+  ## ``trackedPaths`` matters only when ``readSet.captured``; an empty set
+  ## there makes every read inside the repository an untracked input.
+  var seen = initHashSet[string]()
+  if readSet.captured:
     for path in readSet.paths:
       let relative = repositoryRelativePath(repositoryRoot, path)
-      if relative.len == 0:
+      if relative.len == 0 or seen.contains(relative):
         continue
-      for entry in untrackedPaths:
-        if relative == entry and not seen.containsOrIncl(relative):
-          result.offending.add(relative)
-    result.offending.sort(system.cmp[string])
-    result.withhold = result.offending.len > 0
+      if relative == ".git" or relative.startsWith(".git/"):
+        continue
+      if isTrackedOrInsideTracked(relative, trackedPaths):
+        continue
+      if dirExists(canonicalReadPath(path)):
+        continue
+      if isExemptOutputRead(path, readSet):
+        continue
+      seen.incl(relative)
+      result.offending.add(relative)
+  result.read = result.offending
+  result.read.sort(system.cmp[string])
+  if mode == cuiStrict:
+    for entry in untrackedPaths:
+      if not seen.containsOrIncl(entry):
+        result.offending.add(entry)
+  result.offending.sort(system.cmp[string])
+  result.withhold = result.offending.len > 0
+  if result.withhold:
+    return
+  if not readSet.captured:
+    result.note = "no read set was captured for this run (" &
+      readSet.source & "), so whether the tests read untracked or ignored " &
+      "files could not be judged" &
+      (if untrackedPaths.len > 0: "; the certificate reports untracked = true"
+       else: "")
+  elif readSet.gaps.len > 0:
+    result.note = "the read set is incomplete (" & readSet.gaps.join("; ") &
+      "), so reads of untracked or ignored files it missed could not be " &
+      "judged" &
+      (if untrackedPaths.len > 0: "; the certificate reports untracked = true"
+       else: "")
 
 proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
   ## The files a monitored run read, from the io-mon depfile its capture
@@ -88013,8 +88148,9 @@ proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
   ## missing or unreadable is ``captured = false``, never an empty set.
   ##
   ## An incomplete capture still counts: what it observed WAS read, so a hit
-  ## withholds; what it may have missed changes nothing, because without a
-  ## hit the certificate reports ``untracked = true`` either way.
+  ## withholds. What it may have missed is recorded in ``gaps``, which the
+  ## judgement reports (Failure-Semantics §"Monitoring Failures": loss is
+  ## never treated as "read nothing").
   var dep: MonitorDepFile
   try:
     dep = readMonitorDepFile(path)
@@ -88022,9 +88158,17 @@ proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
     return CapturedReadSet(captured: false,
       source: "no usable read set in '" & path & "': " & err.msg)
   result = CapturedReadSet(captured: true, source: path)
+  if dep.completeness != mcComplete:
+    result.gaps.add("the monitor graded the capture '" & path &
+      "' incomplete")
   var seen = initHashSet[string]()
   for record in dep.records:
     if record.path.len == 0:
+      continue
+    # A failed open or an absent-path probe read nothing: a test that looks
+    # for an optional `.env` and finds none consumed no input, so it must not
+    # withhold a certificate for a file that does not exist.
+    if recordIsFailedExistenceLookup(record):
       continue
     if record.observationKind in {moFileOpen, moFileRead, moExecute,
                                   moDirectoryEnumerate}:
@@ -88304,27 +88448,54 @@ proc confirmTestedState*(pre: IssuancePreconditions;
   untrackedPaths.sort(system.cmp[string])
   result.untracked = pre.untracked or observed.untracked
   result.untrackedPaths = untrackedPaths
+  # The tracked paths, so a captured read can be told apart from a read of an
+  # untracked or ignored file. Asked only when there is a read set to judge.
+  var tracked = initHashSet[string]()
+  if readSet.captured:
+    let listed = gitRunPlainQuery(identity, ["-C", pre.repository,
+      "ls-files", "-z", "--cached", "--full-name"])
+    if listed.code != 0:
+      return TestedStateVerdict(reason: tswUnobservable,
+        message: "the tracked files could not be listed after the run (" &
+          listed.diagnostic & "), so the tests' reads could not be judged",
+        remedy: "investigate the git error and re-run 'repro test'; no " &
+          "certificate is issued rather than guessing")
+    for entry in listed.output.split('\0'):
+      if entry.len > 0:
+        tracked.incl(entry)
   let judgement = judgeUntrackedInputs(pre.untrackedInputs, pre.repository,
-    untrackedPaths, readSet)
+    untrackedPaths, tracked, readSet)
   if judgement.withhold:
     result.reason = tswUntrackedInput
-    case pre.untrackedInputs
-    of cuiStrict:
+    let readOffending = judgement.read
+    var presentOnly: seq[string]
+    for path in judgement.offending:
+      if path notin readOffending:
+        presentOnly.add(path)
+    if readOffending.len > 0:
+      result.message = "the tests read untracked files, which are not part " &
+        "of the content a certificate names (ignored files included; only " &
+        "a declared output of an action in the certified closure is " &
+        "exempt): " & readOffending.join(", ") & " (read set: " &
+        readSet.source & ")"
+      result.remedy = "add the file so its content is part of what is " &
+        "certified ('git add " & readOffending.join(" ") & "', with -f for " &
+        "an ignored one), produce it with an action the certified node " &
+        "depends on (a file a test writes and reads back, or a tool cache, " &
+        "belongs under a directory that action declares as an output or " &
+        "scratch directory, or outside the repository), or stop the tests " &
+        "reading it, then re-run 'repro test'"
+      if presentOnly.len > 0:
+        result.message.add("; and untracked_inputs = \"strict\" withholds " &
+          "on any untracked file: " & presentOnly.join(", "))
+    else:
       result.message = "untracked files exist, and the certificate policy's " &
         "untracked_inputs = \"strict\" withholds on any: " &
-        judgement.offending.join(", ")
+        presentOnly.join(", ")
       result.remedy = "add each file the tests need ('git add " &
-        judgement.offending.join(" ") & "') and ignore (.gitignore) or " &
+        presentOnly.join(" ") & "') and ignore (.gitignore) or " &
         "delete the rest, then re-run 'repro test'; \"read-set\" withholds " &
         "only for untracked files a captured read set shows the tests read"
-    of cuiReadSet:
-      result.message = "the tests read untracked files, which are not part " &
-        "of the content a certificate names: " &
-        judgement.offending.join(", ") & " (read set: " & readSet.source & ")"
-      result.remedy = "add the file ('git add " &
-        judgement.offending.join(" ") & "') so its content is part of what " &
-        "is certified, or ignore it (.gitignore) if it is generated or " &
-        "machine-local, then re-run 'repro test'"
     return
   result.note = judgement.note
 
@@ -89786,6 +89957,11 @@ type
     commands: seq[seq[string]]
     depfiles: seq[string]
       ## Monitor captures of the closure's executed actions.
+    uncaptured: seq[string]
+      ## The closure's executed actions that left no monitor capture.
+    outputs, outputTrees: seq[string]
+      ## The declared outputs (and emptied output directories) of every
+      ## action in the closure: what reading is not an untracked input.
     recordedReads: seq[string]
       ## What the records of the closure's reused actions say their
       ## executions read, from ``recordedSources`` records.
@@ -89832,6 +90008,10 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
       missing.add(id)
       continue
     let record = records[id]
+    result.outputs.add(record.declaredOutputs)
+    result.outputTrees.add(record.declaredOutputTrees)
+    if record.launched:
+      result.outputTrees.add(record.scratchTrees)
     if record.status notin {asSucceeded, asCacheHit, asUpToDate}:
       failed.add(id & " (" & $record.status &
         (if record.status == asFailed: ", exit code " & $record.exitCode
@@ -89839,6 +90019,8 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
     elif record.launched:
       if record.monitorDepfile.len > 0:
         result.depfiles.add(record.monitorDepfile)
+      elif record.kind == bakProcess:
+        result.uncaptured.add(id)
     elif record.cacheDecision in {cdHit, cdHybridCutoff}:
       inc result.recordedSources
       for path in record.cacheRecordInputs:
@@ -89904,21 +90086,36 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
 
 proc readSetFromMonitorDepFiles(paths: openArray[string];
                                 recordedReads: openArray[string] = [];
-                                recordedSources = 0): CapturedReadSet =
+                                recordedSources = 0;
+                                uncaptured: openArray[string] = [];
+                                outputs: openArray[string] = [];
+                                outputTrees: openArray[string] = []):
+    CapturedReadSet =
   ## The union of several monitor captures and of what ``recordedSources``
   ## reused cache records say their executions read (``recordedReads``,
   ## already absolute). A capture that cannot be read contributes nothing,
   ## but what the others observed WAS read: the set counts as captured when
   ## at least one capture or record was read, and ``source`` names the
-  ## captures that were not. With none, nothing was captured.
+  ## captures that were not. With none, nothing was captured. Every way the
+  ## union may lack a read — an unreadable or incomplete capture, an executed
+  ## action (``uncaptured``) that left none — is a ``gaps`` entry.
+  ## ``outputs`` / ``outputTrees`` are the closure's declared outputs, which
+  ## the judgement exempts.
   var seen = initHashSet[string]()
   var read, unreadable: seq[string]
+  result.exemptOutputs = @outputs
+  result.exemptOutputTrees = @outputTrees
+  for id in uncaptured:
+    result.gaps.add("the executed action '" & id & "' left no monitor " &
+      "capture")
   for path in paths:
     let one = readSetFromMonitorDepFile(path)
     if not one.captured:
       unreadable.add(path)
+      result.gaps.add(one.source)
       continue
     read.add(path)
+    result.gaps.add(one.gaps)
     for p in one.paths:
       if not seen.containsOrIncl(p):
         result.paths.add(p)
@@ -90610,7 +90807,8 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
         continue
       discard issueForCertificateNode(pre, run.node.name, verdict.commands,
         readSetFromMonitorDepFiles(verdict.depfiles, verdict.recordedReads,
-          verdict.recordedSources), workspaceRoot, copyOut)
+          verdict.recordedSources, verdict.uncaptured, verdict.outputs,
+          verdict.outputTrees), workspaceRoot, copyOut)
   reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
   reportUnselectedCertificates(unselected)
   code
