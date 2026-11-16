@@ -136,15 +136,24 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     "journalctl -b -o cat --no-pager -u repro-addon-boot-hold.service | " &
     "grep -e 'repro-addon boot-holds' -e skipped; true").stdout
   record["rebootAfterTick"] = %sock
+  # The boot's own account, in order: the socket's lines, the boot-hold
+  # unit's, the re-assertion's and the boot-confirm unit's.
+  let timeline = g.exec("journalctl -b -o short-monotonic --no-pager " &
+    "-u a9t-sr.socket -u a9t-sr.service -u repro-addon-boot-hold.service " &
+    "-u repro-addon-reassert.service -u repro-addon-boot-confirm.service; true").stdout
+  record["bootTimeline"] = %timeline
   step("after the reboot the tick's revert is committed and no floored unit " &
        "started unchecked: the socket is down and never listened",
-       "pending" notin sock and "ActiveState=active" notin sock and
+       # The marker by its own test: the boot-hold unit's skip line names
+       # its path, which contains the word.
+       g.exec("test -e " & Pending).exitCode != 0 and
+       "ActiveState=active" notin sock and
        "held " in sock and
        # systemd's own line for the socket when it binds (its unit's
        # journal; the add-on's report names the socket in other lines).
        g.exec("journalctl -b -o cat --no-pager -u a9t-sr.socket | " &
               "grep -c '^Listening on'; true").stdout.strip() == "0",
-       sock)
+       sock & "\n" & timeline)
   discard g.run("rm -rf /var/lib/a9t-sr")
 
 suite Gate:
