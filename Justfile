@@ -3303,3 +3303,16 @@ integration_hcr_linux_stack_mapping_changes_do_not_fault:
         --out:build/test-bin/integration_hcr_linux_stack_mapping_changes_do_not_fault \
         tests/e2e/hcr-linux-threads/t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim \
         2>&1 | tee test-logs/integration_hcr_linux_stack_mapping_changes_do_not_fault.log
+
+# User documentation site (docs/users/): standard Metacraft docs recipes.
+build-docs:
+    bash ./scripts/build_user_docs.sh build
+
+dev-docs port="8000" host="127.0.0.1":
+    cd docs/users && nim c -r --skipParentCfg --hints:off -o:build/dev src/dev.nim {{port}} {{host}}
+
+serve-docs port="8000" host="127.0.0.1":
+    cd docs/users && nim c -r --skipParentCfg --hints:off -o:build/serve_public src/serve_public.nim {{port}} {{host}}
+
+open-docs port="8000":
+    python3 -m webbrowser "http://127.0.0.1:{{port}}/"

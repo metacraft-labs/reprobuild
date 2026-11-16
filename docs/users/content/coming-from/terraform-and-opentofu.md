@@ -55,6 +55,29 @@ tool for cloud resources.
 | `terraform graph` | `repro graph` |
 | a pipeline that runs `terraform apply` against each environment | [`repro deploy-agent`](../reference/glossary.md#deploy-agent) on each machine |
 
+## Before and after
+
+A Terraform resource managing a systemd unit file on a host:
+
+```hcl
+resource "local_file" "exporter_unit" {
+  filename = "/etc/systemd/system/metrics-exporter.service"
+  content  = "[Unit]\nDescription=Metrics exporter\n[Service]\nExecStart=/usr/local/bin/metrics-exporter\n[Install]\nWantedBy=multi-user.target\n"
+}
+```
+
+becomes a typed system-profile declaration in `system.nim` that writes the unit,
+reloads systemd and manages its enabled state through `repro infra plan` and
+`repro infra apply`:
+
+```nim
+systemd.systemUnit {
+  name = "metrics-exporter.service"
+  content = "[Unit]\nDescription=Metrics exporter\n[Service]\nExecStart=/usr/local/bin/metrics-exporter\n[Install]\nWantedBy=multi-user.target\n"
+  enabled = true
+}
+```
+
 ## What works differently
 
 Each machine applies its own state. `repro infra apply` changes the machine it
