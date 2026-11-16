@@ -644,7 +644,7 @@
 ## ``partial-fix-accepted``                a generation that resolves one
 ##                                           recorded trigger goes through
 ##                                           with others still on record
-##                                           (decision 168)
+##                                           (decision 170)
 ## ``restart-record-after-held``           a revert drops a trigger from the
 ##                                           held record before it is on the
 ##                                           restart record (round 10)

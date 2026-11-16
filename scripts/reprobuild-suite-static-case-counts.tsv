@@ -646,6 +646,7 @@ libs/repro_local_store/tests/t_store_budget_gc.nim	nim	12
 libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	5
 libs/repro_local_store/tests/t_store_concurrent_first_open_waits.nim	nim	2
 libs/repro_local_store/tests/t_store_copy.nim	nim	22
+libs/repro_local_store/tests/t_store_index_gains_additive_schema_on_every_open.nim	nim	2
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
 libs/repro_local_store/tests/t_store_publish_is_durable_and_recover_verifies_prefix_contents.nim	nim	9
 libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.nim	nim	12
