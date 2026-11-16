@@ -185,6 +185,9 @@
 169 Leave dependants out | dependant, leaves out
 170 Allow the fixing apply | fixing, resolve, partial fix
 171 Every requirer of a refused unit stays held | requirer, refused unit, held
+172 The boot-hold unit is required, and no ordering cycles through it | boot-hold, RequiredBy, ordering cycle, sysinit.target, required
+173 The agent's units are re-pointed too | agent, re-point, agent-apply, agent-fetch
+174 Only the static add-on image is installed | static, image, dynamic engine
 175 The fixing switch starts what it resolves | fixing switch, resolve
 176 Dependants block like triggers | dependant, block
 177 Requirers are read from systemd, and an essential unit is never held | essential, requirer, systemd, held

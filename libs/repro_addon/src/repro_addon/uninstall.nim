@@ -1854,6 +1854,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       # Stopped, then disabled by removing exactly its ledgered install
       # links in step 2 -- never `systemctl disable`, which would also
       # remove links the base made for units the add-on does not own.
+      # The boot-hold unit is never stopped: sysinit.target requires it
+      # (§13 decision 172), so its stop would stop sysinit.target and every
+      # unit that requires it -- every service with default dependencies,
+      # the base's sshd among them. It only runs at boot; removing its file
+      # and its link is enough.
+      if u.unit == BootHoldUnit:
+        when not mutated("uninstall-stops-boot-hold"):
+          continue
       systemctlOrRecord(["stop", "--", u.unit], result)
 
   # 1b. The deploy agent's fetch unit keeps its staging in a dynamic user's

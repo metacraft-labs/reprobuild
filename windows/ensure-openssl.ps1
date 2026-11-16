@@ -76,15 +76,20 @@ function Get-OpenSslInstallDir {
 }
 
 function Get-OpenSslArchiveUrls {
-  param([Parameter(Mandatory = $true)][string]$AssetName)
+  param(
+    [Parameter(Mandatory = $true)][string]$AssetName,
+    # The MSYS2 environment: ucrt64 for x64, clangarm64 for arm64
+    # (Get-WindowsArchRuntimeNames).
+    [string]$Msys2Env = "ucrt64"
+  )
 
   # Direct tier-one fallbacks from https://www.msys2.org/dev/mirrors/.
   # The primary and its geo redirector share an outage domain. All sources
   # must supply the identical archive authenticated by the existing SHA256 pin.
   return @(
-    "https://repo.msys2.org/mingw/ucrt64/$AssetName",
-    "https://mirror.umd.edu/msys2/mingw/ucrt64/$AssetName",
-    "https://mirror.accum.se/mirror/msys2.org/mingw/ucrt64/$AssetName"
+    "https://repo.msys2.org/mingw/$Msys2Env/$AssetName",
+    "https://mirror.umd.edu/msys2/mingw/$Msys2Env/$AssetName",
+    "https://mirror.accum.se/mirror/msys2.org/mingw/$Msys2Env/$AssetName"
   )
 }
 
@@ -95,32 +100,22 @@ function Ensure-OpenSsl {
     [Parameter(Mandatory = $true)][hashtable]$Toolchain
   )
 
+  # One OpenSSL version for both legs (OPENSSL_VERSION); the MSYS2 build, its
+  # release suffix and its sha256 are per arch: the ucrt64 package on x64, the
+  # clangarm64 package on arm64 (reprobuild-pm Distribution-And-Packaging.md
+  # §7.1, W4). Both are UCRT builds, matching the leg's C compiler.
   $version = $Toolchain["OPENSSL_VERSION"]
-  $release = $Toolchain["OPENSSL_MSYS2_RELEASE"]
-  $expectedSha = $Toolchain["OPENSSL_SHA256"]
-
-  foreach ($pair in @(
-    @{ name = "OPENSSL_VERSION"; value = $version },
-    @{ name = "OPENSSL_MSYS2_RELEASE"; value = $release },
-    @{ name = "OPENSSL_SHA256"; value = $expectedSha }
-  )) {
-    if ([string]::IsNullOrWhiteSpace($pair.value)) {
-      throw "ensure-openssl: $($pair.name) is missing from windows/toolchain-versions.env."
-    }
+  if ([string]::IsNullOrWhiteSpace($version)) {
+    throw "ensure-openssl: OPENSSL_VERSION is missing from windows/toolchain-versions.env."
   }
+  $release = Get-ToolchainArchPin -Toolchain $Toolchain -Arch $Arch `
+    -X64Key "OPENSSL_MSYS2_RELEASE" -Arm64Key "OPENSSL_WIN_ARM64_MSYS2_RELEASE" -Consumer "ensure-openssl"
+  $expectedSha = Get-ToolchainArchPin -Toolchain $Toolchain -Arch $Arch `
+    -X64Key "OPENSSL_SHA256" -Arm64Key "OPENSSL_WIN_ARM64_SHA256" -Consumer "ensure-openssl"
+  $names = Get-WindowsArchRuntimeNames -Arch $Arch
 
-  # MSYS2 publishes the ucrt64 tree for x86_64 only. Fail loudly rather than
-  # installing import libraries whose machine type the linker will reject with
-  # a far less obvious message than this one.
-  if ($Arch -ne "x64") {
-    throw ("ensure-openssl: MSYS2 publishes the ucrt64 OpenSSL package for " +
-           "x86_64 only, but this host resolved to '$Arch'. Build OpenSSL " +
-           "from source for ARM64, or set WINDOWS_DIY_ARCH_OVERRIDE=x64 when " +
-           "targeting an emulated x64 toolchain.")
-  }
-
-  $assetName = "mingw-w64-ucrt-x86_64-openssl-$version-$release-any.pkg.tar.zst"
-  $assetUrls = @(Get-OpenSslArchiveUrls -AssetName $assetName)
+  $assetName = "$($names.Msys2PackagePrefix)-openssl-$version-$release-any.pkg.tar.zst"
+  $assetUrls = @(Get-OpenSslArchiveUrls -AssetName $assetName -Msys2Env $names.Msys2Env)
 
   $installDir = Get-OpenSslInstallDir -Root $Root -Version $version
   $libDir = Join-Path $installDir "lib"
@@ -136,6 +131,8 @@ function Ensure-OpenSsl {
     openssl_msys2_release = $release
     openssl_archive_sha256 = $expectedSha.ToLowerInvariant()
   }
+  # x64's metadata is unchanged, so an existing x64 install stays valid.
+  if ($Arch -ne "x64") { $expectedMetadata.openssl_arch = $Arch }
 
   # Idempotence: marker file plus a metadata match, so a pin bump
   # re-provisions instead of being silently satisfied by the old install.
@@ -180,9 +177,9 @@ function Ensure-OpenSsl {
     # The package lays its payload out under the MSYS2 prefix it was built
     # for. Flatten that prefix away so the installed tree is a plain
     # lib/ + bin/ + include/ triple and callers never encode "ucrt64".
-    $prefixDir = Join-Path $staging "ucrt64"
+    $prefixDir = Join-Path $staging $names.Msys2Env
     if (-not (Test-Path -LiteralPath $prefixDir -PathType Container)) {
-      throw ("ensure-openssl: expected a 'ucrt64' prefix inside '$assetName' " +
+      throw ("ensure-openssl: expected a '$($names.Msys2Env)' prefix inside '$assetName' " +
              "but it is not there. The asset layout changed; re-check the pin.")
     }
 
@@ -208,13 +205,14 @@ function Ensure-OpenSsl {
     # The runtime DLLs are a separate failure mode from the import libraries:
     # without them every ssl binary links and then dies at startup with a
     # loader error naming libcrypto-3-x64.dll.
-    foreach ($dll in @("libssl-3-x64.dll", "libcrypto-3-x64.dll")) {
+    foreach ($dll in $names.OpenSslDlls) {
       $probe = Join-Path $binDir $dll
       if (-not (Test-Path -LiteralPath $probe -PathType Leaf)) {
         throw ("ensure-openssl: install completed but the runtime library " +
                "'$dll' is missing from '$binDir'. Every --define:ssl binary " +
                "would link and then fail to start.")
       }
+      Assert-PeMachine -Path $probe -Arch $Arch -Consumer "ensure-openssl"
     }
 
     Write-KeyValueFile -Path $installMetaFile -Values $expectedMetadata

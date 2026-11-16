@@ -1814,6 +1814,36 @@ const
                           "activator-boot-order-effective-unchecked",
                           # ... and the parse half.
                           "activator-boot-order-parse-unchecked",
+                          # ... and both, in the rule the two halves
+                          # share (service_floor.activatorBootOrderRefusal).
+                          "activator-boot-order-unchecked",
+                          # A9 review round 17: a revert or a rollback
+                          # re-points the engine units backwards.
+                          "repoint-backwards",
+                          # the dynamic engine is installed as the units'.
+                          "repoint-dynamic-engine",
+                          # systemd's d, w, M and y time units unread.
+                          "timespan-units-partial",
+                          # the boot-hold unit is wanted, not required.
+                          "boot-hold-wanted",
+                          # an ordering cycle through the boot-hold unit
+                          # passes the parse half / the effective half.
+                          "boot-hold-cycle-parse-unchecked",
+                          "boot-hold-cycle-effective-unchecked",
+                          # an empty After=/Before= resets the list.
+                          "deps-empty-resets",
+                          # a template's instances a revert stops are not
+                          # recorded.
+                          "revert-stopped-instances-unrecorded",
+                          # the record is cleared before step 7's starts.
+                          "revert-stopped-cleared-early",
+                          # uninstall stops the boot-hold unit, which stops
+                          # sysinit.target and everything requiring it.
+                          "uninstall-stops-boot-hold",
+                          # a boot revert to a generation with a
+                          # health-checked floored unit confirms inside the
+                          # re-assertion (and times out).
+                          "boot-confirm-revert-in-reassert",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",
