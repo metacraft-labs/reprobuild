@@ -1,6 +1,8 @@
-## The command line of the thin cargo edge, shared by `repro cargo run` and by
-## the standard provider's own helper entry (`--cargo-edge`), which a cargo
-## convention's action runs so that it needs no `repro` binary on its argv.
+## The command line of the thin cargo edge: the standard provider's own
+## helper entry (`--cargo-edge`), which a cargo convention's action runs so
+## that it needs no `repro` binary on its argv. `repro cargo run` takes the
+## same options from repro's own command-line description and calls
+## `runCargoEdgeCommand` with them.
 ##
 ##   run [-j N] [--products FILE] [--fragment FILE --action-id ID]
 ##       [--relative-to DIR] [--libs] -- cargo ARGS...
@@ -16,6 +18,28 @@ const
     "usage: repro cargo run [-j N] [--products FILE] " &
     "[--fragment FILE --action-id ID] [--relative-to DIR] [--libs] " &
     "-- cargo ARGS...\n"
+
+proc runCargoEdgeCommand*(options: CargoEdgeOptions; verb: string): int =
+  ## Run the edge with options already read from a command line: cargo's
+  ## exit status when it ran, 2 when no cargo command or a negative width
+  ## was given, 1 on any other failure. `verb` names the command in
+  ## messages.
+  if options.width < 0:
+    stderr.writeLine verb & ": -j takes a whole number"
+    return 2
+  if options.cargo.len == 0:
+    stderr.writeLine verb & ": no cargo command after `--`"
+    return 2
+  try:
+    let outcome = runCargoEdge(options)
+    if outcome.exitCode == 0:
+      stderr.writeLine verb & ": " & $outcome.products.len &
+        " final product(s) from " & $outcome.units & " unit(s), " &
+        $outcome.freshUnits & " fresh"
+    return outcome.exitCode
+  except CatchableError as err:
+    stderr.writeLine verb & ": " & err.msg
+    return 1
 
 proc runEdge*(args: seq[string]; verb = "repro cargo run"): int =
   var options = CargoEdgeOptions()
@@ -62,16 +86,7 @@ proc runEdge*(args: seq[string]; verb = "repro cargo run"): int =
     stderr.writeLine verb & ": no cargo command after `--`"
     stderr.write EdgeUsage
     return 2
-  try:
-    let outcome = runCargoEdge(options)
-    if outcome.exitCode == 0:
-      stderr.writeLine verb & ": " & $outcome.products.len &
-        " final product(s) from " & $outcome.units & " unit(s), " &
-        $outcome.freshUnits & " fresh"
-    return outcome.exitCode
-  except CatchableError as err:
-    stderr.writeLine verb & ": " & err.msg
-    return 1
+  runCargoEdgeCommand(options, verb)
 
 
 func edgeCommand*(helper, productsFile: string; cargo: openArray[string];

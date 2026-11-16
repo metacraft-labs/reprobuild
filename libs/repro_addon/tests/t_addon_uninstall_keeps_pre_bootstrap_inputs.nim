@@ -459,6 +459,8 @@ suite "only the add-on's own empty directories follow the ledger copy":
     writeFile(s.st / "system" / "late", "x")
     writeFile(s.token, $(%*{"schema": StateRemovalTokenSchema, "root": s.st,
       "ledgerCopy": s.lc, "chain": [s.st / "system", s.st],
+      "chainIdentity": {s.st / "system": stateDirIdentity(s.st / "system"),
+                        s.st: stateDirIdentity(s.st)},
       "preBootstrapRoots": newSeq[string]()}))
     var again: UninstallResult
     check finishEmptyStateRoot(again, s.st, s.lc, s.token)
@@ -755,9 +757,136 @@ suite "round 16":
     let sc = inputScene("tokentmp")
     let victim = sc.parent / "victim"
     writeFile(victim, "untouched\n")
-    createSymlink(victim, sc.token & ".tmp")
+    let tmpName = parentDir(sc.token) / ("." & extractFilename(sc.token) &
+                                         ".tmp-" & $getCurrentProcessId())
+    createSymlink(victim, tmpName)
     var r: UninstallResult
     removeWith(sc, r)
     check r.errors.len == 0
     check readFile(victim) == "untouched\n"
-    check not fileExists(sc.token) and not symlinkExists(sc.token & ".tmp")
+    check not fileExists(sc.token) and not symlinkExists(tmpName)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 17 (§13 decisions 165 and 166): the token binds the
+# install whose uninstall wrote it, and a corrupt record of a pre-bootstrap
+# input stops the uninstall before step 1. Falsifiers
+# ``token-not-bound-to-install`` and ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+suite "round 17":
+  test "a token whose directories are another install's is refused, nothing removed":
+    let s = v2Scene("rebound")
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token)
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    check r.errors.len == 1 and fileExists(s.token)
+    # A new install's state at the same path: another directory.
+    let saved = readFile(s.token)
+    removeDir(s.st)
+    createDir(s.st)
+    writeFile(s.token, saved)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of a pre-bootstrap input stops the uninstall, with its remedy":
+    let e = LedgerEntry(class: lcRoot, path: "/var/lib/repro/agent",
+      mode: "0700", owner: "0:0", replaced: "dir 0750 1000:1000",
+      collision: "adopt", observation: PriorCapturedBeforeTakeover)
+    let pb = preBootstrapInputs(Ledger(entries: @[e]))
+    var r: UninstallResult
+    check refuseCorruptInputs(r, pb, "/x/addon-ledger")
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check "restore it from the generation" in r.errors[1]
+    var fine: UninstallResult
+    check not refuseCorruptInputs(fine, preBootstrapInputs(Ledger()), "/x")
+
+# ---------------------------------------------------------------------------
+# A11 code review round 18 (§13 decisions 165, 166: the pre-bootstrap inputs
+# left in place): the token binds its
+# install by inode AND birth time, never the number alone (ext4 reuses
+# numbers), and fails closed where nothing but the number is known; a token
+# from an earlier build, with no identity, is refused with its remedy; a
+# corrupt record of an input stops the uninstall verb itself before the
+# store-evidence gate. The identities are faked (``identityOf``) so the
+# reuse of an inode number is certain, whatever this file system does.
+# Falsifiers ``token-binds-inode-only`` and
+# ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+proc failedRootRun(s: tuple[parent, st, lc, token: string];
+                   ids: IdentityOf): UninstallResult =
+  setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+  removeStateRoot(result, s.st, s.lc, tokenPath = s.token, identityOf = ids)
+  setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+
+suite "round 18":
+  test "a reused inode number with another birth time is another install's directory":
+    let s = v2Scene("reuse")
+    let r = failedRootRun(s, proc (p: string): string =
+      (if dirExists(p): "5@100.1" else: ""))
+    check r.errors.len == 1 and fileExists(s.token)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token,
+      identityOf = proc (p: string): string =
+        (if dirExists(p): "5@200.2" else: ""))
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check again.errors.len == 1 and "remove them and the token yourself" in again.errors[0]
+    check dirExists(s.st)
+
+  test "where nothing but the inode number is known, the re-run refuses":
+    let s = v2Scene("nobtime")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)
+
+  test "the same identity is finished":
+    let s = v2Scene("same")
+    let ids = proc (p: string): string = (if dirExists(p): "5@100.1" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 0 and not dirExists(s.st)
+
+  test "a token from an earlier build, with no identity, is refused with its remedy":
+    let s = v2Scene("oldtoken")
+    discard failedRootRun(s, stateDirIdentity)
+    let j = parseJson(readFile(s.token))
+    j.delete("chainIdentity")
+    removeFile(s.token)
+    writeFile(s.token, $j)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "earlier build" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of an input stops the uninstall verb, nothing written":
+    let base = getTempDir() / ("repro-uninstall-corrupt-" & $getCurrentProcessId())
+    removeDir(base)
+    let st = base / "var-lib-repro"
+    createDir(st / "system")
+    let lc = ledgerCopyPath(st / "system")
+    writeLedger(lc, Ledger(generation: "g0", entries: @[LedgerEntry(
+      class: lcRoot, path: st / "agent", mode: "0700", owner: "0:0",
+      replaced: "dir 0750 1000:1000", collision: "adopt",
+      observation: PriorCapturedBeforeTakeover)]))
+    let before = readFile(lc)
+    createDir(base / "log")
+    let r = runAddonUninstall(UninstallOptions(stateDir: st / "system",
+      stateRoot: st, logDir: base / "log",
+      discardUnacknowledgedStoreEvidence: true))
+    checkpoint $r.errors
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check readFile(lc) == before
+    var n = 0
+    for _ in walkDir(base / "log"): inc n
+    check n == 0
+    removeDir(base)
