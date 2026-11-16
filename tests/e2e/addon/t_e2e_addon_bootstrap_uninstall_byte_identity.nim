@@ -207,6 +207,19 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
   # §13 decision 178: bootstrap made the uninstall records' directory,
   # root's 0700, and verify checks it.
   let logDir = g.exec("stat -c '%U:%G %a %F' /var/log/repro-addon")
+  # §13 decision 178, amended (A11 round 20): bootstrap itself recorded
+  # that directory's identity, root's 0600, before any verify could record
+  # it at first use: <inode>@<birth seconds>.<nanoseconds>, so its prefix
+  # is stat's %i@%W.
+  let idOf = g.exec("stat -c '%i@%W' /var/log/repro-addon")
+  let idRec = g.exec("stat -c '%U:%G %a' /var/lib/repro/system/addon/records-dir.identity" &
+                     " && cat /var/lib/repro/system/addon/records-dir.identity")
+  let idLines = idRec.stdout.strip().splitLines()
+  step("round 3: bootstrap recorded the records directory's identity, root's 0600",
+       idOf.exitCode == 0 and idRec.exitCode == 0 and idLines.len == 2 and
+         idLines[0] == "root:root 600" and
+         idLines[1].startsWith(idOf.stdout.strip() & "."),
+       idOf.stdout & idOf.stderr & "\n" & idRec.stdout & idRec.stderr)
   let vf = g.exec(repro & " system addon verify")
   step("round 3: bootstrap made /var/log/repro-addon root's 0700, and verify checks it",
        logDir.exitCode == 0 and logDir.stdout.strip() == "root:root 700 directory" and

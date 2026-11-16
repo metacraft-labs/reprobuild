@@ -183,8 +183,37 @@ def _short_sentence(help_text: str) -> str:
     return cleaned.replace("|", "\\|")
 
 
+ROOT_BLOCK_OPENER = re.compile(r"^  result = unbound quote do:\s*$")
+
+
+def _root_command_block(all_lines: list[str]) -> list[str]:
+    """The lines of the root command list in cli_description.nim, and no others.
+
+    This parser reads the description by indentation: a top-level command is a
+    ``subcmd`` at four spaces. Helper procs that build nested subcommand trees
+    (the ``repro workspace`` verbs, for one) open their own ``quote do:`` at
+    the same four-space indent, so scanning the whole file would publish their
+    ``list``/``enable``/``add`` as top-level ``repro`` commands. Only the block
+    the root macro returns describes the top level; it runs from its
+    ``result = unbound quote do:`` to the first non-blank line indented less
+    than four spaces.
+    """
+    openers = [i for i, line in enumerate(all_lines) if ROOT_BLOCK_OPENER.match(line)]
+    if len(openers) != 1:
+        raise RuntimeError(
+            f"{CLI_DESC}: expected exactly one root command block "
+            f"(`result = unbound quote do:`), found {len(openers)}; "
+            "update ROOT_BLOCK_OPENER in scripts/render_user_docs_generated.py"
+        )
+    start = openers[0] + 1
+    end = start
+    while end < len(all_lines) and (not all_lines[end].strip() or all_lines[end].startswith("    ")):
+        end += 1
+    return all_lines[start:end]
+
+
 def parse_cli_commands() -> list[CliCommand]:
-    lines = CLI_DESC.read_text(encoding="utf-8").splitlines()
+    lines = _root_command_block(CLI_DESC.read_text(encoding="utf-8").splitlines())
     domain = "General"
     commands: list[CliCommand] = []
     i = 0

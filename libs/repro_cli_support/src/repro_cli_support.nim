@@ -28,6 +28,7 @@ from repro_core/target_object_check import objectCheckTripleFromVariants
 import repro_core/engine_build_info
 import repro_core
 import repro_cli_support/workspace_restore
+import repro_cli_support/force_push_records
 import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
@@ -49677,11 +49678,6 @@ proc forceSyncGuard(args: WorkspaceSyncArgs;
 # behaviour and is right for a detector: an unreadable advisory file must not
 # fail a sync. It is NOT right silently, so it now says so.
 
-const forcePushesRelPath = ".repro" / "workspace" / "force-pushes.json"
-
-proc forcePushesPath(workspaceRoot: string): string =
-  workspaceRoot / forcePushesRelPath
-
 proc migrateForcePushShape(node: JsonNode): JsonNode =
   ## Normalise whatever is on disk to the ARRAY-of-records shape.
   ##
@@ -49711,22 +49707,22 @@ proc migrateForcePushShape(node: JsonNode): JsonNode =
         "migrated_at": ""})
 
 proc loadForcePushedCommits(workspaceRoot: string): JsonNode =
-  ## The records on disk, as a JSON array (see `migrateForcePushShape`).
+  ## The records on disk, as a JSON array (see `migrateForcePushShape`). An
+  ## unparsable file is quarantined by `readForcePushesNode`, never replaced.
   let path = forcePushesPath(workspaceRoot)
-  if fileExists(path):
-    try:
-      return migrateForcePushShape(parseFile(path))
-    except CatchableError as err:
-      stderr.writeLine("workspace: could not read " & path & " (" & err.msg &
-        ") — proceeding as if no force-push was ever recorded. That file is " &
-        "the recovery record for a rewritten remote; fix or move it rather " &
-        "than letting the next write replace it.")
-  newJArray()
+  let node = readForcePushesNode(path)
+  # Valid JSON that is neither shape (a bare string, number, ...) would be
+  # normalised to `[]` and replaced by the next write: quarantine it too.
+  if not node.isNil and node.kind notin {JArray, JObject}:
+    discard quarantineForcePushes(path,
+      "expected a JSON array or object, found " & $node.kind)
+    return newJArray()
+  migrateForcePushShape(node)
 
 proc saveForcePushedCommits(workspaceRoot: string; node: JsonNode) =
-  let dir = workspaceRoot / ".repro" / "workspace"
-  createDir(dir)
-  writeFile(forcePushesPath(workspaceRoot),
+  ## Atomic (temp + fsync + rename). Callers hold `withForcePushesLock`
+  ## across their load-modify-save cycle.
+  writeForcePushesAtomic(forcePushesPath(workspaceRoot),
     pretty(node, indent = 2) & "\n")
 
 proc forcePushRecordKey(record: JsonNode): string =
@@ -50598,15 +50594,16 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     #    during a rename loses it at the one moment two migrations are in
     #    flight over the same checkout.
     block rekeyForcePushes:
-      let records = loadForcePushedCommits(workspaceRoot)
-      var rekeyedCount = rekeyForcePushRecords(records, prior.path, repo.path)
-      if prior.name != repo.name:
-        rekeyedCount += rekeyForcePushRecords(records, prior.name, repo.name)
-      if rekeyedCount > 0:
-        saveForcePushedCommits(workspaceRoot, records)
-        outcome.rekeyed.add($rekeyedCount &
-          " force-pushes.json record(s) re-keyed from '" & prior.path &
-          "' to '" & repo.path & "'")
+      withForcePushesLock(workspaceRoot):
+        let records = loadForcePushedCommits(workspaceRoot)
+        var rekeyedCount = rekeyForcePushRecords(records, prior.path, repo.path)
+        if prior.name != repo.name:
+          rekeyedCount += rekeyForcePushRecords(records, prior.name, repo.name)
+        if rekeyedCount > 0:
+          saveForcePushedCommits(workspaceRoot, records)
+          outcome.rekeyed.add($rekeyedCount &
+            " force-pushes.json record(s) re-keyed from '" & prior.path &
+            "' to '" & repo.path & "'")
 
     # 4. `.repro/develop-overrides.toml`. The general rule the list serves: a
     #    relocation re-keys every workspace-local record keyed by checkout
@@ -51092,8 +51089,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         $fetchActions.len & " repo(s)")
 
   # Detect force pushes after parallel fetch
-  var forcePushes = loadForcePushedCommits(args.workspaceRoot)
-  var forcePushesUpdated = false
+  # Detections are gathered first and filed under the file lock afterwards,
+  # so the lock is not held across git and a concurrent `sync` cannot lose
+  # this run's appends (or lose theirs).
+  var detectedForcePushes: seq[tuple[repoPath, revision, sha, newTip: string]]
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     if oldRemoteTips[repoIdx].len > 0:
@@ -51117,11 +51116,22 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
                 # the new tip and a timestamp as well, so a detection made
                 # today is as useful a recovery record as the hand-written
                 # migration entries beside it.
-                if recordForcePush(forcePushes, repo.path, repo.revision,
-                    sha, newTip):
-                  forcePushesUpdated = true
-  if forcePushesUpdated:
-    saveForcePushedCommits(args.workspaceRoot, forcePushes)
+                detectedForcePushes.add((repo.path, repo.revision, sha, newTip))
+  # The records are read under the lock too, so a torn file is quarantined by
+  # exactly one process, never raced. With nothing detected and no file there
+  # is nothing to protect, and a read-only sync must not create `.repro/`.
+  var forcePushes = newJArray()
+  if detectedForcePushes.len > 0 or
+      fileExists(forcePushesPath(args.workspaceRoot)):
+    withForcePushesLock(args.workspaceRoot):
+      forcePushes = loadForcePushedCommits(args.workspaceRoot)
+      var forcePushesUpdated = false
+      for d in detectedForcePushes:
+        if recordForcePush(forcePushes, d.repoPath, d.revision, d.sha,
+            d.newTip):
+          forcePushesUpdated = true
+      if forcePushesUpdated:
+        saveForcePushedCommits(args.workspaceRoot, forcePushes)
 
   # Step 3b: observe each repo (now with fresh remote-tracking refs). No
   # workspace-wide metadata is folded in: a repo's classification is a function

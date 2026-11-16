@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2874,
+    "nimTestBinaries": 2878,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 776,
+    "pureUnitTests": 777,
     "staticallyDetectedRuntimeCompilerFlowTests": 144,
-    "testEntries": 2921
+    "testEntries": 2925
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1641,9 +1641,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1587,
-      "platform/destructive": 186,
-      "pure unit": 776,
+      "integration": 1589,
+      "platform/destructive": 187,
+      "pure unit": 777,
       "unclassified": 349
     },
     "graphOwnedTestArtifacts": [
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2874,
+    "nimTestBinaryCount": 2878,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2921
+    "testEntryCount": 2925
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14042,6 +14042,24 @@
       "source": "libs/repro_cli_support/tests/t_f5_the_session_minted_record_merges_without_losing_rows.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_force_pushes_records_survive_a_torn_write",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_force_pushes_records_survive_a_torn_write.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42365,6 +42383,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_dsl_reference_snippets_compile_and_docs_build",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_dsl_reference_snippets_compile_and_docs_build.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_dss11_cross_process_contribution_reaches_the_instance",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -55752,6 +55788,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_workspace_sync_torn_force_pushes_record",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_workspace_sync_torn_force_pushes_record.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_workspace_vcs_clone_cacheable",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -56928,6 +56981,25 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_engine_built_actions_key_their_argv.nim",
       "sourceSuiteCount": 6,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_env_tables_keep_one_path_on_windows",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_env_tables_keep_one_path_on_windows.nim",
+      "sourceSuiteCount": 1,
       "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
