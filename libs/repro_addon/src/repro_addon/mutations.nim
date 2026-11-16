@@ -1240,10 +1240,10 @@
 ##                                            of a fresh open, not the one
 ##                                            prepareRecordsDir took (A11
 ##                                            round 21, decision 178)
-## ``identity-removed-before-ledger-copy``    uninstall removes the records
-##                                            directory's identity with the
-##                                            rest of the state, before the
-##                                            ledger copy (decision 178)
+## ``identity-removed-before-ledger-copy``    uninstall removes the identity
+##                                            of the records' directory with
+##                                            the rest of the state, before
+##                                            the ledger copy (decision 178)
 ## ``state-gone-from-addon-dir-alone``        the records directory counts as
 ##                                            bound to a removed state when
 ##                                            the identity's directory is gone,

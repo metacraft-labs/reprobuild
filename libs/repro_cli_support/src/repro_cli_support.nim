@@ -11398,75 +11398,54 @@ var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## have changed in between.
 
 proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
-  ## Provisioning-Contributions.md §Lookup:
-  ## Before compiling a recipe whose committed repro.lock pins reprobuild-packages,
-  ## the build engine materializes that revision under
-  ## .repro/cross-repo-producers/reprobuild-packages/<rev> (or verifies it is
-  ## already present) unless $REPROBUILD_PACKAGES_ROOT or a develop sibling
-  ## takes precedence.
+  ## Provisioning-Contributions.md §Lookup: before compiling a recipe whose
+  ## committed repro.lock pins reprobuild-packages, the build engine
+  ## materializes that revision under
+  ## ``<lockDir>/.repro/cross-repo-producers/reprobuild-packages/<rev>`` (or
+  ## verifies it is already present), unless $REPROBUILD_PACKAGES_ROOT is set
+  ## or a checkout is selected in the pin's place.
+  ##
+  ## Which catalog the recipe builds against is `selectExternalCatalog`'s
+  ## answer, the one the compile's own lookup and the extraction identity
+  ## (`catalogSelectionIdentity`) use, so the three cannot disagree. Only a
+  ## develop override, the workspace's own declared checkout or a checkout at
+  ## the pinned commit stand in for the pin; any other `reprobuild-packages`
+  ## beside the recipe or an ancestor is ignored and the pin is materialized.
   ## Returns the checkout root of the materialized catalog, or "" if skipped.
   if getEnv(ReprobuildPackagesRootEnv).len > 0:
     return ""
 
-  let startDir =
-    # Recipe-relative helpers deliberately receive a bare module filename.
-    # Resolve the lookup anchor against their cwd before walking ancestors;
-    # keep the compiler's location-independent argv unchanged.
-    if modulePath.len > 0: absolutePath(modulePath).parentDir
-    elif consumerRoot.len > 0: absolutePath(consumerRoot)
-    else: getCurrentDir()
-
-  # Develop-mode sibling beside consumer or any ancestor
-  var dir = startDir
-  for _ in 0 ..< 16:
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    let sibling = parent / ReprobuildPackagesRepositoryName
-    if dirExists(sibling):
-      # Develop-mode sibling takes precedence
-      return ""
-    dir = parent
-
-  # Inside a recipe compile edge the launcher has already prepared the pin
-  # and declared it (`LockedCatalogEnv`); reading the lock here would make the
-  # whole lock an input of the edge.
-  if modulePath.len > 0:
-    var declared: tuple[consumerRoot, revision: string]
-    if declaredLockedCatalog(absolutePath(modulePath), declared):
-      if declared.revision.len == 0:
-        return ""
-      let prepared = declared.consumerRoot / ".repro" / "cross-repo-producers" /
-        ReprobuildPackagesRepositoryName / declared.revision
-      if dirExists(extendedPath(prepared)):
-        return prepared
-      # Not materialized (a launcher that did not prepare it): fetch it the
-      # usual way below, which reads the lock for the pin's coordinates.
-
-  # Find enclosing repro.lock
-  var lockDir = ""
-  var lockFile = ""
-  dir = startDir
-  for _ in 0 ..< 16:
-    let candidate = dir / CommittedLockFileName
-    if fileExists(candidate):
-      lockDir = dir
-      lockFile = candidate
-      break
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-
-  if lockFile.len == 0:
+  # The file the selection walks from. Recipe-relative helpers deliberately
+  # receive a bare module filename: resolve it against their cwd before
+  # walking ancestors, keeping the compiler's location-independent argv
+  # unchanged. With no module, a file IN the consumer root (or the cwd), so
+  # the walk starts at that directory.
+  let anchor =
+    if modulePath.len > 0: absolutePath(modulePath)
+    elif consumerRoot.len > 0: absolutePath(consumerRoot) / CommittedLockFileName
+    else: getCurrentDir() / CommittedLockFileName
+  let selection = selectExternalCatalog(anchor)
+  if selection.kind != eckLockPinned:
     return ""
 
+  # Inside a recipe compile edge the launcher has already prepared the pin
+  # and declared it (`LockedCatalogEnv`, which the selection honoured);
+  # reading the lock here would make the whole lock an input of the edge.
+  var declared: tuple[consumerRoot, revision: string]
+  if declaredLockedCatalog(anchor, declared) and
+      declared.revision == selection.revision and
+      dirExists(extendedPath(selection.root)):
+    return selection.root
+  # Not materialized (or a launcher that did not prepare it): fetch it from
+  # the lock that pins it, which holds the pin's coordinates.
   try:
-    let content = readFile(lockFile)
+    let content = readFile(selection.lockDir / CommittedLockFileName)
     let ld = parseLockedDependencies(content)
     for dep in ld.deps:
-      if dep.name == ReprobuildPackagesRepositoryName and dep.coordinates.kind == ckVcs:
-        return fetchLockPinnedProducer(dep, lockDir)
+      if dep.name == ReprobuildPackagesRepositoryName and
+          not isSelfLockedDep(dep) and dep.coordinates.kind == ckVcs and
+          dep.coordinates.revision == selection.revision:
+        return fetchLockPinnedProducer(dep, selection.lockDir)
   except CatchableError as err:
     if err of OSError or err of IOError:
       raise
@@ -20514,6 +20493,11 @@ type
     workspaceRoot: string  ## M17: explicit --workspace-root override.
     json: bool             ## M17: emit JSON to stdout in addition to the report file.
     report: ReportSpec     ## Opt-in ``--write-report[=PATH]`` artifact.
+    reAnchor: bool         ## ``--re-anchor``: ``ensure --vcs`` may replace a
+                           ## managed body demanding a contract token this
+                           ## build does not generate (CLI/hooks.md
+                           ## §"Re-anchoring is explicit"). Never passed by a
+                           ## generated or shell-entry caller.
 
   NativeShellActivationRequest = object
     cwd: string
@@ -20890,7 +20874,14 @@ proc direnvManagedBlockContent(): string =
   result.add("    unset " & guard & "\n")
   result.add("    return 1\n")
   result.add("  fi\n")
-  result.add("  \"$repro_cmd\" hooks ensure --vcs \"$PWD\" >/dev/null 2>&1 || true\n")
+  # No `hooks ensure --vcs` here (CLI/hooks.md §"Direnv Integration",
+  # amended 2026-11-16). An earlier block ran it on every directory entry with
+  # its output discarded and its status swallowed, from whichever `repro` this
+  # shell resolved -- so the one command whose refusals report a hook-contract
+  # mismatch ran where nobody could read them. VCS hooks are installed and
+  # repaired by an explicit `repro hooks ensure --vcs`, by `repro health
+  # --fix`, and by the managed hooks' own self-heal. A block an older build
+  # wrote is replaced by this one on the next `hooks ensure --shell-direnv`.
   result.add("  local repro_status=0\n")
   result.add("  if [ -n \"${REPRO_DIRENV_STATS:-}\" ]; then\n")
   result.add("    eval \"$(\"$repro_cmd\" __repro-direnv-activate \"$PWD\" --dev-env-stats \"$REPRO_DIRENV_STATS\")\" || repro_status=$?\n")
@@ -22146,6 +22137,19 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
         PreCommitDisplacedArg & "=$RUNNING_AS_LEGACY) || exit $?; fi\n")
   result.add("exit 0\n")
 
+const
+  ManagedHookInstallingBuildAssignment* = "REPRO_INSTALLING_BUILD="
+    ## The column-zero assignment a generated managed-hook body bakes the
+    ## installing build's path into (CLI/hooks.md §"Per-install resolution").
+    ## ``managedHookInstallingBuild`` reads it back by prefix match on a whole
+    ## line, which finds the baked value and never the indented lines that
+    ## merely READ the variable. Bodies written before 2026-11-16 carry no such
+    ## line; they resolve ``$REPROBUILD_REPRO`` then ``PATH``, and every reader
+    ## treats a missing line as "no installing build" for exactly that reason.
+  ManagedHookInstallingBuildSource* = "installing-build"
+    ## ``REPRO_CMD_SOURCE`` (and the refusal record's ``resolvedFrom``) when the
+    ## body resolved the build that installed it.
+
 const ManagedHookRefusalRecordSchemaId* =
   "reprobuild.managed-hook.contract-refusal.v1"
   ## Schema of the record a managed hook files when it refuses to dispatch
@@ -22217,6 +22221,21 @@ type
       ## Absolute path of the ``repro`` that GENERATED the body, baked in so
       ## the refusal can hand the operator a command instead of the shape of
       ## one.
+    installingBuild: string
+      ## The interpreter the body resolves BEFORE ``PATH`` (CLI/hooks.md
+      ## §"Per-install resolution"): the installing build's path, or "" when
+      ## the image that generated the body is not the ``repro`` CLI.
+      ##
+      ## Usually the same path as ``authorBin``, and kept separate for the one
+      ## case where it must not be: an embedded caller -- a test binary that
+      ## links the engine and runs ``hooks ensure`` in process. Its image does
+      ## not implement ``hooks protocol`` / ``hooks dispatch``; a hook that
+      ## resolved it would re-execute the test binary, which ignores the verb
+      ## and runs its own suite again (the unbounded self-exec chain
+      ## ``spawnableWithInternalVerb`` exists to prevent). The escape hatch
+      ## only ECHOES ``authorBin``, so it may name such an image; resolution
+      ## EXECUTES ``installingBuild``, so it may not. See
+      ## ``thisBuildInstallingPath``.
     refusalRecordDir: string
       ## PG-15 — the directory a contract refusal may file its record in, or
       ## "" when it may file one NOWHERE.
@@ -22281,6 +22300,17 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     quoteShellPosix(site.refusalRecordDir) & "\n")
   result.add("REPRO_REFUSAL_RECORD_NAME=" &
     quoteShellPosix(managedHookRefusalRecordName(hookName)) & "\n")
+  # Per-install resolution (CLI/hooks.md §"Per-install resolution"): the
+  # build that installed this body, tried before PATH, so which build services
+  # a hook is a property of the install rather than of whichever shell runs
+  # `git`. Same pattern as pre-commit's generated shim and its baked
+  # `INSTALL_PYTHON`. Written at column zero as a plain assignment so
+  # `managedHookInstallingBuild` can read it back out of an installed body, and
+  # always written -- as '' when there is no installing build -- so the line
+  # is part of every body's shape and the contract digest (rendered with an
+  # empty site) is the same for every install of one build.
+  result.add(ManagedHookInstallingBuildAssignment &
+    quoteShellPosix(site.installingBuild) & "\n")
   result.add("REPROBUILD_CAPTURED_INTERNAL_CONTEXT=${" &
     InternalHookContextEnv & ":-}\n")
   result.add("unset " & InternalHookContextEnv & "\n")
@@ -22310,7 +22340,11 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # The hook records HOW it resolved its interpreter, not just which one. The
   # PATH fallback is the silent step that let an outdated install speak for
   # hooks a newer build generated, so every diagnostic below names both the
-  # binary and the source it came from.
+  # binary and the source it came from. The order is CLI/hooks.md
+  # §"Per-install resolution": an explicit `$REPROBUILD_REPRO` (set but not
+  # executable fails, it never falls through), then the build that installed
+  # this body while it is still executable, then PATH. Every in-process mirror
+  # (`resolveManagedHookInterpreter`) resolves the same three steps.
   result.add("REPRO_CMD=\n")
   result.add("REPRO_CMD_SOURCE=\n")
   # Declared up front, not where they are first assigned: the body runs under
@@ -22327,6 +22361,12 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("      return 0\n")
   result.add("    fi\n")
   result.add("    return 1\n")
+  result.add("  fi\n")
+  result.add("  if [ -n \"$REPRO_INSTALLING_BUILD\" ] && " &
+    "[ -x \"$REPRO_INSTALLING_BUILD\" ]; then\n")
+  result.add("    REPRO_CMD=$REPRO_INSTALLING_BUILD\n")
+  result.add("    REPRO_CMD_SOURCE=" & ManagedHookInstallingBuildSource & "\n")
+  result.add("    return 0\n")
   result.add("  fi\n")
   result.add("  if command -v repro >/dev/null 2>&1; then\n")
   result.add("    REPRO_CMD=$(command -v repro)\n")
@@ -22556,7 +22596,7 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("    echo \"repro hooks:      re-anchor this repository to it " &
     "and retry:\" >&2\n")
   result.add("    echo \"repro hooks:      $REPRO_CMD hooks ensure --vcs " &
-    "$REPO_ROOT\" >&2\n")
+    "--re-anchor $REPO_ROOT\" >&2\n")
   result.add("  else\n")
   result.add("    echo \"repro hooks: That build predates this handshake, " &
     "so it cannot service this\" >&2\n")
@@ -23046,6 +23086,24 @@ proc managedHookRefusalRecordDirAdvertised*(body: string): string =
         line[ManagedHookRefusalDirAssignment.len .. ^1])
   ""
 
+proc managedHookInstallingBuild*(body: string): string =
+  ## The installing build an installed managed hook resolves before ``PATH``
+  ## (CLI/hooks.md §"Per-install resolution"), or "" when it names none.
+  ##
+  ## "" covers every generation written before 2026-11-16 (no
+  ## ``REPRO_INSTALLING_BUILD=`` line at all: such a body resolves
+  ## ``$REPROBUILD_REPRO`` then ``PATH``) and a body whose generator was not the
+  ## ``repro`` CLI (the line is there and empty). Both resolve the same way, so
+  ## a caller mirroring the body's resolution does not need to tell them apart.
+  ## Kept distinct from ``managedHookAuthorBin``: that one reads the escape
+  ## hatch, which every generation since 2026-08-27 carries, and names the
+  ## writer for a diagnostic; this one names what the body will EXECUTE.
+  for line in body.splitLines():
+    if line.startsWith(ManagedHookInstallingBuildAssignment):
+      return unquoteShellPosixWord(
+        line[ManagedHookInstallingBuildAssignment.len .. ^1])
+  ""
+
 proc managedHookBodyContractDemand*(body: string): string =
   ## The contract token an installed managed-hook BODY demands, or ``""`` when
   ## it demands none.
@@ -23335,9 +23393,9 @@ proc probeHookContractServicing*(reproPath, contract: string):
   ## This runs a binary this process did not build — deliberately, and it is
   ## the only way the question has an answer: the installed bodies will execute
   ## that binary, not this one. A build that is the SAME FILE as this process
-  ## is answered in process instead, which keeps the ambient command the
-  ## generated ``.envrc`` runs on every directory entry from paying for a
-  ## subprocess it cannot benefit from.
+  ## is answered in process instead, which keeps an ambient ``hooks ensure``
+  ## (a dev shell's entry hook) from paying for a subprocess it cannot benefit
+  ## from.
   if reproPath.len == 0:
     return (hcsUnresolved, -1)
   var isSelf = false
@@ -23377,11 +23435,35 @@ proc executableFile(path: string): bool =
   else:
     result = true
 
-proc resolveManagedHookInterpreter*(repoRoot: string):
+proc thisBuildInstallingPath*(): string =
+  ## The installing-build path THIS build bakes into the bodies it writes
+  ## (``ManagedHookSite.installingBuild``), and therefore step 2 of the
+  ## resolution for any body it is about to write.
+  ##
+  ## ``publicCliImagePath()`` -- the path that re-enters this engine, the same
+  ## one the escape hatch names -- but only when that image IS the ``repro``
+  ## CLI. An embedded caller (a test binary linking the engine) gets "": a hook
+  ## that executed it would re-run the test binary with a verb it does not
+  ## implement (see ``ManagedHookSite.installingBuild``).
+  let path =
+    try: publicCliImagePath()
+    except CatchableError: ""
+  if path.len == 0 or not spawnableWithInternalVerb(path):
+    return ""
+  path
+
+proc resolveManagedHookInterpreter*(repoRoot, installingBuild: string):
     tuple[path, source: string] =
   ## ``find_repro_cmd`` from the generated body, evaluated in this process:
-  ## ``$REPROBUILD_REPRO`` if it is executable, else the first ``repro`` on
-  ## PATH, else nothing.
+  ## ``$REPROBUILD_REPRO`` if it is set (not executable: nothing, never a
+  ## fall-through), else ``installingBuild`` if it is executable, else the
+  ## first ``repro`` on PATH, else nothing.
+  ##
+  ## ``installingBuild`` is step 2 of CLI/hooks.md §"Per-install resolution"
+  ## and is taken from the body the caller is asking about: for an installed
+  ## body, ``managedHookInstallingBuild(body)`` ("" for every generation that
+  ## predates the step, which then resolves exactly as it always did); for a
+  ## body this build is about to write, ``thisBuildInstallingPath()``.
   ##
   ## It must stay byte-for-byte equivalent to the shell version. The silent
   ## PATH fallback is the whole mechanism by which governance became
@@ -23399,6 +23481,8 @@ proc resolveManagedHookInterpreter*(repoRoot: string):
       return (candidate, "REPROBUILD_REPRO")
     return ("", "REPROBUILD_REPRO (set to '" & configured &
       "', which is not executable)")
+  if installingBuild.len > 0 and executableFile(installingBuild):
+    return (installingBuild, ManagedHookInstallingBuildSource)
   # AMBIENT ON PURPOSE: ``command -v repro`` is what the hook does.
   let onPath = uncontrolledFindExe("repro")
   if onPath.len > 0:
@@ -23424,9 +23508,9 @@ type
     ## guard's question ("does the build that will RUN these hooks service the
     ## body I am about to write?") has at most a handful of distinct answers on
     ## one machine. Resolving the interpreter once and caching per contract
-    ## token keeps the generated ``.envrc``'s ambient
-    ## ``hooks ensure --vcs "$PWD"`` from paying for 860 subprocesses — and
-    ## keeps the guard from being the reason somebody turns it off.
+    ## token keeps an ambient ``hooks ensure --vcs`` (a dev shell's entry
+    ## hook) from paying for 860 subprocesses — and keeps the guard from being
+    ## the reason somebody turns it off.
     ##
     ## A guard is explicitly NOT long-lived: the resolution it caches is a
     ## property of the process environment, which is the thing that differs
@@ -23454,7 +23538,9 @@ proc interpreter*(guard: HookWriteGuard; repoRoot: string):
   ## The ``repro`` a hook installed into ``repoRoot`` would resolve, resolved
   ## at most once per guard.
   if not guard.resolved:
-    let r = resolveManagedHookInterpreter(repoRoot)
+    # The guard is asked about the bodies THIS build writes, so step 2 is this
+    # build (CLI/hooks.md §"Per-install resolution").
+    let r = resolveManagedHookInterpreter(repoRoot, thisBuildInstallingPath())
     guard.interpreterPath = r.path
     guard.interpreterSource = r.source
     guard.resolved = true
@@ -23502,14 +23588,17 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
                            guard: HookWriteGuard = nil): string =
   ## The canonical managed-hook body for ``repoRoot``, carrying the contract
   ## token of THIS build. Drift detection compares the on-disk file to this
-  ## exact string, so a hook installed by a build with a different body is
-  ## rewritten by the next ``repro hooks ensure --vcs``.
+  ## exact string. A hook whose body demands this same token but differs
+  ## elsewhere (its site) is refreshed by the next ``repro hooks ensure
+  ## --vcs``; one demanding a token this build does NOT generate is replaced
+  ## only under ``--re-anchor`` (CLI/hooks.md §"Re-anchoring is explicit").
   ##
-  ## This build's own path goes in beside the token so the refusal can name a
-  ## runnable escape hatch. It is part of the canonical content, so a hook
-  ## written by a binary at a different path counts as drift and is
-  ## re-anchored on the next ``ensure`` — which is what keeps the escape hatch
-  ## pointing at a binary that still exists.
+  ## This build's own path goes in beside the token, twice: as the escape
+  ## hatch the refusal can print, and as the installing build the body
+  ## resolves before ``PATH`` (§"Per-install resolution"). Both are part of
+  ## the canonical content, so a hook written by the same build at a
+  ## different path counts as drift and is refreshed on the next ``ensure``
+  ## -- which is what keeps both pointing at a binary that still exists.
   ##
   ## ``repoRoot`` is what makes the refusal-record destination (PG-15) a
   ## property of the INSTALL rather than of the generator: the same build
@@ -23519,6 +23608,7 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
   vcsManagedHookBody(hookName, managedHookContract(hookName),
     ManagedHookSite(
       authorBin: publicCliImagePath(),
+      installingBuild: thisBuildInstallingPath(),
       refusalRecordDir: guard.refusalRecordDir(repoRoot)))
 
 type
@@ -23546,6 +23636,22 @@ type
       ## fixing it". A build that cannot know it is doing this (it predates the
       ## flag) cannot report it; this build can, and that is the asymmetry
       ## PG-14 deliverable 2 names.
+    vheoRefusedForeignContract
+      ## The managed body demands a contract token this build does not
+      ## generate, and ``--re-anchor`` was not given, so the hook -- body AND
+      ## dispatcher -- was left byte-for-byte as it was (CLI/hooks.md
+      ## §"Re-anchoring is explicit").
+      ##
+      ## A body demanding a foreign token was written by a DIFFERENT build, and
+      ## a different build is not known to be an older one. Before this
+      ## outcome existed ``ensure`` rewrote such a body silently whenever the
+      ## interpreter it resolved was itself (the usual ambient case), so the
+      ## shell entry of a stale dev shell re-authored current hooks with an
+      ## older body and deleted the refusal that would have reported it --
+      ## reprobuild-pm issue
+      ## 2026-11-12-ambient-hooks-ensure-is-declared-safe-even-though-it-is-the-documented-self-concealing.md.
+      ## Not a success: the command exits non-zero once it has visited every
+      ## other hook and repository.
     vheoReclaimedShadowed
       ## The dispatcher had been overwritten at the canonical path by a
       ## foreign installer re-running over an ALREADY-chained copy of
@@ -23695,10 +23801,11 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
   ##
   ## Everything about its shape is a consequence of §1.6b: it names BOTH builds
   ## (writer and runner) by PATH and STORE PATH, says how each was resolved,
-  ## and never offers ``hooks ensure`` as the remedy — that is the command the
-  ## hook body's own text warns against, the command running ambiently from the
-  ## generated ``.envrc`` on every directory entry, and the command whose
-  ## effect is to delete the diagnostic rather than the defect.
+  ## and leads with reconciling what supplies ``repro``. The re-anchoring it
+  ## offers last is ``--re-anchor`` from one binary pointed at by both, never a
+  ## plain ``hooks ensure``: since 2026-11-16 a plain one refuses a
+  ## foreign-contract body instead (``vheoRefusedForeignContract``), so this
+  ## refusal is only reachable under ``--re-anchor``.
   # `publicCliImagePath`, not `getAppFilename()`: the identity runs
   # `<path> --version`, and under the portable Linux launcher the raw image is
   # the glibc loader, which would answer with ITS version.
@@ -23732,7 +23839,47 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
     "  To install from the build that will run them, point both at one " &
       "binary:\n" &
     "    REPROBUILD_REPRO=" & interpreterPath & " " & interpreterPath &
-      " hooks ensure --vcs " & repoRoot)
+      " hooks ensure --vcs --re-anchor " & repoRoot)
+
+proc foreignContractRefusalLines*(repoLabel, repoPath, hookName,
+    managedPath: string): seq[string] =
+  ## What ``ensure`` says about a hook it left untouched as
+  ## ``refused-foreign-contract`` (CLI/hooks.md §"Re-anchoring is explicit"):
+  ## the token the installed body demands, the token this build generates,
+  ## this build by path and store path, the build that wrote the installed
+  ## body, and the remedy -- reconcile what supplies ``repro`` first, and only
+  ## then re-anchor with this build.
+  ##
+  ## Read back from the file rather than threaded out of
+  ## ``ensureVcsHookDetailed``: the refusal promises the file was not touched,
+  ## so what is on disk now is what the refusal was about.
+  var body = ""
+  try:
+    body = readFile(extendedPath(managedPath))
+  except CatchableError:
+    discard
+  let installed = managedHookBodyContractDemand(body)
+  let mine = managedHookContract(hookName)
+  let self =
+    try: publicCliImagePath() except CatchableError: "repro"
+  let author = managedHookAuthorBin(body)
+  result.add("repro hooks: " & repoLabel & "/" & hookName &
+    ": refused-foreign-contract: left untouched (body and dispatcher). The " &
+    "installed body demands a contract this build does not generate, so a " &
+    "different build wrote it, and a different build is not known to be an " &
+    "older one.")
+  result.add("repro hooks:   installed body demands: " & installed)
+  result.add("repro hooks:   this build generates:   " & mine)
+  result.add("repro hooks:   this build:             " &
+    describeReproBuild(reproBuildIdentity(self)))
+  result.add("repro hooks:   installed body written by: " &
+    (if author.len > 0: describeReproBuild(reproBuildIdentity(author))
+     else: "<not recorded in the body>"))
+  result.add("repro hooks:   remedy: reconcile what supplies 'repro' first " &
+    "(direnv reload, or a new shell; then the reprobuild pin). Only if THIS " &
+    "build is the one this repository should run, re-anchor it:")
+  result.add("repro hooks:     " & self & " hooks ensure --vcs --re-anchor " &
+    repoPath)
 
 type
   CertificateGatePlan* = object
@@ -23760,7 +23907,8 @@ proc removeStaleManagedLocalHook(hooksDir, hookName: string): bool =
 
 proc ensureVcsHookDetailed(hooksDir, hookName: string;
                            guard: HookWriteGuard = nil;
-                           repoRoot = ""): VcsHookEnsureOutcome =
+                           repoRoot = "";
+                           reAnchor = false): VcsHookEnsureOutcome =
   ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
   ## structured outcome so callers can surface per-repo per-hook status
   ## in the JSON report and the human-readable summary line.
@@ -23771,15 +23919,38 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   ## (``certificateGatePlan``).
   ##
   ## Outcome priority (the higher-impact change wins when several apply):
-  ##   reclaimed-shadowed  >  chained-user-hook  >  rewrote-contractless-body
-  ##   >  refreshed-drifted  >  installed  >  already-up-to-date
+  ##   refused-foreign-contract (nothing written)  >  reclaimed-shadowed  >
+  ##   chained-user-hook  >  rewrote-contractless-body  >  refreshed-drifted
+  ##   >  installed  >  already-up-to-date
+  ##
+  ## ``reAnchor`` is ``--re-anchor``: without it a managed body that demands a
+  ## contract token this build does not generate is never replaced
+  ## (``vheoRefusedForeignContract``); with it the replacement proceeds,
+  ## still subject to the writer-versus-runner guard (3) below.
   ##
   ## ``guard`` memoises the PG-14 contract probe across the repos of one
   ## ``ensure`` run; pass ``nil`` and one is created for this call alone.
-  createDir(extendedPath(hooksDir))
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
   let managed = managedHookPath(hooksDir, hookName)
+
+  # ---- Re-anchoring is explicit (CLI/hooks.md) ------------------------------
+  # Asked FIRST, before a single byte of this hook is touched -- the stale
+  # `.repro-local` cleanup, the chaining of a foreign dispatcher and the
+  # `.legacy` sanitising below all included -- because the outcome promises
+  # the hook was left exactly as it was. A body demanding a token this build
+  # does not generate was written by another build; whether that build is
+  # older or newer is not knowable from here, and the guard below (3) cannot
+  # see the dangerous case when the interpreter it resolves is this build.
+  # A missing body is still installed, and a body with NO contract line is
+  # still rewritten (step (4)): neither can hide a mismatch.
+  if not reAnchor and fileExists(extendedPath(managed)) and
+      isReprobuildVcsHook(managed, hookName):
+    let demanded = managedHookBodyContractDemand(
+      readFile(extendedPath(managed)))
+    if demanded.len > 0 and demanded != managedHookContract(hookName):
+      return vheoRefusedForeignContract
+  createDir(extendedPath(hooksDir))
 
   var chainedUser = false
   var reclaimedShadowed = false
@@ -23914,14 +24085,18 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
       "' and the body this build writes demands none. Writing it would " &
       "delete the only line that reports a mismatch.")
 
-  # (3) WRITER vs RUNNER. Two builds that both speak the handshake may still
-  #     generate different bodies, and ``ensure`` re-anchoring a repository to
-  #     the build the operator ran is the NORMAL upgrade — it must stay
-  #     allowed. What must not happen is the strictly destructive case: the
-  #     interpreter the hooks will actually resolve services what is installed
-  #     and does NOT service what we would write. Then the rewrite converts a
+  # (3) WRITER vs RUNNER. Reached only under ``--re-anchor`` (without it a
+  #     foreign-contract body returned ``vheoRefusedForeignContract`` above),
+  #     where replacing a body another build wrote is what the operator asked
+  #     for. What must still not happen is the strictly destructive case: the
+  #     interpreter the NEW body will resolve services what is installed and
+  #     does NOT service what we would write. Then the rewrite converts a
   #     working pairing into a broken one, and nothing afterwards reports it
-  #     (§1.6c measures `health` scoring exactly that state ``ok``).
+  #     (§1.6c measures `health` scoring exactly that state ``ok``). That
+  #     interpreter is ``$REPROBUILD_REPRO`` when set, else this build (the
+  #     installing build the new body bakes), so in practice this fires when
+  #     the operator points ``REPROBUILD_REPRO`` at a different build than the
+  #     one doing the writing.
   #
   #     Deliberately NOT a version comparison: on this host three 0.1.3 builds
   #     disagree about the flag. Deliberately NOT fired on an unresolved
@@ -24118,6 +24293,13 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
       of vheoReclaimedShadowed:
         result.add("repro hooks: repaired " & hookName & " in " & top &
           " (reclaimed-shadowed)")
+      of vheoRefusedForeignContract:
+        # The self-heal follows plain `ensure`'s rule: it repairs and
+        # installs, it never re-anchors. Said on every fire, because the
+        # mismatch it describes is live until somebody reconciles it.
+        for line in foreignContractRefusalLines(lastPathPart(top), top,
+            hookName, managedHookPath(hooksDir, hookName)):
+          result.add(line)
     except CatchableError as err:
       result.add("repro hooks: could NOT repair " & hookName & " in " & top &
         ": " & err.msg)
@@ -24127,7 +24309,8 @@ type
     ## One per (repo, hookName) pair in the M17 JSON report. ``outcome``
     ## is the ``vcsHookOutcomeTag`` of the ``vheo*`` outcome (``installed`` /
     ## ``already-up-to-date`` / ``chained-user-hook`` / ``refreshed-drifted``
-    ## / ``rewrote-contractless-body`` / ``reclaimed-shadowed``);
+    ## / ``rewrote-contractless-body`` / ``reclaimed-shadowed`` /
+    ## ``refused-foreign-contract``);
     ## ``hookPath`` and ``managedPath`` are the absolute paths the installer
     ## touched (or would touch).
     repo*: string
@@ -24136,6 +24319,13 @@ type
     outcome*: string
     hookPath*: string
     managedPath*: string
+    # Filled only for ``refused-foreign-contract`` (CLI/hooks.md
+    # §"Re-anchoring is explicit"), and emitted in the JSON only then.
+    installedContract*: string  ## the token the untouched body demands
+    buildContract*: string      ## the token this build generates
+    build*: string              ## this build, ``describeReproBuild``
+    installedAuthor*: string    ## the build the installed body names
+    remedy*: string             ## the re-anchoring command, offered last
 
   RepoHookWiring* = object
     ## What `ensureRepoVcsHooks` did to one repo. Deliberately not a
@@ -24147,6 +24337,9 @@ type
                                     ## not be made worktree-safe, which leaves
                                     ## the repo's worktrees ungated.
     skippedUnmaterialized*: bool    ## no git checkout at that path yet.
+    refusedForeignContract*: bool   ## at least one hook was left untouched
+                                    ## as ``refused-foreign-contract``; the
+                                    ## invocation must exit non-zero.
     entries*: seq[VcsHookEntry]
 
   HooksEnsureReport* = object
@@ -24168,6 +24361,11 @@ proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
   of vheoRefreshedDrifted: "refreshed-drifted"
   of vheoRewroteContractlessBody: "rewrote-contractless-body"
   of vheoReclaimedShadowed: "reclaimed-shadowed"
+  of vheoRefusedForeignContract: "refused-foreign-contract"
+
+const VcsHookRefusedForeignContractTag* = "refused-foreign-contract"
+  ## ``vcsHookOutcomeTag(vheoRefusedForeignContract)``, named for the callers
+  ## that test an entry's ``outcome`` string.
 
 proc toJsonNode*(report: HooksEnsureReport): JsonNode =
   result = newJObject()
@@ -24187,6 +24385,12 @@ proc toJsonNode*(report: HooksEnsureReport): JsonNode =
     obj["outcome"] = %e.outcome
     obj["hookPath"] = %e.hookPath
     obj["managedPath"] = %e.managedPath
+    if e.outcome == VcsHookRefusedForeignContractTag:
+      obj["installedContract"] = %e.installedContract
+      obj["buildContract"] = %e.buildContract
+      obj["build"] = %e.build
+      obj["installedAuthor"] = %e.installedAuthor
+      obj["remedy"] = %e.remedy
     entriesNode.add(obj)
   result["entries"] = entriesNode
   var summaryNode = newJObject()
@@ -24373,7 +24577,8 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
       repos: newSeq[HookRepoTarget]())
 
 proc ensureRepoVcsHooks(repoName, repoPath: string;
-                        guard: HookWriteGuard): RepoHookWiring =
+                        guard: HookWriteGuard;
+                        reAnchor = false): RepoHookWiring =
   ## Install or repair the managed VCS hooks of ONE materialized repo.
   ##
   ## Extracted from `ensureWorkspaceHooks` so that the sweep and every other
@@ -24392,6 +24597,11 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
   ## Returns `ok = false` only when `core.hooksPath` could not be made
   ## worktree-safe. That is a real failure — the repo's worktrees are ungated
   ## — and must not be counted as a success by any caller.
+  ##
+  ## `reAnchor` is `--re-anchor`. Without it a hook whose body demands a
+  ## foreign contract is left untouched, reported on stderr and in its entry,
+  ## and `refusedForeignContract` is set; the remaining hooks are still
+  ## visited.
   result.ok = true
   if gitTopLevel(repoPath).len == 0:
     # Not materialized yet: skipped rather than failed, which is what lets
@@ -24424,7 +24634,8 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
       # line per rule (stderr, so `--json` keeps stdout one document).
       for line in certificateGatePlan(repoPath).lines:
         stderr.writeLine("repro hooks: " & repoName & ": " & line)
-    let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, repoPath)
+    let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, repoPath,
+      reAnchor)
     let tag = vcsHookOutcomeTag(outcome)
     if outcome == vheoRewroteContractlessBody:
       # Deliverable 2's distinct state, said out loud and not only counted.
@@ -24436,23 +24647,47 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
         "the handshake wrote it. Rewritten with a contract-bearing body; " &
         "reconcile what supplies 'repro' (direnv reload, then the pin) or " &
         "it will be stripped again.")
-    result.entries.add(VcsHookEntry(
+    var entry = VcsHookEntry(
       repo: repoName,
       repoPath: repoPath,
       hook: hookName,
       outcome: tag,
       hookPath: hookPath(hooksDir, hookName),
-      managedPath: managedHookPath(hooksDir, hookName)))
+      managedPath: managedHookPath(hooksDir, hookName))
+    if outcome == vheoRefusedForeignContract:
+      # Said out loud (stderr, so `--json` keeps stdout one document) AND
+      # carried in the entry, because the JSON report is what a script reads.
+      result.refusedForeignContract = true
+      for line in foreignContractRefusalLines(repoName, repoPath, hookName,
+          entry.managedPath):
+        stderr.writeLine(line)
+      var body = ""
+      try:
+        body = readFile(extendedPath(entry.managedPath))
+      except CatchableError:
+        discard
+      let self =
+        try: publicCliImagePath() except CatchableError: "repro"
+      entry.installedContract = managedHookBodyContractDemand(body)
+      entry.buildContract = managedHookContract(hookName)
+      entry.build = describeReproBuild(reproBuildIdentity(self))
+      entry.installedAuthor = managedHookAuthorBin(body)
+      entry.remedy = "reconcile what supplies 'repro' first (direnv " &
+        "reload, then the reprobuild pin); only then: " & self &
+        " hooks ensure --vcs --re-anchor " & repoPath
+    result.entries.add(entry)
 
-proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
+proc ensureWorkspaceHooks(workspaceRoot: string;
+                          reAnchor = false): HooksEnsureReport =
   ## M17 workspace-aware ``ensure`` driver. Walks every participating
   ## repo, installs the four canonical VCS hooks per repo, and returns
   ## a structured report. Exit code follows: 0 when every entry is
   ## ``installed`` / ``already-up-to-date`` / ``refreshed-drifted`` /
   ## ``chained-user-hook`` / ``rewrote-contractless-body`` /
-  ## ``reclaimed-shadowed`` (all "success" outcomes — no failure
-  ## classification exists for ensure on M17 since the installer either
-  ## writes the bytes or raises).
+  ## ``reclaimed-shadowed``; 1 when any entry is
+  ## ``refused-foreign-contract`` (the one classified non-success outcome:
+  ## nothing was written, and the sweep still visited every other repo) or a
+  ## repo's ``core.hooksPath`` could not be made worktree-safe.
   result.workspaceRoot = workspaceRoot
   let enumerated = enumerateParticipatingRepos(workspaceRoot)
   result.mode = enumerated.mode
@@ -24465,9 +24700,9 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   # it.
   let guard = newHookWriteGuard()
   for repo in enumerated.repos:
-    let wiring = ensureRepoVcsHooks(repo.name, repo.repoPath, guard)
+    let wiring = ensureRepoVcsHooks(repo.name, repo.repoPath, guard, reAnchor)
     if wiring.skippedUnmaterialized: continue
-    if not wiring.ok:
+    if not wiring.ok or wiring.refusedForeignContract:
       result.exitCode = 1
     for entry in wiring.entries:
       result.entries.add(entry)
@@ -24521,11 +24756,15 @@ proc resolveHooksWorkspaceRoot(parsed: ParsedHooksCommand): string =
     else: getCurrentDir()
   result = os.normalizedPath(absolutePath(raw))
 
-proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
+proc runVcsHooksCommand(action: HookActionKind;
+                        parsed: ParsedHooksCommand): int =
   ## Single-repo legacy path for ``reinstall`` / ``uninstall``. ``ensure``
   ## now runs through the workspace-aware ``ensureWorkspaceHooks``
   ## driver below; this proc handles the single-repo subset the older
   ## actions still target.
+  ##
+  ## Returns the exit status: 1 when ``ensure`` left a hook untouched as
+  ## ``refused-foreign-contract`` (after visiting every other hook), else 0.
   let targetPath =
     if parsed.targetPath.len > 0: parsed.targetPath
     else: resolveHooksWorkspaceRoot(parsed)
@@ -24554,6 +24793,7 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
     of hakUninstall: "uninstall"
   var changed = false
   var contractless: seq[string]
+  var refused: seq[string]
   if action == hakReinstall:
     for hookName in VcsHookNames:
       changed = uninstallVcsHook(hooksDir, hookName,
@@ -24568,8 +24808,18 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
         # stderr: the stdout line below is `.envrc`'s activation signal.
         for line in certificateGatePlan(resolveHooksTarget(targetPath)).lines:
           stderr.writeLine("repro hooks: " & line)
+      # `reinstall` removed every managed body above, so `--re-anchor` makes
+      # no difference to it; for `ensure` it is the operator's flag.
       let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard,
-        resolveHooksTarget(targetPath))
+        resolveHooksTarget(targetPath), parsed.reAnchor)
+      if outcome == vheoRefusedForeignContract:
+        refused.add(hookName)
+        for line in foreignContractRefusalLines(
+            lastPathPart(resolveHooksTarget(targetPath)),
+            resolveHooksTarget(targetPath), hookName,
+            managedHookPath(hooksDir, hookName)):
+          stderr.writeLine(line)
+        continue
       if outcome != vheoAlreadyUpToDate:
         changed = true
       if outcome == vheoRewroteContractlessBody:
@@ -24580,10 +24830,10 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
         preserveCanonicalUser = preserveCanonicalUser) or changed
   # PG-14 deliverable 2 — a contract-less body is NOT "already current" and is
   # not merely "updated": it says a build that predates the handshake has been
-  # writing into this hooks directory, and that it will do so again from the
-  # ambient `hooks ensure` the generated `.envrc` runs on every directory
-  # entry. So the single-repo path names it rather than folding it into the
-  # one-line status the two existing words carry.
+  # writing into this hooks directory, and that it will do so again the next
+  # time that build runs `hooks ensure` here. So the single-repo path names it
+  # rather than folding it into the one-line status the two existing words
+  # carry.
   if contractless.len > 0:
     stderr.writeLine("repro hooks: " & contractless.join(", ") &
       " had NO contract line at " & hooksDir &
@@ -24593,6 +24843,14 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   let status = if changed: "updated" else: "already current"
   echo "repro hooks: VCS hooks " & actionName & " " & status & " at " &
     hooksDir
+  if refused.len > 0:
+    # Not folded into the status word above: the other hooks were handled, and
+    # these were deliberately NOT, which is a failure of this invocation.
+    echo "repro hooks: VCS hooks " & actionName & " left " &
+      refused.join(", ") & " untouched (" & VcsHookRefusedForeignContractTag &
+      ") at " & hooksDir
+    return 1
+  0
 
 proc untouchedManifestRepos*(root: string): seq[string] =
   ## Names of the repos a workspace-shaped checkout declares but a
@@ -24642,7 +24900,7 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
     var single = parsed
     if single.targetPath.len == 0:
       single.targetPath = workspaceRoot
-    runVcsHooksCommand(hakEnsure, single)
+    let singleCode = runVcsHooksCommand(hakEnsure, single)
     # Say what was NOT done. The line above reads as success for the root repo
     # alone; for a workspace whose project set was never recorded that hides
     # that every participating repo kept its (usually absent) hooks and so
@@ -24657,8 +24915,8 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
         untouched.join(", ") & ". If this is a workspace, record its " &
         "project set ('repro ws enable <project>') and run " &
         "'repro hooks ensure --vcs' again.")
-    return 0
-  var report = ensureWorkspaceHooks(workspaceRoot)
+    return singleCode
+  var report = ensureWorkspaceHooks(workspaceRoot, parsed.reAnchor)
   writeHooksEnsureReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "hooks"))
   stageFailureReport(parsed.report, report.workspaceRoot, "hooks",
@@ -24695,6 +24953,7 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   if c.recordStore:
     result.recordStore = true
     result.vcs = true
+  result.reAnchor = c.reAnchor
   if c.shellAutocomplete:
     raise newException(ValueError,
       "repro hooks --shell-autocomplete is not implemented yet")
@@ -24714,6 +24973,12 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
       result.nativeShells.len == 0:
     result.shellDirenv = true
     result.vcs = true
+  if result.reAnchor and (result.action != hakEnsure or not result.vcs):
+    # Refused rather than ignored: a flag that silently did nothing would let
+    # an operator believe a repository had been re-anchored.
+    raise newException(ValueError,
+      "--re-anchor applies only to 'repro hooks ensure --vcs' (reinstall " &
+      "already rewrites every managed hook of one repository)")
 
 # Forward declaration: M18 wires ``pre-push`` dispatch through the
 # ``repro check --mode=pre-push`` gate; the implementation lives further
@@ -25193,14 +25458,18 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
     if parsed.vcs:
-      runVcsHooksCommand(parsed.action, parsed)
+      let code = runVcsHooksCommand(parsed.action, parsed)
+      if code != 0:
+        return code
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell, reinstall = true)
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      runVcsHooksCommand(parsed.action, parsed)
+      let code = runVcsHooksCommand(parsed.action, parsed)
+      if code != 0:
+        return code
     for shell in parsed.nativeShells:
       uninstallNativeShellHook(shell)
   0
@@ -55301,6 +55570,7 @@ proc managedHookBodyIsCurrent(hookName, body: string): bool =
   ## freshness one.
   let site = ManagedHookSite(
     authorBin: managedHookAuthorBin(body),
+    installingBuild: managedHookInstallingBuild(body),
     refusalRecordDir: managedHookRefusalRecordDirAdvertised(body))
   if site.authorBin.len == 0:
     return false
@@ -55347,7 +55617,19 @@ proc resolveHookReproCli(repoRoot: string): string =
   ## PG-14 folded the resolution itself into `resolveManagedHookInterpreter`,
   ## which additionally reports HOW it resolved — the half the skew diagnostics
   ## need. This wrapper keeps the path-only shape its callers expect.
-  resolveManagedHookInterpreter(repoRoot).path
+  ##
+  ## The installing build (step 2 of CLI/hooks.md §"Per-install resolution")
+  ## is read from the INSTALLED pre-push body, because that body is the one
+  ## the push will execute: preflight must probe the interpreter it resolves,
+  ## not the one a body this build would write resolves.
+  var installing = ""
+  try:
+    let managed = managedHookPath(gitHooksDir(repoRoot), "pre-push")
+    if fileExists(extendedPath(managed)):
+      installing = managedHookInstallingBuild(readFile(extendedPath(managed)))
+  except CatchableError:
+    installing = ""
+  resolveManagedHookInterpreter(repoRoot, installing).path
 
 proc configuredPushLocation(identity: GitToolIdentity; repoRoot,
     remote: string): tuple[ok: bool; value: string; diagnostic: string] =
@@ -68867,10 +69149,14 @@ proc assessHookWriterRunnerSkew*(repoRoot: string;
   # `hookContractWriteRefusal`.
   result.writer = reproBuildIdentity(
     try: publicCliImagePath() except CatchableError: "")
-  let resolved = resolveManagedHookInterpreter(repoRoot)
+  # The runner of the hooks THIS build writes: their step 2 is this build
+  # (CLI/hooks.md §"Per-install resolution"), so absent `$REPROBUILD_REPRO`
+  # the writer and the runner are one build by construction.
+  let resolved = resolveManagedHookInterpreter(repoRoot,
+    thisBuildInstallingPath())
   result.runnerSource =
     if resolved.source.len > 0: resolved.source
-    else: "neither REPROBUILD_REPRO nor PATH"
+    else: "neither REPROBUILD_REPRO, the installing build nor PATH"
   result.runner = reproBuildIdentity(resolved.path)
   if resolved.path.len == 0:
     # NOT "absence degrades" here, and the difference from the `health` row is
@@ -77207,10 +77493,10 @@ proc detectDirenvEnvrcState(workspaceRoot: string):
 #     for the resolution THIS process would get is marked as such, and it is
 #     one row among several rather than the answer.
 #   * The remedy must not be `hooks ensure`. That is the command the hook
-#     body's own refusal text warns against, the command the generated
-#     `.envrc` runs ambiently on every directory entry with its output
-#     discarded, and the command whose effect here is to delete the diagnostic
-#     instead of the defect. The remedy is to reconcile what SUPPLIES `repro`.
+#     body's own refusal text warns against, the command a dev shell may run
+#     ambiently on entry, and the command whose effect here (with
+#     `--re-anchor`) is to delete the diagnostic instead of the defect. The
+#     remedy is to reconcile what SUPPLIES `repro`.
 
 const ReproStoreNamePrefix = "reprobuild-"
   ## Store-path name prefix of a reprobuild build. A derivation that merely
@@ -77241,8 +77527,16 @@ proc direnvSuppliedReproBuilds(dir: string): seq[string] =
       if executableFile(candidate) and candidate notin result:
         result.add(candidate)
 
+type InstalledManagedBody = object
+  ## One installed managed body, reduced to the two facts that decide who
+  ## services it: the token it demands and the installing build it resolves
+  ## before ``PATH`` ("" for a body that predates per-install resolution).
+  token: string
+  installingBuild: string
+
 proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
-    tuple[tokens, authors: seq[string]; bodies, contractless: int] =
+    tuple[tokens, authors: seq[string]; bodies, contractless: int;
+          demands: seq[InstalledManagedBody]] =
   ## What the hooks INSTALLED in these repos actually demand.
   ##
   ## The skew question is about the bodies on disk, not about the body this
@@ -77269,8 +77563,11 @@ proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
       let token = managedHookBodyContractDemand(body)
       if token.len == 0:
         inc result.contractless
-      elif token notin result.tokens:
-        result.tokens.add(token)
+      else:
+        if token notin result.tokens:
+          result.tokens.add(token)
+        result.demands.add(InstalledManagedBody(token: token,
+          installingBuild: managedHookInstallingBuild(body)))
       # The body names the build that WROTE it. That build is the other half of
       # "both builds" the skew report has to name: one wrote these hooks, one
       # will run them, and a report that names only the runner leaves the
@@ -77279,11 +77576,23 @@ proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
       if author.len > 0 and author notin result.authors:
         result.authors.add(author)
 
+type HookResolutionRow = object
+  ## One ``repro`` a managed hook of this workspace could resolve, and the
+  ## tokens of the bodies that would resolve it. Probing a build only with the
+  ## demands of the bodies that reach it is what per-install resolution
+  ## requires: a build that installed one repo's hooks is not asked to service
+  ## a body some other build installed elsewhere, because no hook would ever
+  ## ask it to.
+  path: string
+  source: string
+  tokens: seq[string]
+  thisShell: bool
+
 proc enumerateHookInterpreterResolutions(workspaceRoot: string;
-    repos: seq[HookRepoTarget]; contract: string):
-    seq[HookInterpreterResolution] =
-  ## Every ``repro`` a managed hook of this workspace could resolve, probed
-  ## with ``contract``.
+    repos: seq[HookRepoTarget]; installed: seq[InstalledManagedBody];
+    fallbackContract: string): seq[HookResolutionRow] =
+  ## Every ``repro`` a managed hook of this workspace could resolve, with the
+  ## tokens it would be asked to service.
   ##
   ## MUST NOT be reduced to "this process's PATH". That reduction is what every
   ## implementation an author writes first does, it is what shipped, and it is
@@ -77292,40 +77601,79 @@ proc enumerateHookInterpreterResolutions(workspaceRoot: string;
   ## workspace-root dev shell, and each per-repo dev shell that supplies its
   ## own ``repro`` — and condition 3 is that a DISAGREEMENT between them is
   ## reported when one exists.
-  var seen: HashSet[string]
+  ##
+  ## Each body resolves per CLI/hooks.md §"Per-install resolution":
+  ## ``$REPROBUILD_REPRO``, else the build that installed it while that is
+  ## still executable, else ``PATH``. So a shell's ``PATH`` -- this one's or a
+  ## dev shell's -- governs only the bodies whose installing build is gone or
+  ## that predate the step, and the dev shells are enumerated for exactly those
+  ## bodies. With nothing installed the question is about the bodies this
+  ## build would write (``fallbackContract``), whose installing build is this
+  ## build.
+  var index: Table[string, int]
 
-  proc add(res: var seq[HookInterpreterResolution]; path, source: string;
-           thisShell: bool) =
-    if path.len == 0:
+  proc add(res: var seq[HookResolutionRow]; path, source: string;
+           tokens: seq[string]; thisShell: bool) =
+    if path.len == 0 or tokens.len == 0:
       return
     var key = path
     try:
       key = expandFilename(path)
     except CatchableError:
       discard
-    if key in seen:
-      # The same build reached two ways is one build. Keep the FIRST label:
-      # the resolution order below puts the hook's own resolution first, and
-      # that is the one whose source matters.
+    if key in index:
+      # The same build reached two ways is one build, asked about the union of
+      # the bodies that reach it. Keep the FIRST label: the order below puts
+      # this shell's resolutions first, and that is the one whose source
+      # matters.
+      let at = index[key]
+      for token in tokens:
+        if token notin res[at].tokens:
+          res[at].tokens.add(token)
+      res[at].thisShell = res[at].thisShell or thisShell
       return
-    seen.incl(key)
-    res.add(probeHookInterpreter(path, source, contract, thisShell))
+    index[key] = res.len
+    res.add(HookResolutionRow(path: path, source: source, tokens: tokens,
+      thisShell: thisShell))
 
-  # 1. The resolution a hook firing in THIS process environment would get, and
-  #    the one `health`'s own verdict would otherwise silently be about.
-  let mine = resolveManagedHookInterpreter(workspaceRoot)
-  if mine.path.len > 0:
-    result.add(mine.path, mine.source & " (this shell)", true)
+  let bodies =
+    if installed.len > 0: installed
+    else: @[InstalledManagedBody(token: fallbackContract,
+      installingBuild: thisBuildInstallingPath())]
+  let explicitRepro = getEnv("REPROBUILD_REPRO").len > 0
 
-  # 2. The dev shells. The workspace root first, then every participating repo
-  #    that carries its own direnv profile — on this host those are two
-  #    distinct builds, and they are the half that ANSWERS the handshake while
-  #    bare PATH refuses.
-  for candidate in direnvSuppliedReproBuilds(workspaceRoot):
-    result.add(candidate, "direnv dev shell at " & workspaceRoot, false)
-  for repo in repos:
-    for candidate in direnvSuppliedReproBuilds(repo.repoPath):
-      result.add(candidate, "direnv dev shell at " & repo.repoPath, false)
+  # 1. The resolution each body gets when a hook fires in THIS process
+  #    environment -- what `health`'s own verdict would otherwise silently be
+  #    about.
+  for body in bodies:
+    let mine = resolveManagedHookInterpreter(workspaceRoot,
+      body.installingBuild)
+    result.add(mine.path, mine.source & " (this shell)", @[body.token], true)
+
+  # 2. Other shells. A body whose installing build still runs resolves that
+  #    build in every shell that does not set `$REPROBUILD_REPRO`; when this
+  #    shell sets it, those builds are what the other shells get.
+  var pathTokens: seq[string]
+  for body in bodies:
+    if body.installingBuild.len > 0 and executableFile(body.installingBuild):
+      if explicitRepro:
+        result.add(body.installingBuild, ManagedHookInstallingBuildSource,
+          @[body.token], false)
+    elif body.token notin pathTokens:
+      pathTokens.add(body.token)
+
+  # 3. The dev shells, for the bodies that fall back to PATH. The workspace
+  #    root first, then every participating repo that carries its own direnv
+  #    profile — on the host §1.6b measured those are two distinct builds, and
+  #    they are the half that ANSWERS the handshake while bare PATH refuses.
+  if pathTokens.len > 0:
+    for candidate in direnvSuppliedReproBuilds(workspaceRoot):
+      result.add(candidate, "direnv dev shell at " & workspaceRoot,
+        pathTokens, false)
+    for repo in repos:
+      for candidate in direnvSuppliedReproBuilds(repo.repoPath):
+        result.add(candidate, "direnv dev shell at " & repo.repoPath,
+          pathTokens, false)
 
 proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
   ## The ``hook-interpreter`` row of ``repro health``.
@@ -77352,25 +77700,25 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
   # a doctor into a hundred subprocesses. The cap is generous enough that it
   # has never been reached in practice and is reported when it bites.
   const MaxProbedContracts = 24
-  var probeTokens =
-    if demands.tokens.len > 0: demands.tokens
-    else: @[managedHookContract("post-commit")]
-  var tokensTruncated = false
-  if probeTokens.len > MaxProbedContracts:
-    probeTokens = probeTokens[0 ..< MaxProbedContracts]
-    tokensTruncated = true
   let resolutions = enumerateHookInterpreterResolutions(workspaceRoot,
-    enumerated.repos, probeTokens[0])
+    enumerated.repos, demands.demands, managedHookContract("post-commit"))
+  var tokensTruncated = false
 
   var servicing = 0
   var refusing = 0
   var differentBody = 0
   var rows: seq[string]
   var usedRow = ""
-  for res in resolutions:
-    # Every demanded token has to be serviced, not just the first: a host can
-    # carry bodies from two writers, and a build that services one of them is
-    # not thereby a build that services the others.
+  for resRow in resolutions:
+    var probeTokens = resRow.tokens
+    if probeTokens.len > MaxProbedContracts:
+      probeTokens = probeTokens[0 ..< MaxProbedContracts]
+      tokensTruncated = true
+    let res = probeHookInterpreter(resRow.path, resRow.source, probeTokens[0],
+      resRow.thisShell)
+    # Every token demanded of it has to be serviced, not just the first: a
+    # host can carry bodies from two writers, and a build that services one of
+    # them is not thereby a build that services the others.
     # EVERY demanded token, not just the first. Measured on this workspace:
     # 765 installed bodies demand SIX distinct tokens, so "does this build
     # service the contract?" has six answers per build, and a single-token
@@ -77406,7 +77754,9 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
       " (services " & $serviced & " of " & $probeTokens.len & " contract(s))"
     rows.add(rendered)
     if res.thisShell:
-      usedRow = rendered
+      usedRow =
+        if usedRow.len > 0: usedRow & " | " & rendered
+        else: rendered
 
   var writerRows: seq[string]
   for author in demands.authors:
@@ -77433,8 +77783,9 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
     if usedRow.len > 0:
       "resolution used by a hook firing in THIS shell: " & usedRow
     else:
-      "no 'repro' resolves in THIS shell (REPROBUILD_REPRO unset and none " &
-        "on PATH), so a hook firing here would not dispatch at all"
+      "no 'repro' resolves in THIS shell (REPROBUILD_REPRO unset, no " &
+        "installing build still executable and none on PATH), so a hook " &
+        "firing here would not dispatch at all"
 
   if resolutions.len == 0:
     # Absence degrades (§8). Nothing resolves, so nothing disagrees.
@@ -78642,9 +78993,10 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       proc staleDetailFor(full: bool): string =
         $stale.len & " managed hook(s) STALE — present, carrying " &
           "every marker a generated body carries, and demanding a contract " &
-          "THIS build does not generate, so each fire refuses (pre-push, " &
-          "and pre-commit's certificate gate where one is installed) or " &
-          "fails open in silence (the observational hooks): " &
+          "THIS build does not generate, so each fire that resolves this " &
+          "build refuses (pre-push, and pre-commit's certificate gate where " &
+          "one is installed) or fails open in silence (the observational " &
+          "hooks): " &
           (if full: stale.join(", ")
            else: formatFindingList(stale, parsed.verbose)) & ". " & census &
           (if writers.len > 0:
@@ -78664,9 +79016,13 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsFail,
         detail: staleDetail,
         fullDetail: if staleDetail != fullStaleDetail: fullStaleDetail else: "",
-        # NOT ``hooks ensure``, and NOT auto-fixable. See the block comment.
+        # NOT a plain ``hooks ensure``, and NOT auto-fixable. See the block
+        # comment. A plain ``ensure`` would not help anyway: since 2026-11-16
+        # it leaves a foreign-contract body untouched
+        # (``refused-foreign-contract``), so the re-anchoring step offered
+        # last is the explicit ``--re-anchor`` (CLI/hooks.md §"Checks").
         remedy: "direnv reload   # then, only once hook-interpreter agrees: " &
-          remedy,
+          self & " hooks ensure --vcs --re-anchor " & parsed.workspaceRoot,
         fixKind: hfNone))
     elif pathUnsafe.len > 0:
       # SECOND. Its remedy is the same ``--fix``-able ``hooks ensure --vcs`` as
