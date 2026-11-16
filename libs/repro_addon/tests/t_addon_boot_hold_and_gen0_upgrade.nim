@@ -66,14 +66,16 @@ suite "§13 decision 159: the boot-hold unit":
     check "DefaultDependencies=no\n" in u
     check "Before=sysinit.target shutdown.target\n" in u
     check "After=sysinit.target" notin u
-    check "WantedBy=sysinit.target\n" in u
+    # Required, so a cycle never deletes its job (§13 decision 172).
+    check "RequiredBy=sysinit.target\n" in u
   test "only while a switch is pending, and never on the store mount":
     check "ConditionPathExists=" & PendingMarkerPath & "\n" in u
     check PendingMarkerPath == pendingMarkerPath(SystemStateDir)
     check "Requires=" notin u
     # The base's shell, never the store binary, which may predate it.
     let exec = u.split("ExecStart=")[1].split("\n")[0]
-    check exec.startsWith("/bin/sh -c '") and "/repro/store" notin exec and
+    check exec.startsWith("-/usr/bin/timeout -k 5 ") and
+      " /bin/sh -c '" in exec and "/repro/store" notin exec and
       "system addon" notin exec
 
 suite "§13 decision 159: generation 0's upgrade path":
@@ -162,6 +164,7 @@ suite "§13 decision 159: the start holds across a reboot":
       .replace(BootHoldsWrittenList, s.written)
       .replace("/run/repro-addon", parentDir(s.written))
       .replace(RuntimeUnitDirPath, s.root)
+      .replace(ConservativeHoldDir, parentDir(s.root) / "etc-systemd-system")
       # The host's tools by absolute path; the test's from PATH, with the
       # systemctl stand-in first.
       .replace("/usr/bin/", "")
@@ -173,7 +176,7 @@ suite "§13 decision 159: the start holds across a reboot":
   test "the unit carries the script, each $ doubled for systemd":
     # One single-quoted argument: a quote inside it would end the quoting.
     check '\'' notin bootHoldScript()
-    check ("ExecStart=/bin/sh -c '" & bootHoldScript().replace("$", "$$") & "'\n") in
+    check ("/bin/sh -c '" & bootHoldScript().replace("$", "$$") & "'\n") in
       bootHoldUnit()
     check StartHoldFileName == StartHoldName
     check RuntimeUnitDirPath == RuntimeUnitDir
@@ -216,7 +219,9 @@ suite "§13 decision 159: the start holds across a reboot":
   test "the script names every tool by absolute path":
     let sc = bootHoldScript()
     for tool in ["/usr/bin/systemctl is-active", "/usr/bin/mkdir -p",
-                 "/usr/bin/cp ", "/usr/bin/sha256sum ", "/usr/bin/systemctl daemon-reload"]:
+                 "/usr/bin/cp ", "/usr/bin/sha256sum ",
+                 "/usr/bin/timeout 30 /usr/bin/systemctl daemon-reload",
+                 "/usr/bin/ls -1 "]:
       check tool in sc
     check "set -f;" in sc
   test "a hold text that is not the start hold's: a minimal hold on every recorded unit":
@@ -228,7 +233,7 @@ suite "§13 decision 159: the start holds across a reboot":
     let h = readFile(s.root / "a.socket.d" / StartHoldName)
     check "AssertPathExists=!/" in h
     check "planted" notin h
-  test "a record that is a link is refused; a drop-in directory that is a link is skipped":
+  test "a drop-in directory that is a link is skipped":
     let s = setup()
     writeBootHoldRecord(s.state, ["/run/systemd/system/a.socket.d/" & StartHoldName,
                                   "/run/systemd/system/b.socket.d/" & StartHoldName])
@@ -237,10 +242,23 @@ suite "§13 decision 159: the start holds across a reboot":
     check runScript(s) == 0
     check fileExists(s.root / "a.socket.d" / StartHoldName)
     check not fileExists("/tmp/" & StartHoldName)
+  test "a record that is a link: every socket, timer and path unit held, and exit 0":
+    # A9 review round 17, finding 9: hold conservatively, never fail.
+    let s = setup()
+    writeBootHoldRecord(s.state, ["/run/systemd/system/a.socket.d/" & StartHoldName])
     let rec = bootHoldRecordPath(s.state)
     moveFile(rec, rec & ".real")
     createSymlink(rec & ".real", rec)
-    check runScript(s) != 0
+    let etc = parentDir(s.root) / "etc-systemd-system"
+    createDir(etc)
+    for n in ["x.socket", "y.timer", "z.path", "w.service", "v.target"]:
+      writeFile(etc / n, "[Unit]\n")
+    check runScript(s) == 0
+    for n in ["x.socket", "y.timer", "z.path"]:
+      check fileExists(s.root / (n & ".d") / StartHoldName)
+    for n in ["w.service", "v.target", "a.socket"]:
+      check not dirExists(s.root / (n & ".d"))
+    check readFile(s.log).count("daemon-reload") == 1
   test "the re-assertion lifts the boot's holds only once the switch is resolved":
     let s = setup()
     writeBootHoldRecord(s.state, ["/run/systemd/system/a.service.d/" & StartHoldName,
@@ -265,11 +283,16 @@ suite "§13 decision 164: the re-assert unit is pointed at the upgrading engine"
   const NewExe = "/repro/store/prefixes/repro-addon/0.2.99-new/bin/repro"
   let curUnit = unitContentOf(current, ReassertUnit)
   let sha = sha256Hex(curUnit)
-  test "the add-on's own unit, on disk and in the ledger, is re-rendered":
-    let r = repointReassert(current, NewExe,
-      proc (p: string): tuple[present: bool; sha256: string] = (true, sha),
-      proc (p: string): string = sha)
+  let confirmSha = sha256Hex(unitContentOf(current, BootConfirmUnit))
+  proc onDisk(p: string): tuple[present: bool; sha256: string] =
+    if p == unitPath(ReassertUnit): (true, sha)
+    elif p == unitPath(BootConfirmUnit): (true, confirmSha)
+    else: (false, "")
+  proc recordedAs(p: string): string = onDisk(p).sha256
+  test "the add-on's own units, on disk and in the ledger, are re-rendered":
+    let r = repointEngine(current, NewExe, [Exe], onDisk, recordedAs)
     check r.changed
+    check r.exe == NewExe
     check reassertExeOf(unitContentOf(r.own, ReassertUnit)) == NewExe
     check unitContentOf(r.own, ReassertUnit) == reassertUnit(NewExe)
     # The boot-confirm unit moves with it (§13 decision 157); nothing else
@@ -278,17 +301,17 @@ suite "§13 decision 164: the re-assert unit is pointed at the upgrading engine"
     check r.own.replace(unitContentOf(r.own, ReassertUnit), "").replace(
             unitContentOf(r.own, BootConfirmUnit), "") ==
           current.replace(curUnit, "").replace(unitContentOf(current, BootConfirmUnit), "")
-  test "idempotent: a unit that already runs this engine is left alone":
-    check not repointReassert(current, Exe,
-      proc (p: string): tuple[present: bool; sha256: string] = (true, sha),
-      proc (p: string): string = sha).changed
+  test "idempotent: units that already run this engine are left alone":
+    check not repointEngine(current, Exe, [Exe], onDisk, recordedAs).changed
   test "a foreign unit, or one the ledger does not record, is refused":
-    for (onDisk, rec) in [(sha256Hex("operator's"), sha), (sha, ""), ("", "")]:
-      let d = onDisk
-      let rc = rec
+    for (d, rc) in [(sha256Hex("operator's"), sha), (sha, ""), ("", "")]:
+      let dd = d
+      let rr = rc
       expect ValueError:
-        discard repointReassert(current, NewExe,
-          proc (p: string): tuple[present: bool; sha256: string] = (true, d),
-          proc (p: string): string = rc)
+        discard repointEngine(current, NewExe, [Exe],
+          proc (p: string): tuple[present: bool; sha256: string] =
+            if p == unitPath(ReassertUnit): (true, dd) else: onDisk(p),
+          proc (p: string): string =
+            if p == unitPath(ReassertUnit): rr else: recordedAs(p))
   test "no unit installed: nothing to re-point":
-    check not repointReassert(current, NewExe, absent, unrecorded).changed
+    check not repointEngine(current, NewExe, [Exe], absent, unrecorded).changed

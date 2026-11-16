@@ -35,7 +35,7 @@ libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
-libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	21
+libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	22
 libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	139
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
@@ -55,7 +55,7 @@ libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim	nim	7
 libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
-libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim	nim	20
+libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim	nim	21
 libs/repro_addon/tests/t_addon_floor_round10.nim	nim	33
 libs/repro_addon/tests/t_addon_floor_round11.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round12.nim	nim	48
@@ -63,6 +63,7 @@ libs/repro_addon/tests/t_addon_floor_round13.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round14.nim	nim	13
 libs/repro_addon/tests/t_addon_floor_round15.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round16.nim	nim	12
+libs/repro_addon/tests/t_addon_floor_round17.nim	nim	24
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
@@ -1249,12 +1250,14 @@ tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	ni
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_refuses_management_path_classes.nim	nim	1
+tests/e2e/addon/t_e2e_addon_agent_tick_revert_after_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest.nim	nim	1
 tests/e2e/addon/t_e2e_addon_apply_unit_has_no_network.nim	nim	1
 tests/e2e/addon/t_e2e_addon_apt_hook_never_blocks_dpkg.nim	nim	1
 tests/e2e/addon/t_e2e_addon_audit_bed.nim	nim	1
 tests/e2e/addon/t_e2e_addon_base_boots_without_store.nim	nim	1
 tests/e2e/addon/t_e2e_addon_base_tree_names_are_measured.nim	nim	1
+tests/e2e/addon/t_e2e_addon_boot_hold_is_required.nim	nim	1
 tests/e2e/addon/t_e2e_addon_boot_hold_reaches_existing_hosts.nim	nim	1
 tests/e2e/addon/t_e2e_addon_boot_replay_confirms_floored_unit.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1

@@ -740,7 +740,7 @@ proc runAddonCli*(args: seq[string]): int =
     of "boot-confirm":
       # `repro system addon boot-confirm` (repro-addon-boot-confirm.service,
       # §13 decision 157): after the re-assertion, replay the pending switch
-      # it left here -- with blocking starts and the confirm, now that the
+      # it left here -- with queued starts and the confirm, now that the
       # floored units can start -- then lift the boot's holds and migrate
       # stale generation-0 objects. Never fails the boot transaction.
       if rest.len > 0:

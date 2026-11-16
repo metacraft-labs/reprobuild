@@ -1839,6 +1839,67 @@ proc checkFloorBootOrdering*(p: SystemProfile) =
       raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "' " &
         bootOrderingCycleReason(route))
 
+proc profileUnitLate(p: SystemProfile; name: string;
+                     late: HashSet[string]): bool =
+  ## Whether the profile's unit ``name`` is ordered after
+  ## ``sysinit.target``: by default dependencies (a service, socket, timer
+  ## or path unit; systemd.service(5), systemd.socket(5), systemd.timer(5),
+  ## systemd.path(5), "Default Dependencies"), or by an ``After=`` naming a
+  ## boot target after it, the boot-hold unit, or a unit ``late`` holds.
+  let files = unitFilesOf(p, name)
+  if files.len == 0: return false
+  let dot = name.rfind('.')
+  let typ = if dot >= 0: name[dot + 1 .. ^1] else: ""
+  if typ in ["service", "socket", "timer", "path"] and
+      unitDefaultDependencies(files):
+    return true
+  for c in files:
+    for d in sectionDirectives(c, ["Unit"]):
+      if d.key == "After":
+        for t in d.value.splitWhitespace():
+          if t in ["sysinit.target", "basic.target", "sockets.target",
+                   "timers.target", "paths.target", "multi-user.target",
+                   "graphical.target", BootHoldUnitName] or t in late:
+            return true
+  false
+
+proc checkBootHoldOrdering*(p: SystemProfile) =
+  ## The owner's decision of 2026-11-16 (§13 decision 172; A9 review
+  ## round 17, finding 2): no unit of the profile ordered after
+  ## ``sysinit.target`` -- so after the boot-hold unit -- is ordered, by
+  ## any chain the profile defines, before a unit that runs before
+  ## ``sysinit.target`` (``runsBeforeSysinit``): the boot-hold unit, the
+  ## local file systems and the services it follows, and the base's
+  ## ``sysinit.target`` units. That is an ordering cycle through
+  ## ``sysinit.target``; through the boot-hold unit when it reaches what
+  ## the boot-hold unit follows. Every unit, floored or not: a cycle with
+  ## the boot-hold unit is the boot's, whoever closes it. The effective
+  ## half walks the order systemd reports.
+  when InfraAddonMutation in ["boot-hold-cycle-parse-unchecked",
+                              "floor-unchecked"]:
+    return
+  var names: seq[string]
+  for r in p.resources:
+    let n = ownUnitName(r)
+    if n.len > 0 and n notin names: names.add(n)
+  # Which units are ordered after sysinit.target, followed through the
+  # profile's own After= (a fixpoint: at most one pass per unit).
+  var late = initHashSet[string]()
+  var grew = true
+  while grew:
+    grew = false
+    for n in names:
+      if n notin late and profileUnitLate(p, n, late):
+        late.incl(n)
+        grew = true
+  for n in names:
+    if n notin late: continue
+    let route = earlyOrderingRoute(n,
+      proc (u: string): seq[string] = profileOrderedBeforeOf(p, u))
+    if route.len > 0:
+      raiseSystemProfileInvalid("systemd unit '" & n & "' " &
+        earlyOrderingReason(route))
+
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
   ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
@@ -1851,6 +1912,7 @@ proc applyAddOnServiceFloor*(p: var SystemProfile) =
   checkFloorActivators(p)
   checkFloorReach(p)
   checkFloorBootOrdering(p)
+  checkBootHoldOrdering(p)
 
 proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
   ## Every floor exception of the profile's units under the floor, one
@@ -3350,6 +3412,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
     checkFloorActivators(result)
     checkFloorReach(result)
     checkFloorBootOrdering(result)
+    if addOnDefaults: checkBootHoldOrdering(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------

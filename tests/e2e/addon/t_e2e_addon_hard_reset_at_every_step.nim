@@ -142,12 +142,25 @@ proc selectedPoints(all: openArray[string]): seq[string] =
     if p.strip() in all or p.strip() in MutationOnlyPoints:
       result.add(p.strip())
 
+var fixtureBin = ""
+  ## The add-on's own binary in the store, which every fixture unit runs:
+  ## a program inside a store prefix, as the floor requires (spec §10.1).
+  ## Set once the add-on is bootstrapped.
+
+const FixtureAccount = "reprofixu"
+  ## The account the fixture units run as (the floor refuses root).
+
 proc unitText(gen, desc: string): string =
-  "[Unit]\nDescription=" & desc & "\n[Service]\nEnvironment=GEN=" & gen &
-    "\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n"
+  ## A fixture unit under the hardening floor (§13 decision 157's fourth
+  ## requirement, A9 review round 17, finding 5): no exception, so it is
+  ## ordered after the boot re-assertion (decision 144) and a boot replay of
+  ## a generation with a health check goes through the boot-confirm unit.
+  "[Unit]\nDescription=" & desc & "\n[Service]\nType=oneshot\n" &
+    "RemainAfterExit=yes\nUser=" & FixtureAccount & "\nEnvironment=GEN=" & gen &
+    "\nExecStart=" & fixtureBin & " --version\n\n[Install]\nWantedBy=multi-user.target\n"
 
 proc unit(name, content: string; extra = ""): string =
-  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & name & "\"\n  content = \"" & content &
+  "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" & content &
     "\"\n" & extra & "}\n\n"
 
 proc file(path, content: string; extra = ""): string =
@@ -171,7 +184,7 @@ proc profileA(): string =
     unit("repro-fixture-a.service", unitText("A", "fixture of A")) &
     sysctl("1024")
 
-proc profileB(check = ""; timeout = 0): string =
+proc profileB(check = "active"; timeout = 0): string =
   prefixes(timeout) &
     file("/etc/repro-fixture/common.conf", "generation B\n") &
     file("/etc/repro-fixture/only-b.conf", "only in B\n") &
@@ -236,6 +249,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     if not g.bootstrapAddon(repro, step): return fails
+    discard g.run("useradd -r -M -s /usr/sbin/nologin " & FixtureAccount)
+    fixtureBin = g.run("ls -d /repro/store/prefixes/repro-addon/*/bin/repro " &
+                       "| head -1").strip()
     # --- The two references, each after a clean reboot.
     var r = g.applyProfile(repro, "a", profileA())
     step("generation A applied", r.exitCode == 0, r.stdout & r.stderr)
@@ -548,9 +564,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       if envPoints.len == 0 or p in envPoints.split(','): receiptPoints.add(p)
     if receiptPoints.len > 0:
       let receipt = ReceiptCarry & "/restored.json"
-      let profile = "systemd.systemUnit {\n" & FixtureFloorWaiver &
+      let profile = "systemd.systemUnit {\n" &
         "  name = \"" & ReceiptUnit & "\"\n  content = \"[Service]\n" &
-        "ExecStart=/bin/true\n\"\n  stateDirectories = [\"carry:" &
+        "Type=oneshot\nUser=" & FixtureAccount & "\nExecStart=" & fixtureBin &
+        " --version\n\"\n  stateDirectories = [\"carry:" &
         ReceiptDirs[0] & "\", \"carry:" & ReceiptDirs[1] & "\"]\n}\n"
       let pf = g.putProfile("receipt", profile)
       let setup = g.exec("printf '[Service]\\nExecStart=/bin/true\\n' > " &

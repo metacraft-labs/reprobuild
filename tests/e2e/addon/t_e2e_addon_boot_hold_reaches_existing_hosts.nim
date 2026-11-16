@@ -14,7 +14,7 @@
 ##    two boots (``UserspaceTimestampMonotonic`` to
 ##    ``FinishTimestampMonotonic``, after ``is-system-running --wait``);
 ## 2. one apply by this engine installs the unit, enabled
-##    (``sysinit.target.wants``), with the bytes this build renders, named in
+##    (``sysinit.target.requires``), with the bytes this build renders, named in
 ##    the ledger copy with that digest, and adds it to the stored own
 ##    profile; nothing else of generation 0 changes on disk;
 ## 3. a second apply changes nothing of it (idempotent);
@@ -30,6 +30,10 @@
 ##    socket's drop-in directories full); after a reboot the
 ##    re-assertion commits the revert, and across a second reboot the
 ##    socket stays down and does not listen;
+## 4b. after the re-point, a switch whose health check fails reverts, and
+##    ``repro system rollback`` to the previous engine's generation
+##    succeeds; both leave the re-assert and boot-confirm units on this
+##    engine and its prefix in the ledger (A9 review round 17, finding 1);
 ## 5. ``repro system addon uninstall`` removes it and its link through the
 ##    ledger, and the base is as it was before the bootstrap.
 ##
@@ -41,7 +45,9 @@
 ## Falsifying builds, red here: ``gen0-not-upgraded`` (step 2: the unit never
 ## arrives), ``reassert-not-repointed`` (step 4a: the re-assert unit keeps
 ## the bootstrap engine, which holds the service but not its socket, so the
-## socket listens after the second reboot). The reboot behaviour with a switch pending is
+## socket listens after the second reboot), ``repoint-backwards`` (step 4b:
+## the revert and the rollback point the units back at the previous
+## engine). The reboot behaviour with a switch pending is
 ## ``t_e2e_addon_floor_reapplies_after_restarts``'s (``boot-hold-after-
 ## sysinit``, ``boot-holds-unrecorded``).
 ##
@@ -55,11 +61,17 @@ import repro_test_support/reasoned_skip
 
 import ./addon_testbed
 
+proc currentGeneration(g: Guest): string =
+  ## ``current`` is a link to the generation's directory (``state_dir``).
+  g.exec("basename \"$(readlink /var/lib/repro/system/current)\"").
+    stdout.strip()
+
 const Gate = "e2e_addon_boot_hold_reaches_existing_hosts"
 const Head = "addOn {\n  managedEtcPrefixes = []\n}\n\n"
 const Unit = "repro-addon-boot-hold.service"
 const UnitFile = "/etc/systemd/system/" & Unit
-const WantsLink = "/etc/systemd/system/sysinit.target.wants/" & Unit
+const WantsLink = "/etc/systemd/system/sysinit.target.requires/" & Unit
+  ## ``RequiredBy=sysinit.target`` (§13 decision 172).
 const OwnProfile = "/var/lib/repro/system/addon/own.profile"
 
 proc installPrevious(g: Guest; dir = "/root/addon-prev"): tuple[repro, sha: string] =
@@ -157,6 +169,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # 144). Two boots each: a loaded host's boots vary.
     var r = g.applyProfile(prev, "u0", profile)
     step("the previous engine applies the profile", r.exitCode == 0, r.stdout & r.stderr)
+    let genPrev = g.currentGeneration()
     let before5 = g.bootSeries("bootsBefore", record)
     let baseline = mean(before5)
     record["bootSecondsBefore"] = %baseline
@@ -268,6 +281,42 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     discard g.run("rm -rf /var/lib/a9b-sr")
     r = g.applyProfile(repro, "s3", profile)
     step("and the next apply without it passes", r.exitCode == 0, r.stdout & r.stderr)
+    # A9 review round 17, finding 1 (§13 decision 164 as amended): a revert
+    # and a rollback after the re-point. The target generation of each
+    # names the previous engine; the units on disk run this one. Both must
+    # succeed, and the units keep this engine (never pointed back).
+    proc engineUnits(): string =
+      g.exec("grep -h -o '/repro/store/prefixes/repro-addon/[^ ]*/bin/repro' " &
+        "/etc/systemd/system/repro-addon-reassert.service " &
+        "/etc/systemd/system/repro-addon-boot-confirm.service | sort -u").stdout.strip()
+    let failing = Head.replace("managedEtcPrefixes = []",
+        "managedEtcPrefixes = []\n  confirmTimeout = 5") &
+      "systemd.systemUnit {\n  name = \"a9b-fail.service\"\n" &
+      "  content = \"[Unit]\nDescription=A9 round 17\n\n[Service]\nType=oneshot\n" &
+      "RemainAfterExit=yes\nUser=a9e\nExecStart=" & binary & " --version\n\n" &
+      "[Install]\nWantedBy=multi-user.target\n\"\n  enabled = true\n" &
+      "  healthCheck = \"tcp:127.0.0.1:1\"\n}\n"
+    let genS3 = g.currentGeneration()
+    r = g.applyProfile(repro, "f1", failing)
+    let afterRevert = engineUnits()
+    record["engineAfterRevert"] = %afterRevert
+    step("a switch whose check fails reverts, and the units keep this engine " &
+         "(A9 review round 17, finding 1)",
+         r.exitCode != 0 and g.currentGeneration() == genS3 and
+         g.exec("test -e /var/lib/repro/system/addon/pending").exitCode != 0 and
+         afterRevert == engineExe,
+         r.stdout & r.stderr & "\nunits run: " & afterRevert)
+    r = g.exec(repro & " system rollback " & genPrev, timeoutSec = 1200)
+    let afterRollback = engineUnits()
+    record["engineAfterRollback"] = %afterRollback
+    step("a rollback to the previous engine's generation succeeds, and the units " &
+         "keep this engine, ledgered",
+         r.exitCode == 0 and afterRollback == engineExe and
+         g.run("sha256sum " & Reassert & " | cut -d' ' -f1").strip() in g.ledgerOf() and
+         parentDir(parentDir(engineExe)) in g.ledgerOf(),
+         r.stdout & r.stderr & "\nunits run: " & afterRollback)
+    r = g.applyProfile(repro, "s4", profile)
+    step("and the next apply passes", r.exitCode == 0, r.stdout & r.stderr)
     # The drop-in directory the gate made for the tmpfs is the gate's.
     discard g.run("rmdir /etc/systemd/system/a9b-sr.service.d " &
                   "/etc/systemd/system/a9b-sr.socket.d 2>/dev/null; true")

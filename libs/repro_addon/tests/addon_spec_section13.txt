@@ -182,3 +182,6 @@
 166 The pre-bootstrap inputs are left in place | pre-bootstrap input, left in place, mode and owner
 167 Bootstrap reads a takeover's prior mode before the takeover | prior mode, takeover, marker
 168 Every sequence floor stays while the key is kept | floor, kept
+172 The boot-hold unit is required, and no ordering cycles through it | boot-hold, RequiredBy, ordering cycle, sysinit.target, required
+173 The agent's units are re-pointed too | agent, re-point, agent-apply, agent-fetch
+174 Only the static add-on image is installed | static, image, dynamic engine
