@@ -63,6 +63,12 @@
 ## one of B's target paths before the first write makes the switch roll
 ## itself back to A, with A's services active.
 ##
+## Every fixture unit is under the hardening floor (§13 decision 157's
+## fourth requirement), and A and B each have a health-checked one, so a
+## boot's replay or revert of either is confirmed by the boot-confirm unit.
+## ``boot-confirm-revert-in-reassert`` at ``step-1`` (the revert to A
+## confirmed inside the re-assertion): red.
+##
 ## Controls (``REPRO_ADDON_MUTATION``, aimed with
 ## ``REPRO_ADDON_RESET_POINTS``):
 ##
@@ -186,7 +192,13 @@ proc profileA(): string =
     file("/etc/repro-fixture/only-a.conf", "only in A\n") &
     unit("repro-fixture-common.service", unitText("A", "common fixture"),
          "  exclusive = true\n") &
-    unit("repro-fixture-a.service", unitText("A", "fixture of A")) &
+    # A health-checked floored unit in A too: every recovery that goes
+    # back to A -- a revert at boot, the replay of a revert -- confirms it,
+    # which the re-assertion cannot (the unit waits for it), so the gate
+    # covers the boot-confirm unit's revert as well as its replay (§13
+    # decision 157; A9 review round 17).
+    unit("repro-fixture-a.service", unitText("A", "fixture of A"),
+         "  healthCheck = \"active\"\n") &
     sysctl("1024")
 
 proc profileB(check = "active"; timeout = 0): string =
