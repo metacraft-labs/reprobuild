@@ -26145,15 +26145,30 @@ const DaemonRequestAuthoritativeEnvNames* =
   ## consults it, never one a project merely passes through to its actions.
 
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
-                            currentEnv: openArray[string]): seq[string] =
-  ## Variables the daemon process carries that the REQUEST does not, limited
-  ## to reprobuild's own control namespace
+                            currentEnv: openArray[string];
+                            requestEnvIsComplete = false): seq[string] =
+  ## Variables the daemon process carries that the REQUEST does not, which
+  ## the worker must unset before running a hosted build.
+  ##
+  ## A COMPLETE request (``environmentIsComplete``: the client sent its whole
+  ## environment, as every client since v0.2.0 does) is the caller's
+  ## environment, so every name it lacks is unset and the hosted build sees
+  ## exactly what a direct build from the same shell sees, which is what a
+  ## hosted build must be equivalent to. The curated rule below could not
+  ## deliver it: a daemon started from a ``nix develop`` shell also holds
+  ## ``CC``, ``CXX``, ``AR``, ``LD``, ``PKG_CONFIG``, the pkg-config
+  ## wrapper's role variable, ``CONFIG_SHELL``, ``SOURCE_DATE_EPOCH`` and
+  ## more, and no list of them stays complete. Names the daemon publishes for
+  ## its own builds (``RUNQUOTA_SOCKET``, the ``*_SRC`` roots) are
+  ## re-established by the build itself, as on the direct route.
+  ##
+  ## An INCOMPLETE request is overlaid, and only these names are unset:
+  ## reprobuild's own control namespace
   ## (``DaemonRequestAuthoritativeEnvPrefixes``), the few variables outside
   ## it that reprobuild reads to pick a default
   ## (``DaemonRequestAuthoritativeEnvNames``), and the compiler-toolchain
   ## environment (``DaemonNixToolchainEnvVars`` /
-  ## ``DaemonNixToolchainEnvPrefixes``). The worker must unset these before
-  ## running a hosted build.
+  ## ``DaemonNixToolchainEnvPrefixes``).
   ##
   ## Without this the request environment was applied as an OVERLAY: every
   ## `KEY=VALUE` the client sent was installed, but a variable the daemon had
@@ -26173,12 +26188,11 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
   ## caller's daemon-hosted compiles while ``--daemon=off`` from the same
   ## shell compiled at ``-O0``.
   ##
-  ## Scoped to these names rather than the whole environment because a
-  ## request from a client before v0.2.0 carried only a curated list, so it
-  ## cannot distinguish "the client had no PATH" from "PATH was not
-  ## forwarded", and clearing the ambient environment of a build is a much
-  ## larger claim than making reprobuild's own knobs request-scoped. Every
-  ## name added here was on that curated list.
+  ## The incomplete rule is scoped to these names rather than the whole
+  ## environment because a request from a client before v0.2.0 carried only
+  ## a curated list, so it cannot distinguish "the client had no PATH" from
+  ## "PATH was not forwarded". Every name added here was on that curated
+  ## list.
   var carried = initHashSet[string]()
   for item in requestEnv:
     let split = item.find('=')
@@ -26192,7 +26206,8 @@ proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
     let key = item[0 ..< split]
     if carried.contains(key):
       continue
-    if key in DaemonRequestAuthoritativeEnvNames or
+    if requestEnvIsComplete or
+        key in DaemonRequestAuthoritativeEnvNames or
         key in DaemonNixToolchainEnvVars or
         DaemonRequestAuthoritativeEnvPrefixes.anyIt(key.startsWith(it)) or
         DaemonNixToolchainEnvPrefixes.anyIt(key.startsWith(it)):
@@ -26202,7 +26217,8 @@ proc currentEnvironmentPairs*(): seq[string] =
   for key, value in envPairs():
     result.add(key & "=" & value)
 
-proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
+proc applyDaemonRequestEnvironment*(requestEnv: openArray[string];
+                                    requestEnvIsComplete = false):
     seq[tuple[key: string; value: string; present: bool]] =
   ## Install a request's environment for the duration of one hosted session
   ## and return the restore list, newest first is not required because every
@@ -26211,7 +26227,8 @@ proc applyDaemonRequestEnvironment*(requestEnv: openArray[string]):
   ## The one funnel both the build and watch executors use, so the two cannot
   ## drift: a hole fixed for builds but not for watch cycles would reappear on
   ## the next `repro watch` that spawns the same actions.
-  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs()):
+  for name in daemonWorkerEnvUnsets(requestEnv, currentEnvironmentPairs(),
+                                    requestEnvIsComplete):
     result.add((key: name, value: getEnv(name), present: existsEnv(name)))
     delEnv(name)
   for item in requestEnv:
@@ -31276,6 +31293,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonBuildEnvironment(),
+      environmentIsComplete: true,
       attached: true,
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
@@ -36241,6 +36259,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       publicCliPath: publicCliPath,
       rawArgs: originalArgs,
       environment: daemonWatchEnvironment(),
+      environmentIsComplete: true,
       attached: not detach,
       detached: detach,
       cancelOnDisconnect: not detach,
@@ -40926,7 +40945,8 @@ proc installUserDaemonBuildExecutor() =
       # merely overlaid on it -- see `daemonWorkerEnvUnsets` for what an
       # overlay let through and what it cost.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # RE-SEED THE EMBEDDED SOURCE ROOTS AFTER THE REQUEST IS INSTALLED, so
       # a hosted build does not depend on WHICH CLIENT sent it.
       #
@@ -41075,7 +41095,8 @@ proc installUserDaemonWatchExecutor() =
       # must enforce the same private-environment boundary, including the
       # request's authority over reprobuild's own namespace.
       previousEnv.add(applyDaemonRequestEnvironment(
-        sanitizeUserDaemonRequestEnvironment(request.environment)))
+        sanitizeUserDaemonRequestEnvironment(request.environment),
+        request.environmentIsComplete))
       # Same re-seed as the build executor, for the reason its comment gives:
       # a hole closed for builds and left open for watch cycles reappears on
       # the next `repro watch` that spawns the same actions.
@@ -68263,7 +68284,7 @@ type
   GatewayConfig* = object
     ## The daemon-owned configuration the gateway bare repo carries: where the
     ## lock a certificate is checked against lives, the registered-keys
-    ## (allowed-signers) store, and the real upstream the ``post-receive``
+    ## (allowed-signers) store, and the real upstream the ``pre-receive``
     ## forwards a verified push to. It is written by ``wirePushGateway`` and
     ## read by the hooks.
     ##
@@ -68292,7 +68313,8 @@ type
       ## ``pre-receive`` reads it to verify each cert's signature.
     upstreamUrl*: string
       ## The real upstream (a second bare repo standing in for GitHub) the
-      ## ``post-receive`` forwards the push to on success.
+      ## ``pre-receive`` forwards an accepted push to, before the gateway's
+      ## own refs move (so an upstream refusal rejects the push).
     # TC-8c (operator decision D12): there is no certificate-store setting.
     # The gateway reads certificates ONLY from the notes that arrive with the
     # push; its former read of ``.repro/workspace/certificates`` is gone and
@@ -68439,8 +68461,9 @@ proc wirePushGateway*(gitBin, repoPath, gatewayBareDir, upstreamUrl: string;
   ## upstream. Concretely:
   ##   1. ``git init --bare`` the gateway if absent.
   ##   2. Install the gateway's ``pre-receive`` + ``post-receive`` hooks.
-  ##   3. Write the daemon-owned ``GatewayConfig`` (policy + lock + registered
-  ##      keys + the real upstream to forward to) under the bare dir.
+  ##   3. Write the daemon-owned ``GatewayConfig`` (lock records dir +
+  ##      registered keys + the real upstream to forward to; no policy, TC-9d)
+  ##      under the bare dir.
   ##   4. Set ``remote.<remoteName>.pushurl`` of ``repoPath`` to the gateway bare,
   ##      while ``remote.<remoteName>.url`` (FETCH) stays the real upstream — so the
   ##      developer still fetches from upstream but PUSHES through the gateway.
@@ -105399,8 +105422,9 @@ proc runLegacyCommand(programName: string; args: seq[string];
   if programName == "repro" and args.len > 0 and args[0] == "gateway":
     # TC-6 — the receiving-side push gateway. The bare gateway repo's
     # ``pre-receive`` / ``post-receive`` hooks invoke ``repro gateway
-    # <phase>`` so the AUTHORITATIVE certificate verify (pre-receive) and the
-    # forward-to-upstream (post-receive) live here, not in shell. This is the
+    # <phase>`` so the AUTHORITATIVE certificate verify and the
+    # forward-to-upstream (both pre-receive; post-receive does nothing) live
+    # here, not in shell. This is the
     # ``--no-verify``-proof enforcement point (Test-Certificates.md
     # §"Enforcement").
     try:
@@ -106343,6 +106367,15 @@ proc runReproCommandLine(programName: string; args: seq[string];
     # `repro cargo gc|record-live|run`: the cargo target-directory janitor
     # and the thin cargo edge (`repro_cli_support/cargo_gc.nim`).
     return cli_cargo_gc.runCargoCommand(conf.cargo)
+  of ReproCommandLineCommand.pressure:
+    # Build-wait pressure from the RunQuota daemon this build would use;
+    # the command lives in `repro_runquota` beside the reports the engine
+    # sends (`repro_runquota/build_pressure`).
+    try:
+      return runPressureCommand(conf.pressure.group, conf.pressure.json)
+    except CatchableError as err:
+      stderr.writeLine("repro pressure: error: " & err.msg)
+      return 1
   of ReproCommandLineCommand.health:
     # RA-30 — top-level `repro health` (the environment doctor): every
     # layer diagnosed, each failure paired with the exact remedy; `--fix`

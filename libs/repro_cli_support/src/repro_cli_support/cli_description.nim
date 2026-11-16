@@ -1571,6 +1571,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         pos topic is seq[string], required = false
 
     # ---- About repro itself ----------------------------------------------
+    subcmd "pressure", help = "Show build-wait pressure from the RunQuota " &
+        "daemon (exit 1 when it cannot be reached or predates it)":
+      flag group is string,
+        help = "Only the session groups of this name, and their sessions"
+      boolFlag json is bool, help = "Print the daemon's answer as JSON"
     subcmd "health", help = "Diagnose the reprobuild environment; exit 1 " &
         "when any check fails":
       flag workspaceRoot is string,
