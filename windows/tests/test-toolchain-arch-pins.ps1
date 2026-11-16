@@ -106,9 +106,12 @@ if ($onWindows) {
   Check "a system image is this host's machine" {
     Assert-PeMachine -Path $cmdExe -Arch $hostArch -Consumer t
   }
-  Check "a system image's imports are read" {
-    $imports = @(Get-PeImportNames -Path $cmdExe)
-    if (-not ($imports -match '^(?i)kernel32\.dll$')) { throw "KERNEL32.dll not among: $($imports -join ', ')" }
+  $cmdImports = @(Get-PeImportNames -Path $cmdExe)
+  Check "a system image's imports are read, one name each" {
+    if ($cmdImports.Count -lt 2) { throw "expected several imports, got $($cmdImports.Count)" }
+    foreach ($name in $cmdImports) {
+      if ($name -isnot [string] -or $name -notmatch '^[A-Za-z0-9_.-]+\.dll$') { throw "not a DLL name: $name" }
+    }
   }
   $dir = Join-Path ([IO.Path]::GetTempPath()) ("closure-" + [Guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Path $dir | Out-Null
@@ -119,14 +122,23 @@ if ($onWindows) {
     }
     # Negative control: the same image with one import renamed to a DLL that
     # exists nowhere. Same length, so the PE stays well formed.
+    # Rename cmd.exe's first import, in place and to the same length, to a
+    # DLL that exists nowhere (Q...Q.dll).
+    $victim = $cmdImports[0]
+    $fakeName = ('Q' * ($victim.Length - 4)) + '.dll'
     $bytes = [IO.File]::ReadAllBytes($cmdExe)
     $text = [Text.Encoding]::ASCII.GetString($bytes)
-    $at = $text.IndexOf("KERNEL32.dll", [StringComparison]::OrdinalIgnoreCase)
-    $fake = [Text.Encoding]::ASCII.GetBytes("NOTREAL1.dll")
-    [Array]::Copy($fake, 0, $bytes, $at, $fake.Length)
-    [IO.File]::WriteAllBytes((Join-Path $dir "bad.exe"), $bytes)
-    Check "an import that is neither in bin/ nor in System32 fails the audit" {
-      Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch } 'bad\.exe imports NOTREAL1\.dll'
+    $at = $text.IndexOf($victim + [char]0, [StringComparison]::Ordinal)
+    Check "the negative control found the import name to rename" {
+      if ($at -lt 0) { throw "$victim not found in $cmdExe" }
+    }
+    if ($at -ge 0) {
+      $fake = [Text.Encoding]::ASCII.GetBytes($fakeName)
+      [Array]::Copy($fake, 0, $bytes, $at, $fake.Length)
+      [IO.File]::WriteAllBytes((Join-Path $dir "bad.exe"), $bytes)
+      Check "an import that is neither in bin/ nor in System32 fails the audit" {
+        Assert-Throws { Assert-WindowsDllClosure -BinDir $dir -Arch $hostArch } ("bad\.exe imports " + [regex]::Escape($fakeName))
+      }
     }
     Check "an image of another machine fails the audit" {
       $other = if ($hostArch -eq "arm64") { "x64" } else { "arm64" }

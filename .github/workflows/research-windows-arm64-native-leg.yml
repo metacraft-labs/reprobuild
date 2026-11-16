@@ -33,7 +33,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: reprobuild
           persist-credentials: false
       - name: Produce the unpublished inputs (Nim prefix, clingo)
         run: |
@@ -41,10 +40,10 @@ jobs:
           $ProgressPreference = 'SilentlyContinue'
           $PSNativeCommandUseErrorActionPreference = $false
           New-Item -ItemType Directory -Force $env:WORK, "$env:WORK\serve" | Out-Null
-          . ./reprobuild/windows/toolchain-utils.ps1
-          $pins = Read-KeyValueFile -Path ./reprobuild/windows/toolchain-versions.env
+          . ./windows/toolchain-utils.ps1
+          $pins = Read-KeyValueFile -Path ./windows/toolchain-versions.env
           # clingo, exactly as the producer workflow builds it.
-          & ./reprobuild/windows/build-clingo-windows-arm64.ps1 `
+          & ./windows/build-clingo-windows-arm64.ps1 `
             -ClingoVersion $pins['CLINGO_VERSION'] `
             -ClingoTarballSha256 4ddd5975e79d7a0f8d126039f1b923a371b1a43e0e0687e1537a37d6d6d5cc7c `
             -LlvmMingwRelease $pins['LLVM_MINGW_WIN_ARM64_RELEASE'] `
@@ -91,13 +90,26 @@ jobs:
             "NIM_WIN_ARM64_SHA256=$((Get-FileHash -Algorithm SHA256 $nimZip.FullName).Hash.ToLowerInvariant())"
             "CLINGO_WIN_ARM64_URL=http://127.0.0.1:8765/$($clingoZip.Name)"
             "CLINGO_WIN_ARM64_SHA256=$((Get-FileHash -Algorithm SHA256 $clingoZip.FullName).Hash.ToLowerInvariant())"
-          ) | Add-Content ./reprobuild/windows/toolchain-versions.env
-          Get-Content ./reprobuild/windows/toolchain-versions.env | Select-Object -Last 6
-      - name: Cold start (env.ps1) and the toolchain qualification
+          ) | Add-Content ./windows/toolchain-versions.env
+          Get-Content ./windows/toolchain-versions.env | Select-Object -Last 6
+      - name: Mint installation token
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+      # The real cold start: setup-dev-env's windows-diy flavour clones the
+      # siblings and sources env.ps1, which downloads, verifies and installs
+      # every pinned arm64 input.
+      - name: Setup dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      - name: Toolchain qualification
         run: |
           $ErrorActionPreference = 'Stop'
-          Set-Location reprobuild
-          . ./env.ps1
           . ./windows/toolchain-utils.ps1
           foreach ($exe in @('nim', 'gcc', 'clang')) {
             $p = (Get-Command $exe).Source
@@ -106,26 +118,23 @@ jobs:
           }
           nim -v | Select-Object -First 1
           & ./windows/tests/test-toolchain-arch-pins.ps1
-          Get-ChildItem env: | Where-Object Name -match '^(REPRO_|WINDOWS_DIY|LIBRARY_PATH|BEARSSL)' | Format-Table -AutoSize
-          # Persist the environment env.ps1 built for the next step.
-          Get-ChildItem env: | ForEach-Object { "$($_.Name)=$($_.Value)" } | Out-File "$env:WORK\env.txt" -Encoding utf8
       - name: Build reprobuild natively
         run: |
           $ErrorActionPreference = 'Stop'
-          Get-Content "$env:WORK\env.txt" | ForEach-Object { $k, $v = $_ -split '=', 2; if ($k) { [Environment]::SetEnvironmentVariable($k, $v) } }
-          Set-Location reprobuild
-          bash ./scripts/build_apps.sh 2>&1 | Tee-Object "$env:WORK\build.log" | Select-Object -Last 80
-          if ($LASTEXITCODE) { throw "build_apps.sh exit $LASTEXITCODE" }
+          $PSNativeCommandUseErrorActionPreference = $false
+          bash ./scripts/build_apps.sh 2>&1 | Tee-Object "$env:WORK\build.log" | Select-Object -Last 120
+          $rc = $LASTEXITCODE
           . ./windows/toolchain-utils.ps1
-          Get-ChildItem build/bin -File | Where-Object Extension -in '.exe', '.dll' | ForEach-Object {
+          Get-ChildItem build/bin -File -ErrorAction SilentlyContinue | Where-Object Extension -in '.exe', '.dll' | ForEach-Object {
             "{0,-40} 0x{1:X4}" -f $_.Name, (Get-PeMachine $_.FullName)
           }
+          if ($rc) { throw "build_apps.sh exit $rc" }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows-arm64-leg-evidence
           path: |
             C:\w\build.log
-            reprobuild/test-logs/
+            test-logs/
           if-no-files-found: warn
           retention-days: 7

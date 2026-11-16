@@ -150,7 +150,9 @@ function Get-PeImportNames {
     $names.Add([Text.Encoding]::ASCII.GetString($bytes, $at, $end - $at))
     $entry += 20
   }
-  return ,$names.ToArray()
+  # Not `,$names`: a wrapped array would iterate as ONE element in a caller's
+  # foreach, and the closure audit would check nothing.
+  return $names.ToArray()
 }
 
 function Assert-WindowsDllClosure {
