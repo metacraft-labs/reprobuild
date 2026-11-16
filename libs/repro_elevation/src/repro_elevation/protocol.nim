@@ -363,6 +363,11 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.sfSourceUrl)
     body.writeString(op.sfSha256)
     body.writeString(op.sfSourceLocal)
+    # How the file is held (POSIX `mode` and `group`, and `form`); empty
+    # when undeclared, which decodes back to empty.
+    body.writeString(op.sfMode)
+    body.writeString(op.sfGroup)
+    body.writeString(op.sfForm)
     body.writeBool(op.sfDestroy)
   of pokFsSystemDirectory:
     body.writeString(op.fsdPath)
@@ -689,6 +694,9 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.sfSourceUrl = readString(body, pos)
     result.operation.sfSha256 = readString(body, pos)
     result.operation.sfSourceLocal = readString(body, pos)
+    result.operation.sfMode = readString(body, pos)
+    result.operation.sfGroup = readString(body, pos)
+    result.operation.sfForm = readString(body, pos)
     result.operation.sfDestroy = readBool(body, pos, "sfDestroy")
   of pokFsSystemDirectory:
     result.operation = PrivilegedOperation(kind: pokFsSystemDirectory,

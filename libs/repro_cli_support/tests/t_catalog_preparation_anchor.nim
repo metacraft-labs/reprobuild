@@ -3,9 +3,12 @@
 ## repositories provide lock-only catalogs. No public network or provider/SDK
 ## build is needed. These exercise ensureLockPinnedCatalog itself; the existing
 ## provider integration program retains coverage of the isolated compile.
-## Lookup prefers an explicit root, then a workspace ancestor sibling, then
-## the consumer lock's verified catalog revision. Relative module spellings
-## must preserve that order.
+## Lookup prefers an explicit root, then (when the consumer's lock pins the
+## catalog) a develop-mode checkout or an ancestor sibling AT the pinned
+## commit, then the consumer lock's verified catalog revision. A sibling at
+## any other commit does not replace the pin (reprobuild-pm issue
+## 2026-11-12-any-ambient-reprobuild-packages-checkout-...). Relative module
+## spellings must preserve that order.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 import repro_cli_support
@@ -79,17 +82,31 @@ proc initCatalogRemote(remote, hooks: string) =
   discard git(remote, "commit", "--quiet", "-am", "agents tip")
   discard git(remote, "checkout", "--quiet", "main")
 
+proc initPinnedSibling(sibling, hooks: string): string =
+  ## A catalog checkout beside the consumer; its HEAD is the revision the
+  ## consumer's lock will pin, so it stands in for the pin.
+  createDir(sibling)
+  createDir(hooks)
+  discard git(sibling, "init", "--quiet", "--initial-branch=main", "--object-format=sha1", "--template=")
+  discard git(sibling, "config", "core.hooksPath", hooks)
+  discard git(sibling, "config", "commit.gpgsign", "false")
+  discard git(sibling, "config", "user.name", "Catalog Fixture")
+  discard git(sibling, "config", "user.email", "fixture@example.invalid")
+  writeFile(sibling / "repro.nim", "discard\n")
+  discard git(sibling, "add", "repro.nim")
+  discard git(sibling, "commit", "--quiet", "-m", "catalog fixture")
+  git(sibling, "rev-parse", "HEAD")
+
 suite "catalog preparation anchors":
   test "bare relative nested relative and absolute modules find the ancestor sibling":
     withFixture:
       let consumer = root / "consumer"
       let nested = consumer / "nested"
       let sibling = root / "reprobuild-packages"
-      createDir(sibling)
-      writeFile(sibling / "repro.nim", "discard\n")
+      let revision = initPinnedSibling(sibling, root / "empty-hooks")
       # A lost sibling lookup must fail against a real absent local remote,
       # rather than silently succeeding from a bundled catalog or network.
-      writeLock(consumer, fileUrl(root / "absent-remote"), repeat('1', 40))
+      writeLock(consumer, fileUrl(root / "absent-remote"), revision)
       createDir(nested)
       writeFile(nested / "repro.nim", "discard\n")
       setCurrentDir(consumer)
@@ -98,11 +115,27 @@ suite "catalog preparation anchors":
         check ensureLockPinnedCatalog(module, consumer) == ""
         check not dirExists(consumer / ".repro" / "cross-repo-producers")
 
+  test "a sibling at another commit does not stand in for the pin":
+    withFixture:
+      require findExe("git").len > 0
+      let consumer = root / "consumer"
+      discard initPinnedSibling(root / "reprobuild-packages",
+        root / "empty-hooks")
+      # The lock pins a revision the sibling is not at, and the remote is
+      # absent: the pin must be fetched, so the fetch fails loudly.
+      writeLock(consumer, fileUrl(root / "absent-remote"), repeat('1', 40))
+      setCurrentDir(consumer)
+      var diagnostic = ""
+      try: discard ensureLockPinnedCatalog("repro.nim", consumer)
+      except OSError as error: diagnostic = error.msg
+      check repeat('1', 40) in diagnostic
+
   test "relative consumer-root fallback keeps the same sibling precedence":
     withFixture:
       let consumer = root / "consumer" / "nested"
-      createDir(root / "reprobuild-packages")
-      writeLock(consumer, fileUrl(root / "absent-remote"), repeat('2', 40))
+      let revision = initPinnedSibling(root / "reprobuild-packages",
+        root / "empty-hooks")
+      writeLock(consumer, fileUrl(root / "absent-remote"), revision)
       setCurrentDir(root)
       check ensureLockPinnedCatalog("", "consumer" / "nested") == ""
       check not dirExists(consumer / ".repro" / "cross-repo-producers")

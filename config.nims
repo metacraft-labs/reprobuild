@@ -96,7 +96,15 @@ proc repoDirExists(path: string): bool = dirExists(repoPath(path))
 switch("styleCheck", "hint")
 
 if defined(windows):
-  switch("define", "sslVersion=3-x64")
+  # Nim's std/openssl loads libssl-<sslVersion>.dll by name. The suffix is the
+  # Windows architecture OpenSSL was built for (reprobuild-pm
+  # Distribution-And-Packaging.md §7.1, W4): x64 on the x64 leg, arm64 on
+  # windows-aarch64, matching windows/toolchain-utils.ps1's
+  # Get-WindowsArchRuntimeNames.
+  if defined(arm64):
+    switch("define", "sslVersion=3-arm64")
+  else:
+    switch("define", "sslVersion=3-x64")
 
 
 
@@ -440,6 +448,12 @@ for libName in [
   "repro_depfile",
   "repro_project_dsl",
   "repro_dsl_stdlib",
+  # The canonical recipe import surface (`import reprobuild`,
+  # `reprobuild/dsl[/<module>]`, `reprobuild/home`, `reprobuild/system`):
+  # thin re-export modules over the two libraries above and `repro_profile`.
+  # Exposed through `--path` like every other library -- never through
+  # `--import:`, which Nim applies to every module of a compilation.
+  "reprobuild",
   "repro_home_intent",
   "repro_system_apply",
   "repro_profile",

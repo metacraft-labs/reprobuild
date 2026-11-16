@@ -277,11 +277,13 @@ proc observeResource*(r: SystemResource): ResourceObservation =
 #   observed digest == desired digest         -> no-op (cache-hit)
 #   observed digest != desired                -> update
 #
-# The planner does NOT itself fail-closed on drift — that is the
-# broker's re-observe gate at apply time. The plan simply records the
-# baseline digest it saw; if the world moves before apply, the apply
-# detects the staleness (`EPlanStale`) or the broker detects the
-# drift (`EBrokerDrift`).
+# The planner does NOT itself fail-closed on drift. The plan records
+# the baseline digest it saw; if the world moves before an apply of
+# that plan id, `detectStaleResources` makes the apply refuse with
+# `EPlanStale` before any mutation. Nothing re-checks after that: the
+# broker carries no drift gate (M82 Phase A removed `EBrokerDrift`'s
+# raise site), so a change made while the apply runs is overwritten.
+# `dispatch.dispatchOperation` step 3 (repro_elevation) says why.
 # ---------------------------------------------------------------------------
 
 proc decideAction*(obs: ResourceObservation; desiredDigestHex: string;
@@ -385,7 +387,12 @@ proc summaryLine(r: SystemResource; action: string): string =
   of srkLaunchdSystemDaemon:
     action & " system-daemon " & r.sdaLabel
   of srkFsSystemFile:
-    action & " system-file " & r.sfPath
+    # The declared mode and group are named (only when declared, so an
+    # undeclared file's summary is unchanged): a chmod or chgrp of such a
+    # file is drift, and the plan line says what the update restores.
+    action & " system-file " & r.sfPath &
+      (if r.sfMode.len > 0: " (mode " & r.sfMode & ")" else: "") &
+      (if r.sfGroup.len > 0: " (group " & r.sfGroup & ")" else: "")
   of srkFsSystemDirectory:
     action & " system-directory " & r.dirPath &
       (if r.dirAclPresent: " (acl: " & $r.dirAclEntries.len &

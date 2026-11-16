@@ -81,6 +81,37 @@ proc runAfterDpkgVerify*(stateDir = DefaultStateDir;
   if result.findings.len > 0 and result.status == "ok":
     result.status = "drift"
 
+const
+  DpkgControlPath* = "/usr/bin/dpkg"
+    ## The path DET-AO-6's positive control asks about: dpkg's own binary,
+    ## which package ``dpkg`` ships on every base the add-on supports.
+  DpkgControlPackage* = "dpkg"
+
+proc dpkgOwnershipControl*(driver: CollisionDriver): string =
+  ## DET-AO-6's positive control (DET-4; spec §10.4 "Scheduled positive
+  ## controls"): the finding's own routine (``newOwnerFindings``) over a
+  ## one-entry ledger for ``DpkgControlPath`` whose plan-time observation
+  ## names no package, through the hook's collision driver, must report
+  ## package ``dpkg``. That proves the hook still reads the base's package
+  ## database, which a heartbeat cannot. Returns ``tripped`` or ``missed:
+  ## <why>``. Reads only.
+  when mutated("hook-control-skipped"):
+    # FALSIFYING BUILD: the hook never runs the control.
+    return "not-run"
+  if driver.isNil: return "missed: no collision driver"
+  let probe = Ledger(entries: @[LedgerEntry(class: lcEtcFile,
+    path: DpkgControlPath, observation: "unowned")])
+  var findings: seq[string]
+  try: findings = newOwnerFindings(probe, driver)
+  except CatchableError as e: return "missed: " & e.msg
+  let want = "package " & DpkgControlPackage & " now owns ledger path " &
+             DpkgControlPath
+  for f in findings:
+    if f.startsWith(want): return "tripped"
+  "missed: " & (if findings.len > 0: findings.join("; ")
+                else: "no package owns " & DpkgControlPath &
+                      " in the package database the hook reads")
+
 proc renderAfterDpkg*(r: AfterDpkgReport): string =
   result = "repro-addon apt hook: " & r.status & "\n"
   for f in r.findings: result.add("  " & f & "\n")
@@ -144,15 +175,23 @@ proc appendEventLog*(path: string; lines: openArray[string];
 proc runAfterDpkgCli*(stateDir = DefaultStateDir;
                       logPath = AptHookLogPath;
                       site = defaultSite(DefaultStateDir);
-                      dpkgLog = "/var/log/dpkg.log"): int =
+                      dpkgLog = "/var/log/dpkg.log";
+                      driver: CollisionDriver = nil): int =
   ## The hook's entry point: report, record (event log first, then the
-  ## journal), exit 0.
+  ## journal), exit 0. ``driver`` (nil: the host's) is the collision driver
+  ## the positive control asks.
   var r: AfterDpkgReport
   try:
-    r = runAfterDpkgVerify(stateDir)
+    r = runAfterDpkgVerify(stateDir, driver)
   except CatchableError as e:
     r = AfterDpkgReport(status: "degraded", findings: @[e.msg])
   stdout.write(renderAfterDpkg(r))
+  var control = ""
+  try:
+    control = dpkgOwnershipControl(
+      if driver != nil: driver else: detectCollisionDriver())
+  except CatchableError as e:
+    control = "missed: " & e.msg
   # The evidence record (spec §7.8, §10.4; DET-AO-6): every run leaves one,
   # naming the dpkg run it followed, so the off-host check can tell a hook
   # that ran clean from one that never ran (DET-AO-8). A clean run's goes
@@ -164,8 +203,16 @@ proc runAfterDpkgCli*(stateDir = DefaultStateDir;
                    ("dpkgLastRun", dpkgLastRun(dpkgLog)),
                    ("message", r.findings.join("; "))]
     discard recordEvidence(EvidenceEvent(detector: edAptHook,
-      category: ecAudit, trigger: "hook-run", fields: fields, attest: true,
+      category: ecAudit, trigger: "hook-run",
+      fields: fields & @[("control", control)], attest: true,
       offHostOnly: true), site)
+    if control.startsWith("missed"):
+      discard recordEvidence(EvidenceEvent(detector: edAptHook,
+        category: ecDetection, trigger: "hook-control-missed",
+        kind: "apt-hook-control-missed",
+        fields: @[("dpkgLastRun", dpkgLastRun(dpkgLog)),
+                  ("message", "DET-AO-6's positive control did not trip: " &
+                   control)], attest: true), site)
     if r.status != "ok":
       discard recordEvidence(EvidenceEvent(detector: edAptHook,
         category: ecDetection, trigger: "hook-finding",

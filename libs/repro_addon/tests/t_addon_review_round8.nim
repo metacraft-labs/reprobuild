@@ -109,6 +109,7 @@ import repro_addon/ledger
 import repro_addon/evidence as addonEvidence
 import repro_addon/store_custody
 import repro_addon/uninstall
+import repro_addon/record_dir
 
 import ./spec_citations
 
@@ -699,6 +700,186 @@ suite "A11 code review round 18: the records' directory is never a link's target
     var st: Stat
     check stat(victim.cstring, st) == 0 and (int(st.st_mode) and 0o7777) == 0o755
     check symlinkExists(root / name / "log")
+
+suite "A11 code review round 19: the records are read, listed and probed by descriptor":
+  ## Falsifier ``record-read-by-path`` (round 18's path-based reads): a
+  ## resumable intent -- its objects removed, its marker written, its
+  ## completion refused -- is completed by the next run only when it is
+  ## read through the records directory's checked descriptor. A .sig that
+  ## is a link, a link in the directory's place, and a FIFO under an
+  ## intent's name must each be refused; the FIFO must not block the gate
+  ## (it runs in a child process, killed after 10 s). ``corrupt-check-after-
+  ## gate``: the corrupt-record stop comes before the gate, so no intent is
+  ## written.
+  let failWriter19 = proc (path, text: string) =
+    raise newException(IOError, "Operation not permitted")
+  proc resumable(name: string): Scene =
+    result = scene(name)
+    removeDir(result.aside)
+    let st = parentDir(parentDir(result.key)) / "state"
+    writeLedger(ledgerCopyPath(st), Ledger(generation: "g0"))
+    var signer = loadTextSigner(result.key)
+    var r = resultOf(result)
+    doAssert completeDiscardBeforeKeys(r, Ledger(generation: "g0"), st,
+      result.site, signer, result.gate.pending, failWriter19)
+    signer.wipe()
+  proc logOf19(s: Scene): string = parentDir(s.gate.overrideRecord)
+
+  test "the resumable intent is completed through the checked read":
+    let s = resumable("r19-base")
+    let g = storeEvidenceGate(s.site, override, notAcknowledged,
+                              overrideDir = logOf19(s))
+    check g.errors.len == 0 and g.overrideRecord == s.gate.overrideRecord
+
+  test "a .sig that is a link is not followed":
+    let s = resumable("r19-siglink")
+    let sig = s.gate.overrideRecord & DiscardRecordSigExt
+    let moved = root / "r19-siglink" / "elsewhere.sig"
+    moveFile(sig, moved)
+    createSymlink(moved, sig)
+    let g = storeEvidenceGate(s.site, override, notAcknowledged,
+                              overrideDir = logOf19(s))
+    checkpoint g.overrideRecord
+    check g.overrideRecord.len == 0
+
+  test "a link in the records directory's place is not read through":
+    let s = resumable("r19-dirlink")
+    let log = logOf19(s)
+    moveDir(log, log & "-real")
+    createSymlink(log & "-real", log)
+    let g = storeEvidenceGate(s.site, override, notAcknowledged,
+                              overrideDir = log)
+    checkpoint g.overrideRecord
+    check g.overrideRecord.len == 0
+
+  test "a FIFO under an intent's name does not block the gate":
+    let s = resumable("r19-fifo")
+    let fifo = logOf19(s) / "uninstall-29990101T000000Z-discard-intent.json"
+    check mkfifo(fifo.cstring, Mode(0o600)) == 0
+    let pid = fork()
+    if pid == 0:
+      discard storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = logOf19(s))
+      quit(0)
+    var status: cint
+    var done = false
+    for _ in 0 ..< 100:
+      if waitpid(pid, status, WNOHANG) == pid:
+        done = true
+        break
+      sleep(100)
+    if not done:
+      discard kill(pid, SIGKILL)
+      discard waitpid(pid, status, 0)
+    check done
+
+  test "a corrupt input record stops uninstall before the gate writes an intent":
+    let name = "r19-corrupt"
+    let key = root / name / "agent" / "attestation.key"
+    createDir(parentDir(key))
+    discard ensureAttestationKey(key)
+    let site = scratchSite(name, key)
+    discard leaveAside(site, "1-a")
+    writeLedger(ledgerCopyPath(site.stateDir), Ledger(generation: "g0",
+      entries: @[LedgerEntry(class: lcRoot, path: root / name / "agentdir",
+        mode: "0700", owner: "0:0", replaced: "dir 0750 1000:1000",
+        collision: "adopt", observation: PriorCapturedBeforeTakeover)]))
+    let log = root / name / "log"
+    createDir(log)
+    let r = runAddonUninstall(UninstallOptions(stateDir: site.stateDir,
+      logDir: log, custody: site, ship: notAcknowledged,
+      discardUnacknowledgedStoreEvidence: true))
+    checkpoint $r.errors
+    check r.errors.len > 0 and r.errors[^1].startsWith("nothing was removed")
+    var intents = 0
+    for f in walkFiles(log / "*-discard-intent.json"): inc intents
+    check intents == 0
+
+suite "A11 code review round 20: a record read never blocks and is bounded":
+  ## Falsifiers ``record-read-blocking`` (the checked read opened without
+  ## O_NONBLOCK), ``record-read-unbounded`` (no 1 MiB cap) and
+  ## ``operator-read-blocking`` (verify-discard-record reads its path with
+  ## a blocking, unbounded read). A FIFO with no writer blocks a blocking
+  ## open for ever, so each read runs in a child process, killed after
+  ## 10 s; round 19's FIFO under an intent's name never reached a read
+  ## (the listing skips what is not a regular file), so these put the FIFO
+  ## at the names that are read directly: an intent's .sig and its
+  ## completion.
+  let failWriter20 = proc (path, text: string) =
+    raise newException(IOError, "Operation not permitted")
+  proc resumable20(name: string): Scene =
+    result = scene(name)
+    removeDir(result.aside)
+    let st = parentDir(parentDir(result.key)) / "state"
+    writeLedger(ledgerCopyPath(st), Ledger(generation: "g0"))
+    var signer = loadTextSigner(result.key)
+    var r = resultOf(result)
+    doAssert completeDiscardBeforeKeys(r, Ledger(generation: "g0"), st,
+      result.site, signer, result.gate.pending, failWriter20)
+    signer.wipe()
+  proc finishesWithin10s(body: proc ()): bool =
+    let pid = fork()
+    if pid == 0:
+      try: body()
+      except CatchableError: discard
+      quit(0)
+    var status: cint
+    for _ in 0 ..< 100:
+      if waitpid(pid, status, WNOHANG) == pid: return true
+      sleep(100)
+    discard kill(pid, SIGKILL)
+    discard waitpid(pid, status, 0)
+    false
+
+  test "a FIFO at an intent's .sig does not block the gate":
+    let s = resumable20("r20-fifo-sig")
+    let sig = s.gate.overrideRecord & DiscardRecordSigExt
+    removeFile(sig)
+    check mkfifo(sig.cstring, Mode(0o600)) == 0
+    check finishesWithin10s(proc () =
+      discard storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = parentDir(s.gate.overrideRecord)))
+    check finishesWithin10s(proc () =
+      discard readInCheckedDir(sig))
+
+  test "a FIFO at an intent's completion name does not block the gate":
+    let s = resumable20("r20-fifo-done")
+    let done = completionPathOf(s.gate.overrideRecord)
+    removeFile(done)
+    check mkfifo(done.cstring, Mode(0o600)) == 0
+    check finishesWithin10s(proc () =
+      discard storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = parentDir(s.gate.overrideRecord)))
+    check finishesWithin10s(proc () =
+      discard readInCheckedDir(done))
+
+  test "a record over 1 MiB is refused, by descriptor and by path":
+    let dir = root / "r20-big"
+    ensureCheckedDir(dir)
+    writeFile(dir / "big.json", newString(MaxRecordBytes + 1))
+    expect OSError:
+      discard readInCheckedDir(dir / "big.json")
+    expect OSError:
+      discard readBoundedByPath(dir / "big.json")
+    writeFile(dir / "fits.json", newString(MaxRecordBytes))
+    check readInCheckedDir(dir / "fits.json").len == MaxRecordBytes
+
+  test "verify-discard-record on a FIFO neither blocks nor verifies":
+    let s = scene("r20-verify-fifo")
+    let fifo = root / "r20-verify-fifo" / "x-discard-intent.json"
+    check mkfifo(fifo.cstring, Mode(0o600)) == 0
+    check finishesWithin10s(proc () =
+      discard verifyDiscardRecord(fifo, s.pub))
+    check finishesWithin10s(proc () =
+      discard readBoundedByPath(fifo))
+    let sig = s.gate.overrideRecord & DiscardRecordSigExt
+    removeFile(sig)
+    check mkfifo(sig.cstring, Mode(0o600)) == 0
+    let finished = finishesWithin10s(proc () =
+      discard verifyDiscardRecord(s.gate.overrideRecord, s.pub))
+    check finished
+    if finished:
+      check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsInvalid
 
 suite "A11 code review round 12: §13 decision 56, amended":
   test "18: records no run can ship are never waited for":

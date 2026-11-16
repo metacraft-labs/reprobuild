@@ -151,13 +151,15 @@ function Ensure-Gcc {
   }
 
   # WinLibs publishes x86_64 and i686 builds only — there is no aarch64 mingw
-  # toolchain in that project. Say so here rather than 404ing on a URL nobody
-  # will recognise as the cause.
+  # toolchain in that project. The arm64 C toolchain is llvm-mingw
+  # (ensure-llvm-mingw.ps1; bootstrap-toolchain.ps1 picks it by arch). Say so
+  # here rather than 404ing on a URL nobody will recognise as the cause.
   if ($Arch -ne "x64") {
     throw ("ensure-gcc: WinLibs publishes x86_64 (and i686) builds only, but " +
-           "this host resolved to '$Arch'. Provision an ARM64 C toolchain " +
-           "separately, or set WINDOWS_DIY_ARCH_OVERRIDE=x64 when targeting " +
-           "an emulated x64 toolchain.")
+           "this host resolved to '$Arch'. The arm64 C toolchain is llvm-mingw " +
+           "(windows/ensure-llvm-mingw.ps1). WINDOWS_DIY_ARCH_OVERRIDE=x64 " +
+           "selects the emulated x64 toolchain instead, which is not native " +
+           "arm64 coverage.")
   }
 
   $assetName = Get-WinLibsAssetName -Release $release -Version $version

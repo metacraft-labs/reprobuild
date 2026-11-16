@@ -127,7 +127,8 @@ suite "add-on-debian realisation profile":
       state = "Stopped")
     addOnTool(r, command = "ipmitool", aptClosureLock = "lock\n",
       program = "/usr/bin/ipmitool")
-    fsSystemFile(r, path = "/etc/web/a.conf", content = "x", mode = "0640")
+    fsSystemFile(r, path = "/etc/web/a.conf", content = "x", mode = "0640",
+      group = "web", form = "copy")
     fsSystemFile(r, path = "/etc/web/b.conf",
       sourceUrl = "https://example.org/b.conf", sha256 = repeat('a', 64))
     fsSystemFile(r, path = "/etc/web/c.conf", sourceLocal = "./c.conf")

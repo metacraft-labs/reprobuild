@@ -237,6 +237,10 @@ jobs:
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
         run: .\scripts\check_windows_bootstrap_syntax.ps1
 
+      - name: Verify per-architecture toolchain pin conventions
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: .\windows\tests\test-toolchain-arch-pins.ps1
+
       - name: Verify OpenSSL mirror failures and provisioning
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
         run: .\windows\tests\test-openssl-mirrors.ps1

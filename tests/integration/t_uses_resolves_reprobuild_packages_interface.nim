@@ -7,11 +7,13 @@
 ## plain `uses: "sqlite3"`, so the auto-import has to find the moved module:
 ## `reprobuildPackagesInterfaceModule` looks for
 ## `<catalog>/packages/interfaces/<name>/repro.nim`, where the catalog is
-## `$REPROBUILD_PACKAGES_ROOT`, a `reprobuild-packages` beside the consumer or
-## an ancestor of it, or one beside the reprobuild checkout.
+## `$REPROBUILD_PACKAGES_ROOT`, a catalog inside the consumer's own
+## repository, or the one external catalog selected for the consumer (the
+## lock-pinned one, a develop-mode checkout of it, or with no pin the nearest
+## sibling checkout, else the one beside the reprobuild checkout).
 ##
-## The fixture catalog is `tests/reprobuild-packages`, which the walk up from
-## this file reaches first. Remove the catalog branch from `usesImportCode`
+## The fixture catalog is `tests/reprobuild-packages`, inside this repository,
+## which the lookup from this file consults first. Remove the catalog branch from `usesImportCode`
 ## and `rpcatalogfixture` is never imported: it is not registered, and the
 ## consumer's tool use carries no provisioning.
 

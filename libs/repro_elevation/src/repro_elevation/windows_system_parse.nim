@@ -395,9 +395,9 @@ proc serviceMatchesDesired*(obs: ServiceObservation;
   return true
 
 # ===========================================================================
-# Canonical-state digests. The broker's re-observe / drift gate
-# compares a digest of the OBSERVED state against a digest of the
-# DESIRED state and the plan's recorded baseline. For the
+# Canonical-state digests. The broker's re-observe compares a digest
+# of the OBSERVED state against a digest of the DESIRED state (M82
+# Phase A removed the comparison with the plan's recorded baseline). For the
 # feature/capability/service drivers the "state" is a small typed
 # tuple, not a byte payload — these helpers render that tuple to a
 # stable canonical string the digest covers.

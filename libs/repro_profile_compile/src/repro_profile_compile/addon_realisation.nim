@@ -184,10 +184,15 @@ proc addOnDebianProfile*(): RealisationProfile =
       fields: shared("name", "content", "enabled", "state")),
     KindRule(kind: "fs.systemFile", class: fcShared,
       fields: shared("path", "content", "sourceUrl", "sha256", "sourceLocal",
-        "mode") &
+        "mode", "group") &
         @[FieldRule(field: "collision", class: fcAddOnSpecific,
             reason: "the opt-in when a package owns the path (spec §4.3): " &
-              "`divert`")]),
+              "`divert`"),
+          FieldRule(field: "form", class: fcAddOnSpecific,
+            reason: "how an add-on host materialises the file (spec §7.2 " &
+              "step 5): `link` into the static tree or `copy`; a file " &
+              "declaring `mode` or `group` is always a copy. A full " &
+              "realisation writes every file in place")]),
     KindRule(kind: "passwd.user", class: fcShared,
       fields: shared("name", "shell", "extraGroups")),
     KindRule(kind: "passwd.group", class: fcShared,
@@ -301,9 +306,10 @@ proc addOnDebianProfile*(): RealisationProfile =
     FieldRule(field: "fs.systemFile.representation", class: fcIgnored,
       reason: "on an add-on host a managed /etc file is a link into the " &
         "generation's static tree (/etc/repro/static), so a switch is one " &
-        "rename (spec §7.2 steps 3-4); a full realisation writes the file " &
-        "in place. What a reader opens -- its bytes, mode and owner -- is " &
-        "the same")]
+        "rename (spec §7.2 steps 3-4), unless it declares `mode`, `group` " &
+        "or `form = \"copy\"` (then a copy, step 5); a full realisation " &
+        "writes the file in place. What a reader opens -- its bytes, and " &
+        "the declared mode and group -- is the same")]
 
 proc findKind*(rp: RealisationProfile; kind: string): int =
   ## Index of `kind` in `rp.kinds`, or -1.

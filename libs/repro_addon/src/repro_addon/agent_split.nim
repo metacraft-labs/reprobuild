@@ -58,6 +58,7 @@ import ./store_custody
 import ./apt_hook
 import ./evidence
 import ./evidence_ship
+import ./egress_observer
 import ./tick_evidence
 import ./fingerprint
 import ./generation0
@@ -259,9 +260,12 @@ proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];
 
 proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
                       storeRoot = StoreRoot): bool =
-  ## Whether the apply unit will need ``d``'s archive: not when its
-  ## closure is realised, nor when the member is already published at its
-  ## store path. (An older realiser's prefix of it does not count: the
+  ## Whether the apply unit will need ``d``'s archive: when the member is
+  ## not published at its store path, or when its closure's union is not
+  ## realised -- building a union reads every member's ``postinst`` for the
+  ## alternatives links it makes (ReproOS Add-On Mode §8.3 item 4,
+  ## "Alternatives"), so a member already published still needs its
+  ## archive then. (An older realiser's prefix of it does not count: the
   ## archive is the source whenever it is served, threat model C20.) The
   ## store is world-readable, so the fetch unit's dynamic user decides this
   ## itself.
@@ -273,7 +277,8 @@ proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
     not aptClosureRealised(storeRoot, lock) and
       not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
   else:
-    not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
+    not aptClosureRealised(storeRoot, lock) or
+      not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
 
 proc stageDebs(canonical: string; dir: string; notes: var seq[string];
                storeRoot = StoreRoot) =
@@ -324,6 +329,15 @@ proc runAgentFetch*(conf: AgentConf; anchors: TrustAnchors;
                     stagingRoot: string; deps: AgentDeps;
                     fetchTimeoutMs = 30_000): FetchReport =
   ## One fetch: select, stage and publish (see the module header).
+  # DET-AO-3's positive control, before anything else the fetch does (spec
+  # §10.4 "Scheduled positive controls"): one datagram to the control
+  # address, which the egress observer's table counts when it still matches
+  # this unit's slice. A control that cannot be sent is reported here, and
+  # the off-host check sees it as a control that never tripped.
+  let control = sendEgressControl()
+  if control.len > 0:
+    stderr.write("repro system addon agent-fetch: DET-AO-3 control: " &
+                 control & "\n")
   createDir(stagingRoot)
   # One fetch runs at a time (one unit); a build directory another one left
   # (killed mid-download) is garbage, and holds downloaded archives.
@@ -882,10 +896,11 @@ proc tickDetection*(t: RecordedTick; ctx: AgentApplyContext):
   tickDetection(t, refusalOf(ctx))
 
 proc recordTickEvidence*(t: RecordedTick; ctx: AgentApplyContext;
-                         site = defaultSite()) =
+                         site = defaultSite(); anchors: TrustAnchors = nil) =
   ## ``tick_evidence.recordTickEvidence`` for one of the add-on agent's own
-  ## ticks, with what its apply refused.
-  recordTickEvidence(t, refusalOf(ctx), site)
+  ## ticks, with what its apply refused and DET-AO-1's control over
+  ## ``anchors`` (the deploy anchors the fetch unit verifies with).
+  recordTickEvidence(t, refusalOf(ctx), site, anchors)
 
 proc runAddonAgentTick*(cfg: AgentConfig; ctx: var AgentApplyContext;
                         what: string): RecordedTick =
@@ -930,7 +945,7 @@ proc runAddonAgentTick*(cfg: AgentConfig; ctx: var AgentApplyContext;
   recordAgentDrift((if result.raised: "tickRaised" else: $result.outcome.kind),
                    (if result.raised: 0'u64 else: result.outcome.sequence),
                    result.addOnDrift)
-  recordTickEvidence(result, ctx)
+  recordTickEvidence(result, ctx, anchors = cfg.anchors)
 
 proc printTick(t: RecordedTick) =
   if t.raised:
@@ -1020,7 +1035,11 @@ proc runAgentApplyCli*(args: seq[string]): int =
     let o = stagedResult(ctx.copyDir, conf.target)
     let t = RecordedTick(outcome: o, exitCode: deployAgentExitCode(o.kind))
     recordTick(AgentStateDir, conf.target, tickStatusFor(o))
-    recordTickEvidence(t, ctx)
+    # DET-AO-1's control runs on every tick, this one included, with the
+    # anchors the fetch unit refused or waited with.
+    let anchors = try: peerAuth.loadTrustAnchors(DeploySignersPath)
+                  except CatchableError: nil
+    recordTickEvidence(t, ctx, anchors = anchors)
     printTick(t)
     return t.exitCode
   let cfg = AgentConfig(target: conf.target,

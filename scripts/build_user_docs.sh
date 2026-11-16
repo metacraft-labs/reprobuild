@@ -52,7 +52,7 @@ checkout_at() {
 fetch() {
   mkdir -p "${sibling_root}"
   echo "build_user_docs.sh: framework checkouts in ${sibling_root}"
-  local framework_ref="${REPRO_DOCS_ISONIM_DOCS_REF:-HEAD}"
+  local framework_ref="${REPRO_DOCS_ISONIM_DOCS_REF:-4e7041386d5cf319c68628cc49063b76391b7f8a}"
   checkout_at isonim-docs "${framework_ref}"
   local lock="${sibling_root}/isonim-docs/repro.lock"
   [[ -f "${lock}" ]] || die "${lock} is missing; isonim-docs records its dependencies there"
@@ -82,6 +82,7 @@ build() {
   # repository root, out of the site's compiles (see src/config.nims).
   nim c -r --skipParentCfg --hints:off -o:build/check_links src/check_links.nim
   python3 "${repo_root}/scripts/render_command_equivalents.py" --check
+  python3 "${repo_root}/scripts/render_user_docs_generated.py" --check
   nim c -r --skipParentCfg --hints:off -o:build/build src/build.nim
   [[ -f public/index.html ]] || die "the build wrote no public/index.html"
 }

@@ -46,6 +46,7 @@ import git_tool
 # worker pool may be live; see ``repro_core/process_close``.
 from repro_core/process_exec import execCmdExCloseOnce
 from repro_core/ambient_execution import uncontrolledFindExe, uncontrolledStartProcess
+import repro_core/process_env
 
 const
   AlternatesRelPath* = "objects/info/alternates"
@@ -1177,6 +1178,7 @@ proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
   ##
   ## ``gc.pruneExpire`` is written LAST, so a run that fails part-way never
   ## leaves a pool expiring objects without the hook that protects them.
+  ##
   result = true
   for (key, value) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
       barePath):
@@ -2944,6 +2946,21 @@ proc retentionHookConfigValue*(pool: string): string =
   ## that shell is ``sh`` even on Windows.
   quoteShellPosix(retentionHookPath(pool).replace('\\', '/'))
 
+proc retentionDiscoveryEnv*(gitBin: string;
+                            base: StringTableRef = nil): StringTableRef =
+  ## The environment the hook's ``--discover`` pass runs in: ``base``
+  ## (default: ``scrubbedGitRepositoryEnv()``) with the directory of the
+  ## pool's own Git first on the search path, so the pass runs the Git the
+  ## pool is configured for (Shared-Clone-Pool-Integrity §3.2).
+  ##
+  ## The prepend reads and writes the search path through ``base`` itself.
+  ## On Windows that table is case-insensitive, so the inherited ``Path`` is
+  ## extended in place; a second ``PATH`` entry beside it would leave the
+  ## child to pick one, and it could run whatever ``git`` the inherited one
+  ## finds first.
+  result = (if base.isNil: scrubbedGitRepositoryEnv() else: base)
+  result.prependPathEntry(gitBin.parentDir)
+
 proc poolRetentionReady*(gitBin, pool: string): bool =
   ## The hook and readiness share one discovery implementation. A newly
   ## found borrower is registered, but this pass still keeps ``never``; only
@@ -2951,8 +2968,7 @@ proc poolRetentionReady*(gitBin, pool: string): bool =
   if not gitSupportsRetentionHook(gitBin) or
       not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
     return false
-  let env = scrubbedGitRepositoryEnv()
-  env["PATH"] = gitBin.parentDir & $PathSep & getEnv("PATH")
+  let env = retentionDiscoveryEnv(gitBin)
   let discovered = execCmdExCloseOnce("sh " &
     quoteShell(retentionHookPath(pool)) & " --discover", env = env)
   discovered.exitCode == 0

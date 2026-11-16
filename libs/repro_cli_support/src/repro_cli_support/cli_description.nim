@@ -183,6 +183,43 @@ proc devEnvSelectionFlags(): NimNode {.compileTime.} =
       help = "Write statistics of the development-environment computation " &
         "to the path"
 
+proc devSessionSelectionFlags(): NimNode {.compileTime.} =
+  ## The flags that select the development session `up`, `dev` and `down`
+  ## act on: its activities and the work root it lives under.
+  quote do:
+    flag activity is seq[string],
+      help = "The session of the named activity; repeat it or give a " &
+        "comma-separated list for several (default: `default`)"
+    flag workRoot is string,
+      help = "The work root the development environment is computed under"
+    # Internal (accepted, never shown in help), as for `exec` and `tasks`.
+    flag lockSlice is string, visibility = internal,
+      help = "The lock slice the development environment must match"
+
+proc devSessionStartFlags(): NimNode {.compileTime.} =
+  ## The flags of the commands that start a supervised development session
+  ## (`up`, `dev`): how it runs, where its control API listens, and how
+  ## long the command waits for it.
+  quote do:
+    boolFlag foreground is bool,
+      help = "Run the supervised session in the foreground"
+    flag http is string,
+      help = "Serve the control API over TCP at `HOST:PORT` (default: a " &
+        "Unix-domain socket on POSIX, `127.0.0.1:0` on Windows)"
+    boolFlag httpAllowRemote is bool,
+      help = "Permit a non-loopback `--http` host; the session token is " &
+        "then the only barrier"
+    flag readyTimeout is Option[int],
+      help = "Wait at most this many milliseconds for the session to come " &
+        "up (default: derived from the services' readiness timeouts; " &
+        "not with --foreground)"
+    boolFlag replace is bool,
+      help = "Stop the running instance of a shared service and start " &
+        "this definition"
+    boolFlag force is bool,
+      help = "With --replace: take the shared instance over from its other " &
+        "live holders"
+
 proc storeRootFlags(): NimNode {.compileTime.} =
   ## The store root of the commands that open the local store (`store`'s
   ## subcommands, `cas`, `launch-plan`, `self`). Spelt `--store-root=PATH`
@@ -466,12 +503,617 @@ proc cargoTargetDirFlags(): NimNode {.compileTime.} =
         "default 3, also `$REPRO_CARGO_GC_KEEP_SETS` and `keep_sets` under " &
         "`[cargo_gc]` in the configuration file)"
 
+# ---- Group 6 (workspaces and publication) -----------------------------------
+
+proc workspaceRootFlag(): NimNode {.compileTime.} =
+  ## The workspace a workspace command acts on.
+  quote do:
+    flag workspaceRoot is string,
+      help = "The workspace root (default: found from the current directory)"
+
+proc workspaceToolProvisioningFlag(): NimNode {.compileTime.} =
+  ## How a workspace command provisions the tools it runs (git, nix). Every
+  ## spelling `parseToolProvisioning` accepts, as for `repro build`.
+  quote do:
+    flag toolProvisioning is string, values = ["path", "nix", "tarball",
+        "scoop", "from-source", "fromSource", "source"],
+      help = "How the tools the command runs are provisioned (default: " &
+        "`path`)"
+
+proc workspaceReportFlags(): NimNode {.compileTime.} =
+  ## The report surface of the workspace verbs: `--json` prints the report on
+  ## stdout and never touches disk; `--write-report` persists it.
+  quote do:
+    boolFlag json is bool,
+      help = "Print the report as one JSON document on stdout"
+    flag writeReport is Option[string], optionalValue = some(""),
+      help = "Persist the report: bare, as " &
+        "`<workspace>/.repro/build/reports/<verb>-report.json`; with " &
+        "`=PATH`, at exactly PATH"
+    boolFlag noWriteReport is bool,
+      help = "Write no report file, not even the one a failed run leaves"
+
+proc writeReportFlags(): NimNode {.compileTime.} =
+  ## `--write-report[=PATH]` and `--no-write-report` without `--json`.
+  quote do:
+    flag writeReport is Option[string], optionalValue = some(""),
+      help = "Persist the report: bare, as " &
+        "`<workspace>/.repro/build/reports/<verb>-report.json`; with " &
+        "`=PATH`, at exactly PATH"
+    boolFlag noWriteReport is bool,
+      help = "Write no report file, not even the one a failed run leaves"
+
+proc cloneObjectsFlag(): NimNode {.compileTime.} =
+  ## Where a clone keeps its git objects.
+  quote do:
+    flag cloneObjects is string,
+      help = "Where new clones keep their objects: `shared` (the default " &
+        "shared clone pool), `private=<dir>`, or `none` (also spelt " &
+        "`dissociate`)"
+
+proc branchRoleShorthandFlags(): NimNode {.compileTime.} =
+  ## The six built-in branch roles' shorthands: each means exactly
+  ## `--to=<role>` (on `repro branch`, `--from=<role>`).
+  quote do:
+    boolFlag mainline is bool, help = "Shorthand for the `mainline` role"
+    boolFlag unstable is bool, help = "Shorthand for the `unstable` role"
+    boolFlag staging is bool, help = "Shorthand for the `staging` role"
+    boolFlag stable is bool, help = "Shorthand for the `stable` role"
+    boolFlag production is bool, help = "Shorthand for the `production` role"
+    boolFlag lts is bool, help = "Shorthand for the `lts` role"
+
+proc branchRoleToFlags(): NimNode {.compileTime.} =
+  ## `--to=<role>` and the shorthands (`sync`, `switch`, `branch-roles`).
+  ## A list, so naming two different roles is refused rather than resolved
+  ## by position.
+  let shorthands = branchRoleShorthandFlags()
+  quote do:
+    flag toRole is seq[string], perSource = [cli = "to"],
+      help = "The branch role whose branch each repo is reconciled with " &
+        "(a built-in role, or a custom role the workspace declares under " &
+        "`[branch-roles.<name>]`); an undeclared built-in role falls back " &
+        "toward the mainline"
+    `shorthands`
+
+proc repoSelectionFlags(): NimNode {.compileTime.} =
+  ## The repo-name selectors every workspace sweep shares (`sync`,
+  ## `workspace branch-roles`).
+  quote do:
+    flag only is seq[string], separator = ",",
+      help = "Only the named repos (exact names; repeat it or give a " &
+        "comma-separated list)"
+    flag exceptRepos is seq[string], separator = ",",
+      perSource = [cli = "except"],
+      help = "Drop the named repos (exclusion wins over inclusion)"
+    flag filter is seq[string],
+      help = "Only the repos whose name matches the glob (one glob)"
+    flag tags is seq[string], separator = ",",
+      help = "Only the repos carrying one of the tags; a tag written " &
+        "`-<tag>` excludes the repos carrying it"
+
+proc syncFlags(): NimNode {.compileTime.} =
+  ## `repro sync` and `repro workspace sync`, which are one command.
+  let root = workspaceRootFlag()
+  let tools = workspaceToolProvisioningFlag()
+  let report = workspaceReportFlags()
+  let clone = cloneObjectsFlag()
+  let selection = repoSelectionFlags()
+  let roles = branchRoleToFlags()
+  quote do:
+    `root`
+    `tools`
+    `clone`
+    `selection`
+    `roles`
+    boolFlag rebase is bool,
+      help = "With a role: integrate a diverged branch by rebasing it"
+    boolFlag merge is bool,
+      help = "With a role: integrate a diverged branch by merging"
+    boolFlag rebaseOnForcePush is bool, negatable = true,
+      help = "Replay local commits onto an upstream whose history was " &
+        "rewritten"
+    boolFlag forceSync is bool,
+      help = "Overwrite divergent or dirty checkouts with their declared " &
+        "revision (asks first)"
+    boolFlag yes is bool, alias = "--force",
+      help = "Skip the --force-sync confirmation"
+    flag jobs is Option[int], short = 'j',
+      help = "Default parallelism of the fetch and checkout phases"
+    flag jobsNetwork is Option[int],
+      help = "Parallel fetches (default 8)"
+    flag jobsCheckout is Option[int],
+      help = "Parallel checkouts (default: the number of processors)"
+    boolFlag noInterleaved is bool,
+      help = "Finish every fetch before the first checkout (the only " &
+        "phase model; accepted as an explicit request)"
+    boolFlag failFast is bool,
+      help = "Stop at the first failed fetch (accepted; runs continue and " &
+        "report)"
+    boolFlag dryRun is bool,
+      help = "Print the plan and exit 0, changing nothing (nothing is " &
+        "fetched, so a role is planned against the current remote-tracking " &
+        "refs)"
+    boolFlag verbose is bool, short = 'v',
+      help = "Include each repo's raw tool output"
+    flag progress is string,
+      help = "How progress is shown (the values `repro build --progress` " &
+        "takes)"
+    `report`
+    pos projects is seq[string], required = false,
+      help = "Scope the sync to these projects' repos (a project, variant " &
+        "or repo-set name)"
+
+proc pullFlags(): NimNode {.compileTime.} =
+  ## `repro pull` and `repro workspace pull`.
+  let root = workspaceRootFlag()
+  let tools = workspaceToolProvisioningFlag()
+  let report = writeReportFlags()
+  let clone = cloneObjectsFlag()
+  quote do:
+    `root`
+    `tools`
+    `clone`
+    boolFlag force is bool,
+      help = "Also converge a repo whose branch would lose commits no " &
+        "remote carries"
+    `report`
+    pos project is string, required = false,
+      help = "The project to converge (default: the workspace's)"
+
+proc switchFlags(): NimNode {.compileTime.} =
+  ## `repro switch` and `repro workspace switch`.
+  let root = workspaceRootFlag()
+  let tools = workspaceToolProvisioningFlag()
+  let report = workspaceReportFlags()
+  let roles = branchRoleToFlags()
+  quote do:
+    `root`
+    `tools`
+    boolFlag newBranch is bool, short = 'b',
+      help = "Create the branch in every repo, then switch to it"
+    `roles`
+    boolFlag fetch is bool, help = "Fetch before switching (the default)"
+    boolFlag noFetch is bool,
+      help = "Do not fetch: classify against local refs only"
+    boolFlag yes is bool, alias = "--force",
+      help = "Skip the confirmation"
+    `report`
+    pos branch is string, required = false,
+      help = "The branch to switch to (or a role, through --to or a " &
+        "shorthand)"
+
+proc branchFlags(): NimNode {.compileTime.} =
+  ## `repro branch` and `repro workspace new`: fork a sibling workspace.
+  let root = workspaceRootFlag()
+  let tools = workspaceToolProvisioningFlag()
+  let report = workspaceReportFlags()
+  let clone = cloneObjectsFlag()
+  let shorthands = branchRoleShorthandFlags()
+  quote do:
+    `root`
+    `tools`
+    `clone`
+    flag branch is string,
+      help = "The branch name (default: the destination's last path " &
+        "component)"
+    boolFlag existingBranch is bool,
+      help = "Check out a branch that already exists instead of creating one"
+    flag fromRole is seq[string], perSource = [cli = "from"],
+      help = "Cut the new branch in each repo from the branch this role " &
+        "resolves to"
+    `shorthands`
+    boolFlag fetch is bool,
+      help = "With a role: refresh the role branches first (the default)"
+    boolFlag noFetch is bool,
+      help = "With a role: cut from the role branches as last fetched"
+    boolFlag includeChanges is bool,
+      help = "Carry the source workspace's uncommitted changes over"
+    flag unpublished is string,
+      help = "What to do with repos whose commits no remote carries: " &
+        "`refuse` (the default), `carry` or `declared`"
+    flag projects is seq[string], separator = ",",
+      help = "Fork only these projects (repeat it or give a " &
+        "comma-separated list)"
+    `report`
+    pos path is string, required = false,
+      help = "Where to create the new workspace (its last component names " &
+        "the branch)"
+
+proc hooksActionFlags(): NimNode {.compileTime.} =
+  ## `repro hooks ensure|reinstall|uninstall`: which hooks, and where. With
+  ## no selector both `--vcs` and `--shell-direnv` are implied.
+  let root = workspaceRootFlag()
+  let report = workspaceReportFlags()
+  quote do:
+    boolFlag vcs is bool,
+      help = "The managed git hooks of every workspace repo (or of the " &
+        "repo at PATH)"
+    boolFlag recordStore is bool,
+      help = "Register PATH as a git-checkout record store; implies --vcs"
+    boolFlag shellDirenv is bool,
+      help = "The direnv `.envrc` activation block"
+    boolFlag shellAutocomplete is bool,
+      help = "Shell completion scripts (not implemented yet)"
+    flag shell is seq[string],
+      help = "A native shell activation hook: bash, zsh, fish or pwsh " &
+        "(repeat it for several)"
+    `root`
+    `report`
+    pos path is string, required = false,
+      help = "The repository or directory (default: the current one)"
+
+proc membershipSetFlags(): NimNode {.compileTime.} =
+  ## `repro workspace sets|projects` (the retained spelling): list, resolve,
+  ## define and delete repo-sets. Bare, the namespace lists them.
+  proc listFlags(): NimNode =
+    let root = workspaceRootFlag()
+    quote do:
+      `root`
+      boolFlag enabled is bool, help = "Only the sets enabled here"
+      boolFlag disabled is bool, help = "Only the sets not enabled here"
+      boolFlag all is bool, help = "Every defined set (the default)"
+      boolFlag json is bool, help = "Print the list as JSON"
+  let callList = listFlags()
+  let list = listFlags()
+  let resolveRoot = workspaceRootFlag()
+  let addRoot = workspaceRootFlag()
+  let removeRoot = workspaceRootFlag()
+  quote do:
+    call:
+      `callList`
+    subcmd "list", help = "Every defined repo-set, marked enabled or " &
+        "disabled here":
+      `list`
+    subcmd "resolve", help = "The repos a workspace enabling exactly these " &
+        "sets would participate in (read-only)":
+      `resolveRoot`
+      flag at is Option[string], format = equals,
+        help = "Resolve from this commit of the manifest repository instead " &
+          "of its working tree"
+      boolFlag json is bool, help = "Print the resolution as JSON"
+      pos names is seq[string], required = false, help = "The sets"
+    subcmd "add", help = "Define a new set in the manifest repository " &
+        "(to activate an existing one, use `repro workspace enable`)":
+      `addRoot`
+      flag message is string, short = 'm',
+        help = "The set's description, written beside it"
+      flag templateName is string, format = equals,
+        perSource = [cli = "template"],
+        help = "Scaffold from `templates/<NAME>.toml` (default: the host " &
+          "configuration's `[projects] default_template`)"
+      boolFlag noTemplate is bool,
+        help = "Write the empty stub, ignoring a default template"
+      pos name is string, required = false, help = "The new set's name"
+    subcmd "remove", help = "Delete a set's definition (disable it here " &
+        "first)":
+      `removeRoot`
+      boolFlag pruneOrphanRepos is bool,
+        help = "Also delete the repo fragments no other set names"
+      pos name is string, required = false, help = "The set's name"
+    subcmd "help", visibility = hidden:
+      pos topic is seq[string], required = false
+
+proc workspaceReposFlags(): NimNode {.compileTime.} =
+  ## `repro workspace repos`: list, declare and delete repo fragments.
+  proc listFlags(): NimNode =
+    let root = workspaceRootFlag()
+    quote do:
+      `root`
+      flag set is seq[string], format = equals,
+        help = "Only the repos of this set"
+      flag project is seq[string], format = equals,
+        help = "The retained spelling of --set"
+      boolFlag enabled is bool, help = "Only the repos of enabled sets"
+      boolFlag disabled is bool, help = "Only the repos of no enabled set"
+      boolFlag all is bool, help = "Every declared repo (the default)"
+      boolFlag json is bool, help = "Print the list as JSON"
+  let callList = listFlags()
+  let list = listFlags()
+  let addRoot = workspaceRootFlag()
+  let removeRoot = workspaceRootFlag()
+  quote do:
+    call:
+      `callList`
+    subcmd "list", help = "The declared repos":
+      `list`
+    subcmd "add", help = "Declare a repo and name it in a set":
+      `addRoot`
+      flag set is seq[string], format = equals,
+        help = "The set to name the repo in (repeatable; default: the " &
+          "workspace's primary set)"
+      flag project is seq[string], format = equals,
+        help = "The retained spelling of --set"
+      flag remote is string, format = equals,
+        help = "The repo's remote URL (required for a new repo)"
+      flag mainline is seq[string], format = equals, alias = "--branch",
+        help = "The repo's mainline (required for a new repo unless its " &
+          "profile supplies one)"
+      flag profile is string, format = equals,
+        help = "The branch-role profile the repo follows"
+      flag revision is string, format = equals,
+        help = "An exact commit the fragment sits at"
+      flag path is string, format = equals,
+        help = "The checkout directory (default: the repo's name)"
+      flag message is string, short = 'm',
+        help = "The repo's description, written beside its fragment"
+      pos repo is string, required = false, help = "The repo's name"
+    subcmd "remove", help = "Stop naming a repo in a set":
+      `removeRoot`
+      flag set is seq[string], format = equals,
+        help = "The set to drop the repo from (default: every set naming it)"
+      flag project is seq[string], format = equals,
+        help = "The retained spelling of --set"
+      boolFlag deleteFragment is bool,
+        help = "Also delete the repo's fragment"
+      pos repo is string, required = false, help = "The repo's name"
+    subcmd "help", visibility = hidden:
+      pos topic is seq[string], required = false
+
+proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
+    {.compileTime.} =
+  ## Every subcommand of `repro workspace` (`repro ws`).
+  let initRoot = workspaceRootFlag()
+  let initTools = workspaceToolProvisioningFlag()
+  let initReport = workspaceReportFlags()
+  let initClone = cloneObjectsFlag()
+  let enableRoot = workspaceRootFlag()
+  let enableClone = cloneObjectsFlag()
+  let disableRoot = workspaceRootFlag()
+  let sets = membershipSetFlags()
+  let projects = membershipSetFlags()
+  let repos = workspaceReposFlags()
+  let statusRoot = workspaceRootFlag()
+  let statusTools = workspaceToolProvisioningFlag()
+  let statusReport = workspaceReportFlags()
+  let lockRoot = workspaceRootFlag()
+  let lockTools = workspaceToolProvisioningFlag()
+  let lockReport = writeReportFlags()
+  let listRoot = workspaceRootFlag()
+  let listReport = workspaceReportFlags()
+  let manifestsRoot = workspaceRootFlag()
+  let manifestsReport = workspaceReportFlags()
+  let branchRolesRoot = workspaceRootFlag()
+  let branchRolesRoles = branchRoleToFlags()
+  let branchRolesSelection = repoSelectionFlags()
+  let forallRoot = workspaceRootFlag()
+  let forallReport = workspaceReportFlags()
+  let sharedClonesRoot = workspaceRootFlag()
+  let sharedClonesReport = workspaceReportFlags()
+  let migrateRoot = workspaceRootFlag()
+  let migrateReport = workspaceReportFlags()
+  let migrateLocksRoot = workspaceRootFlag()
+  let migrateLocksTools = workspaceToolProvisioningFlag()
+  let publishEvidenceRoot = workspaceRootFlag()
+  let publishEvidenceTools = workspaceToolProvisioningFlag()
+  let bootstrapRoot = workspaceRootFlag()
+  quote do:
+    subcmd "restore", help = "Materialize project sets at recorded pins " &
+        "into a new directory":
+      flag projects is string, format = equals,
+        help = "The project sets to restore (comma-separated; required)"
+      flag at is string, format = equals,
+        help = "The workspace-metadata revision to read the sets from"
+      flag record is string, format = equals,
+        help = "The lock record to restore (`PATH` or " &
+          "`PROJECT/REPO@SHA`)"
+      flag snapshot is string, format = equals,
+        help = "The named snapshot to restore"
+      flag recordStore is string, format = equals,
+        help = "Where the lock records are read from"
+      flag recordStoreAt is string, format = equals,
+        help = "The record store's revision"
+      pos source is string, required = false,
+        help = "The workspace to restore from"
+      pos destination is string, required = false,
+        help = "The new directory"
+    subcmd "init", help = "Join a workspace: from a URL into a new " &
+        "directory, or materialize a project in this one":
+      `initRoot`
+      `initTools`
+      `initClone`
+      boolFlag allowMissingLayers is bool,
+        help = "Drop a manifest layer that cannot be fetched instead of " &
+          "failing"
+      flag manifestUrl is string, help = "The manifest repository's URL"
+      flag manifestBranch is string,
+        help = "The manifest repository's branch"
+      flag privateManifestUrl is string,
+        help = "A private companion manifest repository's URL"
+      boolFlag printResolvedUrl is bool,
+        help = "Print the workspace URL a `<url>` resolves to and exit " &
+          "(clones nothing)"
+      `initReport`
+      pos target is string, required = false,
+        help = "A workspace URL (`host:org`, an org name or a full URL) " &
+          "for a new directory, or a project to materialize here " &
+          "(default: the host configuration's `[projects] default`)"
+      pos localPath is string, required = false,
+        help = "With a URL: the new directory (default: the org's name)"
+    subcmd "bootstrap", help = "Write the bootstrap scripts of a new host " &
+        "into a directory":
+      call:
+        `bootstrapRoot`
+        pos dir is string, required = false,
+          help = "The directory (default: the current one)"
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
+    subcmd "enable", help = "Activate defined projects in this workspace " &
+        "and check out their repos":
+      `enableRoot`
+      boolFlag useDefault is bool, perSource = [cli = "default"],
+        help = "Enable the default projects (`$REPRO_DEFAULT_PROJECTS`, " &
+          "else the host configuration's `[projects] default`)"
+      boolFlag noSync is bool, help = "Record membership only; check " &
+        "nothing out"
+      boolFlag dryRun is bool,
+        help = "Print the resulting set and the checkout plan; change nothing"
+      `enableClone`
+      flag jobs is Option[int], format = equals,
+        help = "Default parallelism of the checkout's fetch and checkout"
+      flag jobsNetwork is Option[int], format = equals,
+        help = "Parallel fetches"
+      flag jobsCheckout is Option[int], format = equals,
+        help = "Parallel checkouts"
+      flag tags is seq[string], separator = ",", format = equals,
+        help = "Check out only the repos carrying one of the tags " &
+          "(`-<tag>` excludes)"
+      boolFlag json is bool, help = "Print the checkout's report as JSON"
+      boolFlag verbose is bool, help = "Include each repo's raw tool output"
+      flag writeReport is Option[string], optionalValue = some(""),
+        help = "Persist the checkout's report (bare: under " &
+          "`.repro/build/reports/`; `=PATH`: at PATH)"
+      pos projects is seq[string], required = false,
+        help = "The projects to enable"
+    subcmd "disable", help = "Deactivate projects and remove the checkouts " &
+        "only they declared":
+      `disableRoot`
+      boolFlag keepCheckouts is bool, help = "Leave every checkout in place"
+      boolFlag force is bool,
+        help = "Remove checkouts even with work no remote carries"
+      pos projects is seq[string], required = false,
+        help = "The projects to disable"
+    subcmd "sets", help = "List, resolve, define and delete repo-sets":
+      `sets`
+    subcmd "projects", visibility = hidden,
+        help = "The retained spelling of `repro workspace sets`":
+      `projects`
+    subcmd "repos", help = "List, declare and delete repos":
+      `repos`
+    subcmd "status", help = "Each repo's branch, cleanliness and " &
+        "divergence":
+      `statusRoot`
+      `statusTools`
+      boolFlag stashes is bool, help = "Report stashes"
+      boolFlag files is bool, help = "Report changed files"
+      boolFlag aheadBehind is bool, help = "Report ahead/behind counts"
+      boolFlag unmerged is bool, help = "Report unmerged branches"
+      boolFlag fileDetails is bool, help = "List each changed file"
+      boolFlag fix is bool, help = "Repair what can be repaired safely"
+      `statusReport`
+      pos project is string, required = false,
+        help = "The project (default: the workspace's)"
+    subcmd "lock", help = "Create or refresh the workspace's lock record":
+      `lockRoot`
+      flag recordStoreRoot is string,
+        help = "The record store the lock is written to"
+      flag sha is string, visibility = internal,
+        help = "The commit that triggered the lock"
+      flag triggerRepo is string, visibility = internal,
+        help = "The repository whose commit triggered the lock"
+      `lockTools`
+      `lockReport`
+      pos project is string, required = false,
+        help = "The project (default: the workspace's)"
+    subcmd "list", help = "The workspace's repos and where they stand":
+      `listRoot`
+      `listReport`
+      pos project is string, required = false,
+        help = "The project (default: the workspace's)"
+    subcmd "manifests", help = "The manifest layers and their revisions":
+      `manifestsRoot`
+      `manifestsReport`
+    subcmd "branch-roles", help = "The branch each branch role resolves to " &
+        "in every repo (fetches and changes nothing)":
+      `branchRolesRoot`
+      `branchRolesRoles`
+      `branchRolesSelection`
+      boolFlag json is bool, help = "Print one JSON document on stdout"
+      pos projects is seq[string], required = false,
+        help = "Scope the list to these projects' repos"
+    subcmd "forall", help = "Run a shell command in every repo":
+      flag command is string, short = 'c', help = "The command (required)"
+      `forallRoot`
+      boolFlag failFast is bool, help = "Stop at the first failure"
+      boolFlag keepGoing is bool,
+        help = "Run in every repo whatever fails (the default)"
+      boolFlag ignoreErrors is bool, help = "The same as --keep-going"
+      boolFlag quiet is bool, help = "Print only failures"
+      `forallReport`
+      pos project is string, required = false,
+        help = "The project (default: the workspace's)"
+    subcmd "shared-clones", help = "Inspect and maintain the shared clone " &
+        "pool":
+      `sharedClonesRoot`
+      boolFlag force is bool, help = "With gc: run whatever the budget says"
+      `sharedClonesReport`
+      pos verb is string, required = false,
+        help = "list (the default), rewire, consolidate, root, gc (also " &
+          "spelt maintenance) or migrate"
+      pos project is string, required = false,
+        help = "The project (default: the workspace's)"
+    subcmd "sync", help = "Fast-forward the workspace's repositories " &
+        "toward a target (`repro sync`)":
+      `syncWs`
+    subcmd "pull", help = "Converge the workspace onto its declared " &
+        "revisions (`repro pull`)":
+      `pullWs`
+    subcmd "new", help = "Fork a new sibling workspace on a new branch " &
+        "(`repro branch <path>`)":
+      `branchWs`
+    subcmd "switch", help = "Switch the workspace to a branch " &
+        "(`repro switch`)":
+      `switchWs`
+    subcmd "provision", help = "Provision a Windows host's toolchain":
+      call:
+        flag installRoot is string, format = equals,
+          help = "Where the toolchain is installed"
+        flag arch is string, format = equals,
+          help = "The architecture to provision"
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
+    subcmd "migrate", help = "Move a workspace from the `.repo/` layout " &
+        "onto the native one":
+      `migrateRoot`
+      boolFlag dryRun is bool, help = "Print what would change"
+      `migrateReport`
+    subcmd "migrate-locks", help = "Move lock records into the record store":
+      `migrateLocksRoot`
+      flag recordStoreRoot is string, help = "The record store"
+      `migrateLocksTools`
+      boolFlag apply is bool, help = "Make the changes"
+      boolFlag dryRun is bool, help = "Print what would change (the default)"
+    subcmd "publish-evidence", help = "Publish the evidence-only repos' " &
+        "records":
+      `publishEvidenceRoot`
+      flag project is string, help = "The project (default: the workspace's)"
+      `publishEvidenceTools`
+      pos projectName is string, required = false,
+        help = "The project, as a positional"
+
+proc lockSolveFlags(): NimNode {.compileTime.} =
+  ## The flags `repro lock solve`, `refresh` and `validate` share.
+  quote do:
+    flag inputs is string,
+      help = "Solve from this solver-inputs file instead of the recipe"
+    flag lock is string, help = "The lock file (default: the committed lock)"
+    flag platform is string, help = "The platform to solve for"
+    flag strategy is Option[string],
+      help = "The version strategy: default, lowest, highest or " &
+        "lowest-direct"
+    boolFlag lowest is bool, help = "Shorthand for --strategy=lowest"
+    boolFlag highest is bool, help = "Shorthand for --strategy=highest"
+    flag registry is seq[string],
+      help = "A metadata index the solve may reach (repeatable)"
+    boolFlag write is bool, help = "Write the solved lock"
+    boolFlag json is bool, help = "Print the result as JSON"
+    pos projectDir is string, required = false,
+      help = "The project (default: the current directory)"
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
   ## Command order is the order ``repro --help`` lists them in.
   let graphInspection = graphInspectionFlags()
   let devEnvSelection = devEnvSelectionFlags()
+  # Group 5 (development environments), one splice per command.
+  let execSelection = devEnvSelectionFlags()
+  let shellSelection = devEnvSelectionFlags()
+  let runSelection = devEnvSelectionFlags()
+  let upSession = devSessionSelectionFlags()
+  let devSession = devSessionSelectionFlags()
+  let downSession = devSessionSelectionFlags()
+  let upStart = devSessionStartFlags()
+  let devStart = devSessionStartFlags()
   let storeRootFlag = storeRootFlags()
   let storeBundleRoots = storeBundleSelectionFlags()
   let storeBundleCommonRoots = storeAndActionCacheRootFlags()
@@ -528,6 +1170,37 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let compileProfileHost = hostIdentityFlag()
   let cargoGcTargetDir = cargoTargetDirFlags()
   let cargoRecordLiveTargetDir = cargoTargetDirFlags()
+  # Group 6 (workspaces and publication), one splice per command.
+  let pushRoot = workspaceRootFlag()
+  let pushTools = workspaceToolProvisioningFlag()
+  let pushReport = workspaceReportFlags()
+  let checkRoot = workspaceRootFlag()
+  let checkTools = workspaceToolProvisioningFlag()
+  let checkReport = workspaceReportFlags()
+  let hooksEnsure = hooksActionFlags()
+  let hooksReinstall = hooksActionFlags()
+  let hooksUninstall = hooksActionFlags()
+  let syncTop = syncFlags()
+  let syncWs = syncFlags()
+  let pullTop = pullFlags()
+  let pullWs = pullFlags()
+  let switchTop = switchFlags()
+  let switchWs = switchFlags()
+  let branchTop = branchFlags()
+  let branchWs = branchFlags()
+  let addRoot = workspaceRootFlag()
+  let addTools = workspaceToolProvisioningFlag()
+  let removeRoot = workspaceRootFlag()
+  let removeTools = workspaceToolProvisioningFlag()
+  let lockingExplainRoot = workspaceRootFlag()
+  let lockingExplainTools = workspaceToolProvisioningFlag()
+  let lockingAdoptRoot = workspaceRootFlag()
+  let lockingAdoptTools = workspaceToolProvisioningFlag()
+  let lockSolve = lockSolveFlags()
+  let lockRefresh = lockSolveFlags()
+  let lockValidate = lockSolveFlags()
+  let workspaceCommands = workspaceSubcommands(syncWs, pullWs, switchWs,
+    branchWs)
   result = unbound quote do:
     help "Reproducible builds, development environments and workspaces"
     # Command-line flags are kebab-case (`--tool-provisioning`); keys in
@@ -589,7 +1262,15 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "clean", help = "Remove the current project's build artifacts":
       pos args is seq[string], required = false, passThrough = true
     subcmd "run", help = "Run a task, a build output or a target once":
-      pos args is seq[string], required = false, passThrough = true
+      `runSelection`
+      boolFlag choose is bool,
+        help = "List the runnable tasks and run-edges instead of running one"
+      pos target is string, required = false,
+        help = "The task or target: `NAME`, `task:NAME` (a task only) or " &
+          "`PACKAGE:NAME` (a run-edge of that package); without one, list " &
+          "what can run"
+      pos args is seq[string], required = false, afterSeparator = true,
+        help = "Arguments for the program, after `--`"
     subcmd "tasks", help = "List the current project's tasks":
       `devEnvSelection`
       pos selector is string, required = false,
@@ -707,69 +1388,344 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
 
     # ---- Development environments ---------------------------------------
     subcmd "exec", help = "Run a command inside the development environment":
-      pos args is seq[string], required = false, passThrough = true
+      `execSelection`
+      pos selector is string, required = false,
+        help = "The project whose environment to use (default: the " &
+          "current directory's)"
+      pos command is seq[string], required = false, afterSeparator = true,
+        help = "The command and its arguments, after `--` (required)"
     subcmd "shell",
         help = "Enter or print the development shell environment":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "allow", help = "Trust a project's development environment":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "deny",
-        help = "Revoke the trust in a project's development environment":
-      pos args is seq[string], required = false, passThrough = true
+      call:
+        `shellSelection`
+        flag shell is string,
+          help = "The shell to start (default: `$SHELL`; on Windows " &
+            "`$COMSPEC`, else pwsh)"
+        flag printEnv is Option[string],
+          help = "Print the environment instead of starting a shell: " &
+            "`posix` (also `sh`, `bash`, `zsh`), `fish`, `powershell` " &
+            "(also `pwsh`, `ps1`) or `json`"
+        pos selector is string, required = false,
+          help = "The project whose environment to use (default: the " &
+            "current directory's)"
+      subcmd "hook", help = "Print the shell hook that activates " &
+          "development environments on `cd`":
+        flag reproBin is string,
+          help = "The repro the hook runs (default: `repro` on PATH)"
+        pos shell is string,
+          help = "The shell: `bash`, `zsh`, `fish`, `nushell` (also `nu`) " &
+            "or `pwsh` (also `powershell`, `ps`, `ps1`)"
+    # `allow` and `deny` take one directory; a directory whose name starts
+    # with `-` is written after `--`.
+    subcmd "allow", help = "Trust a directory's development environment, " &
+        "so the shell hook activates it":
+      pos directory is string, required = false,
+        help = "The directory to trust (default: the current directory)"
+    subcmd "deny", help = "Revoke the trust `repro allow` recorded for a " &
+        "directory":
+      pos directory is string, required = false,
+        help = "The directory (default: the current directory)"
     subcmd "dev-env",
         help = "Export or deactivate a development environment for a shell":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "export", help = "Print the script that activates the " &
+          "project's development environment in a shell":
+        flag projectRoot is string,
+          help = "The project to activate (default: the nearest project " &
+            "above the current directory)"
+        flag activity is string,
+          help = "The activity to activate (default: `default`)"
+        flag developOverrides is string,
+          help = "The develop-overrides metadata file (default: the " &
+            "project's)"
+        flag preActivationEnv is string,
+          help = "The shell's environment before activation, as " &
+            "NUL-separated `NAME=VALUE` entries (`env -0`)"
+        boolFlag allowStale is bool,
+          help = "Skip the cache-key fast path and the stale-dependency " &
+            "check"
+        pos shell is string,
+          help = "The shell: `bash`, `zsh`, `fish`, `nushell` (also `nu`) " &
+            "or `pwsh` (also `powershell`, `ps`, `ps1`)"
+      subcmd "deactivate", help = "Print the script that rolls an " &
+          "activation back (exit 3 when the activation was tampered with)":
+        flag shell is Option[string],
+          help = "The shell of the script (default: `bash`)"
+        pos manifest is string,
+          help = "The rollback manifest the activation wrote " &
+            "(`<artifact>.rollback.json`)"
     subcmd "up", help = "Start the project's services":
-      pos args is seq[string], required = false, passThrough = true
+      `upSession`
+      `upStart`
+      pos selector is string, required = false,
+        help = "The project (default: the current directory's)"
     subcmd "down", help = "Stop the project's supervised development session":
-      pos args is seq[string], required = false, passThrough = true
+      `downSession`
+      boolFlag force is bool,
+        help = "Write a stop request file when the session's control API " &
+          "does not answer"
+      flag stopTimeout is Option[int],
+        help = "Wait at most this many milliseconds for the session to stop"
+      pos selector is string, required = false,
+        help = "The project (default: the current directory's)"
     subcmd "dev",
         help = "Run the development session with continuous rebuilds":
-      pos args is seq[string], required = false, passThrough = true
+      `devSession`
+      `devStart`
+      flag debounceMs is int, default = 250,
+        help = "Wait this many milliseconds for a burst of changes to " &
+          "settle before rebuilding"
+      pos selector is string, required = false,
+        help = "The project (default: the current directory's)"
     subcmd "develop",
         help = "Set up a project or a dependency for development":
       pos args is seq[string], required = false, passThrough = true
     subcmd "add", help = "Add a dependency to the active context":
-      pos args is seq[string], required = false, passThrough = true
+      `addRoot`
+      flag remote is string,
+        help = "The repo's fetch URL (required: the develop-or-binary " &
+          "policy classifies its origin)"
+      flag revision is string, help = "The revision to pin"
+      flag dependsOf is string,
+        help = "The repo that depends on it (default: the workspace's)"
+      `addTools`
+      boolFlag develop is bool,
+        help = "Check it out for development, whatever the policy says"
+      boolFlag binary is bool, alias = "--no-develop",
+        help = "Use it as a binary dependency, whatever the policy says"
+      boolFlag noMembership is bool,
+        help = "Clone it without adding it to the workspace's membership"
+      boolFlag dryRun is bool, help = "Print what would change"
+      boolFlag json is bool, help = "Print the report as JSON"
+      pos repo is string, required = false, help = "The repo's name"
     subcmd "remove", help = "Remove a dependency from the active context":
-      pos args is seq[string], required = false, passThrough = true
+      `removeRoot`
+      `removeTools`
+      boolFlag force is bool, alias = "--yes",
+        help = "Remove it even when that loses work no remote carries"
+      boolFlag dryRun is bool, help = "Print what would change"
+      boolFlag json is bool, help = "Print the report as JSON"
+      pos repo is string, required = false, help = "The repo's name"
     subcmd "hcr", help = "Coordinate hot code reloading":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "coordinate", help = "Run one coordination cycle with an HCR " &
+          "agent: edit, rebuild and patch":
+        flag project is string, help = "The project root (required)"
+        flag target is string, help = "The build target (required)"
+        flag socket is string,
+          help = "The Unix-domain socket the agent connects to (required)"
+        flag sourceEditDriver is string,
+          help = "The program run against the project to edit its source " &
+            "(required)"
+        flag artifacts is string,
+          help = "Where the rebuilt objects and the reports go (required)"
+        flag patchFunction is string,
+          default = "reprobuild_hcr_patchable_value",
+          help = "The function to patch"
+      subcmd "prepare-object", help = "Rewrite an object so its code is " &
+          "patchable (a dedicated segment on Mach-O; expanded compressed " &
+          "debug sections on ELF)":
+        flag input is string, help = "The object to read (required)"
+        flag output is string, help = "The object to write (required)"
+        flag function is string,
+          help = "Rewrite only this function's section (or --all-code)"
+        boolFlag allCode is bool,
+          help = "Rewrite every code section (or --function)"
+        flag segment is string, default = "__HCR",
+          help = "The segment the code is placed in"
 
     # ---- Workspaces and publication -------------------------------------
     subcmd "workspace", aliases = ["ws"],
         help = "Manage the multi-repository workspace":
-      pos args is seq[string], required = false, passThrough = true
+      `workspaceCommands`
     subcmd "sync",
         help = "Fast-forward the workspace's repositories toward a target":
-      pos args is seq[string], required = false, passThrough = true
+      `syncTop`
     subcmd "pull",
         help = "Converge the workspace onto its declared revisions":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "branch", help = "Fork a new sibling workspace on a new branch":
-      pos args is seq[string], required = false, passThrough = true
+      `pullTop`
+    subcmd "branch", help = "Fork a new sibling workspace on a new branch " &
+        "(with no path: print the workspace's branch)":
+      call:
+        `branchTop`
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
     subcmd "switch", help = "Switch the workspace to a branch":
-      pos args is seq[string], required = false, passThrough = true
+      call:
+        `switchTop`
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
     subcmd "push",
         help = "Publish the current work as a reproducible workspace state":
-      pos args is seq[string], required = false, passThrough = true
+      `pushRoot`
+      `pushTools`
+      flag currentRepo is string,
+        help = "The repository being pushed (default: the git worktree " &
+          "containing the current directory)"
+      boolFlag sync is bool,
+        help = "Reconcile with the upstream before pushing (by merging, " &
+          "unless --rebase)"
+      boolFlag merge is bool, help = "Reconcile by merging (implies --sync)"
+      boolFlag rebase is bool, help = "Reconcile by rebasing (implies --sync)"
+      boolFlag certify is bool, negatable = true, default = true,
+        help = "Obtain the test certificate the pushed commit needs " &
+          "(the default)"
+      `pushReport`
+      pos project is string, required = false,
+        help = "The project to push (default: the workspace's)"
     subcmd "check", help = "Run the publication checks (the pre-push gate)":
-      pos args is seq[string], required = false, passThrough = true
+      # Not required by the parser: a missing `--mode` is the command's own
+      # refusal (exit 1), so it stays apart from exit 2, a failed gate.
+      flag mode is string, values = ["pre-push"],
+        help = "The check set to run (required; `pre-push` is the only one)"
+      `checkRoot`
+      flag currentRepo is string,
+        help = "The repository being pushed (default: the git worktree " &
+          "containing the current directory)"
+      flag pushedRefs is string,
+        help = "The file holding the ref lines git gives a pre-push hook"
+      `checkTools`
+      `checkReport`
     subcmd "hooks", help = "Install, repair or remove the managed hooks":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "ensure",
+          help = "Install or repair the managed hooks (idempotent)":
+        `hooksEnsure`
+      subcmd "reinstall", help = "Rewrite the managed hooks from scratch":
+        `hooksReinstall`
+      subcmd "uninstall", help = "Remove the managed hooks":
+        `hooksUninstall`
+      # The handshake a managed hook body runs before handing its work over
+      # (`hooks protocol --require=2 --hook-contract=<token>`); exit 3 means
+      # "I speak the handshake but generate a different hook". Each flag is
+      # spelt `--flag=VALUE` only, as the bodies write it.
+      subcmd "protocol", visibility = internal,
+          help = "Answer a managed hook's contract handshake":
+        flag require is string, format = equals,
+          help = "The dispatcher protocol the hook speaks (`2`)"
+        flag hookContract is Option[string], format = equals,
+          help = "The contract token the hook body carries"
+        boolFlag requireSourceComponent is bool,
+          help = "Require source-component capabilities"
+      # What a managed hook body runs: `hooks dispatch <hook> --repo-root R
+      # [--refs-file F --protocol=2] [--phase=P --dispatcher-displaced=D]
+      # -- <git's hook arguments>`.
+      subcmd "dispatch", visibility = internal,
+          help = "Run a managed git hook's work":
+        flag repoRoot is string, help = "The repository the hook fired in"
+        flag refsFile is string,
+          help = "The file holding the ref lines git gave a pre-push hook"
+        flag protocol is Option[string], help = "The hook protocol (`2`)"
+        flag phase is string, default = "refresh",
+          help = "The pre-commit phase: `refresh` or `certificate-gate`"
+        flag dispatcherDisplaced is string,
+          help = "`1` when the dispatcher runs displaced as `<hook>.legacy`"
+        pos hookName is string,
+          help = "The hook: pre-commit, pre-push, post-commit, post-merge " &
+            "or post-checkout"
+        pos hookArgs is seq[string], required = false, afterSeparator = true,
+          help = "The arguments git gave the hook"
+      # Spawned detached by the post-commit hook.
+      subcmd "cache-push", visibility = internal,
+          help = "Push the committed branch into the shared clone cache":
+        flag repoRoot is string, help = "The repository committed in"
+        flag workspaceName is string, help = "The workspace's cache namespace"
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
     subcmd "lock", help = "Inspect and update the project's lock":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "list", help = "The lock files the project declares, each " &
+          "with its description":
+        pos projectDir is string, required = false,
+          help = "The project (default: the current directory)"
+      subcmd "solve", help = "Solve the project's lock (written only with " &
+          "--write)":
+        `lockSolve`
+      subcmd "refresh", help = "Solve the project's lock and write it":
+        `lockRefresh`
+        boolFlag provisioning is bool,
+          help = "Re-select the lock's provisioning records instead of " &
+            "carrying them forward"
+        flag allowPinRegression is seq[string],
+          help = "Allow these siblings' pins to move backward " &
+            "(comma-separated; `$REPRO_ALLOW_PIN_REGRESSION` is read too)"
+        flag repin is seq[string],
+          help = "Re-pin only these packages (comma-separated)"
+        boolFlag allowStaleManifest is bool,
+          help = "Deprecated; accepted and ignored"
+      subcmd "update", help = "Move every resolution of one repository, in " &
+          "repro.lock and in flake.lock, to one revision (an intended " &
+          "upgrade)":
+        flag to is string,
+          help = "The target revision (default: the sibling checkout's HEAD)"
+        flag repoRoot is string,
+          help = "The repo whose recipes and locks are updated (default: the " &
+            "git top level of the current directory)"
+        flag allowPinRegression is seq[string],
+          help = "Allow a target behind, or diverged from, a current " &
+            "resolution (comma-separated; `$REPRO_ALLOW_PIN_REGRESSION` is " &
+            "read too)"
+        pos dependency is string, required = false,
+          help = "A flake input, repro.lock dependency or workspace repo " &
+            "name (qualify an ambiguous one as `input:`, `dep:` or `repo:`)"
+      subcmd "validate", help = "Check the committed lock is loadable, " &
+          "consistent and still what a fresh solve gives":
+        `lockValidate`
+      subcmd "diff", help = "The provisioning-level difference of two locks":
+        pos oldLock is string, required = false, help = "The old lock"
+        pos newLock is string, required = false, help = "The new lock"
+      subcmd "explain", help = "Explain a variant's value from a solver " &
+          "fixture":
+        flag fixture is string, help = "The solver fixture (required)"
+        boolFlag json is bool, help = "Print the explanation as JSON"
+        pos variant is string, required = false, help = "The variant"
     subcmd "locking",
         help = "Explain or adopt the workspace's locking configuration":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "explain", help = "Each repo's lock tier and backend, and the " &
+          "configuration layer that decided it":
+        `lockingExplainRoot`
+        flag project is string, help = "The project (default: the workspace's)"
+        `lockingExplainTools`
+        boolFlag json is bool, help = "Print the explanation as JSON"
+        pos projectName is string, required = false,
+          help = "The project, as a positional"
+      subcmd "adopt-manifest", help = "Adopt the manifest's locking " &
+          "declarations into the workspace":
+        `lockingAdoptRoot`
+        flag project is string, help = "The project (default: the workspace's)"
+        `lockingAdoptTools`
+        pos projectName is string, required = false,
+          help = "The project, as a positional"
     subcmd "flake",
         help = "Compute the Nix flake overrides of the develop set":
       pos args is seq[string], required = false, passThrough = true
     subcmd "gateway", help = "Run a push-gateway hook entry point":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "pre-receive", help = "Verify the pushed refs' certificates " &
+          "and forward them upstream (the gateway's pre-receive hook)":
+        flag gatewayDir is string,
+          help = "The gateway bare (default: `$GIT_DIR`, else the current " &
+            "directory)"
+      subcmd "post-receive",
+          help = "Nothing (the gateway's post-receive hook)":
+        flag gatewayDir is string,
+          help = "The gateway bare (default: `$GIT_DIR`, else the current " &
+            "directory)"
+      subcmd "migrate", help = "Install or repair the gateways of a " &
+          "workspace's repos":
+        flag workspaceRoot is string, format = equals,
+          help = "The workspace root (default: the current directory)"
+        boolFlag dryRun is bool, help = "Print what would change"
     subcmd "prompt",
         help = "Print a workspace-state segment for the shell prompt":
-      pos args is seq[string], required = false, passThrough = true
+      call:
+        flag format is Option[string],
+          help = "`plain` (the default), `ansi`, `json`, or a template " &
+            "with `{branch}`, `{repos}`, `{drift}`, `{develop}`, `{stale}` " &
+            "and `{segment}`"
+        flag workspaceRoot is Option[string],
+          help = "The workspace, used as given (default: the one above the " &
+            "current directory)"
+      subcmd "init", help = "Print the snippet that adds the segment to a " &
+          "shell's prompt":
+        pos shell is string,
+          help = "`bash`, `zsh`, `fish`, `starship`, `p10k` (also " &
+            "`powerlevel10k`), `oh-my-zsh` (also `omz`) or `prezto`"
 
     # ---- Stores, caches and daemons -------------------------------------
     subcmd "daemon", help = "Manage the per-user reprobuild daemon":

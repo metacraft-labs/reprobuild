@@ -189,17 +189,32 @@ The add-on handles this in four ways:
     re-assertion, so a small boot unit, `repro-addon-boot-hold.service`,
     puts the holds of a step back that is still pending in place before
     any of them can start. It runs only while a switch is pending, so a
-    normal boot skips it. A host installed by an add-on version without
-    that unit gets it at its next apply. That apply also points the
-    add-on's boot-time re-assertion at the add-on version doing the apply,
-    so the next boot recovers with the current rules; nothing else the
-    add-on installed changes. If a file is already at one of those paths
-    and it is not exactly what the add-on put there, the apply refuses
-    and changes nothing until you move it away. A socket, path or timer
-    unit that starts a hardened service must start after
-    `sysinit.target`: one with `DefaultDependencies=no` and no
-    `After=sysinit.target`, or ordered before an early boot unit, is
-    refused. If a switch whose profile has a hardened unit with a health
+    normal boot skips it. `sysinit.target` requires it, so systemd never
+    drops it to break an ordering cycle, and it never fails: if a step of
+    it fails it logs that and goes on, and if it cannot read the pending
+    switch's list of holds it holds every socket, timer and path unit in
+    `/etc/systemd/system` until the switch is resolved. A host installed
+    by an add-on version without that unit gets it at its next apply.
+    That apply also points the add-on's boot-time re-assertion, its
+    boot-time confirm and the deploy agent's two units at the add-on
+    version doing the apply, so the next boot and the next agent tick
+    recover with the current rules; nothing else the add-on installed
+    changes. A later step back or rollback keeps them on the newest
+    version. Only the statically linked add-on binary is installed this
+    way: when the full `reprobuild` engine applies, the add-on binary of
+    the same version already in the store is used, and if there is none
+    the apply says so and leaves the units as they are. If a file is
+    already at one of those paths and it is not exactly what the add-on
+    put there, the apply refuses and changes nothing until you move it
+    away. A socket, path or timer unit that starts a hardened service
+    must start after `sysinit.target`: one with `DefaultDependencies=no`
+    and no `After=sysinit.target`, or ordered before an early boot unit,
+    is refused. So is any unit of the profile that starts after
+    `sysinit.target` and is ordered, directly or through other units,
+    before a unit that runs before it -- a local mount,
+    `local-fs.target`, `systemd-remount-fs.service`, journald, udev and
+    the like: that is an ordering cycle. An empty `Before=` or `After=`
+    in a drop-in does not clear the unit file's list; systemd adds to it. If a switch whose profile has a hardened unit with a health
     check is interrupted, the next boot finishes it in a separate unit,
     `repro-addon-boot-confirm.service`, after the re-assertion, so the
     health check can see the unit start; the boot itself does not wait
@@ -287,7 +302,8 @@ sandbox.
 ## Weakening the floor is an operator's apply
 
 The deploy agent never applies a generation that loosens the
-confinement of a unit the profile defines. Every plan lists such units
+confinement of a unit the profile defines, or that changes a
+distribution package's unit through a drop-in. Every plan lists such units
 under `service floor weakened`, and the agent reports the generation as
 an operator action instead of applying it. A unit is listed when the
 generation:
@@ -303,7 +319,14 @@ generation:
   gid 0, in a privileged group, as an account the profile itself does not
   show to be unprivileged, with a command run as root (the `+` or `!`
   prefix, or `PermissionsStartOnly=yes`), or with ambient capabilities.
-  The unit's drop-ins in the profile count, as systemd reads them.
+  The unit's drop-ins in the profile count, as systemd reads them;
+- adds, changes or removes a drop-in over a unit the profile does not
+  define (`collision = "dropIn"`, or a `systemd.systemDropIn` for a
+  package's unit), when the drop-in has a `[Service]` section or a
+  command line. The floor does not cover a package's unit, and the unit
+  may run as root, so any setting there (an account, a command line, an
+  `Environment=` such as `LD_PRELOAD`) can change what runs as root. A
+  drop-in that only orders units is not listed.
 
 So a service that runs as root needs one operator apply for its first
 deployment. Run `repro system addon plan`, read the list, and apply from
@@ -313,11 +336,9 @@ its waiver and its account. A waived unit has no floor, so whoever signs
 the profile still decides what such a unit runs. The operator's review is
 of the decision to run the unit unconfined.
 
-A drop-in over a distribution package's unit (`collision = "dropIn"`,
-or a `systemd.systemDropIn` for a unit the profile does not define) is
-not under the floor: the package's unit runs as the package installed
-it, and the agent applies such a drop-in without listing it here. Review
-those drop-ins when you review who may sign the profile.
+The same holds for a drop-in over a package's unit: its first
+deployment and every change to it are an operator's apply, and the agent
+re-applies it unchanged after that.
 
 ## Running a validator safely
 

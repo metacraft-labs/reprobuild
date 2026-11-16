@@ -43,6 +43,7 @@
 
 import std/[json, os, strutils, tables]
 
+import repro_core/process_env
 import repro_hash
 import dev_env_shell_export
 
@@ -171,14 +172,44 @@ proc computeActivationScriptHash*(script: string): string =
 # Build the rollback manifest from an ExportPlan + pre-activation env
 # ---------------------------------------------------------------------
 
+proc previousValue*(preEnv: PreActivationEnv; name: string;
+                    caseInsensitive = HostEnvNamesAreCaseInsensitive):
+    tuple[wasSet: bool; value: string] =
+  ## The pre-activation value of ``name``. An entry spelled exactly ``name``
+  ## wins. Otherwise, with Windows name semantics, an entry whose name differs
+  ## only in case is the same variable: the activation's ``PATH`` op restores
+  ## the inherited ``Path``, which a case-sensitive lookup would record as
+  ## unset, and deactivation would then delete the shell's search path. Among
+  ## several such spellings (only possible in a capture made by a POSIX-style
+  ## shell) the lexicographically smallest is taken, so the manifest does not
+  ## depend on the table's iteration order.
+  if name in preEnv.table:
+    return (wasSet: true, value: preEnv.table[name])
+  if caseInsensitive:
+    var chosen = ""
+    var found = false
+    for key in preEnv.table.keys:
+      if sameEnvName(key, name, caseInsensitive) and
+          (not found or key < chosen):
+        chosen = key
+        found = true
+    if found:
+      return (wasSet: true, value: preEnv.table[chosen])
+  (wasSet: false, value: "")
+
 proc buildRollbackVars*(plan: ExportPlan;
-                       preEnv: PreActivationEnv): seq[RollbackVar] =
+                       preEnv: PreActivationEnv;
+                       caseInsensitive = HostEnvNamesAreCaseInsensitive):
+    seq[RollbackVar] =
   ## Each ExportOp produces ONE RollbackVar capturing the
   ## activation-side payload + the pre-activation snapshot for the
   ## affected name. Marker ops are emitted as ``rokMarker`` so the
   ## deactivation pass can unset them regardless of pre-state (the
   ## spec mandates ``__REPRO_*`` markers are NOT rolled back to a
   ## prior value — they are simply unset on deactivation).
+  ##
+  ## ``caseInsensitive`` selects the variable-name semantics of the shell's
+  ## environment (``previousValue``); it defaults to the host's.
   result = @[]
   for op in plan:
     var entry = RollbackVar()
@@ -204,24 +235,23 @@ proc buildRollbackVars*(plan: ExportPlan;
       entry.name = op.markerName
       entry.op = rokMarker
       entry.value = op.markerValue
-    if entry.name in preEnv.table:
-      entry.previous = preEnv.table[entry.name]
-      entry.wasSet = true
-    else:
-      entry.previous = ""
-      entry.wasSet = false
+    let previous = preEnv.previousValue(entry.name, caseInsensitive)
+    entry.previous = previous.value
+    entry.wasSet = previous.wasSet
     result.add(entry)
 
 proc buildRollbackManifest*(plan: ExportPlan;
                             preEnv: PreActivationEnv;
                             artifactFingerprint: string;
                             activationScript: string;
-                            activationShell: ShellKind): RollbackManifest =
+                            activationShell: ShellKind;
+                            caseInsensitive = HostEnvNamesAreCaseInsensitive):
+    RollbackManifest =
   result.artifact = artifactFingerprint
   result.activationScriptHash =
     computeActivationScriptHash(activationScript)
   result.activationShell = activationShell
-  result.vars = buildRollbackVars(plan, preEnv)
+  result.vars = buildRollbackVars(plan, preEnv, caseInsensitive)
 
 # ---------------------------------------------------------------------
 # JSON serialisation

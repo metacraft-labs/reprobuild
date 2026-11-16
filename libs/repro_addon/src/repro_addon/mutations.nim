@@ -631,22 +631,75 @@
 ##                                           refused unit is shown by name,
 ##                                           which systemd refuses (decision
 ##                                           153, round 10)
-## ``unjudged-requirers-released``         a unit the live check does not
-##                                           judge that requires a refused
-##                                           unit is not held (decision 153,
-##                                           round 10)
+## ``unjudged-requirers-released``         no unit the live check does not
+##                                           judge is held as a requirer, by
+##                                           any path: files, systemd's view
+##                                           before the writes, the post-reload
+##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
-## ``live-check-restart-before-stale-holds-cleared``
-##                                           the next apply restarts the
-##                                           recorded triggers under the dead
-##                                           apply's holds (round 11, H1)
+## ``dead-apply-holds-lifted``             round 11's order: the next apply
+##                                           lifts every hold a dead apply
+##                                           left, a judged service's
+##                                           included, and starts its
+##                                           triggers before its own check
+##                                           (round 12, M3; supersedes
+##                                           round 11's
+##                                           live-check-restart-before-stale-
+##                                           holds-cleared, whose early
+##                                           restart no longer exists)
+## ``recover-lifts-unit-holds``            recover lifts a dead apply's hold
+##                                           on a judged service, not only
+##                                           the triggers' own (round 12, M3)
+## ``recover-keeps-trigger-holds``         recover starts a recorded trigger
+##                                           without lifting its own hold
+##                                           (round 12, recover's stale-hold
+##                                           clearing)
+## ``alias-names-unresolved``              a unit is matched by the name a
+##                                           file used, not systemd's Id=
+##                                           (round 12, M1)
+## ``judged-template-shown-by-name``       a judged template's requirers are
+##                                           read by showing the template,
+##                                           which systemd refuses (round 12,
+##                                           M1)
+## ``essential-judged-units-held``         a judged essential unit is held
+##                                           (round 12, M1)
+## ``essential-triggers-held``             an essential trigger is held
+##                                           (round 12, M1)
+## ``target-units-held``                   a .target that requires a judged
+##                                           unit is held (round 12, "never
+##                                           hold .target units")
+## ``full-apply-fixing-skips-starts``      a full apply commits a resolution
+##                                           without starting what it
+##                                           resolved (round 12, M2)
+## ``full-apply-clears-with-errors``       a full apply with errors clears
+##                                           resolved entries (round 12, M2)
+## ``full-apply-renders-full-profile``     a full apply compares the record
+##                                           with its text as the carried-
+##                                           state requirements extend it,
+##                                           not the generation as written
+##                                           (round 12, M2)
+## ``fixing-start-unreadable-skipped``     the fixing path skips a unit
+##                                           systemd cannot be asked about
+##                                           and clears its entry (round 12)
+## ``boot-record-starts-block``            at boot the records of triggers
+##                                           are started with blocking starts
+##                                           (round 12, M4)
+## ``boot-fixing-starts-block``            a boot replay's fixing starts block
+##                                           and its commit clears them
+##                                           unconfirmed (round 12, M4)
 ## ``empty-requires-resets``               an empty ``Requires=`` resets the
 ##                                           list (round 11, M4)
 ## ``template-requirers-skipped``          a template requirer is not held
 ##                                           (round 11, M3)
 ## ``requirers-from-files-only``           systemd's reverse dependencies are
-##                                           not read (decision 171, round 11)
+##                                           not read before the writes
+##                                           (decision 177)
+## ``requirer-files-unread``               the generation's files are not
+##                                           read for requirers (decision 177)
+## ``post-reload-requirers-released``      a requirer systemd names only after
+##                                           the drivers' reload is not held
+##                                           (decision 177)
 ## ``essential-requirers-held``            an essential unit is held instead
 ##                                           of the apply refused (round 11)
 ## ``dependants-do-not-block``             a recorded dependant does not block
@@ -1171,6 +1224,63 @@
 ##                                            (decision 178)
 ## ``verify-skips-log-dir``                   verify does not check that
 ##                                            directory (decision 178)
+## ``record-read-by-path``                   the uninstall records are read,
+##                                            enumerated and probed by path
+##                                            (decision 178)
+## ``records-dir-identity-unchecked``         a records directory put in the
+##                                            place of the one bootstrap
+##                                            made is used (decision 178)
+## ``records-dir-left-open``                  bootstrap keeps an existing
+##                                            directory's mode (decision 178)
+## ``bootstrap-identity-reopened``            bootstrap records the identity
+##                                            of a fresh open of the path, not
+##                                            of the descriptor it tightened
+##                                            (decision 178, A11 round 20)
+## ``bootstrap-wiring-reopens``              bootstrap records the identity
+##                                            of a fresh open, not the one
+##                                            prepareRecordsDir took (A11
+##                                            round 21, decision 178)
+## ``identity-removed-before-ledger-copy``    uninstall removes the records
+##                                            directory's identity with the
+##                                            rest of the state, before the
+##                                            ledger copy (decision 178)
+## ``state-gone-from-addon-dir-alone``        the records directory counts as
+##                                            bound to a removed state when
+##                                            the identity's directory is gone,
+##                                            whether or not the ledger copy is
+##                                            (decision 178)
+## ``token-cleared-before-identity``          bootstrap clears a stale token,
+##                                            and keeps a directory it made,
+##                                            before it knows the directory
+##                                            has a birth time (decision 178)
+## ``bootstrap-identity-not-recorded``        bootstrap records no identity
+##                                            (decision 178)
+## ``unbound-when-no-birth-time``             a records directory with no
+##                                            birth time is used unbound, and
+##                                            bootstrap goes on (decision 178,
+##                                            amended 2026-11-16)
+## ``identity-file-torn-accepted``            an empty or malformed identity
+##                                            file reads as nothing recorded
+##                                            (decision 178)
+## ``uninstall-records-dir-unbound``          uninstall uses the records
+##                                            directory without its recorded
+##                                            identity (decision 178)
+## ``verify-first-use-silent``                verify records the identity at
+##                                            first use without saying so
+## ``record-read-blocking``                   a record is opened without
+##                                            O_NONBLOCK: a FIFO hangs it
+## ``record-read-unbounded``                  a record is read whole, with
+##                                            no size cap
+## ``operator-read-blocking``                 verify-discard-record reads its
+##                                            path with a blocking, unbounded
+##                                            read
+## ``token-cleared-before-anchors``           bootstrap clears a stale token
+##                                            before it validates the trust
+##                                            anchors (decision 178)
+## ``corrupt-check-after-gate``               the stop on a corrupt record of
+##                                            a pre-bootstrap input comes
+##                                            after the store-evidence gate
+##                                            (decision 166)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1207,6 +1317,15 @@
 ##                                            however old it is
 ##                                            (``repro_test_support/
 ##                                            fresh_binary``; round 4)
+## ``egress-control-not-sent``                the fetch sends no DET-AO-3
+##                                            control datagram (DET-4)
+## ``manifest-control-skipped``               the tick never runs DET-AO-1's
+##                                            control (DET-4)
+## ``hook-control-skipped``                   the apt hook never runs
+##                                            DET-AO-6's control (DET-4)
+## ``check-ignores-controls``                 the off-host check never
+##                                            judges a positive control
+##                                            (DET-4)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1216,6 +1335,11 @@ from repro_deploy_agent/agent_mutations import KnownAgentMutations
 const
   AddonMutation* {.strdefine: "reproAddonMutation".} = ""
   KnownAddonMutations* = ["uninstall-skips-diversion-removal",
+                          # DET-4's scheduled positive controls (spec
+                          # §10.4 "Scheduled positive controls").
+                          "egress-control-not-sent",
+                          "manifest-control-skipped",
+                          "hook-control-skipped", "check-ignores-controls",
                           # Not a falsifier: a failure injected once
                           # (while /var/tmp/repro-addon-fail-before-ledger
                           # exists) after the flip and before the ledger
@@ -1753,6 +1877,36 @@ const
                           "activator-boot-order-effective-unchecked",
                           # ... and the parse half.
                           "activator-boot-order-parse-unchecked",
+                          # ... and both, in the rule the two halves
+                          # share (service_floor.activatorBootOrderRefusal).
+                          "activator-boot-order-unchecked",
+                          # A9 review round 17: a revert or a rollback
+                          # re-points the engine units backwards.
+                          "repoint-backwards",
+                          # the dynamic engine is installed as the units'.
+                          "repoint-dynamic-engine",
+                          # systemd's d, w, M and y time units unread.
+                          "timespan-units-partial",
+                          # the boot-hold unit is wanted, not required.
+                          "boot-hold-wanted",
+                          # an ordering cycle through the boot-hold unit
+                          # passes the parse half / the effective half.
+                          "boot-hold-cycle-parse-unchecked",
+                          "boot-hold-cycle-effective-unchecked",
+                          # an empty After=/Before= resets the list.
+                          "deps-empty-resets",
+                          # a template's instances a revert stops are not
+                          # recorded.
+                          "revert-stopped-instances-unrecorded",
+                          # the record is cleared before step 7's starts.
+                          "revert-stopped-cleared-early",
+                          # uninstall stops the boot-hold unit, which stops
+                          # sysinit.target and everything requiring it.
+                          "uninstall-stops-boot-hold",
+                          # a boot revert to a generation with a
+                          # health-checked floored unit confirms inside the
+                          # re-assertion (and times out).
+                          "boot-confirm-revert-in-reassert",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",
@@ -1889,9 +2043,25 @@ const
                           "live-check-triggers-in-memory",
                           "template-requirer-shown-by-name",
                           "unjudged-requirers-released",
+                          "requirer-files-unread",
+                          "post-reload-requirers-released",
                           # A13 review round 11.
                           "restart-success-by-exit-code",
-                          "live-check-restart-before-stale-holds-cleared",
+                          # A13 review round 12.
+                          "dead-apply-holds-lifted",
+                          "recover-lifts-unit-holds",
+                          "recover-keeps-trigger-holds",
+                          "alias-names-unresolved",
+                          "judged-template-shown-by-name",
+                          "essential-judged-units-held",
+                          "essential-triggers-held",
+                          "target-units-held",
+                          "full-apply-fixing-skips-starts",
+                          "full-apply-clears-with-errors",
+                          "full-apply-renders-full-profile",
+                          "fixing-start-unreadable-skipped",
+                          "boot-record-starts-block",
+                          "boot-fixing-starts-block",
                           "empty-requires-resets",
                           "template-requirers-skipped",
                           "requirers-from-files-only",
@@ -2083,6 +2253,24 @@ const
                           "token-binds-inode-only",
                           "bootstrap-leaves-log-dir",
                           "verify-skips-log-dir",
+                          "record-read-by-path",
+                          "records-dir-identity-unchecked",
+                          "records-dir-left-open",
+                          "token-cleared-before-anchors",
+                          "bootstrap-identity-reopened",
+                          "bootstrap-identity-not-recorded",
+                          "bootstrap-wiring-reopens",
+                          "identity-removed-before-ledger-copy",
+                          "state-gone-from-addon-dir-alone",
+                          "token-cleared-before-identity",
+                          "unbound-when-no-birth-time",
+                          "identity-file-torn-accepted",
+                          "uninstall-records-dir-unbound",
+                          "verify-first-use-silent",
+                          "record-read-blocking",
+                          "record-read-unbounded",
+                          "operator-read-blocking",
+                          "corrupt-check-after-gate",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
@@ -2102,7 +2290,12 @@ const
                           # asymmetry spec §10.1 *An agent apply never
                           # weakens the floor* closed
                           # (t_addon_agent_cannot_weaken_the_floor).
-                          "agent-may-weaken-floor"]
+                          "agent-may-weaken-floor",
+                          # An agent apply may add, change or remove a
+                          # drop-in over a unit the profile does not define
+                          # (a package's, which may run as root) unattended
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-change-package-dropins"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

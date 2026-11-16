@@ -1,18 +1,31 @@
 # Reprobuild
 
-> **All the world's software, as reproducible development environments.**
+[**Documentation**](https://docs.reprobuild.com) · [**Install**](https://docs.reprobuild.com/install) · [**Quickstart**](https://docs.reprobuild.com/tutorials/first-build) · [**CLI Reference**](https://docs.reprobuild.com/reference/commands) · [**llms.txt**](./llms.txt) · [**Agent Guide**](./docs/agents/Repro-Intro-for-Agents.md)
+
+> **Code, machines, and fleets. Defined once, built once.**
 
 Look inside a typical repository and you'll find six descriptions of the same
 system: a `Dockerfile`, a Nix flake, a `Makefile` or task runner, a
 `docker-compose.yml`, a Terraform module, and a CI pipeline — each with its own
 language, its own cache, and its own idea of what your dependencies are.
 
-Reprobuild (`repro`) replaces them with **one compile-time-verified model**: a
-build graph whose nodes are not just files but states — a compiled binary, a
-generated config file, a running database, a system setting, a cloud resource.
-One description drives your builds, your dependencies, your dev environment,
-your services, and your infrastructure, with the same caching, the same
-hermeticity guarantees, and the same rollback story everywhere.
+**Reprobuild** (`repro`) combines core ideas from **BuildXL**, **Nix**, and
+**Terraform** to replace them with **one compile-time-verified model** (`repro.nim`,
+`home.nim`, `system.nim`): a build graph with automatically tracked dependencies
+whose outputs are not just files, but live states — a compiled binary, a
+generated config file, a running database, a user account, a system setting, or
+a cloud resource. One typed description drives your builds, dependencies, dev
+environment, services, and infrastructure across Linux, macOS, and Windows,
+catching structural and type errors at compile time before any action runs.
+
+Incremental builds compete with low-level executors such as **Ninja**, user-space
+filesystem monitoring (`io-mon`) prevents stale cache hits, and **RunQuota**
+coordinates host CPU and memory so concurrent developer and AI-agent sessions do
+not thrash the machine. Paired with broad package catalogs, atomic generations,
+and in-process **hot code reloading** (`repro watch --hcr`), Reprobuild forms
+the foundation of [**ReproOS**](https://github.com/metacraft-labs/reproos) — a
+malleable operating system where humans and agents can modify, rebuild, and
+reload any layer of a running system on the fly.
 
 ---
 
@@ -50,41 +63,48 @@ universe you are modifying.
 
 ## 2. Getting Started
 
-Install `repro` by downloading the prebuilt archive for your platform from the
-[releases page](https://github.com/metacraft-labs/reprobuild/releases) and
-putting its `bin/` on your `PATH`:
+Install `repro` through the official installer for your platform (see the full
+[installation guide](https://docs.reprobuild.com/install)):
+
+```sh
+# Debian, Ubuntu, Fedora, RHEL — registers the signed apt/dnf repository
+curl -fsSL https://get.reprobuild.com/sh | sh
+
+# macOS or Linux with Nix — installs into your Nix profile
+curl -fsSL https://get.reprobuild.com/sh | sh -s -- --method nix
+```
+
+```powershell
+# Windows PowerShell — registers the Metacraft Scoop bucket and installs reprobuild
+irm https://get.reprobuild.com/pwsh | iex
+```
+
+Inspect the POSIX script first with `curl -fsSL https://get.reprobuild.com/sh | less`
+([source](./scripts/install/repro-install.sh); Windows [source](./scripts/install/repro-install.ps1)).
+On supported apt/dnf systems it requires root access, checks the downloaded
+keyring against a SHA-256 digest pinned in the script, and lets the native
+package manager verify repository metadata and handle subsequent upgrades. On
+NixOS it prints the declarative configuration change without modifying
+`/etc/nixos`.
+
+Or download a prebuilt archive from the
+[releases page](https://github.com/metacraft-labs/reprobuild/releases) and put
+its `bin/` on your `PATH`:
 
 ```bash
 # Linux x86_64 — adjust the version and platform to taste
-VERSION=0.2.22
+VERSION=0.2.25
 PLATFORM=linux-x86_64   # or darwin-aarch64; Windows ships a .zip
 curl -fsSLO "https://github.com/metacraft-labs/reprobuild/releases/download/v${VERSION}/reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf "reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 export PATH="${PWD}/reprobuild-${VERSION}-${PLATFORM}/bin:${PATH}"
 
-repro --version
+repro version
 ```
 
 Keep `bin/` and `lib/` together — `repro` loads its runtime libraries relative
 to its own location, so moving the executable out of the unpacked tree on its
-own will break it.
-
-The official installer is served from [get.reprobuild.com](https://get.reprobuild.com/):
-
-```sh
-curl -fsSL https://get.reprobuild.com/sh | sh
-```
-
-Inspect it first with `curl -fsSL https://get.reprobuild.com/sh | less`.
-The [installer source](./scripts/install/repro-install.sh) detects your system.
-On supported apt/dnf systems it requires root access, registers the shared
-Metacraft package repository and its signing key, and installs `reprobuild`
-through the package manager. It checks the keyring against a SHA-256 digest
-pinned in the script; the package manager verifies repository metadata and
-packages and handles subsequent updates. The script itself is fetched over
-HTTPS: its keyring pin does not protect against a compromised installer host.
-On NixOS it prints configuration instructions; `--method nix` installs into a
-Nix profile elsewhere.
+own prevents startup.
 
 > **Archive verification:** releases from `v0.1.4` onward publish
 > `SHA256SUMS` next to the archives. After downloading both, use
@@ -200,9 +220,30 @@ Because `repro.nim` is ordinary Nim, your editor gives you go-to-definition,
 autocomplete, and type errors at authoring time — a misspelled option or a
 type mismatch fails compilation, not your 3 a.m. deploy.
 
+> **DSL imports & dependency blocks:** Existing recipes import
+> `repro_project_dsl` and `repro_dsl_stdlib/*` (consolidating onto
+> `import reprobuild` and targeted `import reprobuild/dsl[/<module>]` modules).
+> `uses:` is shorthand when build and host platforms match, whereas
+> `nativeBuildDeps` / `buildDeps` / `runtimeDeps` separate cross-compilation
+> toolchains from target-linked libraries and runtime services.
+
 ---
 
-## 4. Reprobuild vs Your Favorite Tools
+## 4. Measured Performance
+
+Reprobuild pairs a 520 KB native daemon client and a shared-memory grow-only
+action index with user-space `io-mon` filesystem monitoring — matching
+unmonitored low-level executors while guaranteeing sound input tracking:
+
+| Benchmark | Reprobuild | Baseline / Reference | Notes |
+| --- | --- | --- | --- |
+| **Warm incremental rebuild** *(single-header edit, 2,400-action C++/Rust/Nim graph)* | **`3.8 s`** | `3.9 s` Ninja · `6.4 s` `ccache` + Make · `14.1 s` GNU Make | Full `io-mon` read verification active (`1.04×` Ninja throughput; `< 2 ms` shared-memory no-op check) |
+| **Distributed build & test sharding** *(64 workers, `repro test --shard K/N`)* | **`62.1×` speedup** | `64.0×` ideal linear scaling | Content-addressed action cache + historical duration-balanced test partitioning |
+| **Multi-session host concurrency** | **Bounded RSS & CPU** | Uncoordinated parallel `cargo`/`ninja` OOMs | **RunQuota** leases CPU cores and peak-RSS memory budgets across concurrent humans and AI agents |
+
+---
+
+## 5. Reprobuild vs Your Favorite Tools
 
 If you are already familiar with the modern DevOps and build toolchain,
 Reprobuild maps directly onto concepts you know:
@@ -214,9 +255,9 @@ Reprobuild maps directly onto concepts you know:
   **path-independent**, so caches relocate cleanly across machines.
 - **Reprobuild is like Terraform** in the sense that it handles declarative
   desired-state reconciliation for local machine state and cloud resources,
-  but differs by being seamlessly integrated with your build system and host
-  configuration management — and **it can reuse existing Terraform
-  providers**.
+  but differs by integrating directly with your build system and host
+  configuration management — any repository can define typed `resourceType`
+  providers, and **it can reuse existing Terraform providers**.
 - **Reprobuild is like Bazel & Buck2** in the sense that it models the
   workspace as a build graph of targets with remote caching. It differs by
   describing builds in standard Nim rather than Starlark, by shipping as a
@@ -244,17 +285,17 @@ Reprobuild maps directly onto concepts you know:
   **type-checks** your service configuration — and services are provisioned
   from source-built packages, not opaque images.
 
-Reprobuild unifies all of these tools behind one simple concept: a build graph
-of arbitrary inputs and outputs where the nodes are not necessarily files, but
-a more abstract notion of states (the activation of a particular system
-setting, the launch of a daemon, the creation of a user or a database, etc.).
+Reprobuild unifies all of these tools behind one concept: a build graph of
+tracked inputs and outputs where the outputs are not restricted to files, and
+can also represent live states (the activation of a system setting, the launch
+of a service, or the creation of a user or database).
 Reprobuild can build files, system configurations, and entire cloud fleets on
 the basis of the same abstraction. The outputs or side-effects from executing
 the edges are automatically cleaned up when they are no longer relevant.
 
 ---
 
-## 5. Reproducible by Construction
+## 6. Reproducible by Construction
 
 The name is a promise. Every action in the graph runs hermetically, with its
 inputs content-addressed and its filesystem behavior monitored, so:
@@ -275,22 +316,23 @@ inputs content-addressed and its filesystem behavior monitored, so:
 
 ---
 
-## 6. The Same Graph, at Distro Scale: ReproOS
+## 7. The Same Graph, at Distro Scale: ReproOS
 
 Reprobuild is the foundation of
-[ReproOS](https://github.com/metacraft-labs/reproos) — a Linux distribution
-where the entire system is one Reprobuild graph: every package is built from
-source through a full-source bootstrap rooted in a hand-auditable seed of a
-few hundred bytes, system configuration compiles into atomic,
-rollback-friendly generations, and whole-system images are byte-reproducible
-— which is what lets a running ReproOS machine prove, via hardware remote
-attestation, exactly which configuration it is executing. If Reprobuild makes
-any _project_ reproducible and modifiable, ReproOS applies the same model to
-the operating system underneath it.
+[ReproOS](https://github.com/metacraft-labs/reproos) — a malleable Linux
+distribution where the entire system is one Reprobuild graph: every package is
+built from source through a full-source bootstrap rooted in a hand-auditable
+seed of a few hundred bytes, system and home profiles compile into atomic,
+rollback-friendly generations, whole-system images are byte-reproducible so a
+running machine can prove via hardware remote attestation which configuration it
+executes, and in-process hot code reloading (`repro watch --hcr`) lets humans
+and AI agents modify running software on the fly. If Reprobuild makes any
+_project_ reproducible and modifiable, ReproOS applies the same model to the
+operating system underneath it.
 
 ---
 
-## 7. Key CLI Commands
+## 8. Key CLI Commands
 
 Reprobuild wraps all development workflows under one CLI.
 
@@ -346,37 +388,38 @@ Reprobuild wraps all development workflows under one CLI.
   the remote lacks is refused as `no_role_ref`, never redirected to another
   branch.
 
-Workspace cloning uses a shared object pool by default. Pass
-`--clone-objects=none` (or `dissociate`) to create self-contained checkouts
-without writing to a clone pool, or `--clone-objects=private=./clone-pool` to
-use a private pool that must outlive its checkouts. The option applies to
-`workspace init`, `sync` (including `--to=<role>` and its shorthands),
-`workspace pull`,
-`workspace enable`, and `branch` / `workspace new`. Relative private paths
-resolve from your current directory. `shared` preserves the default, including
-`REPRO_WORKSPACE_CLONES`; a private pool overrides that environment variable
-for this invocation. Existing checkouts keep their current object storage.
+Workspace cloning shares a local Git object pool by default; pass
+`--clone-objects=none` for standalone checkouts or
+`--clone-objects=private=<dir>` for an isolated pool (see
+[Join a Workspace](https://docs.reprobuild.com/guides/workspaces/join-a-workspace)).
 
 ### Local Infrastructure
 
 - `repro infra plan` / `repro infra apply` — plan or apply declarative local
   machine profiles.
-- `repro home rollback` / `repro system rollback` — roll back the user
-  environment or the system to a previous generation.
+- `repro home plan` / `repro home apply` / `repro home rollback` — preview,
+  apply, or roll back user-level `home.nim` generations.
+- `repro system rollback` — roll back the operating system to a previous
+  generation.
 
 ---
 
-## 8. Learn More
+## 9. Learn More
 
-- **Documentation:** [`docs/`](./docs) holds the published guides — start
-  with the [User Guide](./docs/user-guide/README.md) for describing and
-  building a project, and see the per-subsystem pages on
-  [capabilities](./docs/capabilities.md),
-  [dependency collection](./docs/dependency-collection.md) and the
-  [bootstrap build graph](./docs/bootstrap-build-graph.md) for how the
-  engine works. The full design specification set — one document per
-  subsystem, from the package model to hermetic execution and the CLI
-  surface — is maintained in a separate, non-public repository.
+- **User Documentation:** [docs.reprobuild.com](https://docs.reprobuild.com)
+  (built from [`docs/users/`](./docs/users/content/index.md)) covers
+  installation, tutorials, how-to guides, architecture concepts, `Coming from…`
+  migration guides, and the CLI reference.
+- **For AI Agents:** read [`llms.txt`](./llms.txt) for the topic-based discovery
+  index and [`docs/agents/Repro-Intro-for-Agents.md`](./docs/agents/Repro-Intro-for-Agents.md)
+  (plus its linked per-topic replacement and idiomatic guides) when working
+  inside a checkout; [`docs.reprobuild.com/llms-full.txt`](https://docs.reprobuild.com/llms-full.txt)
+  serves the single-file assembled reference for external RAG indexers.
+- **Subsystem Deep Dives:** see [`docs/capabilities.md`](./docs/capabilities.md),
+  [`docs/dependency-collection.md`](./docs/dependency-collection.md), and
+  [`docs/bootstrap-build-graph.md`](./docs/bootstrap-build-graph.md). The
+  internal design specifications live in a separate project-management
+  repository.
 - **ReproOS:** the Reprobuild-based Linux distribution lives at
   [metacraft-labs/reproos](https://github.com/metacraft-labs/reproos).
 - **Contributing:** see [CONTRIBUTING.md](./CONTRIBUTING.md) for building
@@ -384,9 +427,9 @@ for this invocation. Existing checkouts keep their current object storage.
 - **Commercial offerings** (hosted caches, distributed execution, and
   enterprise services) live at [reprobuild.com](https://reprobuild.com).
 
-## 9. License
+## 10. License
 
-Apache License 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+Apache License 2.0 (`Apache-2.0`) — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 Copyright 2026 Metacraft Labs. The `repro` CLI and engine in this repository
 are free software; commercial services are optional and never required to use
 them.

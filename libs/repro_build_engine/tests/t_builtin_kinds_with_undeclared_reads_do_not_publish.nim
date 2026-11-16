@@ -92,7 +92,7 @@ proc actionOf(kind: BuildActionKind; p: string): BuildAction =
     text = "src\ntree"
     entries = @["file\tmain.c"]
   of bakEnsureSnippet:
-    entries = @["# begin", "# end", "# begin", "# end", "snippet"]
+    entries = ensureSnippetEntries("t-pkg", "t-block", "snippet")
   else:
     discard
   result = builtinAction(kind, id, cwd = p,

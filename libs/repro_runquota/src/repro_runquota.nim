@@ -18,6 +18,7 @@ import runquota_process
 import runquota_protocol
 import runquota_client/pressure_text
 import repro_runquota/build_pressure
+import repro_runquota/store_status
 
 export build_pressure
 
@@ -1991,6 +1992,16 @@ proc sendPressureReport*(session: ReproRunQuotaSession;
     return false
   session.session.reportPressure(report)
 
+proc pressureFailureJson(report: StoreStatusReport; error: string): JsonNode =
+  ## What ``repro pressure --json`` prints when it has no answer to print:
+  ## the store status, the remedy and the error, so a tool reading stdout
+  ## gets an object rather than nothing.
+  result = %*{
+    "endpoint": runQuotaEndpointText(),
+    "error": error
+  }
+  addStoreStatus(result, report)
+
 proc runPressureCommand*(group = ""; json = false): int =
   ## ``repro pressure [--group G] [--json]``: the build-wait pressure of the
   ## RunQuota daemon this process would use, as ``runquota pressure``
@@ -1998,24 +2009,76 @@ proc runPressureCommand*(group = ""; json = false): int =
   ## those of that name. Exit 0 when the daemon answered, 1 when it could
   ## not be reached or predates pressure reports. The command line is
   ## parsed by repro's generated parser, which exits 2 on bad arguments.
+  ##
+  ## Both modes report the store status (``repro_runquota/store_status``):
+  ## ``--json`` adds ``capture_enabled``, ``store_status`` and ``remedy``
+  ## to the daemon's answer (and prints them on their own, with ``error``,
+  ## when there is no answer), and text mode prints one stderr line when
+  ## the status is not ``ready``.
+  const command = "repro pressure"
   var answer = ""
+  var connected = false
   try:
     var client = connectDefault()
+    connected = true
     defer: client.close()
     answer = client.queryPressure(psAll, group)
   except CatchableError as err:
-    stderr.writeLine("repro pressure: " & err.msg & " (endpoint " &
-      runQuotaEndpointText() & ")")
+    # A daemon that answered the handshake and then could not serve the
+    # query (one that predates pressure reports) is reachable but
+    # unusable; only a failed connection is judged against the endpoint's
+    # provisioning.
+    var report =
+      if connected:
+        StoreStatusReport(captureEnabled: false, status: ssDaemonUnreachable,
+          reason: "runquotad at " & runQuotaEndpointText() &
+            " could not answer QueryPressure (" & err.msg & ")",
+          remedy: "upgrade or restart runquotad at that endpoint: " &
+            startDaemonRemedy(defaultEndpoint().path))
+      else:
+        unreachableReport(err.msg)
+    if json:
+      echo $pressureFailureJson(report, err.msg)
+      stderr.writeLine(command & ": " & err.msg & " (endpoint " &
+        runQuotaEndpointText() & ")")
+    else:
+      # ONE LINE: the notice's reason already names the error and the
+      # endpoint.
+      writeStoreStatusNotice(command, report)
     return 1
+  var root: JsonNode
+  try:
+    root = parseJson(answer)
+    if root.kind != JObject:
+      raise newException(ValueError, "the answer is not a JSON object")
+  except CatchableError as err:
+    let report = StoreStatusReport(captureEnabled: false,
+      status: ssDaemonUnreachable,
+      reason: "the daemon's answer could not be read (" & err.msg & ")",
+      remedy: "runquota pressure (asks the daemon at " &
+        runQuotaEndpointText() & " directly)")
+    if json:
+      echo $pressureFailureJson(report,
+        "could not read the daemon's answer: " & err.msg)
+      stderr.writeLine(command & ": could not read the daemon's answer: " &
+        err.msg)
+    else:
+      writeStoreStatusNotice(command, report)
+    return 1
+  let report = pressureStoreStatus(root, buildPressureEnabled())
   if json:
-    echo answer
+    # The daemon's answer as it was sent, with three keys added beside its
+    # own; none of the daemon's keys is renamed or removed.
+    addStoreStatus(root, report)
+    echo $root
     return 0
   try:
     echo renderPressureText(answer)
   except CatchableError as err:
-    stderr.writeLine("repro pressure: could not read the daemon's answer: " &
+    stderr.writeLine(command & ": could not read the daemon's answer: " &
       err.msg)
     return 1
+  writeStoreStatusNotice(command, report)
   0
 
 # ---------------------------------------------------------------------------

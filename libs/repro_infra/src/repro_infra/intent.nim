@@ -364,6 +364,15 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  sourceLocal = " & renderScalar(r.sfSourceLocal))
     if r.sfCollision.len > 0:
       result.add("  collision = " & renderScalar(r.sfCollision))
+    # How the file is held: emitted only when declared, so a profile
+    # that declares none renders byte-identically to the text from
+    # before the fields existed (and keeps its generation digests).
+    if r.sfMode.len > 0:
+      result.add("  mode = " & renderScalar(r.sfMode))
+    if r.sfGroup.len > 0:
+      result.add("  group = " & renderScalar(r.sfGroup))
+    if r.sfForm.len > 0:
+      result.add("  form = " & renderScalar(r.sfForm))
   of srkFsSystemDirectory:
     result.add("  path = " & renderScalar(r.dirPath))
     if r.dirAclPresent:

@@ -29,6 +29,7 @@
 import std/[algorithm, sets, strutils, tables]
 
 import repro_elevation
+import repro_core/system_file_holding
 import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
@@ -317,6 +318,18 @@ type
         ## dpkg diversion sends the package's copy to `<path>.distrib`
         ## first, recorded and undone on removal). Outside add-on mode the
         ## field is carried and ignored.
+      sfMode*: string
+        ## The file's exact permission bits, four octal digits (`0640`);
+        ## "" keeps the replaced regular file's bits, else 0644. Never a
+        ## setuid, setgid or sticky bit, never writable by others
+        ## (`repro_core/system_file_holding`).
+      sfGroup*: string
+        ## The owning group's name (`root:<group>`); "" means `root:root`.
+        ## Resolved to a gid by the driver when it writes the file.
+      sfForm*: string
+        ## `link`, `copy` or "": how a ReproOS add-on host materialises
+        ## the file (ReproOS-Add-On-Mode §7.2 step 5). A file declaring
+        ## `sfMode` or `sfGroup` is a copy; elsewhere carried and ignored.
     of srkFsSystemDirectory:
       dirPath*: string
       dirAclPresent*: bool                ## false => ACL is unmanaged
@@ -1840,6 +1853,67 @@ proc checkFloorBootOrdering*(p: SystemProfile) =
       raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName & "' " &
         bootOrderingCycleReason(route))
 
+proc profileUnitLate(p: SystemProfile; name: string;
+                     late: HashSet[string]): bool =
+  ## Whether the profile's unit ``name`` is ordered after
+  ## ``sysinit.target``: by default dependencies (a service, socket, timer
+  ## or path unit; systemd.service(5), systemd.socket(5), systemd.timer(5),
+  ## systemd.path(5), "Default Dependencies"), or by an ``After=`` naming a
+  ## boot target after it, the boot-hold unit, or a unit ``late`` holds.
+  let files = unitFilesOf(p, name)
+  if files.len == 0: return false
+  let dot = name.rfind('.')
+  let typ = if dot >= 0: name[dot + 1 .. ^1] else: ""
+  if typ in ["service", "socket", "timer", "path"] and
+      unitDefaultDependencies(files):
+    return true
+  for c in files:
+    for d in sectionDirectives(c, ["Unit"]):
+      if d.key == "After":
+        for t in d.value.splitWhitespace():
+          if t in ["sysinit.target", "basic.target", "sockets.target",
+                   "timers.target", "paths.target", "multi-user.target",
+                   "graphical.target", BootHoldUnitName] or t in late:
+            return true
+  false
+
+proc checkBootHoldOrdering*(p: SystemProfile) =
+  ## The owner's decision of 2026-11-16 (§13 decision 172; A9 review
+  ## round 17, finding 2): no unit of the profile ordered after
+  ## ``sysinit.target`` -- so after the boot-hold unit -- is ordered, by
+  ## any chain the profile defines, before a unit that runs before
+  ## ``sysinit.target`` (``runsBeforeSysinit``): the boot-hold unit, the
+  ## local file systems and the services it follows, and the base's
+  ## ``sysinit.target`` units. That is an ordering cycle through
+  ## ``sysinit.target``; through the boot-hold unit when it reaches what
+  ## the boot-hold unit follows. Every unit, floored or not: a cycle with
+  ## the boot-hold unit is the boot's, whoever closes it. The effective
+  ## half walks the order systemd reports.
+  when InfraAddonMutation in ["boot-hold-cycle-parse-unchecked",
+                              "floor-unchecked"]:
+    return
+  var names: seq[string]
+  for r in p.resources:
+    let n = ownUnitName(r)
+    if n.len > 0 and n notin names: names.add(n)
+  # Which units are ordered after sysinit.target, followed through the
+  # profile's own After= (a fixpoint: at most one pass per unit).
+  var late = initHashSet[string]()
+  var grew = true
+  while grew:
+    grew = false
+    for n in names:
+      if n notin late and profileUnitLate(p, n, late):
+        late.incl(n)
+        grew = true
+  for n in names:
+    if n notin late: continue
+    let route = earlyOrderingRoute(n,
+      proc (u: string): seq[string] = profileOrderedBeforeOf(p, u))
+    if route.len > 0:
+      raiseSystemProfileInvalid("systemd unit '" & n & "' " &
+        earlyOrderingReason(route))
+
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
   ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
@@ -1852,6 +1926,7 @@ proc applyAddOnServiceFloor*(p: var SystemProfile) =
   checkFloorActivators(p)
   checkFloorReach(p)
   checkFloorBootOrdering(p)
+  checkBootHoldOrdering(p)
 
 proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
   ## Every floor exception of the profile's units under the floor, one
@@ -2947,6 +3022,15 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
         raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
           "' sets `sha256` but no `sourceUrl` — the digest is only " &
           "meaningful when paired with a URL fetch")
+      # How the file is held: the same refusals as the constructor, the
+      # adapter and the operation validator (`systemFileHoldingError`).
+      let sfMode = if "mode" in fields: fields["mode"] else: ""
+      let sfGroup = if "group" in fields: fields["group"] else: ""
+      let sfForm = if "form" in fields: fields["form"] else: ""
+      let holdingError = systemFileHoldingError(sfMode, sfGroup, sfForm)
+      if holdingError.len > 0:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath & "' " &
+          holdingError)
       res = SystemResource(kind: srkFsSystemFile,
         sfPath: sfPath,
         sfContent: sfContent,
@@ -2955,7 +3039,10 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
         sfSourceLocal: sfSourceLocal,
         sfCollision: parseCollisionField(kindTag,
           (if "collision" in fields: fields["collision"] else: ""),
-          FileCollisionOptIns))
+          FileCollisionOptIns),
+        sfMode: sfMode,
+        sfGroup: sfGroup,
+        sfForm: sfForm)
     of srkFsSystemDirectory:
       let dirPath = need("path")
       # ACL is optional: a stanza without aclEntries leaves ACL
@@ -3351,6 +3438,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
     checkFloorActivators(result)
     checkFloorReach(result)
     checkFloorBootOrdering(result)
+    if addOnDefaults: checkBootHoldOrdering(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------
@@ -3457,6 +3545,9 @@ proc toPrivilegedOperation*(r: SystemResource;
       sfSourceUrl: r.sfSourceUrl,
       sfSha256: r.sfSha256,
       sfSourceLocal: r.sfSourceLocal,
+      sfMode: r.sfMode,
+      sfGroup: r.sfGroup,
+      sfForm: r.sfForm,
       sfDestroy: destroy)
   of srkFsSystemDirectory:
     PrivilegedOperation(kind: pokFsSystemDirectory, address: r.address,
