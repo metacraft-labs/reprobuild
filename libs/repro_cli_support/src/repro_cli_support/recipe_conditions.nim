@@ -29,11 +29,14 @@
 ##   is `<variant>.value` or a bare `<variant>`, or a `case <variant>.value` /
 ##   `case <variant>`, its `of` arms each labelled by ONE literal. Such an arm
 ##   applies when the lock's recorded value of that variant equals the arm's
-##   value (`true` / `false` for an `if`). Every other `if` / `case` arm the
-##   DSL lowers UNGATED — every arm contributes its entries — and so does an
-##   arm nested inside a gated arm (the DSL keeps the outer gate); those apply.
-##   An `if` / `case` written around the dependency block is not lowered by
-##   the DSL at all, and is undecidable here.
+##   value (`true` / `false` for an `if`). Every other `if` / `case` shape in
+##   a dependency block — an `elif` chain, a comparison, a `case` `else:` arm,
+##   an `of` with several labels or a non-literal one, a variant gate nested
+##   inside a gated arm — the DSL REFUSES to compile, because its arms are not
+##   statically enumerable (Configurable-System.md §"Admissible conditional
+##   forms"). Such an entry is undecidable here: no lock can have been
+##   resolved from that recipe. An `if` / `case` written around the dependency
+##   block is not lowered by the DSL at all, and is undecidable too.
 ##
 ## Every answer that is not "applies" or "does not apply" is undecidable, with
 ## a reason, and the callers list it (`notChecked`) rather than pass or refuse
@@ -338,7 +341,7 @@ proc caseLabelValue*(label: string): string =
   ## One `of` label as the DSL's `literalCaseLabel` lowers it: a string
   ## literal's value, `true` / `false`, an integer's decimal spelling; ""
   ## for anything else (several labels, a range, a name), which the DSL
-  ## lowers ungated.
+  ## refuses to compile.
   let l = label.strip()
   if l.len >= 2 and l[0] == '"' and l[^1] == '"':
     let inner = l[1 .. ^2]
@@ -375,8 +378,8 @@ proc armApplicability*(decl: ReproUsesDeclaration;
   ## the others say, and an undecidable guard leaves it undecidable otherwise.
   result.applicability = aaApplies
   var gated = false
-    ## An enclosing in-block `if` / `case` arm is already a variant gate: the
-    ## DSL then lowers every nested `if` / `case` arm under that gate.
+    ## An enclosing in-block `if` / `case` arm is already a variant gate. An
+    ## entry carries at most one gate, so the DSL refuses a nested one.
   var undecided = ""
   for g in decl.guards:
     var v = triTrue
@@ -418,7 +421,10 @@ proc armApplicability*(decl: ReproUsesDeclaration;
         why = "under " & describeArm(g) & ", an `" & $g.kind & "` around " &
           "the dependency block, which only running the recipe decides"
       elif gated:
-        v = triTrue
+        v = triUnknown
+        why = "under " & describeArm(g) & ", a variant gate nested inside " &
+          "another variant arm, which the DSL refuses to compile (an entry " &
+          "carries at most one gate)"
       else:
         var variant = ""
         var wanted = ""
@@ -435,8 +441,13 @@ proc armApplicability*(decl: ReproUsesDeclaration;
             wanted = caseLabelValue(g.conditions[g.arm])
           if wanted.len == 0: variant = ""
         if variant.len == 0:
-          # Not a gate: the DSL lowers every arm of it, ungated.
-          v = triTrue
+          # Not an admissible gate: the DSL refuses the recipe, so no lock
+          # was resolved from it and nothing here can be held to one.
+          v = triUnknown
+          why = "under " & describeArm(g) & ", a conditional the DSL " &
+            "refuses in a dependency block (its arms are not statically " &
+            "enumerable: Configurable-System.md §\"Admissible conditional " &
+            "forms\")"
         else:
           gated = true
           if variant notin facts.variants:
