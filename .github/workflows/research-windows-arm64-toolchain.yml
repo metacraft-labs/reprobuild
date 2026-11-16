@@ -25,7 +25,8 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - [self-hosted, windows, arm64]
+          # eph-win-arm64 ([self-hosted, windows, arm64]) is down on
+          # 2026-11-16 (m3 GARM stopped); do not leave a job queued on it.
           - [windows-11-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
@@ -34,6 +35,7 @@ jobs:
         shell: pwsh
     env:
       WORK: C:\r
+    # clingo exits 10/20/30 by design; the steps check exit codes themselves.
     steps:
       - name: Host facts
         run: |
@@ -207,7 +209,7 @@ jobs:
           $t = Measure-Command {
             & $cmake -S $s -B $b -G "NMake Makefiles" "-DCMAKE_BUILD_TYPE=Release" `
               "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" `
-              "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" `
+              "-DCMAKE_POLICY_DEFAULT_CMP0091=NEW" "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" `
               "-DCLINGO_BUILD_WITH_PYTHON=OFF" "-DCLINGO_BUILD_WITH_LUA=OFF" `
               "-DCLINGO_BUILD_SHARED=ON" "-DCLINGO_BUILD_APPS=ON" "-DCLINGO_BUILD_TESTS=OFF" 2>&1 | Select-Object -Last 15 | Out-Host
             if ($LASTEXITCODE) { throw "configure failed" }
@@ -223,6 +225,7 @@ jobs:
           if ($dumpbin) { & $dumpbin.FullName /dependents $dll.FullName | Out-Host }
           New-Item -ItemType Directory -Force "$env:WORK\clingo-msvc-out" | Out-Null
           Copy-Item $dll.FullName, $exe.FullName "$env:WORK\clingo-msvc-out\"
+          $PSNativeCommandUseErrorActionPreference = $false
           'a :- not b. b :- not a.' | Set-Content "$env:WORK\p.lp"
           & "$env:WORK\clingo-msvc-out\clingo.exe" --version | Select-Object -First 1
           & "$env:WORK\clingo-msvc-out\clingo.exe" "$env:WORK\p.lp" 0 | Out-Host
@@ -253,14 +256,24 @@ jobs:
           $dll = Get-ChildItem -Recurse $b -Filter "*clingo*.dll" | Select-Object -First 1
           "dll=$($dll.FullName) machine=$(Get-PeMachine $dll.FullName) size=$($dll.Length)"
           llvm-readobj --coff-imports $dll.FullName | Select-String "Name:" | Out-Host
+          $exe = Get-ChildItem -Recurse $b -Filter clingo.exe | Select-Object -First 1
+          llvm-readobj --coff-imports $exe.FullName | Select-String "Name:" | Out-Host
+          New-Item -ItemType Directory -Force "$env:WORK\clingo-mingw-out" | Out-Null
+          Copy-Item $dll.FullName "$env:WORK\clingo-mingw-out\clingo.dll"
+          Copy-Item $dll.FullName, $exe.FullName "$env:WORK\clingo-mingw-out\"
+          $PSNativeCommandUseErrorActionPreference = $false
+          'a :- not b. b :- not a.' | Set-Content "$env:WORK\p.lp"
+          & "$env:WORK\clingo-mingw-out\clingo.exe" "$env:WORK\p.lp" 0 | Out-Host
+          "clingo.exe exit=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 30) { throw "clingo solve exit $LASTEXITCODE" }
 
-      - name: 3c. Native Nim loads clingo.dll (MSVC build) and solves
+      - name: 3c. Native Nim loads clingo.dll (both builds) through the C API
         id: clingoffi
         continue-on-error: true
         run: |
           $ErrorActionPreference = "Stop"
           $env:PATH = "$env:WORK\nim-x64\nim-2.2.8\bin;$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
-          Set-Location "$env:WORK\clingo-msvc-out"
+          Set-Location $env:WORK
           @'
           type ClingoControl = pointer
           proc clingo_version(ma, mi, re: ptr cint) {.importc, dynlib: "clingo.dll", cdecl.}
@@ -279,7 +292,16 @@ jobs:
           '@ | Set-Content ffi.nim
           nim c --hints:off -d:release ffi.nim 2>&1 | Out-Host
           if ($LASTEXITCODE) { throw "ffi compile failed" }
-          .\ffi.exe; if ($LASTEXITCODE) { throw "ffi run failed" }
+          $sys = "$env:SystemRoot\System32;$env:SystemRoot"
+          foreach ($d in @("clingo-msvc-out", "clingo-mingw-out")) {
+            Copy-Item ffi.exe "$env:WORK\$d\"
+            Push-Location "$env:WORK\$d"
+            $saved = $env:PATH; $env:PATH = $sys
+            .\ffi.exe; $rc = $LASTEXITCODE
+            $env:PATH = $saved; Pop-Location
+            "$d ffi exit=$rc"
+            if ($rc) { throw "ffi run failed for $d" }
+          }
 
       - name: 4. Native Nim with OpenSSL (import libs), zstd and sqlite DLLs
         id: runtime
@@ -304,8 +326,8 @@ jobs:
             doAssert f != nil, sym
             echo name, " ", f()
           '@ | Set-Content rt.nim
-          nim c --hints:off -d:release -d:ssl --dynlibOverride:ssl --dynlibOverride:crypto `
-            "--passL:-L$m\lib" --passL:-lssl --passL:-lcrypto rt.nim 2>&1 | Out-Host
+          # config.nims sets sslVersion=3-x64 on Windows; this leg's name is 3-arm64.
+          nim c --hints:off -d:release -d:ssl "-d:sslVersion=3-arm64" rt.nim 2>&1 | Out-Host
           if ($LASTEXITCODE) { throw "rt compile failed" }
           "rt.exe machine=$(Get-PeMachine rt.exe)"
           llvm-readobj --coff-imports rt.exe | Select-String "Name:" | Out-Host
