@@ -85,7 +85,7 @@ jobs:
         run: |
           @'
           function Get-PeMachine([string]$Path) {
-            $b = [IO.File]::ReadAllBytes($Path)
+            $b = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path).ProviderPath)
             $pe = [BitConverter]::ToInt32($b, 0x3c)
             return ('0x{0:x4}' -f [BitConverter]::ToUInt16($b, $pe + 4))
           }
@@ -122,6 +122,13 @@ jobs:
           $env:PATH = "$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
           $src = "$env:WORK\nim-x64\nim-2.2.8"
           Get-ChildItem "$src\dist" | Select-Object -ExpandProperty Name
+          # The release zip's icons\*_icon.o are x64 COFF objects that
+          # compiler/nim.nim and koch.nim link on Windows+gcc; rebuild them
+          # for the target with the target's resource compiler.
+          foreach ($i in @("nim", "koch")) {
+            aarch64-w64-mingw32-windres -i "$src\icons\$i.rc" -O coff -o "$src\icons\${i}_icon.o"
+            if ($LASTEXITCODE) { throw "windres $i failed" }
+          }
           $t = Measure-Command {
             & "$src\bin\nim.exe" c --hints:off -d:release --cpu:arm64 --os:windows --cc:gcc `
               --nimcache:"$env:WORK\nc-seed" -o:"$src\bin\nim-arm64.exe" "$src\compiler\nim.nim" 2>&1 | Out-Host
@@ -189,14 +196,22 @@ jobs:
           & $cmake --version
           $s = "$env:WORK\clingo-src\clingo-5.8.0"
           $b = "$env:WORK\clingo-msvc"
+          # Native ARM64-hosted MSVC environment, whatever VS version the image has.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          "VS: $vs"
+          $envLines = & cmd.exe /d /s /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" arm64 >nul && set"
+          if ($LASTEXITCODE) { throw "vcvarsall arm64 failed" }
+          foreach ($l in $envLines) { $k, $v = $l -split '=', 2; if ($k -and $v) { [Environment]::SetEnvironmentVariable($k, $v) } }
+          (Get-Command cl.exe).Source
+          "cl.exe machine=$(Get-PeMachine (Get-Command cl.exe).Source)"
           $t = Measure-Command {
-            & $cmake -S $s -B $b -G "Visual Studio 17 2022" -A ARM64 `
-              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
-              -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
-              -DCLINGO_BUILD_WITH_PYTHON=OFF -DCLINGO_BUILD_WITH_LUA=OFF `
-              -DCLINGO_BUILD_SHARED=ON -DCLINGO_BUILD_APPS=ON -DCLINGO_BUILD_TESTS=OFF 2>&1 | Select-Object -Last 15 | Out-Host
+            & $cmake -S $s -B $b -G "NMake Makefiles" "-DCMAKE_BUILD_TYPE=Release" `
+              "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" `
+              "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded" `
+              "-DCLINGO_BUILD_WITH_PYTHON=OFF" "-DCLINGO_BUILD_WITH_LUA=OFF" `
+              "-DCLINGO_BUILD_SHARED=ON" "-DCLINGO_BUILD_APPS=ON" "-DCLINGO_BUILD_TESTS=OFF" 2>&1 | Select-Object -Last 15 | Out-Host
             if ($LASTEXITCODE) { throw "configure failed" }
-            & $cmake --build $b --config Release --parallel 2>&1 | Select-Object -Last 15 | Out-Host
+            & $cmake --build $b 2>&1 | Select-Object -Last 15 | Out-Host
             if ($LASTEXITCODE) { throw "build failed" }
           }
           "clingo MSVC build: {0:N0}s" -f $t.TotalSeconds
@@ -224,12 +239,12 @@ jobs:
           $s = "$env:WORK\clingo-src\clingo-5.8.0"
           $b = "$env:WORK\clingo-mingw"
           $t = Measure-Command {
-            & $cmake -S $s -B $b -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release `
-              -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ `
-              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
+            & $cmake -S $s -B $b -G "MinGW Makefiles" "-DCMAKE_BUILD_TYPE=Release" `
+              "-DCMAKE_C_COMPILER=gcc" "-DCMAKE_CXX_COMPILER=g++" `
+              "-DCMAKE_POLICY_VERSION_MINIMUM=3.5" `
               "-DCMAKE_SHARED_LINKER_FLAGS=-static" "-DCMAKE_EXE_LINKER_FLAGS=-static" `
-              -DCLINGO_BUILD_WITH_PYTHON=OFF -DCLINGO_BUILD_WITH_LUA=OFF `
-              -DCLINGO_BUILD_SHARED=ON -DCLINGO_BUILD_APPS=ON -DCLINGO_BUILD_TESTS=OFF 2>&1 | Select-Object -Last 15 | Out-Host
+              "-DCLINGO_BUILD_WITH_PYTHON=OFF" "-DCLINGO_BUILD_WITH_LUA=OFF" `
+              "-DCLINGO_BUILD_SHARED=ON" "-DCLINGO_BUILD_APPS=ON" "-DCLINGO_BUILD_TESTS=OFF" 2>&1 | Select-Object -Last 15 | Out-Host
             if ($LASTEXITCODE) { throw "configure failed" }
             & $cmake --build $b --parallel 4 2>&1 | Select-Object -Last 15 | Out-Host
             if ($LASTEXITCODE) { throw "build failed" }
