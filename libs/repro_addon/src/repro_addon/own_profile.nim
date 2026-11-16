@@ -151,8 +151,11 @@ type
     ## The digest the committed ledger records for a path the add-on
     ## wrote, "" when the ledger does not name it.
 
+proc engineExeIn*(unitText: string): string
+
 proc addMissingGeneration0*(own: string; candidates: openArray[OwnObject];
-                            probe: PathProbe; recorded: RecordedDigest): string =
+                            probe: PathProbe; recorded: RecordedDigest;
+                            known: openArray[string] = []): string =
   ## ``own`` with each of ``candidates`` (``missingGeneration0Objects``)
   ## added, so the switch installs it like every generation-0 object, with
   ## its ledger entry and fingerprint (§13 decision 159, the upgrade path). It only adds: an
@@ -163,11 +166,21 @@ proc addMissingGeneration0*(own: string; candidates: openArray[OwnObject];
   ## its bytes are exactly the object's -- anything else is not the
   ## add-on's to write over (§4.3), and raises ``ValueError`` naming it.
   ## Idempotent: an own profile carrying the objects has no candidates.
+  ## A unit that runs the add-on binary may be there as rendered for
+  ## another engine ``known`` lists (the ledger's add-on binary prefixes):
+  ## a rollback to a generation from before the unit existed, on a host a
+  ## later engine already gave it (A9 review round 17, finding 1).
   for o in candidates:
     let p = probe(o.path)
     if not p.present: continue
-    let want = sha256Hex(o.content)
+    var want = sha256Hex(o.content)
     let rec = recorded(o.path)
+    let exe = engineExeIn(o.content)
+    if exe.len > 0 and p.sha256 != want and rec == p.sha256:
+      for k in known:
+        if sha256Hex(o.content.replace(exe, k)) == p.sha256:
+          want = p.sha256
+          break
     if p.sha256 != want or rec != want:
       raise newException(ValueError, o.path & " is there and is not " &
         "generation 0's " & o.unit & " (" &
@@ -256,6 +269,10 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
   ## has it (an image being assembled, a test's own root).
   result.own = own
   var found: seq[tuple[unit, cur, ownExe, disk: string]]
+  # Units of ``own`` no file is installed for yet (generation 0's upgrade
+  # path adds them in this switch): rendered for the engine the others run,
+  # with nothing on disk to check.
+  var absentUnits: seq[tuple[unit, cur, ownExe: string]]
   for u in RepointedUnits:
     let cur = unitContentOf(own, u)
     if cur.len == 0: continue
@@ -263,7 +280,9 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
     if ownExe.len == 0: continue
     let path = unitPath(u)
     let p = probe(path)
-    if not p.present: continue
+    if not p.present:
+      absentUnits.add((u, cur, ownExe))
+      continue
     let rec = recorded(path)
     var disk = ""
     if p.sha256.len > 0 and rec == p.sha256:
@@ -280,7 +299,20 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
                "engine the ledger records") &
         "); it is not re-pointed. Restore it, or re-bootstrap")
     found.add((u, cur, ownExe, disk))
-  if found.len == 0: return
+  if found.len == 0:
+    # Nothing installed to keep: an image being assembled or a test's own
+    # root keeps the own profile's engine; a host where only the units
+    # this switch adds are missing gets the applying engine's image.
+    if engineExe.len == 0 or absentUnits.len == 0: return
+    when mutated("reassert-not-repointed"):
+      return
+    result.exe = engineExe
+    for a in absentUnits:
+      let want = a.cur.replace(a.ownExe, engineExe)
+      if want != a.cur:
+        result.own = replaceUnitContent(result.own, a.unit, want)
+        result.changed = true
+    return
   # The newest engine on disk, by the order the ledger recorded them in.
   let order = @known
   proc age(x: string): int =
@@ -308,4 +340,11 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
     let want = f.cur.replace(f.ownExe, result.exe)
     if want != f.cur:
       result.own = replaceUnitContent(result.own, f.unit, want)
+      result.changed = true
+  # A unit this switch adds (the boot-confirm unit on a host an engine
+  # before it bootstrapped) runs the same engine as the installed ones.
+  for a in absentUnits:
+    let want = a.cur.replace(a.ownExe, result.exe)
+    if want != a.cur:
+      result.own = replaceUnitContent(result.own, a.unit, want)
       result.changed = true

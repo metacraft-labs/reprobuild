@@ -5233,6 +5233,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # by an earlier engine gets the boot-hold unit at its next apply). Here,
   # under the host apply lock and before anything is written, so a path in
   # the way stops the apply before any generation change.
+  # The add-on binary prefixes the committed ledger records, oldest
+  # first: the engines a generation-0 unit on disk may run.
+  var ledgerPrefixes: seq[string]
+  for e in previous.entries:
+    if e.class == lcStorePrefix: ledgerPrefixes.add(e.path)
+  let known = binaryPrefixesOf(ledgerPrefixes)
   let ownTextUpgraded =
     if replaying: migratedOwn
     else:
@@ -5242,7 +5248,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           recorded = proc (path: string): string =
             for e in previous.entries:
               if e.path == path: return e.sha256
-            "")
+            "",
+          known = known)
       except ValueError as e:
         raise newException(AddonApplyError, "generation 0 cannot be " &
           "upgraded: " & e.msg)
@@ -5262,10 +5269,6 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   var bootstrapEntries = opts.bootstrapEntries
   var ownText = ownTextUpgraded
   if not replaying and not opts.planOnly:
-    var prefixes: seq[string]
-    for e in previous.entries:
-      if e.class == lcStorePrefix: prefixes.add(e.path)
-    let known = binaryPrefixesOf(prefixes)
     let sel = repointEngineChoice(getAppFilename(), known, isStaticElf,
       proc (p: string): string =
         try: sha256OfFile(p) except CatchableError: "")
@@ -6448,7 +6451,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     f.alive = if f.exclusive: unitAliveness(f.unit) else: uaEmpty
   for r in removedUnits:
     var f = UnitFacts(unit: r.suName, address: r.address, owned: true,
-      removed: true, exclusive: isExclusiveUnit(r), stopHeld: r.suStopHeld)
+      removed: true, exclusive: isExclusiveUnit(r),
+      stopHeld: r.suStopHeld or r.suName == BootHoldUnit)
     observed(f)
     facts.add(f)
     factUnits.incl(r.suName)
@@ -6463,8 +6467,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         exclusive: isExclusiveUnit(r) or
           (r.suName in prevUnits and
            unitContentDeclaresExclusive(readFile(prevUnits[r.suName].path))),
-        restartHeld: r.suRestartHeld, reloadIfChanged: r.suReloadIfChanged,
-        stopHeld: r.suStopHeld,
+        # The boot-hold unit is never restarted or stopped by a switch:
+        # sysinit.target requires it (§13 decision 172), and a stop or a
+        # restart of a required unit propagates to every unit that requires
+        # sysinit.target -- every service with default dependencies
+        # (systemd.unit(5), Requires=). It only runs at boot.
+        restartHeld: r.suRestartHeld or r.suName == BootHoldUnit,
+        reloadIfChanged: r.suReloadIfChanged,
+        stopHeld: r.suStopHeld or r.suName == BootHoldUnit,
         credentialsChanged: r.suCredentials.len > 0 and
           credentialServiceOf(r.suName) in credentialChanged)
       observed(f)

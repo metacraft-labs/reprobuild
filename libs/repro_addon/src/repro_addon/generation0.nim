@@ -692,7 +692,13 @@ proc bootHoldUnit*(): string =
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
-  "RemainAfterExit=yes\n" &
+  # Not RemainAfterExit=: once it has run it is inactive, so nothing a
+  # switch plans ever restarts it, and a stop of it -- which, required by
+  # sysinit.target, would stop every unit that requires sysinit.target --
+  # is refused unless a dependency asks for it, as shutdown's Conflicts=
+  # does (systemd.unit(5), RefuseManualStop=; §13 decision 172).
+  "RemainAfterExit=no\n" &
+  "RefuseManualStop=yes\n" &
   "TimeoutStartSec=" & $BootHoldTimeoutSec & "\n" &
   # systemd expands $NAME in ExecStart= (systemd.service(5), "Command
   # lines"); $$ passes a single $ to the shell.

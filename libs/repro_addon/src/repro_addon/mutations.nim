@@ -1743,6 +1743,9 @@ const
                           "revert-stopped-instances-unrecorded",
                           # the record is cleared before step 7's starts.
                           "revert-stopped-cleared-early",
+                          # uninstall stops the boot-hold unit, which stops
+                          # sysinit.target and everything requiring it.
+                          "uninstall-stops-boot-hold",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",

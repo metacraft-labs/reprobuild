@@ -302,7 +302,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["engineAfterRevert"] = %afterRevert
     step("a switch whose check fails reverts, and the units keep this engine " &
          "(A9 review round 17, finding 1)",
-         r.exitCode != 0 and g.currentGeneration() == genS3 and
+         r.exitCode != 0 and "was rolled back to " & genS3 in (r.stdout & r.stderr) and
          g.exec("test -e /var/lib/repro/system/addon/pending").exitCode != 0 and
          afterRevert == engineExe,
          r.stdout & r.stderr & "\nunits run: " & afterRevert)

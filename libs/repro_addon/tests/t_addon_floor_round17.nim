@@ -1,6 +1,8 @@
 ## The add-on after the A9 review's round 17 (ReproOS Add-On Mode spec
-## §6.2 step 4, §10.1; §13 decisions 164, 172, 173 and 174; the reviewer's
-## probes ``probe17/p_repoint_revert.nim``, ``p_boot_order17.nim`` and
+## §6.2 step 4, §10.1; the re-assert unit re-pointed at the upgrading
+## engine, §13 decision 164; the boot-hold unit required by sysinit.target,
+## decision 172; the agent's units re-pointed, decision 173; only the static
+## image installed, decision 174; the reviewer's probes ``probe17/p_repoint_revert.nim``, ``p_boot_order17.nim`` and
 ## ``p_delay17.nim``):
 ##
 ## - finding 1 (§13 decision 164 as amended): a revert or a rollback, whose
@@ -45,7 +47,7 @@
 ## ``systemd-analyze verify`` over unit files in a temporary directory; it is
 ## skipped where the host has none.
 
-import std/[os, osproc, sets, strutils, tempfiles, unittest]
+import std/[os, osproc, sequtils, sets, strutils, tempfiles, unittest]
 
 from repro_core import ReprobuildVersion
 
@@ -125,6 +127,39 @@ suite "A9 review round 17, finding 1: a revert or rollback after a re-point":
         proc (p: string): string =
           if p == unitPath(BootConfirmUnit): "" else: d(p).sha256)
 
+suite "A9 review round 17, finding 1: the units an upgrade adds, and a rollback past them":
+  test "a unit not installed yet runs the engine the installed ones run":
+    let g = ownFor(E1)
+    proc d(p: string): tuple[present: bool; sha256: string] =
+      if p == unitPath(BootConfirmUnit): return (false, "")
+      for u in RepointedUnits:
+        if p == unitPath(u): return (true, sha256Hex(unitContentOf(g, u)))
+      (false, "")
+    let r = repointEngine(g, E2, [E1], d, proc (p: string): string = d(p).sha256)
+    check r.exe == E2
+    check unitContentOf(r.own, BootConfirmUnit) == bootConfirmUnit(E2)
+  test "only units the switch adds: they get the applying engine's image":
+    let g = ownFor(E1)
+    proc d(p: string): tuple[present: bool; sha256: string] = (false, "")
+    let r = repointEngine(g, E2, [E1], d, proc (p: string): string = "")
+    check engineExeIn(unitContentOf(r.own, BootConfirmUnit)) == E2
+    check not repointEngine(g, "", [E1], d, proc (p: string): string = "").changed
+  test "generation 0's upgrade path accepts a unit rendered for a recorded engine":
+    # A rollback to a generation from before the boot-confirm unit: the own
+    # profile lacks it, the host has it as E2's.
+    let g2 = ownFor(E2)
+    let onDisk = sha256Hex(unitContentOf(g2, BootConfirmUnit))
+    let cand = @[OwnObject(kind: ookUnit, unit: BootConfirmUnit,
+      path: unitPath(BootConfirmUnit), content: bootConfirmUnit(E1), enabled: true)]
+    let probe = proc (p: string): tuple[present: bool; sha256: string] =
+      if p == unitPath(BootConfirmUnit): (true, onDisk) else: (false, "")
+    let rec = proc (p: string): string = probe(p).sha256
+    let own = renderOwnProfile(generation0Objects(Gen0Inputs(reproExe: E1)).filterIt(
+      it.unit != BootConfirmUnit), "/f")
+    check BootConfirmUnit in addMissingGeneration0(own, cand, probe, rec, known = [E1, E2])
+    expect ValueError:
+      discard addMissingGeneration0(own, cand, probe, rec, known = [E1])
+
 suite "§13 decision 173: the agent's units move with the re-assert unit":
   test "an upgrade re-points the agent-apply and fetch units":
     let g = ownFor(E1)
@@ -193,6 +228,12 @@ suite "§13 decision 174: only the static add-on image is installed":
 
 suite "§13 decision 172: the boot-hold unit is required by sysinit.target":
   let u = bootHoldUnit()
+  test "never stopped or restarted at run time: inactive once run, manual stops refused":
+    # A stop or a restart of a unit sysinit.target requires propagates to
+    # every unit that requires sysinit.target (systemd.unit(5), Requires=).
+    check "RemainAfterExit=no\n" in u
+    check "RefuseManualStop=yes\n" in u
+    check "RemainAfterExit=yes" notin u
   test "RequiredBy=, and nothing it runs can fail the unit":
     check "RequiredBy=sysinit.target\n" in u
     check "WantedBy=sysinit.target" notin u

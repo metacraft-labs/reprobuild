@@ -313,5 +313,10 @@ suite "§13 decision 164: the re-assert unit is pointed at the upgrading engine"
             if p == unitPath(ReassertUnit): (true, dd) else: onDisk(p),
           proc (p: string): string =
             if p == unitPath(ReassertUnit): rr else: recordedAs(p))
-  test "no unit installed: nothing to re-point":
-    check not repointEngine(current, NewExe, [Exe], absent, unrecorded).changed
+  test "no unit installed: nothing to keep, so the applying image or nothing":
+    # A9 review round 17: the units an upgrade adds run the applying
+    # engine's image; with none (the dynamic engine and no static image),
+    # the own profile is left as it is.
+    check not repointEngine(current, "", [Exe], absent, unrecorded).changed
+    let r = repointEngine(current, NewExe, [Exe], absent, unrecorded)
+    check reassertExeOf(unitContentOf(r.own, ReassertUnit)) == NewExe
