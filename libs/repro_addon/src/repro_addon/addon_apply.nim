@@ -1865,8 +1865,11 @@ proc revertStoppedToStart*(recorded: openArray[string];
     let installed =
       if tmpl.len > 0:
         tmpl in generationUnits and
-          (socketActivated == nil or not socketActivated(u) or
-           mutated("revert-stopped-instances-by-enablement"))
+          (socketActivated == nil or not socketActivated(u)) and
+          # FALSIFYING MUTATION: the rule before round 18 -- an instance
+          # comes back only when enabled, so a Wants=-pulled one stays down
+          # (approximated: never, since no fixture enables one).
+          not mutated("revert-stopped-instances-by-enablement")
       else: u in generationUnits
     if installed and u notin planned and not isActive(u) and u notin result:
       result.add(u)
