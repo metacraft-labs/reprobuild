@@ -549,7 +549,11 @@ jobs:
             if (-not (Test-Path $justExe)) {
               New-Item -ItemType Directory -Force -Path $justDir | Out-Null
               $justZip = Join-Path $env:RUNNER_TEMP "just.zip"
-              $justUrl = "https://github.com/casey/just/releases/download/$justVersion/just-$justVersion-x86_64-pc-windows-msvc.zip"
+              # The leg's own architecture: an aarch64 just.exe on windows-aarch64,
+              # where an x64 one would run under emulation (reprobuild-pm
+              # Distribution-And-Packaging.md §7.1).
+              $justTriple = if ('${{ matrix.arch }}' -eq 'aarch64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+              $justUrl = "https://github.com/casey/just/releases/download/$justVersion/just-$justVersion-$justTriple.zip"
               Write-Host "Provisioning just $justVersion from $justUrl"
               Invoke-WebRequest -Uri $justUrl -OutFile $justZip
               Expand-Archive -Path $justZip -DestinationPath $justDir -Force

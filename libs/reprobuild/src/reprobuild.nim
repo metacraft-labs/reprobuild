@@ -1,14 +1,17 @@
 ## The Reprobuild recipe SDK: ``import reprobuild``.
 ##
 ## The zero-ceremony import for a ``repro.nim``. It brings the core project
-## DSL (``package``, ``uses``, ``nativeBuildDeps``, ``buildDeps``,
-## ``runtimeDeps``, ``executable``, ``library``, ``build``, ``tasks``,
-## ``task``, ``service``, ``config``, ``glob``, ``shell``, ``aggregate``, ...)
+## DSL (the ``package`` macro with its ``uses:``, ``buildDeps:``,
+## ``nativeBuildDeps:``, ``runtimeDeps:``, ``executable``, ``library``,
+## ``files``, ``build:``, ``config:``, ``devEnv:`` (with its ``activity``,
+## ``task`` and environment statements) and ``service`` sections; ``target``,
+## ``aggregate``, ``collect`` and ``defaultBuildAction``)
 ## together with the standard prelude: the typed filesystem operations
-## (``writeText``, ``copyFile``, ``stamp``, ...), configurables, the active
-## build context and lock-file declarations. Packages named on a ``uses:``
-## line bring their own typed tool bindings into the recipe; nothing has to be
-## imported for them.
+## (``writeText``, ``copyFile``, ``ensureDir``, ``stamp``, ...),
+## configurables, the active build context and lock-file declarations.
+## Packages named on a ``uses:`` or ``nativeBuildDeps:`` line bring their own
+## typed tool bindings into the recipe (``uses: "sh"`` brings ``shell``);
+## nothing has to be imported for them.
 ##
 ## The module tree under this one is the canonical import surface:
 ##
