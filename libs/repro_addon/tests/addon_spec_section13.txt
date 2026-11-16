@@ -185,3 +185,4 @@
 169 Leave dependants out | dependant, leaves out
 170 Allow the fixing apply | fixing, resolve, partial fix
 171 Every requirer of a refused unit stays held | requirer, refused unit, held
+178 Bootstrap makes the uninstall records' directory | uninstall records, records' directory, bootstrap, verify

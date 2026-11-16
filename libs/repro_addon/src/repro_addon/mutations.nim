@@ -635,6 +635,27 @@
 ##                                           judge that requires a refused
 ##                                           unit is not held (decision 153,
 ##                                           round 10)
+## ``restart-success-by-exit-code``        a restart's exit code is taken as
+##                                           its outcome (round 11, H1)
+## ``live-check-restart-before-stale-holds-cleared``
+##                                           the next apply restarts the
+##                                           recorded triggers under the dead
+##                                           apply's holds (round 11, H1)
+## ``empty-requires-resets``               an empty ``Requires=`` resets the
+##                                           list (round 11, M4)
+## ``template-requirers-skipped``          a template requirer is not held
+##                                           (round 11, M3)
+## ``requirers-from-files-only``           systemd's reverse dependencies are
+##                                           not read (decision 171, round 11)
+## ``essential-requirers-held``            an essential unit is held instead
+##                                           of the apply refused (round 11)
+## ``dependants-do-not-block``             a recorded dependant does not block
+##                                           an apply (round 11, M1)
+## ``fixing-switch-skips-starts``          the fixing switch starts nothing it
+##                                           resolved (round 11, H2)
+## ``record-outside-host-lock``            recover changes the record of
+##                                           triggers outside the host apply
+##                                           lock (round 11, M2)
 ## ``switch-ignores-restart-record``       an add-on switch does not check
 ##                                           the record of triggers to
 ##                                           restart (decision 160, round 10)
@@ -1138,6 +1159,18 @@
 ##                                            corrupt record of a
 ##                                            pre-bootstrap input
 ##                                            (decision 166)
+## ``record-dir-link-followed``              the uninstall records are
+##                                            written by path, following a
+##                                            link in their directory's place
+##                                            (decision 178)
+## ``token-binds-inode-only``                 the token's install binding
+##                                            compares inode numbers only
+##                                            (decision 165)
+## ``bootstrap-leaves-log-dir``               bootstrap does not make the
+##                                            uninstall records' directory
+##                                            (decision 178)
+## ``verify-skips-log-dir``                   verify does not check that
+##                                            directory (decision 178)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1856,6 +1889,16 @@ const
                           "live-check-triggers-in-memory",
                           "template-requirer-shown-by-name",
                           "unjudged-requirers-released",
+                          # A13 review round 11.
+                          "restart-success-by-exit-code",
+                          "live-check-restart-before-stale-holds-cleared",
+                          "empty-requires-resets",
+                          "template-requirers-skipped",
+                          "requirers-from-files-only",
+                          "essential-requirers-held",
+                          "dependants-do-not-block",
+                          "fixing-switch-skips-starts",
+                          "record-outside-host-lock",
                           "switch-ignores-restart-record",
                           "fixing-apply-refused",
                           "partial-fix-accepted",
@@ -2036,6 +2079,10 @@ const
                           "token-dir-unchecked",
                           "token-not-bound-to-install",
                           "corrupt-input-record-continues",
+                          "record-dir-link-followed",
+                          "token-binds-inode-only",
+                          "bootstrap-leaves-log-dir",
+                          "verify-skips-log-dir",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
@@ -2048,7 +2095,14 @@ const
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
-                          "fresh-accepts-user-config"]
+                          "fresh-accepts-user-config",
+                          # An agent apply may weaken a unit's confinement
+                          # (a new whole-floor waiver, a new exception, a
+                          # waived unit moved onto root) unattended: the
+                          # asymmetry spec §10.1 *An agent apply never
+                          # weakens the floor* closed
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-weaken-floor"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
