@@ -18,7 +18,16 @@ on:
 
 jobs:
   probe:
-    runs-on: [self-hosted, windows, arm64]
+    # The fleet class (eph-win-arm64) and GitHub's hosted Windows 11 Arm
+    # image: the second measures the same toolchain on a stock host while the
+    # fleet class is unavailable.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - [self-hosted, windows, arm64]
+          - [windows-11-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     defaults:
       run:
