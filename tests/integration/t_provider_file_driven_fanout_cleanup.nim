@@ -154,6 +154,7 @@ suite "provider file-driven fan-out + cleanup":
       proc refresh(): ProviderRefreshReport =
         refreshProviderGraph(RefreshConfig(
           storeRoot: storeRoot,
+          projectId: "fileFanout",
           providerBinaryPath: providerBin,
           providerArtifactId: Artifact,
           rootEntryPointId: RootEntryPoint,
