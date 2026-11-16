@@ -118,20 +118,47 @@ suite "Add-On apt closure: real Debian trixie armhf closure":
       check elfIsArmhf(prefix / "usr/lib/arm-linux-gnueabihf/libc.so.6")
       check fileExists(prefix / "usr/bin/dash")
       check symlinkExists(prefix / "usr/bin/sh")
+
+      # The commands Debian provides only through update-alternatives
+      # (spec §8.3 item 4, "Alternatives"): no package ships /usr/bin/awk
+      # or /usr/bin/which -- mawk's and debianutils' postinst register them
+      # -- so a closure that runs no maintainer script lacked them all
+      # (issue 2026-11-12-apt-closures-leave-out-every-alternatives-managed-
+      # command.md). Each link resolves INSIDE the closure, to the provider
+      # with the highest priority, and its slaves come with it.
+      proc resolvesTo(link, target: string): bool =
+        symlinkExists(prefix / link) and
+          not expandSymlink(prefix / link).isAbsolute and
+          sameFile(prefix / link, prefix / target)
+      check resolvesTo("usr/bin/awk", "usr/bin/mawk")
+      check fileExists(prefix / "usr/bin/awk") and
+        elfIsArmhf(prefix / "usr/bin/awk")
+      check resolvesTo("usr/bin/nawk", "usr/bin/mawk")
+      check resolvesTo("usr/share/man/man1/awk.1.gz",
+        "usr/share/man/man1/mawk.1.gz")
+      check resolvesTo("usr/bin/which", "usr/bin/which.debianutils")
+      check resolvesTo("usr/bin/pager", "usr/bin/more")
+      check resolvesTo("usr/sbin/rmt", "usr/sbin/rmt-tar")
+      # The union records what it linked, from which package.
+      let record = readFile(prefix / ".repro-apt-alternatives")
+      check "master awk usr/bin/awk usr/bin/mawk 5 mawk" in
+        record.splitLines()
+      check "slave awk usr/bin/nawk usr/bin/mawk" in record.splitLines()
       # The daemon is shared with its member prefix, not copied.
       for d in lock.debs:
         if d.name == "prometheus-node-exporter":
           check sameFile(exporter,
             aptDebPrefixPath(store, d) / "usr/bin/prometheus-node-exporter")
 
-      # Only ``usr`` and ``etc`` (and the marker and the store's receipt)
+      # Only ``usr`` and ``etc`` (and the marker, the alternatives record and
+      # the store's receipt)
       # at the top: the base owns /bin, /lib, /sbin as merged-/usr links,
       # and /var, /run, ... are the host's.
       var top: seq[string] = @[]
       for kind, p in walkDir(prefix): top.add(p.extractFilename)
-      check top.len == 4
+      check top.len == 5
       check "usr" in top and "etc" in top and ".repro-apt-closure" in top and
-        ".repro-receipt" in top
+        ".repro-receipt" in top and ".repro-apt-alternatives" in top
 
       # No setuid/setgid bit anywhere (util-linux's ``su`` is setuid in the
       # archive), no special files.

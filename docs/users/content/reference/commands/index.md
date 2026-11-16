@@ -77,15 +77,15 @@ Commands fall into four side-effect classes:
 | `repro workspace` (`repro ws`) | — | Manage the multi-repository workspace. |
 | `repro sync` | — | Fast-forward the workspace's repositories toward a target. |
 | `repro pull` | — | Converge the workspace onto its declared revisions. |
-| `repro branch` | — | Fork a new sibling workspace on a new branch. |
+| `repro branch` | — | Fork a new sibling workspace on a new branch (with no path: print the workspace's branch). |
 | `repro switch` | — | Switch the workspace to a branch. |
 | `repro push` | — | Publish the current work as a reproducible workspace state. |
 | `repro check` | — | Run the publication checks (the pre-push gate). |
-| `repro hooks` | — | Install, repair or remove the managed hooks. |
-| `repro lock` | — | Inspect and update the project's lock. |
-| `repro locking` | — | Explain or adopt the workspace's locking configuration. |
+| `repro hooks` | `ensure`, `reinstall`, `uninstall` | Install, repair or remove the managed hooks. |
+| `repro lock` | `list`, `solve`, `refresh`, `update`, `validate`, `diff`, `explain` | Inspect and update the project's lock. |
+| `repro locking` | `explain`, `adopt-manifest` | Explain or adopt the workspace's locking configuration. |
 | `repro flake` | — | Compute the Nix flake overrides of the develop set. |
-| `repro gateway` | — | Run a push-gateway hook entry point. |
+| `repro gateway` | `pre-receive`, `post-receive`, `migrate` | Run a push-gateway hook entry point. |
 | `repro prompt` | `init` | Print a workspace-state segment for the shell prompt. |
 
 ## Stores, caches and daemons
@@ -138,7 +138,7 @@ Commands fall into four side-effect classes:
 | `repro anywhere` | Machines | Bootstrap a booted distribution host into ReproOS add-on mode over SSH (Linux): without --expect-plan print the plan and exit 3, with it apply. |
 | `repro attest` | Machines | Compute and check launch measurements of attested images. |
 | `repro bench` | Building and testing | Run the project's benchmarks. |
-| `repro branch` | Workspaces and publication | Fork a new sibling workspace on a new branch. |
+| `repro branch` | Workspaces and publication | Fork a new sibling workspace on a new branch (with no path: print the workspace's branch). |
 | `repro build` | Building and testing | Build the current project or the selected targets. |
 | `repro bundle` | Stores, caches and daemons | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
 | `repro cache` | Stores, caches and daemons | Look up, substitute and publish binary-cache entries. |

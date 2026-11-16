@@ -700,6 +700,36 @@ proc tarExtractDataMember(debPath, memberName: string;
     e.stderrText = res.output
     raise e
 
+proc debMemberNamed(debPath, stem: string):
+    tuple[name: string, offset: int64, size: int64] =
+  ## The ``<stem>.*`` member (``data.tar`` or ``control.tar``) of the
+  ## ``.deb`` at ``debPath``, from its headers alone; ``offset`` is -1 when
+  ## there is none.
+  let f = open(debPath, fmRead)
+  try:
+    for m in parseDebMembers(f, getFileSize(f)):
+      if m.name == stem or m.name.startsWith(stem & "."):
+        return (m.name, m.offset, m.size)
+  finally:
+    f.close()
+  ("", -1'i64, 0'i64)
+
+proc writeDebMemberAsTar(debPath, memName: string; memOff, memSize: int64;
+                         outTarPath: string)
+
+proc extractDebControlMemberToTar*(debPath: string;
+                                   outTarPath: string): bool =
+  ## Write the ``control.tar.*`` member of the ``.deb`` at ``debPath`` (its
+  ## control file and maintainer scripts; deb(5)) to ``outTarPath`` as a
+  ## plain tar stream, exactly as ``extractDebDataMemberToTar`` writes the
+  ## data member. Returns false, writing nothing, when the archive has no
+  ## control member. Nothing is verified or unpacked here.
+  ## https://manpages.debian.org/trixie/dpkg-dev/deb.5.en.html
+  let (memName, memOff, memSize) = debMemberNamed(debPath, "control.tar")
+  if memOff < 0: return false
+  writeDebMemberAsTar(debPath, memName, memOff, memSize, outTarPath)
+  true
+
 proc extractDebDataMemberToTar*(debPath: string; outTarPath: string) =
   ## Write the ``data.tar.*`` member of the ``.deb`` at ``debPath`` to
   ## ``outTarPath`` as a PLAIN (decompressed) tar stream, through the same
@@ -723,6 +753,13 @@ proc extractDebDataMemberToTar*(debPath: string; outTarPath: string) =
     var e = newException(AptExtractError, "no data.tar.* member in " & debPath)
     e.debPath = debPath
     raise e
+  writeDebMemberAsTar(debPath, memName, memOff, memSize, outTarPath)
+
+proc writeDebMemberAsTar(debPath, memName: string; memOff, memSize: int64;
+                         outTarPath: string) =
+  ## The member ``memName`` at ``memOff`` of ``debPath``, decompressed to
+  ## ``outTarPath``. ``memName`` is ``<stem>.tar`` or ``<stem>.tar.<ext>``
+  ## for ``data`` and ``control`` alike.
   let outDir = parentDir(outTarPath)
   if not dirExists(outDir):
     raise newException(IOError, "directory missing: " & outDir)
@@ -736,10 +773,15 @@ proc extractDebDataMemberToTar*(debPath: string; outTarPath: string) =
     raise e
   template writeMember(path: string) =
     writeDebMember(debPath, memOff, memSize, path)
-  case memName
-  of "data.tar":
+  let ext = (if memName.endsWith(".tar"): ""
+             else: memName[memName.find(".tar") + 4 .. ^1])
+  if not (memName.startsWith("data.tar") or
+          memName.startsWith("control.tar")):
+    fail("unsupported .deb member: " & memName)
+  case ext
+  of "":
     writeMember(outTarPath)
-  of "data.tar.zst":
+  of ".zst":
     let packed = outTarPath & ".zst"
     writeMember(packed)
     defer:
@@ -749,14 +791,14 @@ proc extractDebDataMemberToTar*(debPath: string; outTarPath: string) =
     if not res.ok:
       fail("zstd decompression failed (exit " & $res.exitCode & "): " &
         res.output, res.command, res.exitCode, res.output)
-  of "data.tar.xz", "data.tar.gz", "data.tar.bz2":
+  of ".xz", ".gz", ".bz2":
     # ``<tool> -d <file.ext>`` replaces the file with its decompression,
     # so the member is written under the name the tool expects and the
     # output lands at ``outTarPath``.
-    let (tool, ext) =
-      if memName == "data.tar.xz": ("xz", ".xz")
-      elif memName == "data.tar.gz": ("gzip", ".gz")
-      else: ("bzip2", ".bz2")
+    let tool =
+      if ext == ".xz": "xz"
+      elif ext == ".gz": "gzip"
+      else: "bzip2"
     let exe = findExe(tool)
     if exe.len == 0:
       fail("no '" & tool & "' on PATH to decompress " & memName)
@@ -770,7 +812,7 @@ proc extractDebDataMemberToTar*(debPath: string; outTarPath: string) =
       fail(tool & " decompression failed (exit " & $res.exitCode & "): " &
         res.output, cmd, res.exitCode, res.output)
   else:
-    fail("unsupported data.tar variant: " & memName)
+    fail("unsupported " & memName.split('.')[0] & ".tar variant: " & memName)
 
 proc extractAptDeb*(debPath: string;
                     sha256: string;
