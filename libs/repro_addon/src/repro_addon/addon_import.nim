@@ -40,7 +40,9 @@
 ## file's own path, the narrowest there is (decision 22).
 
 import std/[algorithm, os, sets, strutils, tables]
+from std/posix import Stat, lstat
 
+import repro_core/system_file_holding
 import repro_elevation
 import repro_infra
 
@@ -83,6 +85,44 @@ proc hostPath(o: ImportObserver; path: string): string =
 
 proc readHostFile(o: ImportObserver; path: string): string =
   readFile(o.hostPath(path))
+
+proc hostGroupName(o: ImportObserver; gid: int): string =
+  ## The name the host's own `/etc/group` gives `gid` (read under `root`,
+  ## like every other host file), or "" when it names none. Not
+  ## `getgrgid(3)`: that answers for the machine running the import, which
+  ## is not the host when `root` relocates the reads.
+  let path = o.hostPath("/etc/group")
+  if not fileExists(path): return ""
+  for line in readFile(path).splitLines():
+    let f = line.split(':')
+    if f.len >= 3 and f[2] == $gid: return f[0]
+  ""
+
+proc holdingOf(o: ImportObserver; path: string; res: var SystemResource;
+               flags: var seq[string]) =
+  ## Carry the host file's permission bits and group into the skeleton's
+  ## `fs.systemFile` when they are not the default (`0644`, `root`), so a
+  ## `0640 root:<svc>` file round-trips instead of being rewritten
+  ## world-readable and `root:root` (and, on an add-on host, linked into
+  ## the world-readable static tree). What a managed file cannot declare
+  ## (a setuid or other-writable mode, a gid with no name) is flagged, not
+  ## guessed.
+  var st: Stat
+  if lstat(o.hostPath(path).cstring, st) != 0: return
+  let mode = toOct(int(st.st_mode) and 0o7777, 4)
+  if mode != "0644":
+    let why = systemFileModeError(mode)
+    if why.len == 0: res.sfMode = mode
+    else: flags.add("file: " & path & " has " & why & ": declare the mode " &
+      "it should have")
+  let gid = int(st.st_gid)
+  if gid != 0:
+    let name = hostGroupName(o, gid)
+    if name.len > 0 and systemFileGroupError(name).len == 0:
+      res.sfGroup = name
+    else:
+      flags.add("file: " & path & " belongs to gid " & $gid & ", which the " &
+        "host's /etc/group does not name: declare its group")
 
 proc isRegularHostFile(o: ImportObserver; path: string): bool =
   let p = o.hostPath(path)
@@ -421,8 +461,9 @@ proc importUnit*(o: ImportObserver; unit: string): ImportSkeleton =
       flags.add("file: " & path & " cannot be managed: " & perr)
       continue
     let content = o.readHostFile(path)
-    let fileRes = SystemResource(kind: srkFsSystemFile, sfPath: path,
+    var fileRes = SystemResource(kind: srkFsSystemFile, sfPath: path,
       sfContent: content, address: "systemFile:" & path)
+    holdingOf(o, path, fileRes, flags)
     let secrets = if path in envFiles:
                     holdsSecrets(path, content, envFile = true)
                   else: @[]

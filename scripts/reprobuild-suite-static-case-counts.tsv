@@ -108,6 +108,7 @@ libs/repro_addon/tests/t_addon_store_custody.nim	nim	7
 libs/repro_addon/tests/t_addon_store_verify.nim	nim	9
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
+libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.nim	nim	5
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	67
@@ -791,6 +792,7 @@ libs/repro_profile_compile/tests/t_smoke_phase_g_action_edges_integration.nim	ni
 libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim	nim	96
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	nim	42
 libs/repro_profile_compile/tests/t_smoke_system_apply_integration.nim	nim	24
+libs/repro_profile_compile/tests/t_system_file_declared_mode_and_group_hold.nim	nim	14
 libs/repro_profile_compile/tests/t_system_profile_text_quoting.nim	nim	8
 libs/repro_profile_compile/tests/t_system_unit_state_directories.nim	nim	8
 libs/repro_profile_compile/tests/t_systemd_unit_restart_on_change.nim	nim	5
