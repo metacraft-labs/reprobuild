@@ -140,7 +140,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        "started unchecked: the socket is down and never listened",
        "pending" notin sock and "ActiveState=active" notin sock and
        "held " in sock and
-       g.exec("journalctl -b -o cat --no-pager | grep -c 'Listening on.*a9t-sr'; true").stdout.strip() == "0",
+       # systemd's own line for the socket when it binds (its unit's
+       # journal; the add-on's report names the socket in other lines).
+       g.exec("journalctl -b -o cat --no-pager -u a9t-sr.socket | " &
+              "grep -c '^Listening on'; true").stdout.strip() == "0",
        sock)
   discard g.run("rm -rf /var/lib/a9t-sr")
 
