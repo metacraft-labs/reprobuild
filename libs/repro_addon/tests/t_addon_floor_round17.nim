@@ -232,8 +232,10 @@ suite "§13 decision 172: the boot-hold unit is required by sysinit.target":
     # A stop or a restart of a unit sysinit.target requires propagates to
     # every unit that requires sysinit.target (systemd.unit(5), Requires=).
     check "RemainAfterExit=no\n" in u
-    check "RefuseManualStop=yes\n" in u
     check "RemainAfterExit=yes" notin u
+    # RefuseManualStop= is a [Unit] key: in [Service] systemd ignores it.
+    let unitSection = u.split("\n[Service]\n")[0]
+    check "\nRefuseManualStop=yes\n" in unitSection
   test "RequiredBy=, and nothing it runs can fail the unit":
     check "RequiredBy=sysinit.target\n" in u
     check "WantedBy=sysinit.target" notin u
@@ -263,7 +265,10 @@ suite "§13 decision 172: the boot-hold unit is required by sysinit.target":
       # A socket the base installs (not the profile's: the profile's is
       # refused) closes a cycle through the boot-hold unit.
       writeFile(d / "a9cyc.service", "[Service]\nExecStart=/bin/sh -c true\n")
-      writeFile(d / "a9cyc.socket", "[Unit]\nBefore=local-fs.target\n" &
+      # Before= the unit itself: a cycle through it alone (a longer one,
+      # through local-fs.target, has systemd delete local-fs.target's job
+      # whichever way the unit is installed, so it decides nothing).
+      writeFile(d / "a9cyc.socket", "[Unit]\nBefore=" & BootHoldUnit & "\n" &
         "[Socket]\nListenStream=/run/a9cyc\n[Install]\nWantedBy=sockets.target\n")
       createDir(d / "sockets.target.wants")
       createSymlink(d / "a9cyc.socket", d / "sockets.target.wants" / "a9cyc.socket")

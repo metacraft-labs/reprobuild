@@ -21,6 +21,8 @@
 ##    the unit holds every socket, timer and path unit, exits with success,
 ##    and the boot reaches ``multi-user.target`` (finding 9: hold
 ##    conservatively, never fail the boot);
+## 3a. a manual ``systemctl stop`` of the unit is refused, so it cannot
+##    stop ``sysinit.target`` and every unit that requires it;
 ## 4. the effective half: a profile socket ordered before a base service
 ##    that is ordered before ``-.mount`` -- a chain the parse half cannot
 ##    see -- is refused ``boot-hold-cycle`` by the switch's check.
@@ -117,6 +119,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "is reached", "ActiveState=active" notin sock and
          sock.splitLines().len >= 4 and sock.splitLines()[2].strip() == "0" and
          sock.splitLines()[3].strip() == "active", sock)
+    # A stop of a unit sysinit.target requires would stop every unit that
+    # requires sysinit.target: refused, and nothing stops.
+    let stop = g.exec("systemctl stop " & Unit)
+    let after = g.exec("systemctl is-active sysinit.target ssh.service; true").stdout
+    step("a manual stop of the boot-hold unit is refused, and sysinit.target and " &
+         "the base's sshd stay up (RefuseManualStop=yes)",
+         stop.exitCode != 0 and "refuse" in (stop.stdout & stop.stderr).toLowerAscii() and
+         after.splitLines().len >= 2 and after.splitLines()[0].strip() == "active" and
+         after.splitLines()[1].strip() == "active",
+         stop.stdout & stop.stderr & "\n" & after)
     discard g.run("systemctl disable a9cyc.socket; rm -f /etc/systemd/system/a9cyc.service " &
       "/etc/systemd/system/a9cyc.socket; systemctl daemon-reload")
     # Finding 9: a record the unit cannot use. Pending again, the record

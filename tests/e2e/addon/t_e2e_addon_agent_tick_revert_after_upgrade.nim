@@ -131,7 +131,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let sock = g.exec("test -e " & Pending & " && echo pending; " &
     "systemctl show -p ActiveState -p AssertResult a9t-sr.socket a9t-sr.service; " &
     "ss -xlH | grep -c ' /run/a9t-sr '; " &
-    "journalctl -b -o cat --no-pager -u repro-addon-boot-hold.service | tail -3; true").stdout
+    # The unit's own lines this boot: it runs at boot, and a switch may
+    # start it again later, when its condition skips it.
+    "journalctl -b -o cat --no-pager -u repro-addon-boot-hold.service | " &
+    "grep -e 'repro-addon boot-holds' -e skipped; true").stdout
   record["rebootAfterTick"] = %sock
   step("after the reboot the tick's revert is committed and no floored unit " &
        "started unchecked: the socket is down and never listened",

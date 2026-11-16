@@ -685,6 +685,9 @@ proc bootHoldUnit*(): string =
       "After=local-fs.target\nBefore=sysinit.target shutdown.target\n"
   "[Unit]\n" &
   "Description=Reprobuild add-on boot-time start holds\n" &
+  # A [Unit] key (systemd.unit(5)): only a dependency, such as shutdown's
+  # Conflicts=, stops it; see the [Service] comment below.
+  "RefuseManualStop=yes\n" &
   "DefaultDependencies=no\n" &
   order &
   "Conflicts=shutdown.target\n" &
@@ -698,7 +701,6 @@ proc bootHoldUnit*(): string =
   # is refused unless a dependency asks for it, as shutdown's Conflicts=
   # does (systemd.unit(5), RefuseManualStop=; §13 decision 172).
   "RemainAfterExit=no\n" &
-  "RefuseManualStop=yes\n" &
   "TimeoutStartSec=" & $BootHoldTimeoutSec & "\n" &
   # systemd expands $NAME in ExecStart= (systemd.service(5), "Command
   # lines"); $$ passes a single $ to the shell.
