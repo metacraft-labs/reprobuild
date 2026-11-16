@@ -4439,13 +4439,13 @@ proc decideInstall(driver: CollisionDriver; r: SystemResource;
   for t in installTargets(r.suContent):
     case t.kind
     of "DefaultInstance":
-      raise newException(AddonCollisionError, "refusing " & r.address &
+      raise newAddonCollisionError("refusing " & r.address &
         ": [Install] DefaultInstance=" & t.target & " enables a template " &
         "instance whose links the add-on does not derive; declare the " &
         "instance's unit instead")
     of "Also":
       if t.target notin enabledUnits:
-        raise newException(AddonCollisionError, "refusing " & r.address &
+        raise newAddonCollisionError("refusing " & r.address &
           ": [Install] Also=" & t.target & " would enable " & t.target &
           ", which this profile does not declare as an enabled unit; " &
           "`systemctl enable` would change the enablement of a unit the " &
@@ -4453,10 +4453,10 @@ proc decideInstall(driver: CollisionDriver; r: SystemResource;
     of "Alias":
       let err = systemdUnitNameError("[Install] Alias of " & r.suName, t.target)
       if err.len > 0:
-        raise newException(AddonCollisionError, "refusing " & r.address &
+        raise newAddonCollisionError("refusing " & r.address &
           ": " & err)
       if not t.target.endsWith(suffix):
-        raise newException(AddonCollisionError, "refusing " & r.address &
+        raise newAddonCollisionError("refusing " & r.address &
           ": [Install] Alias=" & t.target & " is not a " & suffix &
           " name (systemd requires an alias of the unit's own type)")
       let path = unitPath(t.target)
@@ -4509,11 +4509,12 @@ proc newlyShadowedVendorUnits*(previous: Ledger;
       let vendor = d & name
       if fileExists(vendor) or symlinkExists(vendor):
         let pkg = driver.packageOwner(vendor).package
-        result.add("EAddOnUnitShadows: " & name & " is now also provided by " &
+        result.add(diagnosticMessage(adUnitShadows, name &
+          " is now also provided by " &
           (if pkg.len > 0: "package " & pkg else: "a vendor unit") & " at " &
           vendor & "; the add-on's " & e.path & " (" & e.resource &
           ") shadows it. Declare `collision = \"replace\"` on the resource " &
-          "to keep shadowing it, or remove the resource")
+          "to keep shadowing it, or remove the resource"))
         break
 
 proc recordingRefusals(inner: PreWriteGuard;
@@ -5302,10 +5303,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # switch every agent apply goes through, not only in the units.
   if opts.agentSequence > 0'u64 and isContained(stateDir) and
       not mutated("contained-agent-applies"):
-    raise newException(AddonApplyError, "EAddOnContained: the host is " &
+    raise newException(AddonApplyError, diagnosticMessage(adContained,
+      "the host is " &
       "contained by an operator (" & containedMarkerPath(stateDir) & "); " &
       "a deploy-agent apply is refused until `repro system addon release`; " &
-      "nothing was written")
+      "nothing was written"))
   if opts.agentRecord.present and opts.agentSequence > 0'u64 and
       opts.agentRecord.sequence != opts.agentSequence:
     # The generation would carry two different sequences, and the floor
@@ -5656,14 +5658,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     # at its path would silently displace the carried-forward entry.
     let why = keptPathRefusal(previous, targetPathOf(r))
     if why.len > 0:
-      raise newException(AddonCollisionError, "refusing " & r.address & ": " & why)
+      raise newAddonCollisionError("refusing " & r.address & ": " & why)
     if r.kind == srkLinuxSysctl:
       # A base fragment applied after the add-on's would put its own
       # value back at every boot (spec §4.3, §7.2 step 6).
       let clash = sysctlPrecedenceRefusal(r.sysctlKey, r.sysctlValue,
                                           targetPathOf(r))
       if clash.len > 0:
-        raise newException(AddonCollisionError, "refusing " & r.address &
+        raise newAddonCollisionError("refusing " & r.address &
           ": " & clash)
       # networkd writes the forwarding knobs itself at runtime when its
       # configuration asks it to (spec §7.2 step 6).
@@ -5674,7 +5676,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       let nwd = networkdRefusal(r.sysctlKey, r.sysctlValue, networkdInUse,
                                 networkdVersion = hostSystemdVersion())
       if nwd.len > 0:
-        raise newException(AddonCollisionError, "refusing " & r.address &
+        raise newAddonCollisionError("refusing " & r.address &
           ": " & nwd)
 
   var prevForm = initTable[string, string]()  # target path -> link / copy
@@ -6051,7 +6053,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                         else: ""
         if (r.seId.len > 0 and r.seId != liveId) or
             (r.seShell.len > 0 and r.seShell != liveShell):
-          raise newException(AddonCollisionError, "refusing " & r.address &
+          raise newAddonCollisionError("refusing " & r.address &
             ": " & r.seKind & " " & r.seName & " already exists with id " &
             liveId & (if liveShell.len > 0: " and shell " & liveShell else: "") &
             ", which differs from the entry (id " &
@@ -6186,7 +6188,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   block:
     let why = liveReferenceRefusal(@[preservedDir(stateDir)])
     if why.len > 0:
-      refusals.add(newException(AddonCollisionError, "refusing the " &
+      refusals.add(newAddonCollisionError("refusing the " &
         "switch: step 1 recomputes the store's hold, and " & why))
   # A tool's driver writes its wrapper only with the sandbox launcher
   # beside the engine that applies it (``addOnToolLauncherPath``); without
@@ -6196,7 +6198,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         verdictByAddress.getOrDefault(r.address, cvNoOp) notin
           {cvNoOp, cvAdopt} and
         not fileExists(addOnToolLauncherPath()):
-      refusals.add(newException(AddonCollisionError, "refusing " &
+      refusals.add(newAddonCollisionError("refusing " &
         r.address & ": its wrapper would be written, and the sandbox " &
         "launcher it execs is not installed beside this engine at " &
         addOnToolLauncherPath() & " (install the reprobuild bundle or " &
@@ -6224,7 +6226,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   for a in opts.adoptAddresses:
     let v = verdictByAddress.getOrDefault(a, cvCreate)
     if v notin {cvAdopt, cvNoOp}:
-      raise newException(AddonCollisionError, "refusing to adopt " & a &
+      raise newAddonCollisionError("refusing to adopt " & a &
         ": its target would be " & $v & ", not adopted as it is (see the " &
         "collision report); nothing was written")
 
@@ -6868,7 +6870,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   block:
     let why = liveReferenceRefusal(@[preservedDir(stateDir)])
     if why.len > 0:
-      raise newException(AddonCollisionError, "refusing the switch: step 1 " &
+      raise newAddonCollisionError("refusing the switch: step 1 " &
         "recomputes the store's hold, and " & why & "; nothing was written")
 
   # The invocation id every running managed unit has just before step 2

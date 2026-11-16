@@ -32,10 +32,10 @@ proc isCanonicalProfileText*(text: string): bool =
     false
 
 const
-  ManagementPathRefusal* = "EAddOnManagementPath"
+  ManagementPathRefusal* = $adManagementPath
     ## The prefix of the refusal an agent apply reports for an sshd drop-in
     ## or a firewall or network resource (spec §7.5, threat model G27).
-  CompiledProfileRefusal* = "EAddOnCompiledProfile"
+  CompiledProfileRefusal* = $adCompiledProfile
     ## The prefix of the refusal an agent apply reports for a compiled
     ## profile the signed manifest does not vouch for (B1; Deploy-Agent
     ## §"The compiled-profile pin").

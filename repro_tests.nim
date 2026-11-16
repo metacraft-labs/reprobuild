@@ -377,6 +377,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_diagnostic_names_are_defined_once.nim",
+    binary: "build/test-bin/t_addon_diagnostic_names_are_defined_once",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_drill_findings.nim",
     binary: "build/test-bin/t_addon_drill_findings",
     defines: @[],
