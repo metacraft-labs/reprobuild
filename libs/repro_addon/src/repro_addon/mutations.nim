@@ -2038,7 +2038,14 @@ const
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
-                          "fresh-accepts-user-config"]
+                          "fresh-accepts-user-config",
+                          # An agent apply may weaken a unit's confinement
+                          # (a new whole-floor waiver, a new exception, a
+                          # waived unit moved onto root) unattended: the
+                          # asymmetry spec §10.1 *An agent apply never
+                          # weakens the floor* closed
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-weaken-floor"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
