@@ -15,9 +15,9 @@
 #
 # The tag tarball is self-contained: clasp, libpotassco and third-party headers
 # are in-tree, and the generated grammar sources are checked in, so neither
-# bison nor re2c is needed. CMAKE_SHARED_LIBRARY_PREFIX="" names the DLL
-# clingo.dll -- the name repro_solver binds -- and makes clingo.exe import it
-# under that name.
+# bison nor re2c is needed. An empty CMAKE_SHARED_LIBRARY_PREFIX (set from a
+# project include, below) names the DLL clingo.dll -- the name repro_solver
+# binds -- and makes clingo.exe import it under that name.
 #
 # Driven by .github/workflows/clingo-windows-arm64.yml. Runs only on a native
 # Windows ARM64 host; every image it builds or runs is ARM64.
@@ -79,10 +79,15 @@ $env:PATH = "$llvmBin;$(Split-Path -Parent $cmake);$env:SystemRoot\System32;$env
 
 $source = Join-Path $WorkRoot "clingo-$ClingoVersion"
 $build = Join-Path $WorkRoot 'build'
+# CMake's Windows-GNU platform file sets CMAKE_SHARED_LIBRARY_PREFIX to "lib"
+# as a normal variable, which shadows a -D cache entry. A project include runs
+# after the platform files, so setting it there names the DLL clingo.dll.
+$noLibPrefix = Join-Path $WorkRoot 'no-lib-prefix.cmake'
+[IO.File]::WriteAllText($noLibPrefix, "set(CMAKE_SHARED_LIBRARY_PREFIX `"`")`n")
 Invoke-Checked 'configure' {
     & $cmake -S $source -B $build -G 'MinGW Makefiles' '-DCMAKE_BUILD_TYPE=Release' `
         '-DCMAKE_C_COMPILER=gcc' '-DCMAKE_CXX_COMPILER=g++' '-DCMAKE_MAKE_PROGRAM=mingw32-make' `
-        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5' '-DCMAKE_SHARED_LIBRARY_PREFIX=' `
+        '-DCMAKE_POLICY_VERSION_MINIMUM=3.5' "-DCMAKE_PROJECT_INCLUDE=$noLibPrefix" `
         '-DCMAKE_SHARED_LINKER_FLAGS=-static' '-DCMAKE_EXE_LINKER_FLAGS=-static' `
         '-DCLINGO_BUILD_WITH_PYTHON=OFF' '-DCLINGO_BUILD_WITH_LUA=OFF' `
         '-DCLINGO_BUILD_SHARED=ON' '-DCLINGO_BUILD_APPS=ON' '-DCLINGO_BUILD_TESTS=OFF' 2>&1 | Out-Host
