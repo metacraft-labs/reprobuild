@@ -516,7 +516,14 @@ suite "H1: constraints under when / if / case arms (the issue of 2026-11-15)":
       check "a gate on variant 'tls', for which the lock records no value" in
         r.notChecked[0]
 
-  test "a case variant gate, and the arms the DSL lowers ungated":
+  test "a case variant gate, and the shapes the DSL refuses":
+    # The DSL refuses a nested gate, a multi-label `of` and a case `else:`
+    # (their arms are not statically enumerable; Configurable-System.md
+    # §"Admissible conditional forms", reprobuild-pm issue
+    # 2026-11-12-every-arm-is-statically-enumerable-but-the-canonical-example-
+    # computes-its-uses). No lock is resolved from such a recipe, so their
+    # entries are listed as not checked, never held to the lock as though
+    # they applied.
     let recipe = "package app:\n  uses:\n" &
       "    case compiler.value\n" &
       "    of \"gcc\":\n" &
@@ -536,12 +543,25 @@ suite "H1: constraints under when / if / case arms (the issue of 2026-11-15)":
       variants = "{ name = \"compiler\", value = \"gcc\" }"))
     var violated: seq[string]
     for v in r.violationsOf(crH1): violated.add(v.dependency)
-    # gcc: its arm is selected. lld: an `if` nested in a gated arm is lowered
-    # under the outer gate, so it applies with it (no `lto` value needed).
-    # make, cmake: a multi-label `of` and a case `else` are lowered ungated.
-    # clang: its arm is not selected.
-    check violated == @["gcc", "lld", "make", "cmake"]
-    check r.notChecked.len == 0
+    # gcc: its arm is selected. clang: its arm is not selected.
+    check violated == @["gcc"]
+    check r.notChecked.len == 3
+    if r.notChecked.len == 3:
+      check "nested inside another variant arm" in r.notChecked[0]
+      check "refuses in a dependency block" in r.notChecked[1]
+      check "refuses in a dependency block" in r.notChecked[2]
+
+  test "an if over a comparison is refused, not lowered ungated":
+    let recipe = "package app:\n  uses:\n" &
+      "    if ssl.value == \"openssl\":\n" &
+      "      \"openssl >=3\"\n" &
+      "    else:\n" &
+      "      \"boringssl >=1\"\n"
+    let packages = pkg("openssl", "1.1.0") & ", " & pkg("boringssl", "0.1.0")
+    let r = checkRecipeLockConsistency(armInputs(recipe, packages,
+      variants = "{ name = \"ssl\", value = \"openssl\" }"))
+    check r.violationsOf(crH1).len == 0
+    check r.notChecked.len == 2
 
   test "an exact pin under an arm that applies is compared by H2":
     let recipe = "package app:\n  uses:\n" &

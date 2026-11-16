@@ -1177,6 +1177,7 @@ proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
   ##
   ## ``gc.pruneExpire`` is written LAST, so a run that fails part-way never
   ## leaves a pool expiring objects without the hook that protects them.
+  ##
   result = true
   for (key, value) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
       barePath):

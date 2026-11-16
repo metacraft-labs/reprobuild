@@ -40,6 +40,36 @@ where they differ, and says when Bazel or Buck2 remains the better tool.
 | `bazel query`, `aquery` | `repro graph` |
 | `bazel build`, `test`, `run` | `repro build`, `repro test`, `repro run` |
 
+## Before and after
+
+A `MODULE.bazel` and per-directory `BUILD.bazel` pair for a Rust binary:
+
+```python
+# BUILD.bazel
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+
+rust_binary(
+    name = "server",
+    srcs = glob(["src/**/*.rs"]),
+    edition = "2021",
+)
+```
+
+becomes one `repro.nim` beside the project's `Cargo.toml`, with no per-directory
+build files:
+
+```nim
+import repro_project_dsl
+
+package server:
+  uses:
+    "rustc >=1.80 <2.0"
+    "cargo >=1.80 <2.0"
+
+  executable server:
+    discard
+```
+
 ## What works differently
 
 No build file per directory. A project that follows its ecosystem's layout
@@ -47,6 +77,12 @@ needs no rule per target. reprobuild reads the layout, or the project's
 `Cargo.toml`, `go.mod` or `CMakeLists.txt`, through
 [conventions](../concepts/conventions-and-modes.md). Moving a project to
 reprobuild does not start with rewriting its build in a new language.
+
+Single native binary, with host-wide resource coordination. `repro` is a compiled
+native executable with a lightweight per-user daemon and no JVM. When several
+terminals or AI agents build on the same machine at once, RunQuota coordinates
+CPU and memory leases (`repro pressure`) so concurrent builds do not exhaust
+RAM.
 
 Inputs are discovered as well as declared. Bazel and Buck2 require every
 input to be declared, and a sandbox hides the rest, so an undeclared input is a
@@ -60,8 +96,10 @@ misspelt attribute or a wrong type is a compile error in the project file.
 Starlark is interpreted, and such mistakes surface when the file is evaluated.
 
 One file describes more than the build. The project file also declares the
-development environment, named tasks and local services. There is no separate
-tool for a developer shell or a task runner.
+development environment, named tasks, local services and leased test resources,
+and the same graph model extends to home and system profiles (`home.nim`,
+`system.nim`). There is no separate tool for a developer shell, a service
+supervisor or host state reconciliation.
 
 ## What reprobuild does not do
 
