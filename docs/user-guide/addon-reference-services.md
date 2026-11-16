@@ -284,6 +284,41 @@ group such as `adm` or `shadow`, needs the whole-floor waiver
 waived, because a PAM session can run code as root outside the unit's
 sandbox.
 
+## Weakening the floor is an operator's apply
+
+The deploy agent never applies a generation that loosens the
+confinement of a unit the profile defines. Every plan lists such units
+under `service floor weakened`, and the agent reports the generation as
+an operator action instead of applying it. A unit is listed when the
+generation:
+
+- waives the whole floor (`serviceFloor: <why>`) of a new unit, of a
+  unit the current generation installed under the floor, or of a unit
+  that ran no command before (a socket or timer without a command line);
+- names a floor exception the unit did not have before, including every
+  exception of a new unit and a new value in an exception that adds to a
+  setting (`AmbientCapabilities+<capability>: <why>`);
+- gives a unit that already runs without the floor (waived, or installed
+  before the floor existed) more privilege: it now runs as root, with
+  gid 0, in a privileged group, as an account the profile itself does not
+  show to be unprivileged, with a command run as root (the `+` or `!`
+  prefix, or `PermissionsStartOnly=yes`), or with ambient capabilities.
+  The unit's drop-ins in the profile count, as systemd reads them.
+
+So a service that runs as root needs one operator apply for its first
+deployment. Run `repro system addon plan`, read the list, and apply from
+the operator's shell. After that, the agent applies later generations of
+that unit, including changes to its command lines, as long as they keep
+its waiver and its account. A waived unit has no floor, so whoever signs
+the profile still decides what such a unit runs. The operator's review is
+of the decision to run the unit unconfined.
+
+A drop-in over a distribution package's unit (`collision = "dropIn"`,
+or a `systemd.systemDropIn` for a unit the profile does not define) is
+not under the floor: the package's unit runs as the package installed
+it, and the agent applies such a drop-in without listing it here. Review
+those drop-ins when you review who may sign the profile.
+
 ## Running a validator safely
 
 The validator client is declared `exclusive = true`. On an add-on host,
