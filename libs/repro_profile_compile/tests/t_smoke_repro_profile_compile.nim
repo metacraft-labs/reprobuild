@@ -171,6 +171,58 @@ suite "M83 Phase C: cache layout":
     # the nimcache, which is the compile edge's ignored input prefix.
     check not binary.startsWith(nimcache)
 
+  test "the nimcache leaves room under MAX_PATH for every module of this tree":
+    # Nim writes `<nimcache>/<mangled module>.c` (and `.o`) through Win32
+    # calls bound by MAX_PATH: 259 characters plus the terminator. A profile
+    # compile under a 121-character state directory on eli-pc failed with
+    # `cannot open '<state>\profile-cache\nimcache\<64 hex>\
+    # @prepro_project_dsl@sinstall_mirror_resolver.nim.c'`, a 260-character
+    # path (reprobuild-pm issue
+    # 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d).
+    # Pure arithmetic over the real layout and the real module names, so it
+    # holds on every host: a layout that gives the room back up fails here
+    # on Linux too, not only when a Windows compile reaches the limit.
+    const WindowsMaxPathChars = 259
+    # Nim names a module outside the main project `@p` + its path below the
+    # search path, `/` spelled `@s`, then `.c` and the object's `.o`. Every
+    # `libs/<lib>/src` is on the profile compile's search path, so its
+    # longest such name is the longest a profile of this tree can produce.
+    var longest = ""
+    for lib in walkDirs(CompiledRepoRoot / "libs" / "*"):
+      let src = lib / "src"
+      if not dirExists(src):
+        continue
+      for path in walkDirRec(src):
+        if not path.endsWith(".nim"):
+          continue
+        let name = "@p" & relativePath(path, src).replace(DirSep, '/').
+          replace("/", "@s") & ".c.o"
+        if name.len > longest.len:
+          longest = name
+    checkpoint("longest mangled module name: " & $longest.len & " " & longest)
+    # The walk found the tree: the module the observed failure named, and
+    # the longer catalog module the issue measured beside it, both fit
+    # inside what it found.
+    check longest.len >=
+      "@prepro_project_dsl@sinstall_mirror_resolver.nim.c.o".len
+    check longest.len >=
+      "@prepro_project_dsl@sreprobuild_packages_catalog.nim.c.o".len
+    let key = profileCompileKey("/home/someone/.config/repro/home.nim")
+    check key.len == 64
+    # The state directory that failed (121 characters), and the deepest
+    # the layout promises to leave room for (`cachedNimcacheDir`).
+    for stateLen in [121, 148]:
+      let stateDir = "C:" & DirSep & repeat('s', stateLen - 3)
+      check stateDir.len == stateLen
+      let nimcache = cachedNimcacheDir(stateDir, key)
+      let deepest = nimcache / longest
+      checkpoint("state " & $stateLen & " -> " & $deepest.len &
+        " characters: " & nimcache)
+      check deepest.len <= WindowsMaxPathChars
+      # Still the profile's own directory under the state directory.
+      check nimcache.startsWith(profileCacheDir(stateDir) / "nimcache")
+      check nimcache.endsWith(key[0 ..< ProfileNimcacheKeyChars])
+
   test "the output name follows the profile path, never its content":
     # The declared output must not move when the profile's content does: an
     # output name keyed on content is a hand-written cache key in front of
