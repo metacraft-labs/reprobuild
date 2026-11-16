@@ -55,6 +55,7 @@ verb	lsp
 verb	mcp
 verb	outdated
 verb	package
+verb	pressure
 verb	prompt
 verb	pull
 verb	push
@@ -367,3 +368,304 @@ flag	repro self list	--store-root
 command	repro self prune-roots
 flag	repro self prune-roots	--json
 flag	repro self prune-roots	--store-root
+command	repro home
+flag	repro home	--profile-dir
+command	repro home add
+flag	repro home add	--activity
+flag	repro home add	--catalog
+flag	repro home add	--data
+flag	repro home add	--if
+flag	repro home add	--no-apply
+flag	repro home add	--when
+command	repro home remove
+flag	repro home remove	--activity
+flag	repro home remove	--data
+flag	repro home remove	--if
+flag	repro home remove	--no-apply
+flag	repro home remove	--when
+command	repro home enable
+flag	repro home enable	--host
+flag	repro home enable	--no-apply
+flag	repro home enable	--now
+flag	repro home enable	--port
+flag	repro home enable	--remote-repro
+flag	repro home enable	--ssh
+flag	repro home enable	--ssh-option
+flag	repro home enable	--target-arch
+flag	repro home enable	--target-home-dir
+flag	repro home enable	--target-platform
+flag	repro home enable	--target-state-dir
+flag	repro home enable	--target-store-daemon
+flag	repro home enable	--target-store-endpoint
+flag	repro home enable	--target-store-root
+flag	repro home enable	--target-wsl
+command	repro home disable
+flag	repro home disable	--host
+flag	repro home disable	--no-apply
+flag	repro home disable	--now
+flag	repro home disable	--port
+flag	repro home disable	--remote-repro
+flag	repro home disable	--ssh
+flag	repro home disable	--ssh-option
+flag	repro home disable	--target-arch
+flag	repro home disable	--target-home-dir
+flag	repro home disable	--target-platform
+flag	repro home disable	--target-state-dir
+flag	repro home disable	--target-store-daemon
+flag	repro home disable	--target-store-endpoint
+flag	repro home disable	--target-store-root
+flag	repro home disable	--target-wsl
+command	repro home list
+flag	repro home list	--host
+command	repro home why
+flag	repro home why	--host
+command	repro home history
+command	repro home apply
+flag	repro home apply	--accept-overwrite
+flag	repro home apply	--allow-drift
+flag	repro home apply	--host
+flag	repro home apply	--plan
+flag	repro home apply	--reconcile-drift
+flag	repro home apply	--relock
+flag	repro home apply	--target-arch
+flag	repro home apply	--target-platform
+flag	repro home apply	--uninstall-from-scoop
+command	repro home plan
+flag	repro home plan	--allow-drift
+flag	repro home plan	--host
+flag	repro home plan	--reconcile-drift
+command	repro home export
+flag	repro home export	--check
+flag	repro home export	--format
+flag	repro home export	--host
+flag	repro home export	--target
+command	repro home facts
+flag	repro home facts	--host
+flag	repro home facts	--output
+flag	repro home facts	--target
+command	repro home compare
+flag	repro home compare	--allow
+flag	repro home compare	--facts
+flag	repro home compare	--format
+flag	repro home compare	--show-same
+command	repro home rollback
+flag	repro home rollback	--accept-overwrite
+flag	repro home rollback	--uninstall-from-scoop
+command	repro home gc
+flag	repro home gc	--dry-run
+flag	repro home gc	--force
+flag	repro home gc	--keep-generations
+flag	repro home gc	--store
+flag	repro home gc	-y
+command	repro home set
+flag	repro home set	--no-apply
+flag	repro home set	--when
+command	repro home get
+command	repro home adopt
+command	repro home resource
+command	repro home resource move
+command	repro home migrate-from-env-scripts
+flag	repro home migrate-from-env-scripts	--activity
+flag	repro home migrate-from-env-scripts	--dry-run
+flag	repro home migrate-from-env-scripts	--env-file
+command	repro system
+command	repro system add
+flag	repro system add	--profile
+flag	repro system add	--state-dir
+command	repro system remove
+flag	repro system remove	--profile
+flag	repro system remove	--state-dir
+command	repro system list
+flag	repro system list	--profile
+flag	repro system list	--state-dir
+command	repro system why
+flag	repro system why	--profile
+flag	repro system why	--state-dir
+command	repro system sync
+flag	repro system sync	--accept-drift
+flag	repro system sync	--accept-passwd-destroy
+flag	repro system sync	--elevate
+flag	repro system sync	--force-unlock
+flag	repro system sync	--home-profile-dir
+flag	repro system sync	--host
+flag	repro system sync	--no-elevate
+flag	repro system sync	--profile
+flag	repro system sync	--reconcile-drift
+flag	repro system sync	--state-dir
+command	repro system history
+flag	repro system history	--state-dir
+command	repro system rollback
+flag	repro system rollback	--accept-drift
+flag	repro system rollback	--accept-feature-destroy
+flag	repro system rollback	--accept-passwd-destroy
+flag	repro system rollback	--force-unlock
+flag	repro system rollback	--generation
+flag	repro system rollback	--home-profile-dir
+flag	repro system rollback	--host
+flag	repro system rollback	--profile
+flag	repro system rollback	--reconcile-drift
+flag	repro system rollback	--state-dir
+command	repro system audit
+flag	repro system audit	--profile
+flag	repro system audit	--state-dir
+command	repro infra
+command	repro infra plan
+flag	repro infra plan	--accept-drift
+flag	repro infra plan	--activity
+flag	repro infra plan	--home-profile-dir
+flag	repro infra plan	--host
+flag	repro infra plan	--json
+flag	repro infra plan	--profile
+flag	repro infra plan	--reconcile-drift
+flag	repro infra plan	--state-dir
+flag	repro infra plan	--strict
+command	repro infra apply
+flag	repro infra apply	--accept-drift
+flag	repro infra apply	--accept-feature-destroy
+flag	repro infra apply	--accept-passwd-destroy
+flag	repro infra apply	--activity
+flag	repro infra apply	--elevate
+flag	repro infra apply	--force-unlock
+flag	repro infra apply	--home-profile-dir
+flag	repro infra apply	--host
+flag	repro infra apply	--json
+flag	repro infra apply	--keep-days
+flag	repro infra apply	--keep-generations
+flag	repro infra apply	--no-elevate
+flag	repro infra apply	--no-preview
+flag	repro infra apply	--plan
+flag	repro infra apply	--profile
+flag	repro infra apply	--reconcile-drift
+flag	repro infra apply	--staged
+flag	repro infra apply	--state-dir
+flag	repro infra apply	--yes
+command	repro infra cache-keys
+flag	repro infra cache-keys	--platform-abi
+flag	repro infra cache-keys	--platform-cpu
+flag	repro infra cache-keys	--platform-libc
+flag	repro infra cache-keys	--platform-os
+flag	repro infra cache-keys	--profile
+flag	repro infra cache-keys	--state-dir
+command	repro infra install-root
+flag	repro infra install-root	--device
+flag	repro infra install-root	--disko
+flag	repro infra install-root	--dry-run
+flag	repro infra install-root	--exclude
+flag	repro infra install-root	--hostname
+flag	repro infra install-root	--initrd
+flag	repro infra install-root	--kernel
+flag	repro infra install-root	--no-fstab
+flag	repro infra install-root	--no-grub
+flag	repro infra install-root	--no-rsync
+flag	repro infra install-root	--source
+flag	repro infra install-root	--target
+command	repro infra image
+flag	repro infra image	--addon-binary
+flag	repro infra image	--addon-sha256
+flag	repro infra image	--assembly-timeout
+flag	repro infra image	--compress
+flag	repro infra image	--deb-cache
+flag	repro infra image	--home-profile-dir
+flag	repro infra image	--host
+flag	repro infra image	--keep-work
+flag	repro infra image	--output
+flag	repro infra image	--profile
+flag	repro infra image	--work-dir
+command	repro anywhere
+flag	repro anywhere	--addon-binary
+flag	repro anywhere	--addon-sha256
+flag	repro anywhere	--agent-target
+flag	repro anywhere	--applied-profile-out
+flag	repro anywhere	--arch
+flag	repro anywhere	--cache-publishers
+flag	repro anywhere	--cache-url
+flag	repro anywhere	--deploy-signers
+flag	repro anywhere	--expect-plan
+flag	repro anywhere	--home-profile-dir
+flag	repro anywhere	--host
+flag	repro anywhere	--known-hosts
+flag	repro anywhere	--manifest
+flag	repro anywhere	--mode
+flag	repro anywhere	--poll-interval
+flag	repro anywhere	--profile
+flag	repro anywhere	--recipient-out
+flag	repro anywhere	--ssh-key
+flag	repro anywhere	--ssh-port
+command	repro deploy-agent
+flag	repro deploy-agent	--allowed-signers
+flag	repro deploy-agent	--cache-root
+flag	repro deploy-agent	--fetch-timeout-ms
+flag	repro deploy-agent	--host
+flag	repro deploy-agent	--manifest
+flag	repro deploy-agent	--secrets-dir
+flag	repro deploy-agent	--secrets-key
+flag	repro deploy-agent	--state-dir
+flag	repro deploy-agent	--target
+command	repro deploy-agent keygen
+flag	repro deploy-agent keygen	--secrets-key
+command	repro deploy-agent compile-profile
+flag	repro deploy-agent compile-profile	--actions-out
+flag	repro deploy-agent compile-profile	--arch
+flag	repro deploy-agent compile-profile	--canonical-out
+flag	repro deploy-agent compile-profile	--digest-out
+flag	repro deploy-agent compile-profile	--host
+flag	repro deploy-agent compile-profile	--platform
+flag	repro deploy-agent compile-profile	--probe-c-compiler
+flag	repro deploy-agent compile-profile	--revision-out
+flag	repro deploy-agent compile-profile	--staged
+flag	repro deploy-agent compile-profile	--state-dir
+flag	repro deploy-agent compile-profile	--stdio
+flag	repro deploy-agent compile-profile	--system-activities
+flag	repro deploy-agent compile-profile	--system-mode
+command	repro hardware
+command	repro hardware probe
+flag	repro hardware probe	--dry-run
+flag	repro hardware probe	--output
+flag	repro hardware probe	--regenerate
+command	repro disk
+command	repro disk plan
+command	repro disk apply
+flag	repro disk apply	--confirm
+flag	repro disk apply	--device
+flag	repro disk apply	--identity
+command	repro disk mount
+flag	repro disk mount	--confirm
+flag	repro disk mount	--target
+command	repro disk unmount
+flag	repro disk unmount	--target
+command	repro disk generate
+flag	repro disk generate	--probe
+command	repro disk image
+flag	repro disk image	--output
+flag	repro disk image	--size
+command	repro cargo
+command	repro cargo gc
+flag	repro cargo gc	--cargo-home
+flag	repro cargo gc	--dry-run
+flag	repro cargo gc	--keep-sets
+flag	repro cargo gc	--min-age
+flag	repro cargo gc	--target-dir
+command	repro cargo record-live
+flag	repro cargo record-live	--from
+flag	repro cargo record-live	--keep-sets
+flag	repro cargo record-live	--target-dir
+flag	repro cargo record-live	--tee
+command	repro cargo run
+flag	repro cargo run	--action-id
+flag	repro cargo run	--fragment
+flag	repro cargo run	--libs
+flag	repro cargo run	--products
+flag	repro cargo run	--relative-to
+flag	repro cargo run	--width
+flag	repro cargo run	-j
+command	repro health
+flag	repro health	--fix
+flag	repro health	--json
+flag	repro health	--offline
+flag	repro health	--verbose
+flag	repro health	--workspace-root
+flag	repro health	-v
+command	repro debug
+command	repro debug artifact
+flag	repro debug artifact	--format
+flag	repro debug artifact	--json

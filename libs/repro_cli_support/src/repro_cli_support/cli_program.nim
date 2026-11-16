@@ -175,3 +175,47 @@ proc reproCommandIsShown*(command: int): bool =
       return false
     at = g.commands[at].parent
   true
+
+proc reportReproUsageError*(e: ref CliUsageError): int =
+  ## A command line the generated parser rejected: its one-line message
+  ## (clispec's error taxonomy, naming the command) and where to look next,
+  ## on stderr; the usage exit code (2).
+  stderr.writeLine("repro: " & e.msg)
+  stderr.writeLine("Run `repro --help` for the list of commands, or " &
+    "`repro help <command>` for one of them.")
+  e.exitCode
+
+proc loadReproCommandLine*(argv: openArray[string];
+                           conf: var ReproCommandLine): int =
+  ## Parses ``argv`` (repro's arguments, without the program name) with the
+  ## generated parser, the process environment as the source for the
+  ## parameters that declare variables, into ``conf``.
+  ##
+  ## -1 when ``conf`` holds a command to run. Otherwise the command line was
+  ## answered here and the result is its exit code: a help or completion
+  ## request printed on stdout (0), or a usage or configuration error
+  ## reported on stderr (2).
+  try:
+    conf = ReproCommandLine.load(reproArgvForParser(argv),
+      CliSources(env: cliProcessEnv()))
+  except CliHelpRequest as e:
+    # `CliCompletionRequest` too: its text is the completion reply.
+    stdout.write(e.text)
+    return 0
+  except CliUsageError as e:
+    return reportReproUsageError(e)
+  except CliConfigError as e:
+    stderr.writeLine("repro: " & e.msg)
+    return 2
+  -1
+
+proc runReproArgs*(argv: openArray[string];
+                   run: proc (conf: ReproCommandLine): int): int =
+  ## ``argv`` parsed by the generated parser (``loadReproCommandLine``) and,
+  ## when it selects a command, handed to ``run`` as its typed
+  ## configuration. For the commands' in-process callers and tests, which
+  ## then go through the same parser as ``repro``.
+  var conf: ReproCommandLine
+  result = loadReproCommandLine(argv, conf)
+  if result < 0:
+    result = run(conf)

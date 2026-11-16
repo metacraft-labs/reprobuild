@@ -714,6 +714,10 @@ jobs:
             # single-quoted dev-exec bash -c, where a stray quote truncates it.)
             bash scripts/relocate_release_posix.sh "${pkg_name}"
 
+            # darwin: the non-SIP tools bundle, unchanged, at
+            # libexec/stackable-hooks-macos-tools (a no-op elsewhere).
+            bash scripts/release/stage_release_macos_tools.sh "${pkg_name}"
+
             tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
             echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
             echo "ASSET_NAME=${pkg_name}.tar.gz" >> "$GITHUB_ENV"

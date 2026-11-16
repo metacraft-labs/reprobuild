@@ -42,7 +42,7 @@
 ## observability; those three are. See ``tick_status.nim`` for the incident
 ## that made them necessary.
 
-import std/[algorithm, base64, json, os, sequtils, sets, strutils]
+import std/[algorithm, base64, json, options, os, sequtils, sets, strutils]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
@@ -52,6 +52,7 @@ import repro_home_intent/host_identity
 import repro_profile
 from repro_core import ReprobuildSourceRevision
 import ./infra
+import ./cli_program
 # Add-on mode owns Linux filesystem and ledger operations, so its closure
 # reaches `repro_addon/linux_fs` and its `<sys/vfs.h>` bindings. Keep those
 # imports out of the portable engine, exactly as `./infra` does -- this
@@ -87,54 +88,7 @@ type
     secretsKey: string
     secretsDir: string
 
-proc parseFlags(args: openArray[string]): DeployAgentFlags =
-  result.fetchTimeoutMs = 30_000
-  result.hostIdentity = ""
-  var i = 0
-  proc need(i: var int; name: string; args: openArray[string]): string =
-    inc i
-    if i >= args.len:
-      raise newException(ValueError, name & " requires a value")
-    args[i]
-  while i < args.len:
-    let a = args[i]
-    case a
-    of "--target": result.target = need(i, a, args)
-    of "--manifest": result.sources.add(need(i, a, args))
-    of "--allowed-signers": result.allowedSigners = need(i, a, args)
-    of "--state-dir": result.stateDir = need(i, a, args)
-    of "--cache-root": result.cacheRoot = need(i, a, args)
-    of "--host":
-      result.hostIdentity = need(i, a, args)
-      result.hostGiven = true
-    of "--secrets-key": result.secretsKey = need(i, a, args)
-    of "--secrets-dir": result.secretsDir = need(i, a, args)
-    of "--fetch-timeout-ms":
-      result.fetchTimeoutMs = parseInt(need(i, a, args))
-    else:
-      if a.startsWith("--target="): result.target = a["--target=".len .. ^1]
-      elif a.startsWith("--manifest="):
-        result.sources.add(a["--manifest=".len .. ^1])
-      elif a.startsWith("--allowed-signers="):
-        result.allowedSigners = a["--allowed-signers=".len .. ^1]
-      elif a.startsWith("--state-dir="):
-        result.stateDir = a["--state-dir=".len .. ^1]
-      elif a.startsWith("--cache-root="):
-        result.cacheRoot = a["--cache-root=".len .. ^1]
-      elif a.startsWith("--host="):
-        result.hostIdentity = a["--host=".len .. ^1]
-        result.hostGiven = true
-      elif a.startsWith("--secrets-key="):
-        result.secretsKey = a["--secrets-key=".len .. ^1]
-      elif a.startsWith("--secrets-dir="):
-        result.secretsDir = a["--secrets-dir=".len .. ^1]
-      elif a.startsWith("--fetch-timeout-ms="):
-        result.fetchTimeoutMs = parseInt(a["--fetch-timeout-ms=".len .. ^1])
-      else:
-        raise newException(ValueError, "unknown flag: " & a)
-    inc i
-
-proc runDeployAgentKeygen(args: seq[string]): int =
+proc runDeployAgentKeygen(keyPath: string): int =
   ## ``repro deploy-agent keygen --secrets-key <FILE>`` — generate the
   ## sealed-secrets recipient key ON THIS HOST (or read the one already
   ## there) and print its public half, for the producer to seal to
@@ -145,22 +99,6 @@ proc runDeployAgentKeygen(args: seq[string]): int =
   ## command composes (`... keygen --secrets-key K > recipient-pubkey.txt`);
   ## what happened goes to stderr. Exit 0 on success, 1 when the key cannot
   ## be created or the existing one is unusable, 2 on a usage error.
-  var keyPath = ""
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    if a == "--secrets-key":
-      inc i
-      if i >= args.len:
-        stderr.writeLine("repro deploy-agent keygen: --secrets-key requires a value")
-        return 2
-      keyPath = args[i]
-    elif a.startsWith("--secrets-key="):
-      keyPath = a["--secrets-key=".len .. ^1]
-    else:
-      stderr.writeLine("repro deploy-agent keygen: unknown argument: " & a)
-      return 2
-    inc i
   if keyPath.len == 0:
     stderr.writeLine("repro deploy-agent keygen: --secrets-key <FILE> is required")
     return 2
@@ -210,7 +148,7 @@ proc compileTargetFor(host, platform, arch: string; systemMode = "";
   if platform.len > 0: result.facts.platform = platform
   if arch.len > 0: result.facts.arch = arch
 
-proc runDeployAgentCompileProfile*(args: seq[string]): int =
+proc runDeployAgentCompileProfile*(c: ReproCommandLineDeployAgentCompileProfile): int =
   ## ``repro deploy-agent compile-profile --staged <module.nim>
   ## --canonical-out <file> --actions-out <file> [--state-dir D]
   ## [--host H] [--platform P] [--arch A] [--digest-out F]
@@ -234,11 +172,26 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## The unprivileged fetch unit of a ReproOS add-on host runs this as its
   ## profile compiler, so the compiler never runs as root (ReproOS add-on
   ## §9.1).
-  var staged, canonicalOut, actionsOut, stateDir, digestOut, revisionOut = ""
-  var host, platform, arch, systemMode = ""
+  var staged = c.staged
+  let canonicalOut = c.canonicalOut
+  let actionsOut = c.actionsOut
+  var stateDir = c.stateDir
+  let digestOut = c.digestOut
+  let revisionOut = c.revisionOut
+  var host = c.host.get("")
+  let hostGiven = c.host.isSome
+  let platform = c.platform
+  let arch = c.arch
+  var systemMode = c.systemMode
   var systemActivities: seq[string]
-  var hostGiven, stdio = false
-  if args == @["--probe-c-compiler"]:
+  for name in c.systemActivities:
+    if name.strip().len > 0: systemActivities.add(name.strip())
+  let stdio = c.stdio
+  if c.probeCCompiler:
+    if c != ReproCommandLineDeployAgentCompileProfile(probeCCompiler: true):
+      stderr.writeLine("repro deploy-agent compile-profile: " &
+        "--probe-c-compiler takes no other option")
+      return 2
     # The toolchain a compile here would use, without compiling: the Nim
     # compiler and the C compiler (ReproOS add-on mode §13 decision 31: a
     # host that compiles profiles needs both). Exit 1, naming what is
@@ -252,37 +205,6 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
     except CompileFailure as e:
       stderr.writeLine(e.msg)
       return 1
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    if a == "--stdio":
-      stdio = true
-      inc i
-      continue
-    if i + 1 >= args.len:
-      stderr.writeLine("repro deploy-agent compile-profile: " & a &
-        " needs a value")
-      return 2
-    case a
-    of "--staged": staged = args[i + 1]
-    of "--canonical-out": canonicalOut = args[i + 1]
-    of "--actions-out": actionsOut = args[i + 1]
-    of "--state-dir": stateDir = args[i + 1]
-    of "--digest-out": digestOut = args[i + 1]
-    of "--revision-out": revisionOut = args[i + 1]
-    of "--host":
-      host = args[i + 1]
-      hostGiven = true
-    of "--platform": platform = args[i + 1]
-    of "--arch": arch = args[i + 1]
-    of "--system-mode": systemMode = args[i + 1]
-    of "--system-activities":
-      for name in args[i + 1].split(','):
-        if name.strip().len > 0: systemActivities.add(name.strip())
-    else:
-      stderr.writeLine("repro deploy-agent compile-profile: unknown option " & a)
-      return 2
-    i += 2
   # One spelling of the selection (``canonicalSystemSelection``): the compile
   # and the digest below both use it, so ``addOn`` alone, ``addOn`` with
   # ``default`` and ``addOn`` with ``,`` all bind the add-on mode's
@@ -317,12 +239,8 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
     createDir(workspace / "home")
     stateDir = workspace / "state"
   elif staged.len == 0 or canonicalOut.len == 0 or actionsOut.len == 0:
-    stderr.writeLine("usage: repro deploy-agent compile-profile --staged " &
-      "<module.nim> --canonical-out <file> --actions-out <file> " &
-      "[--state-dir D] [--host H] [--platform P] [--arch A] " &
-      "[--digest-out F] [--revision-out F] [--system-mode addOn|full] " &
-      "[--system-activities a,b]\n       repro deploy-agent compile-profile --stdio " &
-      "[--host H] [--platform P] [--arch A]")
+    stderr.writeLine("repro deploy-agent compile-profile: --staged, " &
+      "--canonical-out and --actions-out are required (or --stdio)")
     return 2
   else:
     profileText = readFile(staged)
@@ -368,20 +286,24 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
     writeFile(revisionOut, ReprobuildSourceRevision & "\n")
   0
 
-proc runDeployAgentCommand*(args: seq[string]): int =
+proc runDeployAgentCommand*(conf: ReproCommandLineDeployAgent): int =
   ## ``repro deploy-agent`` entrypoint (one tick), or ``repro deploy-agent
   ## keygen`` (see `runDeployAgentKeygen`), or ``compile-profile``
-  ## (`runDeployAgentCompileProfile`).
-  if args.len > 0 and args[0] == "keygen":
-    return runDeployAgentKeygen(args[1 .. ^1])
-  if args.len > 0 and args[0] == "compile-profile":
-    return runDeployAgentCompileProfile(args[1 .. ^1])
-  var flags: DeployAgentFlags
-  try:
-    flags = parseFlags(args)
-  except ValueError as e:
-    stderr.writeLine("repro deploy-agent: " & e.msg)
-    return 2
+  ## (`runDeployAgentCompileProfile`). The command line is parsed from
+  ## repro's description (``repro_cli_support/cli_description``).
+  case conf.command
+  of ReproCommandLineDeployAgentCommand.keygen:
+    return runDeployAgentKeygen(conf.keygen.secretsKey)
+  of ReproCommandLineDeployAgentCommand.compileProfile:
+    return runDeployAgentCompileProfile(conf.compileProfile)
+  of ReproCommandLineDeployAgentCommand.call:
+    discard
+  let c = conf.call
+  var flags = DeployAgentFlags(target: c.target, sources: c.manifest,
+    allowedSigners: c.allowedSigners, stateDir: c.stateDir,
+    cacheRoot: c.cacheRoot, fetchTimeoutMs: c.fetchTimeoutMs,
+    hostIdentity: c.host.get(""), hostGiven: c.host.isSome,
+    secretsKey: c.secretsKey, secretsDir: c.secretsDir)
 
   if flags.target.len == 0:
     stderr.writeLine("repro deploy-agent: --target is required")
@@ -674,3 +596,9 @@ proc runDeployAgentCommand*(args: seq[string]): int =
   # which carries the rationale for each class (in particular why a secrets
   # failure is deliberately NOT the retryable 1).
   return tick.exitCode
+
+proc runDeployAgentCommand*(args: seq[string]): int =
+  ## ``repro deploy-agent <args>`` in this process, through the generated
+  ## parser.
+  runReproArgs(@["deploy-agent"] & args, proc (c: ReproCommandLine): int =
+    runDeployAgentCommand(c.deployAgent))
