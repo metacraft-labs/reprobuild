@@ -547,14 +547,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # §13 decision 159: the boot-hold unit ran before sysinit.target and put
     # the holds back, so no activator got past its assertions: each start
     # the boot queued asserted after the unit had exited, and failed.
+    # The unit is inactive once it has run (RemainAfterExit=no, §13
+    # decision 172) and a switch may start it again later, when its own
+    # check returns at once; so the boot's run is read from the journal:
+    # when it reported the holds in place (after its one reload).
     let bh = g.exec("systemctl show -p ActiveState -p Result " &
-      "-p ExecMainExitTimestampMonotonic repro-addon-boot-hold.service; " &
-      "journalctl -b -o cat --no-pager -u repro-addon-boot-hold.service | tail -3").stdout
+      "repro-addon-boot-hold.service; " &
+      "journalctl -b -o short-monotonic --no-pager -u repro-addon-boot-hold.service " &
+      "| grep 'repro-addon boot-holds: held' | head -1").stdout
     var bhExit = 0'i64
     for l in bh.splitLines():
-      if l.startsWith("ExecMainExitTimestampMonotonic="):
-        try: bhExit = parseBiggestInt(l.split('=')[1]) except ValueError: discard
-    var actOk = bhExit > 0 and "ActiveState=active" in bh and "Result=success" in bh
+      let a = l.find('[')
+      let z = l.find(']')
+      if a >= 0 and z > a and "boot-holds: held" in l:
+        try: bhExit = int64(parseFloat(l[a + 1 ..< z].strip()) * 1_000_000)
+        except ValueError: discard
+    var actOk = bhExit > 0 and "Result=success" in bh
     var actDetail = bh
     for a in Activators:
       let sh = g.exec("systemctl show -p ActiveState -p AssertResult " &
