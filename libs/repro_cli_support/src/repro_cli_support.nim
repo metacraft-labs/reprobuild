@@ -13009,6 +13009,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     progressRenderer.renderPhase("refreshing trycompile provider graph")
     let refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
+      projectId: TryCompileProviderPackageName,
       providerBinaryPath: tryCompileProviderBinary,
       providerArtifactId: TryCompileProviderArtifactId,
       rootEntryPointId: TryCompileProviderRootEntryPointId,
@@ -13842,6 +13843,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("refreshing standard provider graph")
       let refresh = refreshReadableProviderGraph(RefreshConfig(
         storeRoot: providerGraphStoreRoot(outDir / "provider-graph"),
+        # The project being refreshed is the recipe's package, not the
+        # shared standard provider that produces its graph.
+        projectId: artifact.projectInterface.packageName,
         providerBinaryPath: standardProviderBinary,
         providerArtifactId: standardProviderArtifactId,
         rootEntryPointId: StandardProviderRootEntryPointId,
@@ -14156,6 +14160,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("refreshing project provider graph")
       refresh = refreshReadableProviderGraph(RefreshConfig(
         storeRoot: providerGraphStore,
+        projectId: artifact.projectInterface.packageName,
         providerBinaryPath: provider.outputBinaryPath,
         providerArtifactId: providerArtifactId,
         rootEntryPointId: artifact.projectInterface.packageName & ".root",
@@ -31924,6 +31929,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   else:
     refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStore,
+      projectId: artifact.projectInterface.packageName,
       providerBinaryPath: provider.outputBinaryPath,
       providerArtifactId: result.providerArtifactId,
       rootEntryPointId: artifact.projectInterface.packageName & ".root",
@@ -32134,6 +32140,7 @@ proc refreshRecipeProviderSnapshot(target: string;
   else:
     refresh = refreshReadableProviderGraph(RefreshConfig(
       storeRoot: providerGraphStore,
+      projectId: artifact.projectInterface.packageName,
       providerBinaryPath: provider.outputBinaryPath,
       providerArtifactId: providerArtifactId,
       rootEntryPointId: artifact.projectInterface.packageName & ".root",

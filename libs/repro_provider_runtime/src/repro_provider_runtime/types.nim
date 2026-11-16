@@ -500,6 +500,11 @@ type
 
   RefreshConfig* = object
     storeRoot*: string
+    projectId*: string
+      ## The project whose graph is refreshed: its package name, taken from
+      ## the project interface, never from the provider's response. It is
+      ## the first component of every invocation key the refresh stores
+      ## (Project-Provider-Graph-Protocol.md §"Graph Fragment"). Required.
     providerBinaryPath*: string
     providerArtifactId*: string
     rootEntryPointId*: string

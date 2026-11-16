@@ -145,13 +145,24 @@ proc arMember(name, payload: string): string =
   result = header & payload
   if (payload.len and 1) == 1: result.add('\n')
 
-proc writeDeb(debPath: string; entries: seq[TarFixtureEntry]) =
-  writeFile(debPath, "!<arch>\n" & arMember("debian-binary", "2.0\n") &
-    arMember("data.tar", tarBytes(entries)))
+proc writeDeb(debPath: string; entries: seq[TarFixtureEntry];
+              postinst = "") =
+  ## A ``.deb`` with the given data entries and, when ``postinst`` is not
+  ## empty, a ``control.tar`` member holding a control file and that
+  ## maintainer script, in the order ``dpkg-deb`` writes the members.
+  var deb = "!<arch>\n" & arMember("debian-binary", "2.0\n")
+  if postinst.len > 0:
+    deb.add(arMember("control.tar", tarBytes(@[
+      tarEntry("./", '5', 0o755),
+      tarEntry("./control", '0', 0o644, "Package: fixture\n"),
+      tarEntry("./postinst", '0', 0o755, postinst)])))
+  deb.add(arMember("data.tar", tarBytes(entries)))
+  writeFile(debPath, deb)
 
 type FixtureDeb = object
   name: string
   entries: seq[TarFixtureEntry]
+  postinst: string
 
 proc fileDeb(name: string; files: seq[(string, string)];
              links: seq[(string, string)] = @[]): FixtureDeb =
@@ -185,7 +196,7 @@ proc buildDebs(root: string; specs: seq[FixtureDeb]):
     let rel = "pool/main/" & s.name & "_1.0_armhf.deb"
     let debPath = root / rel
     createDir(parentDir(debPath))
-    writeDeb(debPath, s.entries)
+    writeDeb(debPath, s.entries, s.postinst)
     lock.debs.add(AptLockedDeb(name: s.name, version: "1.0",
       architecture: "armhf", filename: rel, size: getFileSize(debPath),
       sha256: sha256OfFile(debPath)))
@@ -631,6 +642,228 @@ suite "Add-On apt closure: realisation (spec §8.3 items 2 and 4)":
     check not debianArchitectureRunsOn("arm64", "armv7l")
     check not debianArchitectureRunsOn("armhf", "")
     check hostMachineName().len > 0
+
+suite "Add-On apt closure: alternatives links (spec §8.3 item 4, \"Alternatives\")":
+  # Regression cases for reprobuild-pm issues/2026-11-12-apt-closures-
+  # leave-out-every-alternatives-managed-command.md: a closure runs no
+  # maintainer script, so the commands Debian provides only through
+  # update-alternatives (awk, which, pager, nc, iptables) were missing.
+  # The real-archive halves are t_addon_apt_closure_trixie_armhf.nim and
+  # t_addon_apt_closure_runs_its_alternatives.nim.
+
+  test "the postinst reader takes literal installs and records the rest":
+    let script = """#!/bin/sh
+set -e
+# update-alternatives --install /usr/bin/commented x /usr/bin/no 99
+if [ "$1" = "configure" ]; then
+	update-alternatives --quiet --install /usr/bin/awk awk \
+	    /usr/bin/mawk 5 \
+	    --slave /usr/bin/nawk nawk /usr/bin/mawk \
+	    --slave '/usr/share/man/man1/awk.1.gz' "awk.1.gz" /usr/share/man/man1/mawk.1.gz
+fi
+for i in a b; do
+  update-alternatives --install /usr/bin/$i $i /usr/bin/$i.x 20
+done
+update-alternatives --install /usr/bin/lzma lzma /usr/bin/xz 20 $(slave lzcat)
+update-alternatives --install /usr/bin/p p /usr/bin/p.x high
+x=$(update-alternatives --list java); update-alternatives --remove awk /usr/bin/old
+update-alternatives --install /bin/nc nc /bin/nc.openbsd 50; true
+"""
+    let m = parseUpdateAlternativesInstalls(script, "pkg")
+    check m.candidates.len == 3
+    let awk = m.candidates[0]
+    check awk.package == "pkg" and awk.name == "awk" and
+      awk.link == "/usr/bin/awk" and awk.path == "/usr/bin/mawk" and
+      awk.priority == 5
+    check awk.slaves == @[
+      AptAlternativeSlave(link: "/usr/bin/nawk", name: "nawk",
+        path: "/usr/bin/mawk"),
+      AptAlternativeSlave(link: "/usr/share/man/man1/awk.1.gz",
+        name: "awk.1.gz", path: "/usr/share/man/man1/mawk.1.gz")]
+    # A literal master with a slave list only a shell can expand: the
+    # master is taken, the slaves are not, and the record says so.
+    check m.candidates[1].name == "lzma" and m.candidates[1].slaves.len == 0
+    check m.candidates[2].name == "nc" and m.candidates[2].link == "/bin/nc"
+    # ``$i`` and a non-numeric priority are not guessed at.
+    check m.unread.len == 3
+    check m.unread[0].startsWith("pkg: update-alternatives --install " &
+      "/usr/bin/$i")
+    check "not literal" in m.unread[1]
+    check "high" in m.unread[2]
+
+  test "per name the highest priority wins, slaves follow, /bin folds":
+    let root = scratch("alt-select")
+    let (prefix, lock) = realiseLocal(root, @[
+      FixtureDeb(name: "svc", entries: fileDeb("svc",
+        @[("usr/bin/svc", "svc")]).entries),
+      FixtureDeb(name: "ipt", entries: fileDeb("ipt", @[
+          ("usr/sbin/ipt-legacy", "L"), ("usr/sbin/ipt-legacy-save", "LS"),
+          ("usr/sbin/ipt-nft", "N"), ("usr/sbin/ipt-nft-save", "NS")]).entries,
+        postinst: """
+update-alternatives --install /usr/sbin/ipt ipt /usr/sbin/ipt-legacy 10 \
+  --slave /usr/sbin/ipt-save ipt-save /usr/sbin/ipt-legacy-save
+update-alternatives --install /usr/sbin/ipt ipt /usr/sbin/ipt-nft 20 \
+  --slave /usr/sbin/ipt-save ipt-save /usr/sbin/ipt-nft-save \
+  --slave /usr/share/man/man8/ipt.8.gz ipt.8.gz /usr/share/man/man8/nft.8.gz
+"""),
+      FixtureDeb(name: "nc", entries: fileDeb("nc",
+          @[("bin/nc.openbsd", "nc")]).entries,
+        postinst: "update-alternatives --install /bin/nc nc " &
+          "/bin/nc.openbsd 50\n"),
+      # Two providers of one name across members: the higher one wins even
+      # though the lower one's package sorts first.
+      FixtureDeb(name: "aaa-ed", entries: fileDeb("aaa-ed",
+          @[("usr/bin/ed.aaa", "ed-a")]).entries,
+        postinst: "update-alternatives --install /usr/bin/editor editor " &
+          "/usr/bin/ed.aaa 10\n"),
+      FixtureDeb(name: "zzz-vim", entries: fileDeb("zzz-vim",
+          @[("usr/bin/vim.zzz", "vim")]).entries,
+        postinst: "update-alternatives --install /usr/bin/editor editor " &
+          "/usr/bin/vim.zzz 15\n" &
+          # A candidate whose path the closure does not hold (a package
+          # not in the closure) never wins, whatever its priority.
+          "update-alternatives --install /usr/bin/editor editor " &
+          "/usr/bin/absent 99\n")])
+    check expandSymlink(prefix / "usr/sbin/ipt") == "ipt-nft"
+    check readFile(prefix / "usr/sbin/ipt") == "N"
+    check expandSymlink(prefix / "usr/sbin/ipt-save") == "ipt-nft-save"
+    # A slave whose path is absent is not linked (update-alternatives drops
+    # it), and no directory is made for it.
+    check not symlinkExists(prefix / "usr/share/man/man8/ipt.8.gz")
+    check expandSymlink(prefix / "usr/bin/nc") == "nc.openbsd"
+    check readFile(prefix / "usr/bin/nc") == "nc"
+    check expandSymlink(prefix / "usr/bin/editor") == "vim.zzz"
+    check not dirExists(prefix / "bin") and not symlinkExists(prefix / "bin")
+    let record = readFile(prefix / AlternativesRecordName)
+    check record == "repro-apt-alternatives v1\n" &
+      "master editor usr/bin/editor usr/bin/vim.zzz 15 zzz-vim\n" &
+      "master ipt usr/sbin/ipt usr/sbin/ipt-nft 20 ipt\n" &
+      "slave ipt usr/sbin/ipt-save usr/sbin/ipt-nft-save\n" &
+      "master nc usr/bin/nc usr/bin/nc.openbsd 50 nc\n"
+    check modeOf(prefix / AlternativesRecordName) == 0o644
+    # The links are part of the union's published bytes, so its sealed
+    # tree digest covers them and a realisation again reuses it as is.
+    var count = new int
+    check realiseAptClosure(lock, root / "store", root / "cache",
+      proc (url, dest: string; expectedSize: int64) =
+        raise newException(IOError, "unexpected fetch of " & url),
+      hostMachine = "armv7l") == prefix
+
+  test "a shipped file, a symlinked directory or a foreign tree is not replaced":
+    let root = scratch("alt-keep")
+    let (prefix, _) = realiseLocal(root, @[
+      FixtureDeb(name: "svc", entries: fileDeb("svc",
+          @[("usr/bin/pager", "shipped-pager"), ("usr/bin/less", "less"),
+            ("usr/libexec/real/tool.x", "t")],
+          links = @[("usr/libexec/tool", "/usr/lib/elsewhere")]).entries,
+        postinst: """
+update-alternatives --install /usr/bin/pager pager /usr/bin/less 77
+update-alternatives --install /usr/libexec/tool/x tool /usr/libexec/real/tool.x 1
+update-alternatives --install /var/lib/x varx /usr/bin/less 1
+update-alternatives --install /usr/bin/../bin/up up /usr/bin/less 1
+""")])
+    check readFile(prefix / "usr/bin/pager") == "shipped-pager"
+    check not symlinkExists(prefix / "usr/bin/pager")
+    check not fileExists(prefix / "usr/lib/elsewhere/x")
+    check not dirExists(prefix / "var")
+    check not symlinkExists(prefix / "usr/bin/up")
+    let record = readFile(prefix / AlternativesRecordName).splitLines()
+    check "skipped pager usr/bin/pager the closure already has it" in record
+    check "skipped tool usr/libexec/tool/x its directory lies under a " &
+      "symlink" in record
+    check "skipped varx /var/lib/x is outside the closure's trees" in record
+    check "skipped up /usr/bin/../bin/up is outside the closure's trees" in
+      record
+
+  test "a member published before is read from its archive, fetched again":
+    # rpi2's case on its first realisation with this realiser: every member
+    # is already in the store (the union before alternatives was built from
+    # them) and the download cache is empty. The new union needs each
+    # member's postinst, so the archives are fetched and verified again;
+    # nothing is unpacked again.
+    let root = scratch("alt-refetch")
+    let (lock, urls) = buildDebs(root, @[
+      FixtureDeb(name: "mawk", entries: fileDeb("mawk",
+          @[("usr/bin/mawk", "mawk")]).entries,
+        postinst: "update-alternatives --install /usr/bin/awk awk " &
+          "/usr/bin/mawk 5\n")])
+    let store = root / "store"
+    var count = new int
+    # Publish the member only, as an older union of it left it.
+    var st = openStore(store)
+    discard realiseDeb(st, lock, lock.debs[0], store, root / "cache",
+      localFetcher(urls, count), retainDebCache = false)
+    st.close()
+    check count[] == 1
+    check toSeq(walkDir(root / "cache")).len == 0
+    let member = aptDebPrefixPath(store, lock.debs[0])
+    let before = getFileInfo(member / "usr/bin/mawk").id
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    check count[] == 2
+    check expandSymlink(prefix / "usr/bin/awk") == "mawk"
+    check getFileInfo(member / "usr/bin/mawk").id == before
+    check toSeq(walkDir(root / "cache")).len == 0
+    # An archive that cannot be fetched for a reason other than the
+    # archive's own "not served" is a refusal, not a closure without links.
+    let store2 = root / "store2"
+    var st2 = openStore(store2)
+    discard realiseDeb(st2, lock, lock.debs[0], store2, root / "cache",
+      localFetcher(urls, count), retainDebCache = false)
+    st2.close()
+    expect IOError:
+      discard realiseAptClosure(lock, store2, root / "cache",
+        proc (url, dest: string; expectedSize: int64) =
+          raise newException(IOError, "connection refused"),
+        hostMachine = "armv7l")
+    check not aptClosureRealised(store2, lock)
+
+  test "a member the archive no longer serves is recorded as unknown":
+    # The C20 case: the archive answers 404 and the member stands in from
+    # its published prefix. Its postinst cannot be read; the union is still
+    # built, and its record names the member whose registrations it lacks.
+    let root = scratch("alt-unserved")
+    let (lock, urls) = buildDebs(root, @[
+      FixtureDeb(name: "mawk", entries: fileDeb("mawk",
+          @[("usr/bin/mawk", "mawk")]).entries,
+        postinst: "update-alternatives --install /usr/bin/awk awk " &
+          "/usr/bin/mawk 5\n"),
+      FixtureDeb(name: "zlib", entries: fileDeb("zlib",
+          @[("usr/lib/libz.so.1", "z")]).entries)])
+    let store = root / "store"
+    var count = new int
+    var st = openStore(store)
+    for d in lock.debs:
+      discard realiseDeb(st, lock, d, store, root / "cache",
+        localFetcher(urls, count), retainDebCache = false)
+    st.close()
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      proc (url, dest: string; expectedSize: int64) =
+        if url.endsWith("zlib_1.0_armhf.deb"):
+          raise newException(EAptDebUnserved, "HTTP 404 for " & url)
+        copyFile(urls[url], dest),
+      hostMachine = "armv7l")
+    check expandSymlink(prefix / "usr/bin/awk") == "mawk"
+    check readFile(prefix / AlternativesRecordName) ==
+      "repro-apt-alternatives v1\n" &
+      "master awk usr/bin/awk usr/bin/mawk 5 mawk\n" &
+      "unknown zlib 1.0\n"
+
+  test "the union moves; its members and the older union's path do not":
+    # The union's realization hash carries its layout, its members' do not:
+    # no member is unpacked again, and a unit bound to the union realiser 3
+    # built before alternatives (the path below, computed by reprobuild
+    # 3390209065) is relocated through ``legacyAptClosurePrefixPaths``.
+    let lock = sampleLock()
+    let pre = "/repro/store/prefixes/apt-closure-svc/1_2.0-1-57044ca7c177b65d"
+    check preAlternativesAptClosurePrefixPath("/repro/store", lock) == pre
+    check aptClosurePrefixPath("/repro/store", lock) != pre
+    check aptDebPrefixPath("/repro/store", lock.debs[0]) ==
+      "/repro/store/prefixes/apt-deb-libc6/2.41-12-87894d07e9b3ff23"
+    check aptDebPrefixPath("/repro/store", lock.debs[1]) ==
+      "/repro/store/prefixes/apt-deb-svc/1_2.0-1-2a7139bfc16a1771"
+    let legacy = legacyAptClosurePrefixPaths("/repro/store", lock)
+    check legacy.len == 2 and legacy[^1] == pre
 
 suite "Add-On apt closure: store receipts, index rows and GC (threat model G38)":
   ## A closure prefix the store does not know is never collected and no

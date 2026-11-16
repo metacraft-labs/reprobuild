@@ -424,7 +424,8 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
 libs/repro_distributed_worker/tests/t_signer_closes_after_its_early_returns.nim	nim	1
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	41
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	47
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure_runs_its_alternatives.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_apt_install_store_identity_is_byte_keyed.nim	nim	8
@@ -2263,6 +2264,7 @@ tests/integration/t_provider_library_c_abi_memory_ownership.nim	nim	3
 tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
+tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	4
 tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
