@@ -95,8 +95,6 @@ echo "=== Checking installed-compile sources in $pkg_dir/share/repro ==="
 required_sources=(
   source/libs/repro_interface_artifacts/src/repro_interface_artifacts.nim
   source/libs/repro_project_dsl/src/repro_project_dsl.nim
-  # The canonical recipe import surface (`import reprobuild`).
-  source/libs/reprobuild/src/reprobuild.nim
   source/libs/repro_dsl_stdlib/src/repro_dsl_stdlib/constructors.nim
   source/libs/repro_cli_support/src/repro_cli_support.nim
   source/libs/blake3/src/blake3/vendor/blake3.c
@@ -241,7 +239,8 @@ fi
 #      test passed on exactly the archives a user would find broken.
 #
 # Keep these in sync with the staging blocks in scripts/build_apps.sh.
-if [[ "$archive_name" == *-windows-aarch64.zip ]]; then
+if [[ "$archive_name" == *.zip ]]; then
+ if [[ "$archive_name" == *-windows-aarch64.zip ]]; then
   # windows-aarch64 (reprobuild-pm Distribution-And-Packaging.md §7.1): clingo
   # is built with llvm-mingw -static, so no MSVC runtime joins the closure,
   # and OpenSSL's DLLs carry the arm64 suffix.
@@ -253,7 +252,7 @@ if [[ "$archive_name" == *-windows-aarch64.zip ]]; then
     sqlite3_64.dll         # repro_local_store
     sqlite3.dll
   )
-elif [[ "$archive_name" == *.zip ]]; then
+ else
   required_dlls=(
     clingo.dll             # repro_solver ASP bindings — dlopen'd at MODULE INIT
     vcruntime140.dll       # clingo.dll is MSVC-built; needs the VC++ redist
@@ -265,6 +264,7 @@ elif [[ "$archive_name" == *.zip ]]; then
     sqlite3_64.dll         # repro_local_store
     sqlite3.dll
   )
+ fi
 
   echo "=== Checking required runtime DLLs in $pkg_dir/bin ==="
   missing_dlls=()

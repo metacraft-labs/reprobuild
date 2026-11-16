@@ -1097,7 +1097,15 @@ esac
 case "${REPRO_HOST_PLATFORM}" in
   windows)
     zstd_exe="$(command -v zstd.exe 2>/dev/null || true)"
-    if [ -n "${zstd_exe}" ]; then
+    # windows-aarch64: the pinned arm64 DLL env.ps1 installed
+    # (windows/ensure-runtime-dlls.ps1) comes first.
+    if [ -n "${REPRO_WINDOWS_RUNTIME_DLL_DIR:-}" ] &&
+       [ -f "${REPRO_WINDOWS_RUNTIME_DLL_DIR}/libzstd.dll" ]; then
+      if stage_windows_dll "${REPRO_WINDOWS_RUNTIME_DLL_DIR}/libzstd.dll" build/bin/libzstd.dll; then
+        echo "Staged libzstd.dll from ${REPRO_WINDOWS_RUNTIME_DLL_DIR} -> build/bin/libzstd.dll"
+      fi
+      zstd_exe=""
+    elif [ -n "${zstd_exe}" ]; then
       zstd_src_dir="$(dirname "${zstd_exe}")"
       zstd_src_dll=""
       if [ -f "${zstd_src_dir}/libzstd.dll" ]; then
@@ -1164,7 +1172,11 @@ case "${REPRO_HOST_PLATFORM}" in
   windows)
     sqlite_src_dll=""
     nim_exe="$(command -v nim.exe 2>/dev/null || true)"
-    if [ -n "${nim_exe}" ]; then
+    if [ -n "${REPRO_WINDOWS_RUNTIME_DLL_DIR:-}" ] &&
+       [ -f "${REPRO_WINDOWS_RUNTIME_DLL_DIR}/sqlite3_64.dll" ]; then
+      # windows-aarch64: the pinned arm64 sqlite (windows/ensure-runtime-dlls.ps1).
+      sqlite_src_dll="${REPRO_WINDOWS_RUNTIME_DLL_DIR}/sqlite3_64.dll"
+    elif [ -n "${nim_exe}" ]; then
       nim_bin_dir="$(dirname "${nim_exe}")"
       nim_root_dir="$(dirname "${nim_bin_dir}")"
       for cand in \

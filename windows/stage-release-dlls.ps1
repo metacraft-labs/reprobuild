@@ -62,7 +62,11 @@ function Copy-IntoBin {
     if ($DestName.EndsWith(".dll", [StringComparison]::OrdinalIgnoreCase)) {
         # Every DLL staged is of the leg's own machine (0x8664 on x64, 0xAA64
         # on windows-aarch64). Do not stage a same-named DLL of another one.
-        Assert-PeMachine -Path $SrcPath -Arch $script:releaseArch -Consumer "stage-release-dlls"
+        # A caller that loads only this function (the staging boundary test)
+        # has no $script:releaseArch; the host's architecture is then the leg's.
+        $legArch = if (Get-Variable -Name releaseArch -Scope Script -ErrorAction SilentlyContinue) {
+            $script:releaseArch } else { Get-WindowsArch }
+        Assert-PeMachine -Path $SrcPath -Arch $legArch -Consumer "stage-release-dlls"
     }
     if ($ExpectedSha256) { Assert-FileSha256 -Path $SrcPath -Expected $ExpectedSha256 }
     $dest = Join-Path $binDir $DestName
@@ -211,30 +215,16 @@ if ($script:releaseArch -eq "arm64") {
     }
     Copy-IntoBin -SrcPath (Join-Path $clingoRoot "clingo.dll") -DestName "clingo.dll"
 
-    # zstd: MSYS2 clangarm64, the same environment as the OpenSSL above.
-    $zstdAsset = "$($names.Msys2PackagePrefix)-zstd-$($toolchain['ZSTD_WIN_ARM64_VERSION'])-$($toolchain['ZSTD_WIN_ARM64_MSYS2_RELEASE'])-any.pkg.tar.zst"
-    $zstdWork = Join-Path $tmp "zstd-arm64"
-    $zstdPkg = Get-VerifiedReleaseArchive -Url "https://repo.msys2.org/mingw/$($names.Msys2Env)/$zstdAsset" `
-        -Sha256 $toolchain["ZSTD_WIN_ARM64_SHA256"] -ArchivePath (Join-Path $zstdWork $zstdAsset)
-    $zstdOut = Join-Path $zstdWork ("stage-" + [Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Force -Path $zstdOut | Out-Null
-    try {
-        & (Join-Path $env:SystemRoot "System32\tar.exe") -xf $zstdPkg -C $zstdOut
-        if ($LASTEXITCODE -ne 0) { throw "stage-release-dlls: tar failed extracting $zstdAsset (exit $LASTEXITCODE)" }
-        Copy-IntoBin -SrcPath (Join-Path $zstdOut "$($names.Msys2Env)/bin/libzstd.dll") -DestName "libzstd.dll"
-    } finally {
-        Remove-Item -LiteralPath $zstdOut -Recurse -Force -ErrorAction SilentlyContinue
+    # sqlite and zstd: the pinned arm64 DLLs the cold start installed
+    # (windows/ensure-runtime-dlls.ps1), checked against their pins.
+    . (Join-Path $PSScriptRoot "ensure-runtime-dlls.ps1")
+    $runtimeDir = Get-WindowsRuntimeDllDir -Root $toolchainRoot -Toolchain $toolchain
+    $runtimeMeta = Read-KeyValueFile -Path (Join-Path $runtimeDir "runtime-dlls.install.meta")
+    if (-not (Test-KeyValueFileMatches -Expected (Get-WindowsRuntimeDllMetadata -Toolchain $toolchain) -Actual $runtimeMeta)) {
+        throw "stage-release-dlls: source metadata does not match the declared pin: $runtimeDir"
     }
-
-    # sqlite: sqlite.org's own arm64 DLL, under both names Nim's binding tries.
-    $sqliteStage = Download-Zip -Url ("https://www.sqlite.org/" + $toolchain["SQLITE_WIN_ARM64_ARCHIVE_PATH"]) `
-        -Sha256 $toolchain["SQLITE_WIN_ARM64_ARCHIVE_SHA256"] -OutDir (Join-Path $tmp "sqlite-arm64")
-    try {
-        foreach ($dll in @("sqlite3_64.dll", "sqlite3.dll")) {
-            Copy-IntoBin -SrcPath (Join-Path $sqliteStage "sqlite3.dll") -DestName $dll
-        }
-    } finally {
-        Remove-Item -LiteralPath $sqliteStage -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($dll in @("libzstd.dll", "sqlite3_64.dll", "sqlite3.dll")) {
+        Copy-IntoBin -SrcPath (Join-Path $runtimeDir $dll) -DestName $dll
     }
 
     # cacert.pem: as on x64 (best effort, not in the verify manifest).
