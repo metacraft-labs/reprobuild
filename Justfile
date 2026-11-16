@@ -937,6 +937,11 @@ format:
 
 fmt: format
 
+# Regenerate the `reprobuild/dsl/<module>` re-export modules from the
+# standard-library tree (libs/reprobuild/README.md).
+regen-reprobuild-dsl-modules:
+    python3 ./scripts/generate_reprobuild_dsl_modules.py
+
 # Regenerate the four tracked artifacts that are pure functions of the tree:
 # repro_tests.nim, scripts/reprobuild-test-shape-parity.tsv,
 # scripts/reprobuild-suite-static-case-counts.tsv and

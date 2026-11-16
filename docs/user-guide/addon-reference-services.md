@@ -287,7 +287,8 @@ sandbox.
 ## Weakening the floor is an operator's apply
 
 The deploy agent never applies a generation that loosens the
-confinement of a unit the profile defines. Every plan lists such units
+confinement of a unit the profile defines, or that changes a
+distribution package's unit through a drop-in. Every plan lists such units
 under `service floor weakened`, and the agent reports the generation as
 an operator action instead of applying it. A unit is listed when the
 generation:
@@ -303,7 +304,14 @@ generation:
   gid 0, in a privileged group, as an account the profile itself does not
   show to be unprivileged, with a command run as root (the `+` or `!`
   prefix, or `PermissionsStartOnly=yes`), or with ambient capabilities.
-  The unit's drop-ins in the profile count, as systemd reads them.
+  The unit's drop-ins in the profile count, as systemd reads them;
+- adds, changes or removes a drop-in over a unit the profile does not
+  define (`collision = "dropIn"`, or a `systemd.systemDropIn` for a
+  package's unit), when the drop-in has a `[Service]` section or a
+  command line. The floor does not cover a package's unit, and the unit
+  may run as root, so any setting there (an account, a command line, an
+  `Environment=` such as `LD_PRELOAD`) can change what runs as root. A
+  drop-in that only orders units is not listed.
 
 So a service that runs as root needs one operator apply for its first
 deployment. Run `repro system addon plan`, read the list, and apply from
@@ -313,11 +321,9 @@ its waiver and its account. A waived unit has no floor, so whoever signs
 the profile still decides what such a unit runs. The operator's review is
 of the decision to run the unit unconfined.
 
-A drop-in over a distribution package's unit (`collision = "dropIn"`,
-or a `systemd.systemDropIn` for a unit the profile does not define) is
-not under the floor: the package's unit runs as the package installed
-it, and the agent applies such a drop-in without listing it here. Review
-those drop-ins when you review who may sign the profile.
+The same holds for a drop-in over a package's unit: its first
+deployment and every change to it are an operator's apply, and the agent
+re-applies it unchanged after that.
 
 ## Running a validator safely
 

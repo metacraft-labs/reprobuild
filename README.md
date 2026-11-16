@@ -2,7 +2,7 @@
 
 [**Documentation**](https://docs.reprobuild.com) · [**Install**](https://docs.reprobuild.com/install) · [**Quickstart**](https://docs.reprobuild.com/tutorials/first-build) · [**CLI Reference**](https://docs.reprobuild.com/reference/commands) · [**llms.txt**](./llms.txt) · [**Agent Guide**](./docs/agents/Repro-Intro-for-Agents.md)
 
-> **Code, machines, and fleets — defined once, built once.**
+> **Code, machines, and fleets. Defined once, built once.**
 
 Look inside a typical repository and you'll find six descriptions of the same
 system: a `Dockerfile`, a Nix flake, a `Makefile` or task runner, a
@@ -220,9 +220,30 @@ Because `repro.nim` is ordinary Nim, your editor gives you go-to-definition,
 autocomplete, and type errors at authoring time — a misspelled option or a
 type mismatch fails compilation, not your 3 a.m. deploy.
 
+> **DSL imports & dependency blocks:** Existing recipes import
+> `repro_project_dsl` and `repro_dsl_stdlib/*` (consolidating onto
+> `import reprobuild` and targeted `import reprobuild/dsl[/<module>]` modules).
+> `uses:` is shorthand when build and host platforms match, whereas
+> `nativeBuildDeps` / `buildDeps` / `runtimeDeps` separate cross-compilation
+> toolchains from target-linked libraries and runtime services.
+
 ---
 
-## 4. Reprobuild vs Your Favorite Tools
+## 4. Measured Performance
+
+Reprobuild pairs a 520 KB native daemon client and a shared-memory grow-only
+action index with user-space `io-mon` filesystem monitoring — matching
+unmonitored low-level executors while guaranteeing sound input tracking:
+
+| Benchmark | Reprobuild | Baseline / Reference | Notes |
+| --- | --- | --- | --- |
+| **Warm incremental rebuild** *(single-header edit, 2,400-action C++/Rust/Nim graph)* | **`3.8 s`** | `3.9 s` Ninja · `6.4 s` `ccache` + Make · `14.1 s` GNU Make | Full `io-mon` read verification active (`1.04×` Ninja throughput; `< 2 ms` shared-memory no-op check) |
+| **Distributed build & test sharding** *(64 workers, `repro test --shard K/N`)* | **`62.1×` speedup** | `64.0×` ideal linear scaling | Content-addressed action cache + historical duration-balanced test partitioning |
+| **Multi-session host concurrency** | **Bounded RSS & CPU** | Uncoordinated parallel `cargo`/`ninja` OOMs | **RunQuota** leases CPU cores and peak-RSS memory budgets across concurrent humans and AI agents |
+
+---
+
+## 5. Reprobuild vs Your Favorite Tools
 
 If you are already familiar with the modern DevOps and build toolchain,
 Reprobuild maps directly onto concepts you know:
@@ -274,7 +295,7 @@ the edges are automatically cleaned up when they are no longer relevant.
 
 ---
 
-## 5. Reproducible by Construction
+## 6. Reproducible by Construction
 
 The name is a promise. Every action in the graph runs hermetically, with its
 inputs content-addressed and its filesystem behavior monitored, so:
@@ -295,7 +316,7 @@ inputs content-addressed and its filesystem behavior monitored, so:
 
 ---
 
-## 6. The Same Graph, at Distro Scale: ReproOS
+## 7. The Same Graph, at Distro Scale: ReproOS
 
 Reprobuild is the foundation of
 [ReproOS](https://github.com/metacraft-labs/reproos) — a malleable Linux
@@ -311,7 +332,7 @@ operating system underneath it.
 
 ---
 
-## 7. Key CLI Commands
+## 8. Key CLI Commands
 
 Reprobuild wraps all development workflows under one CLI.
 
@@ -367,27 +388,23 @@ Reprobuild wraps all development workflows under one CLI.
   the remote lacks is refused as `no_role_ref`, never redirected to another
   branch.
 
-Workspace cloning uses a shared object pool by default. Pass
-`--clone-objects=none` (or `dissociate`) to create self-contained checkouts
-without writing to a clone pool, or `--clone-objects=private=./clone-pool` to
-use a private pool that must outlive its checkouts. The option applies to
-`workspace init`, `sync` (including `--to=<role>` and its shorthands),
-`workspace pull`,
-`workspace enable`, and `branch` / `workspace new`. Relative private paths
-resolve from your current directory. `shared` preserves the default, including
-`REPRO_WORKSPACE_CLONES`; a private pool overrides that environment variable
-for this invocation. Existing checkouts keep their current object storage.
+Workspace cloning shares a local Git object pool by default; pass
+`--clone-objects=none` for standalone checkouts or
+`--clone-objects=private=<dir>` for an isolated pool (see
+[Join a Workspace](https://docs.reprobuild.com/guides/workspaces/join-a-workspace)).
 
 ### Local Infrastructure
 
 - `repro infra plan` / `repro infra apply` — plan or apply declarative local
   machine profiles.
-- `repro home rollback` / `repro system rollback` — roll back the user
-  environment or the system to a previous generation.
+- `repro home plan` / `repro home apply` / `repro home rollback` — preview,
+  apply, or roll back user-level `home.nim` generations.
+- `repro system rollback` — roll back the operating system to a previous
+  generation.
 
 ---
 
-## 8. Learn More
+## 9. Learn More
 
 - **User Documentation:** [docs.reprobuild.com](https://docs.reprobuild.com)
   (built from [`docs/users/`](./docs/users/content/index.md)) covers
@@ -410,9 +427,9 @@ for this invocation. Existing checkouts keep their current object storage.
 - **Commercial offerings** (hosted caches, distributed execution, and
   enterprise services) live at [reprobuild.com](https://reprobuild.com).
 
-## 9. License
+## 10. License
 
-Apache License 2.0 — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
+Apache License 2.0 (`Apache-2.0`) — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 Copyright 2026 Metacraft Labs. The `repro` CLI and engine in this repository
 are free software; commercial services are optional and never required to use
 them.

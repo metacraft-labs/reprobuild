@@ -12,13 +12,24 @@
 ##       run heartbeats, so a check that stopped running is silence, not
 ##       "nothing refused" (DET-5).
 ##
+## Its positive control runs on the host, every fetch (DET-4; spec §10.4
+## "Scheduled positive controls"): the fetch unit sends one datagram to the
+## control address (``sendEgressControl``), and the check reports whether
+## the table counted it (the heartbeat's ``control``). A table that is loaded
+## and no longer matches the slice -- rules flushed, or a slice created
+## again, since a ``socket cgroupv2`` match keeps the cgroup it resolved at
+## load -- heartbeats ``present`` exactly as a working one does; only the
+## control tells them apart, and the off-host check alerts when no control
+## tripped for a while (``evidence_check``).
+##
 ## Why a table at all: the fetch unit's ``IPAddressDeny=`` drops a refused
 ## packet in a cgroup BPF program that counts nothing it denies, and the only
 ## process that sees the ``EPERM`` is the attacker's. Netfilter's output hook
 ## runs before that program, so the table sees every packet the unit sends;
 ## it drops none (the unit's filter does).
 
-import std/[json, os, sets, strutils, tables, times]
+import std/[json, nativesockets, net, os, sets, strutils, tables, times]
+from std/posix import EPERM
 
 import ./evidence
 import ./evidence_ship
@@ -32,6 +43,14 @@ const
   EgressStateName* = "egress-refused.state"
     ## Under the evidence directory: ``<address> <packets>`` per line, the
     ## counts the previous check saw.
+  EgressControlAddress* = "127.68.69.84"
+    ## Where the fetch unit sends its control datagram. In the loopback
+    ## range, so it never leaves the host whatever the routing; outside
+    ## every allow-list (the allow-list names the two origins), so the
+    ## table's rules count it and the unit's ``IPAddressDeny=`` then drops
+    ## it.
+  EgressControlPort* = 9
+    ## The discard port (RFC 863): nothing is expected to answer.
 
 type
   RefusedDestination* = tuple[address: string; packets: int64]
@@ -47,6 +66,14 @@ type
     setFull*: bool                      ## a set holds ``EgressSetSize``
     stateError*: string
       ## The check's own state could not be used (read, parsed, written).
+    control*: string
+      ## The positive control (spec §10.4): ``tripped`` when the control
+      ## address's count grew since the previous check of this table
+      ## instance, ``idle`` when it did not (no fetch ran since),
+      ## ``not-run`` when the table is missing or could not be read.
+    controlPackets*: int64
+      ## The control address's count in the table now (never a refused
+      ## destination: kept apart from ``refused``).
     error*: string
 
 const
@@ -55,6 +82,31 @@ const
   EgressDetectionsMax* = 64
     ## Destinations one check records one by one; the rest in one summary,
     ## so a flood of throwaway addresses cannot fill the host's records.
+
+proc sendEgressControl*(): string =
+  ## The fetch unit's positive control: one UDP datagram from this process
+  ## to ``EgressControlAddress``. Returns "" when it was handed to the
+  ## kernel -- refused by the unit's ``IPAddressDeny=`` (``EPERM``) included,
+  ## since the table's output hook counted it before that drop -- and why
+  ## not otherwise (a socket the unit's ``RestrictAddressFamilies=`` does
+  ## not allow, say), which the fetch reports and the off-host check then
+  ## sees as a control that never trips.
+  when mutated("egress-control-not-sent"):
+    # FALSIFYING BUILD: the fetch sends no control.
+    return ""
+  var sock: Socket
+  try:
+    sock = newSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP, buffered = false)
+  except CatchableError as e:
+    return "cannot open the control socket: " & e.msg
+  defer: sock.close()
+  try:
+    sock.sendTo(EgressControlAddress, Port(EgressControlPort), "c")
+  except OSError as e:
+    # EPERM is the unit's own filter dropping it after it was counted.
+    if e.errorCode != EPERM.int32:
+      return "cannot send the control datagram: " & e.msg
+  ""
 
 proc parseRefusedSet*(json: string): seq[RefusedDestination] =
   ## The elements of one ``nft -j list set`` answer: ``{"elem": {"val":
@@ -91,6 +143,8 @@ type
     counts: Table[string, int64]     ## of THIS table instance
     owed: seq[OwedDestination]       ## oldest first
     check: int64                     ## checks made so far
+    control: int64                   ## the control address's count (of
+                                     ## THIS table instance)
 
 proc readState(path: string; table: string): EgressState =
   ## The counts the previous check saw -- of THIS table instance: a table
@@ -124,6 +178,8 @@ proc readState(path: string; table: string): EgressState =
       if p.len == 0: continue
       if p.len == 2 and p[0] == "table": instance = p[1]
       elif p.len == 2 and p[0] == "check": result.check = parseBiggestInt(p[1])
+      elif p.len == 2 and p[0] == "control":
+        result.control = parseBiggestInt(p[1])
       elif p.len == 3 and p[0] == "counter":
         result.counts[" counter"] = parseBiggestInt(p[2])
       elif p.len == 4 and p[0] == "owed":
@@ -138,6 +194,7 @@ proc readState(path: string; table: string): EgressState =
   when not mutated("egress-state-survives-reload"):
     if instance != table:
       result.counts.clear()
+      result.control = 0
       when mutated("egress-owed-dropped-at-reload"):
         result.owed.setLen(0)
 
@@ -170,7 +227,9 @@ proc tableInstance*(nft: string): string =
 proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
                  table = "-"; counted = -1'i64;
                  unattributed: ptr int64 = nil;
-                 recordMax = EgressDetectionsMax): seq[RefusedDestination] =
+                 recordMax = EgressDetectionsMax;
+                 controlPackets = -1'i64;
+                 controlBefore: ptr int64 = nil): seq[RefusedDestination] =
   ## The destinations to record since the check before, in the order the
   ## check records them, which ``statePath`` then reflects. Raises
   ## ``EgressStateError`` (nothing written) when the state is unusable.
@@ -189,7 +248,14 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
   ## With ``counted`` (the named counter), ``unattributed`` is set to the
   ## refused packets since the last check that no set element's growth
   ## accounts for.
+  ##
+  ## ``controlPackets`` (the control address's count now, when known) is
+  ## kept in the state as its own line, and ``controlBefore`` is set to the
+  ## count the previous check of this table instance saw (0 for a new
+  ## instance). ``refused`` and ``counted`` must already leave the control
+  ## out (``checkEgress``).
   let before = readState(statePath, table)
+  if controlBefore != nil: controlBefore[] = before.control
   let checkNo = before.check + 1
   var now = initTable[string, int64]()
   for d in refused: now[d.address] = d.packets
@@ -224,6 +290,8 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
     else: stillOwed.add((d.address, checkNo, d.packets))
   var text = EgressStateHeader & "\n" & "table " & table & "\n" &
              "check " & $checkNo & "\n"
+  if controlPackets >= 0:
+    text.add("control " & $controlPackets & "\n")
   for d in refused:
     text.add(d.address & " " & $d.packets & "\n")
   if counted >= 0 and not mutated("egress-ignores-counter"):
@@ -247,8 +315,10 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
     return EgressCheck(error: "no nft on this host")
   let l = listTableNames(nft)
   if not l.ok: return EgressCheck(error: l.why)
-  if EgressTableKey notin l.tables: return EgressCheck(present: false)
+  if EgressTableKey notin l.tables:
+    return EgressCheck(present: false, control: "not-run")
   result.present = true
+  result.control = "not-run"
   for setName in ["refused4", "refused6"]:
     let r = runHostTool([nft, "-j", "list", "set", EgressTableFamily,
                          EgressTableName, setName], mergeStderr = false,
@@ -267,16 +337,32 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
   if c.exitCode == 0:
     try: result.counted = parseCounterPackets(c.output)
     except CatchableError: discard
+  # The control address is the fetch unit's positive control, never a
+  # refused destination: kept apart, and its packets taken off the named
+  # counter so the counter and the sets still agree.
+  # Whether a set is full is judged on what the set holds, the control's
+  # element included.
   var v4, v6 = 0
+  var others: seq[RefusedDestination]
   for d in result.refused:
     if ':' in d.address: inc v6 else: inc v4
+    if d.address == EgressControlAddress:
+      result.controlPackets = d.packets
+    else:
+      others.add(d)
   result.setFull = v4 >= EgressSetSize or v6 >= EgressSetSize
+  result.refused = others
+  if result.counted >= 0:
+    result.counted = max(0'i64, result.counted - result.controlPackets)
   let instance = tableInstance(nft)
   var un = 0'i64
+  var controlBefore = 0'i64
   try:
     result.fresh = freshSince(result.refused, statePath,
                               if instance.len > 0: instance else: "-",
-                              result.counted, addr un)
+                              result.counted, addr un,
+                              controlPackets = result.controlPackets,
+                              controlBefore = addr controlBefore)
   except EgressStateError as e:
     # Fail closed: nothing is judged from a state the check cannot trust,
     # and the state is left as it is for the operator (A11 review round 3).
@@ -284,6 +370,8 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
     result.error = e.msg
     return
   result.unattributed = un
+  result.control = if result.controlPackets > controlBefore: "tripped"
+                   else: "idle"
 
 proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
                         heartbeatMs: int64) =
@@ -336,6 +424,7 @@ proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
     fields: @[("intervalMs", $heartbeatMs),
               ("status", if c.error.len > 0: "error: " & c.error
                          elif c.present: "present" else: "missing"),
+              ("control", if c.control.len > 0: c.control else: "not-run"),
               ("count", $c.refused.len)]), site)
 
 proc runEgressCheckCli*(args: seq[string]): int =

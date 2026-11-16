@@ -171,9 +171,14 @@ proc profileInlineExecActionEdge*(
     cacheable = true;
     commandStatsId = "";
     substituteOnly = false;
-    expectedOutputDigest = "") =
+    expectedOutputDigest = "";
+    timeoutSeconds = 0) =
   ## Profile-scope shim for ``inlineExecCall(...)`` used inside a
   ## profile's ``resources:`` block.
+  ##
+  ## ``timeoutSeconds`` is the edge's deadline (``0``: the apply's
+  ## default); see ``ProfileBuildAction.timeoutSeconds``. A negative value is
+  ## refused here, at profile compile time.
   ##
   ## ``substituteOnly`` / ``expectedOutputDigest`` are the substitute-only
   ## edge of Binary-Caches.md §"Publishing for a host that cannot build":
@@ -223,6 +228,11 @@ proc profileInlineExecActionEdge*(
     if commandStatsId.len > 0: commandStatsId
     else: "inlineExecCall"
   let call = inlineExecCall(argv, cwd = cwd)
+  if timeoutSeconds < 0:
+    raise newException(ValueError,
+      "inlineExecCall '" & id & "': timeoutSeconds must be 0 (the " &
+      "default deadline) or a positive number of seconds, got " &
+      $timeoutSeconds)
   if substituteOnly and expectedOutputDigest.len == 0:
     raise newException(ValueError,
       "inlineExecCall '" & id & "': substituteOnly = true needs " &
@@ -251,4 +261,5 @@ proc profileInlineExecActionEdge*(
   var mirrored = toProfileBuildAction(action)
   mirrored.substituteOnly = substituteOnly
   mirrored.expectedOutputDigest = expectedOutputDigest
+  mirrored.timeoutSeconds = timeoutSeconds
   target.add(mirrored)
