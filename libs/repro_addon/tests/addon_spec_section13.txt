@@ -42,7 +42,7 @@
 26 Rollback on a base outside the supported matrix | rollback, supported matrix, unsupported base, base
 27 Recoveries that cannot revert keep the marker | recover, cannot revert, marker
 28 A compiled profile is applied only at the producer's signed digest | compiled profile, producer, signed, digest
-29 The full engine's agent is held to every A8 rule | full engine, agent, a8
+29 The full engine's agent is held to every A8 check | full engine, agent, a8
 30 A profile may supersede generation 0's deploy-signer anchors and `caches.conf`
 31 A host that compiles profiles takes its C compiler from its base | compiles profiles, c compiler, base, preflight, compile-profile
 32 What the parity gate's full realisation is | parity, realisation, reproos, stock
