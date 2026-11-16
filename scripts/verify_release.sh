@@ -95,6 +95,8 @@ echo "=== Checking installed-compile sources in $pkg_dir/share/repro ==="
 required_sources=(
   source/libs/repro_interface_artifacts/src/repro_interface_artifacts.nim
   source/libs/repro_project_dsl/src/repro_project_dsl.nim
+  # The canonical recipe import surface (`import reprobuild`).
+  source/libs/reprobuild/src/reprobuild.nim
   source/libs/repro_dsl_stdlib/src/repro_dsl_stdlib/constructors.nim
   source/libs/repro_cli_support/src/repro_cli_support.nim
   source/libs/blake3/src/blake3/vendor/blake3.c
@@ -188,6 +190,30 @@ if [[ "$archive_name" != *.zip ]]; then
       exit 1
     }
   )
+fi
+
+# ── darwin: the non-SIP tools bundle ─────────────────────────────────────────
+#
+# A monitored action on macOS needs a non-SIP shell. The engine's last
+# fallback for it is a build-host store path that does not exist on a Mac
+# without Nix, so the archive carries the bundle at
+# libexec/stackable-hooks-macos-tools (Distribution-And-Packaging.md §5.1,
+# scripts/release/stage_release_macos_tools.sh). Without it the first
+# monitored launch fails with "SIP-safe monitored launch requires a non-SIP
+# shell".
+if [[ "$archive_name" == *darwin* ]]; then
+  echo "=== Verifying the darwin non-SIP tools bundle ==="
+  tools_sh="$pkg_dir/libexec/stackable-hooks-macos-tools/bin/sh"
+  if [[ ! -x "$tools_sh" ]]; then
+    echo "ERROR: $archive_name has no executable libexec/stackable-hooks-macos-tools/bin/sh" >&2
+    echo "       Stage it with scripts/release/stage_release_macos_tools.sh." >&2
+    exit 1
+  fi
+  if ! env -i PATH=/usr/bin:/bin "$tools_sh" -c 'exit 0'; then
+    echo "ERROR: $archive_name's libexec/stackable-hooks-macos-tools/bin/sh does not run with PATH=/usr/bin:/bin" >&2
+    exit 1
+  fi
+  echo "    ok  libexec/stackable-hooks-macos-tools/bin/sh"
 fi
 
 # ── Windows: archive self-containment ────────────────────────────────────────

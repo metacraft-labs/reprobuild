@@ -311,7 +311,10 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
   ## reuses the same ``FixtureContext`` for every action edge it
   ## dispatches. Re-constructing the spawner per call would discard
   ## the closure invariant.
-  let spawner = mkInfraApplyBrokerSpawn(ctx)
+  # Refilled from the edges at every dispatch, so the one spawner built here
+  # sees each edge's own `timeoutSeconds`.
+  let actionTimeouts: ActionTimeouts = newTable[string, int]()
+  let spawner = mkInfraApplyBrokerSpawn(ctx, actionTimeouts)
   let capturedCacheRoot = cacheRoot
   let capturedMonitorCliPath = monitorCliPath
   let capturedMonitorCliArgs = @monitorCliArgs
@@ -321,6 +324,10 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
     {.cast(gcsafe).}:
       if actions.len == 0:
         return @[]
+      actionTimeouts.clear()
+      for a in actions:
+        if a.timeoutSeconds > 0:
+          actionTimeouts[a.id] = a.timeoutSeconds
       # `onProgress` is the apply lock's progress heartbeat (see
       # ``repro_infra/apply_lock.nim``). It has to fire per EDGE, not
       # once around the whole dispatch: extracting a runner archive or

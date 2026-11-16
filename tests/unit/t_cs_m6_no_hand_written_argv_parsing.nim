@@ -46,19 +46,17 @@ const
     # `apps/repro-client/repro_client.nim` left this list in the first group:
     # its flag tables are generated from the description. The third group
     # emptied `bundle_cli.nim`, `selfhost.nim`, `store_bundle_cli.nim` and
-    # `store_copy_cli.nim`.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 1086),
-    ("libs/repro_cli_support/src/repro_cli_support/anywhere.nim", 23),
+    # `store_copy_cli.nim`; the fourth `anywhere.nim`, `cargo_gc.nim`,
+    # `deploy_agent.nim`, `disk.nim`, `hardware.nim`, `home.nim` and
+    # `infra_install_root.nim`; the fifth `dev_env_fast_path.nim` (the thin
+    # client's `dev-env export` reader takes its flags from the
+    # description). What `infra.nim` and `infra_image.nim` still hold is no
+    # argv parsing (a `git describe` suffix, a table of the flags a
+    # bootstrap names), but it has the shape the scan counts.
+    ("libs/repro_cli_support/src/repro_cli_support.nim", 964),
     ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
-    ("libs/repro_cli_support/src/repro_cli_support/cargo_gc.nim", 10),
-    ("libs/repro_cli_support/src/repro_cli_support/deploy_agent.nim", 32),
-    ("libs/repro_cli_support/src/repro_cli_support/dev_env_fast_path.nim", 13),
-    ("libs/repro_cli_support/src/repro_cli_support/disk.nim", 13),
-    ("libs/repro_cli_support/src/repro_cli_support/hardware.nim", 4),
-    ("libs/repro_cli_support/src/repro_cli_support/home.nim", 200),
-    ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 50),
+    ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
-    ("libs/repro_cli_support/src/repro_cli_support/infra_install_root.nim", 20),
     ("libs/repro_cli_support/src/repro_cli_support/project_pins.nim", 4),
     ("libs/repro_cli_support/src/repro_cli_support/workspace_restore.nim", 8),
   ]
@@ -83,7 +81,25 @@ const
     "runStoreDaemonCommand", "runStoreServeCommand", "runCasCommand",
     "parseCasDigest", "runCacheCommand",
     "runBundleCliCommand", "namespaceHelpText", "runReapCommand",
-    "runLaunchPlanCommand", "runCertSignerCommand", "runSelfCommand"]
+    "runLaunchPlanCommand", "runCertSignerCommand", "runSelfCommand",
+    # The fourth group (machines) whose procs live here: `health`, `debug
+    # artifact`. Its other commands' modules (`home`, `infra`, `disk`,
+    # `hardware`, `cargo_gc`, `deploy_agent`, `anywhere`,
+    # `infra_install_root`) left `Remaining` above.
+    "healthArgsOf", "runHealthCommand", "runDebugArtifactCommand",
+    # The fifth group (development environments): `exec`, `run`, `shell`
+    # with `shell hook`, `allow`, `deny`, `dev-env export|deactivate`, `up`,
+    # `dev`, `down`, `hcr coordinate|prepare-object`, `prompt` with `prompt
+    # init`. (`devSessionStartOf`, generic over `up`'s and `dev`'s
+    # configuration, is not found by `procBody`; it reads typed fields
+    # only.)
+    "devEnvSelectionOf", "reproRunOf", "runReproRunCommand",
+    "runReproExecCommand", "runReproShellCommand", "runShellHookCommand",
+    "runReproAllowCommand", "runReproDenyCommand", "devEnvExportOf",
+    "runDevEnvExportCommand", "runDevEnvDeactivateCommand",
+    "devSessionCommandOf", "resolveDevSessionCommand", "runUpOrDevCommand",
+    "runDownCommand", "runHcrCoordinateCommand", "runHcrPrepareObjectCommand",
+    "promptArgsOf", "runPromptCommand", "runPromptInitCommand"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.

@@ -118,6 +118,11 @@ const
   KeyCacheable    = "cacheable"
   KeySubstituteOnly = "substituteOnly"
   KeyExpectedOutputDigest = "expectedOutputDigest"
+  KeyTimeoutSeconds = "timeoutSeconds"
+    ## Inside a build action: the edge's own deadline in seconds
+    ## (`ProfileBuildAction.timeoutSeconds`), as an unsigned integer.
+    ## Optional; omitted when 0 (the default deadline), so an edge without
+    ## one encodes exactly as before.
   KeyId           = "id"
   KeyBody         = "body"
   KeyPredicate    = "predicate"
@@ -331,6 +336,8 @@ proc encodeBuildAction(b: ProfileBuildAction): DynamicValue =
   # Only when set, so a profile-level edge encodes exactly as before.
   if b.activity.len > 0:
     entries.add entry(KeyActivity, cborText(b.activity))
+  if b.timeoutSeconds > 0:
+    entries.add entry(KeyTimeoutSeconds, cborUInt(uint64(b.timeoutSeconds)))
   cborMap(entries)
 
 proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
@@ -644,6 +651,14 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
       let actNode = lookupOpt(bEntries, KeyActivity, actFound)
       if actFound:
         ba.activity = expectText(actNode, KeyActivity)
+      var toFound: bool
+      let toNode = lookupOpt(bEntries, KeyTimeoutSeconds, toFound)
+      if toFound:
+        if toNode.kind != dvUInt or toNode.uintValue == 0 or
+            toNode.uintValue > uint64(high(int32)):
+          raiseRbpiCorrupt("body", "buildActions.timeoutSeconds must be a " &
+            "positive number of seconds")
+        ba.timeoutSeconds = int(toNode.uintValue)
       for it in expectArray(lookup(bEntries, KeyArgv,
           "ProfileBuildAction"), KeyArgv):
         ba.argv.add expectText(it, KeyArgv)

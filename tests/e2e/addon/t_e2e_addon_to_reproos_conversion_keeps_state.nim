@@ -649,6 +649,13 @@ const
           "/var/lib/a13-r11/%n.ran'\n",
         enabled = false,
         address = "r11TimerSvc")"""
+  R12EssResource = """
+      # Decision 177 (A13 review round 11): a drop-in that makes an
+      # essential unit, a console getty, require a unit the live check
+      # judges. The apply must be refused before it writes anything.
+      systemdSystemDropIn(unit = "getty@tty6.service", name = "a13-ess",
+        content = "[Unit]\nRequires=eth-r10-sock.service\nAfter=eth-r10-sock.service\n",
+        address = "r12Ess")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -1072,9 +1079,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
       ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
       R10Resources & R11Resources))
+    # The next generation with one profile drop-in that makes a console
+    # getty require a judged unit (decision 177's essential-unit case).
+    writeFile(work / "system_ess.nim", src0.replace(anchor, anchor &
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources & R11Resources & R12EssResource))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
-    for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
+    for f in ["system.nim", "system_next.nim", "system_ess.nim", PinsModule,
+              "home.nim"]:
       nw.copyTo(work / f, RefDir / f)
     let env = ReidentifyPrefix
     putReferenceSecrets(nw, env & eng & " system secret put", jwt, adminToken,
@@ -1366,9 +1379,44 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
             else: ""), judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") &
            detail)
+    # The premise of decision 153 for units outside the judged set (A13
+    # review round 10, finding 8), measured on this host's systemd with
+    # units of the gate's own and no repro in the loop: a unit that
+    # Requires= a unit whose start a condition hold skips (the full apply's
+    # hold, ConditionPathExists=!/) starts and runs, the skipped start
+    # counting as satisfied (systemd.unit(5), "Conditions and Asserts").
+    block:
+      discard nw.run("mkdir -p /run/systemd/system/a13m-held.service.d && " &
+        "printf '[Unit]\\nDescription=A13 decision-153 premise: held\\n\\n" &
+        "[Service]\\nType=oneshot\\nRemainAfterExit=yes\\nExecStart=/bin/true\\n' " &
+        "> /run/systemd/system/a13m-held.service && printf '[Unit]\\n" &
+        "ConditionPathExists=!/\\n' > /run/systemd/system/a13m-held.service.d/" &
+        "zz-hold.conf && printf '[Unit]\\nDescription=A13 decision-153 premise: " &
+        "requires the held unit\\nRequires=a13m-held.service\\nAfter=" &
+        "a13m-held.service\\n\\n[Service]\\nType=oneshot\\nRemainAfterExit=yes\\n" &
+        "ExecStart=/bin/true\\n' > /run/systemd/system/a13m-req.service && " &
+        "systemctl daemon-reload")
+      let st = nw.exec("systemctl start a13m-req.service")
+      let show = nw.exec("systemctl show -p ActiveState -p Result a13m-req.service " &
+        "| tr '\\n' ' '; echo; systemctl show -p ActiveState -p ConditionResult " &
+        "a13m-held.service | tr '\\n' ' '").stdout
+      let lines = show.splitLines()
+      let reqRan = st.exitCode == 0 and lines.len > 0 and
+        "ActiveState=active" in lines[0]
+      let heldSkipped = "ConditionResult=no" in show
+      discard nw.run("systemctl stop a13m-req.service a13m-held.service; rm -rf " &
+        "/run/systemd/system/a13m-held.service /run/systemd/system/a13m-held.service.d " &
+        "/run/systemd/system/a13m-req.service; systemctl daemon-reload")
+      record["decision153Premise"] = %*{"startExit": st.exitCode, "show": show,
+        "requirerRan": reqRan, "heldSkipped": heldSkipped}
+      step("decision 153's premise: on this systemd a unit that requires a " &
+           "condition-held unit starts, the held unit's start skipped",
+           reqRan and heldSkipped, show & "\n" & st.stdout & st.stderr)
     # Owner decision 153 (decided 2026-11-15): on a partial refusal, a unit
     # that Requires= a refused unit stays held with it, and the apply says
-    # so. eth-r10-gen.service is refused by the live check (a generator
+    # so. As decided again in A13 review round 10, every unit of the
+    # generation that requires it, judged or not: eth-r10-ureq.target is
+    # not a service, so the live check does not judge it. eth-r10-gen.service is refused by the live check (a generator
     # makes it root at the apply's reload, as round 6's live probe);
     # eth-r10-req.service is confined, enabled and Requires= it. Without
     # the rule it is released and started, and systemd counts its
@@ -1388,9 +1436,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "ReadWritePaths=/var/lib/a13-r5\\nExecStart=/bin/sh -c 'id -u > " &
         ProbeMarkerDir & "/eth-r10-req.service.ran'\\n\\n[Install]\\n" &
         "WantedBy=multi-user.target\\n\",\n        address = \"r10Req\")\n"
+      let ureq = "      systemdSystemUnit(name = \"eth-r10-ureq.target\",\n" &
+        "        content = \"[Unit]\\nDescription=A13 decision-153 probe: an " &
+        "unjudged unit that requires a refused unit\\nRequires=eth-r10-gen.service\\n" &
+        "After=eth-r10-gen.service\\n\\n[Install]\\nWantedBy=multi-user.target\\n\",\n" &
+        "        address = \"r10Ureq\")\n"
       let pf = probeFile("r10req")
       writeFile(work / pf, probeProfile("r10req",
-        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req))
+        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req & ureq))
       nw.copyTo(work / pf, RefDir / pf)
       let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
         pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
@@ -1406,12 +1459,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # Decision 153: a unit that requires a refused unit stays held.
       record["decision153"] = %*{"exit": r.exitCode, "reported": reported,
         "heldInEtc": heldReq, "started": started, "judged": judged(o)}
+      let ureqReported = "eth-r10-ureq.target requires eth-r10-gen.service" in o
+      let ureqHeld = nw.exec("test -f /etc/systemd/system/eth-r10-ureq.target.d/" &
+        "zz-repro-carried-check-hold.conf").exitCode == 0
+      let ureqActive = nw.exec("systemctl is-active eth-r10-ureq.target").stdout.strip()
       discard nw.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
         "/etc/systemd/system/eth-r10-gen.service.d && systemctl daemon-reload")
       step("decision 153: a unit that requires a unit the live check refuses " &
            "stays held with it, never started, and the apply says why",
            r.exitCode != 0 and reported and heldReq and not started,
            o & "\n" & journal & "\nheld: " & $heldReq & " ran: " & $ran)
+      record["decision153Unjudged"] = %*{"reported": ureqReported,
+        "heldInEtc": ureqHeld, "active": ureqActive}
+      step("decision 153: a unit the live check does not judge that requires " &
+           "a refused unit stays held with it, not active, and the apply " &
+           "says why", ureqReported and ureqHeld and ureqActive != "active",
+           o & "\nheld: " & $ureqHeld & " active: " & ureqActive)
     # A stored plan made now, before install-unit: no requirement is due
     # yet, so the plan has none (finding 4; applied after the restore).
     let planFile = probeFile("r5plan")
@@ -1762,6 +1825,66 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("decision 151, full apply (next generation, triggers active " &
            "before it): the socket and the path unit, held through the " &
            "apply, are active after it and their services run", ok, $ev)
+    # A13 review round 11, H1: a full apply that died between its hold and
+    # its release leaves its record of triggers and its /run holds. The
+    # gate stages that state for the unheld R11 socket (stopped, held by the
+    # full apply's own hold drop-in in /run, named in the record), and the
+    # next full apply must clear the stale hold before it starts the
+    # recorded trigger -- under the hold the start exits 0 and does nothing
+    # -- and keep the record until the trigger is up. Falsifier: the engine
+    # build live-check-restart-before-stale-holds-cleared.
+    block:
+      discard nw.run("systemctl stop " & R11Socket & " " & R11SocketSvc &
+        "; mkdir -p " &
+        "/run/systemd/system/" & R11Socket & ".d && printf '[Unit]\\n" &
+        "ConditionPathExists=!/\\n' > /run/systemd/system/" & R11Socket &
+        ".d/zz-repro-carried-check-hold.conf && printf '" & R11Socket &
+        "\\n' > /var/lib/repro/system/live-check-triggers && systemctl daemon-reload")
+      let staged = nw.exec("systemctl is-active " & R11Socket).stdout.strip()
+      let h1Apply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let h1Active = nw.exec("systemctl is-active " & R11Socket).stdout.strip()
+      let h1Record = nw.exec("cat /var/lib/repro/system/live-check-triggers " &
+        "2>/dev/null").stdout.strip()
+      let h1Hold = nw.exec("ls /run/systemd/system/" & R11Socket &
+        ".d/zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+      let h1Ok = staged != "active" and h1Active == "active" and
+        R11Socket notin h1Record and h1Hold.len == 0
+      record["decisionH1"] = %*{"staged": staged, "exit": h1Apply.exitCode,
+        "active": h1Active, "recordLeft": h1Record, "holdLeft": h1Hold,
+        "ok": h1Ok}
+      step("H1: the next full apply clears a dead apply's stale hold before " &
+           "it starts the triggers that apply left on record, and keeps the " &
+           "record until they are up", h1Ok, h1Apply.stdout & h1Apply.stderr &
+           "\nactive: " & h1Active & "\nrecord: " & h1Record & "\nhold: " & h1Hold)
+    # Decision 177 (A13 review round 11): with carried state restored, an
+    # apply of the next generation plus a drop-in that makes a console getty
+    # require a judged unit would hold an essential unit, so it is refused
+    # before it writes anything -- by that refusal and no other (its text,
+    # and the absence of every other refusal the apply reports). Falsifier:
+    # the engine build essential-requirers-held.
+    block:
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_ess.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let essText = "getty@tty6.service would be held for the carried-state check"
+      let otherRefusal = "carried state is not restored yet" in o or
+        "carried state's owners would not match" in o or
+        "ECarriedStatePending" in o.replace("ECarriedStatePending: getty@tty6.service would be held", "")
+      let refusedEss = r.exitCode != 0 and essText in o and not otherRefusal
+      let written = nw.exec("ls /etc/systemd/system/getty@tty6.service.d 2>&1").stdout
+      let dropInWritten = "a13-ess" in written
+      discard nw.run("rm -rf /etc/systemd/system/getty@tty6.service.d " &
+        "/run/systemd/system/getty@tty6.service.d; systemctl daemon-reload")
+      record["decisionEssential"] = %*{"exit": r.exitCode,
+        "refused": refusedEss, "essentialRefusalText": essText in o,
+        "otherRefusal": otherRefusal, "dropInWritten": dropInWritten}
+      step("decision 171: an apply in which an essential requirer would be held " &
+           "(a console getty that requires a judged unit) is refused before " &
+           "it writes anything", refusedEss and not dropInWritten,
+           o & "\n" & written)
     # Decision 151 with the socket's service running and connections
     # arriving during the apply (the common case): a trigger whose unit runs
     # cannot fire at the hold and is left alone -- with Accept=no the

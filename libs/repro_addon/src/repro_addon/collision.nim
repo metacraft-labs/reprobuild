@@ -90,9 +90,14 @@ type
       ## by name when the ``divert`` opt-in is asked for.
 
   AddonCollisionError* = object of CatchableError
-    ## A refusal of the decision table that has no typed add-on
-    ## diagnostic of its own: a symlink component, a foreign diversion,
-    ## a diversion opt-in on a base without diversions.
+    ## ``EAddOnCollision`` (``adCollision``): a refusal of the decision
+    ## table that has no more specific diagnostic -- a symlink component,
+    ## a foreign diversion, a diversion opt-in on a base without
+    ## diversions. Its message starts with the diagnostic's name, like
+    ## every add-on refusal's. It is deliberately not an ``EAddOn``: the
+    ## switch undoes a fresh switch refused by an ``EAddOn`` before its
+    ## flip, while a collision the before-each-write re-check finds takes
+    ## the failed-switch path, and that difference is kept.
 
   AddonDriftError* = object of CatchableError
     ## ``EDrift``: an object the add-on does not own differs from what the
@@ -160,6 +165,11 @@ type
     ucElsewhere = "elsewhere" ## transient (``/run/systemd/system``), generated, or local
                               ## (``/usr/local/lib``): shadowing it silently is wrong,
                               ## and no opt-in covers it
+
+proc newAddonCollisionError*(detail: string): ref AddonCollisionError =
+  ## An ``EAddOnCollision`` refusal; ``detail`` says what was refused and
+  ## why (``"refusing <address>: ..."``).
+  newException(AddonCollisionError, diagnosticMessage(adCollision, detail))
 
 proc classifyUnit*(u: UnitProvision): UnitClass =
   if u.loadState.startsWith("masked"):
@@ -267,7 +277,7 @@ proc loadDpkgIndex(root: string; idx: DpkgIndex) =
   if idx.loaded and stamp == idx.stamp: return
   let dir = root / DpkgInfoDir
   if not dirExists(dir):
-    raise newException(AddonCollisionError, "the dpkg package database " &
+    raise newAddonCollisionError("the dpkg package database " &
       "is incomplete: " & dir & " does not exist, so package ownership " &
       "cannot be observed; nothing is decided without it")
   idx.owner = initTable[string, string]()
@@ -348,14 +358,14 @@ proc readUnitProvision*(unit: string): UnitProvision =
         "NeedDaemonReload",
       "--", templateObservationName(unit)])
   except HostToolMissing as e:
-    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+    raise newAddonCollisionError("cannot observe unit " & unit &
       ": " & e.msg)
   if r.exitCode != 0:
-    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+    raise newAddonCollisionError("cannot observe unit " & unit &
       ": systemctl show exited " & $r.exitCode & ": " & r.output.strip())
   result = unitProvisionFromShow(r.output)
   if result.loadState.len == 0:
-    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+    raise newAddonCollisionError("cannot observe unit " & unit &
       ": systemctl show reported no LoadState: " & r.output.strip())
 
 proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
@@ -411,7 +421,7 @@ proc detectCollisionDriver*(root = "/"): CollisionDriver =
   ## refused rather than read as "nothing is owned" (``loadDpkgIndex``).
   if fileExists(root / "/var/lib/dpkg/status"):
     if not dirExists(root / DpkgInfoDir):
-      raise newException(AddonCollisionError, "the dpkg package database " &
+      raise newAddonCollisionError("the dpkg package database " &
         "is incomplete: " & root / DpkgInfoDir & " does not exist")
     return newDpkgDriver(root)
   raise newAddOnUnsupportedBase("unknown",
@@ -525,7 +535,7 @@ type
 
 proc refuseLink(o: TargetObservation; address: string) =
   if o.linkComponent.len > 0:
-    raise newException(AddonCollisionError, "refusing " & address & ": " &
+    raise newAddonCollisionError("refusing " & address & ": " &
       o.linkComponent & " is a symbolic link on the target path " & o.path &
       "; the add-on never writes through a link (threat model G29)")
 
@@ -536,7 +546,7 @@ proc refuseForeignDiversion(o: TargetObservation; address: string;
   ## called -- a local diversion to ``<path>.distrib`` made by hand is not
   ## the add-on's because it spells its name the way the add-on would.
   if not o.diversion.present or ownedByLedger: return
-  raise newException(AddonCollisionError, "refusing " & address & ": " &
+  raise newAddonCollisionError("refusing " & address & ": " &
     o.path & " is already diverted to " & o.diversion.divertTo & " by " &
     (if o.diversion.package == ":": "a local diversion the ledger does not list"
      else: "package " & o.diversion.package) &
@@ -555,7 +565,7 @@ proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
   ## one.
   if not o.ownership.viaUcf: return
   let hint = d.dropInHint(o.path)
-  raise newException(AddonCollisionError, "refusing " & address & ": " &
+  raise newAddonCollisionError("refusing " & address & ": " &
     o.path & " is managed by package " & o.ownership.package &
     " through ucf (/var/lib/ucf/registry), and a ucf-managed file cannot " &
     "be diverted: ucf would withhold the package's next version of it " &
@@ -573,7 +583,7 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
   refuseLink(o, inp.address)
   refuseForeignDiversion(o, inp.address, inp.ledgerOwnsDiversion)
   if o.exists and not o.isRegular:
-    raise newException(AddonCollisionError, "refusing " & inp.address &
+    raise newAddonCollisionError("refusing " & inp.address &
       ": " & o.path & " exists and is not a regular file")
   # Row 2: the ledger owns it -- unless a package came to own the path
   # since (spec §4.3, §7.6, §7.8): that is a package-owned path, refused by
@@ -673,7 +683,7 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       raise newAddOnPackageOwned(o.path, o.ownership.package,
                                  o.ownership.conffile, d.dropInHint(o.path))
     if not d.supportsDiversions:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": " & o.path & " is owned by package " & o.ownership.package &
         " and the " & d.name & " base has no diversions; `collision = " &
         "\"divert\"` is unavailable here")
@@ -729,10 +739,10 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
     refuseLink(o, inp.address)
     refuseForeignDiversion(o, inp.address, inp.ledgerOwns)
     if not d.supportsDiversions:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": the " & d.name & " base has no diversions")
     if o.ownership.package.len == 0:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": no installed package owns " & path & "; a diversion is only " &
         "for a package-owned path (declare the file as an fs.systemFile)")
     refuseUcfDivert(d, o, inp.address)
@@ -760,11 +770,11 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
     let packageUnit = cls == ucPackage
     case cls
     of ucMasked:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": " & inp.unit & " is masked (" & o.unit.loadState &
         "); the add-on does not write over a mask")
     of ucElsewhere:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": " & inp.unit & " is loaded from " & o.unit.fragmentPath &
         ", a transient, generated or local unit outside the package and " &
         "/etc directories; an /etc unit would shadow it silently and no " &
@@ -775,7 +785,7 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
       # The unit itself is not written; the drop-in file is decided by
       # the file rows. Here: what the drop-in modifies, which must exist.
       if cls == ucNone:
-        raise newException(AddonCollisionError, "refusing " & inp.address &
+        raise newAddonCollisionError("refusing " & inp.address &
           ": nothing provides " & inp.unit & ", so a drop-in has nothing " &
           "to modify; declare the unit itself")
       dec.verdict = cvDropIn

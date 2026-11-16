@@ -28,6 +28,10 @@
 import std/[net, os, strutils, sysrand]
 import blake3
 import repro_core
+import repro_core/owned_directory
+
+when defined(windows):
+  from std/winlean import WSAEINTR
 
 when defined(posix):
   import std/posix
@@ -107,48 +111,14 @@ proc controlSocketPath*(endpointDir: string): string =
 proc controlTokenPath*(endpointDir: string): string =
   endpointDir / ControlTokenName
 
-when defined(posix):
-  proc verifyOwnedDirectory(path: string; privateDir: bool) =
-    ## Refuse ``path`` unless it is a real directory (not a symlink) owned
-    ## by this user. ``privateDir`` additionally refuses ANY group or other
-    ## permission (the endpoint directory itself); otherwise only group or
-    ## other WRITE is refused, which is what lets another account replace
-    ## an entry below it.
-    var st: Stat
-    if lstat(path.cstring, st) != 0:
-      raiseOSError(osLastError(),
-        "cannot inspect the dev-session control directory " & path)
-    if not S_ISDIR(st.st_mode):
-      raise newException(IOError,
-        "refusing the dev-session control directory " & path &
-        ": it is not a directory (a symlink or another file is in its place)")
-    if int(st.st_uid) != currentUserId():
-      raise newException(IOError,
-        "refusing the dev-session control directory " & path &
-        ": it is owned by uid " & $st.st_uid & ", not by this user (uid " &
-        $currentUserId() & "), so another account could read the session " &
-        "token or replace the control socket")
-    let mode = int(st.st_mode) and 0o777
-    let forbidden = if privateDir: 0o077 else: 0o022
-    if (mode and forbidden) != 0:
-      raise newException(IOError,
-        "refusing the dev-session control directory " & path & ": its mode " &
-        "is 0" & toOct(mode, 3) & ", and it must grant " &
-        (if privateDir: "no group or other permissions (0700)"
-         else: "no group or other write permission") &
-        "; remove it or fix its mode and start the session again")
-
-  proc ensureOwnedDirectory(path: string; privateDir: bool) =
-    ## Create ``path`` as ``0700`` when it is missing; then verify it,
-    ## whoever created it.
-    if mkdir(path.cstring, Mode(0o700)) == 0:
-      # mkdir's mode is narrowed by the umask; set it exactly.
-      if chmod(path.cstring, Mode(0o700)) != 0:
-        raiseOSError(osLastError(), path)
-    elif errno != EEXIST:
-      raiseOSError(osLastError(),
-        "cannot create the dev-session control directory " & path)
-    verifyOwnedDirectory(path, privateDir)
+const DevSessionDirRole = OwnedDirectoryRole(
+  noun: "dev-session control directory",
+  exposure: "another account could read the session token or replace the " &
+    "control socket",
+  remedy: "remove it or fix its mode and start the session again")
+  ## How a refusal is worded. The check itself is
+  ## ``repro_core/owned_directory``, shared with the dev store daemon's
+  ## endpoint directory.
 
 proc ensurePrivateEndpointDir*(endpointDir: string) =
   ## Create (or admit) ``endpointDir`` and every directory between the
@@ -173,7 +143,8 @@ proc ensurePrivateEndpointDir*(endpointDir: string) =
     let sessionsDir = parentDir(endpointDir)
     let chain = @[parentDir(sessionsDir), sessionsDir, endpointDir]
     for i, dir in chain:
-      ensureOwnedDirectory(dir, privateDir = i == chain.high)
+      ensureOwnedDirectory(dir, privateDir = i == chain.high,
+        DevSessionDirRole)
   else:
     createDir(extendedPath(endpointDir))
 
@@ -219,6 +190,38 @@ proc writeControlToken*(path, token: string) =
         discard unlink(path.cstring)
   else:
     writeFile(extendedPath(path), token)
+
+proc writeNewFileExclusive*(path, content: string) =
+  ## Create ``path`` as a NEW file holding ``content``: on POSIX
+  ## ``O_CREAT | O_EXCL | O_NOFOLLOW`` (mode ``0666`` narrowed by the umask,
+  ## as ``writeFile`` would leave it), so an existing entry -- a symlink
+  ## planted at a predictable name in a directory another account can
+  ## write -- is refused rather than written through. Raises ``OSError``;
+  ## a partially written file is removed.
+  when defined(posix):
+    let fd = posix.open(path.cstring,
+      O_WRONLY or O_CREAT or O_EXCL or O_NOFOLLOW or O_CLOEXEC, Mode(0o666))
+    if fd < 0:
+      raiseOSError(osLastError(), "cannot create " & path)
+    var ok = false
+    try:
+      var written = 0
+      while written < content.len:
+        let n = posix.write(fd, unsafeAddr content[written],
+          content.len - written)
+        if n < 0:
+          if errno == EINTR: continue
+          raiseOSError(osLastError(), "cannot write " & path)
+        written += n
+      ok = true
+    finally:
+      discard posix.close(fd)
+      if not ok:
+        discard unlink(path.cstring)
+  else:
+    if fileExists(extendedPath(path)) or symlinkExists(extendedPath(path)):
+      raise newException(OSError, "cannot create " & path & ": it exists")
+    writeFile(extendedPath(path), content)
 
 proc readControlToken*(path: string): string =
   ## The token at ``path``. A client that cannot read it is not the
@@ -350,3 +353,44 @@ proc refuseNonLoopbackBind*(bindValue, host: string; allowRemote: bool) =
     "the session control API to the network, where the session token is " &
     "the only thing standing between it and anyone who can reach the port; " &
     "pass " & AllowRemoteFlag & " as well to accept that")
+
+type ControlWriter* = proc (data: pointer; size: int): int {.closure.}
+  ## One write to a control-API connection: the number of bytes accepted,
+  ## or a negative number with the OS error set (``osLastError``), exactly
+  ## as ``std/net``'s low-level ``send(socket, pointer, size)`` reports.
+
+proc writeInterrupted(err: OSErrorCode): bool =
+  when defined(windows):
+    err.int32 == WSAEINTR
+  else:
+    err.int32 == EINTR
+
+proc writeFully*(write: ControlWriter; data: string) =
+  ## Write all of ``data`` through ``write``, resuming a short write at the
+  ## first byte not yet accepted, and raise ``OSError`` when the peer has
+  ## gone away.
+  ##
+  ## Written here rather than taken from ``std/net``'s ``send(socket,
+  ## string)`` because the Nim this project pins has two defects in that
+  ## loop (upstream nim-lang/Nim#26286 and #26287, absent from the fork):
+  ## with the default ``SafeDisconn`` flag it swallows EPIPE / ECONNRESET
+  ## and retries forever, so one client that resets its connection keeps
+  ## the single-threaded control-API listener spinning and ``repro down``
+  ## is never served again; and after a short write it sends again from
+  ## byte 0, so the client receives the start of the answer twice.
+  ## An interrupted write (EINTR) wrote nothing and is retried; any other
+  ## failure ends this one exchange, and the accept loop goes on.
+  var written = 0
+  while written < data.len:
+    let accepted = write(unsafeAddr data[written], data.len - written)
+    if accepted > 0:
+      written += accepted
+    elif accepted == 0:
+      # A stream socket accepts at least one byte or fails; zero would
+      # otherwise loop forever.
+      raise newException(OSError,
+        "the control-API connection accepted no bytes; it is closed")
+    else:
+      let err = osLastError()
+      if not writeInterrupted(err):
+        raiseOSError(err, "the control-API client went away")

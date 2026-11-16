@@ -117,6 +117,13 @@ suite "the parse-time half refuses a floored unit ordered before the re-assertio
                       rawUnit(u, body))
       checkpoint m
       check ("a.service -> " & u & " -> " & target) in m
+  test "before the boot-hold unit (A9 review round 16, finding 6)":
+    # The re-assertion is after sysinit.target, which the boot-hold unit is
+    # before; the reviewer's probe p_boot_hold_cycle.nim.
+    for extra in ["Before=repro-addon-boot-hold.service\n",
+                  "DefaultDependencies=no\nBefore=repro-addon-boot-hold.service\n"]:
+      checkpoint extra
+      check Cycle in refused(unitStanza("a9p.service", extra))
   test "before the egress observer's slice":
     check Cycle in refused(unitStanza("a.service",
       "Before=system-reproagent.slice\n"))
@@ -221,6 +228,12 @@ suite "ReassertWaitsFor names what generation 0 orders the re-assertion after":
     check EgressUnit in units
     check FloorReassertUnit == ReassertUnit
     var closure = @[ReassertUnit]
+    # The re-assertion keeps systemd's default dependencies, which order it
+    # after sysinit.target and basic.target (systemd.service(5), "Default
+    # Dependencies"); a unit ordered before either is ordered before it (A9
+    # review round 16, finding 6: the boot-hold unit's Before=sysinit.target).
+    if "DefaultDependencies=no" notin units[ReassertUnit]:
+      closure.add(["sysinit.target", "basic.target"])
     var changed = true
     while changed:
       changed = false
@@ -244,3 +257,4 @@ suite "ReassertWaitsFor names what generation 0 orders the re-assertion after":
     check missing.len == 0
     # The egress observer's slice is reached only through the observer.
     check AgentSlice in closure
+    check BootHoldUnit in closure

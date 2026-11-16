@@ -42,6 +42,8 @@ import repro_peer_cache/types
 import repro_deploy_agent/secrets
 
 import ./addon_apply
+import ./uninstall
+import ./record_dir
 import ./attestation
 import ./evidence
 import ./evidence_keys
@@ -154,7 +156,11 @@ proc rootEntry(path, kindHint, replaced: string): LedgerEntry =
   let st = statOwner(path)
   LedgerEntry(class: lcRoot, path: path, mode: st.mode, owner: st.owner,
               kindHint: kindHint, replaced: replaced,
-              collision: (if replaced.len > 0: "adopt" else: ""))
+              collision: (if replaced.len > 0: "adopt" else: ""),
+              # A takeover's prior value is read before the takeover
+              # (§13 decision 167): the marker says so to uninstall.
+              observation: (if replaced.len > 0: PriorCapturedBeforeTakeover
+                            else: ""))
 
 proc baseRootValue(path: string): string =
   if path == "/etc" or path.startsWith("/etc/"): etcEntryValue(path)
@@ -195,6 +201,34 @@ const
     ("/run/repro", 0o755), (SecretsRunDir, 0o700),
     (AgentStateDir, 0o700), (AgentStateRecordsDir, 0o700),
   ]
+
+proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
+                        logDir = UninstallOverrideDir) =
+  ## The trust anchors validated first (strict: a bad file raises and
+  ## nothing is written, a stale token included); then a state-removal
+  ## token an earlier uninstall left (§13 decision 165), which belongs to
+  ## that uninstall and not to this install, removed durably; then the
+  ## directory of the add-on's uninstall records made root's 0700 through
+  ## a descriptor that does not follow a link (§13 decision 178: an
+  ## existing root directory that passes the checks is tightened to 0700,
+  ## anything else is refused). Raises ``AddonBootstrapError`` naming the
+  ## remedy when the directory cannot be used.
+  when mutated("token-cleared-before-anchors"):
+    try: clearStateRemovalToken(logDir)     # FALSIFIER: before the anchors
+    except OSError: discard
+  for p in [deploySignersPath, cachePublishersPath]:
+    if p.len > 0:
+      discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
+  try:
+    clearStateRemovalToken(logDir)
+    when not mutated("bootstrap-leaves-log-dir"):
+      ensureCheckedDir(logDir, tighten = true)
+  except OSError as e:
+    raise newException(AddonBootstrapError, logDir &
+      " cannot hold the add-on's uninstall records (" & e.msg & "). It " &
+      "is not one this add-on made: inspect it, remove it (or the entry " &
+      "named " & StateRemovalTokenName & " in it), and run bootstrap " &
+      "again; nothing was written")
 
 proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -251,9 +285,7 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       "inputs under /var/lib/repro, which the preflight inspected at the " &
       "default state directory " & DefaultStateDir & "; --state-dir " &
       stateDir & " is refused; nothing was written")
-  for p in [opts.deploySignersPath, opts.cachePublishersPath]:
-    if p.len > 0:
-      discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
+  prepareRecordsDir(opts.deploySignersPath, opts.cachePublishersPath)
 
   # 2. Roots: created, or taken over where the plan says they are
   # pre-bootstrap inputs. The directories the plan lists beyond the
@@ -277,8 +309,23 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       if mode < 0:
         raise newException(AddonBootstrapError, "the plan lists " & p &
           " as a pre-bootstrap input, which bootstrap has no mode for")
-      entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
+      # The prior value first: rootEntry's arguments are evaluated left to
+      # right, and the takeover changes the mode and owner it records
+      # (§13 decision 167).
+      when mutated("prior-mode-captured-after-takeover"):
+        entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
+      else:
+        let before = baseRootValue(p)
+        entries.add(rootEntry(p, takeOverRootDir(p, mode), before))
   ensureSystemStateDir(stateDir)
+  # §13 decision 178, amended: the identity of the records directory made
+  # above, recorded in the root-only state, so every later checked open
+  # refuses another directory put in its place.
+  when not mutated("bootstrap-leaves-log-dir"):
+    let ident = identityOfCheckedDir(UninstallOverrideDir)
+    if ident.len > 0:
+      createDir(parentDir(recordsDirIdentityPath(stateDir)))
+      writeFileAtomic(recordsDirIdentityPath(stateDir), ident & "\n", 0o600)
   # Every apply's pending-switch check finds the add-on's state through
   # this, whatever --state-dir it was itself given (§7.7).
   writeAddonStateDirPointer(stateDir)

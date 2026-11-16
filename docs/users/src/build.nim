@@ -106,6 +106,13 @@ when isMainModule:
                         contentDir = stagedDir,
                         docsTokensCss = metacraftDocsTokensCss(),
                         clientEntry = "src/main.nim")
+  # Emit single-source topic-based `/agents/*.md`, `/llms.txt` and assembled
+  # `/llms-full.txt` from `docs/agents/` and the staged `build/content/` pages.
+  let llmsExit = execShellCmd(
+    "python3 ../../scripts/render_user_docs_generated.py --emit-web-llms public " &
+    quoteShell(stagedDir))
+  if llmsExit != 0:
+    quit("docs build: failed to emit web llms.txt bundle", 1)
   echo "SSG: rendered ", n, " static pages into ./public/ (",
     stats.claims, " unverified claims across ", stats.pages, " pages; ",
     "repro.version = ", values["repro.version"], ")"

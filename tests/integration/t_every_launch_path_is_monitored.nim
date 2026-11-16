@@ -853,7 +853,12 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
       spawning: @["commandSpec", "launchProcess"],
       inert: @["libraryInfo", "shellScriptDir", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
-               "waitForExit", "cancelAndWait", "close"]),
+               "waitForExit", "cancelAndWait", "close",
+               # The Windows leftover sweep. It reads the Job Object a
+               # command already runs in and terminates it when anything is
+               # still alive; on POSIX it answers false. It ends processes
+               # and never starts one.
+               "endJobLeftovers"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
     # on the capability list with no surface at all. `startDirect` (L1),
     # `offerWithRunQuotaBatch` (L3) and `startGrantedWithRunQuota` (L3b)
@@ -896,6 +901,12 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "extNull", "extText", "extInt", "extReal",
                "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
                "denialDeadlockTimeoutMs",
+               # Build-wait pressure: the switch read, a one-way report on
+               # the session's existing connection, and `repro pressure`,
+               # which connects to the daemon and asks (`QueryPressure`).
+               # None starts a process.
+               "buildPressureEnabled", "sendPressureReport",
+               "runPressureCommand",
                # The bounded queue wait (e1c068066, "make a RunQuota queue
                # wait loud and bounded"). Read one by one: the grant poll,
                # the liveness probe and the lease-holder snapshot are
@@ -927,6 +938,12 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # with the caller's existing spawn path. The other two close
                # or report the connection held to an adopted daemon. None
                # starts a process.
+               # The session-close diagnostic. `runQuotaSessionLeases` asks
+               # the daemon's `leases` inspection over the session's existing
+               # connection, and `summarizeSessionLeases` is a pure JSON
+               # parse that names the leases a refused close leaked. Neither
+               # starts a process.
+               "runQuotaSessionLeases", "summarizeSessionLeases",
                "decideRunQuotaHandover", "holdsAdoptedDaemon",
                "releaseAdoptedDaemonHold",
                # The hold every POSIX adopter and starter of the shared

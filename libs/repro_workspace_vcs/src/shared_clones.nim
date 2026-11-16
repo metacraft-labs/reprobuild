@@ -630,6 +630,16 @@ const
     ## Maximum wait time (2 minutes) when acquiring a per-cache-entry or
     ## per-checkout lock before giving up.
   VcsLockPollIntervalMs = 25
+  VcsLockWaitNoticeMs* {.intdefine.} = 5_000
+    ## How long a waiter waits in silence. After this, and then every
+    ## ``VcsLockWaitNoticeRepeatMs``, it says on stderr which lock it is
+    ## waiting for and who holds it (pid, command, age). A lazy read through
+    ## the pool transport waits without a deadline, and a pre-push that sat
+    ## behind a hung holder for 55 minutes printed nothing at all
+    ## (issues/2026-11-15-a-hung-cache-push-holds-the-shared-pool-lock-and-
+    ## stalls-every-pre-push.md). Negative disables the notice.
+  VcsLockWaitNoticeRepeatMs = 60_000
+  VcsLockHolderMagic = "reprobuild.vcs-lock-holder.v1"
 
 when defined(windows):
   const
@@ -717,6 +727,88 @@ proc checkoutLockPath*(repoPath: string): string {.gcsafe.} =
     return repoPath / "repro-vcs-lock"
   ""
 
+proc vcsLockHolderPath*(lockFile: string): string {.gcsafe.} =
+  ## The holder record beside ``lockFile``: who holds the lock, since when.
+  ## A sibling file rather than the lock file's own bytes, because on Windows
+  ## the lock IS an unshared open of that file, which no waiter can read.
+  if lockFile.len == 0: "" else: lockFile & ".holder"
+
+proc holderCommandLine(): string {.gcsafe.} =
+  ## This process's command line, on one bounded line.
+  try:
+    var parts = @[getAppFilename()]
+    for i in 1 .. paramCount(): parts.add(paramStr(i))
+    result = quoteShellCommand(parts)
+  except CatchableError:
+    result = ""
+  for ch in result.mitems:
+    if ch in {'\n', '\r'}: ch = ' '
+  if result.len > 512: result = result[0 ..< 509] & "..."
+
+proc writeVcsLockHolder(lockFile: string) {.gcsafe.} =
+  ## Record this process as the holder of ``lockFile``. Called only while the
+  ## OS lock is held, so no other repro writes the record concurrently. It is
+  ## diagnostics: a failure to write it never costs the caller its lock.
+  let path = vcsLockHolderPath(lockFile)
+  if path.len == 0: return
+  let staged = path & "." & $getCurrentProcessId() & ".tmp"
+  try:
+    writeFile(staged, VcsLockHolderMagic & "\npid=" & $getCurrentProcessId() &
+      "\nacquired=" & $int64(epochTime()) & "\ncommand=" &
+      holderCommandLine() & "\n")
+    moveFile(staged, path)
+  except CatchableError:
+    try: removeFile(staged)
+    except CatchableError: discard
+
+proc readVcsLockHolder(lockFile: string):
+    tuple[pid: int; acquired: int64; command: string] {.gcsafe.} =
+  ## The record ``writeVcsLockHolder`` left; ``pid`` 0 when there is none.
+  try:
+    let lines = readFile(vcsLockHolderPath(lockFile)).splitLines()
+    if lines.len == 0 or lines[0] != VcsLockHolderMagic: return
+    for line in lines[1 .. ^1]:
+      if line.startsWith("pid="): result.pid = parseInt(line[4 .. ^1])
+      elif line.startsWith("acquired="):
+        result.acquired = parseBiggestInt(line[9 .. ^1])
+      elif line.startsWith("command="): result.command = line[8 .. ^1]
+  except CatchableError, Defect:
+    result = (pid: 0, acquired: 0'i64, command: "")
+
+proc clearVcsLockHolder(lockFile: string) {.gcsafe.} =
+  ## Remove our holder record. Called before the OS lock is released, so the
+  ## next holder's record is never the one removed.
+  if readVcsLockHolder(lockFile).pid == getCurrentProcessId():
+    try: removeFile(vcsLockHolderPath(lockFile))
+    except CatchableError: discard
+
+proc describeVcsLockHolder*(lockFile: string): string {.gcsafe.} =
+  ## "held by pid N for Ss: <command>", from the holder record. A holder that
+  ## left no record (a repro build older than the record, or another tool) is
+  ## named as such rather than guessed at.
+  let holder = readVcsLockHolder(lockFile)
+  if holder.pid <= 0:
+    return "held by a process that left no holder record (an older repro " &
+      "build, or another tool)"
+  result = "held by pid " & $holder.pid
+  if holder.acquired > 0:
+    result.add(" for " & $max(0'i64, int64(epochTime()) - holder.acquired) & "s")
+  when not defined(windows):
+    if posix.kill(Pid(holder.pid), 0) != 0 and errno == ESRCH:
+      result.add(" (that process has exited)")
+  if holder.command.len > 0:
+    result.add(": " & holder.command)
+
+proc noticeVcsLockWait(lockFile: string; waitedSeconds: float) {.gcsafe.} =
+  ## The line a waiter prints instead of sleeping in silence.
+  try:
+    {.cast(gcsafe).}:
+      stderr.writeLine("repro: waiting " & $int(waitedSeconds) &
+        "s for the lock " & lockFile & ", " & describeVcsLockHolder(lockFile))
+      stderr.flushFile()
+  except CatchableError:
+    discard
+
 proc acquireVcsFileLock*(lockFile: string;
                          timeoutMs = VcsLockDefaultTimeoutMs): VcsFileLock {.gcsafe.} =
   ## Acquire a cross-process and cross-thread re-entrant exclusive lock on
@@ -738,7 +830,13 @@ proc acquireVcsFileLock*(lockFile: string;
       return VcsFileLock(acquired: false)
 
   let tid = getThreadId()
-  let deadline = epochTime() + (float(max(0, timeoutMs)) / 1000.0)
+  let waitStarted = epochTime()
+  let deadline = waitStarted + (float(max(0, timeoutMs)) / 1000.0)
+  var nextNotice = waitStarted + float(VcsLockWaitNoticeMs) / 1000.0
+  template noticeIfDue() =
+    if VcsLockWaitNoticeMs >= 0 and epochTime() >= nextNotice:
+      noticeVcsLockWait(lockFile, epochTime() - waitStarted)
+      nextNotice = epochTime() + float(VcsLockWaitNoticeRepeatMs) / 1000.0
   while true:
     var inUseByOtherThread = false
     var reentered = false
@@ -758,6 +856,7 @@ proc acquireVcsFileLock*(lockFile: string;
     if inUseByOtherThread:
       if timeoutMs >= 0 and epochTime() >= deadline:
         return VcsFileLock(acquired: false)
+      noticeIfDue()
       sleep(VcsLockPollIntervalMs)
       continue
 
@@ -784,11 +883,14 @@ proc acquireVcsFileLock*(lockFile: string;
         # waiting indefinitely.
         permanentFault = int(osLastError()) notin [32, ERROR_LOCK_VIOLATION]
     else:
-      # This new mode has no contention deadline. An exec'd credential or
-      # transport helper must not retain its lock if the owner is interrupted.
-      let descriptorFlags = if timeoutMs < 0: posix.O_CLOEXEC else: cint(0)
+      # Close-on-exec in every mode. An flock belongs to the open file
+      # description, so a child that inherited this descriptor -- a
+      # credential helper, ``git push`` and the ``receive-pack`` and hooks it
+      # runs in the pool -- keeps the lock after its owner has gone. In the
+      # 2026-11-15 incident a hung ``receive-pack`` held the pool lock this
+      # way as fd 3. (Windows handles are opened noninheritable already.)
       let fd = posix.open(cstring(lockFile),
-        posix.O_CREAT or posix.O_RDWR or descriptorFlags, posix.Mode(0o600))
+        posix.O_CREAT or posix.O_RDWR or posix.O_CLOEXEC, posix.Mode(0o600))
       if fd >= 0:
         if cFlock(fd, LOCK_EX_C or LOCK_NB_C) == 0:
           osAcquired = true
@@ -806,6 +908,7 @@ proc acquireVcsFileLock*(lockFile: string;
         permanentFault = int(osLastError()) != int(posix.EINTR)
 
     if osAcquired:
+      writeVcsLockHolder(lockFile)
       return VcsFileLock(key: key, lockFile: lockFile, acquired: true)
 
     {.cast(gcsafe).}:
@@ -816,6 +919,7 @@ proc acquireVcsFileLock*(lockFile: string;
 
     if permanentFault or (timeoutMs >= 0 and epochTime() >= deadline):
       return VcsFileLock(acquired: false)
+    noticeIfDue()
     sleep(VcsLockPollIntervalMs)
 
 proc releaseVcsFileLock*(lock: var VcsFileLock) {.gcsafe.} =
@@ -832,6 +936,7 @@ proc releaseVcsFileLock*(lock: var VcsFileLock) {.gcsafe.} =
           vcsLockEntries.del(lock.key)
           shouldClose = true
   if shouldClose:
+    clearVcsLockHolder(lock.lockFile)
     when defined(windows):
       if toClose.handle != 0 and toClose.handle != INVALID_HANDLE_VALUE:
         discard closeHandle(toClose.handle)
@@ -1072,6 +1177,7 @@ proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
   ##
   ## ``gc.pruneExpire`` is written LAST, so a run that fails part-way never
   ## leaves a pool expiring objects without the hook that protects them.
+  ##
   result = true
   for (key, value) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
       barePath):
@@ -3975,6 +4081,97 @@ proc cacheRefPushArgvFault*(argv: openArray[string];
         cacheRefNamespace
   ""
 
+const
+  CacheRefPushDeadlineMs* {.intdefine.} = 60_000
+    ## How long the cache push may hold the pool lock with its ``git push``.
+    ## The push is best-effort and every lazy read, refresh and pre-push of
+    ## that repository on the host waits behind it, so it must not be able
+    ## to hold the lock indefinitely. Half the ordinary VCS lock deadline: a
+    ## bounded waiter that queued behind the push outlasts it, stop grace
+    ## included. A push that needs longer loses only its cache ref; the
+    ## commit is untouched and its objects reach the pool by ordinary fetch.
+  CacheRefPushStopGraceMs = 3_000
+    ## Between SIGTERM and SIGKILL when the deadline stops the push. Git
+    ## removes its lock files and push quarantine on SIGTERM.
+
+proc stopProcessTree(process: Process) =
+  ## Stop ``process`` and everything it started. On POSIX it leads a process
+  ## group of its own (``poDaemon``), which holds ``git push``, the
+  ## ``receive-pack`` it runs in the pool and the pool's hooks: SIGTERM so
+  ## git can clean up, then SIGKILL for whatever did not exit in the grace.
+  let pid = process.processID
+  when defined(windows):
+    discard execCmdExCloseOnce("taskkill /T /F /PID " & $pid)
+  else:
+    discard posix.kill(Pid(-pid), SIGTERM)
+    let graceEnds = epochTime() + float(CacheRefPushStopGraceMs) / 1000.0
+    var groupGone = false
+    while epochTime() < graceEnds:
+      # Reap the leader once it exits; the group is gone when no member
+      # remains to receive a signal.
+      try: discard process.peekExitCode()
+      except OSError: discard
+      if posix.kill(Pid(-pid), 0) != 0:
+        groupGone = true
+        break
+      sleep(20)
+    # Only a group that still exists is killed: once it is empty its id is
+    # free for the system to hand to an unrelated process group.
+    if not groupGone:
+      discard posix.kill(Pid(-pid), SIGKILL)
+  try: discard process.waitForExit()
+  except OSError: discard
+
+proc runGitWithDeadline(gitBin: string; args: openArray[string];
+                        lazyFetch: bool; deadlineMs: int):
+    tuple[code: int; output: string; timedOut: bool] =
+  ## Run git (merged output) and stop its whole process tree once
+  ## ``deadlineMs`` has passed. Output goes to a file through the pool's
+  ## shell, so no pipe can fill while this process is only watching the
+  ## clock, and stdin is ``/dev/null``.
+  let env = scrubbedGitRepositoryEnv()
+  if lazyFetch: env.del("GIT_NO_LAZY_FETCH")
+  else: env["GIT_NO_LAZY_FETCH"] = "1"
+  var log: tuple[cfile: File, path: string]
+  try:
+    log = createTempFile("git-deadline-", ".log")
+    log.cfile.close()
+  except CatchableError as err:
+    return (code: -1, output: "cannot create the log for " & gitBin & ": " &
+      err.msg, timedOut: false)
+  defer:
+    try: removeFile(log.path)
+    except CatchableError: discard
+  var script = quotePoolShell(gitBin)
+  for arg in args: script.add(" " & quotePoolShell(arg))
+  script.add(" </dev/null >" & quotePoolShell(log.path) & " 2>&1")
+  var process: Process
+  try:
+    process = uncontrolledStartProcess(poolTransportShell(gitBin),
+      args = @["-c", script], env = env, options = {poDaemon, poParentStreams})
+  except CatchableError as err:
+    return (code: -1, output: "cannot run " & gitBin & ": " & err.msg,
+      timedOut: false)
+  try:
+    let deadline = epochTime() + float(max(0, deadlineMs)) / 1000.0
+    var pollMs = 1
+    while true:
+      let code = process.peekExitCode()
+      if code != -1:
+        result.code = code
+        break
+      if epochTime() >= deadline:
+        stopProcessTree(process)
+        result.code = -1
+        result.timedOut = true
+        break
+      sleep(pollMs)
+      pollMs = min(pollMs * 2, 50)
+  finally:
+    process.close()
+  try: result.output = readFile(log.path)
+  except CatchableError: discard
+
 proc cacheRefPushArgv*(repoPath: string; plan: CacheRefPushPlan): seq[string] =
   ## The argv for a validated plan. ``--force --no-verify`` is correct only
   ## because the destination is this machine's own object cache: the
@@ -3988,7 +4185,8 @@ proc cacheRefPushArgv*(repoPath: string; plan: CacheRefPushPlan): seq[string] =
     "HEAD:" & plan.cacheRef]
 
 proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
-                   branch = ""): SharedCloneResult =
+                   branch = "";
+                   deadlineMs = CacheRefPushDeadlineMs): SharedCloneResult =
   ## Push ``repoPath``'s current branch (or the explicit ``branch``) into
   ## the shared bare under ``refs/cache/<workspaceName>/<branch>``, using
   ## ``--force --no-verify`` (the publication gate does not apply to an
@@ -4007,6 +4205,11 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
   ## ref it cannot vouch for is refused here rather than pushed somewhere
   ## else. See ``cacheRefPushPlan`` for why that has to be a rule and not a
   ## convention.
+  ##
+  ## It holds the pool lock for at most ``deadlineMs``: past that the push's
+  ## whole process tree is stopped, the lock released and a diagnostic
+  ## returned. A ``receive-pack`` that never finishes once held the lock for
+  ## an hour while every pre-push on the host waited behind it.
   let useBranch =
     if branch.len > 0: branch else: currentBranch(gitBin, repoPath)
   if useBranch.len == 0:
@@ -4032,7 +4235,18 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
     # Send a self-contained pack and disable all lazy fetches in this locked
     # best-effort operation. Unexpected missing history then refuses the cache
     # push rather than waiting on the lock its own parent holds.
-    let res = runGitEnv(gitBin, argv, lazyFetch = false)
+    let res = runGitWithDeadline(gitBin, argv, lazyFetch = false, deadlineMs)
+    if res.timedOut:
+      # SIGKILL can leave the ref's lock file behind, and then every later
+      # push of this ref fails. Only this workspace's cache push writes this
+      # ref, and only under the pool lock we still hold.
+      try: removeFile(sharedBarePath / (plan.cacheRef & ".lock"))
+      except CatchableError: discard
+      return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "cache-ref push exceeded its " & $(deadlineMs div 1000) &
+          "s deadline while holding the pool lock and was stopped; the " &
+          "commit is intact and " & plan.cacheRef & " was not updated: " &
+          res.output.strip())
     if res.code != 0:
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
         diagnostic: "cache-ref push failed (" & $res.code & "): " &

@@ -51,6 +51,10 @@ from ./fingerprint import sha256OfFile
 
 import repro_infra/service_floor
 import repro_infra/service_account
+import repro_infra/addon_diagnostics
+
+const FloorRefusalPrefix = $adFloorNotEffective & ":"
+  ## How an ``EAddOnFloorNotEffective`` refusal's first line starts.
 
 type
   ShowProps* = Table[string, string]
@@ -1058,7 +1062,13 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
     if v.invocationStart <= 0:
       return "systemd reports no start for the unit's last run"
     let window = (when mutated("recreated-window-exact"): 0'i64 else: RestartWindowNs)
-    if v.btime < v.invocationStart - window:
+    # The run's real start (``runStartOf``) bounds it from below too:
+    # after a Restart= restart, a tree born during the RestartSec= wait,
+    # before the run began, is not the run's (A9 review round 16).
+    let lower = (when mutated("restart-lower-bound-from-inactive-exit"):
+                   v.invocationStart
+                 else: runStartOf(v))
+    if v.btime < lower - window:
       return "it was born more than " & $(window div 1_000_000) &
         " ms before the unit's last run began"
     if v.stopped:
@@ -1195,10 +1205,10 @@ proc refusalRuleCodes*(output, stem: string): seq[string] =
   for raw in output.splitLines():
     var l = raw.strip()
     if not inBlock:
-      let at = l.find("EAddOnFloorNotEffective:")
+      let at = l.find(FloorRefusalPrefix)
       if at < 0: continue
       inBlock = true
-      l = l[at + "EAddOnFloorNotEffective:".len .. ^1].strip()
+      l = l[at + FloorRefusalPrefix.len .. ^1].strip()
       if l.len == 0: continue
     if l == "nothing was started":
       inBlock = false
@@ -1475,6 +1485,14 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
   block:
     let bn = baseTreeActivatorRefusal(unit)
     if bn.len > 0: problem2("unit-name", "Id", bn)
+  # §13 decision 163: ordered after sysinit.target as systemd reports it
+  # (its After= carries the default dependencies' sysinit.target), and
+  # never before a unit the boot-hold unit runs before.
+  when not mutated("activator-boot-order-effective-unchecked"):
+    block:
+      let why = activatorBootOrderRefusal(unit, defaultDeps = false,
+        words(show.getOrDefault("After")), words(show.getOrDefault("Before")))
+      if why.len > 0: problem2("boot-order", "After,Before,DefaultDependencies", why)
   if show.getOrDefault("FragmentPath") != fragment:
     problem2("provenance", "FragmentPath", "FragmentPath=" & show.getOrDefault("FragmentPath") &
             ", not a unit file the add-on wrote (" & fragment & ")")

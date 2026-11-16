@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/source_root
 import repro_core/arg_files
 import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
@@ -112,6 +113,13 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # note in `runBuild`.
 import repro_core/nix_store_roots
 import repro_core/nix_configuration_env
+# The ONE managed-file writer behind ``ensureLine`` / ``ensureSnippet`` (and
+# the home-profile ``fs.managedBlock``): sentinel format, locator, splice and
+# atomic write. reprobuild-pm spec/CLI/internal/fs-file-utilities.md §3-§4.
+from repro_core/managed_block import ManagedBlockKey, ManagedBlockError,
+  managedBlockKey, validateManagedBlockKey, spliceManagedBlock,
+  ensureLineContent, readManagedFile, updateManagedFile, alAfterBlankLine,
+  ProjectBlockScope
 from repro_core/process_streams import drainStream
 # ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
 # second time on POSIX. This scheduler thread is not alone once the worker
@@ -3798,6 +3806,40 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     networkMode: networkMode,
     netDestinations: @netDestinations)
 
+const ManagedFileWriterKinds* = {bakEnsureLine, bakEnsureSnippet}
+  ## The built-ins that rewrite part of their output file through the
+  ## managed-file writer (``repro_core/managed_block``) and may therefore
+  ## share that file with each other, under ``validateGraph``'s rules.
+
+proc ensureSnippetEntries*(packageName, blockId, snippet: string;
+                           scope = ProjectBlockScope): seq[string] =
+  ## The ``builtinEntries`` payload of a ``bakEnsureSnippet`` action: the
+  ## block's key and its content, never sentinel text. reprobuild-pm
+  ## spec/CLI/internal/fs-file-utilities.md §3: the sentinels are rendered by
+  ## the managed-file writer from ``(scope, packageName, blockId)``, so no
+  ## caller can invent a format the other writers cannot read. The DSL
+  ## lowering and every direct constructor encode through this one proc.
+  @[scope, packageName, blockId, snippet]
+
+proc ensureSnippetPayload*(action: BuildAction):
+    tuple[key: ManagedBlockKey; snippet: string] =
+  ## Decode ``ensureSnippetEntries``. Raises ``BuildEngineError`` for a
+  ## payload of the wrong shape and ``ManagedBlockError`` for a key that is
+  ## not a valid ``project`` block key (fs-file-utilities.md §3:
+  ## ``fs.ensureSnippet`` is the project-scope entry point).
+  if action.builtinEntries.len != 4:
+    raise newException(BuildEngineError, "ensureSnippet action " & action.id &
+      " requires the payload (scope, packageName, blockId, snippet); got " &
+      $action.builtinEntries.len & " entries")
+  let key = managedBlockKey(action.builtinEntries[0],
+    action.builtinEntries[1], action.builtinEntries[2])
+  if key.scope != ProjectBlockScope:
+    raise newException(ManagedBlockError, "ensureSnippet action " &
+      action.id & " writes a '" & key.scope &
+      "' block; ensureSnippet writes project blocks only")
+  validateManagedBlockKey(key)
+  (key: key, snippet: action.builtinEntries[3])
+
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
 
@@ -4510,7 +4552,11 @@ proc validateGraph(g: BuildGraph) =
 
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
-  var outputs = initHashSet[string]()
+  # Managed-file writers (``ensureLine`` / ``ensureSnippet``) may share an
+  # output file: each owns only its line or block in it. Whether two of them
+  # may coexist is decided by the managed-file pass below, so a duplicate
+  # between two of them is deferred to it; any other duplicate is refused.
+  var outputs = initTable[string, bool]()
   for action in g.actions:
     if action.id.len == 0:
       raiseEngine("action id is required")
@@ -4520,10 +4566,13 @@ proc validateGraph(g: BuildGraph) =
     byId[action.id] = action
     if action.kind == bakProcess and action.argv.len == 0 and action.outputs.len == 0 and action.optionalOutputs.len == 0:
       raiseEngine("action has neither command nor outputs: " & action.id)
+    let managedWriter = action.kind in ManagedFileWriterKinds
     for output in action.outputs & action.optionalOutputs:
-      if outputs.contains(output):
+      if outputs.hasKey(output):
+        if managedWriter and outputs[output]:
+          continue
         raiseEngine("duplicate declared output: " & output)
-      outputs.incl(output)
+      outputs[output] = managedWriter
   for action in g.actions:
     for dep in action.deps:
       if not ids.contains(dep):
@@ -4563,6 +4612,54 @@ proc validateGraph(g: BuildGraph) =
           if dep notin seen:
             stack.add(dep)
     false
+
+  # reprobuild-pm spec/CLI/internal/fs-file-utilities.md §4. Managed-file
+  # writers read their output and replace it, so for any two that write the
+  # same FILE (compared by location, not by spelling):
+  #   * declaring the same block -- the same ``(scope, packageName,
+  #     blockId)`` -- is refused whatever their order: a block has one owner
+  #     (Generated-Configuration-Files.md §"Sentinel uniqueness");
+  #   * otherwise they are a double write unless a dependency chain orders
+  #     them (Filesystem-Policy-And-Observed-Inputs.md §"Double Writes"):
+  #     two concurrent read-modify-replace runs lose one update.
+  # A malformed ``ensureSnippet`` payload is left to the action, which fails
+  # naming it when it runs.
+  var managedWriters: seq[tuple[actionId, raw, file: string;
+    hasKey: bool; key: ManagedBlockKey]] = @[]
+  for action in g.actions:
+    if action.kind notin ManagedFileWriterKinds or action.outputs.len != 1:
+      continue
+    var entry = (actionId: action.id, raw: action.outputs[0],
+      file: outputRemovalLocation(action.cwd, action.outputs[0]),
+      hasKey: false, key: ManagedBlockKey())
+    if action.kind == bakEnsureSnippet and action.builtinEntries.len == 4:
+      entry.hasKey = true
+      entry.key = managedBlockKey(action.builtinEntries[0],
+        action.builtinEntries[1], action.builtinEntries[2])
+    managedWriters.add(entry)
+  for i in 0 ..< managedWriters.len:
+    for j in (i + 1) ..< managedWriters.len:
+      let a = managedWriters[i]
+      let b = managedWriters[j]
+      if a.file.len == 0 or a.file != b.file:
+        continue
+      if a.hasKey and b.hasKey and a.key == b.key:
+        raiseEngine("managed block '" & $a.key & "' in '" & a.raw &
+          "' is declared by two actions, '" & a.actionId & "' and '" &
+          b.actionId & "': a block has one owner, whatever the order of " &
+          "its writers. Rename one block id or merge the two snippets " &
+          "into one block. Spec: CLI/internal/fs-file-utilities.md §4, " &
+          "Generated-Configuration-Files.md §\"Sentinel uniqueness\".")
+      if reachable(a.actionId, b.actionId) or
+          reachable(b.actionId, a.actionId):
+        continue
+      raiseEngine("double-write reject: '" & a.actionId & "' and '" &
+        b.actionId & "' both rewrite one file ('" & a.raw & "' and '" &
+        b.raw & "') with no dependency chain between them; " &
+        "each reads the file and replaces it, so concurrent runs would " &
+        "lose one update. Add a dependency edge from one to the other. " &
+        "Spec: CLI/internal/fs-file-utilities.md §4, " &
+        "Filesystem-Policy-And-Observed-Inputs.md §\"Double Writes\".")
 
   var declaredIndex: seq[tuple[actionId: string; root: string;
     optional: bool; ordinary: bool]] = @[]
@@ -5352,21 +5449,25 @@ proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
 
 proc inferDeclaredActionDeps(g: BuildGraph): BuildGraph =
   result = g
-  var outputProducer = initTable[string, string]()
+  # A path normally has one producer; several managed-file writers
+  # (``ensureLine`` / ``ensureSnippet``, ordered by dependencies -- see
+  # ``validateGraph``) may share one file, and a reader of that file then
+  # depends on every one of them, not only on whichever came first.
+  var outputProducers = initTable[string, seq[string]]()
   for action in g.actions:
     for output in action.outputs & action.optionalOutputs:
       let normalized = normalizedDeclaredActionPath(action, output)
-      if normalized.len > 0 and not outputProducer.hasKey(normalized):
-        outputProducer[normalized] = action.id
+      if normalized.len > 0:
+        outputProducers.mgetOrPut(normalized, @[]).addUnique(action.id)
 
   for i in 0 ..< result.actions.len:
     for input in result.actions[i].inputs:
       let normalized = normalizedDeclaredActionPath(result.actions[i], input)
-      if normalized.len == 0 or not outputProducer.hasKey(normalized):
+      if normalized.len == 0 or not outputProducers.hasKey(normalized):
         continue
-      let producerId = outputProducer[normalized]
-      if producerId != result.actions[i].id:
-        result.actions[i].deps.addUnique(producerId)
+      for producerId in outputProducers[normalized]:
+        if producerId != result.actions[i].id:
+          result.actions[i].deps.addUnique(producerId)
 
 proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
@@ -14254,6 +14355,54 @@ proc monitorPayloadArgIndex(argv: openArray[string]): int =
     inc i
   -1
 
+const
+  ShippedMacosToolsEnvVar* = "STACKABLE_HOOKS_TOOLS_DIR"
+    ## The variable the stackable-hooks resolver (`resolveSipReplacement`)
+    ## reads for a tools root, after the invocation's own sandbox directory and
+    ## before the build-embedded store path.
+  ShippedMacosToolsSubdir* = "libexec" / "stackable-hooks-macos-tools"
+    ## Where a darwin release archive carries the non-SIP tools bundle,
+    ## relative to its prefix (`scripts/release/stage_release_macos_tools.sh`).
+
+proc shippedMacosToolsDirFor*(prefixes: openArray[string];
+                              validShell: proc(sh: string): bool): string =
+  ## The first ``<prefix>/libexec/stackable-hooks-macos-tools`` whose
+  ## ``bin/sh`` ``validShell`` accepts, or "". Pure apart from ``validShell``,
+  ## so a test can drive it on any host.
+  for prefix in prefixes:
+    if prefix.len == 0:
+      continue
+    let dir = prefix / ShippedMacosToolsSubdir
+    if validShell(dir / "bin" / "sh"):
+      return dir
+  ""
+
+when defined(macosx):
+  proc ensureShippedMacosToolsEnvironmentImpl()
+
+proc ensureShippedMacosToolsEnvironment*() =
+  ## Point the stackable-hooks resolver at the non-SIP tools bundle a darwin
+  ## release archive ships beside this image, when the caller has not chosen a
+  ## tools root (Distribution-And-Packaging.md §5.1, "The darwin non-SIP tools
+  ## bundle").
+  ##
+  ## A monitored action on macOS must start under a non-SIP shell. The
+  ## resolver's last fallback is the bundle's build-host store path, compiled
+  ## in, which a Mac without Nix does not have, so an unpacked release failed
+  ## every monitored launch with "SIP-safe monitored launch requires a non-SIP
+  ## shell". The archive carries the bundle at
+  ## ``<prefix>/libexec/stackable-hooks-macos-tools``, where ``<prefix>`` is
+  ## the parent of the running image's ``bin/``.
+  ##
+  ## Only an unset variable is filled: a caller's value always wins. It is set
+  ## in the process environment because that reaches every reader: this
+  ## engine's wrapper shell, the in-process monitor host, a ``repro internal
+  ## io monitor`` child and the shim in each monitored process, which all
+  ## resolve through the same stackable-hooks resolver. A Nix-installed engine
+  ## has no such directory and keeps the build-embedded path. A no-op off macOS.
+  when defined(macosx):
+    ensureShippedMacosToolsEnvironmentImpl()
+
 when defined(macosx):
   proc resolveNonSipShell*(): string
 
@@ -14826,6 +14975,30 @@ proc resolveMonitorShimLibForInstall*(): string =
     shimLibMemoKey = key
     shimLibMemoValue = result
 
+proc msvcInheritedSearchLists(action: BuildAction;
+                              config: BuildEngineConfig):
+    seq[(string, string)] =
+  ## The MSVC search lists (``MsvcListKeys``) the launched process inherits
+  ## from this one, with their values NOW: what ``mergeActionEnvWithMsvc``
+  ## puts the activation's MSVC-owned entries in front of when the action
+  ## does not declare the list itself. An isolated launch, or one under an
+  ## allowlisted environment, inherits none of them, so none is returned and
+  ## such an action gets the owned entries alone.
+  ##
+  ## Read per launch rather than taken from the activation, which is
+  ## captured once per process: the activation's own copy of ``PATH`` is the
+  ## host's ``PATH`` at that moment, and layering it would hide every later
+  ## change from both the launch and the key (``actionEnvResolver`` mirrors
+  ## this composition). See ``msvcDevEnvFromActivation``.
+  when defined(windows):
+    if config.hermeticEnv or action.isolateHostEnvironment:
+      return @[]
+    for name in MsvcListKeys:
+      if existsEnv(name):
+        result.add((name, getEnv(name)))
+  else:
+    discard
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -15080,6 +15253,27 @@ when defined(macosx):
   # spec's "reuse io-mon's existing population rather than re-implementing it".
   import stackable_hooks/propagation as sip_propagation
 
+  proc describeMacosToolsRoot*(root: string): string =
+    ## ``<root> (usable)``, ``<root> (no usable <root>/bin/sh)`` or
+    ## ``<root> (does not exist)``; ``(unset)`` for an empty root.
+    if root.len == 0:
+      return "(unset)"
+    if not dirExists(root):
+      return root & " (does not exist)"
+    let sh = root / "bin" / "sh"
+    if sip_propagation.isValidSipReplacement(sh):
+      root & " (usable)"
+    else:
+      root & " (no usable " & sh & ")"
+
+  proc ensureShippedMacosToolsEnvironmentImpl() =
+    if existsEnv(ShippedMacosToolsEnvVar):
+      return
+    let dir = shippedMacosToolsDirFor(runningImagePrefixCandidates(),
+      proc(sh: string): bool = sip_propagation.isValidSipReplacement(sh))
+    if dir.len > 0:
+      putEnv(ShippedMacosToolsEnvVar, dir)
+
   const nonSipShellCandidateNames* = ["sh", "bash", "dash", "ash", "zsh"]
     ## Executable names accepted as the non-SIP wrapper shell, most-preferred
     ## first. ``sh`` stays first so a host that does expose one keeps its
@@ -15162,7 +15356,13 @@ when defined(macosx):
         let candidate = entry / name
         if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
           rejected.add(candidate)
-    parts.add("shipped tools=" & sip_propagation.StackableHooksBuiltToolsDir)
+    # Every tools root the shared resolver consults after PATH, with its
+    # state, rather than the build-embedded path alone as if it were shipped
+    # (Distribution-And-Packaging.md §5.1, the darwin tools bundle).
+    for (label, root) in [
+        ("STACKABLE_HOOKS_TOOLS_DIR", getEnv(ShippedMacosToolsEnvVar)),
+        ("build-embedded tools", sip_propagation.StackableHooksBuiltToolsDir)]:
+      parts.add(label & "=" & describeMacosToolsRoot(root))
     parts.add("searched " & $pathDirs & " PATH dir(s) for " &
       nonSipShellCandidateNames.join("/"))
     if rejected.len == 0:
@@ -15309,7 +15509,7 @@ proc preparedActionEnv(action: BuildAction;
   let childEnv = launchChildEnv(action, config)
   let mergedEnv =
     if actionUsesMsvcToolchain(action, monitorCliPath(config)):
-      mergeActionEnvWithMsvc(childEnv)
+      mergeActionEnvWithMsvc(childEnv, msvcInheritedSearchLists(action, config))
     else:
       childEnv
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
@@ -18211,69 +18411,6 @@ when not defined(windows):
      response: exchange.response, attempts: exchange.attempts,
      diagnostic: exchange.diagnostic)
 
-proc ensureSnippetContent(content, openSentinel, closeSentinel, openSearch,
-                          closeSearch, snippet: string): string =
-  ## The bytes ``ensureSnippet`` wants the file holding ``content`` to hold.
-  ## A result equal to ``content`` means "already up to date, do not write".
-  ##
-  ## The file is often TRACKED (``nimRepropathsConfig`` targets a project's
-  ## ``config.nims``), so every byte outside the sentinel block -- each line
-  ## terminator, the presence or absence of a final one, the count of trailing
-  ## blank lines -- is copied through verbatim, never re-joined from split
-  ## lines. Re-joining is what used to add one "\n" per build: ``splitLines``
-  ## yields a trailing "" for a file ending in "\n", and the rejoin appended
-  ## another terminator after it. It also rewrote CRLF files to LF.
-  ##
-  ## Lines are recognised as ``splitLines`` does (``\r\n``, ``\n`` or a lone
-  ## ``\r``). The block's own lines, and any terminator added when appending
-  ## it, use CRLF when the file's first terminator is CRLF and LF otherwise,
-  ## so a CRLF checkout (e.g. Windows with ``core.autocrlf``) stays CRLF.
-  var eol = "\n"
-  let firstBreak = content.find({'\r', '\n'})
-  if firstBreak >= 0 and content.continuesWith("\r\n", firstBreak):
-    eol = "\r\n"
-  let newBlock =
-    if eol == "\n": openSentinel & "\n" & snippet & "\n" & closeSentinel
-    else: (openSentinel & "\n" & snippet & "\n" & closeSentinel).
-      replace("\r\n", "\n").replace("\n", eol)
-  # Byte offsets of the block: from the start of the (last) open-sentinel
-  # line before the first close-sentinel line, to the end of that close line's
-  # text -- its terminator is outside the block and therefore preserved.
-  var blockStart = -1
-  var blockEnd = -1
-  var lineStart = 0
-  var lastLineStart = 0
-  while lineStart <= content.len:
-    var lineEnd = lineStart
-    while lineEnd < content.len and content[lineEnd] notin {'\r', '\n'}:
-      inc lineEnd
-    let line = content[lineStart ..< lineEnd].strip()
-    if line.startsWith(openSearch):
-      blockStart = lineStart
-    elif line.startsWith(closeSearch) and blockStart != -1:
-      blockEnd = lineEnd
-      break
-    lastLineStart = lineStart
-    if lineEnd >= content.len:
-      break
-    lineStart = lineEnd + 1
-    if content[lineEnd] == '\r' and lineStart < content.len and
-        content[lineStart] == '\n':
-      inc lineStart
-  if blockStart != -1 and blockEnd != -1:
-    return content[0 ..< blockStart] & newBlock & content[blockEnd .. ^1]
-  # Absent block: append it after one blank line. These are byte-for-byte the
-  # bytes the action has always appended to an LF file, so a file that
-  # already received the block is not touched again by this rewrite: one
-  # terminator closes an unterminated non-blank last line, one more makes the
-  # blank separator, and the block ends with a terminator.
-  result = content
-  if content[lastLineStart .. ^1].strip().len > 0:
-    result.add(eol)
-  result.add(eol)
-  result.add(newBlock)
-  result.add(eol)
-
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -18325,52 +18462,27 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
     of bakEnsureLine:
       if action.outputs.len != 1:
         raiseEngine("ensureLine action requires exactly one output: " & action.id)
+      # fs-file-utilities.md §2/§4: the line is written by the managed-file
+      # writer, so a changing write replaces the file atomically and an
+      # up-to-date file is not written (its mtime is kept).
       let destination = action.builtinPath(action.outputs[0])
-      let destExt = extendedPath(destination)
-      let lineToEnsure = action.builtinText
-      var content = ""
-      var linesList: seq[string] = @[]
-      if fileExists(destExt):
-        content = readFile(destExt)
-        linesList = content.splitLines()
-      var found = false
-      let lineToEnsureStrip = lineToEnsure.strip()
-      for l in linesList:
-        if l.strip() == lineToEnsureStrip:
-          found = true
-          break
-      if not found:
-        createDir(destExt.splitPath.head)
-        prepareBuiltinFileOutput(destination)
-        var newContent = content
-        if newContent.len > 0 and not newContent.endsWith("\n") and not newContent.endsWith("\r"):
-          newContent.add("\n")
-        newContent.add(lineToEnsure)
-        newContent.add("\n")
-        writeFile(destExt, newContent)
+      let prior = readManagedFile(destination)
+      discard updateManagedFile(destination, prior,
+        ensureLineContent(prior, action.builtinText))
     of bakEnsureSnippet:
       if action.outputs.len != 1:
         raiseEngine("ensureSnippet action requires exactly one output: " & action.id)
-      if action.builtinEntries.len < 5:
-        raiseEngine("ensureSnippet action requires openSentinel, closeSentinel, openSearch, closeSearch, and snippet")
+      # fs-file-utilities.md §3: the block is identified by its key, never
+      # by caller-supplied sentinel text, and spliced by the same writer
+      # ``fs.managedBlock`` uses. A duplicated or unterminated block raises
+      # ``ManagedBlockError`` naming the file and the block, which fails the
+      # action below.
       let destination = action.builtinPath(action.outputs[0])
-      let destExt = extendedPath(destination)
-      let openSentinel = action.builtinEntries[0]
-      let closeSentinel = action.builtinEntries[1]
-      let openSearch = action.builtinEntries[2]
-      let closeSearch = action.builtinEntries[3]
-      let snippet = action.builtinEntries[4]
-      var content = ""
-      if fileExists(destExt):
-        content = readFile(destExt)
-      let newContent = ensureSnippetContent(content, openSentinel,
-        closeSentinel, openSearch, closeSearch, snippet)
-      # Write only on a real change: an up-to-date tracked file keeps its
-      # bytes and its mtime.
-      if content != newContent:
-        createDir(destExt.splitPath.head)
-        prepareBuiltinFileOutput(destination)
-        writeFile(destExt, newContent)
+      let payload = action.ensureSnippetPayload()
+      let prior = readManagedFile(destination)
+      discard updateManagedFile(destination, prior,
+        spliceManagedBlock(prior, payload.key, payload.snippet,
+          alAfterBlankLine, destination))
     of bakStamp:
       if action.outputs.len != 1:
         raiseEngine("stamp action requires exactly one output: " & action.id)
@@ -21215,6 +21327,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         RestoreOutcome(inputChanged: inputChanged)
       else:
         RestoreOutcome(declined: reason)
+    if action.kind in ManagedFileWriterKinds:
+      # ``ensureLine`` / ``ensureSnippet`` own a line or a block of their
+      # output, not the file: the recorded bytes include everything else the
+      # file held when the action last ran (the user's lines, other writers'
+      # blocks). Restoring them would revert those bytes, so a hit whose
+      # output is not what the last run left re-runs the action, which
+      # rewrites only its own line or block (reprobuild-pm
+      # spec/CLI/internal/fs-file-utilities.md §4, "Not memoized across
+      # hosts").
+      return decline("the output of a managed-file writer is not the " &
+        "recorded one; the action re-runs over it rather than restoring " &
+        "the whole file, which would revert bytes it does not own")
     if overwrites.len > 0 and action.unsafePreserveOutputs:
       let note = overwrites[0].path & " was modified (on disk " &
         overwrites[0].onDisk & ", recorded " & overwrites[0].restored &
@@ -21675,7 +21799,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return true
     false
 
+  # BUILD-WAIT PRESSURE (see ``repro_runquota/build_pressure``): how much
+  # of this build's wall time its leased actions spent held up -- queued at
+  # RunQuota, or running slower than the daemon expects of them -- reported
+  # to the daemon on the build's session at most once a second and once
+  # more before it closes. The ``pressure-reports``
+  # measurement (off by default); with it off the tracker does nothing.
+  proc pressureNowMicros(): int64 = monotonicNowNs() div 1000
+  var buildPressure = initBuildPressure(buildPressureEnabled(),
+    pressureNowMicros(), int64(epochTime() * 1000.0))
+
+  proc reportBuildPressure(force: bool) =
+    if not buildPressure.enabled or not inlineRunQuotaSessionOpen:
+      return
+    let now = pressureNowMicros()
+    if not force and not buildPressure.reportDue(now):
+      return
+    discard sendPressureReport(inlineRunQuotaSession,
+      buildPressure.takeReport(now))
+
   proc failRunningAction(index: int; message: string) =
+    buildPressure.noteWithdrawn(running[index].id, pressureNowMicros())
     running[index].inlineFailure = inlineRunQuotaFailureResult(
       running[index].id, message)
     running[index].processKind = rpkInlineRunQuotaFailed
@@ -21697,6 +21841,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # while grants come back as fast as the build offers and halves once a
   # queued candidate waits past the threshold, within ``maxParallel``.
   var frontier = initFrontierSizer(int(maxParallel), frontierWaitMillis())
+
 
   proc pendingInlineCount(): int =
     for item in running:
@@ -21737,6 +21882,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               grant.diagnostic)
             return j
           frontier.noteQueuedGrant(engineNowMs() - running[j].queuedAtMs)
+          buildPressure.noteGranted(running[j].id, pressureNowMicros())
           try:
             var queued = running[j].queuedRunQuotaProcess
             running[j].runQuotaProcess = startGrantedWithRunQuota(
@@ -23984,10 +24130,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             var processKind: RunningProcessKind
             var runQuotaProcess: ReproRunQuotaRunningProcess
             var queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
+            buildPressure.noteReady(staged.id, pressureNowMicros())
             case offer.kind
             of rqokStarted:
               runQuotaProcess = offer.running
               processKind = rpkInlineRunQuota
+              buildPressure.noteGranted(staged.id, pressureNowMicros())
               inc grantedAtOnce
             of rqokQueued:
               queuedRunQuotaProcess = offer.queued
@@ -24080,6 +24228,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runIndex = tickRunQuotaQueue()
           if runIndex >= 0:
             break
+        reportBuildPressure(force = false)
         # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose
         # root has exited before choosing which action to reap, and settle
         # them in their own pass so the choice cannot skip any.
@@ -24211,6 +24360,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         raiseEngine("internal missing running action: " & finished.id)
       if runningItem.processKind == rpkHelperProcess:
         closeProcessOnce(runningItem.process)
+      # The finish is where a running action's slowdown becomes known: the
+      # launcher's duration against the daemon's expected uncontended one,
+      # which the finish's acknowledgement carried. Any other way out of the
+      # running set (a denial, a failed launch) only ends its wait.
+      if runningItem.processKind == rpkInlineRunQuota and
+          runningItem.runQuotaProcess.completed:
+        buildPressure.noteFinished(runningItem.id, pressureNowMicros(),
+          runningItem.runQuotaProcess.execution.elapsedMillis,
+          runningItem.runQuotaProcess.execution.expectedUncontendedMillis)
+      else:
+        buildPressure.noteWithdrawn(runningItem.id, pressureNowMicros())
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
         if finishedUsed > runningItem.poolUnits:
@@ -24465,6 +24625,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         teardownFailures.add("stopping action " & item.id & identities &
           ": " & err.msg)
     if inlineRunQuotaSessionOpen:
+      # The last build-wait pressure report, before the session closes:
+      # whatever is still in flight ends here.
+      try:
+        for item in running:
+          buildPressure.noteWithdrawn(item.id, pressureNowMicros())
+        reportBuildPressure(force = true)
+      except CatchableError:
+        discard
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       # The daemon refuses to close a session that still owns leases, and
       # that refusal is correct: it is kept verbatim in the collected text,

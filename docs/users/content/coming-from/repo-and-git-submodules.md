@@ -44,6 +44,28 @@ remain the better choice.
 | `revision` attribute, submodule commit | [`repro.lock`](../reference/glossary.md#lock-file) in each repository |
 | `repo start <branch>` | `repro switch -b <branch>` |
 
+## Before and after
+
+A `<project>` entry in a `repo` manifest (`default.xml`):
+
+```xml
+<project name="org/lib-a" path="lib-a" remote="origin" revision="main" />
+```
+
+becomes a repository fragment at `repos/lib-a.toml` in the workspace root:
+
+```toml
+schema = "reprobuild.workspace.repo.v2"
+
+[repo]
+name = "lib-a"
+path = "lib-a"
+remote = "origin"
+mainline = "main"
+```
+
+Each workspace project in `projects/<name>.toml` includes the fragments it needs.
+
 ## What works differently
 
 The workspace and the build know about each other. A repository builds

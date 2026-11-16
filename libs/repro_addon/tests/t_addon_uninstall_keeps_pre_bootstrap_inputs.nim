@@ -1,29 +1,35 @@
-## Uninstall puts a pre-bootstrap input back exactly as found (ReproOS
-## Add-On Mode spec §6.1, §6.4), the deploy agent's live records above
-## all: the sequence floor is rewritten at every tick, so it is ledgered
-## with its content UNPINNED (``lcKept``), captured before anything is
-## removed, and written back byte for byte. A floor that did not survive
-## would let a manifest this host already accepted replay on its kept key.
+## Uninstall leaves a pre-bootstrap input in place (ReproOS Add-On Mode
+## spec §6.1, §6.4; §13 decisions 166 to 168), the deploy agent's live
+## records above all: the sequence floor is rewritten at every tick, so it
+## is ledgered with its content UNPINNED (``lcKept``), never removed, never
+## rewritten, and every ``*.seq`` floor stays while the key does. A floor
+## that did not survive would let a manifest this host already accepted
+## replay on its kept key. Only the mode and owner bootstrap's takeover
+## changed are put back, in place, before the ledger copy goes.
 ##
 ## The reviewed defect (R review, item 1): the records were ledgered with
 ## a content digest, so after the first tick the capture judged them
 ## drifted and skipped them, the state directory was removed, and nothing
-## wrote them back. The falsifier is that classification: ledger the
-## bumped record as a content-pinned ``lcEtcFile`` and "a bumped sequence
-## floor survives" goes red (run and reverted before this file landed).
+## wrote them back. Since §13 decision 166 nothing is written back at all:
+## the inputs are never removed, and only their mode and owner change,
+## back to what they were (the suite "the pre-bootstrap inputs stay where
+## they are" below).
 ##
 ## No mocks: real files under a temporary root, the uninstall's own
-## capture and restore procedures (the host-level verb around them needs
+## removal and metadata procedures (the host-level verb around them needs
 ## root and a ledger of a real bootstrap; the VM gates cover that), the
 ## ledger's own drift check, and the apply planner's own refusal.
 
-import std/[json, os, posix, strutils, unittest]
+import std/[json, os, posix, sequtils, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
-import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall]
+import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall, record_dir]
+from repro_addon/bootstrap import prepareRecordsDir
+from repro_addon/preflight import AgentStateRecordsDir
 
 let me = $getuid() & ":" & $getgid()
+let myIds = (int(getuid()), int(getgid()))
 
 suite "the agent's records survive uninstall byte for byte":
   let root = getTempDir() / ("repro-addon-uninstall-kept-" & $getCurrentProcessId())
@@ -51,23 +57,16 @@ suite "the agent's records survive uninstall byte for byte":
     writeFile(seqPath, "12\n")        # the agent ticked after bootstrap
     check observeDrift(ledger.entries[3]) == ""
 
-  test "a bumped sequence floor survives: captured live, put back byte for byte":
+  test "a bumped sequence floor is an input left where it is, with its recorded mode and owner":
     writeFile(seqPath, "12\n")
-    let captured = capturePreBootstrapInputs(ledger)
-    check captured.drift.len == 0
-    check captured.files.len == 1 and captured.files[0].bytes == "12\n"
-    removeDir(root / "agent")         # what `removeDir("/var/lib/repro")` does
-    check not fileExists(seqPath)
-    var r: UninstallResult
-    restorePreBootstrapInputs(captured, keepStore = false, r)
-    check r.errors == newSeq[string]()
-    check readFile(seqPath) == "12\n"
-    var st: Stat
-    check stat(seqPath.cstring, st) == 0 and (int(st.st_mode) and 0o7777) == 0o600
-    check stat((root / "agent").cstring, st) == 0 and
-          (int(st.st_mode) and 0o7777) == 0o700
+    let pb = preBootstrapInputs(ledger, expectedOwner = myIds)
+    check pb.drift.len == 0 and pb.errors.len == 0
+    check pb.inputs.len == 4
+    check pb.inputs[3].path == seqPath and not pb.inputs[3].isDir and
+          pb.inputs[3].mode == 0o600
+    check pb.inputs[0].isDir and pb.inputs[0].mode == 0o700
 
-  test "a content-pinned input that changed is drift, not silently put back":
+  test "a content-pinned input that changed is drift":
     let signers = root / "signers"
     writeFile(signers, "key\n")
     let pinned = LedgerEntry(class: lcEtcFile, path: signers,
@@ -75,9 +74,8 @@ suite "the agent's records survive uninstall byte for byte":
       replaced: "f 0644 " & me & " sha256:" & sha256Hex("key\n"),
       collision: "adopt")
     writeFile(signers, "other key\n")
-    let captured = capturePreBootstrapInputs(Ledger(entries: @[pinned]))
-    check captured.files.len == 0
-    check captured.drift.len == 1 and "content changed" in captured.drift[0]
+    let pb = preBootstrapInputs(Ledger(entries: @[pinned]), expectedOwner = myIds)
+    check pb.drift.len == 1 and "content changed" in pb.drift[0]
 
   test "the ledger text carries the kept class":
     check parseLedger(ledger.render()).entries[3].class == lcKept
@@ -361,7 +359,7 @@ suite "the ledger copy goes last":
     check st in again.removed and (st / "ev" & " (store evidence)") in again.removed
 
 # ---------------------------------------------------------------------------
-# A11 code review rounds 14 and 15 (§13 decisions 161 and 163, amending
+# A11 code review rounds 14 and 15 (§13 decisions 161 and 165, amending
 # 150): after the ledger copy only rmdir(2) of the add-on's own empty
 # directories runs. Before the ledger copy goes, a durable token outside the
 # state (beside the discard records) names them; a re-run with that token
@@ -462,6 +460,8 @@ suite "only the add-on's own empty directories follow the ledger copy":
     writeFile(s.st / "system" / "late", "x")
     writeFile(s.token, $(%*{"schema": StateRemovalTokenSchema, "root": s.st,
       "ledgerCopy": s.lc, "chain": [s.st / "system", s.st],
+      "chainIdentity": {s.st / "system": stateDirIdentity(s.st / "system"),
+                        s.st: stateDirIdentity(s.st)},
       "preBootstrapRoots": newSeq[string]()}))
     var again: UninstallResult
     check finishEmptyStateRoot(again, s.st, s.lc, s.token)
@@ -513,3 +513,456 @@ suite "only the add-on's own empty directories follow the ledger copy":
     let again = rerun(s)
     check again.errors.len == 0
     check dirExists(s.st) and not dirExists(s.st / "system")
+
+# ---------------------------------------------------------------------------
+# A11 code review round 15, F2 (§13 decision 166): uninstall never deletes
+# or recreates a pre-bootstrap input. The removal of the state keeps every
+# input; before the token and the ledger copy, each gets back the mode and
+# owner it had before the add-on, in place (fchown, fchmod, fsync); a crash
+# at any point leaves the ledger copy (a re-run finishes) or the inputs
+# already right. The crash is a test seam (``InputStepHook``) raising a
+# ``Defect``-free exception the removal does not catch, as a killed process
+# would stop there. Ownership is the test user's own (chown to another id
+# needs root); an owner that is no account is uid 4000000.
+# Falsifiers ``inputs-removed-and-restored``, ``input-mode-owner-not-
+# restored`` and ``input-metadata-after-ledger-copy``.
+# ---------------------------------------------------------------------------
+
+type Crash = object of CatchableError
+
+proc inodeOf(p: string): uint64 =
+  var st: Stat
+  doAssert lstat(p.cstring, st) == 0, p
+  uint64(st.st_ino)
+
+proc modeOf(p: string): int =
+  var st: Stat
+  doAssert lstat(p.cstring, st) == 0, p
+  int(st.st_mode) and 0o7777
+
+type InputScene = object
+  parent, st, lc, token, agent, key, floor, attest: string
+  inputs: seq[PreBootstrapInput]
+
+proc inputScene(name: string): InputScene =
+  let s = v2Scene("inputs-" & name)
+  result.parent = s.parent
+  result.st = s.st
+  result.lc = s.lc
+  result.token = s.token
+  result.agent = s.st / "agent"
+  result.attest = s.st / "agent" / "attestation.key"    # the add-on's
+  result.key = s.st / "agent" / "recipient.key"         # inputs
+  result.floor = s.st / "agent" / "state" / "deploy-agent" / "rpi2.seq"
+  createDir(parentDir(result.floor))
+  writeFile(result.key, "KEY\n")
+  writeFile(result.floor, "12\n")
+  setFilePermissions(result.key, {fpUserRead})
+  # bootstrap's takeover gave agent/ the add-on's 0700; it was 0750.
+  setFilePermissions(result.agent, {fpUserRead, fpUserWrite, fpUserExec})
+  let (u, g) = (int(getuid()), int(getgid()))
+  result.inputs = @[
+    PreBootstrapInput(path: s.st, isDir: true, mode: modeOf(s.st), uid: u, gid: g),
+    PreBootstrapInput(path: result.agent, isDir: true, mode: 0o750, uid: u, gid: g),
+    PreBootstrapInput(path: result.agent / "state", isDir: true,
+                      mode: modeOf(result.agent / "state"), uid: u, gid: g),
+    PreBootstrapInput(path: parentDir(result.floor), isDir: true,
+                      mode: modeOf(parentDir(result.floor)), uid: u, gid: g),
+    PreBootstrapInput(path: result.key, isDir: false, mode: 0o400, uid: u, gid: g),
+    PreBootstrapInput(path: result.floor, isDir: false, mode: modeOf(result.floor),
+                      uid: u, gid: g)]
+
+proc removeWith(sc: InputScene; r: var UninstallResult;
+                hook: InputStepHook = nil) =
+  removeStateRoot(r, sc.st, sc.lc, tokenPath = sc.token,
+                  preBootstrap = inputPaths(sc.inputs), inputs = sc.inputs,
+                  hook = hook)
+
+suite "the pre-bootstrap inputs stay where they are":
+  test "inputs are never deleted or recreated, and get their prior mode and owner back":
+    let sc = inputScene("stay")
+    let before = @[inodeOf(sc.key), inodeOf(sc.floor), inodeOf(sc.agent)]
+    var r: UninstallResult
+    removeWith(sc, r)
+    checkpoint $r.errors
+    check r.errors.len == 0
+    check fileExists(sc.key) and fileExists(sc.floor)
+    check @[inodeOf(sc.key), inodeOf(sc.floor), inodeOf(sc.agent)] == before
+    check readFile(sc.key) == "KEY\n" and readFile(sc.floor) == "12\n"
+    check modeOf(sc.agent) == 0o750 and modeOf(sc.key) == 0o400
+    check not fileExists(sc.attest)                 # the add-on's: gone
+    check not dirExists(sc.st / "system")           # the add-on's: gone
+    check dirExists(sc.st) and not fileExists(sc.token)
+
+  test "a crash after the ledger copy goes leaves the key and the floor intact":
+    let sc = inputScene("crash-after-ledger")
+    let before = @[inodeOf(sc.key), inodeOf(sc.floor)]
+    var r: UninstallResult
+    expect Crash:
+      removeWith(sc, r, proc (step, path: string) =
+        if step == "ledger-copy-removed": raise newException(Crash, step))
+    check not fileExists(sc.lc) and fileExists(sc.token)
+    check fileExists(sc.key) and fileExists(sc.floor)
+    check @[inodeOf(sc.key), inodeOf(sc.floor)] == before
+    check readFile(sc.key) == "KEY\n" and readFile(sc.floor) == "12\n"
+    check modeOf(sc.agent) == 0o750                 # already right
+    let again = rerun((sc.parent, sc.st, sc.lc, sc.token))
+    checkpoint $again.errors
+    check again.errors.len == 0
+    check readFile(sc.floor) == "12\n" and inodeOf(sc.floor) == before[1]
+    check not dirExists(sc.st / "system") and not fileExists(sc.token)
+
+  test "a crash between an input's chown and its chmod is finished by the re-run":
+    let sc = inputScene("crash-chown")
+    var r: UninstallResult
+    expect Crash:
+      removeWith(sc, r, proc (step, path: string) =
+        if step == "chowned" and path == sc.agent:
+          raise newException(Crash, step))
+    check fileExists(sc.lc)                         # the re-run resumes
+    check modeOf(sc.agent) == 0o700                 # the chmod never ran
+    var again: UninstallResult
+    removeWith(sc, again)
+    checkpoint $again.errors
+    check again.errors.len == 0
+    check modeOf(sc.agent) == 0o750
+    check not fileExists(sc.lc) and readFile(sc.floor) == "12\n"
+
+  test "an input that is gone is a note, never recreated":
+    let sc = inputScene("gone")
+    removeFile(sc.floor)
+    var r: UninstallResult
+    removeWith(sc, r)
+    check r.errors.len == 0
+    check not fileExists(sc.floor)
+    check r.notes.anyIt(it.startsWith(sc.floor & ": a pre-bootstrap input " &
+      "that is not on the host now"))
+
+  test "the other roots keep their inputs: /etc/repro's signers file, the store directories":
+    let base = getTempDir() / ("repro-uninstall-roots-" & $getCurrentProcessId())
+    removeDir(base)
+    let etc = base / "etc-repro"
+    createDir(etc / "anchors")
+    writeFile(etc / "deploy-manifest-allowed-signers", "signer\n")
+    writeFile(etc / "anchors" / "cache.pub", "x")       # the add-on's
+    let signersIno = inodeOf(etc / "deploy-manifest-allowed-signers")
+    var r: UninstallResult
+    removeRootKeepingInputs(r, etc, @[etc, etc / "deploy-manifest-allowed-signers"])
+    check r.errors.len == 0
+    check dirExists(etc) and not dirExists(etc / "anchors")
+    check inodeOf(etc / "deploy-manifest-allowed-signers") == signersIno
+    let repro = base / "repro"
+    createDir(repro / "store" / "prefixes" / "x")
+    writeFile(repro / "store" / "prefixes" / "x" / "f", "y")
+    writeFile(repro / "gc-roots", "z")
+    removeAllBelowKeeping(repro, @[repro, repro / "store"])
+    check dirExists(repro / "store") and not dirExists(repro / "store" / "prefixes")
+    check not fileExists(repro / "gc-roots")
+    var gone: UninstallResult
+    removeRootKeepingInputs(gone, base / "run-repro-absent", @[])
+    check gone.errors.len == 0
+    removeDir(base)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 16: the pre-bootstrap inputs left in place (§13
+# decisions 166 amended, 167, 168; R16-1, R16-2,
+# R16-3, R16-5, R16-6). Falsifiers ``unmarked-prior-trusted``,
+# ``new-floors-removed``, ``etc-sweep-rewrites-inputs``,
+# ``run-repro-rewrites-inputs``, ``store-remover-rewrites-inputs`` and
+# ``token-dir-unchecked``; the bootstrap and step-4 halves
+# (``prior-mode-captured-after-takeover``, ``etc-input-rewritten-in-step-4``)
+# need root and a real host, and are held by the byte-identity VM gate.
+# ---------------------------------------------------------------------------
+
+suite "round 16":
+  test "R16-6: a recorded prior owner that is not root's is a corrupt ledger":
+    let e = LedgerEntry(class: lcRoot, path: "/var/lib/repro/agent",
+      mode: "0700", owner: "0:0", replaced: "dir 0750 1000:1000",
+      collision: "adopt", observation: PriorCapturedBeforeTakeover)
+    let pb = preBootstrapInputs(Ledger(entries: @[e]))
+    check pb.inputs.len == 0
+    check pb.errors.len == 1 and "the ledger is corrupt" in pb.errors[0]
+
+  test "R16-1: an unmarked takeover root of the four keeps the recorded mode, and says so":
+    let unmarked = LedgerEntry(class: lcRoot, path: AgentStateRecordsDir,
+      mode: "0700", owner: "0:0", replaced: "dir 0700 0:0", collision: "adopt")
+    var marked = unmarked
+    marked.observation = PriorCapturedBeforeTakeover
+    let established = LedgerEntry(class: lcRoot, path: "/var/lib/repro/agent",
+      mode: "0700", owner: "0:0", replaced: "dir 0750 0:0", collision: "adopt")
+    let a = preBootstrapInputs(Ledger(entries: @[unmarked, established]))
+    check a.errors.len == 0 and a.inputs.len == 2
+    check a.inputs[0].mode == 0o700 and a.inputs[1].mode == 0o750
+    check a.notes.len == 1 and a.notes[0].startsWith(AgentStateRecordsDir &
+      ": its mode before the add-on was not captured")
+    let b = preBootstrapInputs(Ledger(entries: @[marked]))
+    check b.notes.len == 0
+
+  test "R16-2: with the key kept, every floor stays, a later one too":
+    let sc = inputScene("floors")
+    let records = parentDir(sc.floor)
+    writeFile(records / "rpi3.seq", "41\n")      # the add-on's agent wrote it
+    writeFile(records / "rpi2.last-tick.json", "{}")
+    let floors = keptFloors(sc.inputs, keyPath = sc.key, recordsDir = records)
+    check (records / "rpi3.seq") in floors and sc.floor in floors
+    var r: UninstallResult
+    removeStateRoot(r, sc.st, sc.lc, tokenPath = sc.token,
+                    preBootstrap = inputPaths(sc.inputs) & floors,
+                    inputs = sc.inputs)
+    checkpoint $r.errors
+    check r.errors.len == 0
+    check readFile(records / "rpi3.seq") == "41\n"
+    check not fileExists(records / "rpi2.last-tick.json")   # not a floor
+    let noKey = sc.inputs.filterIt(it.path != sc.key)
+    check keptFloors(noKey, keyPath = sc.key, recordsDir = records).len == 0
+
+  test "R16-3: each removal site keeps its inputs' inodes":
+    let base = getTempDir() / ("repro-uninstall-sites-" & $getCurrentProcessId())
+    removeDir(base)
+    for site in ["etc", "run", "store"]:
+      let d = base / site
+      createDir(d / "input-dir")
+      writeFile(d / "input-file", "kept\n")
+      writeFile(d / "addon-file", "x")
+      createDir(d / "addon-dir")
+      let keep = @[d, d / "input-dir", d / "input-file"]
+      let ino = @[inodeOf(d / "input-dir"), inodeOf(d / "input-file")]
+      keepingRemoval(d, keep, site)
+      checkpoint site
+      check not fileExists(d / "addon-file") and not dirExists(d / "addon-dir")
+      check fileExists(d / "input-file") and dirExists(d / "input-dir")
+      check @[inodeOf(d / "input-dir"), inodeOf(d / "input-file")] == ino
+    removeDir(base)
+
+  test "R16-5: the token is never written to, or read from, a directory others can write":
+    let sc = inputScene("tokendir")
+    setFilePermissions(parentDir(sc.token), {fpUserRead, fpUserWrite,
+      fpUserExec, fpGroupWrite, fpGroupRead, fpGroupExec})
+    var r: UninstallResult
+    removeWith(sc, r)
+    checkpoint $r.errors
+    check r.errors.len == 1 and "writable by its group" in r.errors[0]
+    check fileExists(sc.lc) and not fileExists(sc.token)
+    # A token planted there is not acted on.
+    removeFile(sc.lc)
+    writeFile(sc.token, $(%*{"schema": StateRemovalTokenSchema, "root": sc.st,
+      "ledgerCopy": sc.lc, "chain": [sc.st / "system"],
+      "preBootstrapRoots": newSeq[string]()}))
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, sc.st, sc.lc, sc.token)
+    check again.errors.len == 1 and "may not be trusted" in again.errors[0]
+    check dirExists(sc.st / "system")
+    setFilePermissions(parentDir(sc.token), {fpUserRead, fpUserWrite, fpUserExec})
+
+  test "R16-5: a stale link at the token's temporary name is not followed":
+    let sc = inputScene("tokentmp")
+    let victim = sc.parent / "victim"
+    writeFile(victim, "untouched\n")
+    let tmpName = parentDir(sc.token) / ("." & extractFilename(sc.token) &
+                                         ".tmp-" & $getCurrentProcessId())
+    createSymlink(victim, tmpName)
+    var r: UninstallResult
+    removeWith(sc, r)
+    check r.errors.len == 0
+    check readFile(victim) == "untouched\n"
+    check not fileExists(sc.token) and not symlinkExists(tmpName)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 17 (§13 decisions 165 and 166): the token binds the
+# install whose uninstall wrote it, and a corrupt record of a pre-bootstrap
+# input stops the uninstall before step 1. Falsifiers
+# ``token-not-bound-to-install`` and ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+suite "round 17":
+  test "a token whose directories are another install's is refused, nothing removed":
+    let s = v2Scene("rebound")
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token)
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    check r.errors.len == 1 and fileExists(s.token)
+    # A new install's state at the same path: another directory.
+    let saved = readFile(s.token)
+    removeDir(s.st)
+    createDir(s.st)
+    writeFile(s.token, saved)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of a pre-bootstrap input stops the uninstall, with its remedy":
+    let e = LedgerEntry(class: lcRoot, path: "/var/lib/repro/agent",
+      mode: "0700", owner: "0:0", replaced: "dir 0750 1000:1000",
+      collision: "adopt", observation: PriorCapturedBeforeTakeover)
+    let pb = preBootstrapInputs(Ledger(entries: @[e]))
+    var r: UninstallResult
+    check refuseCorruptInputs(r, pb, "/x/addon-ledger")
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check "restore it from the generation" in r.errors[1]
+    var fine: UninstallResult
+    check not refuseCorruptInputs(fine, preBootstrapInputs(Ledger()), "/x")
+
+# ---------------------------------------------------------------------------
+# A11 code review round 18 (§13 decisions 165, 166: the pre-bootstrap inputs
+# left in place): the token binds its
+# install by inode AND birth time, never the number alone (ext4 reuses
+# numbers), and fails closed where nothing but the number is known; a token
+# from an earlier build, with no identity, is refused with its remedy; a
+# corrupt record of an input stops the uninstall verb itself before the
+# store-evidence gate. The identities are faked (``identityOf``) so the
+# reuse of an inode number is certain, whatever this file system does.
+# Falsifiers ``token-binds-inode-only`` and
+# ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+proc failedRootRun(s: tuple[parent, st, lc, token: string];
+                   ids: IdentityOf): UninstallResult =
+  setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+  removeStateRoot(result, s.st, s.lc, tokenPath = s.token, identityOf = ids)
+  setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+
+suite "round 18":
+  test "a reused inode number with another birth time is another install's directory":
+    let s = v2Scene("reuse")
+    let r = failedRootRun(s, proc (p: string): string =
+      (if dirExists(p): "5@100.1" else: ""))
+    check r.errors.len == 1 and fileExists(s.token)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token,
+      identityOf = proc (p: string): string =
+        (if dirExists(p): "5@200.2" else: ""))
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check again.errors.len == 1 and "remove them and the token yourself" in again.errors[0]
+    check dirExists(s.st)
+
+  test "where nothing but the inode number is known, the re-run refuses":
+    let s = v2Scene("nobtime")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)
+
+  test "the same identity is finished":
+    let s = v2Scene("same")
+    let ids = proc (p: string): string = (if dirExists(p): "5@100.1" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 0 and not dirExists(s.st)
+
+  test "a token from an earlier build, with no identity, is refused with its remedy":
+    let s = v2Scene("oldtoken")
+    discard failedRootRun(s, stateDirIdentity)
+    let j = parseJson(readFile(s.token))
+    j.delete("chainIdentity")
+    removeFile(s.token)
+    writeFile(s.token, $j)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "earlier build" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of an input stops the uninstall verb, nothing written":
+    let base = getTempDir() / ("repro-uninstall-corrupt-" & $getCurrentProcessId())
+    removeDir(base)
+    let st = base / "var-lib-repro"
+    createDir(st / "system")
+    let lc = ledgerCopyPath(st / "system")
+    writeLedger(lc, Ledger(generation: "g0", entries: @[LedgerEntry(
+      class: lcRoot, path: st / "agent", mode: "0700", owner: "0:0",
+      replaced: "dir 0750 1000:1000", collision: "adopt",
+      observation: PriorCapturedBeforeTakeover)]))
+    let before = readFile(lc)
+    createDir(base / "log")
+    let r = runAddonUninstall(UninstallOptions(stateDir: st / "system",
+      stateRoot: st, logDir: base / "log",
+      discardUnacknowledgedStoreEvidence: true))
+    checkpoint $r.errors
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check readFile(lc) == before
+    var n = 0
+    for _ in walkDir(base / "log"): inc n
+    check n == 0
+    removeDir(base)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 19 (§13 decision 178, amended): the records
+# directory is the one bootstrap made -- its identity recorded, a swapped
+# directory refused, recorded at first use where nothing is recorded yet;
+# bootstrap tightens an existing root directory to 0700; a stale token
+# survives a bootstrap refused on its trust anchors; a token identity with
+# a generation but no birth time is refused. Falsifiers
+# ``records-dir-identity-unchecked``, ``records-dir-left-open``,
+# ``token-cleared-before-anchors`` and ``token-binds-inode-only``.
+# ---------------------------------------------------------------------------
+
+suite "round 19":
+  test "a directory swapped into the records directory's place is refused":
+    let base = getTempDir() / ("repro-r19-swap-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    writeFile(idFile, identityOfCheckedDir(dir) & "\n")
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    moveDir(dir, dir & ".away")
+    createDir(dir)
+    setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+    let why = checkedDirRefusal(dir)
+    checkpoint why
+    check "not the directory bootstrap made" in why
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "with nothing recorded, the first checked open records the identity":
+    let base = getTempDir() / ("repro-r19-tofu-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    check fileExists(idFile) and readFile(idFile).strip() == identityOfCheckedDir(dir)
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "bootstrap's ensure tightens an existing root directory to 0700":
+    let base = getTempDir() / ("repro-r19-tight-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    setFilePermissions(base / "log", {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    ensureCheckedDir(base / "log", tighten = true)
+    check modeOf(base / "log") == 0o700
+    removeDir(base)
+
+  test "a bootstrap refused on its trust anchors leaves a stale token":
+    let base = getTempDir() / ("repro-r19-anchors-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    let token = base / "log" / StateRemovalTokenName
+    writeFile(token, "{}")
+    writeFile(base / "bad.anchors", "not an anchor\n")
+    expect CatchableError:
+      prepareRecordsDir(base / "bad.anchors", "", logDir = base / "log")
+    check fileExists(token)
+    removeDir(base)
+
+  test "a generation without a birth time is not enough to finish":
+    let s = v2Scene("genonly")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-g7" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)

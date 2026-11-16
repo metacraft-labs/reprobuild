@@ -19,7 +19,11 @@
 ##      produced by the real filesystem monitor: ``repro internal io monitor``
 ##      runs ``cat`` on the scratch file, and ``readSetFromMonitorDepFile``
 ##      reads the depfile it wrote. The same capture of a command that read
-##      only a tracked file withholds in neither mode.
+##      only a tracked file withholds in neither mode. A read of a file outside
+##      the content that ``git status`` does not list (an IGNORED file)
+##      withholds in both modes, unless it is a declared output of the
+##      certified closure or lies under one of its exempt output trees.
+##      Strict mode tells the files the tests read from those merely present.
 ##   4. An invalid value (``"sometimes"``) in the snapshot → a loud error
 ##      naming the key and the accepted values, and no certificate — never a
 ##      silent default. The pre-push gate refuses the commit carrying it too.
@@ -30,7 +34,7 @@
 ## NO MOCKS: real repositories, the built ``repro`` and its monitor. Skip
 ## rule: ``git`` or ``ssh-keygen`` missing.
 
-import std/[os, strutils, unittest]
+import std/[os, sets, strutils, unittest]
 import repro_test_support
 import repro_test_support/reasoned_skip
 import repro_cli_support
@@ -93,29 +97,88 @@ suite "TC-8d — the untracked-inputs flag":
         let depfile = fx.sib.scratch / (label & ".iomon")
         let monitored = runShell(shellCommand(@[fx.sib.repro, "internal",
           "io", "monitor", "--depfile", depfile, "--", "sh", "-c",
-          "cat " & q(readPath) & " > /dev/null"]))
+          "cat " & q(readPath) & " > /dev/null 2>&1 || true"]))
         checkpoint(monitored.output)
         check monitored.code == 0
         readSetFromMonitorDepFile(depfile)
+      # What the index tracks, as issuance lists it after the run.
+      var tracked = initHashSet[string]()
+      for entry in fx.gitIn(app, "ls-files --cached --full-name").splitLines():
+        if entry.strip().len > 0:
+          tracked.incl(entry.strip())
+      check "README.md" in tracked
       let readScratch = capture("reads-scratch", scratchFile)
       check readScratch.captured
       for mode in [cuiReadSet, cuiStrict]:
         let judged = judgeUntrackedInputs(mode, app, @["scratch.txt"],
-          readScratch)
+          tracked, readScratch)
         check judged.withhold
         check judged.offending == @["scratch.txt"]
+        check judged.read == @["scratch.txt"]
       let readTracked = capture("reads-tracked", app / "README.md")
       check readTracked.captured
       let lenient = judgeUntrackedInputs(cuiReadSet, app, @["scratch.txt"],
-        readTracked)
+        tracked, readTracked)
       check not lenient.withhold
       check lenient.note.len == 0          # a read set WAS captured
       # Strict needs no read set: any untracked file withholds.
-      check judgeUntrackedInputs(cuiStrict, app, @["scratch.txt"],
-        readTracked).withhold
+      let strictTracked = judgeUntrackedInputs(cuiStrict, app,
+        @["scratch.txt"], tracked, readTracked)
+      check strictTracked.withhold
+      check strictTracked.offending == @["scratch.txt"]
+      check strictTracked.read.len == 0    # present, not read
+      # An IGNORED file (untracked, but not in ``git status``'s list, so not
+      # in ``untrackedPaths``) that the tests read withholds in both modes:
+      # the content binds it no more than an untracked one. Declared as an
+      # output of an action in the certified closure, the same read is exempt.
+      let ignoredFile = app / "local.env"
+      writeFile(ignoredFile, "TOKEN=local\n")
+      let readIgnored = capture("reads-ignored", ignoredFile)
+      check readIgnored.captured
+      for mode in [cuiReadSet, cuiStrict]:
+        let judged = judgeUntrackedInputs(mode, app, @["scratch.txt"],
+          tracked, readIgnored)
+        check judged.withhold
+        check "local.env" in judged.offending
+        check judged.read == @["local.env"]
+      var asOutput = readIgnored
+      asOutput.exemptOutputs = @[ignoredFile]
+      check not judgeUntrackedInputs(cuiReadSet, app, @["scratch.txt"],
+        tracked, asOutput).withhold
+      # A tree whose name is a prefix of the file's ("local" of "local.env")
+      # does not contain it.
+      var besideTree = readIgnored
+      besideTree.exemptOutputTrees = @[app / "local"]
+      check judgeUntrackedInputs(cuiReadSet, app, @["scratch.txt"],
+        tracked, besideTree).withhold
+      removeFile(ignoredFile)
+      # A lookup that FAILED read nothing: probing for an optional ignored
+      # file that is absent must not withhold a certificate.
+      let readAbsent = capture("reads-absent", app / "absent.env")
+      check readAbsent.captured
+      for mode in [cuiReadSet, cuiStrict]:
+        let judged = judgeUntrackedInputs(mode, app, @["scratch.txt"],
+          tracked, readAbsent)
+        check "absent.env" notin judged.offending
+        check "absent.env" notin judged.read
+      # A file under an exempt tree (an output the engine empties first, or
+      # the scratch directory of an action that ran) is exempt; the same
+      # read with no such tree withholds.
+      createDir(app / "cache-tree")
+      let treeFile = app / "cache-tree" / "blob.bin"
+      writeFile(treeFile, "written by the run\n")
+      let readInTree = capture("reads-in-tree", treeFile)
+      check readInTree.captured
+      check judgeUntrackedInputs(cuiReadSet, app, @["scratch.txt"],
+        tracked, readInTree).offending == @["cache-tree/blob.bin"]
+      var inTree = readInTree
+      inTree.exemptOutputTrees = @[app / "cache-tree"]
+      check not judgeUntrackedInputs(cuiReadSet, app, @["scratch.txt"],
+        tracked, inTree).withhold
+      removeDir(app / "cache-tree")
       # No read set: the default issues and says why it could not judge.
       let none = judgeUntrackedInputs(cuiReadSet, app, @["scratch.txt"],
-        noReadSetOnFixturePath)
+        tracked, noReadSetOnFixturePath)
       check not none.withhold
       check "no read set was captured" in none.note
 

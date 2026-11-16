@@ -277,11 +277,13 @@ proc observeResource*(r: SystemResource): ResourceObservation =
 #   observed digest == desired digest         -> no-op (cache-hit)
 #   observed digest != desired                -> update
 #
-# The planner does NOT itself fail-closed on drift — that is the
-# broker's re-observe gate at apply time. The plan simply records the
-# baseline digest it saw; if the world moves before apply, the apply
-# detects the staleness (`EPlanStale`) or the broker detects the
-# drift (`EBrokerDrift`).
+# The planner does NOT itself fail-closed on drift. The plan records
+# the baseline digest it saw; if the world moves before an apply of
+# that plan id, `detectStaleResources` makes the apply refuse with
+# `EPlanStale` before any mutation. Nothing re-checks after that: the
+# broker carries no drift gate (M82 Phase A removed `EBrokerDrift`'s
+# raise site), so a change made while the apply runs is overwritten.
+# `dispatch.dispatchOperation` step 3 (repro_elevation) says why.
 # ---------------------------------------------------------------------------
 
 proc decideAction*(obs: ResourceObservation; desiredDigestHex: string;
@@ -535,6 +537,10 @@ proc triggeredUnitIndex(profile: SystemProfile; target: string): int =
   ## (systemd.unit(5): an instance without a file of its own is loaded from
   ## its template). -1 when the profile defines neither.
   result = findResourceIndex(profile, $srkSystemdSystemUnit, target)
+  when PlannerMutation == "trigger-instance-unmapped":
+    # FALSIFYING MUTATION (§13 decision 154): an instance is not mapped to
+    # the template it is loaded from.
+    return
   if result < 0:
     let tmpl = templateOf(target)
     if tmpl.len > 0:

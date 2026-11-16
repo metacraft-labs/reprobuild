@@ -40,6 +40,8 @@ proc previewFooterHtml*(unverifiedClaims, pages: int): string =
     " statements across " & $pages & " pages are not yet backed by a check; " &
     "each page lists its own in its <a href=\"" & contentSourceUrl &
     "\">source</a>. " &
+    "Agent indexes: <a href=\"/llms.txt\">llms.txt</a> · " &
+    "<a href=\"/llms-full.txt\">llms-full.txt</a>. " &
     "Built by <a href=\"https://github.com/metacraft-labs\">Metacraft Labs</a>."
 
 proc reprobuildDocsConfig*(basePath = ""; footerHtml = ""): DocsConfig =
@@ -49,9 +51,10 @@ proc reprobuildDocsConfig*(basePath = ""; footerHtml = ""): DocsConfig =
   let base = normalizeBasePath(basePath)
   DocsConfig(
     siteTitle: "Reprobuild",
-    siteDescription: "Documentation for reprobuild (repro): builds, " &
-      "development environments, tasks, services and multi-repository " &
-      "workspaces from one description of each project.",
+    siteDescription: "Documentation for Reprobuild (repro): a unified build, " &
+      "environment, operating-system and fleet engine combining BuildXL's " &
+      "monitored dependency tracking, Nix's store and generations, and " &
+      "Terraform's plan-and-apply state reconciliation.",
     defaultRoute: "/",
     stylesheetHref: "/assets/style.css",
     baseUrl: docsSiteOrigin & base,
@@ -61,6 +64,7 @@ proc reprobuildDocsConfig*(basePath = ""; footerHtml = ""): DocsConfig =
     sectionOrder: @["tutorials", "guides", "concepts", "coming-from", "reference"],
     headerLinks: @[
       (label: "Install", href: "/install"),
+      (label: "llms.txt", href: "/llms.txt"),
       (label: "GitHub", href: repositoryUrl),
     ],
     sidebarLinks: @[
@@ -75,5 +79,6 @@ proc reprobuildDocsConfig*(basePath = ""; footerHtml = ""): DocsConfig =
     # theme toggle and sidebar collapse work; the pages stay readable without it.
     appScriptHref: defaultAppScriptUrl,
     expandAllNavSections: true,
+    emitLlmsTxt: true,
     footerHtml: footerHtml,
   )

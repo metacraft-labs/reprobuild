@@ -5200,19 +5200,34 @@ proc ensureLine*(tool: ReproFs; output, line: string; actionId = "";
     dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
-proc ensureSnippet*(tool: ReproFs; output, openSentinel, closeSentinel, openSearch, closeSearch, snippet: string; actionId = "";
+proc ensureSnippet*(tool: ReproFs; output, blockId, snippet: string;
+                    actionId = "";
                     deps: openArray[string] = [];
                     after: openArray[BuildActionDef] = [];
                     cacheable = true; commandStatsId = "";
                     actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable, dynOrStatic.} =
+  ## Ensure ``output`` holds the managed block ``blockId`` of the package
+  ## declaring this action, with ``snippet`` as its content
+  ## (reprobuild-pm spec/CLI/internal/fs-file-utilities.md §3). The
+  ## sentinels are ``# >>> repro:project:<packageName>:<blockId> >>>`` and its
+  ## closing twin, rendered by the managed-file writer: the caller names the
+  ## block, never the sentinel text, so every writer reads every block.
+  ##
+  ## ``<packageName>`` is the package whose ``build:`` body is running
+  ## (``currentOwningPackage``); a call outside one has no owner to name and
+  ## is refused.
   discard tool
+  let packageName = currentOwningPackage()
+  if packageName.len == 0:
+    raise newException(ValueError, "fs.ensureSnippet(" & output & ", " &
+      blockId & "): called outside a package's build body, so the block " &
+      "has no owning package to name in its sentinels")
   let call = builtinFsCall("ensureSnippet", [
     outputArg("output", output),
-    cliArg("openSentinel", openSentinel),
-    cliArg("closeSentinel", closeSentinel),
-    cliArg("openSearch", openSearch),
-    cliArg("closeSearch", closeSearch),
+    cliArg("scope", "project"),
+    cliArg("packageName", packageName),
+    cliArg("blockId", blockId),
     cliArg("snippet", snippet)
   ])
   let selectedActionId =
