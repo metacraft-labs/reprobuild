@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2855,
+    "nimTestBinaries": 2856,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 776,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2902
+    "testEntries": 2903
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1644,7 +1644,7 @@
       "integration": 1573,
       "platform/destructive": 185,
       "pure unit": 776,
-      "unclassified": 345
+      "unclassified": 346
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2855,
+    "nimTestBinaryCount": 2856,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2902
+    "testEntryCount": 2903
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -56423,6 +56423,23 @@
       "source": "tests/unit/t_dev_env_cache_key_store_root.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dev_env_directory_trust_binds_recipe",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dev_env_engine"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_dev_env_directory_trust_binds_recipe.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
