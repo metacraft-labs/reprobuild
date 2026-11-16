@@ -60,6 +60,10 @@ import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
 from repro_core/link_target import readSymlinkTarget
 from repro_core/relocation import recipeSourceName
+# The managed-file writer's sentinel format (`fs.managedBlock`'s sentinels are
+# rendered by the one implementation; Core-Invariants.md §"One Implementation
+# Per Concern").
+from repro_core/managed_block as coreManagedBlock import nil
 from repro_core/target_object_check import TargetObjectExemption,
   TargetObjectExemptionsEnvVar, encodeTargetObjectExemptions,
   validateTargetObjectExemption
