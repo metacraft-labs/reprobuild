@@ -10,6 +10,14 @@
 import std/[tables, strutils, unittest]
 
 import repro_cli_support/infra_install_root
+import repro_cli_support/cli_program
+
+proc parseInstallRootArgs(args: seq[string]): InstallRootOptions =
+  ## The options `repro infra install-root <args>` runs with, read by
+  ## repro's generated command-line parser (a rejected line raises
+  ## CliUsageError).
+  installRootOptionsOf(ReproCommandLine.load(
+    @["infra", "install-root"] & args, CliSources()).infra.installRoot)
 import repro_profile/types
 
 # ---------------------------------------------------------------------
@@ -102,11 +110,11 @@ suite "M9.R.41 install-root arg parser":
     check opts.dryRun
 
   test "unknown flag fails fast (matches the rest of the infra surface)":
-    expect ValueError:
+    expect CliUsageError:
       discard parseInstallRootArgs(@["--bogus"])
 
   test "missing value for a flag that needs one fails fast":
-    expect ValueError:
+    expect CliUsageError:
       discard parseInstallRootArgs(@["--target"])
 
 suite "M9.R.41 fstab emission":

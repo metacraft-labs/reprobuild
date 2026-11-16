@@ -28,7 +28,7 @@
 ## (reprobuild-pm `spec/ReproOS-Anywhere-Safety-Contract.md`). Remote
 ## commands are built from shell-quoted words only.
 
-import std/[json, os, osproc, strutils]
+import std/[json, options, os, osproc, strutils]
 
 import repro_core/ambient_execution
 import repro_addon/mutations
@@ -38,6 +38,7 @@ import repro_addon/host_exec
 from repro_addon/image_boot import elfMachineArch
 from repro_home_intent/host_identity import selectHost, EHostIdentity
 import repro_cli_support/infra
+import repro_cli_support/cli_program
 
 type
   EAnywhere* = object of CatchableError
@@ -313,81 +314,34 @@ proc runAnywhereAddon*(o: AnywhereOptions; work: string): AnywhereResult =
 # The command line.
 # ---------------------------------------------------------------------------
 
-const AnywhereUsage* = """usage: repro anywhere --mode addon --host NAME --profile FILE
-         --addon-binary FILE --addon-sha256 HEX --known-hosts FILE
-         [--ssh-key FILE] [--ssh-port N] [--arch amd64|arm64|armhf]
-         [--deploy-signers FILE] [--cache-publishers FILE] [--cache-url URL]
-         [--agent-target T --manifest URL...] [--poll-interval S]
-         [--expect-plan DIGEST] [--recipient-out FILE]
-         [--applied-profile-out FILE]
-         [--home-profile-dir DIR] root@ADDRESS
-  Bootstrap an already-booted distribution host into ReproOS add-on mode
-  over SSH (ReproOS Add-On Mode §6.5.3). Without --expect-plan it runs the
-  read-only preflight, prints the plan -- the host's preflight report, the
-  profile text it would apply, the binary and anchor digests -- and one
-  digest over all of it, and applies nothing (exit 3). With --expect-plan
-  DIGEST, the acknowledged digest, it runs the preflight again, refuses
-  any other digest (a changed profile, binary or anchor included), then
-  bootstraps, applies the profile and requires a plan that predicts
-  nothing. Options a profile's
-  baseOs.bootstrap declares are its defaults.
-"""
-
-proc runAnywhereCli*(args: seq[string]): int =
-  var o = AnywhereOptions()
-  var mode, host, profile, homeDir, arch: string
-  var hostGiven = false
-  var i = 0
-  try:
-    while i < args.len:
-      let a = args[i]
-      template value(): string =
-        if "=" in a: a.split('=', 1)[1]
-        elif i + 1 < args.len:
-          inc i
-          args[i]
-        else:
-          raise newException(ValueError, a & " requires a value")
-      let flag = if a.startsWith("--"): a.split('=', 1)[0] else: a
-      case flag
-      of "-h", "--help":
-        stdout.write(AnywhereUsage)
-        return 0
-      of "--mode": mode = value()
-      of "--host": host = value(); hostGiven = true
-      of "--profile": profile = value()
-      of "--addon-binary": o.addonBinary = value()
-      of "--addon-sha256": o.addonSha256 = value().toLowerAscii()
-      of "--known-hosts": o.knownHosts = value()
-      of "--ssh-key": o.sshKey = value()
-      of "--ssh-port": o.sshPort = parseInt(value())
-      of "--arch": arch = value()
-      of "--deploy-signers": o.deploySigners = value()
-      of "--cache-publishers": o.cachePublishers = value()
-      of "--cache-url": o.cacheUrl = value()
-      of "--agent-target": o.agentTarget = value()
-      of "--manifest": o.agentSources.add value()
-      of "--poll-interval": o.pollIntervalSec = parseInt(value())
-      of "--expect-plan": o.expectPlan = value()
-      of "--recipient-out": o.recipientOut = value()
-      of "--applied-profile-out": o.appliedProfileOut = value()
-      of "--home-profile-dir": homeDir = value()
-      else:
-        if a.startsWith("-"): raise newException(ValueError, "unknown flag: " & a)
-        if o.target.len > 0:
-          raise newException(ValueError, "one target only, got " & a)
-        o.target = a
-      inc i
-    if mode != "addon":
-      raise newException(ValueError, "--mode addon is the only mode " &
-        "(the ReproOS conversion is the reproos repository's anywhere tool)")
-    for (name, v) in [("--profile", profile), ("--addon-binary", o.addonBinary),
-                      ("--addon-sha256", o.addonSha256),
-                      ("--known-hosts", o.knownHosts), ("root@ADDRESS", o.target)]:
-      if v.len == 0: raise newException(ValueError, name & " is required")
-  except ValueError as e:
-    stderr.write("repro anywhere: " & e.msg & "\n" & AnywhereUsage)
+proc runAnywhereCli*(conf: ReproCommandLineAnywhere): int =
+  ## ``repro anywhere --mode addon ... root@ADDRESS``, its command line parsed
+  ## from repro's description (``repro_cli_support/cli_description``).
+  var o = AnywhereOptions(addonBinary: conf.addonBinary,
+    addonSha256: conf.addonSha256.toLowerAscii(), knownHosts: conf.knownHosts,
+    sshKey: conf.sshKey, sshPort: conf.sshPort,
+    deploySigners: conf.deploySigners, cachePublishers: conf.cachePublishers,
+    cacheUrl: conf.cacheUrl, agentTarget: conf.agentTarget,
+    agentSources: conf.manifest, pollIntervalSec: conf.pollInterval,
+    expectPlan: conf.expectPlan, recipientOut: conf.recipientOut,
+    appliedProfileOut: conf.appliedProfileOut, target: conf.destination)
+  let host = conf.host.get("")
+  let hostGiven = conf.host.isSome
+  let profile = conf.profile
+  let homeDir = conf.homeProfileDir
+  var arch = conf.arch
+  if conf.mode != "addon":
+    stderr.writeLine("repro anywhere: --mode addon is the only mode " &
+      "(the ReproOS conversion is the reproos repository's anywhere tool)")
     return 2
+  let required = [("--profile", profile), ("--addon-binary", o.addonBinary),
+                  ("--addon-sha256", o.addonSha256),
+                  ("--known-hosts", o.knownHosts), ("root@ADDRESS", o.target)]
+  for (name, v) in required:
+    if v.len == 0:
+      stderr.writeLine("repro anywhere: " & name & " is required; see " &
+        "`repro anywhere --help`")
+      return 2
   try:
     o.host = selectHost(host, hostGiven).name
   except EHostIdentity as e:

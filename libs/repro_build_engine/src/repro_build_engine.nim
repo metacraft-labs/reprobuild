@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/source_root
 import repro_core/arg_files
 import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
@@ -14132,6 +14133,54 @@ proc monitorPayloadArgIndex(argv: openArray[string]): int =
     inc i
   -1
 
+const
+  ShippedMacosToolsEnvVar* = "STACKABLE_HOOKS_TOOLS_DIR"
+    ## The variable the stackable-hooks resolver (`resolveSipReplacement`)
+    ## reads for a tools root, after the invocation's own sandbox directory and
+    ## before the build-embedded store path.
+  ShippedMacosToolsSubdir* = "libexec" / "stackable-hooks-macos-tools"
+    ## Where a darwin release archive carries the non-SIP tools bundle,
+    ## relative to its prefix (`scripts/release/stage_release_macos_tools.sh`).
+
+proc shippedMacosToolsDirFor*(prefixes: openArray[string];
+                              validShell: proc(sh: string): bool): string =
+  ## The first ``<prefix>/libexec/stackable-hooks-macos-tools`` whose
+  ## ``bin/sh`` ``validShell`` accepts, or "". Pure apart from ``validShell``,
+  ## so a test can drive it on any host.
+  for prefix in prefixes:
+    if prefix.len == 0:
+      continue
+    let dir = prefix / ShippedMacosToolsSubdir
+    if validShell(dir / "bin" / "sh"):
+      return dir
+  ""
+
+when defined(macosx):
+  proc ensureShippedMacosToolsEnvironmentImpl()
+
+proc ensureShippedMacosToolsEnvironment*() =
+  ## Point the stackable-hooks resolver at the non-SIP tools bundle a darwin
+  ## release archive ships beside this image, when the caller has not chosen a
+  ## tools root (Distribution-And-Packaging.md §5.1, "The darwin non-SIP tools
+  ## bundle").
+  ##
+  ## A monitored action on macOS must start under a non-SIP shell. The
+  ## resolver's last fallback is the bundle's build-host store path, compiled
+  ## in, which a Mac without Nix does not have, so an unpacked release failed
+  ## every monitored launch with "SIP-safe monitored launch requires a non-SIP
+  ## shell". The archive carries the bundle at
+  ## ``<prefix>/libexec/stackable-hooks-macos-tools``, where ``<prefix>`` is
+  ## the parent of the running image's ``bin/``.
+  ##
+  ## Only an unset variable is filled: a caller's value always wins. It is set
+  ## in the process environment because that reaches every reader: this
+  ## engine's wrapper shell, the in-process monitor host, a ``repro internal
+  ## io monitor`` child and the shim in each monitored process, which all
+  ## resolve through the same stackable-hooks resolver. A Nix-installed engine
+  ## has no such directory and keeps the build-embedded path. A no-op off macOS.
+  when defined(macosx):
+    ensureShippedMacosToolsEnvironmentImpl()
+
 when defined(macosx):
   proc resolveNonSipShell*(): string
 
@@ -14704,6 +14753,30 @@ proc resolveMonitorShimLibForInstall*(): string =
     shimLibMemoKey = key
     shimLibMemoValue = result
 
+proc msvcInheritedSearchLists(action: BuildAction;
+                              config: BuildEngineConfig):
+    seq[(string, string)] =
+  ## The MSVC search lists (``MsvcListKeys``) the launched process inherits
+  ## from this one, with their values NOW: what ``mergeActionEnvWithMsvc``
+  ## puts the activation's MSVC-owned entries in front of when the action
+  ## does not declare the list itself. An isolated launch, or one under an
+  ## allowlisted environment, inherits none of them, so none is returned and
+  ## such an action gets the owned entries alone.
+  ##
+  ## Read per launch rather than taken from the activation, which is
+  ## captured once per process: the activation's own copy of ``PATH`` is the
+  ## host's ``PATH`` at that moment, and layering it would hide every later
+  ## change from both the launch and the key (``actionEnvResolver`` mirrors
+  ## this composition). See ``msvcDevEnvFromActivation``.
+  when defined(windows):
+    if config.hermeticEnv or action.isolateHostEnvironment:
+      return @[]
+    for name in MsvcListKeys:
+      if existsEnv(name):
+        result.add((name, getEnv(name)))
+  else:
+    discard
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -14958,6 +15031,27 @@ when defined(macosx):
   # spec's "reuse io-mon's existing population rather than re-implementing it".
   import stackable_hooks/propagation as sip_propagation
 
+  proc describeMacosToolsRoot*(root: string): string =
+    ## ``<root> (usable)``, ``<root> (no usable <root>/bin/sh)`` or
+    ## ``<root> (does not exist)``; ``(unset)`` for an empty root.
+    if root.len == 0:
+      return "(unset)"
+    if not dirExists(root):
+      return root & " (does not exist)"
+    let sh = root / "bin" / "sh"
+    if sip_propagation.isValidSipReplacement(sh):
+      root & " (usable)"
+    else:
+      root & " (no usable " & sh & ")"
+
+  proc ensureShippedMacosToolsEnvironmentImpl() =
+    if existsEnv(ShippedMacosToolsEnvVar):
+      return
+    let dir = shippedMacosToolsDirFor(runningImagePrefixCandidates(),
+      proc(sh: string): bool = sip_propagation.isValidSipReplacement(sh))
+    if dir.len > 0:
+      putEnv(ShippedMacosToolsEnvVar, dir)
+
   const nonSipShellCandidateNames* = ["sh", "bash", "dash", "ash", "zsh"]
     ## Executable names accepted as the non-SIP wrapper shell, most-preferred
     ## first. ``sh`` stays first so a host that does expose one keeps its
@@ -15040,7 +15134,13 @@ when defined(macosx):
         let candidate = entry / name
         if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
           rejected.add(candidate)
-    parts.add("shipped tools=" & sip_propagation.StackableHooksBuiltToolsDir)
+    # Every tools root the shared resolver consults after PATH, with its
+    # state, rather than the build-embedded path alone as if it were shipped
+    # (Distribution-And-Packaging.md §5.1, the darwin tools bundle).
+    for (label, root) in [
+        ("STACKABLE_HOOKS_TOOLS_DIR", getEnv(ShippedMacosToolsEnvVar)),
+        ("build-embedded tools", sip_propagation.StackableHooksBuiltToolsDir)]:
+      parts.add(label & "=" & describeMacosToolsRoot(root))
     parts.add("searched " & $pathDirs & " PATH dir(s) for " &
       nonSipShellCandidateNames.join("/"))
     if rejected.len == 0:
@@ -15187,7 +15287,7 @@ proc preparedActionEnv(action: BuildAction;
   let childEnv = launchChildEnv(action, config)
   let mergedEnv =
     if actionUsesMsvcToolchain(action, monitorCliPath(config)):
-      mergeActionEnvWithMsvc(childEnv)
+      mergeActionEnvWithMsvc(childEnv, msvcInheritedSearchLists(action, config))
     else:
       childEnv
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
@@ -21504,7 +21604,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return true
     false
 
+  # BUILD-WAIT PRESSURE (see ``repro_runquota/build_pressure``): how much
+  # of this build's wall time its leased actions spent held up -- queued at
+  # RunQuota, or running slower than the daemon expects of them -- reported
+  # to the daemon on the build's session at most once a second and once
+  # more before it closes. The ``pressure-reports``
+  # measurement (off by default); with it off the tracker does nothing.
+  proc pressureNowMicros(): int64 = monotonicNowNs() div 1000
+  var buildPressure = initBuildPressure(buildPressureEnabled(),
+    pressureNowMicros(), int64(epochTime() * 1000.0))
+
+  proc reportBuildPressure(force: bool) =
+    if not buildPressure.enabled or not inlineRunQuotaSessionOpen:
+      return
+    let now = pressureNowMicros()
+    if not force and not buildPressure.reportDue(now):
+      return
+    discard sendPressureReport(inlineRunQuotaSession,
+      buildPressure.takeReport(now))
+
   proc failRunningAction(index: int; message: string) =
+    buildPressure.noteWithdrawn(running[index].id, pressureNowMicros())
     running[index].inlineFailure = inlineRunQuotaFailureResult(
       running[index].id, message)
     running[index].processKind = rpkInlineRunQuotaFailed
@@ -21526,6 +21646,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # while grants come back as fast as the build offers and halves once a
   # queued candidate waits past the threshold, within ``maxParallel``.
   var frontier = initFrontierSizer(int(maxParallel), frontierWaitMillis())
+
 
   proc pendingInlineCount(): int =
     for item in running:
@@ -21566,6 +21687,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               grant.diagnostic)
             return j
           frontier.noteQueuedGrant(engineNowMs() - running[j].queuedAtMs)
+          buildPressure.noteGranted(running[j].id, pressureNowMicros())
           try:
             var queued = running[j].queuedRunQuotaProcess
             running[j].runQuotaProcess = startGrantedWithRunQuota(
@@ -23724,10 +23846,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             var processKind: RunningProcessKind
             var runQuotaProcess: ReproRunQuotaRunningProcess
             var queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
+            buildPressure.noteReady(staged.id, pressureNowMicros())
             case offer.kind
             of rqokStarted:
               runQuotaProcess = offer.running
               processKind = rpkInlineRunQuota
+              buildPressure.noteGranted(staged.id, pressureNowMicros())
               inc grantedAtOnce
             of rqokQueued:
               queuedRunQuotaProcess = offer.queued
@@ -23820,6 +23944,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runIndex = tickRunQuotaQueue()
           if runIndex >= 0:
             break
+        reportBuildPressure(force = false)
         # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose
         # root has exited before choosing which action to reap, and settle
         # them in their own pass so the choice cannot skip any.
@@ -23951,6 +24076,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         raiseEngine("internal missing running action: " & finished.id)
       if runningItem.processKind == rpkHelperProcess:
         closeProcessOnce(runningItem.process)
+      # The finish is where a running action's slowdown becomes known: the
+      # launcher's duration against the daemon's expected uncontended one,
+      # which the finish's acknowledgement carried. Any other way out of the
+      # running set (a denial, a failed launch) only ends its wait.
+      if runningItem.processKind == rpkInlineRunQuota and
+          runningItem.runQuotaProcess.completed:
+        buildPressure.noteFinished(runningItem.id, pressureNowMicros(),
+          runningItem.runQuotaProcess.execution.elapsedMillis,
+          runningItem.runQuotaProcess.execution.expectedUncontendedMillis)
+      else:
+        buildPressure.noteWithdrawn(runningItem.id, pressureNowMicros())
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
         if finishedUsed > runningItem.poolUnits:
@@ -24203,6 +24339,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         teardownFailures.add("stopping action " & item.id & identities &
           ": " & err.msg)
     if inlineRunQuotaSessionOpen:
+      # The last build-wait pressure report, before the session closes:
+      # whatever is still in flight ends here.
+      try:
+        for item in running:
+          buildPressure.noteWithdrawn(item.id, pressureNowMicros())
+        reportBuildPressure(force = true)
+      except CatchableError:
+        discard
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       # The daemon refuses to close a session that still owns leases, and
       # that refusal is correct: it is kept verbatim in the collected text,

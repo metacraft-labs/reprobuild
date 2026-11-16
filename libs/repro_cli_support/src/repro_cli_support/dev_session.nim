@@ -3539,6 +3539,20 @@ proc queryValue(query, name, fallback: string): string =
       return part[eq + 1 .. ^1]
   fallback
 
+proc sendAll(client: Socket; data: string) =
+  ## Send ``data`` to one control-API client, raising ``OSError`` when the
+  ## client has gone away.
+  ##
+  ## ``flags = {}`` is the point. With the default ``SafeDisconn`` flag,
+  ## ``std/net``'s ``send`` swallows a disconnection error (EPIPE,
+  ## ECONNRESET) and retries without counting the attempt, so a peer that
+  ## resets the connection before its answer is written keeps the
+  ## single-threaded listener spinning forever: one packet from any account
+  ## that can reach the port, and ``repro down`` can never be served again.
+  ## Raising instead ends that one exchange; the accept loop
+  ## (``runDevSessionHttpServer``) drops the connection and goes on.
+  client.send(data, flags = {})
+
 proc sendResponse(client: Socket; status: int; contentType, body: string;
                   extraHeaders = "") =
   ## ``extraHeaders`` is zero or more complete ``Name: value\r\n`` lines.
@@ -3554,7 +3568,7 @@ proc sendResponse(client: Socket; status: int; contentType, body: string;
     of 405: "Method Not Allowed"
     of 415: "Unsupported Media Type"
     else: "Error"
-  client.send("HTTP/1.1 " & $status & " " & reason & "\r\n" &
+  client.sendAll("HTTP/1.1 " & $status & " " & reason & "\r\n" &
     "Content-Type: " & contentType & "\r\n" &
     "Content-Length: " & $body.len & "\r\n" &
     extraHeaders &
@@ -3562,14 +3576,13 @@ proc sendResponse(client: Socket; status: int; contentType, body: string;
 
 proc sendSse(client: Socket; id: int; node: JsonNode) =
   let kind = node{"kind"}.getStr("message")
-  client.send("id: " & $id & "\n")
-  client.send("event: " & kind & "\n")
-  client.send("data: " & $node & "\n\n")
+  client.sendAll("id: " & $id & "\n" & "event: " & kind & "\n" &
+    "data: " & $node & "\n\n")
 
 proc serveEvents(client: Socket; sessionDir, query: string) =
   let waitMs = parseInt(queryValue(query, "wait-ms", "250"))
   let since = parseInt(queryValue(query, "since", "0"))
-  client.send("HTTP/1.1 200 OK\r\n" &
+  client.sendAll("HTTP/1.1 200 OK\r\n" &
     "Content-Type: text/event-stream\r\n" &
     "Cache-Control: no-cache\r\n" &
     "Connection: close\r\n\r\n")
@@ -3597,12 +3610,36 @@ const
     ## The largest request body read and discarded. Reading it rather than
     ## closing on unread bytes keeps the kernel from answering the client
     ## with a reset that can destroy the response it has not read yet.
+  HttpRequestReadTimeoutMs = 5000
+    ## The whole request -- request line, headers and drained body -- must
+    ## arrive within this long of the connection being accepted. The
+    ## listener serves one connection at a time, so without a deadline any
+    ## account that can reach a TCP port could connect, send nothing, and
+    ## keep ``repro down`` and every other client from the API for as long
+    ## as it liked (§"Control API Access Control", "Request deadline").
 
-proc recvHttpLine(socket: Socket): tuple[line: string; ok: bool] =
-  ## One CRLF- (or LF-) terminated line. ``ok`` is false at end of stream
-  ## or when the line exceeds ``MaxHttpHeaderLineBytes``.
+proc remainingMs(deadline: MonoTime): int =
+  ## Milliseconds left before ``deadline``; 0 once it has passed.
+  max(0, int((deadline - getMonoTime()).inMilliseconds))
+
+proc recvBefore(socket: Socket; size: int; deadline: MonoTime): string =
+  ## ``recv`` that gives up at ``deadline``: "" when the deadline passes or
+  ## the peer closes, so the caller treats both as the end of the exchange.
+  let left = remainingMs(deadline)
+  if left <= 0:
+    return ""
+  try:
+    socket.recv(size, timeout = left)
+  except TimeoutError:
+    ""
+
+proc recvHttpLine(socket: Socket; deadline: MonoTime):
+    tuple[line: string; ok: bool] =
+  ## One CRLF- (or LF-) terminated line. ``ok`` is false at end of stream,
+  ## when ``deadline`` passes, or when the line exceeds
+  ## ``MaxHttpHeaderLineBytes``.
   while true:
-    let chunk = socket.recv(1)
+    let chunk = socket.recvBefore(1, deadline)
     if chunk.len == 0:
       return (result.line, false)
     let ch = chunk[0]
@@ -3659,12 +3696,14 @@ proc handleHttpClient(client: Socket; sessionDir: string;
   ## not authenticated learns nothing about which routes exist, and a
   ## refused request has no side effect.
   defer: client.close()
-  let (request, requestOk) = client.recvHttpLine()
+  let deadline = getMonoTime() + initDuration(
+    milliseconds = HttpRequestReadTimeoutMs)
+  let (request, requestOk) = client.recvHttpLine(deadline)
   if not requestOk or request.len == 0:
     return
   var headers: seq[tuple[name, value: string]] = @[]
   while true:
-    let (line, ok) = client.recvHttpLine()
+    let (line, ok) = client.recvHttpLine(deadline)
     if not ok:
       return
     if line.len == 0:
@@ -3714,7 +3753,7 @@ proc handleHttpClient(client: Socket; sessionDir: string;
     try: remaining = min(parseInt(lengths[0]), MaxHttpBodyBytes)
     except ValueError: remaining = 0
     while remaining > 0:
-      let chunk = client.recv(min(remaining, 4096))
+      let chunk = client.recvBefore(min(remaining, 4096), deadline)
       if chunk.len == 0: break
       remaining -= chunk.len
 
@@ -3832,5 +3871,13 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
     var client: owned(Socket)
     server.accept(client)
     if not client.isNil:
-      client.handleHttpClient(config.sessionDir, access)
+      # One client's failure ends only its own exchange: a peer that resets
+      # mid-answer (`sendAll`), or an authenticated request whose query does
+      # not parse, must not take the listener -- and with it `repro down`
+      # -- away from everyone else. `handleHttpClient` closes the socket on
+      # every path.
+      try:
+        client.handleHttpClient(config.sessionDir, access)
+      except CatchableError:
+        discard
   0
