@@ -312,6 +312,10 @@ type
     baseIdentity*: BaseIdentity    ## the base observed at plan time (§7.4)
     previousBase*: BaseIdentity    ## the one the current generation recorded
     baseChanges*: seq[string]      ## what changed between the two (§7.9)
+    baseLayerOverrides*: seq[string]
+      ## Every ``collision = "overrideBaseLayer"`` of the profile and what
+      ## it acknowledges: ``<address>\t<path or unit>\t<what>`` (spec
+      ## §4.3.2: listed in every plan).
     floorIntroduced*: seq[string]
       ## Units whose floor this generation changes -- installed without it
       ## or under an older floor version (``floorIntroducedUnits``): each
@@ -4180,6 +4184,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   for r in user.resources:
     if r.kind == srkFsSystemFile and r.sfCollision.len > 0:
       refuseOptInForBase(driver, r.address, r.sfCollision)
+    elif r.kind == srkSystemdSystemUnit and r.suCollision.len > 0:
+      refuseOptInForBase(driver, r.address, r.suCollision,
+                         "systemd.systemUnit.collision")
     elif r.kind == srkLinuxDpkgDiversion and not driver.supportsDiversions:
       raise newAddOnOutOfScope("linux.dpkgDiversion", "", r.address,
         DivertUnavailableOnArch & ": pacman has no diversions (no " &
@@ -4216,6 +4223,34 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if p.detail.len > 0:
         raise newAddOnError(p.diagnostic, p.detail &
           "; nothing was planned or changed")
+      # Omarchy as a third owner (spec §4.3.2): a managed prefix, a file
+      # or a unit of the operator's profile that intersects what Omarchy's
+      # install and migration scripts write is refused, naming the
+      # scripts, unless it is acknowledged with `collision =
+      # "overrideBaseLayer"`; every acknowledgement is listed in the plan.
+      # Before the collision pass observes anything. Generation 0's own
+      # objects are never in the set's terms (they are the add-on's).
+      if isOmarchyBase(result.baseIdentity.id):
+        let layer = readOmarchyPathSet()
+        let check = baseLayerCheck(layer, user)
+        let why = baseLayerRefusalDetail(layer, check)
+        if why.len > 0:
+          raise newAddOnError(adBaseLayerOwned, why)
+        result.baseLayerOverrides = check.overrides
+      else:
+        # No configuration layer sits on this base: an acknowledgement has
+        # nothing to acknowledge, and the plan says so.
+        for r in user.resources:
+          let c = case r.kind
+            of srkFsSystemFile: r.sfCollision
+            of srkSystemdSystemUnit: r.suCollision
+            else: ""
+          if c == OverrideBaseLayer:
+            result.baseLayerOverrides.add(r.address & "\t" &
+              (if r.kind == srkFsSystemFile: r.sfPath else: r.suName) &
+              "\tacknowledges nothing: the base is " &
+              result.baseIdentity.id & ", which has no configuration " &
+              "layer above the distribution")
   let baseIdentityText = renderBaseIdentity(result.baseIdentity)
   # A package that arrived since the add-on took a unit name (spec §4.3):
   # reported on every plan and apply as actionable drift.

@@ -126,16 +126,30 @@ proc firewallChainCheck(value: FieldValue): string =
       AddOnFirewallTable & "`; add-on firewall rules go only there"
   ""
 
+const NoBaseLayerOnDebian = "`overrideBaseLayer` acknowledges a path or " &
+  "unit a configuration layer above the distribution writes, and the only " &
+  "such layer the add-on observes is Omarchy, on Arch (spec §4.3.2); a " &
+  "Debian base has none to override"
+
 proc debianCollisionCheck(value: FieldValue): string =
   ## `fs.systemFile.collision` in `add-on-debian`: `takeOver` is the pacman
   ## backup-file opt-in, which dpkg has no counterpart of but the
-  ## diversion (spec §4.3, §4.3.1).
+  ## diversion (spec §4.3, §4.3.1); `overrideBaseLayer` acknowledges
+  ## Omarchy's paths (§4.3.2), which a Debian base does not have.
   let v = if value.kind == fvkString: value.s else: ""
   if v == "takeOver":
     return "`takeOver` is for pacman backup files (Arch); on a Debian " &
       "base a package-owned file is replaced through `collision = " &
       "\"divert\"` (spec §4.3)"
+  if v == "overrideBaseLayer":
+    return NoBaseLayerOnDebian
   ""
+
+proc debianUnitCollisionCheck(value: FieldValue): string =
+  ## `systemd.systemUnit.collision` in `add-on-debian`: as for a file,
+  ## `overrideBaseLayer` has nothing to override there (spec §4.3.2).
+  let v = if value.kind == fvkString: value.s else: ""
+  if v == "overrideBaseLayer": NoBaseLayerOnDebian else: ""
 
 proc archCollisionCheck(value: FieldValue): string =
   ## `fs.systemFile.collision` in `add-on-arch`: pacman has no diversions,
@@ -172,7 +186,9 @@ proc addOnDebianProfile*(): RealisationProfile =
                      "exclusive") &
         @[FieldRule(field: "collision", class: fcAddOnSpecific,
             reason: "the opt-in when a package provides a unit of the " &
-              "same name (spec §4.3): `dropIn` or `replace`"),
+              "same name (spec §4.3): `dropIn` or `replace`; on Omarchy, " &
+              "`overrideBaseLayer` for a unit its scripts install (§4.3.2)",
+            check: debianUnitCollisionCheck),
           FieldRule(field: "dropInName", class: fcAddOnSpecific,
             reason: "names the drop-in file of a `collision = dropIn` " &
               "unit"),
@@ -220,7 +236,8 @@ proc addOnDebianProfile*(): RealisationProfile =
         @[FieldRule(field: "collision", class: fcAddOnSpecific,
             reason: "the opt-in when a package owns the path (spec §4.3, " &
               "§4.3.1): `divert` on Debian, `takeOver` of a backup file " &
-              "on Arch",
+              "on Arch; on Omarchy, `overrideBaseLayer` for a path its " &
+              "scripts write (§4.3.2)",
             check: debianCollisionCheck)]),
     KindRule(kind: "passwd.user", class: fcShared,
       fields: shared("name", "shell", "extraGroups")),
@@ -386,6 +403,13 @@ proc addOnArchProfile*(): RealisationProfile =
               "§8.3, §13 decision 92)")
     else:
       discard
+  # A unit's `collision = "overrideBaseLayer"` is valid on Arch: an Omarchy
+  # base has a layer to override (§4.3.2), and whether this base is Omarchy
+  # is the apply's to observe, since the realisation covers both.
+  for k in result.kinds.mitems:
+    if k.kind == "systemd.systemUnit":
+      for f in k.fields.mitems:
+        if f.field == "collision": f.check = nil
 
 proc findKind*(rp: RealisationProfile; kind: string): int =
   ## Index of `kind` in `rp.kinds`, or -1.

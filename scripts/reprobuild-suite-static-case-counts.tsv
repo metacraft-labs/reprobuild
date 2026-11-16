@@ -76,6 +76,7 @@ libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_late_recipient_key_pair.nim	nim	4
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
 libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	9
+libs/repro_addon/tests/t_addon_omarchy_base_layer.nim	nim	29
 libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	3
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	17
@@ -736,7 +737,7 @@ libs/repro_profile/tests/t_smoke_repro_profile.nim	nim	138
 libs/repro_profile_compile/tests/t_a_real_dispatcher_carries_reboot_required.nim	nim	2
 libs/repro_profile_compile/tests/t_activity_scoped_intent_plans_per_host.nim	nim	7
 libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
-libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim	nim	11
+libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim	nim	12
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
 libs/repro_profile_compile/tests/t_addon_profile_collision_and_managed_prefixes.nim	nim	6
 libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	9
@@ -1305,6 +1306,7 @@ tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_apt_closure_refused.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_bootstrap_uninstall_byte_identity.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_collision_matrix.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_no_base_layer_on_plain_arch.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_preflight_is_zero_write.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_removal_respects_ledger.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_store_placement_by_root_fs.nim	nim	1
@@ -1312,6 +1314,7 @@ tests/e2e/addon/t_e2e_arch_addon_takeover_restore_rechecked.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_takeover_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_uninstall_refuses_pending_switch.nim	nim	1
 tests/e2e/addon/t_e2e_arch_testbed_is_pinned.nim	nim	1
+tests/e2e/addon/t_e2e_omarchy_addon_base_layer_refusal.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	0
 tests/e2e/addon/t_validator_safety_checks.nim	nim	11
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5

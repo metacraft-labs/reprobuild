@@ -821,7 +821,10 @@ template systemdSystemUnit*(targetResources: var seq[ResourceIntent];
   ## (`/etc/systemd/system/<name>.d/50-repro-<dropInName>.conf`,
   ## `dropInName` defaulting to `addon`), `"replace"` lets this unit
   ## shadow the package's. Without it such a unit is refused
-  ## (`EAddOnUnitShadows`). Outside add-on mode the field is ignored.
+  ## (`EAddOnUnitShadows`). On an Omarchy base, `"overrideBaseLayer"`
+  ## acknowledges a unit Omarchy's own scripts install, which is otherwise
+  ## refused (`EAddOnBaseLayerOwned`, spec §4.3.2). Outside add-on mode the
+  ## field is ignored.
   ##
   ## A unit that is active when the apply reaches it is RESTARTED when its
   ## file, its closure, or a resource it `dependsOn` (its configuration
@@ -1147,7 +1150,10 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
       fields["sourceLocal"] = strField(sourceLocal)
     # Add-on mode's opt-in when a package owns `path` (ReproOS Add-On Mode
     # spec §4.3): `"divert"` moves the package's copy to `<path>.distrib`
-    # through a local dpkg diversion first. Ignored outside add-on mode.
+    # through a local dpkg diversion first (Debian); `"takeOver"` replaces a
+    # pacman backup file (Arch, §4.3.1); `"overrideBaseLayer"` acknowledges
+    # a path Omarchy's own scripts write (§4.3.2). Ignored outside add-on
+    # mode.
     if collision.len > 0:
       fields["collision"] = strField(collision)
     let addr0 = if address.len > 0: address

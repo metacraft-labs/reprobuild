@@ -72,6 +72,64 @@ proc gen2Profile*(omarchyAccount = ""): string =
   ## The Debian sequence's generation 2: the unit removed, the file changed.
   addOnStanza(omarchyAccount) & fixtureFile("fixture = 2\n")
 
+# ---------------------------------------------------------------------------
+# The base-layer profile (spec §4.3.2): the declarations Omarchy's scripts
+# write, shared by the Omarchy refusal gate and the plain-Arch gate.
+# ---------------------------------------------------------------------------
+
+const
+  SshPrefix* = "/etc/ssh/"
+    ## A managed prefix covering paths Omarchy's scripts write
+    ## (``/etc/ssh/ssh_config.d``, ``/etc/ssh/sshd_config.d/...``).
+  SudoersDir* = "/etc/sudoers.d"
+  SudoersFile* = "/etc/sudoers.d/repro-ar3-fixture"
+    ## A file inside a directory Omarchy's scripts write; also the
+    ## narrowest managed prefix covering it.
+  SudoersBytes* = "# Reprobuild add-on test fixture: no rule\n"
+    ## A comment only, so ``sudo`` reads the tree unchanged.
+  OmarchyUnit* = "omarchy-nvme-suspend-fix.service"
+    ## A unit Omarchy's ``install/hardware/apple/fix-suspend-nvme.sh``
+    ## installs (on Apple hardware only, so absent from the VM).
+  OmarchyUnitPath* = "/etc/systemd/system/" & OmarchyUnit
+  ModprobeDir* = "/etc/modprobe.d"
+  ModprobeFile* = "/etc/modprobe.d/repro-ar3-fixture.conf"
+    ## A file inside another directory Omarchy's scripts write: the file
+    ## an override acknowledges. Not a ``/etc/sudoers.d`` file: the add-on
+    ## writes every ``fs.systemFile`` mode 0644 (``mode`` cannot be
+    ## expressed; reprobuild-pm issue
+    ## 2026-11-12-fs-systemfile-cannot-express-mode-group-or-copy-form), and
+    ## ``visudo -c`` rejects a sudoers file that is not 0440.
+  ModprobeBytes* = "# Reprobuild add-on test fixture: no option\n"
+
+proc baseLayerStanza*(prefixes: openArray[string]; account: string): string =
+  ## The ``addOn`` stanza with ``prefixes``, naming ``account`` on Omarchy.
+  var quoted: seq[string]
+  for p in prefixes: quoted.add("\"" & p & "\"")
+  "addOn {\n  managedEtcPrefixes = [" & quoted.join(", ") & "]\n" &
+    (if account.len > 0: "  omarchyAccount = \"" & account & "\"\n" else: "") &
+    "}\n"
+
+proc sudoersRes*(collision = ""): string =
+  "\nfs.systemFile {\n  path = \"" & SudoersFile & "\"\n  content = \"" &
+    SudoersBytes & "\"\n" &
+    (if collision.len > 0: "  collision = \"" & collision & "\"\n" else: "") &
+    "}\n"
+
+proc modprobeRes*(collision = ""): string =
+  "\nfs.systemFile {\n  path = \"" & ModprobeFile & "\"\n  content = \"" &
+    ModprobeBytes & "\"\n" &
+    (if collision.len > 0: "  collision = \"" & collision & "\"\n" else: "") &
+    "}\n"
+
+proc omarchyUnitRes*(reproExe: string; collision = ""): string =
+  ## The fixture unit (``fixtureUnit``: the add-on's own ``repro
+  ## --version``, a ``oneshot`` that stays active) under the name of a unit
+  ## Omarchy's scripts install.
+  var s = fixtureUnit(reproExe).replace(FixtureUnitName, OmarchyUnit)
+  if collision.len > 0:
+    s = s[0 ..< s.rfind("}")] & "  collision = \"" & collision & "\"\n}\n"
+  "\n" & s
+
 const SettleBaselineCommand* = "udevadm settle && systemctl daemon-reload && " &
   "for a in $(systemctl list-units --type=automount --state=active --plain " &
   "--no-legend | awk '{print $1}'); do m=\"${a%.automount}.mount\"; " &

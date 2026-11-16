@@ -176,3 +176,34 @@ proc isArchFamilyRoot*(root = "/"): bool =
   ## readable. Read by ``repro_infra/host_base``'s parser, the one every
   ## other reader of the base's family uses.
   observeHostBaseAt(root).isArchFamily()
+
+proc pacmanOwnersOf*(paths: openArray[string]; root = "/"):
+    Table[string, seq[string]] =
+  ## For each of ``paths`` (``/``-rooted, no trailing ``/``), every installed
+  ## package whose ``%FILES%`` lists it -- as a file or as a directory, which
+  ## several packages may list -- sorted by name; a path no package lists has
+  ## no key. Raises ``ValueError`` for a database entry with no name or no
+  ## ``files`` list: a reader that reports who owns a path must not read a
+  ## damaged entry as "nobody".
+  var wanted = initTable[string, seq[string]]()
+  for p in paths: wanted[p] = @[]
+  for pkg in pacmanInstalledPackages(root):
+    if pkg.name.len == 0 or not fileExists(pkg.dir / "files"):
+      raise newException(ValueError, "the pacman database entry " & pkg.dir &
+        " has no name or no files list")
+    for p in pacmanFilesPaths(readFile(pkg.dir / "files")):
+      if p in wanted and pkg.name notin wanted[p]:
+        wanted[p].add(pkg.name)
+  for p, owners in wanted:
+    if owners.len > 0:
+      result[p] = owners.sorted(system.cmp)
+
+proc pacmanPackageFilesEntry*(name: string; root = "/"):
+    tuple[found: bool; entry: string] =
+  ## The ``files`` entry of the installed package ``name``; ``found`` false
+  ## when it is not installed. Raises ``IOError`` when it is installed and
+  ## the entry cannot be read.
+  for pkg in pacmanInstalledPackages(root):
+    if pkg.name == name:
+      return (true, readFile(pkg.dir / "files"))
+  (false, "")

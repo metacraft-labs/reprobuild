@@ -885,6 +885,11 @@ proc renderAddonSections*(r: AddonApplyResult): string =
     # Every weakening of the hardening floor, in every plan (§10.1, CONF-2).
     result.add("service floor exceptions:\n")
     for l in r.floorExceptions: result.add("  " & l & "\n")
+  if r.baseLayerOverrides.len > 0:
+    # Every acknowledgement of a path or unit the base layer writes, in
+    # every plan (§4.3.2).
+    result.add("base-layer overrides (collision = \"overrideBaseLayer\"):\n")
+    for l in r.baseLayerOverrides: result.add("  " & l & "\n")
   if r.baseIdentity.id.len > 0:
     # The base the plan was computed against (§7.4) and, after a
     # distribution upgrade, what changed since the current generation (§7.9).

@@ -125,6 +125,9 @@ type
       ## ``systemctl is-active`` does not answer with exactly one known
       ## state per service (``networkManagerFromIsActive``). Arch bases only.
     omarchy*: OmarchyFacts   ## Omarchy bases only
+    omarchyPaths*: OmarchyPathSet
+      ## Omarchy bases only: the base layer's ``/etc`` path set (spec
+      ## §4.3.2), recorded in the plan with each path's scripts and owners.
     omarchyAccount*: string  ## the profile's, as checked
 
   OsRelease* = Table[string, string]
@@ -989,6 +992,20 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   let omarchyBase = isOmarchyBase(id)
   if omarchyBase:
     result.omarchy = omarchyFacts(osr)
+    # The base layer's path set (spec §4.3.2): recorded here and checked
+    # by every plan. A set that cannot be read fails the preflight, since
+    # an empty one would let every path through.
+    result.omarchyPaths = readOmarchyPathSet()
+    let ps = result.omarchyPaths
+    var bothOwners = 0
+    for e in ps.paths:
+      if e.owners.len > 0: inc bothOwners
+    result.add("omarchy-path-set", ps.problem.len == 0,
+      if ps.problem.len > 0: diagnosticMessage(adBaseLayerOwned, ps.problem)
+      else: "Omarchy " & ps.packageVersion & ": " & $ps.paths.len &
+            " /etc path(s) named by " & $ps.scriptCount & " file(s) under " &
+            OmarchyShareDir & "/{" & OmarchyScriptDirs.join(",") & "}/, " &
+            $bothOwners & " of them also owned by a package")
   if omarchyBase or result.omarchyAccount.len > 0:
     let why =
       if omarchyBase and inp.profilePath.len == 0:
@@ -1209,6 +1226,10 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       "package": result.omarchy.packageVersion,
       "account": result.omarchyAccount,
     }
+    var paths = newJArray()
+    for e in result.omarchyPaths.paths:
+      paths.add(%*{"path": e.path, "scripts": e.scripts, "owners": e.owners})
+    plan["omarchy"]["paths"] = paths
   if inp.profilePath.len > 0:
     # Only when given, so a plan without a profile keeps its bytes.
     plan["profile"] = %*{"sha256": profileSha,
@@ -1219,5 +1240,13 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
 proc renderPreflightHuman*(r: PreflightReport): string =
   for c in r.checks:
     result.add(alignLeft($c.verdict, 5) & alignLeft(c.id, 20) & c.detail & "\n")
+  if r.omarchyPaths.paths.len > 0:
+    # Every path with both of its owners (spec §4.3.2): the scripts that
+    # name it, and the packages that also list it ("-" for none).
+    result.add("\nOmarchy path set (path, package owners, scripts):\n")
+    for e in r.omarchyPaths.paths:
+      result.add("  " & e.path & "\t" &
+        (if e.owners.len > 0: e.owners.join(",") else: "-") & "\t" &
+        e.scripts.join(",") & "\n")
   result.add("\ncompatible: " & $r.compatible & "\n")
   result.add("plan digest: " & r.digest & "\n")

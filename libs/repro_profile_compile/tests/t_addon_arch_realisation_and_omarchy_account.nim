@@ -99,6 +99,30 @@ suite "the add-on-arch realisation profile":
     discard adaptSystemProfile(withCollision("takeOver"), archTarget())
     discard adaptSystemProfile(withCollision("divert"), debTarget)
 
+  test "overrideBaseLayer is valid on Arch and refused on Debian, on a file and on a unit":
+    # spec §4.3.2, §8.4: the opt-in acknowledges a path or unit Omarchy's
+    # scripts write; add-on-arch covers Arch and Omarchy, so whether the
+    # base has the layer is the apply's to observe, and a Debian base has
+    # none.
+    proc withOverride(unit: bool): ProfileIntent =
+      result = ProfileIntent(name: "box")
+      if unit:
+        systemdSystemUnit(result.resources, name = "omarchy-x.service",
+          content = "[Service]\nExecStart=/repro/store/prefixes/x/1-0123456789abcdef/bin/x\n",
+          collision = "overrideBaseLayer", address = "u")
+      else:
+        fsSystemFile(result.resources, path = "/etc/sudoers.d/repro-fx",
+          content = "# x\n", collision = "overrideBaseLayer", address = "f")
+    let debTarget = systemPlanTarget("deb", toHashSet(["default"]), srAddOnDebian)
+    for unit in [false, true]:
+      discard adaptSystemProfile(withOverride(unit), archTarget())
+      let onDebian = refusal(proc () =
+        discard adaptSystemProfile(withOverride(unit), debTarget))
+      require not onDebian.isNil
+      check onDebian.field == (if unit: "systemd.systemUnit.collision"
+                               else: "fs.systemFile.collision")
+      check "a Debian base has none to override" in onDebian.msg
+
   test "the same unit as a store package plans on Arch":
     var p = ProfileIntent(name: "archbox")
     systemdSystemUnit(p.resources, name = "fixture.service",

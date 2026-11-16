@@ -1014,6 +1014,11 @@
 ##                                            ``takeOver`` removal it cannot
 ##                                            carry out instead of keeping
 ##                                            the path, owned
+## ``omarchy-path-set-empty``                 the Omarchy path set is read
+##                                            as empty: preflight records no
+##                                            path, and no plan refuses a
+##                                            prefix, file or unit Omarchy's
+##                                            scripts write
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1688,7 +1693,10 @@ const
                           "observer-ignores-backup",
                           "takeover-restores-recorded-bytes",
                           "takeover-skips-write-recheck",
-                          "takeover-replay-refuses"]
+                          "takeover-replay-refuses",
+                          # Omarchy as a third owner: the base-layer path
+                          # set read as empty (omarchy.nim).
+                          "omarchy-path-set-empty"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

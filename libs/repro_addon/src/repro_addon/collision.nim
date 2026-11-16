@@ -107,6 +107,11 @@ type
       ## §4.3.1), so ``collision = "takeOver"`` exists there; dpkg's
       ## counterpart is the diversion, and a ``takeOver`` on a dpkg base is
       ## refused by name.
+    hasBaseLayers*: bool
+      ## A configuration layer above the distribution can sit on this base
+      ## (Omarchy on pacman, spec §4.3.2), so ``collision =
+      ## "overrideBaseLayer"`` means something here; on a dpkg base it is
+      ## refused by name.
 
   AddonCollisionError* = object of CatchableError
     ## A refusal of the decision table that has no typed add-on
@@ -517,7 +522,7 @@ proc newPacmanDriver*(root = "/"; unitProvision: proc(unit: string):
   let idx = PacmanIndex()
   let rootDir = root
   result = CollisionDriver(name: "pacman", supportsDiversions: false,
-                           supportsTakeOver: true)
+                           supportsTakeOver: true, hasBaseLayers: true)
   result.packageOwner = proc(path: string): PackageOwnership =
     when mutated("observer-never-package-owned"):
       return PackageOwnership()
@@ -719,12 +724,15 @@ proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
 const DivertUnavailableOnArch* = "`divert` is unavailable on Arch"
   ## The phrase spec §4.3.1 item 2 and §8.4 have the refusal name.
 
-proc refuseOptInForBase*(d: CollisionDriver; address, collision: string) =
-  ## A file opt-in the base cannot honour, refused by name before anything
-  ## is observed (spec §4.3.1, §8.4): ``divert`` on a base without
-  ## diversions (pacman: "`divert` is unavailable on Arch"), and
-  ## ``takeOver`` on a base whose package manager would not keep a locally
-  ## replaced file (dpkg, whose counterpart is the diversion).
+proc refuseOptInForBase*(d: CollisionDriver; address, collision: string;
+                         field = "fs.systemFile.collision") =
+  ## An opt-in the base cannot honour, refused by name before anything is
+  ## observed (spec §4.3.1, §4.3.2, §8.4): ``divert`` on a base without
+  ## diversions (pacman: "`divert` is unavailable on Arch"), ``takeOver``
+  ## on a base whose package manager would not keep a locally replaced
+  ## file (dpkg, whose counterpart is the diversion), and
+  ## ``overrideBaseLayer`` -- a file's or a unit's (``field``) -- on a base
+  ## no configuration layer sits on (dpkg).
   if collision == "divert" and not d.supportsDiversions:
     raise newAddOnOutOfScope("fs.systemFile.collision", "", address,
       DivertUnavailableOnArch & ": pacman has no diversions (no " &
@@ -736,6 +744,12 @@ proc refuseOptInForBase*(d: CollisionDriver; address, collision: string) =
       "`takeOver` is for pacman backup files (Arch); on the " & d.name &
       " base a package-owned file is replaced through `collision = " &
       "\"divert\"` (spec §4.3, §4.3.1)")
+  if collision == "overrideBaseLayer" and not d.hasBaseLayers:
+    raise newAddOnOutOfScope(field, "", address,
+      "`overrideBaseLayer` acknowledges a path or unit a configuration " &
+      "layer above the distribution writes, and the only such layer the " &
+      "add-on observes is Omarchy, on Arch (spec §4.3.2); the " & d.name &
+      " base has none to override")
 
 proc md5OfFile*(path: string): string =
   ## Lower-case hex MD5 of ``path``'s bytes: the kind of digest pacman's

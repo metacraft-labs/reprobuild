@@ -1587,14 +1587,19 @@ const
   SecretFileStanzaTag* = "secrets.secretFile"
     ## The `secrets.secretFile` declaration (`SecretFileDecl`). Like the
     ## `addOn` stanza it is not a resource stanza.
-  UnitCollisionOptIns* = ["dropIn", "replace"]
-    ## `collision` values a `systemd.systemUnit` may declare.
-  FileCollisionOptIns* = ["divert", "takeOver"]
+  UnitCollisionOptIns* = ["dropIn", "replace", "overrideBaseLayer"]
+    ## `collision` values a `systemd.systemUnit` may declare: `dropIn` and
+    ## `replace` for a unit a package provides (ReproOS-Add-On-Mode §4.3),
+    ## `overrideBaseLayer` for one a configuration layer above the
+    ## distribution installs (Omarchy, §4.3.2).
+  FileCollisionOptIns* = ["divert", "takeOver", "overrideBaseLayer"]
     ## `collision` values an `fs.systemFile` may declare: `divert` (a
-    ## dpkg diversion, Debian) and `takeOver` (a pacman backup file,
-    ## Arch). Which one a base honours is the add-on's to decide
-    ## (ReproOS-Add-On-Mode §4.3, §4.3.1): each is refused by name on the
-    ## other base.
+    ## dpkg diversion, Debian), `takeOver` (a pacman backup file,
+    ## Arch) and `overrideBaseLayer` (a path a configuration layer above
+    ## the distribution writes, Omarchy). Which one a base honours is the
+    ## add-on's to decide (ReproOS-Add-On-Mode §4.3, §4.3.1, §4.3.2):
+    ## `divert` and `takeOver` are each refused by name on the other base,
+    ## and `overrideBaseLayer` on Debian.
   AddOnClassDirectories* = ["/etc/systemd/system/", "/etc/sysusers.d/",
                             "/etc/tmpfiles.d/", "/etc/sysctl.d/"]
     ## Directories reached through their own add-on classes (units,

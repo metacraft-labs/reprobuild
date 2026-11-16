@@ -123,6 +123,16 @@ e2e_arch_addon_removal_respects_ledger:
 e2e_arch_addon_takeover_restore_rechecked:
     REPRO_ADDON_TEST_SEAMS=1 REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_takeover_restore_rechecked
 
+# Omarchy as a third owner: preflight records the Omarchy path set, and a
+# plan refuses a prefix, a file or a unit Omarchy's scripts write unless it
+# is acknowledged; on plain Arch the same profile meets only the package
+# rules.
+e2e_omarchy_addon_base_layer_refusal:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_base_layer_refusal
+
+e2e_arch_addon_no_base_layer_on_plain_arch:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_no_base_layer_on_plain_arch
+
 e2e_addon_bootstrap_changes_nothing_preexisting:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
 
