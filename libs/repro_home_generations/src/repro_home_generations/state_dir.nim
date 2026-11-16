@@ -223,6 +223,9 @@ proc writeCurrentGenerationId*(stateDir, generationId: string) =
   ## is updated; callers (the apply pipeline) are responsible for that.
   ensureStateDir(stateDir)
   let p = currentPath(stateDir)
+  # A write that died before its rename left its temporary file behind;
+  # sweep the ones too old to belong to a write in progress.
+  discard removeStaleDurableTemps(p)
   when defined(windows):
     replaceFileDurably(p, generationId)
   else:

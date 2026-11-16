@@ -972,7 +972,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "`30m`, `12h`, `2d`; default: `2d`)"
         boolFlag evictCas is bool,
           help = "Also evict CAS blobs no remaining action-cache entry " &
-            "references"
+            "references. Only for a store the action cache alone refers " &
+            "to, such as a shared CI store: in a user's store it also " &
+            "evicts home-generation records, which cannot be recovered"
         boolFlag dryRun is bool,
           help = "Plan the budget eviction without removing anything"
       subcmd "recover", help = "Reconcile the store's index with the " &
@@ -1051,7 +1053,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "cas", help = "Inspect the content-addressed blob store":
       `storeRootFlag`
       subcmd "gc",
-          help = "Reclaim every CAS blob outside the retain set":
+          help = "Reclaim every CAS blob outside the retain set. This " &
+            "includes the blobs home generations refer to, which cannot " &
+            "be recovered; run it only on a store with none, or keep them":
         flag keep is string, format = equals,
           help = "The blobs to keep, as comma-separated 64-character hex " &
             "digests"

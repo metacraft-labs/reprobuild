@@ -7,7 +7,10 @@
 ## ``<tmp>/repro-<uid>/repro-daemon-<uid>.sock`` for the user daemon
 ## (``userDaemonRuntimeDir`` / ``defaultUserDaemonEndpoint``) and
 ## ``<tmp>/reprostore-<uid>.sock`` for the store daemon
-## (``defaultDevEndpoint``). A deep ``TMPDIR`` such as the test runner's
+## (``defaultDevEndpoint``; since then moved into a private
+## ``<tmp>/reprostore-<uid>/`` directory, reprobuild-pm
+## ``issues/2026-11-12-dev-store-daemon-clients-never-authenticate-the-daemon-and-the-endpoint-can-fall-into-tmp.md``).
+## A deep ``TMPDIR`` such as the test runner's
 ## ``~/.cache/reprobuild-test-tmp/<slot>`` or a ``nix-shell`` session dir
 ## leaves an endpoint `std/net` cannot bind: it refuses a path of
 ## ``Sockaddr_un_path_length`` bytes or more, 108 on Linux and 92 on macOS.
@@ -22,8 +25,10 @@
 ## room beside them for the longest compact staging leaf ``bindIpcListener``
 ## can fall back to: ``.zik0zj.1y2p0ij32e8e7``, the largest ``pid_t`` and the
 ## largest 64-bit bind sequence in base 36 (21 bytes). A short ``TMPDIR``
-## keeps the derivation it always had, so nothing moves for a host where it
-## already fitted.
+## keeps the user daemon's derivation, so its endpoint does not move on a host
+## where it already fitted. The store daemon's endpoint is in its private
+## ``<tmp>/reprostore-<uid>/`` directory under any ``TMPDIR``, and under
+## ``XDG_RUNTIME_DIR`` it is used as given.
 ##
 ## Nothing is BOUND at the default endpoint on purpose: with a long ``TMPDIR``
 ## it falls back into ``/tmp``, which is where a real user daemon on this host
@@ -118,16 +123,32 @@ suite "default daemon endpoints fit the socket address limit":
         check fitsWithStaging(endpoint)
         check endpoint.extractFilename ==
           "reprostore-" & $storeProtocol.currentUid() & ".sock"
+        check endpoint.parentDir.extractFilename ==
+          "reprostore-" & $storeProtocol.currentUid()
     else:
       skip("Windows endpoints are named pipes, which have no sun_path limit; the bound is POSIX-only")
 
-  test "the store daemon's default endpoint is unchanged under a short TMPDIR":
+  test "the store daemon's default endpoint is in its private directory under a short TMPDIR":
     when defined(posix):
+      # Never directly in the shared temp directory: reprobuild-pm
+      # spec/Store-Daemon-And-Multi-User-Coordination.md, "Development
+      # socket paths".
       withEnvironment("/tmp"):
+        let uid = $storeProtocol.currentUid()
         check storeProtocol.defaultDevEndpoint() ==
-          "/tmp" / ("reprostore-" & $storeProtocol.currentUid() & ".sock")
+          "/tmp" / ("reprostore-" & uid) / ("reprostore-" & uid & ".sock")
     else:
       skip("Windows endpoints are named pipes, which have no sun_path limit; the bound is POSIX-only")
+
+  test "the store daemon's endpoint under XDG_RUNTIME_DIR is used as given":
+    when defined(posix):
+      withEnvironment("/tmp"):
+        let runtime = shortSocketDirAtProcessExit("xdg-")
+        putEnv("XDG_RUNTIME_DIR", runtime)
+        check storeProtocol.defaultDevEndpoint() ==
+          runtime / ("reprostore-" & $storeProtocol.currentUid() & ".sock")
+    else:
+      skip("Windows endpoints are named pipes; XDG_RUNTIME_DIR is POSIX-only")
 
   test "an explicit endpoint override is respected verbatim":
     when defined(posix):

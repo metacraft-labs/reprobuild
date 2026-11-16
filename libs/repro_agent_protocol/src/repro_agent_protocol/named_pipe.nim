@@ -38,6 +38,8 @@ when not defined(windows):
 
 import std/[asyncdispatch, os, strutils, sysrand, widestrs]
 import std/winlean
+import repro_core/peer_identity
+export peer_identity.currentUserSid
 
 const
   PIPE_TYPE_BYTE = 0'i32
@@ -55,7 +57,6 @@ const
   SECURITY_SQOS_PRESENT = 0x00100000'i32
   SECURITY_IDENTIFICATION = 0x00010000'i32 ## SecurityIdentification shl 16
   TOKEN_QUERY = 0x0008'i32
-  TokenUserClass = 1'i32
   SDDL_REVISION_1 = 1'i32
   ConnectRetryMs = 10
   ConnectWaitMs* = 5_000
@@ -96,13 +97,6 @@ proc RevertToSelf(): WINBOOL {.stdcall, dynlib: "advapi32", importc.}
 proc OpenThreadToken(thread: Handle; access: int32; openAsSelf: WINBOOL;
                      token: ptr Handle): WINBOOL {.
   stdcall, dynlib: "advapi32", importc.}
-proc OpenProcessToken(process: Handle; access: int32; token: ptr Handle):
-  WINBOOL {.stdcall, dynlib: "advapi32", importc.}
-proc GetTokenInformation(token: Handle; cls: int32; info: pointer;
-                         len: int32; retLen: ptr int32): WINBOOL {.
-  stdcall, dynlib: "advapi32", importc.}
-proc ConvertSidToStringSidW(sid: pointer; str: ptr WideCString): WINBOOL {.
-  stdcall, dynlib: "advapi32", importc.}
 proc ConvertStringSecurityDescriptorToSecurityDescriptorW(
   sddl: WideCString; revision: int32; sd: ptr pointer; size: ptr int32):
   WINBOOL {.stdcall, dynlib: "advapi32", importc.}
@@ -110,32 +104,9 @@ proc ConvertStringSecurityDescriptorToSecurityDescriptorW(
 # ---------------------------------------------------------------------
 # Identities
 
-proc tokenUserSid(token: Handle): string =
-  ## The string form (`S-1-5-21-…`) of a token's user SID.
-  var needed: int32
-  discard GetTokenInformation(token, TokenUserClass, nil, 0, addr needed)
-  if needed <= 0:
-    raiseOSError(osLastError(), "GetTokenInformation(TokenUser) size")
-  var buf = newSeq[byte](needed)
-  if GetTokenInformation(token, TokenUserClass, addr buf[0], needed,
-                         addr needed) == 0:
-    raiseOSError(osLastError(), "GetTokenInformation(TokenUser)")
-  # TOKEN_USER { SID_AND_ATTRIBUTES User { PSID Sid; DWORD Attributes } }:
-  # the SID pointer is the first field.
-  let sid = cast[ptr pointer](addr buf[0])[]
-  var text: WideCString
-  if ConvertSidToStringSidW(sid, addr text) == 0:
-    raiseOSError(osLastError(), "ConvertSidToStringSidW")
-  result = $text
-  discard LocalFree(cast[pointer](text))
-
-proc currentUserSid*(): string =
-  ## The user SID of this process's token: the identity peers must share.
-  var token: Handle
-  if OpenProcessToken(getCurrentProcess(), TOKEN_QUERY, addr token) == 0:
-    raiseOSError(osLastError(), "OpenProcessToken")
-  defer: discard closeHandle(token)
-  tokenUserSid(token)
+# `tokenUserSid` and `currentUserSid` (the user SID of a token, and of this
+# process's) are `repro_core/peer_identity`'s, shared with the daemon IPC
+# layer's named-pipe server check.
 
 proc ownerOnlySddl*(sid: string): string =
   ## The protected DACL that admits `sid` alone (spec: `D:P(A;;GA;;;<SID>)`).

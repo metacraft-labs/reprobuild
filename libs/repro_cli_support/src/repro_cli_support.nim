@@ -39532,7 +39532,15 @@ proc runStoreDaemonCommand(conf: ReproCommandLineStoreDaemon): int =
       echo renderStatus(status)
       return 0
     of ReproCommandLineStoreDaemonCommand.status:
-      echo renderStatus(queryDevStatus(config.endpoint))
+      # An endpoint another account holds is reported as such and fails;
+      # it is never "not-running" (reprobuild-pm
+      # spec/Store-Daemon-And-Multi-User-Coordination.md, "A client
+      # authenticates the daemon").
+      try:
+        echo renderStatus(queryDevStatus(config.endpoint))
+      except StoreDaemonEndpointRefused as err:
+        echo renderRefusedStatus(config.endpoint, err.msg)
+        return 1
       return 0
     of ReproCommandLineStoreDaemonCommand.stop:
       let status = queryDevStatus(config.endpoint)
