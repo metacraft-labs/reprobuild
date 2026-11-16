@@ -3543,15 +3543,12 @@ proc sendAll(client: Socket; data: string) =
   ## Send ``data`` to one control-API client, raising ``OSError`` when the
   ## client has gone away.
   ##
-  ## ``flags = {}`` is the point. With the default ``SafeDisconn`` flag,
-  ## ``std/net``'s ``send`` swallows a disconnection error (EPIPE,
-  ## ECONNRESET) and retries without counting the attempt, so a peer that
-  ## resets the connection before its answer is written keeps the
-  ## single-threaded listener spinning forever: one packet from any account
-  ## that can reach the port, and ``repro down`` can never be served again.
-  ## Raising instead ends that one exchange; the accept loop
-  ## (``runDevSessionHttpServer``) drops the connection and goes on.
-  client.send(data, flags = {})
+  ## Not ``client.send(data)``: see ``writeFully`` for the two defects in
+  ## the pinned ``std/net`` loop (a reset peer spins the single-threaded
+  ## listener forever; a short write resends from byte 0). Raising ends
+  ## that one exchange; the accept loop (``runDevSessionHttpServer``) drops
+  ## the connection and goes on.
+  writeFully(proc (p: pointer; size: int): int = client.send(p, size), data)
 
 proc sendResponse(client: Socket; status: int; contentType, body: string;
                   extraHeaders = "") =
