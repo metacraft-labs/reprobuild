@@ -46,7 +46,11 @@ suite "t_plan_reports_its_certificate_producing_nodes":
     check suitePlan[0]["name"].getStr() == "unit-suite"
     check suitePlan[0]["node"].getStr() == "unit-suite"
     check suitePlan[0]["implicit"].getBool() == false
-    check suitePlan[0]["repository"].getStr() == project
+    # ``sameFile``, not ``==``: the plan reports the repository by the
+    # spelling the OS gives the working directory, which on macOS resolves
+    # the ``/var`` -> ``/private/var`` symlink the temporary directory sits
+    # behind. Either spelling names the same repository.
+    check sameFile(suitePlan[0]["repository"].getStr(), project)
 
     let plainEdge = fx.certificatesPlan(project, ["unit-out"])
     checkpoint($plainEdge)
@@ -70,7 +74,7 @@ suite "t_plan_reports_its_certificate_producing_nodes":
     check fromSibling.len == 1
     check fromSibling[0]["name"].getStr() == "sib-suite"
     check fromSibling[0]["package"].getStr() == "sibproj"
-    check fromSibling[0]["repository"].getStr() == sibling
+    check sameFile(fromSibling[0]["repository"].getStr(), sibling)
 
   test "a marked edge reached as a dependency is materialized":
     let fx = newCertFixture("repro-tc9a-plan-dep")
@@ -89,4 +93,4 @@ suite "t_plan_reports_its_certificate_producing_nodes":
     checkpoint($viaDependency)
     check viaDependency.names == @["generated"]
     check viaDependency[0]["nodeKind"].getStr() == "action"
-    check viaDependency[0]["repository"].getStr() == project
+    check sameFile(viaDependency[0]["repository"].getStr(), project)

@@ -189,19 +189,21 @@ tutorial whose scenario fails is a failing test, not a stale page.
 
 ## The Markdown the framework renders
 
-isonim-docs renders a subset of Markdown. Write within it, or the page shows
-stray characters:
+isonim-docs renders standard prose inline formatting and directives, with one
+block-nesting constraint inside lists:
 
-- No bold or italic. `**word**` and `*word*` appear with their asterisks. Make a
-  lead-in a sentence of its own, or a heading.
-- A list item is one line of source. A line break ends the item and starts a
-  new paragraph, so keep each item on one line, however long.
-- A list item holds text only. A code block, tabs or an admonition after an
-  item ends the list, and the next item starts again at 1. Write steps that
-  contain code as numbered headings, `### 1. Load the hook`, each followed by
-  its text and its blocks.
-- Code fences, tables, `:::tabs` with `@tab` panels, and the six admonitions
-  render as expected.
+- Inline emphasis (`**bold**`, `*italic*`, `***both***`, `~~strikethrough~~`),
+  inline code, links, images, and footnotes render in paragraphs, list items,
+  admonitions, and table cells.
+- Multi-line list items are supported when continuation lines are indented by at
+  least two spaces (`- first line` followed by `  second line`).
+- A list item holds inline content only. A code block, `:::tabs` block, or
+  admonition after an item ends the list, and a following ordered item restarts
+  at 1. Write steps that contain code as numbered headings (`### 1. Load the hook`),
+  each followed by its text and blocks.
+- Code fences (with `Copy code` button), responsive scrollable tables, `:::tabs`
+  with `@tab` panels, and the six admonitions render interactively via
+  `docs_client.mountStaticDocsClient`.
 
 ## Language and style
 

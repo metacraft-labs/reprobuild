@@ -7,7 +7,7 @@
 ## always exits 0 and its findings go to stdout (the journal, for the
 ## unit). Run by an operator without a mode flag, it exits 1 on drift.
 
-import std/[os, strutils]
+import std/[os, posix, strutils]
 
 import ./mutations
 
@@ -45,20 +45,37 @@ proc runAddonVerify*(stateDir = DefaultStateDir): VerifyReport =
       result.notes.add(e.unit & ": the add-on's /etc unit shadows the " &
         "package's (" & e.observation & "); check it after every upgrade " &
         "of that package")
-  # §13 decision 178: the directory of the uninstall records is root's,
-  # writable by no group or other, and not a link -- checked on a
-  # descriptor, as uninstall uses it. Absent on a host bootstrapped before
-  # bootstrap made it: a note, since its first use creates it the same way.
+  # §13 decision 178 (amended in A11 round 19): the directory of the
+  # uninstall records is root's, writable by no group or other, not a link,
+  # and the very directory bootstrap made (its identity, recorded in the
+  # state) -- checked on a descriptor, as uninstall uses it. Anything there
+  # that is not a directory is drift. Absence is drift once bootstrap has
+  # recorded the directory's identity; on a host bootstrapped before that,
+  # with nothing recorded, it is a note (its first use makes and records
+  # it).
   when not mutated("verify-skips-log-dir"):
-    if dirExists(AddonLogDir) or symlinkExists(AddonLogDir):
+    let idFile = recordsDirIdentityPath(stateDir)
+    bindRecordsDir(AddonLogDir, idFile)
+    defer: unbindRecordsDir(AddonLogDir)
+    let recorded = recordedIdentity(AddonLogDir).len > 0
+    var st: Stat
+    if lstat(AddonLogDir.cstring, st) != 0:
+      if recorded:
+        result.findings.add(AddonLogDir & " is gone, though bootstrap made " &
+          "it (its identity is recorded in " & idFile & "); inspect " &
+          "/var/log, then remove " & idFile & " to let the next use make " &
+          "and record it again")
+      else:
+        result.notes.add(AddonLogDir & " is absent; the add-on makes it " &
+          "root's 0700 at its first use and records its identity")
+    elif not S_ISDIR(st.st_mode):
+      result.findings.add(AddonLogDir & " is not a directory (a link or " &
+        "another kind of file); the add-on did not put it there: inspect " &
+        "it and remove it")
+    else:
       let why = checkedDirRefusal(AddonLogDir)
       if why.len > 0:
-        result.findings.add(AddonLogDir & ": " & why & "; the add-on did " &
-          "not make it so: inspect it, and remove it -- the add-on makes it " &
-          "root's 0700 again at its next use")
-    else:
-      result.notes.add(AddonLogDir & " is absent; the add-on makes it " &
-        "root's 0700 at its first use")
+        result.findings.add(AddonLogDir & ": " & why)
   if result.findings.len > 0:
     result.status = "drift"
 

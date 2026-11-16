@@ -330,3 +330,65 @@ suite "shared clone cache sweep":
       check hasRef(gitBin, pool, "refs/cache/oldws/main")
       check not hasRef(gitBin, pool, "refs/cache/deadws/main")
       check fileExists(pool / MaintenanceStampRelPath)
+||||||| parent of eb123b446b (test(shared-clones): assert the safety-before-refspec ordering on the proc)
+
+  test "safety_write_failure_leaves_the_refspec_uninstalled":
+    ## PG-0's ORDERING property, asserted on the proc rather than on the
+    ## cache's end state.
+    ##
+    ## ``prepareSharedBare`` installs the borrower-safety config FIRST and
+    ## returns early when it cannot, so the fetch refspec is never installed
+    ## on a bare that automatic maintenance could still prune. That ordering
+    ## is the whole reason the refspec-without-safety state cannot be produced
+    ## by this build -- which is what makes finding seven of them in a cache
+    ## evidence of a DIFFERENT writer (spec §1.6d(ii)).
+    ##
+    ## WHY NOT ASSERT IT ON THE CACHE. A post-sweep "no bare is in the
+    ## refspec-without-safety state" check passes whether or not the ordering
+    ## holds, and passes equally on a cache that never had such a bare, so it
+    ## cannot fail for the right reason.
+    ##
+    ## WHY NOT ASSERT IT WITH PERMISSIONS. A read-only bare directory fails
+    ## BOTH writes -- they are both ``git config`` into the same file -- so
+    ## the refspec is absent whichever order they run in. That version of this
+    ## test passed against a ``prepareSharedBare`` deliberately reordered to
+    ## install the refspec first (measured 2026-11-05), i.e. it asserted
+    ## nothing about the ordering. Hence the injection seam used below, which
+    ## fails the safety write while leaving the refspec write able to succeed.
+    ## Mutation-verified: with the two writes reordered, this case FAILS.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs a real bare repository")
+    else:
+      let scratch = createTempDir("pg0order", "")
+      defer: removeDir(scratch)
+      let up = seedUpstream(gitBin, scratch)
+      let bare = scratch / "cache" / "github.com" / "o" / "r.git"
+      plainBare(gitBin, up.bare, bare)
+
+      # Precondition: the fixture really is in the state the test needs, and
+      # the bare is WRITABLE -- so a refspec write reaching git would land.
+      check configGet(gitBin, bare, "remote.origin.fetch").len == 0
+      check not hasEverySafetyKey(gitBin, bare)
+      check sh(q(gitBin) & " -C " & q(bare) &
+        " config --replace-all pg0.writable yes").code == 0
+
+      putEnv("REPROBUILD_FORCE_SAFETY_WRITE_FAILURE", bare)
+      defer: delEnv("REPROBUILD_FORCE_SAFETY_WRITE_FAILURE")
+
+      let diagnostic = prepareSharedBare(gitBin, bare)
+      checkpoint("prepareSharedBare said: " & diagnostic)
+
+      # It must refuse, naming the safety config rather than the refspec --
+      # the diagnostic is what tells an operator which half failed.
+      check diagnostic.len > 0
+      check diagnostic.contains("safety config")
+
+      # The property: the refspec was never installed, although writing it
+      # would have succeeded.
+      check configGet(gitBin, bare, "remote.origin.fetch").len == 0
+      # And the verdict says so, never "refspec-without-safety".
+      let verdict = inspectSharedBareVerdict(bare)
+      checkpoint("verdict: " & verdict)
+      check verdict != "refspec-without-safety"
+      check verdict == "unconfigured"

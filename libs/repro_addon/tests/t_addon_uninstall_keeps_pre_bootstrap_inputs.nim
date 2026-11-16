@@ -24,7 +24,8 @@ import std/[json, os, posix, sequtils, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
-import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall]
+import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall, record_dir]
+from repro_addon/bootstrap import prepareRecordsDir
 from repro_addon/preflight import AgentStateRecordsDir
 
 let me = $getuid() & ":" & $getgid()
@@ -890,3 +891,78 @@ suite "round 18":
     for _ in walkDir(base / "log"): inc n
     check n == 0
     removeDir(base)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 19 (§13 decision 178, amended): the records
+# directory is the one bootstrap made -- its identity recorded, a swapped
+# directory refused, recorded at first use where nothing is recorded yet;
+# bootstrap tightens an existing root directory to 0700; a stale token
+# survives a bootstrap refused on its trust anchors; a token identity with
+# a generation but no birth time is refused. Falsifiers
+# ``records-dir-identity-unchecked``, ``records-dir-left-open``,
+# ``token-cleared-before-anchors`` and ``token-binds-inode-only``.
+# ---------------------------------------------------------------------------
+
+suite "round 19":
+  test "a directory swapped into the records directory's place is refused":
+    let base = getTempDir() / ("repro-r19-swap-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    writeFile(idFile, identityOfCheckedDir(dir) & "\n")
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    moveDir(dir, dir & ".away")
+    createDir(dir)
+    setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+    let why = checkedDirRefusal(dir)
+    checkpoint why
+    check "not the directory bootstrap made" in why
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "with nothing recorded, the first checked open records the identity":
+    let base = getTempDir() / ("repro-r19-tofu-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    check fileExists(idFile) and readFile(idFile).strip() == identityOfCheckedDir(dir)
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "bootstrap's ensure tightens an existing root directory to 0700":
+    let base = getTempDir() / ("repro-r19-tight-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    setFilePermissions(base / "log", {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    ensureCheckedDir(base / "log", tighten = true)
+    check modeOf(base / "log") == 0o700
+    removeDir(base)
+
+  test "a bootstrap refused on its trust anchors leaves a stale token":
+    let base = getTempDir() / ("repro-r19-anchors-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    let token = base / "log" / StateRemovalTokenName
+    writeFile(token, "{}")
+    writeFile(base / "bad.anchors", "not an anchor\n")
+    expect CatchableError:
+      prepareRecordsDir(base / "bad.anchors", "", logDir = base / "log")
+    check fileExists(token)
+    removeDir(base)
+
+  test "a generation without a birth time is not enough to finish":
+    let s = v2Scene("genonly")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-g7" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)

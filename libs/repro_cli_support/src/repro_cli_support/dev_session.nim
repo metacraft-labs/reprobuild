@@ -1,5 +1,5 @@
 import std/[algorithm, atomics, hashes, json, monotimes, nativesockets, net, options, os, osproc, sequtils,
-            strtabs, strutils, tables, times]
+            strtabs, strutils, sysrand, tables, times]
 
 import cbor
 import repro_core
@@ -409,6 +409,48 @@ proc shellCommand(args: openArray[string]): string =
 proc writeJsonFile(path: string; node: JsonNode) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), pretty(node) & "\n")
+
+proc publishJsonFile*(path: string; node: JsonNode) =
+  ## Write ``path`` so that a reader sees either no file or the whole file,
+  ## never the empty or partial file ``writeFile`` leaves visible between its
+  ## ``O_TRUNC`` open and the end of its write. The content goes to a staging
+  ## sibling first and is then renamed into place; ``rename(2)`` within one
+  ## directory is atomic on POSIX
+  ## (https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html).
+  ##
+  ## Used for files a reader waits for and then parses once, such as
+  ## ``http-ready.json``: ``controlClientFor`` and the tests treat its mere
+  ## existence as "the bind is published".
+  ##
+  ## THE STAGING FILE. The session directory's permissions are not
+  ## guaranteed (see ``removeReadyOwnedBy``), so the staging name carries
+  ## 64 random bits and, on POSIX, is created ``O_EXCL | O_NOFOLLOW``: a
+  ## name planted in advance -- a symlink to one of this user's files -- is
+  ## never written through. ``moveFile`` then renames it over ``path``.
+  ##
+  ## WINDOWS. ``moveFile`` replaces through ``MoveFileExW`` with
+  ## ``MOVEFILE_REPLACE_EXISTING``, which fails while another process holds
+  ## the TARGET open without ``FILE_SHARE_DELETE``. For ``http-ready.json``
+  ## the supervisor removes any previous marker before it starts the helper
+  ## (``discardStaleControlApiBind``), so the target normally does not exist;
+  ## if a stale marker survived that removal because a reader held it, the
+  ## publish fails and raises, naming the file, rather than leaving a
+  ## half-written one. A file rewritten under live readers (``session.json``)
+  ## keeps ``writeJsonFile`` and ``readJsonFileResilient``.
+  let dir = parentDir(path)
+  createDir(extendedPath(dir))
+  var suffix = ""
+  for b in urandom(8):
+    suffix.add toHex(b, 2).toLowerAscii
+  let staging = dir / ("." & extractFilename(path) & "." &
+    $getCurrentProcessId() & "." & suffix & ".tmp")
+  let content = pretty(node) & "\n"
+  try:
+    writeNewFileExclusive(staging, content)
+    moveFile(extendedPath(staging), extendedPath(path))
+  except CatchableError:
+    try: removeFile(extendedPath(staging)) except OSError: discard
+    raise
 
 proc readJsonFileResilient*(path: string): JsonNode =
   # `parseFile` lifts the race that exists between a concurrent
@@ -3846,7 +3888,9 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
   # that sees the bind can always read the token it needs.
   let token = mintControlToken()
   writeControlToken(tokenPath, token)
-  writeJsonFile(config.sessionDir / HttpReadyFile, %*{
+  # Published atomically: readers poll for this file's existence and parse
+  # it at once, so it must never be visible half-written.
+  publishJsonFile(config.sessionDir / HttpReadyFile, %*{
     "schemaId": "reprobuild.dev-session.http.v1",
     "sessionId": config.sessionId,
     "httpBind": httpBindValue,
