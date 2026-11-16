@@ -51,6 +51,10 @@ from ./fingerprint import sha256OfFile
 
 import repro_infra/service_floor
 import repro_infra/service_account
+import repro_infra/addon_diagnostics
+
+const FloorRefusalPrefix = $adFloorNotEffective & ":"
+  ## How an ``EAddOnFloorNotEffective`` refusal's first line starts.
 
 type
   ShowProps* = Table[string, string]
@@ -1201,10 +1205,10 @@ proc refusalRuleCodes*(output, stem: string): seq[string] =
   for raw in output.splitLines():
     var l = raw.strip()
     if not inBlock:
-      let at = l.find("EAddOnFloorNotEffective:")
+      let at = l.find(FloorRefusalPrefix)
       if at < 0: continue
       inBlock = true
-      l = l[at + "EAddOnFloorNotEffective:".len .. ^1].strip()
+      l = l[at + FloorRefusalPrefix.len .. ^1].strip()
       if l.len == 0: continue
     if l == "nothing was started":
       inBlock = false

@@ -27,14 +27,14 @@ proc fastPathFsPath(path: string): string =
 proc fastFileExists(path: string): bool =
   fileExists(fastPathFsPath(path))
 
-proc fileFingerprintPart(path: string): string =
+proc fileFingerprintPart*(path: string): string =
   if path.len == 0:
     return ""
   if not fastFileExists(path):
     return path & "\n<missing>"
   path & "\n" & readFile(fastPathFsPath(path))
 
-proc canonicalProjectFilePath(projectRoot: string): string =
+proc canonicalProjectFilePath*(projectRoot: string): string =
   ## Mirror ``resolveProjectFile`` without surfacing ambiguity diagnostics on
   ## the prompt-time fast path. The full CLI remains authoritative whenever
   ## the fast path cannot prove a no-op.
@@ -64,7 +64,7 @@ proc canonicalProjectFilePath(projectRoot: string): string =
       CanonicalProjectFileName
     if fastFileExists(synthesized): synthesized else: ""
 
-proc lockSliceFilePart(projectRoot: string): string =
+proc lockSliceFilePart*(projectRoot: string): string =
   let lockPath = projectRoot / ".repro" / "dev-env.lock"
   fileFingerprintPart(lockPath)
 

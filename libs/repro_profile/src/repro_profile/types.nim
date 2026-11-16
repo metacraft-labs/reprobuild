@@ -95,6 +95,13 @@ type
       ## this apply folds this into ``ApplyResult.restartNeeded``, which is
       ## what makes the apply's reboot notice reachable from a profile
       ## rather than only from the Windows resource drivers.
+    timeoutSeconds*: int
+      ## The edge's own deadline. An elevated edge still running after this
+      ## many seconds has its whole process tree killed and fails, so the
+      ## apply ends and the next one retries it. `0` (the default) means
+      ## the apply's default deadline
+      ## (`repro_elevation.effectiveInlineExecTimeoutSeconds`). Not part of
+      ## the edge's identity: changing it does not re-key the cache.
 
   AddOnIntent* = object
     ## What a profile's `addOn:` section declares (ReproOS-Add-On-Mode

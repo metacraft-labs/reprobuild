@@ -16,14 +16,20 @@
 ## * ``reproPassThrough(conf)``: for a command still parsed by its own code
 ##   (its ``passThrough`` positional), the command's path and the arguments
 ##   after it, unparsed;
-## * ``ReproPassThroughCommands``: the grammar indexes of those commands.
+## * ``ReproPassThroughCommands``: the grammar indexes of those commands;
+## * ``reproDeclaredEnv()``: the environment the parser is loaded with --
+##   only the variables a parameter declares, each looked up by name.
 ##
 ## ``reproArgvForParser`` is what makes an unmigrated command's arguments
 ## reach it unparsed: it puts ``--`` right after the words that select such a
 ## command, so the parser files everything after them under the command's
 ## ``passThrough`` positional.
+##
+## ``repro exec``'s command and ``repro run``'s arguments are clispec
+## ``afterSeparator`` positionals: the parser itself fills them with the
+## words after the first ``--``, exactly as written.
 
-import std/[macros, options, strutils]
+import std/[macros, options, os, strutils, tables]
 
 import confutils/clispec_config
 
@@ -33,7 +39,7 @@ import ./cli_description
 # library's whole vocabulary would otherwise land in every importer's scope.
 export CliSources, CliOptions, CliHelpRequest, CliCompletionRequest,
   CliUsageError, CliConfigError, CliErrorKind, CliShell, CliGrammar,
-  cliProcessEnv, cliParseShell, cliChildNamed
+  cliParseShell, cliChildNamed
 export ReproCommandLineType, ReproProgramName
 # The configuration objects hold `Option[int]` fields (`store export
 # --zstd-level`, `bundle create --level`, ...).
@@ -176,20 +182,84 @@ proc reproCommandIsShown*(command: int): bool =
     at = g.commands[at].parent
   true
 
+const RetiredFlagReplacements = [
+  # (a retired flag spelling, what replaced it). A retired spelling is an
+  # unknown flag like any other -- it is never read as what it used to mean
+  # -- and the refusal names its replacement, so the operator does not have
+  # to search for it.
+  ("--from-mainlines", "`--from=mainline`, or its shorthand `--mainline`"),
+]
+
+proc retiredFlagNote*(e: ref CliUsageError): string =
+  ## For an unknown flag that is a retired spelling, the note naming what
+  ## replaced it (" (a retired spelling; use ...)"); "" otherwise.
+  if e.kind == cekUnknownFlag:
+    for (retired, replacement) in RetiredFlagReplacements:
+      if e.spelling == retired:
+        return " (a retired spelling; use " & replacement & ")"
+  ""
+
 proc reportReproUsageError*(e: ref CliUsageError): int =
   ## A command line the generated parser rejected: its one-line message
-  ## (clispec's error taxonomy, naming the command) and where to look next,
-  ## on stderr; the usage exit code (2).
-  stderr.writeLine("repro: " & e.msg)
+  ## (clispec's error taxonomy, naming the command, and for a retired flag
+  ## spelling what replaced it) and where to look next, on stderr; the usage
+  ## exit code (2).
+  stderr.writeLine("repro: " & e.msg & retiredFlagNote(e))
   stderr.writeLine("Run `repro --help` for the list of commands, or " &
     "`repro help <command>` for one of them.")
   e.exitCode
 
+proc declaredEnvOf*(g: CliGrammar): Table[string, string] =
+  ## The variables of the process environment that some parameter of ``g``
+  ## may take its value from (``env``, with ``csEnv`` among its sources),
+  ## each looked up by name, keyed by its declared spelling.
+  ##
+  ## For the parse this is the same input as the whole environment:
+  ## confutils' ``cliEnvCandidates`` consults ``CliSources.env`` only
+  ## through ``hasKey`` on those same declared names, so a table holding
+  ## exactly the declared variables that are set yields the same
+  ## candidates. One deliberate difference, Windows only: the lookup is
+  ## case-insensitive there, as the environment is, where a key of
+  ## ``cliProcessEnv()`` matched a declared name only in the same case.
+  for p in g.params:
+    if csEnv notin p.sources:
+      continue
+    for name in p.env:
+      if not result.hasKey(name) and existsEnv(name):
+        result[name] = getEnv(name)
+
+proc reproDeclaredEnv*(): Table[string, string] =
+  ## The environment ``ReproCommandLine.load`` takes its ``env``-sourced
+  ## parameters from: each variable some parameter declares, looked up BY
+  ## NAME, and nothing else.
+  ##
+  ## WHY NOT confutils' ``cliProcessEnv()``. That enumerates the whole
+  ## environment (``envPairs``, which on Windows is ``GetEnvironmentStringsW``
+  ## called from the program's own image). io-mon's Windows shim records such
+  ## a block read as a read of EVERY variable in the block, because it cannot
+  ## see which of them the program goes on to use
+  ## (io-mon ``snoopEnvBlock``). Every monitored edge whose tree runs this
+  ## image -- the profile compile and platform probe helpers, the provider
+  ## compile, interface extraction -- parses its argv here first, so each was
+  ## keyed on the value of every variable of its caller's environment. A
+  ## ``repro home export`` after a ``repro home plan`` that differed only in
+  ## ``$REPRO_HOST`` recompiled the profile ("input metadata changed:
+  ## REPRO_HOST"). On Linux and macOS ``environ`` is read without an
+  ## observable call, so only Windows was affected. A by-name lookup is
+  ## recorded as a read of that one variable, which is exactly the
+  ## dependency the parser has.
+  ##
+  ## While no parameter of repro's description declares a variable -- the
+  ## case when this was written -- the table is empty and the parse reads
+  ## no variable at all.
+  declaredEnvOf(ReproCommandLine.cliGrammar())
+
 proc loadReproCommandLine*(argv: openArray[string];
                            conf: var ReproCommandLine): int =
   ## Parses ``argv`` (repro's arguments, without the program name) with the
-  ## generated parser, the process environment as the source for the
-  ## parameters that declare variables, into ``conf``.
+  ## generated parser, the declared variables of the process environment
+  ## (``reproDeclaredEnv``) as the source for the parameters that declare
+  ## them, into ``conf``.
   ##
   ## -1 when ``conf`` holds a command to run. Otherwise the command line was
   ## answered here and the result is its exit code: a help or completion
@@ -197,7 +267,7 @@ proc loadReproCommandLine*(argv: openArray[string];
   ## reported on stderr (2).
   try:
     conf = ReproCommandLine.load(reproArgvForParser(argv),
-      CliSources(env: cliProcessEnv()))
+      CliSources(env: reproDeclaredEnv()))
   except CliHelpRequest as e:
     # `CliCompletionRequest` too: its text is the completion reply.
     stdout.write(e.text)

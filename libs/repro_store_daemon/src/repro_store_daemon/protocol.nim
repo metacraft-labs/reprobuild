@@ -1,14 +1,17 @@
 import std/[os, strutils]
 
 import repro_core
+import repro_core/owned_directory
 import repro_daemon_core/ipc
 from repro_interface_artifacts import writeTaggedTarballArchiveDetail,
   readTaggedTarballArchiveDetail
 from repro_project_dsl import TarballArchiveDetail
-export ipc, TarballArchiveDetail
+export ipc, TarballArchiveDetail, OwnedDirectoryError
 
 when defined(posix):
   import std/posix
+when defined(windows):
+  import blake3
 
 const
   StoreDaemonProtocolVersion* = 8'u16
@@ -393,7 +396,58 @@ proc parseErrorBody*(body: openArray[byte]): string =
   var pos = 0
   body.readString(pos)
 
+proc currentUid*(): int64 =
+  when defined(posix):
+    int64(getuid())
+  else:
+    0'i64
+
+const DevEndpointDirRole = OwnedDirectoryRole(
+  noun: "dev store daemon endpoint directory",
+  exposure: "another account could put its own socket there and answer " &
+    "for the daemon",
+  remedy: "remove it if it is yours, or set XDG_RUNTIME_DIR or " &
+    "REPROSTORED_ENDPOINT to a directory only you can write")
+  ## How a refusal of the private endpoint directory is worded
+  ## (``repro_core/owned_directory``).
+
+when defined(posix):
+  proc devEndpointLeaf(): string = "reprostore-" & $currentUid() & ".sock"
+
+  proc privateDevRuntimeDir*(): string =
+    ## The per-user directory the default endpoint and the status file live
+    ## in when ``XDG_RUNTIME_DIR`` is unset: ``<tmp>/reprostore-<uid>``, or
+    ## ``/tmp/reprostore-<uid>`` when a socket in the former would not fit
+    ## the platform's Unix-socket address (``ipcEndpointFits``).
+    ##
+    ## The socket is never placed directly in the shared temporary
+    ## directory: anyone can create entries there, so the first to bind the
+    ## predictable name would answer for the daemon. This directory is
+    ## created ``0700`` and admitted only when it is this user's and private
+    ## (``admitDevRuntimeDir``). reprobuild-pm
+    ## ``spec/Store-Daemon-And-Multi-User-Coordination.md`` §"IPC Protocol",
+    ## "Development socket paths" and "The per-user endpoint directory is
+    ## private".
+    ##
+    ## ``$TMPDIR`` has no length limit -- the suite's
+    ## ``~/.cache/reprobuild-test-tmp/<slot>``, a ``nix-shell`` session
+    ## directory -- and the socket must fit what ``std/net`` binds (107 bytes
+    ## on Linux, 91 on macOS; ``repro_core/paths.unixSocketPathMaxLen``) with
+    ## room beside it for ``bindIpcListener``'s staging name. Where it would
+    ## not, the directory goes under ``/tmp`` instead, as
+    ## ``repro_core/paths.runquotaEndpointPath`` does for its own sockets.
+    let dirLeaf = "reprostore-" & $currentUid()
+    result = getTempDir() / dirLeaf
+    if not ipcEndpointFits(result / devEndpointLeaf()):
+      result = "/tmp" / dirLeaf
+
+  proc xdgRuntimeDirSet(): bool = getEnv("XDG_RUNTIME_DIR").len > 0
+
 proc devRuntimeDir*(): string =
+  ## The per-user directory holding the dev daemon's default endpoint and
+  ## its status file: ``$XDG_RUNTIME_DIR`` when set (the session manager
+  ## creates it ``0700`` for the user, so it is used as given), otherwise
+  ## ``privateDevRuntimeDir``. Windows: ``%LOCALAPPDATA%\repro``.
   when defined(windows):
     let local = getEnv("LOCALAPPDATA")
     if local.len > 0:
@@ -401,47 +455,86 @@ proc devRuntimeDir*(): string =
     else:
       getTempDir()
   else:
-    let xdg = getEnv("XDG_RUNTIME_DIR")
-    if xdg.len > 0:
-      xdg
-    else:
-      getTempDir()
+    if xdgRuntimeDirSet(): getEnv("XDG_RUNTIME_DIR")
+    else: privateDevRuntimeDir()
 
-proc currentUid*(): int64 =
+proc admitDevRuntimeDir*() =
+  ## Create the private per-user directory if it is missing, and admit it
+  ## only when ``lstat`` says it is a real directory owned by this user with
+  ## no group or other permission. A no-op when ``XDG_RUNTIME_DIR`` is set
+  ## and on Windows. Never repairs an existing directory.
+  ##
+  ## Raises ``OwnedDirectoryError`` for a refusal (naming the directory,
+  ## its owner and its mode) and ``OSError`` when it cannot be created or
+  ## inspected. The daemon calls it before it binds or writes its status
+  ## file; a client before it connects to a default endpoint
+  ## (``admitDevEndpointDir``).
   when defined(posix):
-    int64(getuid())
+    if not xdgRuntimeDirSet():
+      ensureOwnedDirectory(privateDevRuntimeDir(), privateDir = true,
+        DevEndpointDirRole)
+
+proc endpointIsInPrivateDevRuntimeDir*(endpoint: string): bool =
+  ## Whether ``endpoint`` lies in the product-created private directory,
+  ## which is the case for the default endpoint whenever
+  ## ``XDG_RUNTIME_DIR`` is unset, however it reached the caller (the
+  ## default, ``--endpoint`` from ``startDevDaemon``'s self-spawn, or an
+  ## override that happens to name it).
+  when defined(posix):
+    not xdgRuntimeDirSet() and
+      os.normalizedPath(parentDir(endpoint)) ==
+        os.normalizedPath(privateDevRuntimeDir())
   else:
-    0'i64
+    false
+
+proc admitDevEndpointDir*(endpoint: string) =
+  ## ``admitDevRuntimeDir`` when ``endpoint`` lies in the private directory.
+  ## Any other endpoint's directory -- ``$XDG_RUNTIME_DIR``, or an explicit
+  ## ``REPROSTORED_ENDPOINT`` / ``--endpoint`` -- is not checked: it is the
+  ## session manager's or the caller's choice. The peer check still applies
+  ## to every endpoint (``client.connectDevDaemon``).
+  if endpointIsInPrivateDevRuntimeDir(endpoint):
+    admitDevRuntimeDir()
+
+when defined(windows):
+  proc devPipeUserTag*(userSid: string): string =
+    ## The first 16 lowercase hex characters of the BLAKE3-256 digest of the
+    ## user's string SID: the per-user part of the dev pipe name, so two
+    ## users on one machine never contend for one name.
+    blake3.digest(userSid).toHex()[0 ..< 16].toLowerAscii()
 
 proc defaultDevEndpoint*(): string =
-  ## The dev store daemon's endpoint. ``REPROSTORED_ENDPOINT`` is taken
-  ## verbatim, and so is a socket under ``XDG_RUNTIME_DIR`` (the session
-  ## manager's short ``/run/user/<uid>``); an over-long explicit choice is
-  ## reported by ``bindIpcListener``, naming the limit, rather than moved.
+  ## The dev store daemon's endpoint (reprobuild-pm
+  ## ``spec/Store-Daemon-And-Multi-User-Coordination.md`` §"IPC Protocol",
+  ## "Development socket paths"):
   ##
-  ## Only the ``getTempDir()`` fallback is bounded. ``$TMPDIR`` has no length
-  ## limit -- the suite's ``~/.cache/reprobuild-test-tmp/<slot>``, a
-  ## ``nix-shell`` session directory -- and the socket must fit what
-  ## ``std/net`` binds (107 bytes on Linux, 91 on macOS;
-  ## ``repro_core/paths.unixSocketPathMaxLen``) with room beside it for
-  ## ``bindIpcListener``'s staging name (``ipcEndpointFits``). Where it would
-  ## not, the socket goes straight into ``/tmp``, the location this default
-  ## already has whenever ``TMPDIR=/tmp``, as
-  ## ``repro_core/paths.runquotaEndpointPath`` does for its own sockets. The
-  ## status file (``statusFileForEndpoint``) stays in ``devRuntimeDir``: it
-  ## is a regular file, with no address limit.
+  ## * ``REPROSTORED_ENDPOINT``, verbatim, on every platform;
+  ## * POSIX: ``$XDG_RUNTIME_DIR/reprostore-<uid>.sock`` when that is set,
+  ##   verbatim (an over-long one is reported by ``bindIpcListener``,
+  ##   naming the limit, rather than moved); otherwise
+  ##   ``reprostore-<uid>.sock`` in ``privateDevRuntimeDir``;
+  ## * Windows: ``\\.\pipe\reprostored-dev-<devPipeUserTag(SID)>``.
+  ##
+  ## Where the endpoint is does not make whoever listens there trusted:
+  ## every client authenticates the listener from the kernel's peer
+  ## credentials (``client.connectDevDaemon``).
   let override = getEnv("REPROSTORED_ENDPOINT")
   if override.len > 0:
     return override
   when defined(windows):
-    "\\\\.\\pipe\\reprostored-dev-current-user"
+    let sid =
+      try: ipcOwnIdentity().sid
+      except IpcPeerIdentityError as err:
+        raise newException(IpcPeerIdentityError,
+          "cannot derive the dev store daemon's pipe name: " & err.msg)
+    "\\\\.\\pipe\\reprostored-dev-" & devPipeUserTag(sid)
   else:
-    let leaf = "reprostore-" & $currentUid() & ".sock"
-    result = devRuntimeDir() / leaf
-    if getEnv("XDG_RUNTIME_DIR").len == 0 and not ipcEndpointFits(result):
-      result = "/tmp" / leaf
+    devRuntimeDir() / devEndpointLeaf()
 
 proc statusFileForEndpoint*(endpoint: string): string =
+  ## The status file of the daemon at ``endpoint``: the endpoint's last
+  ## component with ``.status``, in ``devRuntimeDir`` (which the daemon
+  ## admits before writing it, ``admitDevRuntimeDir``).
   let leaf = endpoint.extractFilename
   devRuntimeDir() / (leaf & ".status")
 

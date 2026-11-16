@@ -1,23 +1,24 @@
-# How Repro Replaces Local Infrastructure Provisioners (Terraform)
+# How Repro Replaces Local Infrastructure Provisioners (Terraform, NixOS, Home Manager)
 
-> **Status:** Conceptual mapping guide for developers familiar with infrastructure-as-code and configuration deployment.
+> **Status:** Conceptual mapping guide for developers and agents managing user-level (`home.nim`) and operating-system (`system.nim`) state profiles.
 
-Reprobuild manages local developer machine configuration (dotfiles, database containers, host packages) using a declarative state model.
+Reprobuild reconciles user-level environments (`home.nim`) and operating-system or fleet configurations (`system.nim`) as typed, generation-tracked state outputs in the same dependency graph that builds software.
 
 ## Conceptual Mapping
 
-Reprobuild replaces complex system provisioning scripts and local configuration wrappers with declarative profile rules.
-
 | Infrastructure Concept | Reprobuild Equivalent | How Repro Solves It |
 |---|---|---|
-| **HCL Resources** (Terraform) | DSL `infra` blocks | Declaratively models local system packages, configuration symlinks, and background services. |
-| **State File** (`.tfstate`) | Home Profile Database | Tracks applied files and configurations in a generation database. |
-| **`terraform plan`** | `repro infra plan` | Calculates difference between the current system configuration and the DSL definition. |
-| **`terraform apply`** | `repro infra apply` | Deploys system packages, writes configuration files, and starts services. |
-| **State Rollbacks** | `repro infra rollback` | Instantly rolls back to a previous home profile generation. |
+| **HCL Resources / NixOS & Home Manager modules** | `home.nim` and `system.nim` typed `resources:` / `resourceType` blocks | Compile-time-checked Nim declarations modeling packages, files/symlinks, services, users, mounts, and cloud/Terraform-provider resources. |
+| **State File (`.tfstate`) & Generations** | Home & System Generation Databases | Tracks owned live state resources per generation with drift checks and automatic cleanup when declarations are removed. |
+| **`terraform plan` (user profile)** | `repro home plan [--profile-dir=PATH] [--host=NAME]` | Previews package, file, and service changes for a `home.nim` profile without mutating the machine. |
+| **`terraform apply` (user profile)** | `repro home apply [--profile-dir=PATH] [--host=NAME]` | Materializes and activates a new user-level generation (`repro home rollback` reverts to a prior generation). |
+| **`terraform plan` (OS / machine profile)** | `repro infra plan [--profile=PATH] [--host=NAME]` | Computes the desired-state plan and plan ID for a `system.nim` or host infrastructure profile. |
+| **`terraform apply` (OS / machine profile)** | `repro infra apply [--plan <id>] [--profile=PATH]` | Applies the planned machine generation (`repro system rollback` reverts to a previous system generation). |
+| **Remote bootstrap (`nixos-anywhere`)** | `repro anywhere` / `repro deploy-agent` | Bootstraps target machines over SSH or pulls signed host generations declaratively. |
 
-## Key Commands
+## Key Commands for Agents
 
-- `repro infra plan` — plan local environment setup.
-- `repro infra apply` — apply declarative changes to the host environment.
-- `repro infra rollback` — roll back the local system to a previous generation.
+- Always preview before mutating host state:
+  - User profile (`home.nim`): `repro home plan` → `repro home apply` (rollback: `repro home rollback`).
+  - OS / machine profile (`system.nim`): `repro infra plan` → `repro infra apply --plan <id>` (rollback: `repro system rollback`).
+- Inspect generations and provenance: `repro home history`, `repro home why <item>`, `repro system history`, `repro system audit`.

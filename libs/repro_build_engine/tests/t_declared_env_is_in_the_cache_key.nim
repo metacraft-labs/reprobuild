@@ -98,6 +98,18 @@
 ## does buy is stated and tested in its reachable half: built-in
 ## (non-forking) actions cannot declare an environment at all, so their
 ## records survive.
+##
+## ## Teardown on Windows
+##
+## A fixture's cache root holds engine records at
+## `…/hot-records/0-1-<64 hex>.rbar/<64 hex>.rec`, about 270 characters under
+## a `%TEMP%` fixture root. The engine writes them in the extended-length
+## form; a plain `removeDir` walks without it, cannot see them, and fails
+## with "The directory is not empty" after every assertion has passed. That
+## is what failed cases 1 to 3 on eli-pc (reprobuild-pm issue
+## 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d), so the
+## fixtures are removed with `removeDirEventually`, which escalates to the
+## extended-length form.
 
 import std/[algorithm, os, sequtils, strutils, tables, tempfiles, unittest]
 
@@ -105,6 +117,7 @@ import repro_build_engine
 import repro_hash
 import repro_local_store
 import repro_platform
+from repro_test_support import removeDirEventually
 
 ## Both decisions mean "the recorded result is still valid, do not
 ## re-execute" (Incremental-Invalidation.md §"File Fingerprint Policies").
@@ -183,7 +196,30 @@ proc warmConfig(cacheRoot: string): BuildEngineConfig =
   result.bypassRunQuota = true
   result.maxParallelism = 2'u32
 
-proc shPath(): string = findExe("sh")
+proc shPath(): string =
+  ## The POSIX shell the probes run. Cases 12 and 14 read the `PATH` it was
+  ## STARTED with, so on Windows it must be the shell itself and not a
+  ## launcher in front of it. Git for Windows' `bin\sh.exe`, and the Scoop
+  ## shim that points at it, set up a login environment and PREPEND
+  ## `/ucrt64/bin:/usr/bin:$HOME/bin` before starting the real shell: on
+  ## eli-pc the engine handed the child exactly `/nonexistent-repro-probe-dir`
+  ## and the probe printed `/ucrt64/bin:/usr/bin:/c/Users/zahary/bin:` in
+  ## front of it (reprobuild-pm issue
+  ## 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d). Which
+  ## `sh` comes first on `PATH` is a property of the host, not of the engine.
+  ## The shell itself is the `sh.exe` with its runtime DLL beside it
+  ## (`usr\bin` in Git for Windows, `bin` in MSYS2 and Cygwin); a launcher
+  ## has none. A self-probe (this test binary) is not an option: it loads
+  ## SQLite from `PATH` at start-up and cannot start under the `PATH` these
+  ## cases declare.
+  result = findExe("sh")
+  when defined(windows):
+    for dir in getEnv("PATH").split(PathSep):
+      if dir.len == 0:
+        continue
+      if fileExists(dir / "sh.exe") and
+          (fileExists(dir / "msys-2.0.dll") or fileExists(dir / "cygwin1.dll")):
+        return dir / "sh.exe"
 
 suite "an action's declared environment is part of its cache key":
 
@@ -193,7 +229,7 @@ suite "an action's declared environment is part of its cache key":
       skip()
     else:
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let config = warmConfig(f.cacheRoot)
 
       let alpha = graph([envEdge(sh, f.workRoot,
@@ -247,7 +283,7 @@ suite "an action's declared environment is part of its cache key":
       skip()
     else:
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let config = warmConfig(f.cacheRoot)
 
       # The graph is REBUILT after every host change, and that is
@@ -294,7 +330,7 @@ suite "an action's declared environment is part of its cache key":
       skip()
     else:
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let config = warmConfig(f.cacheRoot)
 
       let without = graph([envEdge(sh, f.workRoot)])
@@ -753,11 +789,12 @@ suite "the environment key rendering is canonical and host-independent":
     # launcher layers `action.env` OVER the inherited environment rather
     # than replacing it". This runs the launcher and asks it.
     let sh = shPath()
+    checkpoint("probe shell: " & sh)
     check sh.len > 0
 
     proc pathSeenBy(env: openArray[string]): string =
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let edge = action("path/probe",
         [sh, "-c", "printf '%s' \"${PATH-<unset>}\" > out/seen.txt"],
         cwd = f.workRoot,
@@ -846,9 +883,10 @@ suite "the environment key rendering is canonical and host-independent":
     # `sh` by absolute path; no resolver is configured, so the declared
     # PATH is the whole of what the edge itself contributes.
     let sh = shPath()
+    checkpoint("probe shell: " & sh)
     check sh.len > 0
     let f = makeFixture()
-    defer: removeDir(f.root)
+    defer: removeDirEventually(f.root)
     var edge = action("path/probe",
       [sh, "-c", "printf '%s' \"${PATH-<unset>}\" > out/seen.txt"],
       cwd = f.workRoot,

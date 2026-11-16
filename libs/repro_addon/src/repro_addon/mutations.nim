@@ -631,10 +631,38 @@
 ##                                           refused unit is shown by name,
 ##                                           which systemd refuses (decision
 ##                                           153, round 10)
-## ``unjudged-requirers-released``         a unit the live check does not
-##                                           judge that requires a refused
-##                                           unit is not held (decision 153,
-##                                           round 10)
+## ``unjudged-requirers-released``         no unit the live check does not
+##                                           judge is held as a requirer, by
+##                                           any path: files, systemd's view
+##                                           before the writes, the post-reload
+##                                           hold (decisions 171 and 177)
+## ``restart-success-by-exit-code``        a restart's exit code is taken as
+##                                           its outcome (round 11, H1)
+## ``live-check-restart-before-stale-holds-cleared``
+##                                           the next apply restarts the
+##                                           recorded triggers under the dead
+##                                           apply's holds (round 11, H1)
+## ``empty-requires-resets``               an empty ``Requires=`` resets the
+##                                           list (round 11, M4)
+## ``template-requirers-skipped``          a template requirer is not held
+##                                           (round 11, M3)
+## ``requirers-from-files-only``           systemd's reverse dependencies are
+##                                           not read before the writes
+##                                           (decision 177)
+## ``requirer-files-unread``               the generation's files are not
+##                                           read for requirers (decision 177)
+## ``post-reload-requirers-released``      a requirer systemd names only after
+##                                           the drivers' reload is not held
+##                                           (decision 177)
+## ``essential-requirers-held``            an essential unit is held instead
+##                                           of the apply refused (round 11)
+## ``dependants-do-not-block``             a recorded dependant does not block
+##                                           an apply (round 11, M1)
+## ``fixing-switch-skips-starts``          the fixing switch starts nothing it
+##                                           resolved (round 11, H2)
+## ``record-outside-host-lock``            recover changes the record of
+##                                           triggers outside the host apply
+##                                           lock (round 11, M2)
 ## ``switch-ignores-restart-record``       an add-on switch does not check
 ##                                           the record of triggers to
 ##                                           restart (decision 160, round 10)
@@ -1138,6 +1166,33 @@
 ##                                            corrupt record of a
 ##                                            pre-bootstrap input
 ##                                            (decision 166)
+## ``record-dir-link-followed``              the uninstall records are
+##                                            written by path, following a
+##                                            link in their directory's place
+##                                            (decision 178)
+## ``token-binds-inode-only``                 the token's install binding
+##                                            compares inode numbers only
+##                                            (decision 165)
+## ``bootstrap-leaves-log-dir``               bootstrap does not make the
+##                                            uninstall records' directory
+##                                            (decision 178)
+## ``verify-skips-log-dir``                   verify does not check that
+##                                            directory (decision 178)
+## ``record-read-by-path``                   the uninstall records are read,
+##                                            enumerated and probed by path
+##                                            (decision 178)
+## ``records-dir-identity-unchecked``         a records directory put in the
+##                                            place of the one bootstrap
+##                                            made is used (decision 178)
+## ``records-dir-left-open``                  bootstrap keeps an existing
+##                                            directory's mode (decision 178)
+## ``token-cleared-before-anchors``           bootstrap clears a stale token
+##                                            before it validates the trust
+##                                            anchors (decision 178)
+## ``corrupt-check-after-gate``               the stop on a corrupt record of
+##                                            a pre-bootstrap input comes
+##                                            after the store-evidence gate
+##                                            (decision 166)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1174,6 +1229,15 @@
 ##                                            however old it is
 ##                                            (``repro_test_support/
 ##                                            fresh_binary``; round 4)
+## ``egress-control-not-sent``                the fetch sends no DET-AO-3
+##                                            control datagram (DET-4)
+## ``manifest-control-skipped``               the tick never runs DET-AO-1's
+##                                            control (DET-4)
+## ``hook-control-skipped``                   the apt hook never runs
+##                                            DET-AO-6's control (DET-4)
+## ``check-ignores-controls``                 the off-host check never
+##                                            judges a positive control
+##                                            (DET-4)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1183,6 +1247,11 @@ from repro_deploy_agent/agent_mutations import KnownAgentMutations
 const
   AddonMutation* {.strdefine: "reproAddonMutation".} = ""
   KnownAddonMutations* = ["uninstall-skips-diversion-removal",
+                          # DET-4's scheduled positive controls (spec
+                          # §10.4 "Scheduled positive controls").
+                          "egress-control-not-sent",
+                          "manifest-control-skipped",
+                          "hook-control-skipped", "check-ignores-controls",
                           # Not a falsifier: a failure injected once
                           # (while /var/tmp/repro-addon-fail-before-ledger
                           # exists) after the flip and before the ledger
@@ -1886,6 +1955,18 @@ const
                           "live-check-triggers-in-memory",
                           "template-requirer-shown-by-name",
                           "unjudged-requirers-released",
+                          "requirer-files-unread",
+                          "post-reload-requirers-released",
+                          # A13 review round 11.
+                          "restart-success-by-exit-code",
+                          "live-check-restart-before-stale-holds-cleared",
+                          "empty-requires-resets",
+                          "template-requirers-skipped",
+                          "requirers-from-files-only",
+                          "essential-requirers-held",
+                          "dependants-do-not-block",
+                          "fixing-switch-skips-starts",
+                          "record-outside-host-lock",
                           "switch-ignores-restart-record",
                           "fixing-apply-refused",
                           "partial-fix-accepted",
@@ -2066,6 +2147,15 @@ const
                           "token-dir-unchecked",
                           "token-not-bound-to-install",
                           "corrupt-input-record-continues",
+                          "record-dir-link-followed",
+                          "token-binds-inode-only",
+                          "bootstrap-leaves-log-dir",
+                          "verify-skips-log-dir",
+                          "record-read-by-path",
+                          "records-dir-identity-unchecked",
+                          "records-dir-left-open",
+                          "token-cleared-before-anchors",
+                          "corrupt-check-after-gate",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",
@@ -2078,7 +2168,19 @@ const
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
-                          "fresh-accepts-user-config"]
+                          "fresh-accepts-user-config",
+                          # An agent apply may weaken a unit's confinement
+                          # (a new whole-floor waiver, a new exception, a
+                          # waived unit moved onto root) unattended: the
+                          # asymmetry spec §10.1 *An agent apply never
+                          # weakens the floor* closed
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-weaken-floor",
+                          # An agent apply may add, change or remove a
+                          # drop-in over a unit the profile does not define
+                          # (a package's, which may run as root) unattended
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-change-package-dropins"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

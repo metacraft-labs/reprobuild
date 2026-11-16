@@ -1,11 +1,11 @@
 ---
 title: Reprobuild documentation
-description: Reprobuild is a build system whose graph also describes operating systems and fleets of machines; what it does in each area, how one graph covers all of it, and where each kind of help lives.
+description: Reprobuild combines BuildXL's monitored dependency tracking, Nix's pinned store and generations, and Terraform's plan-and-apply state reconciliation into one compile-time-checked build and system graph.
 kind: explanation
 persona: evaluator
 order: 0
 verifies:
-  commands: [build, reap, lock update, test, test --shard, shell, exec, run, up, workspace init, develop, home apply, home rollback, infra plan, infra apply, infra apply --accept-passwd-destroy, system, deploy-agent, cache publish, cache substitute]
+  commands: [build, reap, lock update, test, test --shard, shell, exec, run, up, watch, hcr, workspace init, develop, home apply, home rollback, infra plan, infra apply, infra apply --accept-passwd-destroy, system, deploy-agent, cache publish, cache substitute]
   tests:
     - tests/integration/t_monitored_zero_output_edge_input_completeness.nim
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
@@ -34,35 +34,49 @@ unverified:
   - claim: "One project file drives the build, the development environment, tasks and services."
     reason: "No single test exercises all four from one repro.nim; the claim rests on four separate features."
     owner: unassigned
+  - claim: "Incremental no-op and single-file rebuilds compete with Ninja while RunQuota coordinates CPU and memory across concurrent builds."
+    reason: "Benchmark harness results against Ninja and RunQuota multi-session pressure tests are not yet wired into scenarios/."
+    owner: unassigned
+  - claim: "repro watch --hcr reloads modified code into running processes and forms part of the ReproOS runtime model."
+    reason: "Hot code reloading (repro watch --hcr, repro hcr) and ReproOS image/add-on gates exist in the repository, and dedicated user-docs scenarios are pending."
+    owner: unassigned
 ---
 
 # Reprobuild documentation
 
-Reprobuild (`repro`) is a build system whose graph describes more than
-software. In one typed language, and with one engine, it builds your programs
-and the tools and libraries they depend on, configures the operating system
-they run on, and keeps a fleet of computers in the state you declared.
+**Reprobuild** (`repro`) combines core ideas from **BuildXL**, **Nix** and
+**Terraform** into a single system that builds software, configures operating
+systems and converges entire fleets of computers across Linux, macOS and
+Windows. It pairs BuildXL's monitored automatic dependency tracking, Nix's
+pinned toolchains in a content-addressed store with atomic generations, and
+Terraform's plan-and-apply reconciliation into one engine.
 
-Its graph connects files, as any build system's does, and also states: a
-running service, a user account, a systemd unit, a registry value. As Terraform
-does, reprobuild compares the state you declare with the state that exists,
-shows you the plan, applies the difference and removes what you no longer
-declare. Each applied state is a generation you can roll back to, and applying
-runs through the same engine as a build, so a step whose result is already in
-place is not repeated. Any repository can define resource types, as a Terraform
-provider does, and a project can declare resources of them and lease them to
-the tests that use them. [How reprobuild works](concepts/how-reprobuild-works.md)
-explains the idea.
+Everything is expressed in a compact Nim language (`repro.nim` for projects,
+`home.nim` for user accounts and `system.nim` for machines) built on a single
+abstraction: **a build graph with automatically tracked dependencies whose
+outputs can be live system states as well as files**. An output can be an object
+file or an executable, or a running database, a user account, a systemd unit or
+a Windows registry key. One typed description replaces separate Makefiles,
+Dockerfiles, Nix flakes, direnv hooks, task runners and machine playbooks,
+catching structural and type errors at compile time before any action runs.
 
-For a project, one tool obtains its dependencies, builds and tests it, gives you
-the environment to work on it in, runs its tasks and services, and keeps the
-repositories it is made from in step.
+On incremental builds, Reprobuild competes with fast low-level executors such
+as **Ninja** while recording undeclared file reads through user-space filesystem
+monitoring and coordinating host CPU and memory across concurrent sessions
+through **RunQuota** so parallel developer and AI-agent builds do not thrash the
+machine. Paired with package catalogs spanning `reprobuild-packages`, Nix, Scoop
+and native OS repositories, atomic generations and in-process **hot code
+reloading** (`repro watch --hcr`), it forms the foundation of **ReproOS**: a
+malleable operating system where developers and agents can modify, rebuild and
+reload any layer of a live machine on the fly.
+[How reprobuild works](concepts/how-reprobuild-works.md) traces the graph from
+start to finish.
 
 ## What reprobuild does
 
 | Area | What reprobuild does | Commands |
 |---|---|---|
-| [Building](guides/building/index.md) | Derives a build graph from the project's layout or project file, and re-runs only the actions whose recorded inputs changed | `repro build`, `repro graph`, `repro watch` |
+| [Building](guides/building/index.md) | Derives a build graph from the project's layout or project file, re-runs only the actions whose recorded inputs changed, and reloads modified code into running processes | `repro build`, `repro graph`, `repro watch`, `repro hcr` |
 | [Dependencies](concepts/dependencies-and-the-store.md) | Resolves each tool and library a project names with a version range to one exact version, records it in the lock file, and keeps it in its store | `repro lock`, `repro why`, `repro store` |
 | [Testing](concepts/tests-and-certificates.md) | Runs tests as actions in the same graph, splits a suite across machines, and issues test certificates that travel with the commit | `repro test`, `repro certify` |
 | [Environments](guides/environments/index.md) | Puts the project's tools on your `PATH`: in a shell, for one command, or whenever you enter its directory | `repro shell`, `repro exec`, `repro allow` |

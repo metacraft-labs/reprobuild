@@ -537,7 +537,7 @@ proc runBrokerSession*(nonce: string; ctx: FixtureContext): int =
   ## BROKER side. Connects back to the parent, authenticates the
   ## nonce, then services `Operation` frames until `Done`. Each
   ## operation is dispatched through `dispatch.dispatchOperation`
-  ## (the closed-set, re-observe / drift-checked path); the broker
+  ## (the closed-set, re-observe path); the broker
   ## streams back an `ApplyLogRecord` then an `OperationResult`. It
   ## is one-shot: it returns (and the process exits) on `Done` or a
   ## channel drop.
@@ -587,9 +587,11 @@ proc runBrokerSession*(nonce: string; ctx: FixtureContext): int =
       # typed PrivilegedOperation (closed-set guard) — that rejection
       # is an `EProtocol` and is caught here so the broker REPORTS
       # the rejection rather than crashing. The decoded
-      # `WireOperation` carries the parent's plan baseline digest so
-      # the broker's re-observe / drift gate distinguishes a safe
-      # update from a genuine mid-flight drift.
+      # `WireOperation` carries the parent's plan baseline digest;
+      # dispatch no longer compares it with the live state (M82 Phase
+      # A removed that drift gate), so nothing raises the
+      # `EBrokerDrift` caught below today (`errors.raiseBrokerDrift`
+      # says why the type is kept).
       var dr: DispatchResult
       var resultFrame: OperationResultFrame
       var opAddress = ""

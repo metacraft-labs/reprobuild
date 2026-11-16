@@ -39,6 +39,7 @@ import std/[os, posix, strutils, times]
 
 import repro_core/file_lock
 import repro_core/host_apply_lock
+import repro_infra/start_holds
 
 import repro_infra
 from repro_infra/start_holds import templateOf
@@ -172,6 +173,42 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   @["the switch to " & current & " had committed (marker at step " &
     $m.step & "); finished its step 9"]
 
+proc repairTriggerRecords*(stateDir: string; host0: LiveHost = LiveHost();
+                           what = "add-on trigger record repair"):
+    RecoveryOutcome =
+  ## Start again what the records of triggers name -- the full apply's
+  ## ``live-check-triggers`` (an apply that died between its hold and its
+  ## release, §13 decision 151) and the add-on's ``triggers-to-restart``
+  ## (§13 decision 160) -- under the host apply lock (A13 review round 11,
+  ## M2): every read-modify-write of either record happens under it, so a
+  ## recover or the boot re-assert cannot race an apply that is writing
+  ## them. Re-entrant: an apply that already holds the lock (its guard)
+  ## passes. A stale hold an apply that died left in /run is cleared first,
+  ## or every start below would be skipped by it (H1).
+  let host = if host0.start == nil: addonLiveHost() else: host0
+  var lock: HostApplyLock
+  when not mutated("record-outside-host-lock"):
+    try:
+      lock = acquireHostApplyLock(what)
+    except ELockTimeout as e:
+      return RecoveryOutcome(resolved: false, lines: @["the records of " &
+        "triggers to start again were left as they are: " & e.msg])
+  defer: lock.release()
+  var lines: seq[string]
+  if fileExists(stateDir / LiveCheckTriggersFile):
+    if host0.start == nil:
+      try:
+        if clearStaleHolds(CarriedCheckHoldName).len > 0: daemonReload()
+      except CatchableError: discard
+    let failed = restartRecordedLiveCheckTriggers(stateDir, host)
+    if failed.len > 0:
+      return RecoveryOutcome(resolved: false, lines: failed)
+    lines.add("the triggers an interrupted full apply stopped started again")
+  if hasTriggersToRestart(stateDir):
+    let r = retryTriggerRestarts(stateDir, host)
+    return RecoveryOutcome(resolved: r.ok, lines: lines & r.lines)
+  RecoveryOutcome(resolved: true, lines: lines)
+
 proc recoverMarker(stateDir: string; atBoot: bool;
                    driver: CollisionDriver = nil;
                    bootConfirm = false): RecoveryOutcome =
@@ -179,17 +216,10 @@ proc recoverMarker(stateDir: string; atBoot: bool;
   ## marker, start again the triggers a revert could not (§13 decision 160).
   if not hasPendingMarker(stateDir):
     # A full apply that died between its hold and its release left the
-    # triggers it stopped on record (§13 decision 151): started first.
-    var lines: seq[string]
-    if fileExists(stateDir / LiveCheckTriggersFile):
-      let failed = restartRecordedLiveCheckTriggers(stateDir, addonLiveHost())
-      if failed.len > 0:
-        return RecoveryOutcome(resolved: false, lines: failed)
-      lines.add("the triggers an interrupted full apply stopped started again")
-    if hasTriggersToRestart(stateDir):
-      let r = retryTriggerRestarts(stateDir)
-      return RecoveryOutcome(resolved: r.ok, lines: lines & r.lines)
-    return RecoveryOutcome(resolved: true, lines: lines)
+    # triggers it stopped on record (§13 decision 151), and a revert those
+    # it could not start (§13 decision 160): started again, under the host
+    # apply lock.
+    return repairTriggerRecords(stateDir)
   when mutated("reassert-skips-recovery"):
     # The negative control: an interrupted switch is left as it is found.
     return RecoveryOutcome(resolved: true,
@@ -337,9 +367,9 @@ proc afterRecovery*(rec: RecoveryOutcome; stateDir: string;
   when not mutated("recover-skips-triggers-after-marker"):
     if result.resolved and not result.deferred and
         hasTriggersToRestart(stateDir):
-      let r = retryTriggerRestarts(stateDir, host)
+      let r = repairTriggerRecords(stateDir, host)
       result.lines.add(r.lines)
-      result.resolved = r.ok
+      result.resolved = r.resolved
 
 proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
                            driver: CollisionDriver = nil;

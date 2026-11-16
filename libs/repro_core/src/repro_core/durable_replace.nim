@@ -34,7 +34,7 @@
 ## `spec/Configuration-Storage-Principles.md` §"Authoritative Operational
 ## State".
 
-import std/[os, times, atomics]
+import std/[os, times, atomics, strutils]
 
 when defined(windows):
   import std/winlean
@@ -91,16 +91,15 @@ proc syncDirectoryDurably*(dir: string) =
     discard syncFd(fd)
     discard posix.close(fd)
 
-proc writeSyncedFile(path, content: string) =
-  ## Create ``path`` (a fresh temporary file), write ``content``, flush and
-  ## sync it. Raises on any failure.
+proc writeSyncedFile(path: string; data: pointer; len: int) =
+  ## Create ``path`` (a fresh temporary file), write the ``len`` bytes at
+  ## ``data``, flush and sync it. Raises on any failure.
   var f: File
   if not open(f, extendedPath(path), fmWrite):
     raise newException(IOError, "cannot open '" & path & "' for writing: " &
       osErrorMsg(osLastError()))
   try:
-    if content.len > 0 and
-        f.writeBuffer(unsafeAddr content[0], content.len) != content.len:
+    if len > 0 and f.writeBuffer(data, len) != len:
       raise newException(IOError, "short write to '" & path & "'")
     f.flushFile()
     when defined(windows):
@@ -127,19 +126,79 @@ proc renameOver(src, dest: string) =
     if c_rename(cstring(extendedPath(src)), cstring(extendedPath(dest))) != 0:
       raiseOSError(osLastError(), "rename '" & src & "' -> '" & dest & "'")
 
-proc replaceFileDurably*(dest, content: string) =
-  ## Replace (or create) the file ``dest`` with ``content`` atomically and
-  ## durably; see the module documentation. ``dest``'s directory must exist.
-  ## Raises `IOError` / `OSError` on failure, leaving ``dest`` unchanged.
-  let tmp = durableTempPath(dest)
+proc replaceFileDurablyImpl(dest: string; data: pointer; len: int;
+                            tmpPath: string; keepMode: bool) =
+  let tmp = if tmpPath.len > 0: tmpPath else: durableTempPath(dest)
   try:
-    writeSyncedFile(tmp, content)
+    writeSyncedFile(tmp, data, len)
+    if keepMode and fileExists(extendedPath(dest)):
+      # The rename installs the temporary file's inode, whose mode came from
+      # the umask; a file the user made private (or executable) keeps its
+      # mode only if it is copied onto the new inode before it goes live.
+      setFilePermissions(extendedPath(tmp),
+        getFilePermissions(extendedPath(dest)))
     renameOver(tmp, dest)
   except CatchableError:
     try: removeFile(extendedPath(tmp))
     except CatchableError: discard
     raise
   syncDirectoryDurably(parentDir(dest))
+
+proc replaceFileDurably*(dest, content: string; tmpPath = "";
+                         keepMode = false) =
+  ## Replace (or create) the file ``dest`` with ``content`` atomically and
+  ## durably; see the module documentation. ``dest``'s directory must exist.
+  ## Raises `IOError` / `OSError` on failure, leaving ``dest`` unchanged.
+  ##
+  ## ``tmpPath``, when given, is the temporary file to write; it must be in
+  ## ``dest``'s directory and unique to this write. A store whose listing
+  ## skips its own temporary names passes one; everyone else omits it and
+  ## gets ``.<name>.<unique>.tmp``, which `removeStaleDurableTemps` sweeps.
+  ##
+  ## ``keepMode`` gives the new file the permission bits of the file it
+  ## replaces (when there is one), for a file a user owns and edits too.
+  let data = if content.len > 0: unsafeAddr content[0] else: nil
+  replaceFileDurablyImpl(dest, data, content.len, tmpPath, keepMode)
+
+proc replaceFileDurably*(dest: string; content: openArray[byte];
+                         tmpPath = ""; keepMode = false) =
+  ## `replaceFileDurably` for binary content.
+  let data = if content.len > 0: unsafeAddr content[0] else: nil
+  replaceFileDurablyImpl(dest, data, content.len, tmpPath, keepMode)
+
+const DefaultStaleDurableTempAge* = initDuration(hours = 1)
+  ## A live write holds its temporary file for one small write, a sync and a
+  ## rename: milliseconds. One an hour old belongs to a writer that died
+  ## between creating it and renaming it.
+
+proc removeStaleDurableTemps*(dest: string;
+                              maxAge = DefaultStaleDurableTempAge): int =
+  ## Remove the temporary files that crashed writes of ``dest`` left beside
+  ## it (``.<name>.<unique>.tmp``, files or symlinks), when they are older
+  ## than ``maxAge``. Younger ones may belong to a write in progress and are
+  ## kept. Never touches ``dest`` itself or any other name. Returns how many
+  ## were removed; a temporary that cannot be inspected or removed is left
+  ## for the next sweep.
+  let (dir, name) = splitPath(dest)
+  let prefix = "." & name & "."
+  if not dirExists(extendedPath(dir)):
+    return 0
+  for kind, path in walkDir(extendedPath(dir)):
+    if kind notin {pcFile, pcLinkToFile, pcLinkToDir}:
+      continue
+    let fn = extractFilename(path)
+    if not (fn.len > prefix.len + ".tmp".len and fn.startsWith(prefix) and
+            fn.endsWith(".tmp")):
+      continue
+    try:
+      # The link's own time, not its target's: a temporary symlink points at
+      # a generation directory that may be old.
+      let info = getFileInfo(path, followSymlink = false)
+      if getTime() - info.lastWriteTime > maxAge:
+        removeFile(path)
+        inc result
+    except CatchableError:
+      discard
 
 when not defined(windows):
   proc replaceSymlinkDurably*(link, target: string) =

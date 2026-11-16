@@ -100,7 +100,7 @@
 ## file (a failure of the
 ## file system cannot be produced on demand). Nothing else.
 
-import std/[json, os, sequtils, strutils, times, unittest]
+import std/[json, os, posix, sequtils, strutils, times, unittest]
 
 import repro_addon/attestation
 import repro_addon/cli
@@ -671,6 +671,128 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
       check text.startsWith("completing the discard an earlier uninstall")
       check text.endsWith(hint)
       check "was authorised;" notin text
+
+suite "A11 code review round 18: the records' directory is never a link's target":
+  test "a link planted in the records' directory's place is refused, its target untouched":
+    # Falsifier record-dir-link-followed. Ubuntu's /var/log is
+    # root:syslog 0775: a group member can put a link where
+    # /var/log/repro-addon goes. The gate must neither chmod the link's
+    # target nor write the signed records into it.
+    let name = "linkdir"
+    let key = root / name / "agent" / "attestation.key"
+    createDir(parentDir(key))
+    discard ensureAttestationKey(key)
+    let site = scratchSite(name, key)
+    discard leaveAside(site, "1-a")
+    let victim = root / name / "victim"
+    createDir(victim)
+    setFilePermissions(victim, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    createSymlink(victim, root / name / "log")
+    let gate = storeEvidenceGate(site, override, notAcknowledged,
+                                 overrideDir = root / name / "log")
+    checkpoint $gate.errors
+    check gate.errors.len > 0 and gate.overrideRecord.len == 0
+    var n = 0
+    for _ in walkDir(victim): inc n
+    check n == 0
+    var st: Stat
+    check stat(victim.cstring, st) == 0 and (int(st.st_mode) and 0o7777) == 0o755
+    check symlinkExists(root / name / "log")
+
+suite "A11 code review round 19: the records are read, listed and probed by descriptor":
+  ## Falsifier ``record-read-by-path`` (round 18's path-based reads): a
+  ## resumable intent -- its objects removed, its marker written, its
+  ## completion refused -- is completed by the next run only when it is
+  ## read through the records directory's checked descriptor. A .sig that
+  ## is a link, a link in the directory's place, and a FIFO under an
+  ## intent's name must each be refused; the FIFO must not block the gate
+  ## (it runs in a child process, killed after 10 s). ``corrupt-check-after-
+  ## gate``: the corrupt-record stop comes before the gate, so no intent is
+  ## written.
+  let failWriter19 = proc (path, text: string) =
+    raise newException(IOError, "Operation not permitted")
+  proc resumable(name: string): Scene =
+    result = scene(name)
+    removeDir(result.aside)
+    let st = parentDir(parentDir(result.key)) / "state"
+    writeLedger(ledgerCopyPath(st), Ledger(generation: "g0"))
+    var signer = loadTextSigner(result.key)
+    var r = resultOf(result)
+    doAssert completeDiscardBeforeKeys(r, Ledger(generation: "g0"), st,
+      result.site, signer, result.gate.pending, failWriter19)
+    signer.wipe()
+  proc logOf19(s: Scene): string = parentDir(s.gate.overrideRecord)
+
+  test "the resumable intent is completed through the checked read":
+    let s = resumable("r19-base")
+    let g = storeEvidenceGate(s.site, override, notAcknowledged,
+                              overrideDir = logOf19(s))
+    check g.errors.len == 0 and g.overrideRecord == s.gate.overrideRecord
+
+  test "a .sig that is a link is not followed":
+    let s = resumable("r19-siglink")
+    let sig = s.gate.overrideRecord & DiscardRecordSigExt
+    let moved = root / "r19-siglink" / "elsewhere.sig"
+    moveFile(sig, moved)
+    createSymlink(moved, sig)
+    let g = storeEvidenceGate(s.site, override, notAcknowledged,
+                              overrideDir = logOf19(s))
+    checkpoint g.overrideRecord
+    check g.overrideRecord.len == 0
+
+  test "a link in the records directory's place is not read through":
+    let s = resumable("r19-dirlink")
+    let log = logOf19(s)
+    moveDir(log, log & "-real")
+    createSymlink(log & "-real", log)
+    let g = storeEvidenceGate(s.site, override, notAcknowledged,
+                              overrideDir = log)
+    checkpoint g.overrideRecord
+    check g.overrideRecord.len == 0
+
+  test "a FIFO under an intent's name does not block the gate":
+    let s = resumable("r19-fifo")
+    let fifo = logOf19(s) / "uninstall-29990101T000000Z-discard-intent.json"
+    check mkfifo(fifo.cstring, Mode(0o600)) == 0
+    let pid = fork()
+    if pid == 0:
+      discard storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = logOf19(s))
+      quit(0)
+    var status: cint
+    var done = false
+    for _ in 0 ..< 100:
+      if waitpid(pid, status, WNOHANG) == pid:
+        done = true
+        break
+      sleep(100)
+    if not done:
+      discard kill(pid, SIGKILL)
+      discard waitpid(pid, status, 0)
+    check done
+
+  test "a corrupt input record stops uninstall before the gate writes an intent":
+    let name = "r19-corrupt"
+    let key = root / name / "agent" / "attestation.key"
+    createDir(parentDir(key))
+    discard ensureAttestationKey(key)
+    let site = scratchSite(name, key)
+    discard leaveAside(site, "1-a")
+    writeLedger(ledgerCopyPath(site.stateDir), Ledger(generation: "g0",
+      entries: @[LedgerEntry(class: lcRoot, path: root / name / "agentdir",
+        mode: "0700", owner: "0:0", replaced: "dir 0750 1000:1000",
+        collision: "adopt", observation: PriorCapturedBeforeTakeover)]))
+    let log = root / name / "log"
+    createDir(log)
+    let r = runAddonUninstall(UninstallOptions(stateDir: site.stateDir,
+      logDir: log, custody: site, ship: notAcknowledged,
+      discardUnacknowledgedStoreEvidence: true))
+    checkpoint $r.errors
+    check r.errors.len > 0 and r.errors[^1].startsWith("nothing was removed")
+    var intents = 0
+    for f in walkFiles(log / "*-discard-intent.json"): inc intents
+    check intents == 0
 
 suite "A11 code review round 12: §13 decision 56, amended":
   test "18: records no run can ship are never waited for":

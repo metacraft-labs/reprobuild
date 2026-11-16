@@ -103,6 +103,9 @@
 import std/[algorithm, os, strutils]
 
 import nimcrypto/sha2 as nc_sha2
+# The sentinel format has one owner, the managed-file writer
+# (Core-Invariants.md §"One Implementation Per Concern").
+from repro_core/managed_block as coreManagedBlock import nil
 
 import ../apt_jammy
 
@@ -219,12 +222,14 @@ proc openSentinel*(scope: BlockScope;
   ## NDE-spec-block sentinel open. Format:
   ##   ``# >>> repro:<scope>:<packageName>:<blockId> >>>``
   ## See Generated-Configuration-Files.md §"Sentinel uniqueness".
-  "# >>> repro:" & $scope & ":" & packageName & ":" & blockId & " >>>"
+  coreManagedBlock.openSentinel(
+    coreManagedBlock.managedBlockKey($scope, packageName, blockId))
 
 proc closeSentinel*(scope: BlockScope;
                     packageName, blockId: string): string =
   ## NDE-spec-block sentinel close. Mirror-shape of ``openSentinel``.
-  "# <<< repro:" & $scope & ":" & packageName & ":" & blockId & " <<<"
+  coreManagedBlock.closeSentinel(
+    coreManagedBlock.managedBlockKey($scope, packageName, blockId))
 
 proc renderBlock(scope: BlockScope;
                  packageName, blockId, content: string): string =

@@ -24,7 +24,8 @@ import std/[json, os, posix, sequtils, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
-import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall]
+import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall, record_dir]
+from repro_addon/bootstrap import prepareRecordsDir
 from repro_addon/preflight import AgentStateRecordsDir
 
 let me = $getuid() & ":" & $getgid()
@@ -757,12 +758,14 @@ suite "round 16":
     let sc = inputScene("tokentmp")
     let victim = sc.parent / "victim"
     writeFile(victim, "untouched\n")
-    createSymlink(victim, sc.token & ".tmp")
+    let tmpName = parentDir(sc.token) / ("." & extractFilename(sc.token) &
+                                         ".tmp-" & $getCurrentProcessId())
+    createSymlink(victim, tmpName)
     var r: UninstallResult
     removeWith(sc, r)
     check r.errors.len == 0
     check readFile(victim) == "untouched\n"
-    check not fileExists(sc.token) and not symlinkExists(sc.token & ".tmp")
+    check not fileExists(sc.token) and not symlinkExists(tmpName)
 
 # ---------------------------------------------------------------------------
 # A11 code review round 17 (§13 decisions 165 and 166): the token binds the
@@ -801,3 +804,165 @@ suite "round 17":
     check "restore it from the generation" in r.errors[1]
     var fine: UninstallResult
     check not refuseCorruptInputs(fine, preBootstrapInputs(Ledger()), "/x")
+
+# ---------------------------------------------------------------------------
+# A11 code review round 18 (§13 decisions 165, 166: the pre-bootstrap inputs
+# left in place): the token binds its
+# install by inode AND birth time, never the number alone (ext4 reuses
+# numbers), and fails closed where nothing but the number is known; a token
+# from an earlier build, with no identity, is refused with its remedy; a
+# corrupt record of an input stops the uninstall verb itself before the
+# store-evidence gate. The identities are faked (``identityOf``) so the
+# reuse of an inode number is certain, whatever this file system does.
+# Falsifiers ``token-binds-inode-only`` and
+# ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+proc failedRootRun(s: tuple[parent, st, lc, token: string];
+                   ids: IdentityOf): UninstallResult =
+  setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+  removeStateRoot(result, s.st, s.lc, tokenPath = s.token, identityOf = ids)
+  setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+
+suite "round 18":
+  test "a reused inode number with another birth time is another install's directory":
+    let s = v2Scene("reuse")
+    let r = failedRootRun(s, proc (p: string): string =
+      (if dirExists(p): "5@100.1" else: ""))
+    check r.errors.len == 1 and fileExists(s.token)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token,
+      identityOf = proc (p: string): string =
+        (if dirExists(p): "5@200.2" else: ""))
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check again.errors.len == 1 and "remove them and the token yourself" in again.errors[0]
+    check dirExists(s.st)
+
+  test "where nothing but the inode number is known, the re-run refuses":
+    let s = v2Scene("nobtime")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)
+
+  test "the same identity is finished":
+    let s = v2Scene("same")
+    let ids = proc (p: string): string = (if dirExists(p): "5@100.1" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 0 and not dirExists(s.st)
+
+  test "a token from an earlier build, with no identity, is refused with its remedy":
+    let s = v2Scene("oldtoken")
+    discard failedRootRun(s, stateDirIdentity)
+    let j = parseJson(readFile(s.token))
+    j.delete("chainIdentity")
+    removeFile(s.token)
+    writeFile(s.token, $j)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "earlier build" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of an input stops the uninstall verb, nothing written":
+    let base = getTempDir() / ("repro-uninstall-corrupt-" & $getCurrentProcessId())
+    removeDir(base)
+    let st = base / "var-lib-repro"
+    createDir(st / "system")
+    let lc = ledgerCopyPath(st / "system")
+    writeLedger(lc, Ledger(generation: "g0", entries: @[LedgerEntry(
+      class: lcRoot, path: st / "agent", mode: "0700", owner: "0:0",
+      replaced: "dir 0750 1000:1000", collision: "adopt",
+      observation: PriorCapturedBeforeTakeover)]))
+    let before = readFile(lc)
+    createDir(base / "log")
+    let r = runAddonUninstall(UninstallOptions(stateDir: st / "system",
+      stateRoot: st, logDir: base / "log",
+      discardUnacknowledgedStoreEvidence: true))
+    checkpoint $r.errors
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check readFile(lc) == before
+    var n = 0
+    for _ in walkDir(base / "log"): inc n
+    check n == 0
+    removeDir(base)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 19 (§13 decision 178, amended): the records
+# directory is the one bootstrap made -- its identity recorded, a swapped
+# directory refused, recorded at first use where nothing is recorded yet;
+# bootstrap tightens an existing root directory to 0700; a stale token
+# survives a bootstrap refused on its trust anchors; a token identity with
+# a generation but no birth time is refused. Falsifiers
+# ``records-dir-identity-unchecked``, ``records-dir-left-open``,
+# ``token-cleared-before-anchors`` and ``token-binds-inode-only``.
+# ---------------------------------------------------------------------------
+
+suite "round 19":
+  test "a directory swapped into the records directory's place is refused":
+    let base = getTempDir() / ("repro-r19-swap-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    writeFile(idFile, identityOfCheckedDir(dir) & "\n")
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    moveDir(dir, dir & ".away")
+    createDir(dir)
+    setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+    let why = checkedDirRefusal(dir)
+    checkpoint why
+    check "not the directory bootstrap made" in why
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "with nothing recorded, the first checked open records the identity":
+    let base = getTempDir() / ("repro-r19-tofu-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    check fileExists(idFile) and readFile(idFile).strip() == identityOfCheckedDir(dir)
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "bootstrap's ensure tightens an existing root directory to 0700":
+    let base = getTempDir() / ("repro-r19-tight-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    setFilePermissions(base / "log", {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    ensureCheckedDir(base / "log", tighten = true)
+    check modeOf(base / "log") == 0o700
+    removeDir(base)
+
+  test "a bootstrap refused on its trust anchors leaves a stale token":
+    let base = getTempDir() / ("repro-r19-anchors-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    let token = base / "log" / StateRemovalTokenName
+    writeFile(token, "{}")
+    writeFile(base / "bad.anchors", "not an anchor\n")
+    expect CatchableError:
+      prepareRecordsDir(base / "bad.anchors", "", logDir = base / "log")
+    check fileExists(token)
+    removeDir(base)
+
+  test "a generation without a birth time is not enough to finish":
+    let s = v2Scene("genonly")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-g7" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)

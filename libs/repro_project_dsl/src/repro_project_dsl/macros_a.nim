@@ -554,9 +554,9 @@ proc literalCaseLabel(label: NimNode): string =
   ## Lower a ``case`` arm's label literal into the gate value string
   ## the solver expects. ``of "gcc": ...`` yields ``"gcc"``; ``of true:
   ## ...`` yields ``"true"``; integer labels yield their decimal repr.
-  ## Returns the empty string when the label shape is not a single
-  ## literal (e.g. ``of "a", "b": ...``) — the caller falls back to the
-  ## union behaviour for those cases.
+  ## Returns the empty string when the label is not a literal (or is the
+  ## empty string); ``variantCaseGate`` refuses such an arm at compile time
+  ## rather than lowering it ungated.
   case label.kind
   of nnkStrLit..nnkTripleStrLit:
     label.strVal
@@ -569,6 +569,147 @@ proc literalCaseLabel(label: NimNode): string =
     $label.intVal
   else:
     ""
+
+# ---------------------------------------------------------------------------
+# Variant gates in a dependency block: the admissible shapes, and the refusal
+# of every other one.
+#
+# Configurable-System §"`uses:` Resolution Driven by Variants": every arm of a
+# variant-conditioned dependency is statically enumerable from the recipe
+# source, so one metadata-fetch wave covers all of them (Core-Invariants
+# §"Static Metadata Is The Hot Path"), and the solver receives each entry with
+# the ONE (variant, value) pair that selects it -- `ConditionalGate` holds
+# exactly one. Inside a dependency block a variant may therefore condition
+# entries only as
+#
+#   * `if <boolVariant>.value:` (or `if <boolVariant>:`) with an optional
+#     single `else:` -- gated `true` / `false`;
+#   * `case <variant>.value:` (or `case <variant>:`) whose `of` arms each
+#     carry exactly one literal label, with no `else:` arm;
+#
+# and never nested inside another variant arm. Every other `if` / `case`
+# shape is a compile-time error. The predecessor lowered each of them with the
+# OUTER gate -- usually none -- so its entries became unconditional
+# dependencies, silently: both arms of `if v.value == "x": a else: b`, a
+# `case` `else:` arm, a multi-label `of`, and the inner arms of a nested gate
+# all landed on the dependency floor whatever the variant said.
+#
+# reprobuild-pm issue 2026-11-12-every-arm-is-statically-enumerable-but-the-
+# canonical-example-computes-its-uses.md.
+# ---------------------------------------------------------------------------
+
+const VariantDependencyForms =
+  "every arm of a variant-conditioned dependency must be statically " &
+  "enumerable from the recipe source, so that one metadata fetch covers " &
+  "all of them and the solver sees each entry under the one variant value " &
+  "that selects it. Inside a dependency block a variant may condition " &
+  "entries only as `case <variant>.value:` with exactly one literal label " &
+  "per `of` arm and no `else:` arm, or as `if <boolVariant>.value:` with " &
+  "an optional `else:`; use `when` for a condition on compile-time facts"
+
+proc constructText(node: NimNode): string =
+  ## The construct as the author wrote it, on one line, for a diagnostic.
+  let text = node.repr.strip()
+  let newline = text.find('\n')
+  if newline >= 0: text[0 ..< newline].strip() else: text
+
+proc refuseVariantDependencyShape(construct, why: string; node: NimNode) =
+  ## Stop the compile at ``node`` with the shared refusal.
+  error(construct & " in a dependency block " & why & "; " &
+    VariantDependencyForms, node)
+
+proc refuseNestedVariantGate(construct, outerVariant: string;
+                             node: NimNode) =
+  refuseVariantDependencyShape(construct,
+    "is nested inside an arm gated on variant `" & outerVariant &
+      "`, and an entry carries at most one variant gate, so the inner " &
+      "condition would be lost", node)
+
+proc membershipVariant(cond: NimNode): string =
+  ## ``<element> in <variant>.value`` / ``notin``: the multi-valued variant
+  ## it tests, or "".
+  if cond.kind == nnkInfix and cond.len == 3 and
+      cond[0].kind in {nnkIdent, nnkSym} and
+      identText(cond[0]).normalize in ["in", "notin"]:
+    return variantSelectorName(cond[2])
+  ""
+
+proc variantIfGate(node: NimNode; outerVariant: string): string =
+  ## The bool variant an ``if`` in a dependency block gates on. Refuses, at
+  ## compile time, every ``if`` that is not ``if <v>.value:`` / ``if <v>:``
+  ## with an optional single ``else:``, and any ``if`` inside a gated arm.
+  let head = "`if " & constructText(node[0][0]) & "`"
+  if outerVariant.len > 0:
+    refuseNestedVariantGate(head, outerVariant, node)
+  for i in 1 ..< node.len:
+    if node[i].kind in {nnkElifBranch, nnkElifExpr}:
+      refuseVariantDependencyShape(
+        "`elif " & constructText(node[i][0]) & "`",
+        "turns `" & head[1 .. ^2] & "` into a chain whose arms are " &
+          "selected by more than one condition, which no single variant " &
+          "value names", node[i])
+  let cond = node[0][0]
+  let member = membershipVariant(cond)
+  if member.len > 0:
+    error(head & " in a dependency block is a membership gate on a " &
+      "multi-valued variant (`" & member & "`). Gating a dependency on a " &
+      "multi-valued variant is not implemented yet: the solver has no " &
+      "multi-valued variants, so the gate cannot be lowered, and it is " &
+      "refused rather than made unconditional. Until it is implemented, " &
+      "declare a bool variant per member and gate on it with " &
+      "`if <boolVariant>.value:`", node)
+  result = variantSelectorName(cond)
+  if result.len == 0:
+    refuseVariantDependencyShape(head,
+      "is not a variant gate: its condition is not a bare " &
+        "`<variant>.value` (or `<variant>`) selector, and the arms of an " &
+        "arbitrary condition are not enumerable", node)
+
+proc variantCaseGate(node: NimNode; outerVariant: string): string =
+  ## The variant a ``case`` in a dependency block gates on. Refuses, at
+  ## compile time, every ``case`` that is not ``case <v>.value:`` /
+  ## ``case <v>:`` with one literal label per ``of`` arm and no ``else:``,
+  ## and any ``case`` inside a gated arm.
+  let head = "`case " & constructText(node[0]) & "`"
+  if outerVariant.len > 0:
+    refuseNestedVariantGate(head, outerVariant, node)
+  result = variantSelectorName(node[0])
+  if result.len == 0:
+    refuseVariantDependencyShape(head,
+      "is not a variant gate: its selector is not a bare " &
+        "`<variant>.value` (or `<variant>`) selector, and the arms of an " &
+        "arbitrary expression are not enumerable", node)
+  for i in 1 ..< node.len:
+    let branch = node[i]
+    case branch.kind
+    of nnkOfBranch:
+      let labels = branch.len - 1
+      var labelText: seq[string]
+      for j in 0 ..< labels:
+        labelText.add(constructText(branch[j]))
+      let arm = "`of " & labelText.join(", ") & "` in " & head
+      if labels != 1:
+        refuseVariantDependencyShape(arm,
+          "has " & $labels & " labels, and each `of` arm must carry " &
+            "exactly one, the variant value that selects it", branch)
+      let label = branch[0]
+      if literalCaseLabel(label).len == 0:
+        let why =
+          if label.kind in {nnkStrLit..nnkTripleStrLit}:
+            "has an empty label, which names no variant value"
+          else:
+            "has a label that is not a literal (a string, an integer, " &
+              "`true` or `false`), so the source does not say which " &
+              "variant value selects it"
+        refuseVariantDependencyShape(arm, why, branch)
+    of nnkElse:
+      refuseVariantDependencyShape("the `else:` arm of " & head,
+        "stands for every value no `of` arm names, which the source does " &
+          "not enumerate; write one `of` arm per value instead", branch)
+    else:
+      refuseVariantDependencyShape(
+        "`" & constructText(branch) & "` in " & head,
+        "is not an `of <literal>:` arm", branch)
 
 const
   DepKindTarget* = "target"
@@ -686,78 +827,31 @@ proc lowerUsesBody(node: NimNode; accum: NimNode; policyPath: seq[string];
     # resolves it from the solver later. Recursion continues through
     # `lowerUsesBody`, so a `when` written inside an arm is still emitted for
     # the compiler rather than handed to an evaluator.
-    var nestedGateVariant = ""
-    var thenGateValue = ""
-    var elseGateValue = ""
-    block detectVariantGate:
-      var elifCount = 0
-      var hasElse = false
-      for b in node:
-        case b.kind
-        of nnkElifBranch, nnkElifExpr: inc elifCount
-        of nnkElse, nnkElseExpr: hasElse = true
-        else: discard
-      if elifCount != 1: break detectVariantGate
-      var cond: NimNode = nil
-      for b in node:
-        if b.kind in {nnkElifBranch, nnkElifExpr} and b.len >= 1:
-          cond = b[0]
-          break
-      if cond.isNil: break detectVariantGate
-      let varName = variantSelectorName(cond)
-      if varName.len == 0: break detectVariantGate
-      nestedGateVariant = varName
-      thenGateValue = "true"
-      if hasElse:
-        elseGateValue = "false"
+    #
+    # Only `if <boolVariant>.value:` with an optional `else:` is a gate.
+    # Every other shape is refused by `variantIfGate`: the predecessor lowered
+    # it with the outer gate, usually none, which made its entries
+    # unconditional dependencies without a word.
+    let variant = variantIfGate(node, gateVariant)
     for branch in node:
       case branch.kind
       of nnkElifBranch, nnkElifExpr:
-        if branch.len >= 2:
-          if nestedGateVariant.len > 0 and gateVariant.len == 0:
-            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
-              thenGateValue, depKind, outStmts)
-          else:
-            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
-              gateValue, depKind, outStmts)
+        lowerUsesBody(branch[^1], accum, policyPath, variant, "true",
+          depKind, outStmts)
       of nnkElse, nnkElseExpr:
-        if branch.len >= 1:
-          if nestedGateVariant.len > 0 and gateVariant.len == 0 and
-              elseGateValue.len > 0:
-            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
-              elseGateValue, depKind, outStmts)
-          else:
-            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
-              gateValue, depKind, outStmts)
+        lowerUsesBody(branch[^1], accum, policyPath, variant, "false",
+          depKind, outStmts)
       else:
         discard
   of nnkCaseStmt:
     # ``case <variant>.value: of "gcc": ...`` -- one gate per arm value, on
-    # the same reasoning as the `if` form above.
-    var nestedGateVariant = ""
-    if node.len >= 1 and gateVariant.len == 0:
-      nestedGateVariant = variantSelectorName(node[0])
+    # the same reasoning as the `if` form above. `variantCaseGate` refuses
+    # every arm the source does not enumerate.
+    let variant = variantCaseGate(node, gateVariant)
     for i in 1 ..< node.len:
       let branch = node[i]
-      case branch.kind
-      of nnkOfBranch, nnkElifBranch:
-        if branch.len >= 2:
-          var armValue = ""
-          if nestedGateVariant.len > 0 and branch.kind == nnkOfBranch and
-              branch.len == 2:
-            armValue = literalCaseLabel(branch[0])
-          if armValue.len > 0:
-            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
-              armValue, depKind, outStmts)
-          else:
-            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
-              gateValue, depKind, outStmts)
-      of nnkElse:
-        if branch.len >= 1:
-          lowerUsesBody(branch[^1], accum, policyPath, gateVariant, gateValue,
-            depKind, outStmts)
-      else:
-        discard
+      lowerUsesBody(branch[^1], accum, policyPath, variant,
+        literalCaseLabel(branch[0]), depKind, outStmts)
   of nnkCommentStmt, nnkDiscardStmt, nnkEmpty:
     discard
   else:
@@ -2686,6 +2780,11 @@ proc packageLiteral(pkg: PackageDef): string =
           escForCode(cmd.ext.providerEntrypointId) &
         ", dependencyPolicy: " & dependencyPolicyCode(cmd.ext.dependencyPolicy) &
         ", nonDeterminism: " & $cmd.ext.nonDeterminism &
+        # The tool's declared input-check policy. The typed wrapper takes it
+        # at macro time, but the registered ``PackageDef`` is this literal,
+        # so leaving it out made every registered command read
+        # ``acfpUnstated`` whatever its ``cli:`` block declared.
+        ", inputCheckPolicy: " & $cmd.ext.inputCheckPolicy &
         ", nonDeterminismJustification: " &
           escForCode(cmd.ext.nonDeterminismJustification) &
         ", subTools: @[" & escapedCodeList(cmd.ext.subTools) &
