@@ -71,6 +71,7 @@ import repro_binary_cache_client/http_pool
 
 import repro_core/host_apply_lock
 from repro_core import ReprobuildVersion
+import repro_core/system_file_holding
 import repro_dsl_stdlib/packages/apt_closure
 import repro_elevation
 import repro_elevation/posix_system_driver
@@ -370,8 +371,12 @@ const
     ## are (§4.1).
   LinkFormKinds* = {srkFsSystemFile, srkSystemdSystemDropIn, srkLinuxSysctl}
     ## The kinds materialised as links into the static tree (spec §7.2
-    ## step 4). The driver declares it per kind; a resource cannot choose:
-    ## sysusers and tmpfiles fragments are copies so they stay readable
+    ## step 4). The driver declares it per kind, and only an
+    ## ``fs.systemFile`` can choose otherwise: one that declares
+    ## ``form = "copy"``, ``mode`` or ``group`` is a copy
+    ## (``resourceIsCopy``; §7.2 step 5, amended 2026-11-16), since a link
+    ## has no mode or group of its own and the static tree is readable by
+    ## every user. Sysusers and tmpfiles fragments are copies so they stay readable
     ## when the store is unavailable at early boot (step 5), and so are
     ## the add-on's own objects and anything adopted as it is. Unit files
     ## are copies too: `systemctl enable` on a symlinked unit file writes
@@ -381,6 +386,14 @@ const
     ## package's own enablement link of a `replace`d unit, and dangle once
     ## retention released that tree. Drop-ins are read, never enabled, so
     ## they stay links.
+
+proc resourceIsCopy*(r: SystemResource): bool =
+  ## An ``fs.systemFile`` whose own declaration makes it a copy on an
+  ## add-on host (spec §7.2 step 5, amended 2026-11-16): ``form = "copy"``
+  ## (a consumer that refuses links), or a ``mode`` or ``group`` (a link
+  ## carries neither, and its bytes would be in the world-readable static
+  ## tree). Every other resource's form is decided by its kind.
+  r.kind == srkFsSystemFile and systemFileIsCopy(r.sfMode, r.sfGroup, r.sfForm)
 
 proc addonDir*(stateDir: string): string = stateDir / "addon"
 proc ledgerCopyPath*(stateDir: string): string = stateDir / "addon-ledger"
@@ -1401,8 +1414,14 @@ proc savedDecision(s: SavedPlan; fileBacked = true): CollisionDecision =
   result.observation = s.observation
   result.observedSha256 = s.observedSha256
   result.reason = s.reason & " (replayed)"
-  result.acceptedOutOfBand = s.reason == AcceptedOutOfBandReason
-  if fileBacked and result.verdict in {cvAdopt, cvReconcile}:
+  result.acceptedOutOfBand = s.reason.startsWith(AcceptedOutOfBandReason)
+  # An update that takes over an unowned file (its bytes the profile's, its
+  # mode or group not) was saved with the `adopt` collision and preserved
+  # bytes, as an adoption is.
+  result.takesOverUnowned = result.verdict == cvUpdate and
+    s.collision == "adopt"
+  if fileBacked and (result.verdict in {cvAdopt, cvReconcile} or
+                     result.takesOverUnowned):
     if s.preserved.len == 0 or not fileExists(s.preserved):
       raise newException(AddonApplyError, "the pending plan's preserved " &
         "bytes for " & s.address & " are missing (" & s.preserved & ")")
@@ -5030,7 +5049,11 @@ proc closureSpace*(locks: seq[AptClosureLock];
   ## What realising ``locks`` will need: every closure not yet realised at
   ## its store-published prefix, and every member of one not yet published
   ## there, counted once, each listed in ``sources`` as ``cached``,
-  ## ``download`` or ``reuse-because-unserved``. The archive is always the
+  ## ``download`` or ``reuse-because-unserved``. A member already published
+  ## whose archive is not cached is listed as ``download-for-postinst`` (the
+  ## union reads its maintainer script, §8.3 item 4 "Alternatives"; it is
+  ## not unpacked again) or, when the archive does not serve it,
+  ## ``postinst-unknown-because-unserved``. The archive is always the
   ## source when it is cached or served; an older realiser's verified
   ## prefix (``reusableLegacyMember``) stands in only when the archive
   ## answers that it does not serve the member (404/410), and then costs
@@ -5050,6 +5073,31 @@ proc closureSpace*(locks: seq[AptClosureLock];
       if d.sha256 in seen: continue
       seen.incl(d.sha256)
       if fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb"):
+        # Published already (an older union of it, another closure): not
+        # unpacked again, but the new union reads its ``postinst`` for the
+        # alternatives links (§8.3 item 4, "Alternatives"), so its archive
+        # is fetched again unless cached. One the archive no longer serves
+        # leaves its registrations unknown (the union's record says so);
+        # it is not a refusal.
+        if fileExists(cacheDir / (d.sha256 & ".deb")): continue
+        let url = debUrl(lock, d)
+        var verdict = dsServed
+        var detail = ""
+        if probe != nil: (verdict, detail) = probe(url)
+        case verdict
+        of dsServed:
+          result.sources.add("download-for-postinst\t" & d.name & " " &
+            d.version & "\t" & url)
+          result.downloadBytes += d.size
+          result.largestDebBytes = max(result.largestDebBytes, d.size)
+        of dsUnserved:
+          result.sources.add("postinst-unknown-because-unserved\t" & d.name &
+            " " & d.version & "\t" & url & ": " & detail)
+        of dsUnknown:
+          result.unavailable.add(d.name & " " & d.version & ": " & url &
+            " could not be probed (" & detail & "); the new union reads " &
+            "its postinst, and only an archive that does not serve it may " &
+            "be gone without")
         continue
       inc result.members
       let cached = fileExists(cacheDir / (d.sha256 & ".deb"))
@@ -6239,6 +6287,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       of srkFsSystemFile:
         inp.kind = tkFile
         inp.collision = r.sfCollision
+        inp.desiredMode = r.sfMode
+        inp.desiredGroup = r.sfGroup
         inp.divertedByProfile = hasDiversionFor(userResources, r.sfPath)
         let declared = r
         inp.stanza = proc (bytes: string): string =
@@ -6367,7 +6417,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         p.collision = "divert"
       of cvReplace:
         p.collision = "replace"
-      of cvDropIn, cvCreate, cvUpdate, cvNoOp:
+      of cvUpdate:
+        if r.address in dropIns:
+          p.collision = "dropIn"
+        elif dec.takesOverUnowned:
+          # An unowned file with the profile's bytes but another mode or
+          # group (``attributeMismatch``): its bytes are kept and its
+          # attributes set. Like an adoption, the ledger takes it over with
+          # its bytes before preserved, so a removal hands it back.
+          p.collision = "adopt"
+          p.preserved = deferPreserve(dec.preWriteBytes)
+      of cvDropIn, cvCreate, cvNoOp:
         if r.address in dropIns:
           p.collision = "dropIn"
       # The materialisation form (spec §7.2 steps 4 and 5): a link for the
@@ -6384,7 +6444,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                elif r.address in supersedingUser: "copy"
                elif p.keepLedgerSha.len > 0: prevForm.getOrDefault(path, "copy")
                elif carrier.len > 0: "copy"
-               elif r.kind in LinkFormKinds and
+               elif r.kind in LinkFormKinds and not resourceIsCopy(r) and
                   dec.verdict notin {cvAdopt, cvDivert}: "link"
                else: "copy"
       result.collisions.add(CollisionLine(address: r.address, target: path,
@@ -7394,14 +7454,23 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # The drivers' materialisation policy: a link target for every
   # link-form object, and the switch orchestrates every transition.
   var linkTargets = initTable[string, string]()
+  var replacedLinks = initTable[string, string]()
+    ## A copy whose path holds the previous generation's own link (an
+    ## ``fs.systemFile`` that came to declare ``mode``, ``group`` or
+    ## ``form = "copy"``): the copy is renamed over exactly that link.
   for p in plans:
     if p.form == "link":
       linkTargets[p.r.address] = staticLinkTargetFor(p.targetPath)
+    elif p.r.kind == srkFsSystemFile and
+        prevForm.getOrDefault(p.targetPath) == "link":
+      replacedLinks[p.r.address] = staticLinkTargetFor(p.targetPath)
   let policy: AddOnDispatchPolicy = proc(op: PrivilegedOperation):
       AddOnMaterialisation {.gcsafe.} =
     {.cast(gcsafe).}:
       AddOnMaterialisation(linkTarget: linkTargets.getOrDefault(op.address),
-                           orchestrated: true)
+                           orchestrated: true,
+                           replacingLinkTo: replacedLinks.getOrDefault(
+                             op.address))
 
   let transitions = result.transitions
   var stepTransitions = transitions

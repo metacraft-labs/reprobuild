@@ -270,6 +270,7 @@ suite "integration_provider_fragment_refresh_and_pruning":
           extraArgs.add("--malformed-response")
         refreshProviderGraph(RefreshConfig(
           storeRoot: store,
+          projectId: "fixture",
           providerBinaryPath: providerPath,
           providerArtifactId: artifactId,
           rootEntryPointId: RootEntryPoint,
@@ -544,6 +545,7 @@ suite "integration_provider_fragment_refresh_and_pruning":
       proc refresh(): ProviderRefreshReport =
         refreshProviderGraph(RefreshConfig(
           storeRoot: storeRoot,
+          projectId: "fixture",
           providerBinaryPath: provider,
           providerArtifactId: ArtifactV1,
           rootEntryPointId: RootEntryPoint,
@@ -683,6 +685,7 @@ suite "integration_provider_fragment_refresh_and_pruning":
       proc refreshWith(providerPath: string): ProviderRefreshReport =
         refreshProviderGraph(RefreshConfig(
           storeRoot: storeRoot,
+          projectId: "fixture",
           providerBinaryPath: providerPath,
           providerArtifactId: ArtifactV1,
           rootEntryPointId: RootEntryPoint,

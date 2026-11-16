@@ -29,6 +29,7 @@
 import std/[algorithm, sets, strutils, tables]
 
 import repro_elevation
+import repro_core/system_file_holding
 import repro_dsl_stdlib/packages/apt_closure
 
 import ./errors
@@ -317,6 +318,18 @@ type
         ## dpkg diversion sends the package's copy to `<path>.distrib`
         ## first, recorded and undone on removal). Outside add-on mode the
         ## field is carried and ignored.
+      sfMode*: string
+        ## The file's exact permission bits, four octal digits (`0640`);
+        ## "" keeps the replaced regular file's bits, else 0644. Never a
+        ## setuid, setgid or sticky bit, never writable by others
+        ## (`repro_core/system_file_holding`).
+      sfGroup*: string
+        ## The owning group's name (`root:<group>`); "" means `root:root`.
+        ## Resolved to a gid by the driver when it writes the file.
+      sfForm*: string
+        ## `link`, `copy` or "": how a ReproOS add-on host materialises
+        ## the file (ReproOS-Add-On-Mode §7.2 step 5). A file declaring
+        ## `sfMode` or `sfGroup` is a copy; elsewhere carried and ignored.
     of srkFsSystemDirectory:
       dirPath*: string
       dirAclPresent*: bool                ## false => ACL is unmanaged
@@ -3024,6 +3037,15 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
         raiseSystemProfileInvalid("fs.systemFile '" & sfPath &
           "' sets `sha256` but no `sourceUrl` — the digest is only " &
           "meaningful when paired with a URL fetch")
+      # How the file is held: the same refusals as the constructor, the
+      # adapter and the operation validator (`systemFileHoldingError`).
+      let sfMode = if "mode" in fields: fields["mode"] else: ""
+      let sfGroup = if "group" in fields: fields["group"] else: ""
+      let sfForm = if "form" in fields: fields["form"] else: ""
+      let holdingError = systemFileHoldingError(sfMode, sfGroup, sfForm)
+      if holdingError.len > 0:
+        raiseSystemProfileInvalid("fs.systemFile '" & sfPath & "' " &
+          holdingError)
       res = SystemResource(kind: srkFsSystemFile,
         sfPath: sfPath,
         sfContent: sfContent,
@@ -3032,7 +3054,10 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
         sfSourceLocal: sfSourceLocal,
         sfCollision: parseCollisionField(kindTag,
           (if "collision" in fields: fields["collision"] else: ""),
-          FileCollisionOptIns))
+          FileCollisionOptIns),
+        sfMode: sfMode,
+        sfGroup: sfGroup,
+        sfForm: sfForm)
     of srkFsSystemDirectory:
       let dirPath = need("path")
       # ACL is optional: a stanza without aclEntries leaves ACL
@@ -3535,6 +3560,9 @@ proc toPrivilegedOperation*(r: SystemResource;
       sfSourceUrl: r.sfSourceUrl,
       sfSha256: r.sfSha256,
       sfSourceLocal: r.sfSourceLocal,
+      sfMode: r.sfMode,
+      sfGroup: r.sfGroup,
+      sfForm: r.sfForm,
       sfDestroy: destroy)
   of srkFsSystemDirectory:
     PrivilegedOperation(kind: pokFsSystemDirectory, address: r.address,

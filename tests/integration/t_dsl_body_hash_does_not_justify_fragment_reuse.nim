@@ -80,6 +80,7 @@ proc refresh(provider: ProviderCompileArtifact; artifactId, store,
              projectRoot: string): ProviderRefreshReport =
   refreshProviderGraph(RefreshConfig(
     storeRoot: store,
+    projectId: PackageName,
     providerBinaryPath: provider.outputBinaryPath,
     providerArtifactId: artifactId,
     rootEntryPointId: PackageName & ".root",

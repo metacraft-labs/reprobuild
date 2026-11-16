@@ -651,6 +651,10 @@
 ## ``recover-lifts-unit-holds``            recover lifts a dead apply's hold
 ##                                           on a judged service, not only
 ##                                           the triggers' own (round 12, M3)
+## ``recover-starts-trigger-of-held-unit`` recover lifts the hold of, and
+##                                           starts, a recorded trigger whose
+##                                           unit a dead apply still holds
+##                                           (decision 180's clarification)
 ## ``recover-keeps-trigger-holds``         recover starts a recorded trigger
 ##                                           without lifting its own hold
 ##                                           (round 12, recover's stale-hold
@@ -1236,6 +1240,23 @@
 ##                                            of a fresh open of the path, not
 ##                                            of the descriptor it tightened
 ##                                            (decision 178, A11 round 20)
+## ``bootstrap-wiring-reopens``              bootstrap records the identity
+##                                            of a fresh open, not the one
+##                                            prepareRecordsDir took (A11
+##                                            round 21, decision 178)
+## ``identity-removed-before-ledger-copy``    uninstall removes the identity
+##                                            of the records' directory with
+##                                            the rest of the state, before
+##                                            the ledger copy (decision 178)
+## ``state-gone-from-addon-dir-alone``        the records directory counts as
+##                                            bound to a removed state when
+##                                            the identity's directory is gone,
+##                                            whether or not the ledger copy is
+##                                            (decision 178)
+## ``token-cleared-before-identity``          bootstrap clears a stale token,
+##                                            and keeps a directory it made,
+##                                            before it knows the directory
+##                                            has a birth time (decision 178)
 ## ``bootstrap-identity-not-recorded``        bootstrap records no identity
 ##                                            (decision 178)
 ## ``unbound-when-no-birth-time``             a records directory with no
@@ -2051,6 +2072,7 @@ const
                           "dead-apply-holds-lifted",
                           "recover-lifts-unit-holds",
                           "recover-keeps-trigger-holds",
+                          "recover-starts-trigger-of-held-unit",
                           "alias-names-unresolved",
                           "judged-template-shown-by-name",
                           "essential-judged-units-held",
@@ -2259,6 +2281,10 @@ const
                           "token-cleared-before-anchors",
                           "bootstrap-identity-reopened",
                           "bootstrap-identity-not-recorded",
+                          "bootstrap-wiring-reopens",
+                          "identity-removed-before-ledger-copy",
+                          "state-gone-from-addon-dir-alone",
+                          "token-cleared-before-identity",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",
                           "uninstall-records-dir-unbound",

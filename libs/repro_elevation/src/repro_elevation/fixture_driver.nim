@@ -64,6 +64,13 @@ type
     ## switch does that in its own steps, in dependency order.
     linkTarget*: string
     orchestrated*: bool
+    replacingLinkTo*: string
+      ## A copy only: the leaf may be a link pointing at exactly this
+      ## target, and the copy replaces it in one rename. The switch sets it
+      ## when an object that was a link into the previous generation's
+      ## static tree becomes a copy (an `fs.systemFile` that now declares
+      ## `mode`, `group` or `form = "copy"`, §7.2 step 5); any other link
+      ## on the path is still refused (threat model G29).
 
   AddOnDispatchPolicy* = proc(op: PrivilegedOperation): AddOnMaterialisation
     {.gcsafe.}

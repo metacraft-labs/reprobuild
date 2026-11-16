@@ -457,12 +457,13 @@ def on_target_rec(kind, rec):
         return (on_target(kind, steps) and u.get("refused") is False and
                 u.get("dropInWritten") is True)
     if kind == "mutdeadhold":
-        # Red because the service a dead apply held started before the
-        # check that refused it, not for another reason: the check did
-        # refuse it.
+        # Red because of the order, not because the service ran at all (the
+        # product also starts an adopted unit, at its release): under the
+        # mutation the service a dead apply held ran before the new apply
+        # released its holds -- the falsifier's criterion, which a product
+        # run must fail (see dead_hold_order).
         u = rec.get("deadApplyAdopted", {})
-        return (on_target(kind, steps) and u.get("refusedForReason") is True and
-                u.get("started") is True)
+        return on_target(kind, steps) and dead_hold_order(u) == "before-release"
     if kind == "mutfullfix":
         # Red because the apply committed and cleared the record with the
         # socket left down, not for another reason.
@@ -642,6 +643,7 @@ def on_target_rec(kind, rec):
                 premise_measured(rec.get("decision153Premise", {})) and
                 rec.get("decisionH1", {}).get("ok") is True and
                 rec.get("deadApplyAdopted", {}).get("ok") is True and
+                dead_hold_order(rec.get("deadApplyAdopted", {})) == "never" and
                 rec.get("fullApplyFixing", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
@@ -695,6 +697,21 @@ def held_requirer(d153):
     return (isinstance(d153, dict) and d153.get("exit", 0) != 0 and
             d153.get("reported") is True and d153.get("heldInEtc") is True and
             d153.get("started") is False)
+
+
+def dead_hold_order(d):
+    """A13 review round 12, M3: when the service a dead full apply held first
+    ran, relative to the next apply's release of its holds, from the gate's
+    guest-side timestamps (uptime seconds). "before-release" is the
+    falsifier's criterion; a product run must show "never" (its check
+    refused the service) or "after-release"."""
+    if not isinstance(d, dict) or d.get("checkBeganAt", -1) < 0:
+        return "unmeasured"
+    if d.get("serviceActiveAt", -1) < 0:
+        return "never"
+    if d.get("serviceStartedBeforeRelease") is True:
+        return "before-release"
+    return "after-release"
 
 
 def unjudged_held(d):

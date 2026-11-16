@@ -11,8 +11,8 @@
 ## it was not registered, and the dependency's tool use carried no
 ## provisioning, with no diagnostic.
 ##
-## The fixture catalog is `tests/reprobuild-packages`, which the lookup's walk
-## up from this file reaches first (see
+## The fixture catalog is `tests/reprobuild-packages`, inside this repository,
+## which the lookup from this file consults first (see
 ## `t_uses_resolves_reprobuild_packages_interface`). Nothing is mocked: the
 ## real `package` macro expands the consumers below and the real interface
 ## extractor lowers them.

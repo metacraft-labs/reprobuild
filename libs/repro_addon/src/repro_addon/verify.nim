@@ -89,7 +89,7 @@ proc runAddonVerify*(stateDir = DefaultStateDir;
   # it).
   when not mutated("verify-skips-log-dir"):
     let idFile = recordsDirIdentityPath(stateDir)
-    bindRecordsDir(logDir, idFile)
+    bindRecordsDir(logDir, idFile, ledgerCopyPath(stateDir))
     defer: unbindRecordsDir(logDir)
     # Present at all counts: an empty or malformed identity file is not
     # "nothing recorded" (A11 round 20).
