@@ -183,6 +183,43 @@ proc devEnvSelectionFlags(): NimNode {.compileTime.} =
       help = "Write statistics of the development-environment computation " &
         "to the path"
 
+proc devSessionSelectionFlags(): NimNode {.compileTime.} =
+  ## The flags that select the development session `up`, `dev` and `down`
+  ## act on: its activities and the work root it lives under.
+  quote do:
+    flag activity is seq[string],
+      help = "The session of the named activity; repeat it or give a " &
+        "comma-separated list for several (default: `default`)"
+    flag workRoot is string,
+      help = "The work root the development environment is computed under"
+    # Internal (accepted, never shown in help), as for `exec` and `tasks`.
+    flag lockSlice is string, visibility = internal,
+      help = "The lock slice the development environment must match"
+
+proc devSessionStartFlags(): NimNode {.compileTime.} =
+  ## The flags of the commands that start a supervised development session
+  ## (`up`, `dev`): how it runs, where its control API listens, and how
+  ## long the command waits for it.
+  quote do:
+    boolFlag foreground is bool,
+      help = "Run the supervised session in the foreground"
+    flag http is string,
+      help = "Serve the control API over TCP at `HOST:PORT` (default: a " &
+        "Unix-domain socket on POSIX, `127.0.0.1:0` on Windows)"
+    boolFlag httpAllowRemote is bool,
+      help = "Permit a non-loopback `--http` host; the session token is " &
+        "then the only barrier"
+    flag readyTimeout is Option[int],
+      help = "Wait at most this many milliseconds for the session to come " &
+        "up (default: derived from the services' readiness timeouts; " &
+        "not with --foreground)"
+    boolFlag replace is bool,
+      help = "Stop the running instance of a shared service and start " &
+        "this definition"
+    boolFlag force is bool,
+      help = "With --replace: take the shared instance over from its other " &
+        "live holders"
+
 proc storeRootFlags(): NimNode {.compileTime.} =
   ## The store root of the commands that open the local store (`store`'s
   ## subcommands, `cas`, `launch-plan`, `self`). Spelt `--store-root=PATH`
@@ -472,6 +509,15 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## Command order is the order ``repro --help`` lists them in.
   let graphInspection = graphInspectionFlags()
   let devEnvSelection = devEnvSelectionFlags()
+  # Group 5 (development environments), one splice per command.
+  let execSelection = devEnvSelectionFlags()
+  let shellSelection = devEnvSelectionFlags()
+  let runSelection = devEnvSelectionFlags()
+  let upSession = devSessionSelectionFlags()
+  let devSession = devSessionSelectionFlags()
+  let downSession = devSessionSelectionFlags()
+  let upStart = devSessionStartFlags()
+  let devStart = devSessionStartFlags()
   let storeRootFlag = storeRootFlags()
   let storeBundleRoots = storeBundleSelectionFlags()
   let storeBundleCommonRoots = storeAndActionCacheRootFlags()
@@ -589,7 +635,15 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "clean", help = "Remove the current project's build artifacts":
       pos args is seq[string], required = false, passThrough = true
     subcmd "run", help = "Run a task, a build output or a target once":
-      pos args is seq[string], required = false, passThrough = true
+      `runSelection`
+      boolFlag choose is bool,
+        help = "List the runnable tasks and run-edges instead of running one"
+      pos target is string, required = false,
+        help = "The task or target: `NAME`, `task:NAME` (a task only) or " &
+          "`PACKAGE:NAME` (a run-edge of that package); without one, list " &
+          "what can run"
+      pos args is seq[string], required = false, afterSeparator = true,
+        help = "Arguments for the program, after `--`"
     subcmd "tasks", help = "List the current project's tasks":
       `devEnvSelection`
       pos selector is string, required = false,
@@ -707,25 +761,94 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
 
     # ---- Development environments ---------------------------------------
     subcmd "exec", help = "Run a command inside the development environment":
-      pos args is seq[string], required = false, passThrough = true
+      `execSelection`
+      pos selector is string, required = false,
+        help = "The project whose environment to use (default: the " &
+          "current directory's)"
+      pos command is seq[string], required = false, afterSeparator = true,
+        help = "The command and its arguments, after `--` (required)"
     subcmd "shell",
         help = "Enter or print the development shell environment":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "allow", help = "Trust a project's development environment":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "deny",
-        help = "Revoke the trust in a project's development environment":
-      pos args is seq[string], required = false, passThrough = true
+      call:
+        `shellSelection`
+        flag shell is string,
+          help = "The shell to start (default: `$SHELL`; on Windows " &
+            "`$COMSPEC`, else pwsh)"
+        flag printEnv is Option[string],
+          help = "Print the environment instead of starting a shell: " &
+            "`posix` (also `sh`, `bash`, `zsh`), `fish`, `powershell` " &
+            "(also `pwsh`, `ps1`) or `json`"
+        pos selector is string, required = false,
+          help = "The project whose environment to use (default: the " &
+            "current directory's)"
+      subcmd "hook", help = "Print the shell hook that activates " &
+          "development environments on `cd`":
+        flag reproBin is string,
+          help = "The repro the hook runs (default: `repro` on PATH)"
+        pos shell is string,
+          help = "The shell: `bash`, `zsh`, `fish`, `nushell` (also `nu`) " &
+            "or `pwsh` (also `powershell`, `ps`, `ps1`)"
+    # `allow` and `deny` take one directory; a directory whose name starts
+    # with `-` is written after `--`.
+    subcmd "allow", help = "Trust a directory's development environment, " &
+        "so the shell hook activates it":
+      pos directory is string, required = false,
+        help = "The directory to trust (default: the current directory)"
+    subcmd "deny", help = "Revoke the trust `repro allow` recorded for a " &
+        "directory":
+      pos directory is string, required = false,
+        help = "The directory (default: the current directory)"
     subcmd "dev-env",
         help = "Export or deactivate a development environment for a shell":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "export", help = "Print the script that activates the " &
+          "project's development environment in a shell":
+        flag projectRoot is string,
+          help = "The project to activate (default: the nearest project " &
+            "above the current directory)"
+        flag activity is string,
+          help = "The activity to activate (default: `default`)"
+        flag developOverrides is string,
+          help = "The develop-overrides metadata file (default: the " &
+            "project's)"
+        flag preActivationEnv is string,
+          help = "The shell's environment before activation, as " &
+            "NUL-separated `NAME=VALUE` entries (`env -0`)"
+        boolFlag allowStale is bool,
+          help = "Skip the cache-key fast path and the stale-dependency " &
+            "check"
+        pos shell is string,
+          help = "The shell: `bash`, `zsh`, `fish`, `nushell` (also `nu`) " &
+            "or `pwsh` (also `powershell`, `ps`, `ps1`)"
+      subcmd "deactivate", help = "Print the script that rolls an " &
+          "activation back (exit 3 when the activation was tampered with)":
+        flag shell is Option[string],
+          help = "The shell of the script (default: `bash`)"
+        pos manifest is string,
+          help = "The rollback manifest the activation wrote " &
+            "(`<artifact>.rollback.json`)"
     subcmd "up", help = "Start the project's services":
-      pos args is seq[string], required = false, passThrough = true
+      `upSession`
+      `upStart`
+      pos selector is string, required = false,
+        help = "The project (default: the current directory's)"
     subcmd "down", help = "Stop the project's supervised development session":
-      pos args is seq[string], required = false, passThrough = true
+      `downSession`
+      boolFlag force is bool,
+        help = "Write a stop request file when the session's control API " &
+          "does not answer"
+      flag stopTimeout is Option[int],
+        help = "Wait at most this many milliseconds for the session to stop"
+      pos selector is string, required = false,
+        help = "The project (default: the current directory's)"
     subcmd "dev",
         help = "Run the development session with continuous rebuilds":
-      pos args is seq[string], required = false, passThrough = true
+      `devSession`
+      `devStart`
+      flag debounceMs is int, default = 250,
+        help = "Wait this many milliseconds for a burst of changes to " &
+          "settle before rebuilding"
+      pos selector is string, required = false,
+        help = "The project (default: the current directory's)"
     subcmd "develop",
         help = "Set up a project or a dependency for development":
       pos args is seq[string], required = false, passThrough = true
@@ -734,7 +857,31 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "remove", help = "Remove a dependency from the active context":
       pos args is seq[string], required = false, passThrough = true
     subcmd "hcr", help = "Coordinate hot code reloading":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "coordinate", help = "Run one coordination cycle with an HCR " &
+          "agent: edit, rebuild and patch":
+        flag project is string, help = "The project root (required)"
+        flag target is string, help = "The build target (required)"
+        flag socket is string,
+          help = "The Unix-domain socket the agent connects to (required)"
+        flag sourceEditDriver is string,
+          help = "The program run against the project to edit its source " &
+            "(required)"
+        flag artifacts is string,
+          help = "Where the rebuilt objects and the reports go (required)"
+        flag patchFunction is string,
+          default = "reprobuild_hcr_patchable_value",
+          help = "The function to patch"
+      subcmd "prepare-object", help = "Rewrite an object so its code is " &
+          "patchable (a dedicated segment on Mach-O; expanded compressed " &
+          "debug sections on ELF)":
+        flag input is string, help = "The object to read (required)"
+        flag output is string, help = "The object to write (required)"
+        flag function is string,
+          help = "Rewrite only this function's section (or --all-code)"
+        boolFlag allCode is bool,
+          help = "Rewrite every code section (or --function)"
+        flag segment is string, default = "__HCR",
+          help = "The segment the code is placed in"
 
     # ---- Workspaces and publication -------------------------------------
     subcmd "workspace", aliases = ["ws"],
@@ -769,7 +916,19 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       pos args is seq[string], required = false, passThrough = true
     subcmd "prompt",
         help = "Print a workspace-state segment for the shell prompt":
-      pos args is seq[string], required = false, passThrough = true
+      call:
+        flag format is Option[string],
+          help = "`plain` (the default), `ansi`, `json`, or a template " &
+            "with `{branch}`, `{repos}`, `{drift}`, `{develop}`, `{stale}` " &
+            "and `{segment}`"
+        flag workspaceRoot is Option[string],
+          help = "The workspace, used as given (default: the one above the " &
+            "current directory)"
+      subcmd "init", help = "Print the snippet that adds the segment to a " &
+          "shell's prompt":
+        pos shell is string,
+          help = "`bash`, `zsh`, `fish`, `starship`, `p10k` (also " &
+            "`powerlevel10k`), `oh-my-zsh` (also `omz`) or `prezto`"
 
     # ---- Stores, caches and daemons -------------------------------------
     subcmd "daemon", help = "Manage the per-user reprobuild daemon":

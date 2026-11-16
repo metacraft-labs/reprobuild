@@ -1,7 +1,15 @@
+## The thin client's answer to a confirmed ``repro dev-env export`` no-op
+## (see ``apps/repro-client/repro_client.nim``). Its flags are read from
+## repro's command-line description (``repro_cli_support/cli_description``)
+## at compile time, so this reader and the engine's parser agree on every
+## spelling; anything it does not recognise is handed to the engine.
+
 import std/[os, strutils]
 
 import repro_hash
 import repro_dev_env_engine/cache_key
+
+import ./cli_description
 
 proc allowFileHash(path: string): string =
   var bytes = newSeq[byte](path.len)
@@ -28,40 +36,54 @@ type
     developOverridesPath: string
     allowStale: bool
 
-proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
-  let arg = args[i]
-  if arg.startsWith(flag & "="):
-    return arg.split("=", maxsplit = 1)[1]
-  if arg == flag:
-    if i + 1 >= args.len:
-      raise newException(ValueError, flag & " requires a value")
-    inc i
-    return args[i]
-  ""
+const
+  ExportCommand = @["dev-env", "export"]
+  ProjectRootFlag = reproFlagSpellings(ExportCommand, "projectRoot")
+  ActivityFlag = reproFlagSpellings(ExportCommand, "activity")
+  DevelopOverridesFlag = reproFlagSpellings(ExportCommand, "developOverrides")
+  PreActivationEnvFlag = reproFlagSpellings(ExportCommand, "preActivationEnv")
+  AllowStaleFlag = reproFlagSpellings(ExportCommand, "allowStale")
+
+proc takeValue(args: openArray[string]; i: var int;
+               spellings: openArray[string]; value: var string): bool =
+  ## Whether ``args[i]`` is one of a value flag's ``spellings``, as
+  ## ``--flag=value`` or ``--flag value``; its value goes to ``value`` and
+  ## ``i`` moves past it. A flag with no value left raises.
+  for spelling in spellings:
+    if args[i].startsWith(spelling & "="):
+      value = args[i][spelling.len + 1 .. ^1]
+      return true
+    if args[i] == spelling:
+      if i + 1 >= args.len:
+        raise newException(ValueError, spelling & " requires a value")
+      inc i
+      value = args[i]
+      return true
+  false
 
 proc parseFastExportArgs(args: openArray[string]): ParsedFastExport =
-  if args.len == 0:
-    raise newException(ValueError, "missing shell")
-  result.shell = args[0]
-  var i = 1
+  ## The command line of ``dev-env export`` as the engine reads it; anything
+  ## else (an unknown flag, a second positional, ``--``, ``--help``) raises,
+  ## and the invocation goes to the engine.
+  var i = 0
+  var preActivationEnv = ""
   while i < args.len:
     let arg = args[i]
-    if arg == "--project-root" or arg.startsWith("--project-root="):
-      result.projectRoot = valueFromFlag(args, i, "--project-root")
-    elif arg == "--activity" or arg.startsWith("--activity="):
-      result.activity = valueFromFlag(args, i, "--activity")
-    elif arg == "--develop-overrides" or
-        arg.startsWith("--develop-overrides="):
-      result.developOverridesPath =
-        valueFromFlag(args, i, "--develop-overrides")
-    elif arg == "--allow-stale":
+    if takeValue(args, i, ProjectRootFlag, result.projectRoot) or
+        takeValue(args, i, ActivityFlag, result.activity) or
+        takeValue(args, i, DevelopOverridesFlag,
+          result.developOverridesPath) or
+        takeValue(args, i, PreActivationEnvFlag, preActivationEnv):
+      discard
+    elif arg in AllowStaleFlag:
       result.allowStale = true
-    elif arg == "--pre-activation-env" or
-        arg.startsWith("--pre-activation-env="):
-      discard valueFromFlag(args, i, "--pre-activation-env")
-    else:
+    elif arg.startsWith("-") or result.shell.len > 0:
       raise newException(ValueError, "delegate to full CLI")
+    else:
+      result.shell = arg
     inc i
+  if result.shell.len == 0:
+    raise newException(ValueError, "missing shell")
   if result.activity.len == 0:
     result.activity = "default"
 

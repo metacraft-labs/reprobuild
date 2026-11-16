@@ -22,6 +22,10 @@
 ## reach it unparsed: it puts ``--`` right after the words that select such a
 ## command, so the parser files everything after them under the command's
 ## ``passThrough`` positional.
+##
+## ``repro exec``'s command and ``repro run``'s arguments are clispec
+## ``afterSeparator`` positionals: the parser itself fills them with the
+## words after the first ``--``, exactly as written.
 
 import std/[macros, options, strutils]
 

@@ -668,3 +668,83 @@ command	repro debug
 command	repro debug artifact
 flag	repro debug artifact	--format
 flag	repro debug artifact	--json
+command	repro exec
+flag	repro exec	--activity
+flag	repro exec	--dev-env-stats
+flag	repro exec	--lock-slice
+flag	repro exec	--work-root
+command	repro run
+flag	repro run	--activity
+flag	repro run	--choose
+flag	repro run	--dev-env-stats
+flag	repro run	--lock-slice
+flag	repro run	--work-root
+command	repro shell
+flag	repro shell	--activity
+flag	repro shell	--dev-env-stats
+flag	repro shell	--lock-slice
+flag	repro shell	--print-env
+flag	repro shell	--shell
+flag	repro shell	--work-root
+command	repro shell hook
+flag	repro shell hook	--repro-bin
+command	repro allow
+command	repro deny
+command	repro dev-env
+command	repro dev-env export
+flag	repro dev-env export	--activity
+flag	repro dev-env export	--allow-stale
+flag	repro dev-env export	--develop-overrides
+flag	repro dev-env export	--pre-activation-env
+flag	repro dev-env export	--project-root
+command	repro dev-env deactivate
+flag	repro dev-env deactivate	--shell
+command	repro up
+flag	repro up	--activity
+flag	repro up	--force
+flag	repro up	--foreground
+flag	repro up	--http
+flag	repro up	--http-allow-remote
+flag	repro up	--lock-slice
+flag	repro up	--ready-timeout
+flag	repro up	--replace
+flag	repro up	--work-root
+command	repro down
+flag	repro down	--activity
+flag	repro down	--force
+flag	repro down	--lock-slice
+flag	repro down	--stop-timeout
+flag	repro down	--work-root
+command	repro dev
+flag	repro dev	--activity
+flag	repro dev	--debounce-ms
+flag	repro dev	--force
+flag	repro dev	--foreground
+flag	repro dev	--hcr
+flag	repro dev	--hcr-debug
+flag	repro dev	--hcr-mode
+flag	repro dev	--http
+flag	repro dev	--http-allow-remote
+flag	repro dev	--lock-slice
+flag	repro dev	--max-debounce
+flag	repro dev	--ready-timeout
+flag	repro dev	--replace
+flag	repro dev	--work-root
+command	repro hcr
+command	repro hcr coordinate
+flag	repro hcr coordinate	--artifacts
+flag	repro hcr coordinate	--patch-function
+flag	repro hcr coordinate	--project
+flag	repro hcr coordinate	--socket
+flag	repro hcr coordinate	--source-edit-driver
+flag	repro hcr coordinate	--target
+command	repro hcr prepare-object
+flag	repro hcr prepare-object	--all-code
+flag	repro hcr prepare-object	--function
+flag	repro hcr prepare-object	--input
+flag	repro hcr prepare-object	--output
+flag	repro hcr prepare-object	--segment
+command	repro prompt
+flag	repro prompt	--format
+flag	repro prompt	--workspace-root
+command	repro prompt init
