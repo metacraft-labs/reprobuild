@@ -121,6 +121,9 @@ import repro_runquota
 # nothing here opens the store's database file.
 import repro_runquota/stats_query
 import runquota_daemon/host_config
+from runquota_process/cgroup_placement import CgroupRootEnvVar,
+  currentCgroupRoot
+import runquota_process/enforcement
   # The host's RunQuota budget file. The daemon reads it at start; the
   # auto-spawn below reads it only to know which flags NOT to pass, since a
   # flag overrides the file (reprobuild-specs/RunQuota-Host-Configuration.md).
@@ -6406,6 +6409,28 @@ proc targetResolutionJson(record: TargetResolutionRecord): JsonNode =
   of trkUnknown:
     result["suggestions"] = jsonStringSeq(record.suggestions)
 
+proc runQuotaEnforcementRecord*(): EnforcementRecord =
+  ## RunQuota's capability record of enforcement below admission on this
+  ## host, as RunQuota's own launchers would apply it: the client's
+  ## `RUNQUOTA_CGROUP_ROOT`, else the host file's `[enforcement] cgroups`
+  ## (off when absent). Probing creates nothing.
+  var problem = ""
+  let switchOn =
+    if getEnv(CgroupRootEnvVar).strip().len == 0:
+      enforcementCgroupsOn(problem)
+    else: false
+  hostEnforcementRecord(currentCgroupRoot(switchOn))
+
+proc runQuotaEnforcementHeaderLine*(record: EnforcementRecord): string =
+  ## The build-header line stating what is enforced below admission, so a
+  ## gap is visible in the build's output rather than silent. Reprobuild
+  ## does not place its own actions in cgroups, so for them only admission
+  ## applies, whatever the host enforces for RunQuota's launchers
+  ## (`runquota run`, `runquota jobserver`) that actions may call.
+  "runQuota enforcement: Reprobuild's actions are bounded by admission " &
+    "only (not placed in cgroups); for RunQuota's launchers here, " &
+    record.summaryLine
+
 proc runQuotaReportJson*(bypassed: bool): JsonNode =
   ## RA-13: machine-readable resource-authority status for the run report.
   ## ``bypassed`` is true when this build launched at least one action with no
@@ -6420,7 +6445,11 @@ proc runQuotaReportJson*(bypassed: bool): JsonNode =
     "bypassed": bypassed,
     "authority":
       if bypassed: "local-engine-pool-gate-only" else: "runquota",
-    "concurrentInvocationsSafe": not bypassed
+    "concurrentInvocationsSafe": not bypassed,
+    # What is enforced below admission (RunQuota's capability record), and
+    # that Reprobuild's own actions are not placed in cgroups.
+    "reprobuildActionsPlaced": false,
+    "enforcement": parseJson(runQuotaEnforcementRecord().toJson())
   }
 
 proc runQuotaAuthorityHeaderLine*(bypassed: bool): string =
@@ -12366,6 +12395,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     loggedRunQuotaAuthority = true
     logSummary(runQuotaAuthorityHeaderLine(runResult.runQuotaBypassed))
+    logSummary(runQuotaEnforcementHeaderLine(runQuotaEnforcementRecord()))
     # STAGE 2: report the undeclared-environment population beside the
     # resource-authority line, for the same reason — a state the build
     # is in that nobody can see is a state nobody can decide about.

@@ -2145,7 +2145,12 @@ const
                           # asymmetry spec §10.1 *An agent apply never
                           # weakens the floor* closed
                           # (t_addon_agent_cannot_weaken_the_floor).
-                          "agent-may-weaken-floor"]
+                          "agent-may-weaken-floor",
+                          # An agent apply may add, change or remove a
+                          # drop-in over a unit the profile does not define
+                          # (a package's, which may run as root) unattended
+                          # (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-may-change-package-dropins"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

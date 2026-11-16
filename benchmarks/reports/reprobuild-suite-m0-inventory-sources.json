@@ -5516,7 +5516,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1383,
+          "line": 1394,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -8915,7 +8915,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_agent_cannot_weaken_the_floor.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51248,7 +51248,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
