@@ -1746,6 +1746,10 @@ const
                           # uninstall stops the boot-hold unit, which stops
                           # sysinit.target and everything requiring it.
                           "uninstall-stops-boot-hold",
+                          # a boot revert to a generation with a
+                          # health-checked floored unit confirms inside the
+                          # re-assertion (and times out).
+                          "boot-confirm-revert-in-reassert",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",

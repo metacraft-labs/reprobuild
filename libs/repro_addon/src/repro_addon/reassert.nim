@@ -220,15 +220,31 @@ proc recoverMarker(stateDir: string; atBoot: bool;
         plan = readPendingPlan(stateDir)
         planRead = true
       except CatchableError: discard
-      if planRead and needsBootConfirm(plan.targetUserText):
+      # And a switch whose replay cannot run here (no plan: a reset before
+      # it was written) is reverted, and the revert confirms the generation
+      # it goes back to: when that one has a health-checked floored unit,
+      # its confirm cannot pass inside this unit either (A9 review round
+      # 17, finding 5: the hard-reset gate on the real floor).
+      var revertTarget = ""
+      try:
+        let g = generationProfiles(stateDir, m.fromGeneration)
+        if g.found: revertTarget = g.user
+        else:
+          let rec = pendingFromProfiles(stateDir)
+          if rec.found: revertTarget = rec.user
+      except CatchableError: discard
+      if (planRead and needsBootConfirm(plan.targetUserText)) or
+          (revertTarget.len > 0 and needsBootConfirm(revertTarget) and
+           not mutated("boot-confirm-revert-in-reassert")):
         try:
           createDir(stateDir / "addon")
           writeFileAtomic(bootConfirmFlagPath(stateDir), m.purpose & "\n", 0o600)
           return RecoveryOutcome(resolved: true, deferred: true,
-            lines: @["the pending switch has a health-checked floored unit, " &
-                     "which cannot start while the re-assertion runs: it is " &
-                     "left to " & BootConfirmUnit & ", which replays it after " &
-                     "this unit (§13 decision 157)"])
+            lines: @["the pending switch, or the generation its revert goes " &
+                     "back to, has a health-checked floored unit, which " &
+                     "cannot start while the re-assertion runs: it is left " &
+                     "to " & BootConfirmUnit & ", which replays or reverts " &
+                     "it after this unit (§13 decision 157)"])
         except CatchableError as e:
           discard e   # the replay below runs here, as before
   var (hostLock, holder, holderPids) =
