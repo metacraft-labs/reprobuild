@@ -180,6 +180,10 @@ commands:
       (the apt hook): also report packages that now own ledger paths and
       changed vendor units, record findings in the journal and the hook's
       event log, and always exit 0.
+  boot-confirm
+      The boot-confirm unit, after the re-assertion: replay a pending switch
+      the re-assertion left to it (a health-checked floored unit), with its
+      confirm; always exits 0.
   reassert [--boot]
       Finish or revert an interrupted switch, check the current generation
       (static tree, store objects, ledger digests) and report ok, drift or
@@ -718,17 +722,52 @@ proc runAddonCli*(args: seq[string]): int =
         except CatchableError as e:
           stdout.write("repro-addon boot-holds: " & e.msg & "\n")
         # A host bootstrapped before the shipping path unit's fix (the drill's
-        # D1) is migrated here, by one switch, rather than waiting for its
-        # next generation (A11 review finding 8).
-        try:
-          let m = migrateStaleOwnObjects(DefaultStateDir, atBoot = true)
-          if m.len > 0: stdout.write(m & "\n")
-        except CatchableError as e:
-          stdout.write("repro-addon migration: " & e.msg & "\n")
+        # D1) is migrated by one switch rather than waiting for its next
+        # generation (A11 review finding 8). That switch confirms its
+        # health checks, which a floored unit cannot pass while this unit
+        # runs (§13 decision 157): where the boot-confirm unit is installed,
+        # it migrates instead, after this unit.
+        if not fileExists(unitPath(BootConfirmUnit)):
+          try:
+            let m = migrateStaleOwnObjects(DefaultStateDir, atBoot = true)
+            if m.len > 0: stdout.write(m & "\n")
+          except CatchableError as e:
+            stdout.write("repro-addon migration: " & e.msg & "\n")
         return 0
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
       return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
+    of "boot-confirm":
+      # `repro system addon boot-confirm` (repro-addon-boot-confirm.service,
+      # §13 decision 157): after the re-assertion, replay the pending switch
+      # it left here -- with blocking starts and the confirm, now that the
+      # floored units can start -- then lift the boot's holds and migrate
+      # stale generation-0 objects. Never fails the boot transaction.
+      if rest.len > 0:
+        raise newException(ValueError, "unknown option " & rest[0])
+      let flag = bootConfirmFlagPath(DefaultStateDir)
+      if fileExists(flag):
+        try:
+          stdout.write(renderReassert(runAddonReassert(DefaultStateDir,
+            atBoot = true, bootConfirm = true)))
+        except CatchableError as e:
+          stdout.write("repro-addon reassert: degraded\n  " & e.msg & "\n")
+        try: removeFile(flag)
+        except OSError: discard
+        try:
+          for l in releaseBootHolds(DefaultStateDir,
+                                    reload = proc () = daemonReload()):
+            stdout.write("repro-addon boot-holds: " & l & "\n")
+        except CatchableError as e:
+          stdout.write("repro-addon boot-holds: " & e.msg & "\n")
+      else:
+        stdout.write("repro-addon boot-confirm: nothing was left to confirm\n")
+      try:
+        let m = migrateStaleOwnObjects(DefaultStateDir, atBoot = true)
+        if m.len > 0: stdout.write(m & "\n")
+      except CatchableError as e:
+        stdout.write("repro-addon migration: " & e.msg & "\n")
+      return 0
     of "secrets":
       # `repro system addon secrets [--boot]`: re-materialise the current
       # generation's secrets (repro-addon-secrets.service at boot, §7.7).
