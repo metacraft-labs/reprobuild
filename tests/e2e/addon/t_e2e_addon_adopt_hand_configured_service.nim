@@ -1175,8 +1175,54 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     step("decision 160: while a trigger is on record, an add-on switch that " &
          "leaves it and its unit as they are is refused before it writes " &
          "anything", t4bOk, t4bOut & "\nafter: " & t4bAfter)
+    # The owner decision "the fixing switch starts them" (A13 review round
+    # 11, H2): a switch whose generation changes the recorded trigger's
+    # unit goes through the check, and then must start the trigger; the
+    # blocker still holds its port, so the start fails, the switch fails
+    # and reverts, and the record keeps the trigger. Falsifier: the add-on
+    # build fixing-switch-skips-starts (the switch passes and its commit
+    # clears the record, the socket down).
+    let t4c = g.applyProfile(repro, "trig4c", trigProfile.replace("@GEN@", "3").
+      replace("socket-activated\n", "socket-activated (4c)\n") &
+      trigDep.replace("@DEPGEN@", "3"))
+    let t4cOut = t4c.stdout & t4c.stderr
+    let t4cAfter = g.exec("cat /var/lib/repro/system/triggers-to-restart " &
+      "2>/dev/null; systemctl is-active a13r10.socket; test -e " &
+      "/var/lib/repro/system/addon/pending && echo marker; true").stdout
+    let t4cOk = t4c.exitCode != 0 and "so this switch must start it" in t4cOut and
+      "a13r10.socket\t" in t4cAfter and "marker" notin t4cAfter
+    record["fixingSwitch"] = %*{"exit": t4c.exitCode, "out": t4cOut,
+      "after": t4cAfter, "ok": t4cOk}
+    step("the fixing switch: a switch whose generation changes the recorded " &
+         "trigger's unit must start the trigger, and fails, recorded, when " &
+         "it does not start", t4cOk, t4cOut & "\nafter: " & t4cAfter)
     discard g.exec("systemctl stop a13r10-blocker.socket " &
       "a13r10-blocker.service; true")
+    # The owner decision "dependants block like triggers" (A13 review round
+    # 11, M1): with the port free the socket starts again, but the unit left
+    # out with it cannot (a host drop-in fails its start), so it stays on
+    # record and a switch that leaves it as it is is refused. Falsifier: the
+    # add-on build dependants-do-not-block.
+    discard g.run("mkdir -p /run/systemd/system/a13r10-dep.service.d && " &
+      "printf '[Service]\\nExecStartPre=/bin/false\\n' > " &
+      "/run/systemd/system/a13r10-dep.service.d/zz-a13-fail.conf && " &
+      "systemctl daemon-reload")
+    let t4m = g.applyProfile(repro, "trig4m", trigProfile.replace("@GEN@", "4m") &
+                             trigDep.replace("@DEPGEN@", "3"))
+    let t4mOut = t4m.stdout & t4m.stderr
+    let t4mAfter = g.exec("cat /var/lib/repro/system/triggers-to-restart " &
+      "2>/dev/null; systemctl is-active a13r10.socket; systemctl show -p " &
+      "Description a13r10-bad.service").stdout
+    let t4mOk = t4m.exitCode != 0 and "the host is pending" in t4mOut and
+      "a13r10-dep.service" in t4mOut and "a13r10-dep.service\t" in t4mAfter and
+      "generation 4m" notin t4mAfter
+    record["dependantsBlock"] = %*{"exit": t4m.exitCode, "out": t4mOut,
+      "after": t4mAfter, "ok": t4mOk}
+    step("dependants block like triggers: a unit on record that still does " &
+         "not start refuses a switch that leaves it as it is", t4mOk,
+         t4mOut & "\nafter: " & t4mAfter)
+    discard g.run("rm -rf /run/systemd/system/a13r10-dep.service.d && " &
+      "systemctl daemon-reload")
     let rc = g.exec(repro & " system addon recover")
     let rcOut = rc.stdout & rc.stderr
     let t4After = g.exec("systemctl show -p ActiveState -p Result " &
@@ -1185,7 +1231,6 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     # Recover starts the trigger, then the unit left out with it.
     let depAfter = g.exec("systemctl is-active a13r10-dep.service").stdout.strip()
     let t4Ok = rc.exitCode == 0 and
-      "trigger a13r10.socket started again" in rcOut and
       "unit a13r10-dep.service" in rcOut and depAfter == "active" and
       "ActiveState=active" in t4After and "still-pending" notin t4After
     record["decision160"] = %*{"recoverExit": rc.exitCode, "recover": rcOut,
