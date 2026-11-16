@@ -2324,6 +2324,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_shipped_macos_tools.nim",
+    binary: "build/test-bin/t_shipped_macos_tools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g02",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim",
     binary: "build/test-bin/t_soft_rebuild_and_retention",
     defines: @[],
