@@ -96,7 +96,15 @@ proc repoDirExists(path: string): bool = dirExists(repoPath(path))
 switch("styleCheck", "hint")
 
 if defined(windows):
-  switch("define", "sslVersion=3-x64")
+  # Nim's std/openssl loads libssl-<sslVersion>.dll by name. The suffix is the
+  # Windows architecture OpenSSL was built for (reprobuild-pm
+  # Distribution-And-Packaging.md §7.1, W4): x64 on the x64 leg, arm64 on
+  # windows-aarch64, matching windows/toolchain-utils.ps1's
+  # Get-WindowsArchRuntimeNames.
+  if defined(arm64):
+    switch("define", "sslVersion=3-arm64")
+  else:
+    switch("define", "sslVersion=3-x64")
 
 
 
