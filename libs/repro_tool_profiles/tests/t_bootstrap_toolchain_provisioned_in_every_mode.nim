@@ -72,3 +72,32 @@ suite "bootstrap toolchain provisioning":
     check "of which" notin describeBootstrapNimRoute(nimRoute)
     check "of which" notin describeBootstrapCRoute(cRoute,
       bootstrapSystemCCompilers)
+
+  test "each Windows cpu provisions its own native C compiler":
+    # reprobuild-pm Distribution-And-Packaging.md §7.1, W1: WinLibs GCC on
+    # x64, llvm-mingw on arm64 (no maintained Windows-on-Arm-hosted GCC
+    # exists), each recorded under its own identity. A pure function of the
+    # cpu, so both answers are checked on every host. Hand an arm64 engine the
+    # x64 archive and the first assertion on `arm` fails.
+    let x64 = windowsBootstrapCToolUse("amd64")
+    check x64.packageSelector == "gcc-winlibs@16.1.0"
+    check x64.tarballProvisioning.len == 1
+    check x64.tarballProvisioning[0].cpu == "x86_64"
+    check "winlibs-x86_64-" in x64.tarballProvisioning[0].url
+
+    let arm = windowsBootstrapCToolUse("arm64")
+    check arm.tarballProvisioning.len == 1
+    let rec = arm.tarballProvisioning[0]
+    check rec.cpu == "aarch64"
+    check rec.os == "windows"
+    check rec.url == BootstrapLlvmMingwWindowsArm64TarballUrl
+    check "-ucrt-aarch64.zip" in rec.url
+    check rec.packageId == "llvm-mingw@" & BootstrapLlvmMingwWindowsArm64Release
+    check arm.packageSelector == rec.packageId
+    check rec.lockIdentity.startsWith("tarball:llvm-mingw@")
+    check "gcc-winlibs" notin rec.lockIdentity
+    # The driver Nim's `--cc:gcc` invokes: llvm-mingw's clang target wrapper.
+    check rec.executablePath == "bin/gcc.exe"
+
+    # No pinned toolchain for another cpu: no realization, not a borrowed one.
+    check windowsBootstrapCToolUse("i386").tarballProvisioning.len == 0

@@ -682,6 +682,7 @@ libs/repro_lock_gen/tests/t_hidden_lock_shares_with_committed.nim	nim	3
 libs/repro_lock_gen/tests/t_lock_generation_one_path_four_entry_points.nim	nim	10
 libs/repro_lock_gen/tests/t_lock_refresh_carries_catalog_import_pins_forward.nim	nim	4
 libs/repro_lock_gen/tests/t_lock_refresh_carries_provisioning_forward.nim	nim	4
+libs/repro_lock_gen/tests/t_materiality_covers_unselected_and_dormant_constraints.nim	nim	5
 libs/repro_lock_gen/tests/t_materiality_interval_covers_the_gap.nim	nim	5
 libs/repro_lock_gen/tests/t_materiality_irrelevant_metadata_no_invalidation.nim	nim	3
 libs/repro_lock_gen/tests/t_materiality_relevant_metadata_invalidates.nim	nim	3
@@ -1028,7 +1029,7 @@ libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported
 libs/repro_tool_profiles/tests/t_a_tool_probe_writes_no_state_outside_its_scratch.nim	nim	3
 libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim	nim	5
 libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim	nim	8
-libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	3
+libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	4
 libs/repro_tool_profiles/tests/t_elf_relocation_points_programs_at_the_archive_loader.nim	nim	5
 libs/repro_tool_profiles/tests/t_environment_prefix_provisioning.nim	nim	11
 libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim	nim	12
@@ -1252,7 +1253,7 @@ recipes/packages/source/zlib/test_zlib_source.nim	nim	8
 recipes/sandbox-tools/test_sandbox_tools.nim	nim	12
 tests/bundles/bundle_repro_core_dep_scanners_pure_unit.nim	nim	35
 tests/bundles/bundle_repro_core_pure_unit.nim	nim	69
-tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	115
+tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	116
 tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
