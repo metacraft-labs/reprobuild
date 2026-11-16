@@ -21,6 +21,7 @@
 
 import std/[os]
 from repro_core/paths import extendedPath
+import repro_core/durable_replace
 
 import ./errors
 
@@ -210,23 +211,25 @@ proc readCurrentGenerationId*(stateDir: string): string =
       return ""
 
 proc writeCurrentGenerationId*(stateDir, generationId: string) =
-  ## Update the `current` marker to point at `generationId`. On POSIX
-  ## this writes a symlink atomically (via remove + create); on
-  ## Windows it overwrites `current.txt` with the id text. The
-  ## generation directory itself MUST exist before the marker is
-  ## updated — callers (apply pipeline) are responsible for that.
+  ## Move the `current` marker to `generationId`, atomically and durably
+  ## (`repro_core/durable_replace`). On POSIX a fresh symlink is renamed
+  ## over the old one; on Windows a synced `current.txt` replaces the old one
+  ## with a write-through rename. The old marker is never removed first: a
+  ## crash between a removal and the new marker would leave no current
+  ## generation at all, and `current` is authoritative operational state
+  ## that nothing regenerates (reprobuild-pm
+  ## `spec/Configuration-Storage-Principles.md` §"Authoritative Operational
+  ## State"). The generation directory itself MUST exist before the marker
+  ## is updated; callers (the apply pipeline) are responsible for that.
   ensureStateDir(stateDir)
   let p = currentPath(stateDir)
   when defined(windows):
-    let tmpPath = p & ".tmp"
-    writeFile(extendedPath(tmpPath), generationId)
-    if fileExists(extendedPath(p)): removeFile(extendedPath(p))
-    moveFile(extendedPath(tmpPath), extendedPath(p))
+    replaceFileDurably(p, generationId)
   else:
-    let target = generationDir(stateDir, generationId)
-    if symlinkExists(extendedPath(p)) or fileExists(extendedPath(p)):
-      try: removeFile(extendedPath(p)) except OSError: discard
     try:
-      createSymlink(extendedPath(target), extendedPath(p))
+      replaceSymlinkDurably(p, generationDir(stateDir, generationId))
     except OSError:
-      writeFile(extendedPath(p), generationId)
+      # A filesystem that cannot hold a symlink gets the Windows form of the
+      # marker, a file naming the generation; `readCurrentGenerationId`
+      # reads either.
+      replaceFileDurably(p, generationId)

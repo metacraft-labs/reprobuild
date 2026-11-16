@@ -43,6 +43,7 @@ import std/[algorithm, strutils]
 import repro_elevation/posix_system_parse
 from repro_infra/profile import SecretsBootUnit
 
+from ./effective_floor import StartHoldText
 import ./fingerprint
 import ./mutations
 
@@ -112,6 +113,10 @@ const
   StoreMountUnit* = "repro-store.mount"
   ReassertUnit* = "repro-addon-reassert.service"
   BootHoldUnit* = "repro-addon-boot-hold.service"
+  BootConfirmUnit* = "repro-addon-boot-confirm.service"
+    ## Replays, after the boot re-assertion, a pending switch whose
+    ## generation has a health-checked floored unit, so its confirm sees
+    ## the unit start (``bootConfirmUnit``; §13 decision 157).
     ## Puts a pending switch's start holds back early in boot, before
     ## ``sysinit.target`` and so before any socket, path or timer unit can
     ## start (``bootHoldUnit``; §13 decision 159).
@@ -485,7 +490,7 @@ const NoSwapLine* =
   when mutated("secrets-plaintext-swappable"): "LimitMEMLOCK=infinity\n"
   else: "MemorySwapMax=0\nLimitMEMLOCK=infinity\n"
 
-proc reassertUnit(reproExe: string): string =
+proc reassertUnit*(reproExe: string): string =
   # Boot-time re-assertion (§7.7): finishes or reverts an interrupted
   # switch, checks the current generation and reports ok / drift /
   # degraded. It never re-applies on drift.
@@ -540,30 +545,85 @@ proc reassertUnit(reproExe: string): string =
   "[Install]\n" &
   "WantedBy=" & wantedBy & "\n"
 
+proc bootConfirmUnit*(reproExe: string): string =
+  ## The boot-confirm unit (§13 decision 157; A9 review round 16, finding
+  ## 12). Every floored unit is ordered after the re-assertion (decision
+  ## 144), so a switch replayed inside it cannot confirm a floored unit's
+  ## health: the unit cannot start until the replay returns. The
+  ## re-assertion therefore leaves such a switch to this unit
+  ## (``reassert.recoverPendingSwitch``): ordered after the re-assertion, it
+  ## replays the switch the way ``repro system addon recover`` does, with
+  ## blocking starts and the confirm, once the floored units can start.
+  ## The switch's own holds keep its units down until its check passes;
+  ## until the replay writes them, the boot-hold unit's do. Its starts are
+  ## queued, never waited for, and nothing is ordered after it: a unit
+  ## ordered after it would wait for the replay that starts it. Wanted by
+  ## the add-on's target, which multi-user.target does not wait for
+  ## (``targetUnit``), and not ordered before it; conditioned on the
+  ## pending marker, so a boot with nothing pending skips it. The
+  ## re-assertion's confinement and bound.
+  "[Unit]\n" &
+  "Description=Reprobuild add-on boot-time confirm of a replayed switch\n" &
+  "After=local-fs.target repro-store.mount " & ReassertUnit & "\n" &
+  "ConditionPathExists=" & PendingMarkerPath & "\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "RemainAfterExit=yes\n" &
+  "TimeoutStartSec=" & $ReassertTimeoutMin & "min\n" &
+  "ExecStart=/bin/sh -c 'if [ -x " & reproExe & " ]; then exec " & reproExe &
+    " system addon boot-confirm; else echo repro-addon boot-confirm: the " &
+    "add-on binary " & reproExe & " is unavailable; fi'\n" &
+  privilegedConfinement(network = false) &
+  NoSwapLine &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
 proc bootHoldScript*(): string =
   ## The boot-hold unit's shell step, as ``/bin/sh -c`` runs it (``$``
-  ## not yet doubled for systemd): nothing once ``sysinit.target`` is
-  ## reached (an apply that starts the unit), nothing without both state
-  ## files; else, for each recorded drop-in directory name -- ``<unit>.d``,
-  ## no ``/``, not hidden; any other line is skipped, so the record can
-  ## never steer a write outside the runtime unit directory -- the recorded
-  ## hold is copied into place and listed for the re-assertion to lift, and
-  ## systemd is reloaded once. No double quote, ``#``, brace or backslash:
-  ## the canonical profile text carries the unit inline
-  ## (``assertInlineSafe``). No single quote either: the script is one
-  ## single-quoted ``ExecStart=`` argument, and systemd joins ``'a''b'`` into
-  ## ``ab`` (systemd.syntax(7), "Quoting"), so an empty ``''`` would vanish.
+  ## not yet doubled for systemd). Nothing once ``sysinit.target`` is
+  ## reached (an apply that starts the unit). Otherwise:
+  ##
+  ## - a record or hold text that is a link is refused, and the unit fails;
+  ## - each recorded line must be ``<unit>.d`` in the characters a unit
+  ##   name uses (letters, digits, ``@ . _ : -``); any other line is
+  ##   skipped, so the record never steers a write outside the runtime unit
+  ##   directory, and a drop-in directory that is a link is skipped too;
+  ## - the hold copied is the recorded text only if its SHA-256 is the
+  ##   start hold's (``StartHoldText``); otherwise -- no text, other bytes,
+  ##   a link -- each recorded unit gets a minimal hold with the same
+  ##   assertion (``[Unit]`` and ``AssertPathExists=!/``): fail closed,
+  ##   never an activator left free to start;
+  ## - every hold written is listed for the re-assertion to lift, and
+  ##   systemd is reloaded once.
+  ##
+  ## Absolute paths for every tool; ``set -f`` so no expansion globs. No
+  ## double quote, ``#``, brace or backslash: the canonical profile text
+  ## carries the unit inline (``assertInlineSafe``), so ``$d`` cannot be
+  ## quoted and is validated to characters that need none. No single quote
+  ## either: the script is one single-quoted ``ExecStart=`` argument, and
+  ## systemd joins ``'a''b'`` into ``ab`` (systemd.syntax(7), "Quoting").
+  ## A9 review round 16, finding 10.
   let rt = RuntimeUnitDirPath
-  "systemctl is-active -q sysinit.target && exit 0; " &
+  let sha = sha256Hex(StartHoldText)
+  let h = rt & "/$d/" & StartHoldFileName
+  "set -f; /usr/bin/systemctl is-active -q sysinit.target && exit 0; " &
   "r=" & BootHoldRecordPath & "; t=" & BootHoldTextPath & "; " &
-  "[ -f $r ] && [ -f $t ] || exit 0; " &
-  "mkdir -p /run/repro-addon; n=0; " &
-  "while read -r d; do case x$d in x|x.*|x*/*) continue;; x*.d) ;; *) continue;; esac; " &
-  "mkdir -p " & rt & "/$d && cp $t " & rt & "/$d/" & StartHoldFileName & " && " &
-  "echo " & rt & "/$d/" & StartHoldFileName & " >> " & BootHoldsWrittenList & " && " &
+  "if [ -L $r ]; then echo repro-addon boot-holds: the record is a link, refused; exit 1; fi; " &
+  "[ -f $r ] || exit 0; " &
+  "ok=no; if [ -f $t ] && [ ! -L $t ]; then case $(/usr/bin/sha256sum $t) in " &
+    sha & "*) ok=yes;; esac; fi; " &
+  "/usr/bin/mkdir -p /run/repro-addon; n=0; " &
+  "while read -r d; do case x$d in x|x.*|*[!A-Za-z0-9@._:-]*) continue;; x*.d) ;; *) continue;; esac; " &
+  "if [ -L " & rt & "/$d ]; then continue; fi; " &
+  "/usr/bin/mkdir -p " & rt & "/$d || continue; /usr/bin/rm -f " & h & "; " &
+  "if [ $ok = yes ]; then /usr/bin/cp $t " & h & " || continue; " &
+  "else echo [Unit] > " & h & "; echo AssertPathExists=!/ >> " & h & "; fi; " &
+  "echo " & h & " >> " & BootHoldsWrittenList & "; " &
   "n=$((n+1)); done < $r; " &
-  "if [ $n -gt 0 ]; then systemctl daemon-reload || exit 1; fi; " &
-  "echo repro-addon boot-holds: held $n unit drop-in directories"
+  "if [ $n -gt 0 ]; then /usr/bin/systemctl daemon-reload || exit 1; fi; " &
+  "echo repro-addon boot-holds: held $n unit drop-in directories, text $ok"
 
 proc bootHoldUnit*(): string =
   ## The boot-hold unit (§13 decision 159; A9 review round 15):
@@ -1434,6 +1494,8 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
               content: reassertUnit(inp.reproExe), enabled: true),
     OwnObject(kind: ookUnit, unit: BootHoldUnit, path: unitPath(BootHoldUnit),
               content: bootHoldUnit(), enabled: true),
+    OwnObject(kind: ookUnit, unit: BootConfirmUnit, path: unitPath(BootConfirmUnit),
+              content: bootConfirmUnit(inp.reproExe), enabled: true),
     OwnObject(kind: ookEtcFile, path: AptHookPath,
               content: aptHook(inp.reproExe)),
     OwnObject(kind: ookEtcFile, path: ProfileDPath,

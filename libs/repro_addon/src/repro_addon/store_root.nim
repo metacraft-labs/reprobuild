@@ -252,16 +252,11 @@ proc realiseFilesPrefix*(files: openArray[tuple[name, content: string]];
   defer: s.close()
   realiseFilesInto(s, files, version)
 
-proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
-                           files: seq[tuple[name, content: string]]):
-    RealisedPrefixes =
-  ## Copy the running ``repro`` and generation 0's file bodies into the
-  ## store as two prefixes, and verify the binary's digest on the store
-  ## copy (not on the source): the digest the operator pinned is checked
-  ## on the bytes that will run.
-  enterWritableStoreView()
-  var s = openStore(StoreRoot)
-  defer: s.close()
+proc realiseBinaryInto(s: var Store; binaryPath, binarySha256: string):
+    tuple[id: PrefixIdBytes; path, exe, digest: string] =
+  ## The add-on binary at ``binaryPath`` as the store prefix
+  ## ``binaryPrefixPath(binarySha256)``, its digest verified on the store
+  ## copy. Idempotent: a prefix already realised is returned as it is.
   let tmp = StoreRoot / "tmp" / ("addon-staging-" & $getCurrentProcessId())
   removeDir(tmp)
   createDir(tmp / "bin")
@@ -275,14 +270,39 @@ proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
       version: ReprobuildVersion, declaredExecutablePath: "bin/repro",
       exportedExecutables: @["repro"],
       provenanceChecksum: "sha256:" & binarySha256))
-  result.binaryPrefixId = binRes.prefixId
-  result.binaryPrefixPath = binRes.absolutePath
-  result.reproExe = binRes.absolutePath / "bin" / "repro"
-  result.binaryDigest = realisationDigest(tmp, binRes.absolutePath)
-  if result.binaryPrefixPath != binaryPrefixPath(binarySha256):
+  result.id = binRes.prefixId
+  result.path = binRes.absolutePath
+  result.exe = binRes.absolutePath / "bin" / "repro"
+  result.digest = realisationDigest(tmp, binRes.absolutePath)
+  if result.path != binaryPrefixPath(binarySha256):
     raise newException(StoreRootError, "store placed the add-on binary at " &
-      result.binaryPrefixPath & ", not at the planned " &
-      binaryPrefixPath(binarySha256))
+      result.path & ", not at the planned " & binaryPrefixPath(binarySha256))
+
+proc realiseEnginePrefix*(binaryPath, binarySha256: string):
+    tuple[id: PrefixIdBytes; path, exe, digest: string] =
+  ## The running engine as an add-on binary prefix (§13 decision 164: the
+  ## re-assert unit of a host an earlier engine bootstrapped is pointed at
+  ## the engine that upgrades it).
+  enterWritableStoreView()
+  var s = openStore(StoreRoot)
+  defer: s.close()
+  realiseBinaryInto(s, binaryPath, binarySha256)
+
+proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
+                           files: seq[tuple[name, content: string]]):
+    RealisedPrefixes =
+  ## Copy the running ``repro`` and generation 0's file bodies into the
+  ## store as two prefixes, and verify the binary's digest on the store
+  ## copy (not on the source): the digest the operator pinned is checked
+  ## on the bytes that will run.
+  enterWritableStoreView()
+  var s = openStore(StoreRoot)
+  defer: s.close()
+  let b = realiseBinaryInto(s, binaryPath, binarySha256)
+  result.binaryPrefixId = b.id
+  result.binaryPrefixPath = b.path
+  result.reproExe = b.exe
+  result.binaryDigest = b.digest
   let f = realiseFilesInto(s, files)
   result.filesPrefixId = f.id
   result.filesPrefixPath = f.path
