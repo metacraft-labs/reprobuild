@@ -26,8 +26,8 @@
 ##      matching ``pokInlineExecCall`` ``PrivilegedOperation``, wraps it
 ##      in a ``WireOperation`` (``PlannedOperation``) with an empty
 ##      baseline digest (``pokInlineExecCall`` is a one-shot spawn —
-##      ``dispatchOperation`` short-circuits the observe / drift gate
-##      for the kind, so the baseline is unused), and calls
+##      ``dispatchOperation`` short-circuits the observe step for the
+##      kind, and the broker never consults a baseline), and calls
 ##      ``dispatchOperation``.
 ##   3. The closure projects ``DispatchResult`` back into an
 ##      ``ElevatedExecResult``. Success: ``ok = true``, ``exitCode``

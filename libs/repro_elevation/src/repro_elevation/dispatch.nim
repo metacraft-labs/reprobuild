@@ -66,7 +66,9 @@ type
   DispatchOutcome* = enum
     doApplied = "applied"               ## mutated the resource
     doNoOp = "no-op"                    ## already at desired state
-    doDrift = "drift"                   ## fail-closed: drifted, not overwritten
+    doDrift = "drift"                   ## reserved: only an `EBrokerDrift`,
+                                        ## which nothing raises since the
+                                        ## M82 Phase A gate removal
     doError = "error"                   ## driver failure
 
   DispatchResult* = object
@@ -130,8 +132,8 @@ proc desiredDigest(op: PrivilegedOperation): string =
     # Hex` (Windows side, in `windows_system_driver`) and
     # `posixSystemDesiredDigestHex` (POSIX side) produce the SAME
     # canonical bytes for the same desired state, so the broker's
-    # drift gate compares uniformly regardless of where the apply
-    # runs. We pick the platform-resident impl deterministically:
+    # observed-vs-desired comparison is uniform regardless of where
+    # the apply runs. We pick the platform-resident impl deterministically:
     # Windows uses the windows-side digest, POSIX uses the posix
     # digest — both produce the same canonical string by construction.
     when defined(windows):
@@ -337,7 +339,7 @@ proc applyOne(ctx: FixtureContext;
         "in dispatchOperation; this proc is never called for the kind")
 
 # ---------------------------------------------------------------------------
-# Dispatch one planned operation with the re-observe / drift gate.
+# Dispatch one planned operation: re-observe, then apply the delta.
 # ---------------------------------------------------------------------------
 
 proc dispatchOperation*(ctx: FixtureContext;
@@ -453,7 +455,7 @@ proc dispatchOperation*(ctx: FixtureContext;
   # observation closes that race: a true cache-hit is a steady-state
   # property and survives a one-second hold; a transient read does
   # not. If the two samples disagree, the second (later) read is
-  # used as the source of truth for the drift gate and apply path
+  # used as the source of truth for the cache-hit test and apply path
   # since it is closer to the actual settled state. The cost of a
   # ~1 s pause on every legitimate cache-hit is acceptable for the
   # privileged-operations workload (low op-count, high stakes per
