@@ -70,6 +70,7 @@ import std/sysrand
 import repro_binary_cache_client/http_pool
 
 import repro_core/host_apply_lock
+from repro_core import ReprobuildVersion
 import repro_dsl_stdlib/packages/apt_closure
 import repro_elevation
 import repro_elevation/posix_system_driver
@@ -336,6 +337,10 @@ type
     failedAtFloor*: seq[string]
       ## Non-empty when the switch failed after its flip and the rollback
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
+    repointSkipped*: string
+      ## Non-empty when the engine units were not re-pointed because the
+      ## running engine is not the static add-on image and no matching
+      ## image is recorded (§13 decision 174): why, for the operator.
     heldAtRevert*: seq[string]
       ## A revert whose own effective-unit check refused units: each refusal
       ## line. The revert commits; those units keep their start hold and
@@ -1844,15 +1849,22 @@ proc writeRevertStopped*(stateDir: string; units: openArray[string]) =
 proc revertStoppedToStart*(recorded: openArray[string];
                            generationUnits: HashSet[string];
                            planned: openArray[string];
-                           isActive: proc (u: string): bool): seq[string] =
+                           isActive: proc (u: string): bool;
+                           isEnabled: proc (u: string): bool = nil): seq[string] =
   ## Of the units a revert stopped (``recorded``), those the passing switch
-  ## starts again: still installed by the generation, not already planned,
-  ## and not running.
+  ## starts again: still installed by the generation -- an instance through
+  ## its template, and only when it is enabled (an instance a socket with
+  ## ``Accept=yes`` started comes back by its socket, not by the switch; A9
+  ## review round 17, finding 7) -- not already planned, and not running.
   when mutated("revert-stopped-not-restarted"):
     return
   for u in recorded:
-    if u in generationUnits and u notin planned and not isActive(u) and
-        u notin result:
+    let tmpl = templateOf(u)
+    let installed =
+      if tmpl.len > 0:
+        tmpl in generationUnits and isEnabled != nil and isEnabled(u)
+      else: u in generationUnits
+    if installed and u notin planned and not isActive(u) and u notin result:
       result.add(u)
 
 proc readHeldTriggers*(stateDir: string): seq[string] =
@@ -1868,7 +1880,7 @@ proc writeHeldTriggers*(stateDir: string; triggers: openArray[string]) =
   ## renamed into place), or remove the record when there are none.
   let p = heldTriggersPath(stateDir)
   if triggers.len == 0:
-    if fileExists(p): removeFile(p)
+    removeDurably(p)
     return
   writeHoldFile(p, triggers.join("\n") & "\n")
 
@@ -1929,7 +1941,8 @@ proc writeTriggerRestartEntries*(stateDir: string;
   ## remove it when there are no entries.
   let p = triggersToRestartPath(stateDir)
   if entries.len == 0:
-    if fileExists(p): removeFile(p)
+    # Durably: the directory is synced too (A13 review round 12).
+    removeDurably(p)
     return
   var text = ""
   for e in entries:
@@ -2065,7 +2078,17 @@ proc addonLiveHost*(): LiveHost =
       let r = runSystemctlArgs(["stop", "--", u])
       (r.exitCode == 0, r.output),
     resetFailed: proc (u: string) =
-      discard runSystemctlArgs(["reset-failed", "--", u]))
+      discard runSystemctlArgs(["reset-failed", "--", u]),
+    list: proc (pattern: string): seq[string] =
+      let r = runSystemctlArgs(["list-units", "--all", "--plain",
+                                "--no-legend", "--no-pager", "--", pattern])
+      if r.exitCode == 0:
+        for l in r.output.splitLines():
+          let w = l.splitWhitespace()
+          if w.len > 0 and w[0] notin result: result.add(w[0]),
+    startNoBlock: proc (u: string): tuple[ok: bool, output: string] =
+      let r = runSystemctlArgs(["start", "--no-block", "--", u])
+      (r.exitCode == 0, r.output))
 
 proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
     tuple[ok: bool; lines: seq[string]] =
@@ -2186,15 +2209,25 @@ proc step7Dependants*(candidates, excluded: openArray[string];
         if d in candidates: result.add((unit: d, root: reached[u]))
 
 proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
-                                  host0: LiveHost = LiveHost()): seq[string] =
+                                  host0: LiveHost = LiveHost();
+                                  noBlock = false): seq[string] =
   ## The fixing switch starts what it resolves (the owner decision "the
-  ## fixing switch starts them", A13 review round 11): each trigger on record its generation
-  ## ``p`` resolves that systemd still loads, then the dependants recorded
-  ## with it and every dependant it resolves by its own renderings, in the
-  ## order recorded; each confirmed through systemd (``startConfirmed``). A
-  ## unit the generation removed is not started. Returns the problems: any
-  ## fails the switch (decision 160: a trigger that does not restart), and the record keeps its entries,
-  ## since only the commit clears them.
+  ## fixing switch starts them", A13 review round 11; and a full apply's
+  ## fixing path, "yes, same as 175", round 12): each trigger on record its
+  ## generation ``p`` resolves that systemd still loads, then the
+  ## dependants recorded with it and every dependant it resolves by its own
+  ## renderings, in the order recorded; each confirmed through systemd
+  ## (``startConfirmed``). A unit the generation removed is not started. One
+  ## systemd cannot be asked about fails closed: it is a problem, not
+  ## skipped (round 12). Returns the problems: any fails the switch
+  ## (decision 160: a trigger that does not restart), and the record keeps
+  ## its entries, since only a clean commit clears them.
+  ##
+  ## ``noBlock`` (a replay at boot, A13 review round 12, M4): each start is
+  ## queued (``systemctl start --no-block``) and not confirmed -- a floored
+  ## dependant is ordered after the re-assertion, so a blocking start could
+  ## wait out its timeout -- and the commit leaves the entries on record for
+  ## the boot-confirm unit or the next recover to confirm.
   when mutated("fixing-switch-skips-starts"):
     # FALSIFYING MUTATION: the fixing switch starts nothing.
     return
@@ -2207,8 +2240,26 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
       if (pass == 0) != (e.dependantOf.len == 0): continue
       var props: Table[string, string]
       try: props = host.show(e.unit)
-      except CatchableError: continue
+      except CatchableError as ex:
+        when not mutated("fixing-start-unreadable-skipped"):
+          # FALSIFYING MUTATION (when absent): a unit systemd cannot be
+          # asked about is skipped, and the commit clears its entry.
+          result.add("systemctl show " & e.unit & " (on record as one a " &
+            "revert could not start; this generation changes it, so it " &
+            "must be started and confirmed, §13 decision 160): systemd " &
+            "could not be asked: " & ex.msg)
+        continue
       if props.getOrDefault("LoadState") != "loaded": continue
+      if noBlock and not mutated("boot-fixing-starts-block"):
+        # FALSIFYING MUTATION (when absent): the boot replay's starts block.
+        if host.resetFailed != nil: host.resetFailed(e.unit)
+        let q = if host.startNoBlock != nil: host.startNoBlock(e.unit)
+                else: (ok: false, output: "no queued start on this host")
+        if not q.ok:
+          result.add("systemctl start --no-block " & e.unit & " (on record " &
+            "as one a revert could not start, §13 decision 160): " &
+            q.output.strip())
+        continue
       let s = startConfirmed(host, e.unit, mustStayActive = pass == 0)
       if not s.ok:
         result.add("systemctl start " & e.unit & " (on record as one a " &
@@ -2799,29 +2850,75 @@ proc parseUtcStamp(v: string): int64 =
     except ValueError, TimeParseError: discard
   0
 
+proc timeUnitNs(u: string): float64 =
+  ## Nanoseconds in one systemd time unit, -1 for a name systemd does not
+  ## know. The table of ``parse_sec()`` in src/basic/time-util.c
+  ## (https://github.com/systemd/systemd/blob/v257/src/basic/time-util.c,
+  ## ``static const struct { const char *suffix; usec_t usec; } table``),
+  ## documented in systemd.time(7), "PARSING TIME SPANS": a month is 30.44
+  ## days and a year 365.25 days (``USEC_PER_MONTH``, ``USEC_PER_YEAR``).
+  ## Case matters: ``M`` is a month, ``m`` a minute.
+  const S = 1_000_000_000.0
+  case u
+  of "", "s", "sec", "second", "seconds": S
+  of "us", "usec", "\u03bcs", "\u00b5s": 1_000.0
+  of "ms", "msec": 1_000_000.0
+  of "m", "min", "minute", "minutes": 60 * S
+  of "h", "hr", "hour", "hours": 3_600 * S
+  of "d", "day", "days": 86_400 * S
+  of "w", "week", "weeks": 604_800 * S
+  of "M", "month", "months": 2_629_800 * S
+  of "y", "year", "years": 31_557_600 * S
+  else: -1.0
+
 proc parseTimespanNs*(v: string): int64 =
   ## A systemd time span as ``systemctl show`` prints it (``3s``,
-  ## ``100ms``, ``1min 30s``, ``0``; systemd.time(7)) in nanoseconds; -1
-  ## for ``infinity`` or anything else it cannot read.
+  ## ``100ms``, ``1min 30s``, ``1d``, ``1w 2d``, ``1month``, ``1y``,
+  ## ``0``; systemd.time(7)) in nanoseconds; -1 for ``infinity`` or
+  ## anything else it cannot read. Every unit systemd parses is read
+  ## (``timeUnitNs``), separated by blanks or not (``1min30s``), as
+  ## ``parse_time()`` reads them (A9 review round 17, finding 8).
   let t = v.strip()
   if t.len == 0 or t == "0": return 0
   if t == "infinity": return -1
-  for w in t.splitWhitespace():
-    var i = 0
-    while i < w.len and w[i] in {'0'..'9', '.'}: inc i
-    if i == 0: return -1
+  var i = 0
+  var any = false
+  while i < t.len:
+    while i < t.len and t[i] in Whitespace: inc i
+    if i >= t.len: break
+    let n0 = i
+    while i < t.len and t[i] in {'0'..'9', '.'}: inc i
+    if i == n0: return -1
     var n = 0.0
-    try: n = parseFloat(w[0 ..< i])
+    try: n = parseFloat(t[n0 ..< i])
     except ValueError: return -1
-    let unitNs = case w[i .. ^1]
-      of "us", "usec": 1_000.0
-      of "ms", "msec": 1_000_000.0
-      of "", "s", "sec": 1_000_000_000.0
-      of "min", "m": 60_000_000_000.0
-      of "h", "hr": 3_600_000_000_000.0
-      else: -1.0
+    while i < t.len and t[i] in Whitespace: inc i
+    let u0 = i
+    while i < t.len and t[i] notin {'0'..'9', '.'} and t[i] notin Whitespace: inc i
+    var unitNs = timeUnitNs(t[u0 ..< i])
+    when mutated("timespan-units-partial"):
+      # FALSIFYING MUTATION: the units before round 17 only.
+      if t[u0 ..< i] notin ["", "s", "sec", "us", "usec", "ms", "msec",
+                            "m", "min", "h", "hr"]:
+        unitNs = -1.0
     if unitNs < 0: return -1
     result += int64(n * unitNs)
+    any = true
+  if not any: return -1
+
+{.emit: """/*INCLUDESECTION*/
+#include <math.h>
+""".}
+{.emit: """
+static unsigned long long repro_sd_restart_delay_usec(unsigned long long r0,
+    unsigned long long rmax, unsigned int i, unsigned int n) {
+  /* service_restart_usec_next(), src/core/service.c (systemd v257). */
+  return (unsigned long long) (r0 * powl((long double) rmax / r0,
+                                         (long double) i / n));
+}
+""".}
+proc sdRestartDelayUsec(r0, rmax: uint64; i, n: cuint): uint64 {.
+  importc: "repro_sd_restart_delay_usec", nodecl.}
 
 proc restartDelayBefore*(nRestarts: int; restartUsec, maxDelayUsec: int64;
                          steps: int): int64 =
@@ -2848,8 +2945,15 @@ proc restartDelayBefore*(nRestarts: int; restartUsec, maxDelayUsec: int64;
       restartUsec >= maxDelayUsec:
     return restartUsec
   if n > steps: return maxDelayUsec
-  let ratio = maxDelayUsec.float64 / restartUsec.float64
-  int64(restartUsec.float64 * pow(ratio, (n - 1).float64 / steps.float64))
+  # systemd's own arithmetic: ``long double`` and ``powl()``, truncated to
+  # whole microseconds (a ``double`` gives 3999999 us where systemd gives
+  # 4000000 us for 1 s, 8 s and step 2 of 3). In microseconds here, then
+  # back to the inputs' unit.
+  const UnitsPerUsec = 1_000'i64
+  let r0 = uint64(restartUsec div UnitsPerUsec)
+  let rmax = uint64(maxDelayUsec div UnitsPerUsec)
+  if r0 == 0: return restartUsec
+  int64(sdRestartDelayUsec(r0, rmax, cuint(n - 1), cuint(steps))) * UnitsPerUsec
 
 proc parseUnitRun*(output: string): UnitRun =
   ## ``UnitRun`` from the output of ``systemctl show --timestamp=us+utc -p
@@ -3348,7 +3452,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
             result.add(activatorProblems(a, ash, parseShowLines(at),
                                          unitPath(a), aown, aloaded, startsOf,
                                          ownUnits, conflictsOf, listenerProvenance,
-                                         serviceWritable = writable))
+                                         serviceWritable = writable,
+                                         orderedBeforeOf = orderedBeforeOf))
           except CatchableError as ex:
             result.add(refusalLine(a, "show", "-", ex.msg))
     if tmplRefused != nil:
@@ -5338,6 +5443,37 @@ proc storeRecovery*(o: StoreObjectRef; resources: openArray[SystemResource];
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
   ## Defined below, after the switch it wraps with its evidence record.
 
+proc repointEngineChoice*(running: string; known: openArray[string];
+                          isStatic: proc (path: string): bool;
+                          sha256Of: proc (path: string): string):
+    tuple[engineExe, newImage, newImageSha, skipped: string] =
+  ## The engine an apply re-points generation 0's engine units at (§13
+  ## decision 174, the owner's decision of 2026-11-16 on A9 review round
+  ## 17, finding 4): only the static add-on image. When ``running`` (the
+  ## apply's own binary) is one, its store path (``reproExeFor`` of its
+  ## digest), to be realised from it (``newImage``). When it is the dynamic
+  ## engine, the static image of this build's version the ledger records
+  ## (``known``, oldest first), newest first; when there is none, no engine
+  ## (the units keep the one they run) and ``skipped`` says why.
+  var staticRunning = isStatic(running)
+  when mutated("repoint-dynamic-engine"):
+    # FALSIFYING MUTATION: the running engine is installed whatever it
+    # is, the dynamic engine included.
+    staticRunning = true
+  if staticRunning:
+    let sha = sha256Of(running)
+    if sha.len > 0:
+      return (reproExeFor(sha), running, sha, "")
+    return ("", "", "", "the running engine " & running & " cannot be read")
+  for i in countdown(known.high, 0):
+    if prefixVersionOf(parentDir(parentDir(known[i]))) == ReprobuildVersion and
+        isStatic(known[i]):
+      return (known[i], "", "", "")
+  ("", "", "", "the running engine " & running & " is not the static add-on " &
+    "image, and the ledger records no static image of version " &
+    ReprobuildVersion & "; the re-assert, boot-confirm and agent units keep " &
+    "the engine they run. Apply with the static add-on binary to re-point them")
+
 proc restartRecordProfile*(user: SystemProfile): SystemProfile =
   ## What the record of triggers to restart is rendered against, at every
   ## point that renders it -- the revert that records an entry, the
@@ -5494,6 +5630,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # by an earlier engine gets the boot-hold unit at its next apply). Here,
   # under the host apply lock and before anything is written, so a path in
   # the way stops the apply before any generation change.
+  # The add-on binary prefixes the committed ledger records, oldest
+  # first: the engines a generation-0 unit on disk may run.
+  var ledgerPrefixes: seq[string]
+  for e in previous.entries:
+    if e.class == lcStorePrefix: ledgerPrefixes.add(e.path)
+  let known = binaryPrefixesOf(ledgerPrefixes)
   let ownTextUpgraded =
     if replaying: migratedOwn
     else:
@@ -5503,13 +5645,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           recorded = proc (path: string): string =
             for e in previous.entries:
               if e.path == path: return e.sha256
-            "")
+            "",
+          known = known)
       except ValueError as e:
         raise newException(AddonApplyError, "generation 0 cannot be " &
           "upgraded: " & e.msg)
-  # §13 decision 164: the re-assert unit runs the engine that applies, so
-  # a host an earlier engine bootstrapped recovers with this one's holds.
-  # The engine goes into the store as a binary prefix, which the
+  # §13 decision 164 (amended by the owner's decisions 173, the agent's
+  # units too, and 174, the static image only): the
+  # re-assert, boot-confirm and agent units run the newest engine, so a
+  # host an earlier engine bootstrapped recovers, confirms and ticks with
+  # this one's holds -- and a revert or a rollback, whose target names an
+  # older engine, keeps it (``repointEngine``). Only the static add-on
+  # image is installed: when the dynamic engine applies, the image of its
+  # own version the ledger records is used, or the re-point is skipped and
+  # reported. A new image goes into the store as a binary prefix, which the
   # generation's ledger names (a generation-0 entry, carried by every later
   # switch) and its root holds. Under the host apply lock, before anything
   # else is written; a plan writes nothing, and a replay applies exactly
@@ -5517,31 +5666,36 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   var bootstrapEntries = opts.bootstrapEntries
   var ownText = ownTextUpgraded
   if not replaying and not opts.planOnly:
-    let engine = getAppFilename()
-    var engineSha = ""
-    try: engineSha = sha256OfFile(engine) except CatchableError: discard
-    if engineSha.len > 0:
-      let engineExe = reproExeFor(engineSha)
-      try:
-        let rp = repointReassert(ownText, engineExe, ownPathProbe,
-          proc (path: string): string =
-            for e in previous.entries:
-              if e.path == path: return e.sha256
-            "")
-        if rp.changed:
-          let pre = realiseEnginePrefix(engine, engineSha)
-          if pre.exe != engineExe:
-            raise newException(ValueError, "the engine was realised at " &
-              pre.exe & ", not " & engineExe)
-          bootstrapEntries.add(LedgerEntry(class: lcStorePrefix, path: pre.path,
-            sha256: prefixIdHex(pre.id), value: pre.digest, resource: ""))
-          # Under store custody (§13 decision 48) the digest is recorded
-          # outside the store, as bootstrap records its binary's.
-          recordRealised(custodySite(stateDir), pre.path, pre.digest)
-          ownText = rp.own
-      except ValueError as e:
-        raise newException(AddonApplyError, "generation 0's re-assert unit " &
-          "cannot be re-pointed: " & e.msg)
+    let sel = repointEngineChoice(getAppFilename(), known, isStaticElf,
+      proc (p: string): string =
+        try: sha256OfFile(p) except CatchableError: "")
+    let engineExe = sel.engineExe
+    let newImage = sel.newImage
+    let newImageSha = sel.newImageSha
+    if sel.skipped.len > 0:
+      result.repointSkipped = sel.skipped
+      stderr.writeLine("repro-addon: re-point skipped: " & sel.skipped)
+    try:
+      let rp = repointEngine(ownText, engineExe, known, ownPathProbe,
+        proc (path: string): string =
+          for e in previous.entries:
+            if e.path == path: return e.sha256
+          "")
+      if rp.exe.len > 0 and rp.exe == engineExe and newImage.len > 0 and
+          engineExe notin known:
+        let pre = realiseEnginePrefix(newImage, newImageSha)
+        if pre.exe != engineExe:
+          raise newException(ValueError, "the engine was realised at " &
+            pre.exe & ", not " & engineExe)
+        bootstrapEntries.add(LedgerEntry(class: lcStorePrefix, path: pre.path,
+          sha256: prefixIdHex(pre.id), value: pre.digest, resource: ""))
+        # Under store custody (§13 decision 48) the digest is recorded
+        # outside the store, as bootstrap records its binary's.
+        recordRealised(custodySite(stateDir), pre.path, pre.digest)
+      if rp.changed: ownText = rp.own
+    except ValueError as e:
+      raise newException(AddonApplyError, "generation 0's engine units " &
+        "cannot be re-pointed: " & e.msg)
   result.previousLedger = previous
   # The generation `current` names, not the ledger copy's: a switch that
   # failed after its writes leaves the copy describing the host under the
@@ -6694,7 +6848,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     f.alive = if f.exclusive: unitAliveness(f.unit) else: uaEmpty
   for r in removedUnits:
     var f = UnitFacts(unit: r.suName, address: r.address, owned: true,
-      removed: true, exclusive: isExclusiveUnit(r), stopHeld: r.suStopHeld)
+      removed: true, exclusive: isExclusiveUnit(r),
+      stopHeld: r.suStopHeld or r.suName == BootHoldUnit)
     observed(f)
     facts.add(f)
     factUnits.incl(r.suName)
@@ -6709,8 +6864,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         exclusive: isExclusiveUnit(r) or
           (r.suName in prevUnits and
            unitContentDeclaresExclusive(readFile(prevUnits[r.suName].path))),
-        restartHeld: r.suRestartHeld, reloadIfChanged: r.suReloadIfChanged,
-        stopHeld: r.suStopHeld,
+        # The boot-hold unit is never restarted or stopped by a switch:
+        # sysinit.target requires it (§13 decision 172), and a stop or a
+        # restart of a required unit propagates to every unit that requires
+        # sysinit.target -- every service with default dependencies
+        # (systemd.unit(5), Requires=). It only runs at boot.
+        restartHeld: r.suRestartHeld or r.suName == BootHoldUnit,
+        reloadIfChanged: r.suReloadIfChanged,
+        stopHeld: r.suStopHeld or r.suName == BootHoldUnit,
         credentialsChanged: r.suCredentials.len > 0 and
           credentialServiceOf(r.suName) in credentialChanged)
       observed(f)
@@ -7173,6 +7334,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       storedTarget: storedTarget, storedTargetRecorded: true))
   var secretsFailure = ""
   var heldAtRevert: seq[string]   # spec §10.1: what a revert keeps on hold
+  var revertStoppedPlanned = false  # step 7 starts what a revert stopped
   # The revert holds this switch wrote, and the ``<unit>.d`` directories it
   # created for them: the ledger records both (``revertHoldEntries``).
   var revertHoldsWritten: seq[string]
@@ -7937,9 +8099,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             when not mutated("revert-held-left-running"):
               # Recorded first, so the switch that clears the holds starts
               # exactly these again (A9 review round 16, finding 5).
+              # A template's running instances are recorded by name (A9
+              # review round 17, finding 7), so the enabled ones come back.
               var stopping: seq[string]
               for u in held:
-                if '@' notin u and unitIsActive(u): stopping.add(u)
+                if '@' notin u:
+                  if unitIsActive(u): stopping.add(u)
+                else:
+                  when not mutated("revert-stopped-instances-unrecorded"):
+                    for i in hostRunningInstances(u):
+                      if i notin stopping: stopping.add(i)
               if stopping.len > 0:
                 try: writeRevertStopped(stateDir, readRevertStopped(stateDir) & stopping)
                 except CatchableError as ex:
@@ -8026,11 +8195,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               var plannedUnits: seq[string]
               for t in stepTransitions: plannedUnits.add(t.unit)
               for u in revertStoppedToStart(readRevertStopped(stateDir), genUnits,
-                                            plannedUnits, unitIsActive):
+                                            plannedUnits, unitIsActive,
+                                            proc (v: string): bool =
+                                              try: runSystemctl(["is-enabled", "--", v]).output.strip() == "enabled"
+                                              except CatchableError: false):
                 stepTransitions.add(Transition(unit: u, verb: tvStart,
                   reason: "a revert stopped it while it held it; its hold is cleared"))
-              try: writeRevertStopped(stateDir, [])
-              except CatchableError as ex: problems.add(ex.msg)
+              revertStoppedPlanned = true
+              # The record is cleared once step 7's starts succeed, not
+              # here: a crash or a failed start before then leaves it, and
+              # the next switch starts them (A9 review round 17, finding 7).
+              when mutated("revert-stopped-cleared-early"):
+                # FALSIFYING MUTATION: cleared before the starts.
+                try: writeRevertStopped(stateDir, [])
+                except CatchableError as ex: problems.add(ex.msg)
             if startHolds.len > 0 or stale.len > 0 or revertStale.len > 0:
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
@@ -8128,10 +8306,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           if not (purpose == "revert" or (replaying and opts.replayOf == "revert")) and
               hasTriggersToRestart(stateDir):
             for pr in startResolvedRestartEntries(stateDir,
-                                                  restartRecordProfile(user)):
+                                                  restartRecordProfile(user),
+                                                  noBlock = opts.nonBlockingStarts):
               problems.add("step 7 (start): " & pr)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
+      # What a revert stopped is off the record once step 7 started it
+      # (A9 review round 17, finding 7): not before, so a crash or a failed
+      # start leaves the record for the next switch.
+      if revertStoppedPlanned and clean and problems.len == 0:
+        when not mutated("revert-stopped-cleared-early"):
+          try: writeRevertStopped(stateDir, [])
+          except CatchableError as ex: problems.add(ex.msg)
       marker.step = ssStart
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-7")
@@ -8590,7 +8776,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # resolves -- it changes or removes the trigger or its units -- are done
   # with (the owner decision "allow the fixing apply"); a revert's own,
   # recorded against this generation, are not resolved by it.
-  for u in clearResolvedRestartEntries(stateDir, restartRecordProfile(user)):
+  # A boot replay only queued their starts (``nonBlockingStarts``, A13
+  # review round 12, M4): they stay on record until the boot-confirm unit or
+  # the next recover confirms them.
+  for u in (if opts.nonBlockingStarts and not mutated("boot-fixing-starts-block"):
+              newSeq[string]()
+            else: clearResolvedRestartEntries(stateDir, restartRecordProfile(user))):
     stderr.writeLine("repro-addon: " & u & " leaves the record of triggers " &
       "to restart: this generation changes or removes it or the units it " &
       "triggers")

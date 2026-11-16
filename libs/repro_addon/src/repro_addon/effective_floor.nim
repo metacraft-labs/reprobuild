@@ -1462,7 +1462,8 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         ownUnits = initHashSet[string]();
                         conflictsOf: proc (unit: string): seq[string] = nil;
                         listenerProvenance: proc (path: string): string = nil;
-                        serviceWritable: seq[string] = @[]):
+                        serviceWritable: seq[string] = @[];
+                        orderedBeforeOf: proc (u: string): seq[string] = nil):
                         seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
   ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
@@ -1493,6 +1494,21 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
       let why = activatorBootOrderRefusal(unit, defaultDeps = false,
         words(show.getOrDefault("After")), words(show.getOrDefault("Before")))
       if why.len > 0: problem2("boot-order", "After,Before,DefaultDependencies", why)
+  # §13 decision 172: and never, by any chain of Before= systemd reports
+  # (its own, then every other unit's, implicit ones included), before a
+  # unit that runs before sysinit.target -- the boot-hold unit and what it
+  # follows among them: an ordering cycle through the boot-hold unit.
+  when not mutated("boot-hold-cycle-effective-unchecked"):
+    let reportedAfter = words(show.getOrDefault("After"))
+    if "sysinit.target" in reportedAfter or "basic.target" in reportedAfter or
+        BootHoldUnitName in reportedAfter:
+      let route = earlyOrderingRoute(unit,
+        proc (u: string): seq[string] =
+          if u == unit: words(show.getOrDefault("Before"))
+          elif orderedBeforeOf != nil: orderedBeforeOf(u)
+          else: @[])
+      if route.len > 0:
+        problem2("boot-hold-cycle", "Before", earlyOrderingReason(route))
   if show.getOrDefault("FragmentPath") != fragment:
     problem2("provenance", "FragmentPath", "FragmentPath=" & show.getOrDefault("FragmentPath") &
             ", not a unit file the add-on wrote (" & fragment & ")")

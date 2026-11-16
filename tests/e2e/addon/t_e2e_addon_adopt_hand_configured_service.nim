@@ -1249,6 +1249,43 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "ok": t5Ok}
     step("decision 160: after recover the host is not pending, and the next " &
          "switch applies", t5Ok, t5.stdout & t5.stderr & "\n" & t5Pending)
+    # A13 review round 12, M4: a host that boots with a record of triggers
+    # to restart. The re-assertion at boot queues each start (`systemctl
+    # start --no-block`) -- a floored dependant is ordered after it, so a
+    # blocking start could wait out its timeout -- and leaves the record for
+    # the boot-confirm unit or the next recover to confirm. Staged: the
+    # socket stopped and on record, as a revert leaves it; then a reboot.
+    # Falsifier: the add-on build boot-record-starts-block (the re-assertion
+    # starts and confirms it at boot and clears the record).
+    discard g.run("systemctl stop a13r10.socket a13r10.service; printf " &
+      "'a13r10.socket\\n' > /var/lib/repro/system/triggers-to-restart; " &
+      "chmod 600 /var/lib/repro/system/triggers-to-restart; sync")
+    g.rebootGuest()
+    let bootReport = g.exec("cat /var/lib/repro/system/addon/reassert-report " &
+      "2>&1; echo " &
+      "'--- unit'; systemctl show -p ActiveState -p Result " &
+      "-p ExecMainStartTimestampMonotonic -p ExecMainExitTimestampMonotonic " &
+      "repro-addon-reassert.service").stdout
+    let bootRecord = g.exec("cat /var/lib/repro/system/triggers-to-restart " &
+      "2>/dev/null").stdout.strip()
+    let bootSocket = g.exec("systemctl is-active a13r10.socket").stdout.strip()
+    let bootQueued = "the start of a13r10.socket is queued" in bootReport
+    let bootRc = g.exec(repro & " system addon recover")
+    let bootAfter = g.exec("test -e /var/lib/repro/system/triggers-to-restart " &
+      "&& echo still-pending; systemctl is-active a13r10.socket; true").stdout.strip()
+    let bootOk = bootQueued and "a13r10.socket" in bootRecord and
+      bootSocket == "active" and bootRc.exitCode == 0 and
+      "still-pending" notin bootAfter and bootAfter.endsWith("active")
+    record["bootQueuedRestart"] = %*{"report": bootReport,
+      "queued": bootQueued, "recordAfterBoot": bootRecord,
+      "socketAfterBoot": bootSocket, "recoverExit": bootRc.exitCode,
+      "recover": bootRc.stdout & bootRc.stderr, "after": bootAfter,
+      "ok": bootOk}
+    step("M4: at boot the re-assertion queues the start of a recorded " &
+         "trigger without waiting for it and leaves the record, which the " &
+         "next recover confirms and clears", bootOk,
+         bootReport & "\nrecord: " & bootRecord & "\nsocket: " & bootSocket &
+         "\nrecover: " & bootRc.stdout & bootRc.stderr & "\nafter: " & bootAfter)
     record["decision151Recovered"] = %*{"exit": t3.exitCode, "state": t3State,
       "ok": t3Ok}
     step("decision 151, add-on switch after the refusal: once the generator " &

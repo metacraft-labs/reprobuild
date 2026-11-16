@@ -183,19 +183,24 @@ suite "the effective half refuses the cycle systemd reports":
     check p.len == 1
     check "a.service -> " & Reassert in p.join("\n")
   test "through units the generation does not install":
-    # DefaultDependencies=no, Before=systemd-tmpfiles-setup.service: that
-    # unit is before sysinit.target, which is before basic.target, which
-    # the re-assertion is after (the issue's second profile, by another
-    # route the parse-time half cannot see).
-    let others = {"systemd-tmpfiles-setup.service": @["sysinit.target"],
+    # DefaultDependencies=no, Before= a base unit that is before
+    # sysinit.target, which is before basic.target, which the re-assertion
+    # is after (the issue's second profile, by another route the parse-time
+    # half cannot see). The walk stops at the first unit that runs before
+    # sysinit.target (§13 decision 172, ``runsBeforeSysinit``).
+    let others = {"a9-early.service": @["sysinit.target"],
                   "sysinit.target": @["basic.target", "emergency.target"],
                   "basic.target": @["multi-user.target", Reassert]}.toTable
-    let p = orderingProblems(input(Reassert,
-      "systemd-tmpfiles-setup.service", others))
+    let p = orderingProblems(input(Reassert, "a9-early.service", others))
     checkpoint p.join("\n")
     check p.len == 1
-    check ("a.service -> systemd-tmpfiles-setup.service -> sysinit.target " &
-           "-> basic.target -> " & Reassert) in p.join("\n")
+    check "a.service -> a9-early.service -> sysinit.target" in p.join("\n")
+  test "before a unit the base orders before sysinit.target":
+    let p = orderingProblems(input(Reassert, "systemd-tmpfiles-setup.service",
+      initTable[string, seq[string]]()))
+    checkpoint p.join("\n")
+    check p.len == 1
+    check "a.service -> systemd-tmpfiles-setup.service" in p.join("\n")
 
 suite "the effective half accepts what is not a cycle":
   test "ordered before what runs after the re-assertion":
