@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2863,
+    "nimTestBinaries": 2864,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 776,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2910
+    "testEntries": 2911
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1641,7 +1641,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1577,
+      "integration": 1578,
       "platform/destructive": 185,
       "pure unit": 776,
       "unclassified": 349
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2863,
+    "nimTestBinaryCount": 2864,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2910
+    "testEntryCount": 2911
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13182,7 +13182,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22841,7 +22841,8 @@
         "repro_infra",
         "repro_profile",
         "repro_profile_compile",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
@@ -27300,6 +27301,23 @@
       "source": "libs/repro_test_support/tests/t_owned_processes_stop_only_what_the_test_started.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_passthrough_monitor_parses_the_engine_wrapper_argv",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_passthrough_monitor_parses_the_engine_wrapper_argv.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

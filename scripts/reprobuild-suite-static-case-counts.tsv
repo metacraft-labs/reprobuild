@@ -255,7 +255,7 @@ libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	nim	5
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
 libs/repro_build_engine/tests/test_s5_own_output_is_not_a_cache_input.nim	nim	6
 libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	15
-libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	13
+libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	14
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
 libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	10
@@ -1016,6 +1016,7 @@ libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
 libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	36
 libs/repro_test_support/tests/t_home_apply_guard.nim	nim	9
 libs/repro_test_support/tests/t_owned_processes_stop_only_what_the_test_started.nim	nim	4
+libs/repro_test_support/tests/t_passthrough_monitor_parses_the_engine_wrapper_argv.nim	nim	2
 libs/repro_test_support/tests/t_scoped_env_restores_in_any_order.nim	nim	4
 libs/repro_test_support/tests/t_test_owned_runquotad_binds_on_hosts_with_a_runquota_account.nim	nim	2
 libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim	nim	1
