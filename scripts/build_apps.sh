@@ -1182,8 +1182,26 @@ esac
 #      in the sibling `bin`;
 #   3. the directory of `openssl.exe` on PATH;
 #   4. the DLLs themselves on PATH.
+#
+# The DLL names carry the Windows architecture (OpenSSL's mingw targets name
+# them libssl-3-x64.dll / libssl-3-arm64.dll); windows_openssl_arch picks the
+# suffix the same way windows/toolchain-utils.ps1's Get-WindowsArch does
+# (reprobuild-pm Distribution-And-Packaging.md §7.1, W4).
+windows_openssl_arch() {
+  case "${WINDOWS_DIY_ARCH_OVERRIDE:-}" in
+    x64|X64) echo x64; return ;;
+    arm64|ARM64) echo arm64; return ;;
+  esac
+  case "${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-}}" in
+    ARM64|arm64) echo arm64 ;;
+    *) echo x64 ;;
+  esac
+}
 case "${REPRO_HOST_PLATFORM}" in
   windows)
+    ssl_arch="$(windows_openssl_arch)"
+    libssl_dll="libssl-3-${ssl_arch}.dll"
+    libcrypto_dll="libcrypto-3-${ssl_arch}.dll"
     openssl_bin_dir=""
     openssl_candidates=()
     if [ -n "${REPRO_WINDOWS_OPENSSL_DIR:-}" ]; then
@@ -1199,25 +1217,25 @@ case "${REPRO_HOST_PLATFORM}" in
     if [ -n "${openssl_exe}" ]; then
       openssl_candidates+=("$(dirname "${openssl_exe}")")
     fi
-    libssl_on_path="$(command -v libssl-3-x64.dll 2>/dev/null || true)"
+    libssl_on_path="$(command -v ${libssl_dll} 2>/dev/null || true)"
     if [ -n "${libssl_on_path}" ]; then
       openssl_candidates+=("$(dirname "${libssl_on_path}")")
     fi
     for cand in ${openssl_candidates[@]+"${openssl_candidates[@]}"}; do
-      if [ -f "${cand}/libssl-3-x64.dll" ] && [ -f "${cand}/libcrypto-3-x64.dll" ]; then
+      if [ -f "${cand}/${libssl_dll}" ] && [ -f "${cand}/${libcrypto_dll}" ]; then
         openssl_bin_dir="${cand}"
         break
       fi
     done
     if [ -n "${openssl_bin_dir}" ]; then
-      for dll in libssl-3-x64.dll libcrypto-3-x64.dll; do
+      for dll in ${libssl_dll} ${libcrypto_dll}; do
         if [ ! "${openssl_bin_dir}/${dll}" -ef "build/bin/${dll}" ]; then
           cp -f "${openssl_bin_dir}/${dll}" "build/bin/${dll}"
         fi
       done
-      echo "Staged libssl-3-x64.dll and libcrypto-3-x64.dll from ${openssl_bin_dir} -> build/bin/"
+      echo "Staged ${libssl_dll} and ${libcrypto_dll} from ${openssl_bin_dir} -> build/bin/"
     else
-      windows_dll_staging_problem "libssl-3-x64.dll / libcrypto-3-x64.dll not found (REPRO_WINDOWS_OPENSSL_DIR, LIBRARY_PATH's OpenSSL, openssl.exe on PATH, PATH); cannot stage them next to the engine -- it will fail 'could not load: libssl-3-x64.dll' in a clean environment until OpenSSL is provisioned (windows/ensure-openssl.ps1)"
+      windows_dll_staging_problem "${libssl_dll} / ${libcrypto_dll} not found (REPRO_WINDOWS_OPENSSL_DIR, LIBRARY_PATH's OpenSSL, openssl.exe on PATH, PATH); cannot stage them next to the engine -- it will fail 'could not load: ${libssl_dll}' in a clean environment until OpenSSL is provisioned (windows/ensure-openssl.ps1)"
     fi
     ;;
 esac

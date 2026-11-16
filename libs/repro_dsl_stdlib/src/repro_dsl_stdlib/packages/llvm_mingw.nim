@@ -16,6 +16,14 @@
 ## should fall back to the nix realization or a distro-side llvm install. Not
 ## strictly within the M9.5 spec's glibc-2.17 honest-scope target —
 ## documented here for the operator's awareness.
+##
+## windows/aarch64 (hand-added 2026-11-16): the native C toolchain of the
+## windows-aarch64 leg, reprobuild-pm Distribution-And-Packaging.md §7.1, W1.
+## The aarch64-HOSTED UCRT asset of release 20261104; its sha256 is the one
+## GitHub publishes for the asset and is the same pin as
+## ``LLVM_MINGW_WIN_ARM64_*`` in ``windows/toolchain-versions.env``. It
+## carries ``gcc.exe``/``cc.exe`` driver names (clang target wrappers), which
+## is what the engine's windows-aarch64 bootstrap C compiler invokes.
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
@@ -47,3 +55,15 @@ package `llvm-mingw`:
       extractPath = "llvm-mingw-20260519-ucrt-ubuntu-22.04-x86_64",
       cpu = "x86_64",
       os = "linux"
+    tarball url = "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-ucrt-aarch64.zip",
+      sha256 = "7d7f8387a8706639b0b47a629d6e23f8b3ef9acce67e9832b8cd4c5bb2816eab",
+      archiveType = "zip",
+      executablePath = "bin/clang.exe",
+      extraExecutable = "bin/clang++.exe",
+      extraExecutable = "bin/gcc.exe",
+      extraExecutable = "bin/ld.lld.exe",
+      version = "20261104",
+      packageId = "llvm-mingw@20261104",
+      extractPath = "llvm-mingw-20261104-ucrt-aarch64",
+      cpu = "aarch64",
+      os = "windows"

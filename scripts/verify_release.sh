@@ -241,7 +241,19 @@ fi
 #      test passed on exactly the archives a user would find broken.
 #
 # Keep these in sync with the staging blocks in scripts/build_apps.sh.
-if [[ "$archive_name" == *.zip ]]; then
+if [[ "$archive_name" == *-windows-aarch64.zip ]]; then
+  # windows-aarch64 (reprobuild-pm Distribution-And-Packaging.md §7.1): clingo
+  # is built with llvm-mingw -static, so no MSVC runtime joins the closure,
+  # and OpenSSL's DLLs carry the arm64 suffix.
+  required_dlls=(
+    clingo.dll             # repro_solver ASP bindings — dlopen'd at MODULE INIT
+    libcrypto-3-arm64.dll  # OpenSSL, --define:ssl entry points
+    libssl-3-arm64.dll
+    libzstd.dll            # repro cache substitute, zstd frame decompression
+    sqlite3_64.dll         # repro_local_store
+    sqlite3.dll
+  )
+elif [[ "$archive_name" == *.zip ]]; then
   required_dlls=(
     clingo.dll             # repro_solver ASP bindings — dlopen'd at MODULE INIT
     vcruntime140.dll       # clingo.dll is MSVC-built; needs the VC++ redist

@@ -5982,6 +5982,19 @@ const
     "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z"
   BootstrapGccWindowsTarballSha256 =
     "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232"
+  # windows-aarch64's C compiler (reprobuild-pm Distribution-And-Packaging.md
+  # §7.1, W1): WinLibs publishes no aarch64 build and no maintained
+  # Windows-on-Arm-hosted GCC exists, so the arm64 engine compiles recipes with
+  # llvm-mingw, aarch64-hosted, UCRT -- the same archive as the catalog's
+  # ``llvm-mingw`` windows/aarch64 row and ``LLVM_MINGW_WIN_ARM64_*`` in
+  # ``windows/toolchain-versions.env``. It is recorded under its own identity;
+  # its ``gcc.exe`` is the clang target wrapper llvm-mingw ships under that
+  # name, which is the driver Nim's ``--cc:gcc`` invokes.
+  BootstrapLlvmMingwWindowsArm64Release* = "20261104"
+  BootstrapLlvmMingwWindowsArm64TarballUrl* =
+    "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-ucrt-aarch64.zip"
+  BootstrapLlvmMingwWindowsArm64TarballSha256* =
+    "7d7f8387a8706639b0b47a629d6e23f8b3ef9acce67e9832b8cd4c5bb2816eab"
 
 proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -6079,13 +6092,19 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
   for record in result.tarballProvisioning.mitems:
     record.detail.version = BootstrapNimVersion
 
-proc bootstrapGccToolUse*(): InterfaceToolUse =
-  result = InterfaceToolUse(
-    rawConstraint: "gcc",
-    packageSelector: "gcc",
-    executableName: "gcc")
-  when defined(windows):
-    result.packageSelector = "gcc-winlibs@16.1.0"
+proc windowsBootstrapCToolUse*(cpu: string): InterfaceToolUse =
+  ## The recipe-compile C compiler a Windows engine built for ``cpu`` (Nim's
+  ## ``hostCPU``) provisions: WinLibs GCC on ``amd64``, llvm-mingw on
+  ## ``arm64``. A pure function of ``cpu`` so either answer can be tested on
+  ## any host. A CPU with no Windows C toolchain pinned gets a use with no
+  ## realization, which acquisition refuses by name -- never another CPU's
+  ## compiler.
+  case cpu
+  of "amd64":
+    result = InterfaceToolUse(
+      rawConstraint: "gcc",
+      packageSelector: "gcc-winlibs@16.1.0",
+      executableName: "gcc")
     result.tarballProvisioning = @[
       InterfaceTarballProvisioning(
         packageName: "gcc",
@@ -6099,6 +6118,40 @@ proc bootstrapGccToolUse*(): InterfaceToolUse =
           BootstrapGccWindowsTarballSha256,
         cpu: "x86_64",
         os: "windows")]
+  of "arm64":
+    const packageId = "llvm-mingw@" & BootstrapLlvmMingwWindowsArm64Release
+    result = InterfaceToolUse(
+      rawConstraint: "llvm-mingw",
+      packageSelector: packageId,
+      executableName: "gcc")
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "llvm-mingw",
+        url: BootstrapLlvmMingwWindowsArm64TarballUrl,
+        sha256: BootstrapLlvmMingwWindowsArm64TarballSha256,
+        archiveType: "zip",
+        executablePath: "bin/gcc.exe",
+        stripComponents: 1,
+        packageId: packageId,
+        lockIdentity: "tarball:" & packageId & ":sha256:" &
+          BootstrapLlvmMingwWindowsArm64TarballSha256,
+        cpu: "aarch64",
+        os: "windows")]
+  else:
+    result = InterfaceToolUse(
+      rawConstraint: "gcc",
+      packageSelector: "gcc",
+      executableName: "gcc")
+
+proc bootstrapGccToolUse*(): InterfaceToolUse =
+  ## The recipe-compile C compiler for this host. The name is historical: on
+  ## windows-aarch64 it is llvm-mingw (``windowsBootstrapCToolUse``).
+  result = InterfaceToolUse(
+    rawConstraint: "gcc",
+    packageSelector: "gcc",
+    executableName: "gcc")
+  when defined(windows):
+    result = windowsBootstrapCToolUse(hostCPU)
   elif defined(linux):
     let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
     result.nixProvisioning = @[
@@ -6255,8 +6308,8 @@ type
   BootstrapCRoute* = enum
     ## How the bootstrap obtains the C compiler for a recipe compile.
     bcrArchive
-      ## The pinned winlibs gcc archive (Windows, which has no system C
-      ## compiler).
+      ## The pinned archive (Windows, which has no system C compiler):
+      ## winlibs gcc on x64, llvm-mingw on arm64 (``windowsBootstrapCToolUse``).
     bcrNix
       ## The pinned nixpkgs gcc (Linux hosts that have Nix).
     bcrSystem

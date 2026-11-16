@@ -60,18 +60,9 @@ function Copy-IntoBin {
         throw "stage-release-dlls: required source is missing: $SrcPath"
     }
     if ($DestName.EndsWith(".dll", [StringComparison]::OrdinalIgnoreCase)) {
-        # This release leg produces x64 images. Do not stage a same-named x86 DLL.
-        $stream = [IO.File]::OpenRead($SrcPath)
-        $reader = [IO.BinaryReader]::new($stream)
-        try {
-            if ($reader.ReadUInt16() -ne 0x5a4d) { throw "Invalid DOS header: $SrcPath" }
-            $stream.Position = 0x3c
-            $peOffset = $reader.ReadUInt32()
-            $stream.Position = $peOffset
-            if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) {
-                throw "stage-release-dlls: expected an x64 PE image: $SrcPath"
-            }
-        } finally { $reader.Dispose() }
+        # Every DLL staged is of the leg's own machine (0x8664 on x64, 0xAA64
+        # on windows-aarch64). Do not stage a same-named DLL of another one.
+        Assert-PeMachine -Path $SrcPath -Arch $script:releaseArch -Consumer "stage-release-dlls"
     }
     if ($ExpectedSha256) { Assert-FileSha256 -Path $SrcPath -Expected $ExpectedSha256 }
     $dest = Join-Path $binDir $DestName
@@ -157,6 +148,7 @@ function Expand-CondaPackage {
 Write-Host "=== Staging required runtime DLLs into $binDir ==="
 . (Join-Path $PSScriptRoot "toolchain-utils.ps1")
 $toolchain = Read-KeyValueFile -Path (Join-Path $PSScriptRoot "toolchain-versions.env")
+$script:releaseArch = Get-WindowsArch
 $toolchainRoot = $env:WINDOWS_DIY_INSTALL_ROOT
 if ([string]::IsNullOrWhiteSpace($toolchainRoot)) {
     throw "stage-release-dlls: WINDOWS_DIY_INSTALL_ROOT is required; source env.ps1 first."
@@ -188,6 +180,83 @@ foreach ($binding in @(
         throw "stage-release-dlls: $($binding.name) does not name the declared toolchain root."
     }
 }
+if ($script:releaseArch -eq "arm64") {
+    # ── windows-aarch64 (reprobuild-pm Distribution-And-Packaging.md §7.1) ──
+    # Every input is the arm64 pin the cold start installed or a pinned
+    # archive fetched here; nothing is searched for. clingo is built with
+    # llvm-mingw -static, so no MSVC runtime is staged, and the best-effort
+    # WinLibs runtime list below is replaced by the closure audit (W5).
+    $names = Get-WindowsArchRuntimeNames -Arch arm64
+    foreach ($binding in @(
+        @{ path = (Join-Path (Join-Path $toolchainRoot ("llvm-mingw/" + $toolchain["LLVM_MINGW_WIN_ARM64_RELEASE"])) "llvm-mingw.install.meta"); expected = @{
+            llvm_mingw_release = $toolchain["LLVM_MINGW_WIN_ARM64_RELEASE"]
+            llvm_mingw_archive_sha256 = $toolchain["LLVM_MINGW_WIN_ARM64_SHA256"].ToLowerInvariant() } },
+        @{ path = (Join-Path $opensslRoot "openssl.install.meta"); expected = @{
+            openssl_version = $toolchain["OPENSSL_VERSION"]
+            openssl_arch = "arm64"
+            openssl_msys2_release = $toolchain["OPENSSL_WIN_ARM64_MSYS2_RELEASE"]
+            openssl_archive_sha256 = $toolchain["OPENSSL_WIN_ARM64_SHA256"].ToLowerInvariant() } },
+        @{ path = (Join-Path $clingoRoot "clingo.install.meta"); expected = @{
+            clingo_version = $toolchain["CLINGO_VERSION"]
+            clingo_arch = "arm64"
+            clingo_archive_sha256 = $toolchain["CLINGO_WIN_ARM64_SHA256"].ToLowerInvariant() } }
+    )) {
+        $actual = Read-KeyValueFile -Path $binding.path
+        if (-not (Test-KeyValueFileMatches -Expected $binding.expected -Actual $actual)) {
+            throw "stage-release-dlls: source metadata does not match the declared pin: $($binding.path)"
+        }
+    }
+    foreach ($dll in $names.OpenSslDlls) {
+        Copy-IntoBin -SrcPath (Join-Path $opensslRoot "bin/$dll") -DestName $dll
+    }
+    Copy-IntoBin -SrcPath (Join-Path $clingoRoot "clingo.dll") -DestName "clingo.dll"
+
+    # zstd: MSYS2 clangarm64, the same environment as the OpenSSL above.
+    $zstdAsset = "$($names.Msys2PackagePrefix)-zstd-$($toolchain['ZSTD_WIN_ARM64_VERSION'])-$($toolchain['ZSTD_WIN_ARM64_MSYS2_RELEASE'])-any.pkg.tar.zst"
+    $zstdWork = Join-Path $tmp "zstd-arm64"
+    $zstdPkg = Get-VerifiedReleaseArchive -Url "https://repo.msys2.org/mingw/$($names.Msys2Env)/$zstdAsset" `
+        -Sha256 $toolchain["ZSTD_WIN_ARM64_SHA256"] -ArchivePath (Join-Path $zstdWork $zstdAsset)
+    $zstdOut = Join-Path $zstdWork ("stage-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $zstdOut | Out-Null
+    try {
+        & (Join-Path $env:SystemRoot "System32\tar.exe") -xf $zstdPkg -C $zstdOut
+        if ($LASTEXITCODE -ne 0) { throw "stage-release-dlls: tar failed extracting $zstdAsset (exit $LASTEXITCODE)" }
+        Copy-IntoBin -SrcPath (Join-Path $zstdOut "$($names.Msys2Env)/bin/libzstd.dll") -DestName "libzstd.dll"
+    } finally {
+        Remove-Item -LiteralPath $zstdOut -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # sqlite: sqlite.org's own arm64 DLL, under both names Nim's binding tries.
+    $sqliteStage = Download-Zip -Url ("https://www.sqlite.org/" + $toolchain["SQLITE_WIN_ARM64_ARCHIVE_PATH"]) `
+        -Sha256 $toolchain["SQLITE_WIN_ARM64_ARCHIVE_SHA256"] -OutDir (Join-Path $tmp "sqlite-arm64")
+    try {
+        foreach ($dll in @("sqlite3_64.dll", "sqlite3.dll")) {
+            Copy-IntoBin -SrcPath (Join-Path $sqliteStage "sqlite3.dll") -DestName $dll
+        }
+    } finally {
+        Remove-Item -LiteralPath $sqliteStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    # cacert.pem: as on x64 (best effort, not in the verify manifest).
+    if (-not (Test-Path -LiteralPath (Join-Path $binDir "cacert.pem"))) {
+        $cacertSrc = Find-FirstFile -Name "cacert.pem" -Roots @($nimDir, (Join-Path $nimRoot "dist"))
+        if ($null -ne $cacertSrc) {
+            Copy-IntoBin -SrcPath $cacertSrc -DestName "cacert.pem"
+        } else {
+            try {
+                Invoke-DownloadWithRetry { Invoke-WebRequest -Uri "https://curl.se/ca/cacert.pem" -OutFile (Join-Path $binDir "cacert.pem") }
+            } catch {
+                Write-Warning "stage-release-dlls: no cacert.pem staged ($($_.Exception.Message)); HTTPS at runtime will fail until one is beside repro.exe."
+            }
+        }
+    }
+
+    Assert-WindowsDllClosure -BinDir $binDir -Arch arm64
+    Write-Host "=== Runtime DLL staging complete (arm64) ==="
+    Get-ChildItem -LiteralPath $binDir -Filter *.dll | Select-Object -ExpandProperty Name | Sort-Object | ForEach-Object { Write-Host "  bin\$_" }
+    return
+}
+
 foreach ($binding in @(
     @{ path = (Join-Path $gccRoot "gcc.install.meta"); expected = @{
         gcc_version = $toolchain["GCC_VERSION"]

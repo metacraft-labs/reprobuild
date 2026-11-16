@@ -1,0 +1,131 @@
+# RESEARCH ONLY -- never merged. Development probe for the windows-aarch64 leg
+# (reprobuild-pm spec/Distribution-And-Packaging.md §7.1, plan step 6) while
+# eph-win-arm64 is down (2026-11-16, m3 GARM stopped). GitHub's hosted
+# windows-11-arm image is a documented exception (metacraft-dev-guidelines
+# ci-workflow-standards.md): named leg "reprobuild windows-arm64 probe", owner
+# the windows-aarch64 leg, follow-up: delete this branch once the ci.yml leg
+# runs on eph-win-arm64.
+#
+# The arm64 Nim prefix and clingo asset are not published yet (publication
+# runs on eph-win-arm64), so this job builds both the way their producers do,
+# serves them from a loopback HTTP server, and points the arm64 pins at it.
+# Everything after that is the real cold start: env.ps1 downloads, verifies
+# and installs each pinned input, then scripts/build_apps.sh builds reprobuild.
+name: research-windows-arm64-native-leg
+
+on:
+  push:
+    branches: [research/windows-arm64-native-leg]
+
+permissions:
+  contents: read
+
+jobs:
+  leg:
+    runs-on: windows-11-arm
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      WORK: C:\w
+      WINDOWS_DIY_INSTALL_ROOT: C:\t
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: reprobuild
+          persist-credentials: false
+      - name: Produce the unpublished inputs (Nim prefix, clingo)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force $env:WORK, "$env:WORK\serve" | Out-Null
+          . ./reprobuild/windows/toolchain-utils.ps1
+          $pins = Read-KeyValueFile -Path ./reprobuild/windows/toolchain-versions.env
+          # clingo, exactly as the producer workflow builds it.
+          & ./reprobuild/windows/build-clingo-windows-arm64.ps1 `
+            -ClingoVersion $pins['CLINGO_VERSION'] `
+            -ClingoTarballSha256 4ddd5975e79d7a0f8d126039f1b923a371b1a43e0e0687e1537a37d6d6d5cc7c `
+            -LlvmMingwRelease $pins['LLVM_MINGW_WIN_ARM64_RELEASE'] `
+            -LlvmMingwSha256 $pins['LLVM_MINGW_WIN_ARM64_SHA256'] `
+            -CMakeVersion 4.1.2 -CMakeSha256 396bb14c77d12615dfbd666ef6ecd67d3442eb449c321aad25d738216fd9962d `
+            -WorkRoot "$env:WORK\clingo" -OutDir "$env:WORK\serve" -ProducerRevision $env:GITHUB_SHA
+          # The Nim prefix, as the metacraft-labs/nim factory builds it, from
+          # the factory script at its probe revision.
+          git clone -q --depth 1 -b factory/windows-arm64-prefix-probe https://github.com/metacraft-labs/nim.git "$env:WORK\factory"
+          $seed = "$env:WORK\seed"
+          New-Item -ItemType Directory -Force $seed | Out-Null
+          # Seed from the official x64 2.2.8 compiler. The factory generates it
+          # on a native x64 runner; this probe has none, so the generator runs
+          # emulated here -- only the text seed comes out of it.
+          Invoke-WebRequest -Uri https://nim-lang.org/download/nim-2.2.8_x64.zip -OutFile "$env:WORK\nimx64.zip"
+          Assert-FileSha256 -Path "$env:WORK\nimx64.zip" -Expected $pins['NIM_WIN_X64_SHA256']
+          & "$env:SystemRoot\System32\tar.exe" -xf "$env:WORK\nimx64.zip" -C $env:WORK
+          $gsrc = "$env:WORK\gsrc"
+          git init -q $gsrc; git -C $gsrc fetch -q --depth 1 https://github.com/nim-lang/Nim.git 4f500679b196fad944caa50a753f5bbfaefda001; git -C $gsrc checkout -q FETCH_HEAD
+          git clone -q https://github.com/nim-lang/checksums.git "$gsrc\dist\checksums"; git -C "$gsrc\dist\checksums" checkout -q 0b8e46379c5bc1bf73d8b3011908389c60fb9b98
+          Push-Location $gsrc
+          & "$env:WORK\nim-2.2.8\bin\nim.exe" c --compileOnly --genScript --os:windows --cpu:arm64 --cc:gcc -d:release --skipUserCfg --skipParentCfg -d:nimKochBootstrap --hints:off "--lib:$gsrc\lib" "--nimcache:$seed\seed" compiler/nim.nim
+          Pop-Location
+          Set-Content "$seed\seed\SOURCE_ROOT" $gsrc -Encoding ascii
+          @('repo=https://github.com/nim-lang/Nim.git', 'commit=4f500679b196fad944caa50a753f5bbfaefda001', 'version=2.2.8', 'checksums=0b8e46379c5bc1bf73d8b3011908389c60fb9b98') | Set-Content "$seed\seed\SEED_SOURCE" -Encoding ascii
+          & "$env:SystemRoot\System32\tar.exe" -czf "$env:WORK\seed.tgz" -C $seed seed
+          & "$env:WORK\factory\scripts\windows-arm64-prefix.ps1" -Label nim-2.2.8 -Repo https://github.com/nim-lang/Nim.git `
+            -Commit 4f500679b196fad944caa50a753f5bbfaefda001 -Version 2.2.8 -SeedArchive "$env:WORK\seed.tgz" `
+            -LlvmMingwRelease $pins['LLVM_MINGW_WIN_ARM64_RELEASE'] -LlvmMingwSha256 $pins['LLVM_MINGW_WIN_ARM64_SHA256'] `
+            -WorkRoot "$env:WORK\nimw" -Evidence "$env:WORK\serve" -FactoryRevision probe
+          if (-not $?) { throw 'prefix build failed' }
+          (Get-FileHash -Algorithm SHA256 "$env:WORK\serve\nim-2.2.8-4f500679b196-windows-arm64.zip").Hash.ToLowerInvariant() + "  nim-2.2.8-4f500679b196-windows-arm64.zip" |
+            Add-Content "$env:WORK\serve\SHA256SUMS"
+          Get-ChildItem "$env:WORK\serve" | Format-Table Name, Length
+      - name: Serve them and pin the arm64 keys to the loopback copies
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Start-Process -FilePath python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', "$env:WORK\serve" -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+          $nimZip = Get-ChildItem "$env:WORK\serve" -Filter 'nim-2.2.8-*-windows-arm64.zip' | Select-Object -First 1
+          $clingoZip = Get-ChildItem "$env:WORK\serve" -Filter 'clingo-*-windows-arm64-*.zip' | Select-Object -First 1
+          @(
+            "NIM_WIN_ARM64_URL=http://127.0.0.1:8765/$($nimZip.Name)"
+            "NIM_WIN_ARM64_SHA256=$((Get-FileHash -Algorithm SHA256 $nimZip.FullName).Hash.ToLowerInvariant())"
+            "CLINGO_WIN_ARM64_URL=http://127.0.0.1:8765/$($clingoZip.Name)"
+            "CLINGO_WIN_ARM64_SHA256=$((Get-FileHash -Algorithm SHA256 $clingoZip.FullName).Hash.ToLowerInvariant())"
+          ) | Add-Content ./reprobuild/windows/toolchain-versions.env
+          Get-Content ./reprobuild/windows/toolchain-versions.env | Select-Object -Last 6
+      - name: Cold start (env.ps1) and the toolchain qualification
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location reprobuild
+          . ./env.ps1
+          . ./windows/toolchain-utils.ps1
+          foreach ($exe in @('nim', 'gcc', 'clang')) {
+            $p = (Get-Command $exe).Source
+            "{0,-6} {1}  machine 0x{2:X4}" -f $exe, $p, (Get-PeMachine $p)
+            Assert-PeMachine -Path $p -Arch arm64 -Consumer probe
+          }
+          nim -v | Select-Object -First 1
+          & ./windows/tests/test-toolchain-arch-pins.ps1
+          Get-ChildItem env: | Where-Object Name -match '^(REPRO_|WINDOWS_DIY|LIBRARY_PATH|BEARSSL)' | Format-Table -AutoSize
+          # Persist the environment env.ps1 built for the next step.
+          Get-ChildItem env: | ForEach-Object { "$($_.Name)=$($_.Value)" } | Out-File "$env:WORK\env.txt" -Encoding utf8
+      - name: Build reprobuild natively
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-Content "$env:WORK\env.txt" | ForEach-Object { $k, $v = $_ -split '=', 2; if ($k) { [Environment]::SetEnvironmentVariable($k, $v) } }
+          Set-Location reprobuild
+          bash ./scripts/build_apps.sh 2>&1 | Tee-Object "$env:WORK\build.log" | Select-Object -Last 80
+          if ($LASTEXITCODE) { throw "build_apps.sh exit $LASTEXITCODE" }
+          . ./windows/toolchain-utils.ps1
+          Get-ChildItem build/bin -File | Where-Object Extension -in '.exe', '.dll' | ForEach-Object {
+            "{0,-40} 0x{1:X4}" -f $_.Name, (Get-PeMachine $_.FullName)
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-arm64-leg-evidence
+          path: |
+            C:\w\build.log
+            reprobuild/test-logs/
+          if-no-files-found: warn
+          retention-days: 7
