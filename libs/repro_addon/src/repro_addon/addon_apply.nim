@@ -1880,7 +1880,7 @@ proc writeHeldTriggers*(stateDir: string; triggers: openArray[string]) =
   ## renamed into place), or remove the record when there are none.
   let p = heldTriggersPath(stateDir)
   if triggers.len == 0:
-    if fileExists(p): removeFile(p)
+    removeDurably(p)
     return
   writeHoldFile(p, triggers.join("\n") & "\n")
 
@@ -1941,7 +1941,8 @@ proc writeTriggerRestartEntries*(stateDir: string;
   ## remove it when there are no entries.
   let p = triggersToRestartPath(stateDir)
   if entries.len == 0:
-    if fileExists(p): removeFile(p)
+    # Durably: the directory is synced too (A13 review round 12).
+    removeDurably(p)
     return
   var text = ""
   for e in entries:
@@ -2077,7 +2078,17 @@ proc addonLiveHost*(): LiveHost =
       let r = runSystemctlArgs(["stop", "--", u])
       (r.exitCode == 0, r.output),
     resetFailed: proc (u: string) =
-      discard runSystemctlArgs(["reset-failed", "--", u]))
+      discard runSystemctlArgs(["reset-failed", "--", u]),
+    list: proc (pattern: string): seq[string] =
+      let r = runSystemctlArgs(["list-units", "--all", "--plain",
+                                "--no-legend", "--no-pager", "--", pattern])
+      if r.exitCode == 0:
+        for l in r.output.splitLines():
+          let w = l.splitWhitespace()
+          if w.len > 0 and w[0] notin result: result.add(w[0]),
+    startNoBlock: proc (u: string): tuple[ok: bool, output: string] =
+      let r = runSystemctlArgs(["start", "--no-block", "--", u])
+      (r.exitCode == 0, r.output))
 
 proc retryTriggerRestarts*(stateDir: string; host0: LiveHost = LiveHost()):
     tuple[ok: bool; lines: seq[string]] =
@@ -2198,15 +2209,25 @@ proc step7Dependants*(candidates, excluded: openArray[string];
         if d in candidates: result.add((unit: d, root: reached[u]))
 
 proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
-                                  host0: LiveHost = LiveHost()): seq[string] =
+                                  host0: LiveHost = LiveHost();
+                                  noBlock = false): seq[string] =
   ## The fixing switch starts what it resolves (the owner decision "the
-  ## fixing switch starts them", A13 review round 11): each trigger on record its generation
-  ## ``p`` resolves that systemd still loads, then the dependants recorded
-  ## with it and every dependant it resolves by its own renderings, in the
-  ## order recorded; each confirmed through systemd (``startConfirmed``). A
-  ## unit the generation removed is not started. Returns the problems: any
-  ## fails the switch (decision 160: a trigger that does not restart), and the record keeps its entries,
-  ## since only the commit clears them.
+  ## fixing switch starts them", A13 review round 11; and a full apply's
+  ## fixing path, "yes, same as 175", round 12): each trigger on record its
+  ## generation ``p`` resolves that systemd still loads, then the
+  ## dependants recorded with it and every dependant it resolves by its own
+  ## renderings, in the order recorded; each confirmed through systemd
+  ## (``startConfirmed``). A unit the generation removed is not started. One
+  ## systemd cannot be asked about fails closed: it is a problem, not
+  ## skipped (round 12). Returns the problems: any fails the switch
+  ## (decision 160: a trigger that does not restart), and the record keeps
+  ## its entries, since only a clean commit clears them.
+  ##
+  ## ``noBlock`` (a replay at boot, A13 review round 12, M4): each start is
+  ## queued (``systemctl start --no-block``) and not confirmed -- a floored
+  ## dependant is ordered after the re-assertion, so a blocking start could
+  ## wait out its timeout -- and the commit leaves the entries on record for
+  ## the boot-confirm unit or the next recover to confirm.
   when mutated("fixing-switch-skips-starts"):
     # FALSIFYING MUTATION: the fixing switch starts nothing.
     return
@@ -2219,8 +2240,26 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
       if (pass == 0) != (e.dependantOf.len == 0): continue
       var props: Table[string, string]
       try: props = host.show(e.unit)
-      except CatchableError: continue
+      except CatchableError as ex:
+        when not mutated("fixing-start-unreadable-skipped"):
+          # FALSIFYING MUTATION (when absent): a unit systemd cannot be
+          # asked about is skipped, and the commit clears its entry.
+          result.add("systemctl show " & e.unit & " (on record as one a " &
+            "revert could not start; this generation changes it, so it " &
+            "must be started and confirmed, §13 decision 160): systemd " &
+            "could not be asked: " & ex.msg)
+        continue
       if props.getOrDefault("LoadState") != "loaded": continue
+      if noBlock and not mutated("boot-fixing-starts-block"):
+        # FALSIFYING MUTATION (when absent): the boot replay's starts block.
+        if host.resetFailed != nil: host.resetFailed(e.unit)
+        let q = if host.startNoBlock != nil: host.startNoBlock(e.unit)
+                else: (ok: false, output: "no queued start on this host")
+        if not q.ok:
+          result.add("systemctl start --no-block " & e.unit & " (on record " &
+            "as one a revert could not start, §13 decision 160): " &
+            q.output.strip())
+        continue
       let s = startConfirmed(host, e.unit, mustStayActive = pass == 0)
       if not s.ok:
         result.add("systemctl start " & e.unit & " (on record as one a " &
@@ -8267,7 +8306,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           if not (purpose == "revert" or (replaying and opts.replayOf == "revert")) and
               hasTriggersToRestart(stateDir):
             for pr in startResolvedRestartEntries(stateDir,
-                                                  restartRecordProfile(user)):
+                                                  restartRecordProfile(user),
+                                                  noBlock = opts.nonBlockingStarts):
               problems.add("step 7 (start): " & pr)
         except CatchableError as ex:
           problems.add("step 7 (start): " & ex.msg)
@@ -8736,7 +8776,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # resolves -- it changes or removes the trigger or its units -- are done
   # with (the owner decision "allow the fixing apply"); a revert's own,
   # recorded against this generation, are not resolved by it.
-  for u in clearResolvedRestartEntries(stateDir, restartRecordProfile(user)):
+  # A boot replay only queued their starts (``nonBlockingStarts``, A13
+  # review round 12, M4): they stay on record until the boot-confirm unit or
+  # the next recover confirms them.
+  for u in (if opts.nonBlockingStarts and not mutated("boot-fixing-starts-block"):
+              newSeq[string]()
+            else: clearResolvedRestartEntries(stateDir, restartRecordProfile(user))):
     stderr.writeLine("repro-addon: " & u & " leaves the record of triggers " &
       "to restart: this generation changes or removes it or the units it " &
       "triggers")
