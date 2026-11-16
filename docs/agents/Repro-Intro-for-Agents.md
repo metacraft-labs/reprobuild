@@ -6,6 +6,15 @@ Reprobuild is a unified build, dependency, environment, and workspace tool.
 
 Reprobuild models the workspace as a directed acyclic graph (DAG) of type-checked actions defined in the **`repro.nim`** DSL. Sibling repositories declared as **`repos/*.toml`** fragments in the workspace root (whose policy lives in **`repro-workspace.toml`**) are routed dynamically using **`repro develop`** (develop-mode). Build hermeticity is enforced using the **`librepro_monitor_shim`** user-space filesystem interceptor, and execution is cached locally through a per-edge disk store fronted by a host-wide **shared-memory grow-only index** that every engine inserts into directly. Package toolchains are concretized using a **`clingo`** solver, and background services are orchestrated using **`servicePlaceholder`** declarations.
 
+## Non-Interactive CLI Execution for Agents
+
+When invoking `repro` from an automated tool call (with no interactive TTY):
+
+- **Run commands inside the project environment with `repro exec -- <cmd> [args...]`** — never invoke `repro shell`, which opens an interactive subshell and blocks non-TTY callers.
+- **Request structured output with `--json`** (or `--format=json` on `capabilities`): `repro version --json`, `repro health --json [--offline]`, `repro graph --json`, `repro why <target> --json`, `repro show-conventions --json`, `repro stats overview --json`, `repro pressure --json`.
+- **Preview host or account changes before applying**: run `repro infra plan` before `repro infra apply --plan <id>`, and `repro home plan` before `repro home apply`.
+- **Never hand-edit generated lock or scan files**: update `repro.lock` with `repro lock update [<dep>]` or `repro lock refresh`, and update `repro.scanned-deps.nim` with `repro deps refresh`.
+
 ## `repro` Is Two Binaries
 
 `repro` on `PATH` is a ~520 KB **thin daemon client**

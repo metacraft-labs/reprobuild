@@ -10,9 +10,6 @@ verifies:
   tests:
     - tests/integration/t_repro_version_verb.nim
 unverified:
-  - claim: "Every installer option and environment variable shown on this page."
-    reason: "The options block is meant to be generated from `scripts/install/repro-install.sh --help` and `repro-install.ps1 -?`; no generator exists yet, so the region is empty."
-    owner: unassigned
   - claim: "Each installation path on this page installs a working repro."
     reason: "No install scenario runs these commands in clean containers yet (the OpenTofu-style install test proposed for this page)."
     owner: unassigned
@@ -24,9 +21,6 @@ unverified:
     owner: unassigned
   - claim: "The Fedora and Alpine package lists for the release archive's C compiler precondition."
     reason: "Only the Debian list was run (a stock debian:12 container, 2026-11-11); the Fedora and Alpine lists are read from the deb/rpm dependency declarations and the distributions' package names."
-    owner: unassigned
-  - claim: "The version number shown in the archive commands."
-    reason: "Written as {{ repro.version }}; isonim-docs has no version interpolation yet."
     owner: unassigned
 ---
 
@@ -88,6 +82,44 @@ verifier, which a piped installer does not have. Use
 The installer's options:
 
 <!-- generated:begin installer-help sh -->
+```text
+Usage: repro-install.sh [OPTIONS]
+
+  --method auto|apt|dnf|pacman|tarball|nix|nixos|scoop
+                        Install method. "auto" detects the native package
+                        manager and falls back to "tarball" when there is
+                        no repository for this platform. On NixOS it is
+                        "nixos": print the configuration change that adds
+                        reprobuild from the metacraft-labs/nixpkgs fork,
+                        and install nothing. "nix" installs into your Nix
+                        profile from that fork (nix profile install).
+  --version VERSION     Install this exact version instead of the newest.
+  --uninstall           Remove the package, the repository registration
+                        and the trust anchor, then assert they are gone.
+  --prefix PATH         Tarball-install prefix (default /usr/local).
+  --dry-run             Print the commands that would run; change nothing.
+  --yes                 Do not prompt.
+  -h, --help            This text.
+
+Environment (see the comment block at the top of this file):
+  REPRO_BASE_URL        Point every fetch at one base URL. This is the
+                        single knob that retargets the installer at a
+                        local or mirrored host.
+  REPRO_REPO_DOMAIN     Repository domain (default metacraft-labs.com),
+                        used only when REPRO_BASE_URL is unset.
+  REPRO_DEB_URL REPRO_RPM_URL REPRO_ARCH_URL REPRO_DOWNLOADS_URL
+  REPRO_KEYS_URL        Per-ecosystem overrides.
+  REPRO_KEYRING_SHA256  Expected SHA-256 of the trust anchor (pinned to
+                        the organisation key; empty fails closed).
+  REPRO_ALLOW_UNPINNED_KEYRING=1
+                        Proceed with an unpinned keyring. For tests only.
+  REPRO_VERIFY_SCRIPT   Path to repro-verify-release.sh (tarball method).
+  REPRO_ALLOW_TEST_KEY=1
+                        Pass --allow-test-key to the verifier.
+  REPRO_NIX_BRANCH      Branch of the nixpkgs fork to use (nix, nixos), by
+                        its full name (nixos-26.05-metacraft); default:
+                        the one matching this system's channel.
+```
 <!-- generated:end -->
 
 ## Windows: the installer
@@ -112,6 +144,19 @@ irm https://get.reprobuild.com/pwsh | iex
 The installer's options:
 
 <!-- generated:begin installer-help pwsh -->
+```text
+Usage: .\repro-install.ps1 [PARAMETERS]
+
+  -Method <auto|scoop|tarball>   Install method (default: auto; registers Scoop bucket when Scoop is present).
+  -Version <VERSION>             Install this exact version instead of the newest.
+  -Uninstall                     Remove the package and clean up the shared bucket if unused.
+  -BaseUrl <URL>                 Point every fetch at one base URL (default: $env:REPRO_BASE_URL).
+  -Domain <DOMAIN>               Repository domain when -BaseUrl is unset (default: metacraft-labs.com).
+  -BucketUrl <URL>               Override the Scoop bucket Git URL (default: $env:REPRO_BUCKET_URL).
+  -Prefix <PATH>                 Destination directory for -Method tarball.
+  -DryRun                        Print the actions that would run; change nothing.
+  -Yes                           Accepted for scripting compatibility (the installer never prompts).
+```
 <!-- generated:end -->
 
 ## Nix and NixOS
@@ -160,7 +205,7 @@ Use `PLATFORM=linux-x86_64`.
 Use `PLATFORM=darwin-aarch64`.
 
 @tab Windows
-Download `reprobuild-<version>-windows-x86_64.zip` from the release page.
+Download `reprobuild-{{ repro.version }}-windows-x86_64.zip` from the release page.
 :::
 
 ### 2. Check the archive against the checksum file
@@ -178,7 +223,7 @@ shasum -a 256 --ignore-missing -c SHA256SUMS
 
 @tab Windows
 ```powershell
-Get-FileHash .\reprobuild-<version>-windows-x86_64.zip -Algorithm SHA256
+Get-FileHash .\reprobuild-{{ repro.version }}-windows-x86_64.zip -Algorithm SHA256
 ```
 
 Compare the printed hash with the archive's line in `SHA256SUMS`.
@@ -198,7 +243,7 @@ on its own does not start.
 :::
 
 :::important
-`repro` compiles each project's recipe with a C compiler. On Linux without
+`repro` compiles each project file with a C compiler. On Linux without
 Nix it uses the system C compiler at `/usr/bin/cc`, `/usr/bin/gcc` or
 `/usr/bin/clang`, and does not install one of its own. The archive does not
 carry one either, so install the compiler and the C library headers first,

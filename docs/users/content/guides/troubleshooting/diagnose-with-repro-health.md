@@ -70,6 +70,36 @@ repro health --json
 ## The checks
 
 <!-- generated:begin cli-reference health checks -->
+| Check | What it inspects | Safe `--fix` |
+|---|---|---|
+| `binary-cache-producer-key` | Checks whether an unused auto-generated binary-cache producer keypair sits on disk without publisher configuration. | No |
+| `install-version` | Reports the running `repro` version and executable path. | No |
+| `daemon-mode` | Reports whether the per-user store daemon is running or `repro` is operating in single-user direct mode. | Yes (starts user daemon) |
+| `lease-reaper` | Checks whether the daemon's wall-clock lease reaper is completing sweeps over leased ephemeral state. | No |
+| `store` | Verifies that the content-addressed store root exists and its SQLite index opens cleanly. | No |
+| `direnv` | Checks whether `direnv` is installed and any workspace `.envrc` is trusted. | Yes (`direnv allow`) |
+| `workspace` | Verifies that an initialised workspace marker exists at the workspace root. | No |
+| `manifest` | Resolves the active workspace project set and checks its manifests. | Yes (migrates retired state file) |
+| `root-role-manifests` | Checks that every declared branch role of the workspace root loads its manifests cleanly. | No |
+| `siblings` | Checks that every repository declared in the active workspace project set is cloned on disk. | Yes (clones missing checkouts) |
+| `vcs-host-auth` | Confirms that a usable `git` binary is resolvable for workspace operations. | No |
+| `repository-identities` | Compares declared repository URLs against canonical forge identities to spot renames or redirects. | No |
+| `vcs-hooks` | Verifies that managed Git hooks are installed, unshadowed, worktree-safe and contract-compatible across participating repositories. | Yes (missing, shadowed, path-unsafe) |
+| `chained-hooks` | Checks that any chained `<hook>.repro-local` scripts name interpreters and executables that exist. | No |
+| `hook-interpreter` | Verifies that shells on this host resolve the same `repro` binary that wrote the managed Git hooks. | No |
+| `certificate-propagation` | Reports certificate store roots, linked library version, `pre-push` carrier status and policy configuration. | No |
+| `lock-writer` | Reads the `post-commit` lock-writer trace to surface silent lock-refresh refusals. | No |
+| `push-gateway` | Compares participating repositories' push remotes against their enacted test-certificate gate policy. | No |
+| `sibling-exact-pins` | Lists informational exact commit pins of workspace siblings across participating project files. | No |
+| `toolchain` | Confirms that the platform Git toolchain required by workspace operations is provisioned. | No |
+| `certificate-policy` | Reads each participating repository's `repro.lock` certificate policy and validates its branch rules. | No |
+| `workspace-ergonomics` | Checks that `workspace-projects.md` exists, is ignored in `.gitignore` and is referenced in `AGENTS.md`. | Yes |
+| `workspace-state-file` | Checks `.repro/workspace-state.toml` for retired filenames or misplaced manifest layers. | Yes (when unskewed) |
+| `local-settings-file` | Reports when per-user `repro-workspace.local.toml` is accidentally tracked by Git. | No |
+| `unpublished-heads` | Warns when participating checkouts sit at local commits that exist on no remote. | No |
+| `disjoint-local-branches` | Warns about unpublished local branches that share no merge-base with the repository's mainline. | No |
+| `shared-clone-leaves` | Inspects checkouts borrowing from shared bare clones for missing pools, broken refetch chains or stale remote refs. | Yes (pools, chains, stale remote refs) |
+| `certificate-policy-snapshot` | Warns when a repository's recorded certificate-policy snapshot in `repro.lock` is behind its project file. | No |
 <!-- generated:end -->
 
 ## Related
