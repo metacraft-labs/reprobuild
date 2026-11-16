@@ -178,12 +178,18 @@ jobs:
         if: always()
         run: |
           "gates=${{ steps.gates.outcome }} stage=${{ steps.stage.outcome }} package=${{ steps.package.outcome }}"
+      # upload-artifact roots every path at the workspace; copy the log in.
+      - name: Collect evidence
+        if: always()
+        run: |
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          Copy-Item -ErrorAction SilentlyContinue "$env:WORK\build.log" evidence/
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows-arm64-leg-evidence
           path: |
-            C:\w\build.log
+            evidence/
             test-logs/
           if-no-files-found: warn
           retention-days: 7
