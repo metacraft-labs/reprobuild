@@ -10295,8 +10295,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 10,
-      "staticCaseCount": 39,
+      "sourceSuiteCount": 11,
+      "staticCaseCount": 41,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

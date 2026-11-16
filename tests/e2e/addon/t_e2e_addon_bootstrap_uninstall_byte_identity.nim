@@ -191,9 +191,17 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
   step("round 3: the takeover gave the inputs the add-on's modes (recorded)", true, taken)
   # The deploy agent's writes: the floor bumped in place, a floor for a
   # target the preflight never saw (§13 decision 168).
-  let ag = g.exec("printf '8\\n' > /var/lib/repro/agent/state/deploy-agent/" &
-    R3Target & ".seq && printf '41\\n' > /var/lib/repro/agent/state/deploy-agent/rpi3.seq && " &
-    "chmod 0600 /var/lib/repro/agent/state/deploy-agent/rpi3.seq")
+  # The agent writes a floor to a temporary name and renames it into place
+  # (a new inode at every tick), so the inodes the uninstall must keep are
+  # the ones these writes leave.
+  const Records = "/var/lib/repro/agent/state/deploy-agent/"
+  let ag = g.exec("printf '8\\n' > " & Records & R3Target & ".seq.tmp && " &
+    "chmod 0600 " & Records & R3Target & ".seq.tmp && mv " & Records &
+    R3Target & ".seq.tmp " & Records & R3Target & ".seq && " &
+    "printf '41\\n' > " & Records & "rpi3.seq.tmp && chmod 0600 " & Records &
+    "rpi3.seq.tmp && mv " & Records & "rpi3.seq.tmp " & Records & "rpi3.seq")
+  let floorIno = g.exec("stat -c '%i' " & Records & R3Target & ".seq " &
+                        Records & "rpi3.seq").stdout
   step("round 3: the agent's floors are written", ag.exitCode == 0, ag.stdout & ag.stderr)
   # The crash leg: system/ a mount point, so the rmdir after the ledger
   # copy fails (EBUSY). /var/lib/repro itself is an input and never removed,
@@ -208,10 +216,15 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
   for f in R3Files:
     let a = pre.getOrDefault(f).splitWhitespace()
     let b = mid.getOrDefault(f).splitWhitespace()
-    if a.len < 4 or b.len < 4 or a[0] != b[0] or
+    if a.len < 4 or b.len < 4 or (a[0] != b[0] and not f.endsWith(".seq")) or
         (a[3] != b[3] and not f.endsWith(".seq")):
       intact = false
       why.add(f & ": " & a.join(" ") & " -> " & b.join(" ") & "\n")
+  let midFloors = g.exec("stat -c '%i' " & Records & R3Target & ".seq " &
+                         Records & "rpi3.seq").stdout
+  if midFloors != floorIno:
+    intact = false
+    why.add("floors' inodes " & floorIno.strip() & " -> " & midFloors.strip() & "\n")
   step("round 3: an uninstall stopped after the ledger copy leaves the " &
        "token and every input intact",
        u1.exitCode != 0 and tokenThere and ledgerGone and intact,
@@ -227,17 +240,22 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
     let w = post.getOrDefault(k)
     let a = v.splitWhitespace()
     let b = w.splitWhitespace()
-    if b.len < 3 or a[0] != b[0] or a[1] != b[1] or a[2] != b[2]:
+    let isFloor = k.endsWith(R3Target & ".seq")
+    if b.len < 3 or (a[0] != b[0] and not isFloor) or a[1] != b[1] or
+        a[2] != b[2]:
       diffs.add(k & ": " & v & " -> " & w)
     elif a.len == 4 and not k.endsWith(R3Target & ".seq") and
         (b.len < 4 or a[3] != b[3]):
       diffs.add(k & ": bytes " & v & " -> " & w)
   step("round 3: every input keeps its inode, bytes, prior mode and owner",
        diffs.len == 0, diffs.join("\n"))
-  let floors = g.run("cat /var/lib/repro/agent/state/deploy-agent/" & R3Target &
-    ".seq /var/lib/repro/agent/state/deploy-agent/rpi3.seq 2>&1")
-  step("round 3: both floors stay, as the agent wrote them",
-       floors == "8\n41\n", floors)
+  let floors = g.exec("cat " & Records & R3Target & ".seq " & Records &
+                      "rpi3.seq; stat -c '%i' " & Records & R3Target & ".seq " &
+                      Records & "rpi3.seq")
+  step("round 3: both floors stay", floors.exitCode == 0 and
+       floors.stdout == "8\n41\n" & floorIno,
+       "exit " & $floors.exitCode & "\n" & floors.stdout & floors.stderr &
+       "\ninodes after the agent's writes: " & floorIno)
   # The comparison with the staged host: the agent's own writes undone in
   # place first (the bump and the second target are not the add-on's).
   discard g.run("printf '7\\n' > /var/lib/repro/agent/state/deploy-agent/" &
