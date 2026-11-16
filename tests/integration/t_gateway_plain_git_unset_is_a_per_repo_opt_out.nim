@@ -37,6 +37,10 @@
 ##      the record while the ``pushurl`` stays): ``migrate`` reports it already
 ##      wired and back-fills the record, so the plain-git opt-out then holds for
 ##      it too. Without the back-fill this arm's second ``migrate`` re-wires.
+##   5. The back-fill writes only an ABSENT record. A record that disagrees with
+##      the live ``pushurl`` is left as it is, both when the gateway is complete
+##      (``already wired``) and when an incomplete gateway is rebuilt behind the
+##      same ``pushurl`` (``wired``): neither run rewrites it.
 ##
 ## Test doubles: none. The origin is a local bare reached over ``file://``, so
 ## there is no network. ``REPRO_WORKSPACE_CLONES`` points the cache root inside
@@ -245,3 +249,25 @@ suite "a plain-git pushurl unset is a per-repo push-gateway opt-out":
       let quiet = migrate(fx)
       check "lib-a: already wired" in quiet.output
       check "recorded provenance" notin quiet.output
+
+      # ARM 5 — a disagreeing record is never rewritten by the back-fill.
+      const elsewhere = "/elsewhere/not-this-gateway"
+      check gitConfig(fx, "reprobuild.pushGateway.setBy") == "reprobuild"
+      discard must(q(gitBin) & " -C " & q(fx.repoPath) &
+        " config reprobuild.pushGateway.value " & q(elsewhere))
+      let keep = migrate(fx)
+      check keep.code == 0
+      check "lib-a: already wired" in keep.output
+      check "recorded provenance" notin keep.output
+      check gitConfig(fx, "reprobuild.pushGateway.value") == elsewhere
+      # Make the gateway incomplete so the run rebuilds it behind the
+      # pushurl that already names it.
+      let preReceive = gateway / "hooks" / "pre-receive"
+      check fileExists(preReceive)
+      removeFile(preReceive)
+      let rebuilt = migrate(fx)
+      check rebuilt.code == 0
+      check "lib-a: wired ->" in rebuilt.output
+      check fileExists(preReceive)
+      check pushurl(fx) == gateway
+      check gitConfig(fx, "reprobuild.pushGateway.value") == elsewhere

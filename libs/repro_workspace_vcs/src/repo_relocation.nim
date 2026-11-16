@@ -25,11 +25,17 @@
 ##    copied it would be correct only until the first item nobody thought of,
 ##    and that omission is exactly the data loss this mechanism exists to
 ##    prevent.
-## 2. **Copy, verify, then delete — never reordered.** Across filesystems a
-##    rename is unavailable, so the fallback copies, RE-CAPTURES at the
-##    destination, requires an exact match, and only then removes the source. A
-##    mismatch keeps BOTH copies: two copies of the work is a recoverable
-##    state, a deleted source beside an incomplete destination is not.
+## 2. **Copy, verify, then set the source aside — never delete it.** Across
+##    filesystems a rename is unavailable, so the fallback copies every entry
+##    with its mode, compares the WHOLE tree — `.git` and ignored files
+##    included, byte for byte — re-captures git's view at the destination, and
+##    only when all of that matches renames the source to
+##    `<prior>.relocated-<UTC stamp>` beside itself. A mismatch keeps BOTH
+##    copies where they are. Nothing here deletes the source: a verification
+##    can only be as complete as the list of things it thought to compare,
+##    and a deleted source is the one outcome a missed item cannot be
+##    recovered from (reprobuild-pm
+##    issues/2026-11-12-cross-filesystem-relocation-deletes-the-source-after-a-verification-that-misses-most-local.md).
 ## 3. **Presence, not reachability.** The shared-object probe asks whether an
 ##    object id EXISTS in a store, via `git cat-file -e`. `git filter-repo`
 ##    rewrites commits and trees but carries blobs across, so blob presence
@@ -59,7 +65,9 @@
 
 {.push raises: [].}
 
-import std/[algorithm, os, sets, strutils]
+import std/[algorithm, os, sets, strutils, times]
+when defined(posix):
+  import std/posix
 import git_tool
 
 proc cRename(oldname, newname: cstring): cint
@@ -156,6 +164,11 @@ type
     ok*: bool
     verificationFailed*: bool
     crossFilesystem*: bool
+    retainedSource*: string
+      ## Where the source of a successful cross-filesystem move now lives:
+      ## renamed aside to `<prior>.relocated-<UTC stamp>`, or left at the prior
+      ## path when even that rename failed. Empty for a plain rename, which
+      ## leaves nothing behind. Never deleted by this module.
     diagnostic*: string
 
 const
@@ -856,21 +869,276 @@ proc sampleBlobIds*(probe: RelocationGitProbe; dir, treeish: string;
     index += stride
   picked
 
+type
+  TreeEntryKind = enum
+    ## What one directory entry is, asked WITHOUT following a symlink. The
+    ## copy and the comparison both need the entry itself: following a link
+    ## would copy (and compare) whatever it points at, possibly outside the
+    ## tree, and lose the link.
+    tekDirectory, tekFile, tekSymlink, tekSpecial
+
+proc treeEntryKind(path: string): TreeEntryKind {.raises: [OSError].} =
+  when defined(posix):
+    var st: Stat
+    if lstat(path.cstring, st) != 0'i32:
+      raiseOSError(osLastError(), path)
+    if S_ISLNK(st.st_mode): tekSymlink
+    elif S_ISDIR(st.st_mode): tekDirectory
+    elif S_ISREG(st.st_mode): tekFile
+    else: tekSpecial
+  else:
+    let info = getFileInfo(path, followSymlink = false)
+    case info.kind
+    of pcDir: tekDirectory
+    of pcFile: tekFile
+    of pcLinkToFile, pcLinkToDir: tekSymlink
+
+proc entryMode(path: string): int {.raises: [OSError].} =
+  ## The full permission word of an entry that is not a symlink, setuid,
+  ## setgid and sticky bits included (`getFilePermissions` drops those three).
+  ## Windows has no mode word worth carrying: `copyFile` carries the
+  ## attributes there, so the comparison has nothing to compare.
+  when defined(posix):
+    var st: Stat
+    if lstat(path.cstring, st) != 0'i32:
+      raiseOSError(osLastError(), path)
+    int(st.st_mode) and 0o7777
+  else:
+    0
+
+proc setEntryMode(path: string; mode: int) {.raises: [OSError].} =
+  when defined(posix):
+    if chmod(path.cstring, Mode(mode)) != 0'i32:
+      raiseOSError(osLastError(), path)
+  else:
+    discard
+
+proc copyTreeInto(source, destination: string)
+    {.raises: [OSError, IOError, ValueError].} =
+  ## Copy one directory, recursively, carrying each entry as what it is: a
+  ## directory as a directory, a regular file with its content AND its mode, a
+  ## symlink as the same link. A FIFO, socket or device node cannot be carried
+  ## by a copy, so it is a copy failure (and therefore a refusal with the
+  ## source untouched) rather than something silently dropped or, worse,
+  ## opened: reading a FIFO blocks until a writer appears.
+  ##
+  ## `std/os.copyDir` is not used because it drops every permission bit on
+  ## POSIX — an executable hook arrives as an inert file and git skips it
+  ## with a hint nobody reads — and `copyDirWithPermissions` drops setuid,
+  ## setgid and sticky bits and, by default, ignores a mode it failed to set.
+  ## A directory's own mode is applied AFTER its contents, so a read-only
+  ## directory can still be filled.
+  createDir(destination)
+  for _, path in walkDir(source, skipSpecial = false):
+    let target = destination / path.extractFilename
+    case treeEntryKind(path)
+    of tekDirectory:
+      copyTreeInto(path, target)
+    of tekSymlink:
+      when defined(posix):
+        createSymlink(expandSymlink(path), target)
+      else:
+        # `expandSymlink` cannot read a link's target on Windows (it returns
+        # the link's own path), so a "copy" would be a link back into the
+        # source. Refused as a copy failure, like a FIFO, rather than made
+        # wrong and left for the verification to trip over.
+        raise newException(OSError, "'" & path & "' is a symbolic link, " &
+          "whose target cannot be read on this platform, so a copy cannot " &
+          "carry it")
+    of tekFile:
+      copyFile(path, target, {cfSymlinkAsIs})
+      when defined(posix):
+        setEntryMode(target, entryMode(path))
+    of tekSpecial:
+      raise newException(OSError, "'" & path & "' is a FIFO, socket or " &
+        "device node, which a copy cannot carry")
+  when defined(posix):
+    setEntryMode(destination, entryMode(source))
+
 proc copyTreeVerbatim(source, destination: string):
     tuple[ok: bool; diagnostic: string] =
-  ## `copyDir`, which copies symlinks AS symlinks on every non-Windows OS
-  ## (`cfSymlinkAsIs`) and skips them on Windows. `skipSpecial = false` keeps
-  ## FIFOs and device nodes in scope rather than silently dropping them, so a
-  ## tree carrying one produces a copy failure — and therefore a refusal with
-  ## both copies intact — instead of a destination the verify step would have
-  ## to catch.
   try:
-    copyDir(source, destination, skipSpecial = false)
+    copyTreeInto(source, destination)
     (true, "")
-  except OSError as err:
-    (false, err.msg)
   except CatchableError as err:
     (false, err.msg)
+
+proc grantOwnerAccessToDirectories(dir: string) =
+  ## Best effort, for removing a copy that failed part-way: give every
+  ## directory under `dir` (and `dir` itself) owner read, write and search
+  ## permission, without following symlinks. `copyTreeInto` applies a
+  ## directory's own mode only after its contents, so a read-only directory it
+  ## completed before failing would otherwise stop `removeDir` half-way and
+  ## leave a partial checkout at the declared path. Only ever called on the
+  ## destination this module just created, never on the source.
+  when defined(posix):
+    try:
+      if treeEntryKind(dir) != tekDirectory:
+        return
+      let mode = entryMode(dir)
+      if (mode and 0o700) != 0o700:
+        setEntryMode(dir, mode or 0o700)
+      for _, path in walkDir(dir, skipSpecial = false):
+        if treeEntryKind(path) == tekDirectory:
+          grantOwnerAccessToDirectories(path)
+    except CatchableError:
+      discard
+  else:
+    discard
+
+proc sortedEntryNames(dir: string): seq[string] {.raises: [OSError].} =
+  for _, path in walkDir(dir, relative = true, skipSpecial = false):
+    result.add(path)
+  result.sort()
+
+proc sameFileContent(a, b: string): bool {.raises: [IOError].} =
+  ## Byte-for-byte. Not a size check and not a hash of one side: a copy cut
+  ## short by ENOSPC can be the right size (a sparse or pre-allocated file) and
+  ## a hash would read both files in full anyway.
+  const chunk = 65536
+  var fa, fb: File
+  if not open(fa, a, fmRead):
+    raise newException(IOError, "cannot open '" & a & "'")
+  defer: close(fa)
+  if not open(fb, b, fmRead):
+    raise newException(IOError, "cannot open '" & b & "'")
+  defer: close(fb)
+  var bufA = newString(chunk)
+  var bufB = newString(chunk)
+  while true:
+    let readA = readBuffer(fa, addr bufA[0], chunk)
+    let readB = readBuffer(fb, addr bufB[0], chunk)
+    if readA != readB:
+      return false
+    if readA == 0:
+      return true
+    if not equalMem(addr bufA[0], addr bufB[0], readA):
+      return false
+
+proc compareTrees(source, destination, rel: string): string
+    {.raises: [OSError, IOError].} =
+  let here = if rel.len == 0: "." else: rel
+  let namesA = sortedEntryNames(source)
+  let namesB = sortedEntryNames(destination)
+  if namesA != namesB:
+    let setB = namesB.toHashSet()
+    for name in namesA:
+      if name notin setB:
+        return "'" & (if rel.len == 0: name else: rel / name) &
+          "' is missing from the copy"
+    let setA = namesA.toHashSet()
+    for name in namesB:
+      if name notin setA:
+        return "'" & (if rel.len == 0: name else: rel / name) &
+          "' is in the copy but not in the source"
+  for name in namesA:
+    let a = source / name
+    let b = destination / name
+    let relName = if rel.len == 0: name else: rel / name
+    let kindA = treeEntryKind(a)
+    let kindB = treeEntryKind(b)
+    if kindA != kindB:
+      return "'" & relName & "' is a " & $kindA & " in the source but a " &
+        $kindB & " in the copy"
+    case kindA
+    of tekSymlink:
+      let targetA = expandSymlink(a)
+      let targetB = expandSymlink(b)
+      if targetA != targetB:
+        return "'" & relName & "' differs in its symlink target ('" &
+          targetA & "' vs '" & targetB & "')"
+    of tekDirectory, tekFile, tekSpecial:
+      let modeA = entryMode(a)
+      let modeB = entryMode(b)
+      if modeA != modeB:
+        return "'" & relName & "' differs in permissions (" &
+          modeA.toOct(4) & " vs " & modeB.toOct(4) & ")"
+      if kindA == tekDirectory:
+        let inner = compareTrees(a, b, relName)
+        if inner.len > 0:
+          return inner
+      elif kindA == tekFile:
+        let sizeA = getFileSize(a)
+        let sizeB = getFileSize(b)
+        if sizeA != sizeB:
+          return "'" & relName & "' differs in size (" & $sizeA & " vs " &
+            $sizeB & " bytes)"
+        if not sameFileContent(a, b):
+          return "'" & relName & "' differs in content"
+  ""
+
+proc treeDifference*(source, destination: string): string =
+  ## "" when `destination` holds exactly the entries of `source` — every
+  ## path, `.git` and ignored files included, each of the same kind, with the
+  ## same mode, the same symlink target and the same bytes — else the FIRST
+  ## difference, named by its path relative to the tree. Modification times,
+  ## ownership and extended attributes are not compared: a copy by an
+  ## unprivileged user cannot carry ownership, and a changed mtime costs git
+  ## only an index refresh.
+  ##
+  ## A comparison that could not be completed is a difference, not a match:
+  ## "we could not tell" must never read as "it matched" on the path that
+  ## ends with the source being set aside.
+  try:
+    for root in [source, destination]:
+      if treeEntryKind(root) != tekDirectory:
+        return "'" & root & "' is not a directory"
+    compareTrees(source, destination, "")
+  except CatchableError as err:
+    "the comparison could not be completed (" & err.msg & ")"
+
+proc verifyRelocatedCopy*(probe: RelocationGitProbe;
+                          source, destination: string;
+                          before: CheckoutCapture): string =
+  ## Declared-Repository-Renames.md §3.4 step 3. "" when the copy at
+  ## `destination` is the checkout at `source`, else the first mismatch,
+  ## named.
+  ##
+  ## Two comparisons, in this order. The WHOLE-TREE comparison first, because
+  ## it is the one that sees what git's own view omits — ignored files (an
+  ## `.env`, local data), every object and pack under `.git`, `.git/config`,
+  ## hooks and their executable bits, the `rerere` cache — and because it must
+  ## run before any git command touches the destination (`git status` may
+  ## rewrite the index with the copy's own stat data). Then git's view, the
+  ## pre-move `before` capture against a fresh one, which proves git reads
+  ## the copy as the same checkout.
+  ##
+  ## `git fsck --connectivity-only` is deliberately not part of it. The tree
+  ## comparison already proves every object file arrived byte for byte, and
+  ## fsck answers a different question — whether the SOURCE was complete — on
+  ## which a workspace checkout borrowing from a partial shared clone answers
+  ## "missing" by design, so it would refuse moves that lose nothing.
+  let tree = treeDifference(source, destination)
+  if tree.len > 0:
+    return tree
+  let after = captureCheckoutState(probe, destination)
+  if not after.ok:
+    return "git could not read the copy (" & after.diagnostic & ")"
+  sameState(before, after)
+
+proc retainedSourcePath*(source: string; stamp: DateTime): string =
+  ## `<source>.relocated-<UTC stamp>`, beside the source and therefore on the
+  ## SAME filesystem, so setting the source aside is one atomic `rename(2)`.
+  ## The stamp names when it was set aside; a numeric suffix keeps a second
+  ## relocation within the same second from colliding with the first.
+  var stampText = ""
+  try:
+    stampText = stamp.utc.format("yyyyMMdd'T'HHmmss'Z'")
+  except CatchableError:
+    stampText = "unknown-time"
+  let base = source & ".relocated-" & stampText
+  result = base
+  var counter = 2
+  while true:
+    var taken = true
+    try:
+      taken = fileExists(result) or dirExists(result) or symlinkExists(result)
+    except CatchableError:
+      taken = true
+    if not taken:
+      return
+    result = base & "-" & $counter
+    inc counter
 
 proc relocateCheckout*(probe: RelocationGitProbe;
                        source, destination: string;
@@ -878,10 +1146,11 @@ proc relocateCheckout*(probe: RelocationGitProbe;
   ## Move the checkout at `source` to `destination`
   ## (Declared-Repository-Renames.md §3.4).
   ##
-  ## A single `moveDir` first, which is `rename(2)` within a filesystem and
-  ## therefore atomic. Only when that fails with a cross-device error does the
-  ## copy-verify-delete fallback run, and it runs in that order with no
-  ## shortcut: a mismatch at the verify step keeps both copies and refuses.
+  ## A single `rename(2)` first, atomic within a filesystem. Only when that
+  ## fails does the copy-verify-set-aside fallback run, in that order with no
+  ## shortcut: a mismatch at the verify step keeps both copies and refuses,
+  ## and a match renames the source aside (`retainedSource`) — it is never
+  ## deleted here.
   ##
   ## `before` is the pre-move capture. It is REQUIRED rather than taken here,
   ## because the same capture feeds the rewritten-history detection downstream
@@ -926,39 +1195,48 @@ proc relocateCheckout*(probe: RelocationGitProbe;
   if not copied.ok:
     # Nothing is half-moved: the source is untouched, and whatever the copy
     # managed to write is removed so a re-run does not find a partial
-    # destination and mistake it for an occupied one.
+    # destination and mistake it for an occupied one. The copy's read-only
+    # directories are made writable first, or the removal stops at the first
+    # one. If the removal still fails, the report says a partial copy is
+    # there rather than letting it pass as nothing.
+    var leftover = ""
     try:
       if dirExists(destination):
+        grantOwnerAccessToDirectories(destination)
         removeDir(destination)
-    except CatchableError:
-      discard
+    except CatchableError as err:
+      leftover = "; the partial copy at '" & destination &
+        "' could not be removed (" & err.msg & ") — delete it before re-running"
     return RelocationMoveResult(ok: false,
       diagnostic: "rename failed (" & renameDiagnostic &
-        ") and the copy fallback failed too (" & copied.diagnostic & ")")
+        ") and the copy fallback failed too (" & copied.diagnostic & ")" &
+        leftover)
 
-  let after = captureCheckoutState(probe, destination)
-  if not after.ok:
-    return RelocationMoveResult(ok: false, verificationFailed: true,
-      crossFilesystem: true,
-      diagnostic: "copied '" & source & "' to '" & destination &
-        "' but could not re-capture its state to verify the copy (" &
-        after.diagnostic & "); BOTH copies were kept and the source was NOT " &
-        "deleted")
-  let mismatch = sameState(before, after)
+  let mismatch = verifyRelocatedCopy(probe, source, destination, before)
   if mismatch.len > 0:
     return RelocationMoveResult(ok: false, verificationFailed: true,
       crossFilesystem: true,
       diagnostic: "copied '" & source & "' to '" & destination &
-        "' but the post-copy comparison does not match on " & mismatch &
-        "; BOTH copies were kept and the source was NOT deleted")
-  try:
-    removeDir(source)
-  except CatchableError as err:
+        "' but the post-copy verification does not match: " & mismatch &
+        "; BOTH copies were kept and the source was NOT touched")
+
+  # Verified. The source is SET ASIDE, not deleted: a rename beside itself
+  # (same filesystem, so atomic) takes it off the prior path, which is all
+  # the relocation needs, and leaves the decision to delete it with the
+  # operator, who can see both copies.
+  let retained = retainedSourcePath(source, now())
+  if cRename(source.cstring, retained.cstring) == 0'i32:
     return RelocationMoveResult(ok: true, crossFilesystem: true,
-      diagnostic: "copied and verified, but the source '" & source &
-        "' could not be removed (" & err.msg &
-        "); the checkout at '" & destination &
-        "' is complete and the leftover source is safe to delete by hand")
-  RelocationMoveResult(ok: true, crossFilesystem: true)
+      retainedSource: retained,
+      diagnostic: "moved across filesystems by copying and verifying; the " &
+        "source was NOT deleted and is kept at '" & retained &
+        "' — delete it once the checkout at '" & destination &
+        "' is confirmed")
+  RelocationMoveResult(ok: true, crossFilesystem: true,
+    retainedSource: source,
+    diagnostic: "moved across filesystems by copying and verifying, but the " &
+      "source could not be set aside (" & osErrorMsg(osLastError()) &
+      "); it is still at '" & source & "' — delete it once the checkout at '" &
+      destination & "' is confirmed")
 
 {.pop.}
