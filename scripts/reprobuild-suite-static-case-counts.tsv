@@ -2648,7 +2648,7 @@ tests/unit/t_constructor_fetch_tool_refs.nim	nim	9
 tests/unit/t_cross_build_root_lock.nim	nim	1
 tests/unit/t_cross_prefix_runtime_closure.nim	nim	2
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
-tests/unit/t_cs_m1_external_tool_argv_unchanged.nim	nim	3
+tests/unit/t_cs_m1_external_tool_argv_unchanged.nim	nim	6
 tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim	nim	2
 tests/unit/t_cs_m6_no_hand_written_argv_parsing.nim	nim	3
 tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	9

@@ -56289,7 +56289,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cs_m1_external_tool_argv_unchanged.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
