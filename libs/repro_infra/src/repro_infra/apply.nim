@@ -1073,8 +1073,11 @@ proc profileRequirersOf*(p: SystemProfile; units: openArray[string]): seq[string
   ## skipped by its condition hold, which systemd counts as satisfied, so
   ## such a unit would start without it. The full apply holds them with
   ## the judged units and keeps held those that require a refused one.
-  when ApplyMutation == "unjudged-requirers-released":
-    # FALSIFYING MUTATION: only judged units are held as requirers.
+  when ApplyMutation in ["unjudged-requirers-released", "requirer-files-unread"]:
+    # FALSIFYING MUTATIONS: no unit outside the judged set is held as a
+    # requirer by any path (``unjudged-requirers-released``), or only this
+    # layer -- the generation's files -- is not read
+    # (``requirer-files-unread``).
     return
   # Every unit the generation writes a file or a drop-in for: its own
   # units (a template's hold covers its instances, so a template that
@@ -1116,9 +1119,6 @@ proc systemdRequirersOf*(units: openArray[string]; host: LiveHost): seq[string] 
   ## host drop-in, a ``.requires/`` link and an enabled ``[Install]
   ## RequiredBy=``; the owner decision on decision 171, A13 review round
   ## 11). A template is read through the names it is shown under.
-  when ApplyMutation == "requirers-from-files-only":
-    # FALSIFYING MUTATION: systemd's view is not read.
-    return
   var queue = @units
   var seen = @units
   while queue.len > 0:
@@ -1170,6 +1170,39 @@ proc essentialHeld*(held: openArray[string]): seq[string] =
     return
   for u in held:
     if isEssentialUnit(u) and u notin result: result.add(u)
+
+proc preWriteRequirers*(p: SystemProfile; units: openArray[string];
+                        host: LiveHost): seq[string] =
+  ## The units held with the judged ``units`` before anything is written
+  ## (§13 decisions 171 and 177): the generation's requirers read from its
+  ## files (``profileRequirersOf``), and the loaded units systemd's
+  ## effective dependencies name (``systemdRequirersOf``).
+  result = profileRequirersOf(p, units)
+  when ApplyMutation in ["requirers-from-files-only",
+                         "unjudged-requirers-released"]:
+    # FALSIFYING MUTATION: systemd's view is not read before the writes.
+    return
+  for u in systemdRequirersOf(units, host):
+    if u notin units and u notin result: result.add(u)
+
+proc postReloadRequirers*(refused, held: openArray[string]; host: LiveHost):
+    tuple[hold, essential: seq[string]] =
+  ## After the drivers' reload: the units systemd's effective dependencies
+  ## name as requiring a refused unit (``systemdRequirersOf``) that were not
+  ## held with the judged units -- a requirer only the generation's writes
+  ## made one, which neither its files as read before the writes nor
+  ## systemd's view before them could name (§13 decision 177). Each is held
+  ## now (``hold``), but an essential one, which is reported (``essential``).
+  when ApplyMutation in ["post-reload-requirers-released",
+                         "unjudged-requirers-released"]:
+    # FALSIFYING MUTATION: the post-reload layer holds nothing.
+    return
+  for u in systemdRequirersOf(refused, host):
+    if u in held or u in refused: continue
+    if isEssentialUnit(u):
+      if u notin result.essential: result.essential.add(u)
+    elif u notin result.hold:
+      result.hold.add(u)
 
 proc restartRecordedLiveCheckTriggers*(stateDir: string; host: LiveHost):
     seq[string] =
@@ -1335,9 +1368,7 @@ when defined(posix):
     ## The units held with the judged ``units`` (§13 decision 171): the
     ## generation's requirers, read from its files, and the loaded units
     ## systemd's effective dependencies name (``systemdRequirersOf``).
-    result = profileRequirersOf(p, units)
-    for u in systemdRequirersOf(units, host):
-      if u notin units and u notin result: result.add(u)
+    preWriteRequirers(p, units, host)
 
   proc beginLiveCheck(p: SystemProfile; dir, root, stateDir: string;
                       planned: openArray[PlannedOperation]): LiveCheck =
@@ -1457,14 +1488,12 @@ when defined(posix):
       # generation's writes made a requirer (§13 decision 171): held now,
       # in /etc, and stopped if a driver started it; an essential one is
       # reported, not held.
-      var heldNow = c.units & c.requirers
-      for u in systemdRequirersOf(refused, host):
-        if u in heldNow or u in refused: continue
-        if isEssentialUnit(u):
-          problems.add("ECarriedStatePending: " & u & " requires a unit " &
-            "the carried-state check refused, and is essential, so it is " &
-            "not held; the apply reports it")
-          continue
+      let late = postReloadRequirers(refused, c.units & c.requirers, host)
+      for u in late.essential:
+        problems.add("ECarriedStatePending: " & u & " requires a unit " &
+          "the carried-state check refused, and is essential, so it is " &
+          "not held; the apply reports it")
+      for u in late.hold:
         refused.add(u)
         discard writeHolds([u], CarriedCheckHoldName, liveCheckHoldText(),
                            RuntimeUnitDir)

@@ -114,8 +114,8 @@ it cannot read or write is an alert of its own
 (`check-state-unreadable`, `check-state-unwritable`), and an unreadable
 one is never overwritten. The command prints
 a status for each detector of each host (`live-idle`, `live-detecting`,
-`silent` or `never-reported`) and one `ALERT` line for each finding. It
-exits 1 when there is at least one alert. The findings are:
+`silent`, `never-reported` or `unproven`) and one `ALERT` line for each
+finding. It exits 1 when there is at least one alert. The findings are:
 
 - every refusal, rollback, re-assert drift, apt hook finding and refused
   connection a host recorded;
@@ -124,7 +124,30 @@ exits 1 when there is at least one alert. The findings are:
 - a signed statement that does not verify, a generation that changed
   between records, or a generation that no published manifest produced;
 - a host still behind the producer's latest manifest after that manifest's
-  maximum age.
+  maximum age;
+- a detector that reports in, but whose positive control has not tripped
+  (`control-missing`, status `unproven`): see below.
+
+Three detectors test themselves on the host every time they run, because
+what they depend on there can stop working while they keep reporting:
+
+- the manifest check (`DET-AO-1`) offers the agent a manifest signed by a
+  key made up for the test, and the host's deploy anchors must refuse it;
+- the egress observer (`DET-AO-3`) receives one packet that each fetch
+  sends to `127.68.69.84`, a loopback address that never leaves the host,
+  and must count it;
+- the apt hook (`DET-AO-6`) looks up the package that owns
+  `/usr/bin/dpkg`, and must find `dpkg`.
+
+Each run reports whether its test passed. The command raises
+`control-missing` when a host is reporting and no test of the manifest
+check or of the egress observer has passed within three tick intervals,
+or when the latest apt hook run's test did not pass. A test that fails on
+the host is also reported as its own alert (`manifest-control-missed`,
+`hook-control-missed`). An egress observer that stops counting usually
+means its nftables rules no longer match the fetch unit, for example
+because they were flushed. Restarting `repro-addon-egress.service` loads
+the table again.
 
 Each `ALERT` line reads `ALERT <host id> <detector> <trigger> seq=<n>
 <detail>`: the detector's identifier, what triggered it, and the sink
