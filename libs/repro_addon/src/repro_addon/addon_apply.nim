@@ -822,6 +822,79 @@ proc waivedAccountPrivilege(p: SystemProfile; r: SystemResource): string =
       a.unknown.join("; ") & ")"
   ""
 
+proc definesUnit(p: SystemProfile; name: string): bool =
+  ## Whether ``name`` is a unit of the profile ``p`` itself: a
+  ## ``systemd.systemUnit`` that is not a drop-in, or a
+  ## ``systemd.systemTimer``, under that name or, for an instance, under
+  ## its template's.
+  var names = @[name]
+  let at = name.find('@')
+  let dot = name.rfind('.')
+  if at > 0 and dot > at: names.add(name[0 .. at] & name[dot .. ^1])
+  for r in p.resources:
+    if (r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+          r.suName in names) or
+        (r.kind == srkSystemdSystemTimer and r.stName in names):
+      return true
+
+proc foreignDropIns(p: SystemProfile): Table[string, tuple[unit, content: string]] =
+  ## The drop-ins of ``p`` over units ``p`` does not define (a
+  ## ``systemd.systemDropIn`` whose ``unit`` is not one of its own, or a
+  ## ``collision = "dropIn"`` unit), keyed by where each is written, that
+  ## can change what such a unit runs: one with a ``[Service]`` section or
+  ## a command line (a ``.socket``'s ``ExecStartPre=`` runs commands too).
+  ## A drop-in onto a unit a distribution package ships is not under the
+  ## floor (``floorAppliesByDefault``), and the unit may run as root, so
+  ## every directive there -- an account, a command line, an
+  ## ``Environment=`` such as ``LD_PRELOAD`` -- can change what runs with
+  ## the package's privileges. A prefix drop-in (``foo-.service``) is not
+  ## a unit of the profile either: it reaches every unit of that prefix,
+  ## the package's included.
+  for d in p.resources:
+    var key, unit, content: string
+    if d.kind == srkSystemdSystemDropIn and not definesUnit(p, d.diUnit):
+      key = systemDropInPath(d.diUnit, d.diName)
+      unit = d.diUnit
+      content = d.diContent
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      key = "collision = dropIn: " & d.suName
+      unit = d.suName
+      content = d.suContent
+    else:
+      continue
+    if hasServiceSection(content) or hasExecLines(content):
+      result[key] = (unit, content)
+
+proc packageDropInChanges(previousUser, target: SystemProfile): seq[string] =
+  ## The units the generation ``target`` changes through a drop-in over a
+  ## unit it does not define (``foreignDropIns``), against the stored
+  ## current generation ``previousUser``: a drop-in added, changed or
+  ## removed (spec §10.1, *An agent apply never weakens the floor*,
+  ## drop-ins over a package's unit). A removed drop-in counts too: it may
+  ## have been what kept a package's root service on another account.
+  ## Each entry reads ``<unit> (drop-in over a unit the profile does not
+  ## define <added|changed|removed>: <where>)``.
+  when mutated("agent-may-change-package-dropins"):
+    # Falsifying build: drop-ins over package units go unnoticed, as before.
+    return
+  let was = foreignDropIns(previousUser)
+  let now = foreignDropIns(target)
+  var keys: seq[string]
+  for k in now.keys: keys.add(k)
+  for k in was.keys:
+    if k notin now: keys.add(k)
+  keys.sort()
+  for k in keys:
+    let how =
+      if k notin was: "added"
+      elif k notin now: "removed"
+      elif was[k].content != now[k].content: "changed"
+      else: ""
+    if how.len > 0:
+      let unit = if k in now: now[k].unit else: was[k].unit
+      result.add(unit & " (drop-in over a unit the profile does not " &
+        "define " & how & ": " & k & ")")
+
 proc floorWeakenedUnits*(previousUser, target: SystemProfile): seq[string] =
   ## The units whose confinement the generation ``target`` weakens against
   ## the stored current generation ``previousUser``
@@ -844,7 +917,11 @@ proc floorWeakenedUnits*(previousUser, target: SystemProfile): seq[string] =
   ##   root, with gid 0, in a privileged group, as an account the profile
   ##   does not show unprivileged, a command as root through the ``+`` or
   ##   ``!`` prefix or ``PermissionsStartOnly=``, or with ambient
-  ##   capabilities), when that reason or its account settings change.
+  ##   capabilities), when that reason or its account settings change;
+  ## - a drop-in over a unit the profile does not define -- a package's,
+  ##   which the floor does not cover and which may run as root -- added,
+  ##   changed or removed, when it can change what that unit runs
+  ##   (``packageDropInChanges``).
   ##
   ## Every plan lists them (``AddonApplyResult.floorWeakened``) and an
   ## agent apply refuses them (``agentApplyRefusal``): a signed profile
@@ -899,6 +976,7 @@ proc floorWeakenedUnits*(previousUser, target: SystemProfile): seq[string] =
       result.add(r.suName & " (floor version " & effectiveFloor(r) &
         ", exception " & g.join(", ") & " added" &
         (if not had: " on a new unit" else: "") & ")")
+  result.add(packageDropInChanges(previousUser, target))
 
 proc planFloorChanges*(r: var AddonApplyResult; previousUser: SystemProfile;
                        previous: Ledger; target: SystemProfile) =
@@ -941,8 +1019,9 @@ proc agentApplyRefusal*(r: AddonApplyResult; migration = false): string =
   if r.floorWeakened.len > 0 and not migration:
     parts.add("the generation weakens service confinement: " &
       r.floorWeakened.join(", ") & "; an agent apply never adds a " &
-      "whole-floor waiver or a floor exception, or moves an unconfined " &
-      "service onto a privileged account")
+      "whole-floor waiver or a floor exception, moves an unconfined " &
+      "service onto a privileged account, or changes a drop-in over a " &
+      "unit the profile does not define")
   if parts.len == 0: return ""
   "operator action required: " & parts.join("; and ") & ". Review " &
     "`repro system addon plan` and apply this profile once as an " &

@@ -56,6 +56,133 @@ function Get-WindowsArch {
   throw "Unsupported Windows architecture '$systemType'."
 }
 
+function Get-PeMachine {
+  ## The COFF Machine field of a PE image, as the 16-bit value the PE/COFF
+  ## specification defines (https://learn.microsoft.com/windows/win32/debug/pe-format#machine-types):
+  ## 0x8664 for x64, 0xAA64 for ARM64, 0x014C for x86. Throws on a file that
+  ## is not a PE image, so a truncated download cannot pass for a machine.
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $full = (Resolve-Path -LiteralPath $Path).ProviderPath
+  $stream = [IO.File]::OpenRead($full)
+  $reader = New-Object IO.BinaryReader($stream)
+  try {
+    if ($stream.Length -lt 0x40 -or $reader.ReadUInt16() -ne 0x5a4d) {
+      throw "Not a PE image (no MZ header): $full"
+    }
+    $stream.Position = 0x3c
+    $peOffset = $reader.ReadUInt32()
+    if ($peOffset + 6 -gt $stream.Length) { throw "Not a PE image (truncated): $full" }
+    $stream.Position = $peOffset
+    if ($reader.ReadUInt32() -ne 0x4550) { throw "Not a PE image (no PE signature): $full" }
+    return [int]$reader.ReadUInt16()
+  } finally {
+    $reader.Dispose()
+    $stream.Dispose()
+  }
+}
+
+function Get-WindowsArchPeMachine {
+  ## The PE machine a native image for $Arch carries.
+  param([Parameter(Mandatory = $true)][string]$Arch)
+  switch ($Arch) {
+    "x64" { return 0x8664 }
+    "arm64" { return 0xAA64 }
+    default { throw "unsupported Windows architecture '$Arch' (expected x64 or arm64)." }
+  }
+}
+
+function Assert-PeMachine {
+  ## Refuse an image that is not native to $Arch -- the check that keeps an x64
+  ## DLL or compiler from passing for an arm64 one under emulation.
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][string]$Arch,
+    [Parameter(Mandatory = $true)][string]$Consumer
+  )
+  $expected = Get-WindowsArchPeMachine -Arch $Arch
+  $actual = Get-PeMachine -Path $Path
+  if ($actual -ne $expected) {
+    throw ("{0}: {1} is a PE image for machine 0x{2:X4}, not the {3} machine 0x{4:X4}." -f
+      $Consumer, $Path, $actual, $Arch, $expected)
+  }
+}
+
+# ── Per-architecture pins in windows/toolchain-versions.env ─────────────────
+# Distribution-And-Packaging.md §7.1 ("windows/toolchain-versions.env
+# conventions"), reprobuild-pm:
+#
+#   * a key without an arch suffix means the x64 leg, unchanged;
+#   * a windows-aarch64 pin is a separate key carrying `_WIN_ARM64` right after
+#     its component prefix (`OPENSSL_SHA256` -> `OPENSSL_WIN_ARM64_SHA256`);
+#   * a version that must match across the two legs has ONE key and no arm64
+#     variant ($SharedToolchainVersionKeys);
+#   * an arm64 host whose key is absent is refused by name -- there is no
+#     fallback from an arm64 key to the x64 one, because an x64 asset on an
+#     arm64 host is exactly the emulated toolchain the leg exists to replace.
+
+# Versions both Windows legs must share: the same Nim compiles both, the same
+# solver concretizes both (a lock written on one must resolve identically on
+# the other), and the same OpenSSL serves both.
+$SharedToolchainVersionKeys = @("NIM_VERSION", "CLINGO_VERSION", "OPENSSL_VERSION")
+
+function Get-ToolchainArchPin {
+  ## The pin named by $X64Key on x64 and by $Arm64Key on arm64. Throws, naming
+  ## the missing key and the consumer, when the resolved arch has no value.
+  param(
+    [Parameter(Mandatory = $true)][hashtable]$Toolchain,
+    [Parameter(Mandatory = $true)][string]$Arch,
+    [Parameter(Mandatory = $true)][string]$X64Key,
+    [Parameter(Mandatory = $true)][string]$Arm64Key,
+    [Parameter(Mandatory = $true)][string]$Consumer
+  )
+
+  if ($Arm64Key -notmatch '_WIN_ARM64(_|$)') {
+    throw "${Consumer}: '$Arm64Key' is not an arm64 pin key; arm64 keys carry '_WIN_ARM64'."
+  }
+  $key = switch ($Arch) {
+    "x64" { $X64Key }
+    "arm64" { $Arm64Key }
+    default { throw "${Consumer}: unsupported Windows architecture '$Arch' (expected x64 or arm64)." }
+  }
+  $value = $Toolchain[$key]
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    throw ("${Consumer}: $key is missing from windows/toolchain-versions.env, " +
+           "and this host resolved to '$Arch'. An arm64 host never falls back " +
+           "to an x64 pin.")
+  }
+  return $value.Trim()
+}
+
+function Get-ToolchainPinConventionViolations {
+  ## Every way $Toolchain breaks the §7.1 conventions, as messages; empty when
+  ## it keeps them. Used by windows/tests/test-toolchain-arch-pins.ps1.
+  param([Parameter(Mandatory = $true)][hashtable]$Toolchain)
+
+  $violations = New-Object System.Collections.Generic.List[string]
+  foreach ($shared in $SharedToolchainVersionKeys) {
+    if ([string]::IsNullOrWhiteSpace($Toolchain[$shared])) {
+      $violations.Add("shared version key $shared is missing")
+    }
+    $component = $shared.Substring(0, $shared.Length - "_VERSION".Length)
+    foreach ($variant in @("${component}_WIN_ARM64_VERSION", "${shared}_WIN_ARM64")) {
+      if ($Toolchain.ContainsKey($variant)) {
+        $violations.Add("$variant must not exist: $shared is shared by both Windows legs")
+      }
+    }
+  }
+  foreach ($key in @($Toolchain.Keys | Sort-Object)) {
+    $value = "$($Toolchain[$key])"
+    if ($key -match 'SHA256$' -and $value -notmatch '^[0-9a-fA-F]{64}$') {
+      $violations.Add("$key is not a 64-digit hex sha256: '$value'")
+    }
+    if ($key -match 'ARM64' -and $key -notmatch '^[A-Z0-9]+(_[A-Z0-9]+)*_WIN_ARM64(_[A-Z0-9]+)*$') {
+      $violations.Add("$key names arm64 but does not carry the '_WIN_ARM64' suffix form")
+    }
+  }
+  return ,$violations.ToArray()
+}
+
 function Get-ExpectedSha256 {
   param(
     [Parameter(Mandatory = $true)][string]$ShaSource,

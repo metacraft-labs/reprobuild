@@ -440,6 +440,12 @@ for libName in [
   "repro_depfile",
   "repro_project_dsl",
   "repro_dsl_stdlib",
+  # The canonical recipe import surface (`import reprobuild`,
+  # `reprobuild/dsl[/<module>]`, `reprobuild/home`, `reprobuild/system`):
+  # thin re-export modules over the two libraries above and `repro_profile`.
+  # Exposed through `--path` like every other library -- never through
+  # `--import:`, which Nim applies to every module of a compilation.
+  "reprobuild",
   "repro_home_intent",
   "repro_system_apply",
   "repro_profile",

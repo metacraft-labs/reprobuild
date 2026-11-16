@@ -121,6 +121,9 @@ import repro_runquota
 # nothing here opens the store's database file.
 import repro_runquota/stats_query
 import runquota_daemon/host_config
+from runquota_process/cgroup_placement import CgroupRootEnvVar,
+  currentCgroupRoot
+import runquota_process/enforcement
   # The host's RunQuota budget file. The daemon reads it at start; the
   # auto-spawn below reads it only to know which flags NOT to pass, since a
   # flag overrides the file (reprobuild-specs/RunQuota-Host-Configuration.md).
@@ -6406,6 +6409,28 @@ proc targetResolutionJson(record: TargetResolutionRecord): JsonNode =
   of trkUnknown:
     result["suggestions"] = jsonStringSeq(record.suggestions)
 
+proc runQuotaEnforcementRecord*(): EnforcementRecord =
+  ## RunQuota's capability record of enforcement below admission on this
+  ## host, as RunQuota's own launchers would apply it: the client's
+  ## `RUNQUOTA_CGROUP_ROOT`, else the host file's `[enforcement] cgroups`
+  ## (off when absent). Probing creates nothing.
+  var problem = ""
+  let switchOn =
+    if getEnv(CgroupRootEnvVar).strip().len == 0:
+      enforcementCgroupsOn(problem)
+    else: false
+  hostEnforcementRecord(currentCgroupRoot(switchOn))
+
+proc runQuotaEnforcementHeaderLine*(record: EnforcementRecord): string =
+  ## The build-header line stating what is enforced below admission, so a
+  ## gap is visible in the build's output rather than silent. Reprobuild
+  ## does not place its own actions in cgroups, so for them only admission
+  ## applies, whatever the host enforces for RunQuota's launchers
+  ## (`runquota run`, `runquota jobserver`) that actions may call.
+  "runQuota enforcement: Reprobuild's actions are bounded by admission " &
+    "only (not placed in cgroups); for RunQuota's launchers here, " &
+    record.summaryLine
+
 proc runQuotaReportJson*(bypassed: bool): JsonNode =
   ## RA-13: machine-readable resource-authority status for the run report.
   ## ``bypassed`` is true when this build launched at least one action with no
@@ -6420,7 +6445,11 @@ proc runQuotaReportJson*(bypassed: bool): JsonNode =
     "bypassed": bypassed,
     "authority":
       if bypassed: "local-engine-pool-gate-only" else: "runquota",
-    "concurrentInvocationsSafe": not bypassed
+    "concurrentInvocationsSafe": not bypassed,
+    # What is enforced below admission (RunQuota's capability record), and
+    # that Reprobuild's own actions are not placed in cgroups.
+    "reprobuildActionsPlaced": false,
+    "enforcement": parseJson(runQuotaEnforcementRecord().toJson())
   }
 
 proc runQuotaAuthorityHeaderLine*(bypassed: bool): string =
@@ -12345,6 +12374,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       return
     loggedRunQuotaAuthority = true
     logSummary(runQuotaAuthorityHeaderLine(runResult.runQuotaBypassed))
+    logSummary(runQuotaEnforcementHeaderLine(runQuotaEnforcementRecord()))
     # STAGE 2: report the undeclared-environment population beside the
     # resource-authority line, for the same reason — a state the build
     # is in that nobody can see is a state nobody can decide about.
@@ -69310,9 +69340,18 @@ const
     ## makes the plain-git opt-out decidable: ``git config --unset
     ## remote.origin.pushurl`` leaves the record behind, and §7.3 reads "record
     ## present, ``pushurl`` absent" as ``opted-out``. A repo wired by a build
-    ## that predates the record has none, and is deliberately NOT back-filled:
-    ## a ``pushurl`` equal to the expected gateway path is path shape, and
-    ## §7.6.3 rules that path shape is not provenance.
+    ## that predates the record has none; the next wiring run back-fills it,
+    ## but only when the ``pushurl`` is EXACTLY the gateway this workspace
+    ## computes for the repo's upstream and that gateway is complete (both
+    ## hooks and its config, which only reprobuild installs). That is the
+    ## state ``alreadyWired`` already treats as reprobuild's own, so the
+    ## back-fill claims nothing new; a merely cache-root-SHAPED value is still
+    ## not provenance (§7.6.3) and stays ``foreign``.
+
+proc gatewayConfigValue(gitBin, repoPath, key: string): string =
+  ## One git-config value of ``repoPath``; "" when the key is unset.
+  let res = gitNoteQuery(gitBin, ["-C", repoPath, "config", "--get", key])
+  if res.code == 0: res.output.strip() else: ""
 
 proc perRepoGatewayOptOut*(gitBin, repoPath: string;
                            remoteName = "origin"): string =
@@ -69331,9 +69370,7 @@ proc perRepoGatewayOptOut*(gitBin, repoPath: string;
   ##
   ## A repo with no record and no ``pushurl`` is NOT opted out: it was never
   ## wired, or its foreign ``pushurl`` was removed, and §7.6.4 wires it.
-  proc cfg(key: string): string =
-    let res = gitNoteQuery(gitBin, ["-C", repoPath, "config", "--get", key])
-    if res.code == 0: res.output.strip() else: ""
+  proc cfg(key: string): string = gatewayConfigValue(gitBin, repoPath, key)
   # Strict booleans only. ``optOut = off`` is NOT accepted as an opt-out even
   # though an operator might mean "the gateway is off" by it: the key names
   # the MARKER, so reading ``off`` as "opted out" would invert the one
@@ -69579,8 +69616,18 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
   let existing = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".pushurl"])
   var alreadyWired = false
-  if existing.code == 0 and existing.output.strip().len > 0:
-    let current = existing.output.strip()
+  # The pushurl in force BEFORE this run. A failed record write below rolls
+  # back only what this run set, never a value that was already there.
+  let preexisting =
+    if existing.code == 0: existing.output.strip() else: ""
+  # A wired repo with no record at all was wired before the record existed.
+  # Only an absent record is back-filled: a record that disagrees (another
+  # value, another workspace) is reprobuild's own stale belief, and §7.6.3
+  # leaves resolving that to repointing, not to a silent rewrite here.
+  let needsRecord =
+    gatewayConfigValue(gitBin, repoPath, gatewayProvenanceSetByKey).len == 0
+  if preexisting.len > 0:
+    let current = preexisting
     if current == absolutePath(result.gatewayDir):
       # Ours. Only a COMPLETE gateway counts as wired: when the directory
       # behind the pushurl is gone or partial (a cache wipe, a hand deletion)
@@ -69594,9 +69641,16 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       # so for now every other value is reported and left alone. Erring toward
       # not clobbering a developer's own mirror is the right side to err on.
       result.outcome = gwoForeignPushurl
+      let recorded =
+        gatewayConfigValue(gitBin, repoPath, gatewayProvenanceSetByKey) ==
+          "reprobuild" and
+        gatewayConfigValue(gitBin, repoPath, gatewayProvenanceValueKey) ==
+          current
       result.diagnostic = "remote." & remoteName & ".pushurl is already '" &
-        current & "'; left untouched (no provenance record says reprobuild " &
-        "set it)"
+        current & "'; left untouched (" &
+        (if recorded: "reprobuild set it, but it is not this workspace's " &
+           "gateway for the upstream; migrate does not repoint it"
+         else: "no provenance record says reprobuild set it") & ")"
       return
   try:
     var cfg = gatewayConfigForRepo(gitBin, workspaceRoot, repoName)
@@ -69604,7 +69658,9 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     if dryRun:
       result.outcome = if alreadyWired: gwoAlreadyWired else: gwoWouldWire
       result.diagnostic =
-        if alreadyWired: "dry-run: would refresh gateway configuration for " & repoPath
+        if alreadyWired:
+          "dry-run: would refresh gateway configuration for " & repoPath &
+            (if needsRecord: " and record its provenance" else: "")
         else: "dry-run: would wire " & repoPath & " -> " & result.gatewayDir
       return
     if alreadyWired:
@@ -69614,6 +69670,23 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       let body = serializeGatewayConfig(cfg)
       if not fileExists(path) or readFile(path) != body:
         writeFile(path, body)
+      if needsRecord:
+        # Back-fill (see ``gatewayProvenanceSection``). On failure the
+        # pushurl stays — it was there before this run — and only the partial
+        # record goes, since a record naming no value would mislead §7.3.
+        let backfilled = recordGatewayProvenance(gitBin, workspaceRoot,
+          repoPath, absolutePath(result.gatewayDir))
+        if backfilled.len > 0:
+          let cleared = gitNoteRun(gitBin, ["-C", repoPath, "config",
+            "--remove-section", gatewayProvenanceSection])
+          result.outcome = gwoFailed
+          result.diagnostic = backfilled &
+            (if cleared.code == 0: ""
+             else: "; the partial record could not be removed either: " &
+               cleared.output.strip())
+          return
+        result.diagnostic = "recorded provenance for a gateway wired " &
+          "before the record existed"
       result.outcome = gwoAlreadyWired
       return
     let wired = ensureGateway(gitBin, repoPath, result.gatewayDir,
@@ -69631,13 +69704,25 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     let recorded = recordGatewayProvenance(gitBin, workspaceRoot, repoPath,
       absolutePath(result.gatewayDir))
     if recorded.len > 0:
-      discard gitNoteRun(gitBin, ["-C", repoPath, "config", "--unset",
-        "remote." & remoteName & ".pushurl"])
-      discard gitNoteRun(gitBin, ["-C", repoPath, "config", "--remove-section",
-        gatewayProvenanceSection])
+      var rollback: seq[string]
+      # Only a pushurl this run introduced is taken back out. One that was
+      # already this gateway (an incomplete gateway rebuilt above) predates
+      # the run and stays, exactly as the back-fill path leaves it.
+      if preexisting.len == 0:
+        let unset = gitNoteRun(gitBin, ["-C", repoPath, "config", "--unset",
+          "remote." & remoteName & ".pushurl"])
+        rollback.add(if unset.code == 0:
+            "remote." & remoteName & ".pushurl was unset again"
+          else: "remote." & remoteName & ".pushurl could NOT be unset: " &
+            unset.output.strip())
+      let cleared = gitNoteRun(gitBin, ["-C", repoPath, "config",
+        "--remove-section", gatewayProvenanceSection])
+      if cleared.code != 0:
+        rollback.add("the partial record could not be removed: " &
+          cleared.output.strip())
       result.outcome = gwoFailed
-      result.diagnostic = recorded & "; remote." & remoteName &
-        ".pushurl was unset again"
+      result.diagnostic = recorded &
+        (if rollback.len > 0: "; " & rollback.join("; ") else: "")
       return
     result.outcome = gwoWired
   except CatchableError as err:
@@ -69735,7 +69820,8 @@ proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
          else: "dry-run: would wire " & repo.repoPath & " -> " &
            res.gatewayDir))
     of gwoAlreadyWired:
-      lines.add("reprobuild gateway: " & repo.name & ": already wired")
+      lines.add("reprobuild gateway: " & repo.name & ": already wired" &
+        (if res.diagnostic.len > 0: " (" & res.diagnostic & ")" else: ""))
     of gwoForeignPushurl:
       lines.add("reprobuild gateway: " & repo.name & ": foreign — " &
         res.diagnostic)
