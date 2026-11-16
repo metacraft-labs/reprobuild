@@ -333,7 +333,7 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
     elif op.sfSourceLocal.len > 0:
       # The desired bytes are the controller-side file's current
       # contents. Read at observation time so the dispatcher's
-      # drift gate compares against the same bytes the apply path
+      # observed-vs-desired test compares the same bytes the apply path
       # would write. Missing / unreadable is a hard error — same
       # contract as `desiredFileContent`.
       when defined(linux) or defined(macosx) or defined(windows):
@@ -370,7 +370,8 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
   of pokEnvSystemVariable:
     # The desired digest is over the JOINED CONTRIBUTION — the same
     # recorded-payload model `env.userPath` uses, so the broker's
-    # drift gate compares "is our contribution present" uniformly.
+    # observed-vs-desired test asks "is our contribution present"
+    # uniformly.
     if op.evDestroy:
       ZeroDigestHex
     else:
@@ -458,8 +459,8 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       # the driver would issue as `nft add rule <chain> <body>`. Two
       # operators authoring the same logical rule produce the same
       # digest; a hand-edited live rule that disagrees with the
-      # profile yields a different observed digest (the broker's
-      # drift gate re-applies).
+      # profile yields a different observed digest (the broker
+      # re-applies the desired rule).
       posixDigestHexOfText(nftRuleBody(op.lfwProtocol, op.lfwLocalPort,
         op.lfwAction, op.lfwName))
   of pokLinuxNixosSystemModule:
@@ -495,7 +496,7 @@ proc posixSystemDesiredDigestHex*(op: PrivilegedOperation): string =
       # FHS-tree root + every argv element. Two operators authoring
       # the same sandbox declaration digest identically; changing any
       # one input (binary, prefix, argv entry) yields a different
-      # digest so the broker's drift gate re-applies. Each component
+      # digest so the broker re-applies it. Each component
       # is appended to a NUL-separated canonical form because the
       # parser already refused NUL in any element (closed-set
       # validation) — NUL is therefore an unambiguous separator that
@@ -2362,7 +2363,7 @@ proc observeLinuxSysctl*(op: PrivilegedOperation):
         sysctlDropInContent(op.sysctlKey, op.sysctlValue))
     else:
       # File present but does not contain our pair — digest the live
-      # bytes so the broker's drift gate sees a different digest.
+      # bytes so the broker sees it differ from desired and re-applies.
       result.digestHex = posixDigestHexOfText(content)
     # Live-kernel cross-check; exit code is not an error (an unloaded
     # key or a sysctl with no read access is a valid intermediate
@@ -2711,7 +2712,7 @@ proc applyLinuxPolkitRule*(op: PrivilegedOperation):
     createDir(LinuxPolkitRulesDir)
     writeLinuxDropInFile(path, op.polkitContent, 0o644)
     # Post-apply re-probe; polkit's inotify watcher is asynchronous
-    # but the file-content drift gate only checks bytes on disk, not
+    # but the file-content digest only covers bytes on disk, not
     # live polkit state — re-reading the file is sufficient.
     let post = observeLinuxPolkitRule(op)
     let desiredHex = posixDigestHexOfText(op.polkitContent)
@@ -3402,7 +3403,7 @@ proc observeLinuxNixDaemonSetting*(op: PrivilegedOperation):
         nixDaemonDropInContent(op.nixKey, op.nixValue))
     else:
       # File present but does not contain our pair — digest the live
-      # bytes so the broker's drift gate sees a different digest.
+      # bytes so the broker sees it differ from desired and re-applies.
       result.digestHex = posixDigestHexOfText(content)
   else:
     raiseNotImplementedPlatform("linux.nixDaemonSetting observe")
@@ -3752,8 +3753,8 @@ proc observeLinuxFirewallRule*(op: PrivilegedOperation):
   ## Re-observe an nftables rule. Looks for the marker comment in
   ## `nft list ruleset` output. The digest covers the canonical
   ## rule-body bytes, so a hand-edited rule with the same comment
-  ## but a different action / port digests differently and triggers
-  ## the broker's drift gate.
+  ## but a different action / port digests differently and the
+  ## broker re-applies the desired rule.
   when defined(linux):
     let comment = nftRuleComment(op.lfwName)
     let (output, code) = execCmdEx("nft list ruleset")
@@ -3779,7 +3780,7 @@ proc observeLinuxFirewallRule*(op: PrivilegedOperation):
       result.digestHex = posixDigestHexOfText(desiredBody)
     else:
       # The live rule disagrees with desired — digest the live form
-      # so the broker's drift gate triggers a re-apply.
+      # so the broker re-applies the desired rule.
       result.digestHex = posixDigestHexOfText(spec)
   else:
     raiseNotImplementedPlatform("linux.firewallRule observe")
@@ -3924,7 +3925,7 @@ proc observeLinuxNixosSystemModule*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Re-observe the fragment file. The digest covers the verbatim
   ## bytes; a hand-edited fragment yields a different observed digest
-  ## (the broker's drift gate re-applies the desired bytes).
+  ## (the broker re-applies the desired bytes).
   when defined(linux):
     let path = nixosModulePath(op)
     if not fileExists(path):
