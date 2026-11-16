@@ -9,6 +9,7 @@ when defined(posix):
 import nimcrypto/sha2
 import repro_core/ambient_execution
 import repro_local_store/store_bundle
+import repro_local_store/tar_members
 import ./exec
 import ./select
 
@@ -322,12 +323,21 @@ proc parseRegistration*(db: string): seq[RegisteredPath] =
   ## the lines `<path>`, `<narHash>` (base16), `<narSize>`, `<deriver>` (may
   ## be empty), `<n>`, then `n` reference lines. See Nix's
   ## `makeValidityRegistration` (src/libstore/store-api.cc).
+  ##
+  ## Each path must be `/nix/store/<name>`, one store-name component
+  ## (`tar_members.nixStorePathProblem`): the registered paths decide where
+  ## the half's members may be written, so one that named `/nix/store/..` or
+  ## a nested directory would widen that.
   let lines = db.splitLines()
   var i = 0
   while i < lines.len:
     if lines[i].len == 0 and i == lines.len - 1: break
     if i + 4 >= lines.len or not lines[i].startsWith("/nix/store/"):
       bundleFail("malformed Nix half registration at line " & $(i + 1))
+    let pathProblem = nixStorePathProblem(lines[i])
+    if pathProblem.len > 0:
+      bundleFail("malformed Nix half registration at line " & $(i + 1) &
+        ": " & pathProblem)
     var n: int
     try: n = parseInt(lines[i + 4])
     except ValueError:
@@ -500,6 +510,29 @@ proc narHashes(locations: seq[string]): seq[string] =
     if tab > 0: got[line[0 ..< tab]] = line[tab + 1 .. ^1]
   for loc in locations: result.add(got.getOrDefault(loc))
 
+proc nixListingProblem*(listingPath: string;
+                        registered: HashSet[string]): string =
+  ## "" when every member of the archive listed in `listingPath` may be
+  ## written by a Nix half whose registration names `registered` (relative
+  ## `nix/store/<name>`): it passes the rules every half applies
+  ## (`tar_members.admit`, `finish`), and it and any hard link's target lie
+  ## inside a registered path. Otherwise the reason, naming the member.
+  var members = initMemberSet()
+  try:
+    for (_, m) in listingMembers(listingPath):
+      var problem = members.admit(m)
+      if problem.len == 0:
+        problem = nixMemberProblem(memberPath(m), registered)
+      if problem.len == 0 and m.kind == 'h':
+        problem = nixMemberProblem(m.linkTarget, registered)
+        if problem.len > 0:
+          problem = "hard link " & m.name.escape & ": its target " & problem
+      if problem.len > 0:
+        return problem
+  except ValueError as e:
+    return e.msg
+  members.finish()
+
 proc restoreLockedPaths(h: NixHalf; partsDir, root, target, zstdExe: string;
     registered: seq[RegisteredPath]; invalid: HashSet[string]) =
   ## §7 steps 3.4 to 3.7, for the paths in `invalid`, whose locks are held.
@@ -547,7 +580,12 @@ proc restoreLockedPaths(h: NixHalf; partsDir, root, target, zstdExe: string;
       stdinData = db)
 
 proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
-  ## §7 step 3. Only the half's *invalid* paths are restored; a valid path
+  ## §7 step 3. Before anything is locked, written or removed, the archive
+  ## is listed with the tar that will extract it, over the same verified
+  ## parts, and refused unless every member lies inside a store path the
+  ## registration names (`nixListingProblem`).
+  ##
+  ## Only the half's *invalid* paths are restored; a valid path
   ## is Nix's, and is neither rewritten nor re-registered. Each invalid
   ## path's Nix lock (`<path>.lock`) is taken, in sorted order, and held
   ## until registration; validity is checked again under the locks, and a
@@ -568,7 +606,26 @@ proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
   let registered = parseRegistration(mustRunShell(quoteShell(zstdExe) &
     " -q -dc", "decompressing the registration", stdinData = reg))
   var paths: seq[string]
-  for r in registered: paths.add(r.path)
+  var names = initHashSet[string]()
+  for r in registered:
+    paths.add(r.path)
+    names.incl(r.path[1 .. ^1])
+  # Before anything is locked, removed or written: list the archive with
+  # the tar that will extract it, over the same verified parts, and refuse
+  # unless every member lies inside a registered path. The part hashes come
+  # from the same unsigned manifest as the parts, so they cannot confine
+  # the unpack.
+  block:
+    let listing = partsDir / ".members"
+    defer: removeFile(listing)
+    try:
+      listBundleMembers(partsDir, h.parts, listing, zstdExe)
+    except StoreBundleError as e:
+      bundleFail("cannot check the Nix half: " & e.msg)
+    let problem = nixListingProblem(listing, names)
+    if problem.len > 0:
+      bundleFail("refusing the Nix half before restoring it: " & problem &
+        "; nothing was written")
   var gcLock: cint = -1
   var locks: seq[StoreLock]
   try:
