@@ -1130,6 +1130,14 @@
 ## ``token-dir-unchecked``                    the state-removal token is
 ##                                            written to and read from any
 ##                                            directory (decision 165)
+## ``token-not-bound-to-install``            a re-run takes a token whose
+##                                            directories are not the ones
+##                                            its uninstall recorded
+##                                            (decision 165)
+## ``corrupt-input-record-continues``         an uninstall goes on past a
+##                                            corrupt record of a
+##                                            pre-bootstrap input
+##                                            (decision 166)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -2026,6 +2034,8 @@ const
                           "prior-mode-captured-after-takeover",
                           "unmarked-prior-trusted",
                           "token-dir-unchecked",
+                          "token-not-bound-to-install",
+                          "corrupt-input-record-continues",
                           "resume-without-marker",
                           "marker-not-bound-to-intent",
                           "marker-before-sync",

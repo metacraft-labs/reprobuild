@@ -161,38 +161,106 @@ type
   LockBusyHook* = proc () {.closure, gcsafe.}
     ## Called once, the first time an acquisition finds the lock held.
 
+# The holder lookup reads three Linux /proc files. Their parsers are pure
+# and compiled on every platform, so the formats are tested everywhere.
+
+type LockDevice* = tuple[major, minor: uint64]
+  ## A device number split into major and minor, as /proc prints it.
+
+proc deviceOfStDev*(dev: uint64): LockDevice =
+  ## Split a ``st_dev`` the way glibc's ``gnu_dev_major``/``gnu_dev_minor``
+  ## do (https://man7.org/linux/man-pages/man3/makedev.3.html): the major
+  ## is bits 8-19 and 44-63, the minor bits 0-7 and 20-43, each 32 bits.
+  (((dev shr 8) and 0xfff'u64) or ((dev shr 32) and 0xffff_f000'u64),
+   (dev and 0xff'u64) or ((dev shr 12) and 0xffff_ff00'u64))
+
+proc fdinfoMountId*(fdinfoText: string): int =
+  ## The ``mnt_id:`` of a ``/proc/<pid>/fdinfo/<fd>`` text: the ID of the
+  ## mount the open file is on (proc_pid_fdinfo(5),
+  ## https://man7.org/linux/man-pages/man5/proc_pid_fdinfo.5.html; the
+  ## field exists since Linux 3.15). -1 when absent or malformed.
+  result = -1
+  for line in fdinfoText.splitLines():
+    if line.startsWith("mnt_id:"):
+      try: return parseInt(line["mnt_id:".len .. ^1].strip())
+      except ValueError: return -1
+
+proc mountinfoDevice*(mountinfoText: string; mountId: int;
+                      device: var LockDevice): bool =
+  ## The ``major:minor`` (decimal, field 3) of the ``/proc/self/mountinfo``
+  ## line whose mount ID (field 1) is ``mountId``
+  ## (https://man7.org/linux/man-pages/man5/proc_pid_mountinfo.5.html).
+  ## It is the ``st_dev`` of the mount's superblock. False when no line
+  ## names that mount.
+  if mountId < 0: return false
+  for line in mountinfoText.splitLines():
+    let f = line.splitWhitespace()
+    if f.len < 3: continue
+    try:
+      if parseInt(f[0]) != mountId: continue
+      let mm = f[2].split(':')
+      if mm.len != 2: return false
+      device = (parseBiggestUInt(mm[0]).uint64,
+                parseBiggestUInt(mm[1]).uint64)
+      return true
+    except ValueError: continue
+  false
+
+proc procLocksFlockHolders*(locksText: string; devices: openArray[LockDevice];
+                            ino: uint64; excludePid: int): seq[int] =
+  ## The PIDs a ``/proc/locks`` text names as holding a granted FLOCK on
+  ## inode ``ino`` of any of ``devices``, without ``excludePid`` and without
+  ## repeats (proc_locks(5),
+  ## https://man7.org/linux/man-pages/man5/proc_locks.5.html). A line names
+  ## the file as ``<maj>:<min>:<ino>`` with major and minor in hex, printed
+  ## to a minimum width that is not a fixed one, so they are compared as
+  ## numbers. A blocked waiter's line carries ``->`` after the ordinal and
+  ## is not a holder.
+  for line in locksText.splitLines():
+    let f = line.splitWhitespace()
+    # "N: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<ino> <start> <end>"
+    if f.len < 6 or f[1] != "FLOCK": continue
+    let id = f[5].split(':')
+    if id.len != 3: continue
+    try:
+      let dev: LockDevice = (fromHex[uint64](id[0]), fromHex[uint64](id[1]))
+      if dev notin devices or parseBiggestUInt(id[2]).uint64 != ino:
+        continue
+      let pid = parseInt(f[4])
+      if pid != excludePid and pid notin result: result.add(pid)
+    except ValueError: discard
+
 when not defined(windows):
   proc flockHolderPids*(fd: cint): seq[int] =
     ## The PIDs /proc/locks names as holding a granted FLOCK on the file
-    ## open at ``fd``, excluding this process. A line matches only on the
-    ## device (major and minor, compared as numbers: the kernel's minimum
-    ## field width is not a fixed one) AND the inode. Empty where
-    ## /proc/locks is unavailable (non-Linux) or names nobody.
+    ## open at ``fd``, excluding this process. A line matches on the inode
+    ## AND a device that is either ``fstat``'s or that of the mount the fd
+    ## is on (its ``mnt_id`` in ``/proc/self/fdinfo/<fd>``, looked up in
+    ## ``/proc/self/mountinfo``).
+    ##
+    ## The second device is needed on btrfs: ``stat`` reports the
+    ## subvolume's anonymous device (a fresh ``0:N`` per subvolume), while
+    ## /proc/locks prints the superblock's ``s_dev``, which is the device
+    ## mountinfo gives. Matching ``fstat`` alone named nobody there
+    ## (reprobuild-pm issue 2026-11-15, lock-holder lookup names nobody on
+    ## btrfs). Where the fd's mount cannot be found, ``fstat``'s device is
+    ## the only one tried. Empty where /proc/locks is unavailable
+    ## (non-Linux) or names nobody.
     var st: Stat
     if fstat(fd, st) != 0: return
-    let ino = uint64(st.st_ino)
-    let dev = uint64(st.st_dev)
-    let major = ((dev shr 8) and 0xfff'u64) or ((dev shr 32) and not 0xfff'u64)
-    let minor = (dev and 0xff'u64) or ((dev shr 12) and not 0xff'u64)
-    let me = getCurrentProcessId()
+    var devices = @[deviceOfStDev(uint64(st.st_dev))]
+    try:
+      let mountId = fdinfoMountId(readFile("/proc/self/fdinfo/" & $fd))
+      var mountDevice: LockDevice
+      if mountinfoDevice(readFile("/proc/self/mountinfo"), mountId,
+          mountDevice) and mountDevice notin devices:
+        devices.add(mountDevice)
+    except IOError, OSError: discard
     var text = ""
     try: text = readFile("/proc/locks")
     except IOError, OSError: return
-    for line in text.splitLines():
-      let f = line.splitWhitespace()
-      # "N: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<ino> <start> <end>";
-      # a blocked waiter's line carries "->" after the ordinal and is
-      # skipped by the field-1 test.
-      if f.len < 6 or f[1] != "FLOCK": continue
-      let id = f[5].split(':')
-      if id.len != 3: continue
-      try:
-        if fromHex[uint64](id[0]) != major or fromHex[uint64](id[1]) != minor or
-            parseBiggestUInt(id[2]) != ino:
-          continue
-        let pid = parseInt(f[4])
-        if pid != me and pid notin result: result.add(pid)
-      except ValueError: discard
+    procLocksFlockHolders(text, devices, uint64(st.st_ino),
+      getCurrentProcessId())
 
   proc describeHolders(pids: seq[int]): string =
     if pids.len == 0: "a process /proc/locks does not name"

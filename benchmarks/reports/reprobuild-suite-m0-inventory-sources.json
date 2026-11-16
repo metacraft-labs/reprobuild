@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2845,
+    "nimTestBinaries": 2846,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 774,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2892
+    "testEntries": 2893
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1639,7 +1639,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1567,
+      "integration": 1568,
       "platform/destructive": 184,
       "pure unit": 774,
       "unclassified": 344
@@ -1856,9 +1856,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2845,
+    "nimTestBinaryCount": 2846,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2892
+    "testEntryCount": 2893
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10313,8 +10313,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 10,
-      "staticCaseCount": 39,
+      "sourceSuiteCount": 11,
+      "staticCaseCount": 41,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13606,7 +13606,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 16,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15108,6 +15108,24 @@
       "source": "libs/repro_core/tests/t_link_target_reads_reparse_points.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lock_holder_lookup_names_the_holder_on_btrfs",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_lock_holder_lookup_names_the_holder_on_btrfs.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26246,8 +26264,8 @@
     },
     {
       "binary": "build/test-bin/test_csharp_dotnet_convention",
-      "class": "unclassified",
-      "classificationReason": "imports `osproc`, which grants out-of-process reach",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "reproProviderMode"
       ],
@@ -26262,8 +26280,8 @@
       "owner": "libs/repro_standard_provider",
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
