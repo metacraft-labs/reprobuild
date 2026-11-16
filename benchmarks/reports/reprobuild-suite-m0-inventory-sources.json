@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2927,
+    "nimTestBinaries": 2928,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 783,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2975
+    "testEntries": 2976
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1643,7 +1643,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1622,
+      "integration": 1623,
       "platform/destructive": 191,
       "pure unit": 783,
       "unclassified": 355
@@ -1860,9 +1860,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2927,
+    "nimTestBinaryCount": 2928,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2975
+    "testEntryCount": 2976
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2506,7 +2506,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 483,
+          "line": 492,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2522,7 +2522,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 499,
+          "line": 508,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2538,7 +2538,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 504,
+          "line": 513,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2554,7 +2554,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 507,
+          "line": 516,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2570,7 +2570,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 795,
+          "line": 804,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -2586,7 +2586,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 814,
+          "line": 823,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -11938,6 +11938,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_every_edge_keys_its_command_and_payload",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_every_edge_keys_its_command_and_payload.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_evidence_is_evaluated_once_per_action",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -12163,6 +12183,7 @@
         "repro_build_engine",
         "repro_cas_store",
         "repro_core",
+        "repro_hash",
         "repro_local_store",
         "repro_test_support"
       ],

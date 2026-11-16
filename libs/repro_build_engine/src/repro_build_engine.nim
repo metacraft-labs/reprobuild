@@ -3405,14 +3405,17 @@ proc keyedOnArgv*(fingerprint: ContentDigest; argv: openArray[string];
                   cwd = ""): ContentDigest =
   ## `fingerprint` with every element of `argv`, and `cwd`, mixed in.
   ##
-  ## `action()` keys `argv[0]` only when it lies under a content-addressed
-  ## root, and the rest of the command line not at all: an edge whose
-  ## constructor computes its fingerprint over less than what it spawns
-  ## shares one local record across command lines that compute different
-  ## things. A constructor calls this over the argv it hands to `action()`,
-  ## after every rewrite it applies, so the key covers the command by
-  ## construction rather than by a list of the arguments its author thought
-  ## could matter.
+  ## `action()` applies this to every process edge itself, over the argv it
+  ## is handed — after every rewrite its constructor applied, before any
+  ## execution-time rewrite (the monitor wrapper) — so the key covers the
+  ## command by construction rather than by a list of the arguments its
+  ## author thought could matter (Caching-Architecture.md §"BuildXL-Inspired
+  ## Fingerprinting", rider of 2026-11-16). Until then `action()` keyed
+  ## `argv[0]` only when it lay under a content-addressed root and the rest
+  ## of the command line not at all, so each constructor had to call this
+  ## itself; the calls that remain are harmless and some key a form the
+  ## engine cannot derive at construction (an expanded arg file,
+  ## `withArgFilesExpanded`).
   ##
   ## A relocatable edge passes its argv with each path named the way its
   ## record names inputs (`relocatableName`), and no `cwd`: its key must be
@@ -3613,13 +3616,78 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   framed.add($image.len & "\x1f" & image & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc argvKeyComponents*(argv: openArray[string]; cwd: string;
+                        relocatable: bool;
+                        relocationAnchors: openArray[string]):
+    tuple[argv: seq[string]; cwd: string] =
+  ## The argv and cwd `action()` mixes into every process edge's weak
+  ## fingerprint (`keyedOnArgv`), in the form the edge's record uses.
+  ##
+  ## An ordinary edge keys its argv as given and its cwd. A relocatable edge
+  ## keys each argv element the way its record names an input
+  ## (`relocatableName` against its cwd and anchors) and no cwd:
+  ## `keyedOnRelocation` keys the cwd's DEPTH instead, so a byte-identical
+  ## tree elsewhere still keys the same (Caching-Architecture.md
+  ## §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16: "A relocatable
+  ## edge keeps its relocation-safe form of each component").
+  if not relocatable:
+    return (argv: @argv, cwd: cwd)
+  let anchors = effectiveAnchors(cwd, relocationAnchors)
+  for arg in argv:
+    result.argv.add(relocatableName(arg, cwd, anchors))
+  result.cwd = ""
+
+func builtinKindName*(kind: BuildActionKind): string
+
+const PayloadKeyedBuiltinKinds* = {bakCopyFile, bakEnsureDir, bakWriteText,
+                                   bakStamp, bakPreserveTree, bakEnsureLine,
+                                   bakEnsureSnippet}
+  ## The builtins `builtinAction` keys on their kind and whole payload: the
+  ## in-process filesystem builtins, whose payload is all they compute.
+  ##
+  ## The executor-backed kinds (`bakWorkspaceVcs`, `bakForeignProvision`,
+  ## `bakBinaryCacheSubstitute`, `bakMetadataFetch`, `bakSolveLock`,
+  ## `bakLockUpdate`) keep the key their constructor computes. Their
+  ## payloads carry fields their designs keep out of the key on purpose: a
+  ## git clone's reference path, filter, depth and single-branch flag are
+  ## acceleration knobs, so a full and a shallow clone of one revision share
+  ## a receipt (`fingerprintPayload` in `repro_workspace_vcs`, RA-5 and
+  ## RA-14); a Nix provision's payload names the directory `repro` ran from.
+  ## Whether those kinds key their whole payload, or name the fields that
+  ## are identity, awaits an owner decision (reprobuild-pm issue
+  ## `issues/2026-11-16-action-default-weak-fingerprint-is-the-id-alone.md`).
+
+proc keyedOnBuiltinPayload*(fingerprint: ContentDigest; kind: BuildActionKind;
+                            text: string;
+                            entries: openArray[string]): ContentDigest =
+  ## `fingerprint` with a builtin's kind and its whole payload (`text`,
+  ## `entries`) mixed in. A builtin writes its payload; the payload is what
+  ## it computes, so two builtins with one id and different payloads are two
+  ## computations. `builtinAction` applies this to every builtin it builds,
+  ## whatever fingerprint its caller passed (Caching-Architecture.md
+  ## §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16). Length-framed,
+  ## entry count first, like `keyedOnArgv`.
+  var framed = "action-builtin-payload\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  let kindName = builtinKindName(kind)
+  framed.add($kindName.len & "\x1f" & kindName & "\x1e")
+  framed.add($text.len & "\x1f" & text & "\x1e")
+  framed.add($entries.len & "\x1e")
+  for entry in entries:
+    framed.add($entry.len & "\x1f" & entry & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc weakFingerprintFor*(id: string;
                          governingLockIdentity: LockIdentity): ContentDigest =
-  ## The fingerprint `action()` / `builtinAction()` would compute for an edge
-  ## with this id under this lock. For the call sites that construct a
-  ## `BuildAction` object literally rather than through a constructor — §7.2's
-  ## `{.requiresInit.}` field reaches those, but the constructor's mixing
-  ## cannot, so they compose it here instead of re-deriving it.
+  ## The id-and-lock part of what `action()` / `builtinAction()` compute for
+  ## an edge with this id under this lock: the constructors also mix in the
+  ## argv and cwd (`keyedOnArgv`) or the builtin payload
+  ## (`keyedOnBuiltinPayload`), which an id alone cannot supply. For the call
+  ## sites that construct a `BuildAction` object literally rather than
+  ## through a constructor — §7.2's `{.requiresInit.}` field reaches those,
+  ## but the constructor's mixing cannot, so they compose it here instead of
+  ## re-deriving it.
   keyedOnGoverningLock(weakFingerprintFromText(id), governingLockIdentity)
 
 proc legacyDepfileGatheringPolicy(depfile: string;
@@ -3740,13 +3808,28 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # subtracts that root's contents out of the key — see
     # `keyedOnContentAddressedToolRoot` for the measurement that showed
     # the two halves had never been connected.
-    weakFingerprint: keyedOnRelocation(keyedOnGoverningLock(
-      keyedOnContentAddressedToolRoot(
-        keyedOnEnvironmentIsolation(
-          keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
-          isolateHostEnvironment),
-        argv),
-      governingLockIdentity), relocatable, cwd),
+    #
+    # The argv mix is innermost, and it is the ENGINE's, not the caller's:
+    # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+    # 2026-11-16 — a caller-supplied fingerprint is mixed in addition and
+    # never replaces an engine component. The default caller fingerprint is
+    # the id alone, so before this every direct caller that did not call
+    # `keyedOnArgv` itself shared one local record (and, with portable
+    # caching off, one peer key) across command lines that differ only in a
+    # flag. A caller that already mixed its argv in is keyed on it twice,
+    # which costs nothing and changes no decision.
+    weakFingerprint: block:
+      let keyed = argvKeyComponents(argv, cwd, relocatable,
+        relocationAnchors)
+      keyedOnRelocation(keyedOnGoverningLock(
+        keyedOnContentAddressedToolRoot(
+          keyedOnEnvironmentIsolation(
+            keyedOnActionEnvironment(
+              keyedOnArgv(weakFingerprint, keyed.argv, keyed.cwd),
+              env, envPassthrough),
+            isolateHostEnvironment),
+          argv),
+        governingLockIdentity), relocatable, cwd),
     actionCachePolicy: actionCachePolicy,
     relocatable: relocatable,
     relocationAnchors: @relocationAnchors,
@@ -3796,7 +3879,15 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     cwd: cwd,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+    # The kind and payload are the ENGINE's mix, as argv is for `action()`:
+    # the default caller fingerprint is the id alone, and a caller-supplied
+    # one adds to these and never replaces them (Caching-Architecture.md
+    # §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16). Only for the
+    # kinds whose payload is all they compute: see `PayloadKeyedBuiltinKinds`.
+    weakFingerprint: keyedOnGoverningLock(
+      (if kind in PayloadKeyedBuiltinKinds:
+        keyedOnBuiltinPayload(weakFingerprint, kind, text, entries)
+      else: weakFingerprint),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     dependencyPolicy: automaticMonitorGatheringPolicy(),

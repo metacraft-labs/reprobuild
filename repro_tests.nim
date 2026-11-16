@@ -2185,6 +2185,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_every_edge_keys_its_command_and_payload.nim",
+    binary: "build/test-bin/t_every_edge_keys_its_command_and_payload",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_evidence_is_evaluated_once_per_action.nim",
     binary: "build/test-bin/t_evidence_is_evaluated_once_per_action",
     defines: @[],

@@ -26,12 +26,19 @@ type Seen = ref object
   asked: seq[array[32, byte]]
 
 proc writeText(work, text: string): BuildAction =
-  ## Keyed on its id alone, as `builtinAction` keys when the caller passes no
-  ## fingerprint, with one declared input so that only its key decides.
-  builtinAction(bakWriteText, "t-peer-key-write-text", cwd = work,
+  ## Keyed on its id alone, with one declared input so that only its key
+  ## decides. `builtinAction` mixes the payload into the local key itself
+  ## (reprobuild-pm Caching-Architecture.md §"BuildXL-Inspired
+  ## Fingerprinting", rider of 2026-11-16), so the id-only key is put back the
+  ## way an object-literal builtin composes it (`weakFingerprintFor`, which
+  ## the constructor's mix does not reach): the peer key must bind the
+  ## payload whatever the local key covers.
+  result = builtinAction(bakWriteText, "t-peer-key-write-text", cwd = work,
     inputs = [work / "src" / "in.txt"], outputs = [work / "out" / "o.txt"],
     cacheable = true, actionCachePolicy = ffpChecksum, text = text,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  result.weakFingerprint = weakFingerprintFor("t-peer-key-write-text",
+    lockIdentityOutsideSolvedGraph())
 
 proc run(work, cacheRoot: string; action: BuildAction; seen: Seen):
     BuildRunResult =

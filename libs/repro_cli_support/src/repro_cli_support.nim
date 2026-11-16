@@ -5011,7 +5011,10 @@ const
     # bools (captureNonDeterminism, captureIpc). The decoder rejects any other
     # version outright (see `decodeLoweredGraphCache`), so the two new bytes are
     # always present on a v7 record and never straddle an older one.
-  LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v1"
+  # v2: every edge's weak fingerprint now carries its argv/cwd or builtin
+  # payload, and a cached lowered graph stores the fingerprint verbatim, so a
+  # graph lowered by the id-only default must not be served.
+  LoweredGraphAlgorithmVersion = "reprobuild.loweredGraph.v2"
 
 type
   LoweredGraphCacheRecord = object
@@ -11738,8 +11741,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     inputs.add(if relocatable: recipeSpelling(resourceModule)
                else: resourceModule)
   # The action key must distinguish one consumer's extraction from another's.
-  # ``action()``'s default weak fingerprint is derived from the action ID
-  # alone, so a fixed ID would give every project in a shared action-cache
+  # ``action()``'s default weak fingerprint now carries the argv too; the
+  # fixed ID alone would give every project in a shared action-cache
   # root the SAME key — one consumer's interface restored into another's
   # build. The fingerprint is taken from the ARGV instead (`keyedOnArgv`),
   # which names the module, the outputs, the reprobuild libraries and the
@@ -12549,6 +12552,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "forwarded action arguments require a process target: " &
               selectedActionId)
         action.argv.add(forwardedActionArgs)
+        # Appended after `action()` keyed the argv, so key them here: an
+        # edge's weak fingerprint covers its whole command line
+        # (Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider
+        # of 2026-11-16), and a run with other forwarded arguments is
+        # another computation.
+        action.weakFingerprint = keyedOnArgv(action.weakFingerprint,
+          forwardedActionArgs)
         return
     raise newException(ValueError,
       "selected action does not accept forwarded arguments: " &
