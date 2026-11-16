@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2866,
+    "nimTestBinaries": 2868,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 776,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2913
+    "testEntries": 2915
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1641,8 +1641,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1580,
-      "platform/destructive": 185,
+      "integration": 1581,
+      "platform/destructive": 186,
       "pure unit": 776,
       "unclassified": 349
     },
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2866,
+    "nimTestBinaryCount": 2868,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2913
+    "testEntryCount": 2915
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -38487,6 +38487,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_test_that_reads_an_ignored_file_is_not_certified",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_test_that_reads_an_ignored_file_is_not_certified.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_worktree_sibling_is_not_invisible_to_the_refresh",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -39803,6 +39821,25 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_build_wait_pressure_reported.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_build_wait_pressure_reported_windows",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_build_wait_pressure_reported_windows.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
