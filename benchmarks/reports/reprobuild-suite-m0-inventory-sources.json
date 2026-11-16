@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2839,
+    "nimTestBinaries": 2841,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 772,
+    "pureUnitTests": 773,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2886
+    "testEntries": 2888
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -670,7 +670,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_platform"
@@ -678,6 +678,7 @@
       "owner": "libs/repro_platform",
       "sources": [
         "libs/repro_platform/tests/test_msvc_activation_multiline_env.nim",
+        "libs/repro_platform/tests/test_msvc_activation_tracks_the_host_environment.nim",
         "libs/repro_platform/tests/test_msvc_env_merge.nim"
       ],
       "targetOs": "soAny"
@@ -1638,9 +1639,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1566,
+      "integration": 1567,
       "platform/destructive": 182,
-      "pure unit": 772,
+      "pure unit": 773,
       "unclassified": 343
     },
     "graphOwnedTestArtifacts": [
@@ -1855,9 +1856,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2839,
+    "nimTestBinaryCount": 2841,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2886
+    "testEntryCount": 2888
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11930,6 +11931,25 @@
       "source": "libs/repro_build_engine/tests/t_monitor_shim_resolver_memo_keys_its_inputs.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_msvc_activation_keeps_host_env_current",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_hash",
+        "repro_platform"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_msvc_activation_keeps_host_env_current.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -22163,6 +22183,23 @@
       "source": "libs/repro_platform/tests/test_msvc_activation_spawns_no_telemetry.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_msvc_activation_tracks_the_host_environment",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_platform"
+      ],
+      "owner": "libs/repro_platform",
+      "requiresReproBinary": false,
+      "source": "libs/repro_platform/tests/test_msvc_activation_tracks_the_host_environment.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
