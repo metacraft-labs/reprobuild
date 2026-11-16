@@ -193,7 +193,7 @@ when defined(windows):
     ## Read the HKLM value; `present == false` when the value (or its
     ## subkey) is absent. `digestHex` covers the raw value bytes —
     ## the same canonical-bytes model the fixture registry driver
-    ## uses, so the broker's drift gate is uniform.
+    ## uses, so the broker's observed-vs-desired test is uniform.
     var hk: HKEY
     var sub = toWideZ(op.hklmSubkey)
     let openStatus = RegOpenKeyExW(hklm(), cast[LPCWSTR](addr sub[0]), 0,
@@ -390,7 +390,7 @@ proc observeWindowsOptionalFeature*(op: PrivilegedOperation):
     ObservedOperationState =
   ## Re-observe a feature's `State`. `present` is true whenever the
   ## feature name is recognized; `digestHex` covers the canonical
-  ## enabled/disabled state so the drift gate is uniform.
+  ## enabled/disabled state so the observed-vs-desired test is uniform.
   when defined(windows):
     let (output, _) = runPowerShell(
       "Get-WindowsOptionalFeature -Online -FeatureName " &
@@ -476,7 +476,7 @@ proc applyWindowsOptionalFeature*(op: PrivilegedOperation):
 # observations with the same `StartType` + `Status` over a short
 # interval. For capabilities whose service mapping is not in the table
 # below, a small blanket safety pause is taken instead. Cost is paid
-# only on the apply path; observe / drift-gate is untouched.
+# only on the apply path; observe is untouched.
 # ===========================================================================
 
 ## The `CapabilityServiceMap` constant that USED to live here is now
@@ -930,8 +930,8 @@ proc observeWindowsFirewallRule*(op: PrivilegedOperation):
   ## `present` is true whenever the rule exists by that name;
   ## `digestHex` covers the canonical (Name, DisplayName, Protocol,
   ## Direction, Action, LocalPort, Enabled) tuple so an in-place
-  ## drift (e.g. an operator flipped Enabled) shows up in the broker's
-  ## drift gate.
+  ## change (e.g. an operator flipped Enabled) differs from desired
+  ## and the broker re-applies the rule.
   when defined(windows):
     let (output, _) = runPowerShell(firewallProbeScript(op.fwName))
     let obs = parseFirewallRuleQuery(output)

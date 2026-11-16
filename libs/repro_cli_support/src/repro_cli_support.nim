@@ -3471,9 +3471,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         else:
           argValue("text") & argValue("title"),
       entries = if payload.call.subcommand == "ensureSnippet":
-          @[argValue("openSentinel"), argValue("closeSentinel"),
-            argValue("openSearch"), argValue("closeSearch"),
-            argValue("snippet")]
+          # The block's key, not sentinel text: the engine renders the
+          # sentinels (fs-file-utilities.md §3).
+          ensureSnippetEntries(argValue("packageName"), argValue("blockId"),
+            argValue("snippet"), scope = argValue("scope"))
         else:
           argSeqValue("entries"))
 
@@ -9394,6 +9395,23 @@ type
     monitorDepfile*: string
       ## The io-mon depfile the action's monitored launch wrote ("" when it
       ## was not launched under the monitor).
+    declaredOutputs*: seq[string]
+      ## The action's declared output files (``outputs`` and
+      ## ``optionalOutputs``), resolved against its ``cwd``. A test that reads
+      ## one of these where the action is in the certified closure read
+      ## something the closure produced from the bound content, which the
+      ## untracked-inputs rule exempts (``judgeUntrackedInputs``).
+    declaredOutputTrees*: seq[string]
+      ## The outputs the engine removes before the action runs
+      ## (``optionalOutputs`` and ``removeBeforeRun``, the same set as the
+      ## engine's ``isRemovedOutputTreePath``), resolved against its ``cwd``:
+      ## everything under one was written by the action itself.
+    scratchTrees*: seq[string]
+      ## The action's scratch directories (``scratchDirs``), resolved against
+      ## its ``cwd``. The engine empties each before the action runs, so when
+      ## the action RAN, everything under one it wrote itself. A cache hit
+      ## does not empty or restore them: what is there then is left over
+      ## from an earlier run, and is exempt only when the action launched.
     startOrder*: int
       ## Position in the order the scheduler STARTED actions (0-based), or -1
       ## when it never started this one. Parallel actions have no other total
@@ -10438,6 +10456,22 @@ proc executedActionRecords(actions: openArray[BuildAction];
       record.kind = action.kind
       record.argv = action.argv
       record.keyCoversObservedReads = actionKeyCoversObservedReads(action)
+      for output in action.outputs & action.optionalOutputs:
+        record.declaredOutputs.add(
+          if output.isAbsolute or action.cwd.len == 0: output
+          else: action.cwd / output)
+      for tree in action.optionalOutputs & action.removeBeforeRun:
+        # An empty entry would resolve to the action's whole working
+        # directory and exempt everything under it.
+        if tree.len > 0:
+          record.declaredOutputTrees.add(
+            if tree.isAbsolute or action.cwd.len == 0: tree
+            else: action.cwd / tree)
+      for tree in action.scratchDirs:
+        if tree.len > 0:
+          record.scratchTrees.add(
+            if tree.isAbsolute or action.cwd.len == 0: tree
+            else: action.cwd / tree)
     result.add(record)
 
 proc emitFailedActionSummaries(buildResult: BuildRunResult;
@@ -69282,6 +69316,82 @@ proc hookWriterRunnerSkewDiagnostic*(skew: HookWriterRunnerSkew): seq[string] =
 
 # ---- the per-repo wiring entry point --------------------------------------
 
+const
+  gatewayOptOutRepoConfigKey = "reprobuild.pushGateway.optOut"
+    ## §7.4's explicit per-REPO opt-out marker. Its WRITER is ``unwire``
+    ## (§7.6.7), which has no CLI verb yet; both the wiring entry point and the
+    ## health observation read it.
+  gatewayProvenanceSection = "reprobuild.pushGateway"
+  gatewayProvenanceSetByKey = gatewayProvenanceSection & ".setBy"
+  gatewayProvenanceValueKey = gatewayProvenanceSection & ".value"
+  gatewayProvenanceWorkspaceKey = gatewayProvenanceSection & ".workspace"
+  gatewayProvenanceAtKey = gatewayProvenanceSection & ".at"
+    ## §7.6.3's provenance record, written by ``ensureGatewayForRepo`` beside
+    ## the ``pushurl`` it sets, in the repo's own ``.git/config``. It is what
+    ## makes the plain-git opt-out decidable: ``git config --unset
+    ## remote.origin.pushurl`` leaves the record behind, and §7.3 reads "record
+    ## present, ``pushurl`` absent" as ``opted-out``. A repo wired by a build
+    ## that predates the record has none; the next wiring run back-fills it,
+    ## but only when the ``pushurl`` is EXACTLY the gateway this workspace
+    ## computes for the repo's upstream and that gateway is complete (both
+    ## hooks and its config, which only reprobuild installs). That is the
+    ## state ``alreadyWired`` already treats as reprobuild's own, so the
+    ## back-fill claims nothing new; a merely cache-root-SHAPED value is still
+    ## not provenance (§7.6.3) and stays ``foreign``.
+
+proc gatewayConfigValue(gitBin, repoPath, key: string): string =
+  ## One git-config value of ``repoPath``; "" when the key is unset.
+  let res = gitNoteQuery(gitBin, ["-C", repoPath, "config", "--get", key])
+  if res.code == 0: res.output.strip() else: ""
+
+proc perRepoGatewayOptOut*(gitBin, repoPath: string;
+                           remoteName = "origin"): string =
+  ## §7.3/§7.4's per-repo ``opted-out`` verdict, shared by the writer
+  ## (``ensureGatewayForRepo``) and the observer (``observeWorkspaceGateways``)
+  ## so the two cannot disagree about it. Returns the reason, or "" when the
+  ## repo has not opted out. Two forms count:
+  ##
+  ##   * the explicit marker ``reprobuild.pushGateway.optOut`` set to a true
+  ##     boolean (``unwire``'s marker, or set by hand);
+  ##   * the §7.6.3 provenance record present (``setBy = reprobuild``) with
+  ##     ``remote.<name>.pushurl`` absent: reprobuild wired this repo and its
+  ##     owner removed the ``pushurl`` with plain git, which cannot write a
+  ##     marker. Without this rule the next wiring run would silently undo the
+  ##     opt-out §6.4 and §7.4 document.
+  ##
+  ## A repo with no record and no ``pushurl`` is NOT opted out: it was never
+  ## wired, or its foreign ``pushurl`` was removed, and §7.6.4 wires it.
+  proc cfg(key: string): string = gatewayConfigValue(gitBin, repoPath, key)
+  # Strict booleans only. ``optOut = off`` is NOT accepted as an opt-out even
+  # though an operator might mean "the gateway is off" by it: the key names
+  # the MARKER, so reading ``off`` as "opted out" would invert the one
+  # spelling that most plainly says the opposite.
+  if cfg(gatewayOptOutRepoConfigKey).toLowerAscii() in
+      ["true", "yes", "1", "on"]:
+    return "per-repo opt-out marker (" & gatewayOptOutRepoConfigKey & ")"
+  if cfg(gatewayProvenanceSetByKey) == "reprobuild" and
+      cfg("remote." & remoteName & ".pushurl").len == 0:
+    return "per-repo opt-out: remote." & remoteName & ".pushurl was removed " &
+      "after reprobuild wired it (the " & gatewayProvenanceSection &
+      ".* provenance record remains; `git config --remove-section " &
+      gatewayProvenanceSection & "` opts back in)"
+  ""
+
+proc recordGatewayProvenance(gitBin, workspaceRoot, repoPath,
+                             pushurl: string): string =
+  ## Write §7.6.3's record for the ``pushurl`` just set. Returns "" on success,
+  ## otherwise the diagnostic.
+  let at = getTime().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+  for (key, value) in [(gatewayProvenanceSetByKey, "reprobuild"),
+                       (gatewayProvenanceValueKey, pushurl),
+                       (gatewayProvenanceWorkspaceKey,
+                        absolutePath(workspaceRoot)),
+                       (gatewayProvenanceAtKey, at)]:
+    let res = gitNoteRun(gitBin, ["-C", repoPath, "config", key, value])
+    if res.code != 0:
+      return "could not record " & key & ": " & res.output.strip()
+  ""
+
 type
   GatewayWireOutcome* = enum
     ## Per-repo verdict of ``ensureGatewayForRepo``.
@@ -69291,6 +69401,8 @@ type
     gwoAlreadyWired     ## pushurl already correct; configuration refreshed
     gwoForeignPushurl   ## a pushurl this tool did not set: REPORTED, never
                         ## overwritten (§7.3)
+    gwoOptedOut         ## a per-repo opt-out (§7.3, §7.4): reported, never
+                        ## wired; nothing was written
     gwoNoUpstream       ## no ``remote.<name>.url`` to forward to
     gwoSkewRefused      ## the §7.6.5 refusal reached this repo
     gwoFailed           ## git refused the write
@@ -69473,6 +69585,13 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     result.outcome = gwoSkewRefused
     result.diagnostic = "refused: binary skew (spec §7.6.5)"
     return
+  # §7.6.2 step 1: classify BEFORE anything is created, so an opted-out repo
+  # costs nothing and is never written to (not even under --dry-run).
+  let optOut = perRepoGatewayOptOut(gitBin, repoPath, remoteName)
+  if optOut.len > 0:
+    result.outcome = gwoOptedOut
+    result.diagnostic = optOut
+    return
   let upstream = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
   if upstream.code != 0 or upstream.output.strip().len == 0:
@@ -69488,8 +69607,18 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
   let existing = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".pushurl"])
   var alreadyWired = false
-  if existing.code == 0 and existing.output.strip().len > 0:
-    let current = existing.output.strip()
+  # The pushurl in force BEFORE this run. A failed record write below rolls
+  # back only what this run set, never a value that was already there.
+  let preexisting =
+    if existing.code == 0: existing.output.strip() else: ""
+  # A wired repo with no record at all was wired before the record existed.
+  # Only an absent record is back-filled: a record that disagrees (another
+  # value, another workspace) is reprobuild's own stale belief, and §7.6.3
+  # leaves resolving that to repointing, not to a silent rewrite here.
+  let needsRecord =
+    gatewayConfigValue(gitBin, repoPath, gatewayProvenanceSetByKey).len == 0
+  if preexisting.len > 0:
+    let current = preexisting
     if current == absolutePath(result.gatewayDir):
       # Ours. Only a COMPLETE gateway counts as wired: when the directory
       # behind the pushurl is gone or partial (a cache wipe, a hand deletion)
@@ -69498,14 +69627,21 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       alreadyWired = gatewayIsComplete(result.gatewayDir)
     else:
       # §7.3 — a pushurl this tool did not set is never overwritten. Stricter
-      # here than PG-9 will be: without the provenance record (PG-9's
-      # deliverable) this cannot tell "reprobuild set it, to a stale value" from
-      # "the operator set it", so it reports and leaves it alone. Erring toward
+      # here than PG-9 will be: §7.3 lets a ``stale-gateway`` (the provenance
+      # record names the live value) be repointed, and repointing is PG-9's,
+      # so for now every other value is reported and left alone. Erring toward
       # not clobbering a developer's own mirror is the right side to err on.
       result.outcome = gwoForeignPushurl
+      let recorded =
+        gatewayConfigValue(gitBin, repoPath, gatewayProvenanceSetByKey) ==
+          "reprobuild" and
+        gatewayConfigValue(gitBin, repoPath, gatewayProvenanceValueKey) ==
+          current
       result.diagnostic = "remote." & remoteName & ".pushurl is already '" &
-        current & "'; left untouched (no provenance record says reprobuild " &
-        "set it)"
+        current & "'; left untouched (" &
+        (if recorded: "reprobuild set it, but it is not this workspace's " &
+           "gateway for the upstream; migrate does not repoint it"
+         else: "no provenance record says reprobuild set it") & ")"
       return
   try:
     var cfg = gatewayConfigForRepo(gitBin, workspaceRoot, repoName)
@@ -69513,7 +69649,9 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     if dryRun:
       result.outcome = if alreadyWired: gwoAlreadyWired else: gwoWouldWire
       result.diagnostic =
-        if alreadyWired: "dry-run: would refresh gateway configuration for " & repoPath
+        if alreadyWired:
+          "dry-run: would refresh gateway configuration for " & repoPath &
+            (if needsRecord: " and record its provenance" else: "")
         else: "dry-run: would wire " & repoPath & " -> " & result.gatewayDir
       return
     if alreadyWired:
@@ -69523,6 +69661,23 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
       let body = serializeGatewayConfig(cfg)
       if not fileExists(path) or readFile(path) != body:
         writeFile(path, body)
+      if needsRecord:
+        # Back-fill (see ``gatewayProvenanceSection``). On failure the
+        # pushurl stays — it was there before this run — and only the partial
+        # record goes, since a record naming no value would mislead §7.3.
+        let backfilled = recordGatewayProvenance(gitBin, workspaceRoot,
+          repoPath, absolutePath(result.gatewayDir))
+        if backfilled.len > 0:
+          let cleared = gitNoteRun(gitBin, ["-C", repoPath, "config",
+            "--remove-section", gatewayProvenanceSection])
+          result.outcome = gwoFailed
+          result.diagnostic = backfilled &
+            (if cleared.code == 0: ""
+             else: "; the partial record could not be removed either: " &
+               cleared.output.strip())
+          return
+        result.diagnostic = "recorded provenance for a gateway wired " &
+          "before the record existed"
       result.outcome = gwoAlreadyWired
       return
     let wired = ensureGateway(gitBin, repoPath, result.gatewayDir,
@@ -69530,6 +69685,35 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     result.diagnostic = wired.diagnostic
     if not wired.ok:
       result.outcome = gwoFailed
+      return
+    # §7.6.2 step 4: the record follows the pushurl. Written after it, never
+    # before: a record with no pushurl reads as an opt-out (§7.3), so a failed
+    # pushurl write must not leave one. If the record cannot be written, the
+    # pushurl is taken back out — a pushurl with no record could never be
+    # told apart from a hand-set one again, and a plain-git opt-out of it
+    # would be re-wired.
+    let recorded = recordGatewayProvenance(gitBin, workspaceRoot, repoPath,
+      absolutePath(result.gatewayDir))
+    if recorded.len > 0:
+      var rollback: seq[string]
+      # Only a pushurl this run introduced is taken back out. One that was
+      # already this gateway (an incomplete gateway rebuilt above) predates
+      # the run and stays, exactly as the back-fill path leaves it.
+      if preexisting.len == 0:
+        let unset = gitNoteRun(gitBin, ["-C", repoPath, "config", "--unset",
+          "remote." & remoteName & ".pushurl"])
+        rollback.add(if unset.code == 0:
+            "remote." & remoteName & ".pushurl was unset again"
+          else: "remote." & remoteName & ".pushurl could NOT be unset: " &
+            unset.output.strip())
+      let cleared = gitNoteRun(gitBin, ["-C", repoPath, "config",
+        "--remove-section", gatewayProvenanceSection])
+      if cleared.code != 0:
+        rollback.add("the partial record could not be removed: " &
+          cleared.output.strip())
+      result.outcome = gwoFailed
+      result.diagnostic = recorded &
+        (if rollback.len > 0: "; " & rollback.join("; ") else: "")
       return
     result.outcome = gwoWired
   except CatchableError as err:
@@ -69552,6 +69736,12 @@ proc unwireGatewayForRepo*(gitBin, workspaceRoot, repoPath: string;
   ## touches the pool. A ``pushurl`` that does not name this workspace's
   ## gateway is not ours and is left exactly as found. A second call is a
   ## no-op.
+  ##
+  ## The provenance record ``ensureGatewayForRepo`` wrote is left in place, so
+  ## afterwards ``perRepoGatewayOptOut`` reads the repo as ``opted-out`` and the
+  ## next wiring run does not undo this. That is the outcome spec §7.6.7 asks
+  ## of ``unwire``; its own steps reach it by swapping the record for the
+  ## explicit marker instead.
   let upstream = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
   if upstream.code != 0 or upstream.output.strip().len == 0:
@@ -69621,9 +69811,13 @@ proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
          else: "dry-run: would wire " & repo.repoPath & " -> " &
            res.gatewayDir))
     of gwoAlreadyWired:
-      lines.add("reprobuild gateway: " & repo.name & ": already wired")
+      lines.add("reprobuild gateway: " & repo.name & ": already wired" &
+        (if res.diagnostic.len > 0: " (" & res.diagnostic & ")" else: ""))
     of gwoForeignPushurl:
       lines.add("reprobuild gateway: " & repo.name & ": foreign — " &
+        res.diagnostic)
+    of gwoOptedOut:
+      lines.add("reprobuild gateway: " & repo.name & ": opted-out — " &
         res.diagnostic)
     of gwoNoUpstream:
       lines.add("reprobuild gateway: " & repo.name & ": skipped — " &
@@ -69667,17 +69861,18 @@ proc migrateWorkspaceGateways*(workspaceRoot: string; dryRun = false;
 # ``wired`` is computed from the SAME expression ``ensureGatewayForRepo`` writes
 # with (``gatewayBarePathFor(root, lastPathPart(workspaceRoot), upstreamUrl)``),
 # so the report and the writer cannot disagree about what "wired" means. The
-# three OPT-OUTS below are a different matter: §7.4 defines all three, and
-# NOTHING on the writing side honours any of them yet — ``ensureGatewayForRepo``
-# consults neither ``REPRO_PUSH_GATEWAY``, nor the workspace's
-# ``push_gateway``, nor the per-repo marker, so ``gateway migrate`` would wire a
-# repo this reports as ``opted-out``. That asymmetry is deliberate in this
-# direction only: §7.4 is explicit that an opt-out suppresses WIRING and never
-# REPORTING, so the reporting side arriving first costs an operator a
-# diagnostic they can act on, while the reverse would have cost them a silent
-# gateway. PG-11 owns the writer half (and PG-9 ``unwire``, the marker's
-# writer); until it lands, a reader of this row should not infer that
-# ``migrate`` will respect what it says.
+# three OPT-OUTS below are a different matter. The PER-REPO one is decided by
+# ``perRepoGatewayOptOut``, which ``ensureGatewayForRepo`` calls too, so a repo
+# this reports as ``opted-out`` for that reason is never wired by ``gateway
+# migrate``. The per-machine (``REPRO_PUSH_GATEWAY``) and per-workspace
+# (``push_gateway``) scopes are NOT consulted by the writer yet, so ``gateway
+# migrate`` would wire a repo this reports as ``opted-out`` for one of those.
+# That asymmetry is deliberate in this direction only: §7.4 is explicit that an
+# opt-out suppresses WIRING and never REPORTING, so the reporting side arriving
+# first costs an operator a diagnostic they can act on, while the reverse would
+# have cost them a silent gateway. PG-11 owns that writer half; until it lands,
+# a reader of this row should not infer that ``migrate`` respects a machine- or
+# workspace-scoped opt-out.
 
 type
   GatewayObservedState* = enum
@@ -69717,18 +69912,6 @@ const
   gatewayOptOutEnvVar = "REPRO_PUSH_GATEWAY"
     ## §7.4's per-MACHINE opt-out. Intended for CI images and for bisecting a
     ## gateway-related failure.
-  gatewayOptOutRepoConfigKey = "reprobuild.pushGateway.optOut"
-    ## §7.4's per-REPO opt-out marker. Its WRITER is ``unwire`` (§7.6.7), which
-    ## does not exist yet; the reader is implemented now because an opt-out
-    ## suppresses wiring and never reporting, so the reporting side must be able
-    ## to say ``opted-out`` the day the writer lands rather than a release
-    ## later.
-  gatewayProvenanceSetByKey = "reprobuild.pushGateway.setBy"
-  gatewayProvenanceValueKey = "reprobuild.pushGateway.value"
-  gatewayProvenanceWorkspaceKey = "reprobuild.pushGateway.workspace"
-    ## §7.6.3's provenance record. Also written by PG-9 rather than by anything
-    ## here, and read defensively for the same reason: its absence is the normal
-    ## state today and must not be reported as a defect.
 
 proc workspaceDeclaresGatewayOff(workspaceRoot: string): bool =
   ## §7.4's per-WORKSPACE opt-out: ``push_gateway = "off"`` at the top level of
@@ -69809,21 +69992,15 @@ proc observeWorkspaceGateways*(workspaceRoot: string; cacheRoot = "";
 
     one.pushurl = cfg("remote." & remoteName & ".pushurl")
     one.upstreamUrl = cfg("remote." & remoteName & ".url")
-    # Strict booleans only. ``optOut = off`` is NOT accepted as an opt-out even
-    # though an operator might mean "the gateway is off" by it: the key names
-    # the MARKER, so reading ``off`` as "opted out" would invert the one
-    # spelling that most plainly says the opposite.
-    let repoOptOut = cfg(gatewayOptOutRepoConfigKey).toLowerAscii() in
-      ["true", "yes", "1", "on"]
+    let repoOptOut = perRepoGatewayOptOut(gitBin, repoPath, remoteName)
 
-    if result.optOutScope.len > 0 or repoOptOut:
+    if result.optOutScope.len > 0 or repoOptOut.len > 0:
       # §7.4 — an opt-out suppresses WIRING, never REPORTING. The repo is still
       # counted and still named, so a project at ``gate_mode = required`` that
       # opted its repos out reads as the contradiction it is.
       one.state = gosOptedOut
       one.reason =
-        if repoOptOut: "per-repo opt-out marker (" &
-          gatewayOptOutRepoConfigKey & ")"
+        if repoOptOut.len > 0: repoOptOut
         elif result.optOutScope == "machine": "per-machine opt-out (" &
           gatewayOptOutEnvVar & ")"
         else: "per-workspace opt-out (push_gateway in " &
@@ -80655,6 +80832,29 @@ type
     prunedRefs*: seq[string]
     lastFetch*: string
       ## When the pool last fetched (UTC), "" when never or absent.
+    gateway*: string
+      ## §7.6.6's ``gateway`` column: §7.3's verdict for this repo's push path
+      ## (``wired`` / ``stale-gateway`` / ``foreign`` / ``opted-out`` /
+      ## ``not-wired``), "" when the observation was not taken for this verb.
+      ##
+      ## A BOOLEAN WAS NOT ENOUGH, which is why this exists beside ``wired``.
+      ## ``wired`` answers "is the pushurl the expected one"; it cannot
+      ## distinguish a gateway this workspace can repair by repointing
+      ## (``stale-gateway``) from a developer's own mirror that must never be
+      ## overwritten (``foreign``), and it reports an opted-out repo as simply
+      ## unwired. §7.4 is explicit that an opt-out suppresses WIRING and never
+      ## REPORTING, so that distinction has to reach the reader.
+    gatewayReason*: string
+      ## Why, for the states that carry a why (``not-wired`` especially), ""
+      ## otherwise. Kept apart from ``gateway`` so the JSON stays machine-read
+      ## while the human line can print ``not-wired:<reason>`` as §7.6.6
+      ## spells it.
+    gateMode*: string
+      ## §7.6.6's ``gate_mode`` column: the certificate policy that WOULD apply
+      ## to a push of THIS repo now, read from its checked-out ``repro.lock``
+      ## and the rule for its checked-out branch (Test-Certificates TC-9d), so
+      ## ``required`` beside a ``not-wired`` gateway is visible as the
+      ## contradiction it is. "" when not observed for this verb.
     diagnostic*: string
 
   SharedClonesReport* = object
@@ -80673,6 +80873,12 @@ type
     otherBares*: seq[MaintenanceResult]
       ## ``gc`` only: the passes over bares no repo of the resolved project
       ## names, each one due (or forced). Their ``refs/cache/*`` are kept.
+    gatewaySummary*: string
+      ## §7.6.6's summary line: the gateway counts over the population swept,
+      ## beside the gate_mode that would apply now. Built by
+      ## ``describeWorkspaceGatewayObservation`` — the same producer
+      ## ``health``'s ``push-gateway`` row uses, so the two surfaces cannot
+      ## drift into reporting different numbers for one condition.
     warnings*: seq[string]
       ## Conditions that did not stop the verb, such as a sibling workspace
       ## whose state cannot be read and is therefore counted live.
@@ -80695,6 +80901,9 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     obj["barePresent"] = %entry.barePresent
     obj["wired"] = %entry.wired
     obj["verdict"] = %entry.verdict
+    obj["gateway"] = %entry.gateway
+    obj["gatewayReason"] = %entry.gatewayReason
+    obj["gateMode"] = %entry.gateMode
     obj["rewired"] = %entry.rewired
     obj["maintenanceRan"] = %entry.maintenanceRan
     obj["looseBefore"] = %entry.looseBefore
@@ -80733,6 +80942,7 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
       "maintenanceRan": m.ran, "looseBefore": m.looseBefore,
       "looseAfter": m.looseAfter, "diagnostic": m.diagnostic})
   result["otherBares"] = others
+  result["gatewaySummary"] = %report.gatewaySummary
   result["warnings"] = %report.warnings
   result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
@@ -80768,6 +80978,14 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       " wired=" & $entry.wired
     if entry.verdict.len > 0:
       line.add(" verdict=" & entry.verdict)
+    if entry.gateway.len > 0:
+      # §7.6.6 spells the reason into the value (``not-wired:<reason>``) rather
+      # than giving it a column of its own, so a reader sees WHY without
+      # correlating two fields. The JSON keeps them apart.
+      line.add(" gateway=" & entry.gateway &
+        (if entry.gatewayReason.len > 0: ":" & entry.gatewayReason else: ""))
+    if entry.gateMode.len > 0:
+      line.add(" gate_mode=" & entry.gateMode)
     if entry.barePresent:
       line.add(" lastFetch=" &
         (if entry.lastFetch.len > 0: entry.lastFetch else: "never"))
@@ -80808,6 +81026,11 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       if m.diagnostic.len > 0:
         line.add(" diagnostic=" & m.diagnostic)
       result.add(line)
+  if report.gatewaySummary.len > 0:
+    # §7.6.6's summary line: "the answer to the question" the row exists for,
+    # printed last so it reads as the conclusion of the per-repo lines above
+    # rather than a header nobody correlates with them.
+    result.add("workspace shared-clones: " & report.gatewaySummary)
   for w in report.warnings:
     result.add("workspace shared-clones: warning: " & w)
   for d in report.diagnostics:
@@ -80967,6 +81190,42 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         result.diagnostics.add(e.path & ": " & e.diagnostic)
         result.exitCode = 1
 
+  # §7.6.6's gateway half of PG-0's reporting deliverable. Observed ONCE for
+  # the whole pass and indexed by repo name, because `observeWorkspaceGateways`
+  # classifies every participating repo in one walk and calling it per repo
+  # would re-read the same configs N times.
+  #
+  # The same producer `health`'s `push-gateway` row uses, deliberately: §7.6.6
+  # says migration wires its status into this deliverable "rather than
+  # inventing a second surface", and two independent computations of one
+  # condition are exactly how the two surfaces would come to disagree.
+  var gatewayByRepo = initTable[string, GatewayRepoObservation]()
+  var gateModeByRepo = initTable[string, string]()
+  if parsed.verb in ["list", "rewire", "gc"]:
+    let obs = observeWorkspaceGateways(parsed.workspaceRoot, result.cacheRoot)
+    var gatingRepos: seq[string]
+    for one in obs.repos:
+      gatewayByRepo[one.repo] = one
+      # The mode that would apply to a push of THIS repo now, not a
+      # workspace-wide one: since TC-9d it is per repo, read from the
+      # checked-out `repro.lock` and the rule for the checked-out branch.
+      let policy = checkedOutPushPolicy(one.repoPath)
+      gateModeByRepo[one.repo] = $policy.mode
+      if policy.mode != cgmOff:
+        gatingRepos.add(one.repo & " (" & $policy.mode & ": " &
+          policy.detail & ")")
+    result.gatewaySummary = describeWorkspaceGatewayObservation(obs) & "; " &
+      (if gatingRepos.len == 0:
+        "no participating repo's checked-out repro.lock records a " &
+          "certificate policy that gates a push of its current branch"
+      else:
+        "gate_mode that would apply to a push now, per repo's own " &
+          "certificate policy: " & gatingRepos.join(", ")) &
+      (if obs.optOutScope.len > 0:
+        "; a per-" & obs.optOutScope & " opt-out is in force (§7.4), which " &
+        "suppresses WIRING and not REPORTING"
+      else: "")
+
   var sharedBareByUrl = initTable[string, SharedCloneResult]()
   # RA-15: maintain each unique shared bare at most once per pass.
   var maintainedBares = initHashSet[string]()
@@ -80978,7 +81237,11 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     var entry = SharedClonesRepoReport(
       name: repo.name,
       path: repo.path,
-      fetchUrl: cloneUrl)
+      fetchUrl: cloneUrl,
+      gateMode: gateModeByRepo.getOrDefault(repo.name))
+    if gatewayByRepo.hasKey(repo.name):
+      entry.gateway = $gatewayByRepo[repo.name].state
+      entry.gatewayReason = gatewayByRepo[repo.name].reason
     let info = inspectRepoWiring(parsed.workspaceRoot, result.cacheRoot,
       repo.path, cloneUrl)
     entry.sharedBarePath = info.sharedBarePath
@@ -87584,11 +87847,28 @@ type
       ## Absolute paths of the files read.
     source*: string
       ## Where the read set came from, or why there is none.
+    gaps*: seq[string]
+      ## Why the read set may lack reads the run made, one entry per cause:
+      ## an executed action with no capture, a capture that could not be
+      ## read, a capture the monitor graded incomplete (event loss). A read
+      ## set with gaps still withholds on what it did observe; what it may
+      ## have missed is reported, never assumed absent.
+    exemptOutputs*: seq[string]
+      ## Absolute paths of the declared outputs of the actions in the
+      ## certified closure. Reading one is reading something the closure
+      ## produced from the bound content, so it is not an untracked input.
+    exemptOutputTrees*: seq[string]
+      ## Absolute output directories of those actions that the engine empties
+      ## before they run, and the scratch directories of those that ran:
+      ## everything under one, the action wrote itself.
 
   UntrackedJudgement* = object
     withhold*: bool
     offending*: seq[string]
       ## Repository-relative untracked paths that caused the withholding.
+    read*: seq[string]
+      ## The subset of ``offending`` the captured read set shows the tests
+      ## read; the rest are present-only (``cuiStrict``).
     note*: string
       ## Shown when the certificate is issued with ``untracked = true``
       ## without a read set to judge by.
@@ -87734,38 +88014,123 @@ proc repositoryRelativePath(root, path: string): string =
     return ""
   full[base.len + 1 .. ^1].replace(DirSep, '/')
 
+proc isTrackedOrInsideTracked(relative: string;
+    tracked: HashSet[string]): bool =
+  ## ``relative`` is an index entry, or lies inside one. Only a gitlink (a
+  ## submodule) can have paths beneath it, and the content binds a
+  ## submodule's files through its commit (Content-Id §3 refuses one whose
+  ## content was modified).
+  var path = relative
+  while path.len > 0:
+    if path in tracked:
+      return true
+    let slash = path.rfind('/')
+    if slash < 0:
+      return false
+    path = path[0 ..< slash]
+  false
+
+proc isExemptOutputRead(path: string; readSet: CapturedReadSet): bool =
+  ## ``path`` (absolute) is a declared output of an action in the certified
+  ## closure, or lies in an output directory the engine empties before one
+  ## runs. Exact match for files, as the engine's own self-write filter
+  ## (``selfWrittenOutputKeys``) uses: lying NEXT TO an output, or in the
+  ## directory outputs go to, does not make a file an output.
+  let full = canonicalReadPath(path)
+  for output in readSet.exemptOutputs:
+    if canonicalReadPath(output) == full:
+      return true
+  for tree in readSet.exemptOutputTrees:
+    let root = canonicalReadPath(tree)
+    if full == root or (full.len > root.len + 1 and full.startsWith(root) and
+        full[root.len] in {DirSep, AltSep}):
+      return true
+  false
+
 proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
     repositoryRoot: string; untrackedPaths: openArray[string];
+    trackedPaths: HashSet[string];
     readSet: CapturedReadSet): UntrackedJudgement =
   ## The untracked-inputs rule as a pure decision over the repository's
-  ## untracked files (repository-relative, as ``git status`` lists them) and
-  ## the run's read set. It runs nothing and signs nothing.
+  ## untracked files (repository-relative, as ``git status`` lists them:
+  ## untracked and NOT ignored), its tracked paths (its index entries,
+  ## repository-relative) and the run's read set. It runs nothing and signs
+  ## nothing.
   ##
-  ## * ``cuiStrict`` withholds whenever any untracked file exists.
-  ## * ``cuiReadSet`` withholds only for an untracked file the captured read
-  ##   set names. With no read set it issues, and ``note`` says the files
-  ##   could not be judged — it never guesses which files were read.
-  case mode
-  of cuiStrict:
-    result.offending = @untrackedPaths
-    result.withhold = result.offending.len > 0
-  of cuiReadSet:
-    if not readSet.captured:
-      if untrackedPaths.len > 0:
-        result.note = "no read set was captured for this run (" &
-          readSet.source & "), so whether the tests read the untracked " &
-          "files could not be judged; the certificate reports untracked = true"
-      return
-    var seen = initHashSet[string]()
+  ## A read the captured set names is an untracked input when it is inside
+  ## the repository and is NOT
+  ##
+  ## * tracked (an index entry, or inside a submodule's gitlink);
+  ## * under the repository's ``.git``: VCS metadata, not a working-tree
+  ##   file, which no ``git add`` could put in the content;
+  ## * a directory (an enumeration reads names, not content);
+  ## * a declared output of an action in the certified closure, a file
+  ##   under an output the engine removes before such an action runs, or a
+  ##   file under the scratch directory of one that ran
+  ##   (``readSet.exemptOutputs`` / ``exemptOutputTrees``): the closure
+  ##   produced those from the bound content in this run.
+  ##
+  ## Nothing else is exempt. A file a test writes into the working tree and
+  ## reads back outside such a directory, or a tool cache an earlier run left
+  ## there (``__pycache__``, ``.pytest_cache``), withholds: the read set does
+  ## not say whether the bytes read were the ones this run wrote.
+  ##
+  ## IGNORED files are untracked inputs like any other: the content binds
+  ## them no more than an untracked file (Content-Id §2), so a test that
+  ## read ``.env`` ran against something no verifier can reconstruct
+  ## (test-certificates Standard §3.2). The ``.gitignore`` says what is not
+  ## worth committing, not what a test may depend on unseen.
+  ##
+  ## * ``cuiReadSet`` withholds for every untracked input the captured read
+  ##   set names. With no read set it issues, and ``note`` says the reads
+  ##   could not be judged (operator decision D5, 2026-10-09: "withhold only
+  ##   when a captured read set shows that the run read an untracked file");
+  ##   a read set with ``gaps`` likewise withholds only on what it observed,
+  ##   and ``note`` names the gaps. It never guesses which files were read.
+  ## * ``cuiStrict`` additionally withholds whenever any untracked,
+  ##   non-ignored file exists. It is the stricter mode, so it withholds
+  ##   everywhere the default does.
+  ##
+  ## ``trackedPaths`` matters only when ``readSet.captured``; an empty set
+  ## there makes every read inside the repository an untracked input.
+  var seen = initHashSet[string]()
+  if readSet.captured:
     for path in readSet.paths:
       let relative = repositoryRelativePath(repositoryRoot, path)
-      if relative.len == 0:
+      if relative.len == 0 or seen.contains(relative):
         continue
-      for entry in untrackedPaths:
-        if relative == entry and not seen.containsOrIncl(relative):
-          result.offending.add(relative)
-    result.offending.sort(system.cmp[string])
-    result.withhold = result.offending.len > 0
+      if relative == ".git" or relative.startsWith(".git/"):
+        continue
+      if isTrackedOrInsideTracked(relative, trackedPaths):
+        continue
+      if dirExists(canonicalReadPath(path)):
+        continue
+      if isExemptOutputRead(path, readSet):
+        continue
+      seen.incl(relative)
+      result.offending.add(relative)
+  result.read = result.offending
+  result.read.sort(system.cmp[string])
+  if mode == cuiStrict:
+    for entry in untrackedPaths:
+      if not seen.containsOrIncl(entry):
+        result.offending.add(entry)
+  result.offending.sort(system.cmp[string])
+  result.withhold = result.offending.len > 0
+  if result.withhold:
+    return
+  if not readSet.captured:
+    result.note = "no read set was captured for this run (" &
+      readSet.source & "), so whether the tests read untracked or ignored " &
+      "files could not be judged" &
+      (if untrackedPaths.len > 0: "; the certificate reports untracked = true"
+       else: "")
+  elif readSet.gaps.len > 0:
+    result.note = "the read set is incomplete (" & readSet.gaps.join("; ") &
+      "), so reads of untracked or ignored files it missed could not be " &
+      "judged" &
+      (if untrackedPaths.len > 0: "; the certificate reports untracked = true"
+       else: "")
 
 proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
   ## The files a monitored run read, from the io-mon depfile its capture
@@ -87773,8 +88138,9 @@ proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
   ## missing or unreadable is ``captured = false``, never an empty set.
   ##
   ## An incomplete capture still counts: what it observed WAS read, so a hit
-  ## withholds; what it may have missed changes nothing, because without a
-  ## hit the certificate reports ``untracked = true`` either way.
+  ## withholds. What it may have missed is recorded in ``gaps``, which the
+  ## judgement reports (Failure-Semantics §"Monitoring Failures": loss is
+  ## never treated as "read nothing").
   var dep: MonitorDepFile
   try:
     dep = readMonitorDepFile(path)
@@ -87782,9 +88148,17 @@ proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
     return CapturedReadSet(captured: false,
       source: "no usable read set in '" & path & "': " & err.msg)
   result = CapturedReadSet(captured: true, source: path)
+  if dep.completeness != mcComplete:
+    result.gaps.add("the monitor graded the capture '" & path &
+      "' incomplete")
   var seen = initHashSet[string]()
   for record in dep.records:
     if record.path.len == 0:
+      continue
+    # A failed open or an absent-path probe read nothing: a test that looks
+    # for an optional `.env` and finds none consumed no input, so it must not
+    # withhold a certificate for a file that does not exist.
+    if recordIsFailedExistenceLookup(record):
       continue
     if record.observationKind in {moFileOpen, moFileRead, moExecute,
                                   moDirectoryEnumerate}:
@@ -88064,27 +88438,54 @@ proc confirmTestedState*(pre: IssuancePreconditions;
   untrackedPaths.sort(system.cmp[string])
   result.untracked = pre.untracked or observed.untracked
   result.untrackedPaths = untrackedPaths
+  # The tracked paths, so a captured read can be told apart from a read of an
+  # untracked or ignored file. Asked only when there is a read set to judge.
+  var tracked = initHashSet[string]()
+  if readSet.captured:
+    let listed = gitRunPlainQuery(identity, ["-C", pre.repository,
+      "ls-files", "-z", "--cached", "--full-name"])
+    if listed.code != 0:
+      return TestedStateVerdict(reason: tswUnobservable,
+        message: "the tracked files could not be listed after the run (" &
+          listed.diagnostic & "), so the tests' reads could not be judged",
+        remedy: "investigate the git error and re-run 'repro test'; no " &
+          "certificate is issued rather than guessing")
+    for entry in listed.output.split('\0'):
+      if entry.len > 0:
+        tracked.incl(entry)
   let judgement = judgeUntrackedInputs(pre.untrackedInputs, pre.repository,
-    untrackedPaths, readSet)
+    untrackedPaths, tracked, readSet)
   if judgement.withhold:
     result.reason = tswUntrackedInput
-    case pre.untrackedInputs
-    of cuiStrict:
+    let readOffending = judgement.read
+    var presentOnly: seq[string]
+    for path in judgement.offending:
+      if path notin readOffending:
+        presentOnly.add(path)
+    if readOffending.len > 0:
+      result.message = "the tests read untracked files, which are not part " &
+        "of the content a certificate names (ignored files included; only " &
+        "a declared output of an action in the certified closure is " &
+        "exempt): " & readOffending.join(", ") & " (read set: " &
+        readSet.source & ")"
+      result.remedy = "add the file so its content is part of what is " &
+        "certified ('git add " & readOffending.join(" ") & "', with -f for " &
+        "an ignored one), produce it with an action the certified node " &
+        "depends on (a file a test writes and reads back, or a tool cache, " &
+        "belongs under a directory that action declares as an output or " &
+        "scratch directory, or outside the repository), or stop the tests " &
+        "reading it, then re-run 'repro test'"
+      if presentOnly.len > 0:
+        result.message.add("; and untracked_inputs = \"strict\" withholds " &
+          "on any untracked file: " & presentOnly.join(", "))
+    else:
       result.message = "untracked files exist, and the certificate policy's " &
         "untracked_inputs = \"strict\" withholds on any: " &
-        judgement.offending.join(", ")
+        presentOnly.join(", ")
       result.remedy = "add each file the tests need ('git add " &
-        judgement.offending.join(" ") & "') and ignore (.gitignore) or " &
+        presentOnly.join(" ") & "') and ignore (.gitignore) or " &
         "delete the rest, then re-run 'repro test'; \"read-set\" withholds " &
         "only for untracked files a captured read set shows the tests read"
-    of cuiReadSet:
-      result.message = "the tests read untracked files, which are not part " &
-        "of the content a certificate names: " &
-        judgement.offending.join(", ") & " (read set: " & readSet.source & ")"
-      result.remedy = "add the file ('git add " &
-        judgement.offending.join(" ") & "') so its content is part of what " &
-        "is certified, or ignore it (.gitignore) if it is generated or " &
-        "machine-local, then re-run 'repro test'"
     return
   result.note = judgement.note
 
@@ -89546,6 +89947,11 @@ type
     commands: seq[seq[string]]
     depfiles: seq[string]
       ## Monitor captures of the closure's executed actions.
+    uncaptured: seq[string]
+      ## The closure's executed actions that left no monitor capture.
+    outputs, outputTrees: seq[string]
+      ## The declared outputs (and emptied output directories) of every
+      ## action in the closure: what reading is not an untracked input.
     recordedReads: seq[string]
       ## What the records of the closure's reused actions say their
       ## executions read, from ``recordedSources`` records.
@@ -89592,6 +89998,10 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
       missing.add(id)
       continue
     let record = records[id]
+    result.outputs.add(record.declaredOutputs)
+    result.outputTrees.add(record.declaredOutputTrees)
+    if record.launched:
+      result.outputTrees.add(record.scratchTrees)
     if record.status notin {asSucceeded, asCacheHit, asUpToDate}:
       failed.add(id & " (" & $record.status &
         (if record.status == asFailed: ", exit code " & $record.exitCode
@@ -89599,6 +90009,8 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
     elif record.launched:
       if record.monitorDepfile.len > 0:
         result.depfiles.add(record.monitorDepfile)
+      elif record.kind == bakProcess:
+        result.uncaptured.add(id)
     elif record.cacheDecision in {cdHit, cdHybridCutoff}:
       inc result.recordedSources
       for path in record.cacheRecordInputs:
@@ -89664,21 +90076,36 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
 
 proc readSetFromMonitorDepFiles(paths: openArray[string];
                                 recordedReads: openArray[string] = [];
-                                recordedSources = 0): CapturedReadSet =
+                                recordedSources = 0;
+                                uncaptured: openArray[string] = [];
+                                outputs: openArray[string] = [];
+                                outputTrees: openArray[string] = []):
+    CapturedReadSet =
   ## The union of several monitor captures and of what ``recordedSources``
   ## reused cache records say their executions read (``recordedReads``,
   ## already absolute). A capture that cannot be read contributes nothing,
   ## but what the others observed WAS read: the set counts as captured when
   ## at least one capture or record was read, and ``source`` names the
-  ## captures that were not. With none, nothing was captured.
+  ## captures that were not. With none, nothing was captured. Every way the
+  ## union may lack a read — an unreadable or incomplete capture, an executed
+  ## action (``uncaptured``) that left none — is a ``gaps`` entry.
+  ## ``outputs`` / ``outputTrees`` are the closure's declared outputs, which
+  ## the judgement exempts.
   var seen = initHashSet[string]()
   var read, unreadable: seq[string]
+  result.exemptOutputs = @outputs
+  result.exemptOutputTrees = @outputTrees
+  for id in uncaptured:
+    result.gaps.add("the executed action '" & id & "' left no monitor " &
+      "capture")
   for path in paths:
     let one = readSetFromMonitorDepFile(path)
     if not one.captured:
       unreadable.add(path)
+      result.gaps.add(one.source)
       continue
     read.add(path)
+    result.gaps.add(one.gaps)
     for p in one.paths:
       if not seen.containsOrIncl(p):
         result.paths.add(p)
@@ -90379,7 +90806,8 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
         continue
       discard issueForCertificateNode(pre, run.node.name, verdict.commands,
         readSetFromMonitorDepFiles(verdict.depfiles, verdict.recordedReads,
-          verdict.recordedSources), workspaceRoot, copyOut)
+          verdict.recordedSources, verdict.uncaptured, verdict.outputs,
+          verdict.outputTrees), workspaceRoot, copyOut)
   reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
   reportUnselectedCertificates(unselected)
   code
@@ -95269,11 +95697,21 @@ proc runPromptCommand*(conf: ReproCommandLinePromptCall): int =
     stdout.writeLine(renderPromptSegment(state, parsed))
   0
 
-proc renderPromptInitSnippet(shell: string; reproBin: string): string =
+proc renderPromptInitSnippet(shell: string): string =
   ## Emit the per-shell integration snippet (``repro prompt init <shell>``).
   ## Like ``starship init zsh`` / ``direnv hook bash``: prints a snippet for
   ## the user to add to their rc — it NEVER mutates the prompt itself. The
   ## segment is appended (opt-in) so an existing prompt is preserved.
+  ##
+  ## The snippet runs the bare command ``repro``, found on ``PATH`` when the
+  ## prompt renders, as ``repro shell hook`` and the ``repro hooks ensure
+  ## --shell`` blocks do. It never embeds the path of the running image: that
+  ## is the engine (``reprobuild``), not the command a user runs, and on a
+  ## Nix install it is a store path that an upgrade followed by garbage
+  ## collection deletes, which would leave a prompt calling a missing binary
+  ## on every render. The thin client costs one ``execv`` (about a
+  ## millisecond) on its way to the engine, well inside the prompt's budget.
+  const reproBin = ReproThinClientName
   case shell
   of "bash":
     "# repro prompt — add to ~/.bashrc (opt-in; does not replace your prompt)\n" &
@@ -95322,7 +95760,7 @@ proc renderPromptInitSnippet(shell: string; reproBin: string): string =
   else:
     ""
 
-proc runPromptInitCommand*(shell: string; reproBin: string): int =
+proc runPromptInitCommand*(shell: string): int =
   ## ``repro prompt init <shell>`` — print the integration snippet for the
   ## named shell/prompt framework (any letter case). Opt-in: it only PRINTS
   ## a snippet for the user to add; it never edits any rc file or mutates
@@ -95331,7 +95769,7 @@ proc runPromptInitCommand*(shell: string; reproBin: string): int =
   if shell == "help":
     stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
     return 0
-  let snippet = renderPromptInitSnippet(shell.toLowerAscii(), reproBin)
+  let snippet = renderPromptInitSnippet(shell.toLowerAscii())
   if snippet.len == 0:
     stderr.writeLine("repro prompt init: unsupported shell '" & shell &
       "'; run `repro help prompt init` for the shells it knows")
@@ -106213,7 +106651,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
     try:
       case conf.prompt.command
       of ReproCommandLinePromptCommand.init:
-        return runPromptInitCommand(conf.prompt.init.shell, publicCliPath)
+        return runPromptInitCommand(conf.prompt.init.shell)
       of ReproCommandLinePromptCommand.call:
         return runPromptCommand(conf.prompt.call)
     except CatchableError as err:

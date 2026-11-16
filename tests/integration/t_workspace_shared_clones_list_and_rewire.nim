@@ -833,3 +833,85 @@ suite "RA-5 — repro workspace shared-clones":
       "--workspace-root=" & ws], env))
     checkpoint observed.output
     check "no longer exist" notin observed.output
+
+  test "list_reports_the_gateway_verdict_gate_mode_and_the_summary_line":
+    ## PG-0's reporting deliverable, gateway half (spec §7.6.6).
+    ##
+    ## `list` used to answer the pool question only — `bare= present= wired=
+    ## verdict= lastFetch=` — so a reader could see that a pool was healthy
+    ## and still not learn whether a push from that repo reaches the gateway
+    ## at all. §7.6.6 wires migration's status into THIS deliverable instead
+    ## of inventing a second surface, which is why the columns land here and
+    ## not on a new verb.
+    ##
+    ## WHY A BOOLEAN WAS NOT ENOUGH, since `wired` already existed: it cannot
+    ## tell a `stale-gateway` (repairable by repointing) from a `foreign`
+    ## pushurl (a developer's own mirror, never to be overwritten), and it
+    ## reports an opted-out repo as merely unwired. §7.4 says an opt-out
+    ## suppresses WIRING and never REPORTING, so the five-way verdict has to
+    ## reach the output.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs a real workspace fixture")
+    else:
+      let scratch = createTempDir("repro-pg0-gw-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+      let origin = scratch / "origin-lib.git"
+      discard seedGitOrigin(gitBin, origin, scratch / "seed-lib")
+      let libUrl = fileUrl(origin)
+      let cacheDir = scratch / "clones-cache"
+      let env = @[("REPRO_WORKSPACE_CLONES", cacheDir)]
+      let ws = seedWorkspace(scratch, libUrl)
+      discard requireGit(q(gitBin) & " clone --branch main " & q(libUrl) &
+        " " & q(ws / "lib"))
+
+      # --- JSON: the three per-repo columns and the summary. ----------
+      let js = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws, "--json",
+      ], env))
+      check js.code == 0
+      let report = parseJson(js.output)
+      check report["repos"].len == 1
+      let repo = report["repos"][0]
+
+      # Every column §7.6.6 names is present as its own key, so a consumer
+      # does not have to parse the human line.
+      check repo.hasKey("gateway")
+      check repo.hasKey("gatewayReason")
+      check repo.hasKey("gateMode")
+      check report.hasKey("gatewaySummary")
+
+      # This fixture sets no pushurl, so the verdict is the §7.3 state that
+      # says so -- not the empty string, and not merely `wired=false`.
+      checkpoint("gateway=" & repo["gateway"].getStr() &
+        " reason=" & repo["gatewayReason"].getStr() &
+        " gate_mode=" & repo["gateMode"].getStr())
+      check repo["gateway"].getStr() == "not-wired"
+      check repo["gatewayReason"].getStr().len > 0
+      # The mode that would apply to a push now. The fixture records no
+      # certificate policy, so it is the RA-32 default-off state, stated
+      # rather than left blank.
+      check repo["gateMode"].getStr().len > 0
+
+      # The summary is the answer to "is this workspace governed?", and it
+      # must carry both halves: the gateway counts and the gate_mode note.
+      let summary = report["gatewaySummary"].getStr()
+      checkpoint("summary: " & summary)
+      check summary.len > 0
+      check "gateway" in summary
+      check "gate_mode" in summary or "certificate policy" in summary
+
+      # --- the human line and the trailing summary. -------------------
+      let human = runShell(shellCommand(@[
+        reproBin, "workspace", "shared-clones", "list", "ra5proj",
+        "--workspace-root=" & ws,
+      ], env))
+      check human.code == 0
+      checkpoint(human.output)
+      # §7.6.6 spells the reason into the value rather than giving it a
+      # column, so a reader sees WHY without correlating two fields.
+      check "gateway=not-wired:" in human.output
+      check "gate_mode=" in human.output
+      check summary in human.output

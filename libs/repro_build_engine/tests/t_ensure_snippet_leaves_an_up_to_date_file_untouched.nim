@@ -17,10 +17,10 @@ import std/[os, strutils, times, unittest]
 import repro_build_engine
 
 const
-  openSentinel = "# >>> repro:project:demo:repro-paths-bootstrap:v1 >>>"
-  closeSentinel = "# <<< repro:project:demo:repro-paths-bootstrap:v1 <<<"
-  openSearch = "# >>> repro:project:demo:repro-paths-bootstrap:v"
-  closeSearch = "# <<< repro:project:demo:repro-paths-bootstrap:v"
+  # The managed-block sentinels of block `repro-paths-bootstrap` of package
+  # `demo` (reprobuild-pm spec/CLI/internal/fs-file-utilities.md §3).
+  openSentinel = "# >>> repro:project:demo:repro-paths-bootstrap >>>"
+  closeSentinel = "# <<< repro:project:demo:repro-paths-bootstrap <<<"
   snippet = "when withDir(thisDir(), system.fileExists(\"repro.paths\")):\n" &
     "  include \"repro.paths\""
   staleSnippet = "include \"old.paths\""
@@ -46,8 +46,8 @@ proc ensureSnippetAction(destination: string): BuildAction =
     kind: bakEnsureSnippet,
     id: "ensure-snippet-under-test",
     outputs: @[destination],
-    builtinEntries: @[openSentinel, closeSentinel, openSearch, closeSearch,
-      snippet],
+    builtinEntries: ensureSnippetEntries("demo", "repro-paths-bootstrap",
+      snippet),
     cacheable: false)
 
 proc runAction(destination: string) =
@@ -178,33 +178,34 @@ suite "built-in ensureSnippet inserts an absent block once":
     check readFile(destination) == expected
     check getLastModificationTime(destination) == fromUnix(pinnedMtime)
 
-  test "an open sentinel without a close is not a block":
-    # A dangling open line is left alone and a complete block is appended;
-    # the next run finds that block and leaves the file as it is.
+  test "an open sentinel without a close fails and leaves the file alone":
+    # A dangling open line makes the file ambiguous: appending a complete
+    # block after it would leave two opening sentinels for one block. The
+    # action refuses, naming the file and the block (fs-file-utilities.md
+    # §3), instead of guessing.
     let scratch = scratchDir("insert-dangling-open")
     defer: removeDir(scratch)
     let destination = scratch / "config.nims"
     let original = "switch(\"a\")\n" & openSentinel & "\nswitch(\"b\")\n"
     writeFile(destination, original)
-    runAction(destination)
-    let expected = original & "\n" & wantedBlock("\n") & "\n"
-    check readFile(destination) == expected
-    setLastModificationTime(destination, fromUnix(pinnedMtime))
-    runAction(destination)
-    check readFile(destination) == expected
-    check getLastModificationTime(destination) == fromUnix(pinnedMtime)
+    let actionResult = executeBuiltinAction(ensureSnippetAction(destination))
+    check actionResult.status == asFailed
+    check destination in actionResult.stderr
+    check "repro-paths-bootstrap" in actionResult.stderr
+    check readFile(destination) == original
 
 suite "built-in ensureSnippet with more than one block":
-  test "only the first block is refreshed; later bytes are untouched":
+  test "a file holding the block twice fails and is left alone":
+    # Which copy is the block is not the action's to guess (fs-file-utilities
+    # .md §3): it fails, naming the file and the block, and writes nothing.
     let scratch = scratchDir("two-blocks")
     defer: removeDir(scratch)
     let destination = scratch / "config.nims"
     let tail = "\n\nswitch(\"b\")\n" & staleBlock("\n") & "\n\n"
-    writeFile(destination, "switch(\"a\")\n" & staleBlock("\n") & tail)
-    runAction(destination)
-    let expected = "switch(\"a\")\n" & wantedBlock("\n") & tail
-    check readFile(destination) == expected
-    setLastModificationTime(destination, fromUnix(pinnedMtime))
-    runAction(destination)
-    check readFile(destination) == expected
-    check getLastModificationTime(destination) == fromUnix(pinnedMtime)
+    let original = "switch(\"a\")\n" & staleBlock("\n") & tail
+    writeFile(destination, original)
+    let actionResult = executeBuiltinAction(ensureSnippetAction(destination))
+    check actionResult.status == asFailed
+    check destination in actionResult.stderr
+    check "repro-paths-bootstrap" in actionResult.stderr
+    check readFile(destination) == original

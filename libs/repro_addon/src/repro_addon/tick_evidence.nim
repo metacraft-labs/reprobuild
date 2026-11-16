@@ -9,12 +9,21 @@
 ## ``repro_cli_support/deploy_agent``). An agent whose ticks left no record
 ## would make its host look silent to DET-AO-8 -- or, worse, look like a
 ## host that has nothing to report.
+##
+## Every tick also trips DET-AO-1's positive control (DET-4; spec §10.4
+## "Scheduled positive controls"): ``manifestControl`` hands the agent's own
+## selection a manifest signed by a key generated for the control, with the
+## host's anchors, and the heartbeat says whether it was refused
+## (``control``). The anchors are host state the heartbeat does not prove;
+## the off-host check alerts when no tick proved them for a while.
 
-import std/strutils
+import std/[strutils, times]
 
 import repro_infra
 import repro_infra/addon_diagnostics
+import repro_peer_cache/auth as peerAuth
 import repro_deploy_agent/agent
+import repro_deploy_agent/manifest
 import repro_deploy_agent/tick_record
 import repro_deploy_agent/tick_status
 
@@ -77,12 +86,59 @@ proc tickDetection*(t: RecordedTick; r: TickRefusal):
   of aoOperatorAction: (true, edApplyRefusal, "operator-action", false)
   else: (false, edApplyRefusal, "", false)
 
+const
+  ManifestControlSource* = "http://detector-control.invalid/manifest.rdm"
+    ## The synthetic source the control's manifest is served from. Never
+    ## fetched: ``manifestControl`` answers it in memory (``.invalid`` is
+    ## reserved, RFC 2606, so it cannot name a real host either).
+
+proc manifestControl*(target: string; anchors: TrustAnchors): string =
+  ## DET-AO-1's positive control: the agent's selection (``selectManifest``,
+  ## the code that refuses a manifest on a host) over one synthetic source
+  ## serving a manifest for ``target`` signed by a key generated here, with
+  ## the host's ``anchors``. It must end in ``aoRejected``, which the tick
+  ## maps to DET-AO-1. Returns ``tripped``, ``not-run`` (no anchors: nothing
+  ## to prove), or ``missed: <why>``. Fetches and writes nothing.
+  if anchors.isNil: return "not-run"
+  if target.len == 0: return "missed: the agent has no target"
+  when mutated("manifest-control-skipped"):
+    # FALSIFYING BUILD: the tick never runs the control.
+    return "not-run"
+  try:
+    let key = peerAuth.generateKeypair()
+    var m = DeployManifest(target: target, sequence: 1,
+      deploymentId: "detector-control",
+      profileText: "# DET-AO-1 positive control: never applied\n",
+      issuedAt: uint64(getTime().toUnix()), maxAgeSeconds: 60)
+    signManifest(key, m)
+    let bytes = encodeManifest(m)
+    var deps: AgentDeps
+    deps.httpGet = proc(url: string; timeoutMs: int):
+        tuple[ok: bool; missing: bool; body: seq[byte]; error: string] {.gcsafe.} =
+      if url == ManifestControlSource: (true, false, bytes, "")
+      else: (false, false, @[], "not the control's source: " & url)
+    let sel = selectManifest(AgentConfig(target: target,
+      sources: @[ManifestControlSource], anchors: anchors), deps)
+    if sel.found:
+      return "missed: a manifest signed by a key generated for the " &
+        "control was ACCEPTED by the host's anchors"
+    let d = tickDetection(RecordedTick(outcome: sel.outcome), TickRefusal())
+    if sel.outcome.kind != aoRejected or not d.found or
+        d.detector != edManifest:
+      return "missed: the selection ended in " & $sel.outcome.kind &
+        " (" & sel.outcome.errorCode & "), not a DET-AO-1 refusal"
+    "tripped"
+  except CatchableError as e:
+    "missed: " & e.msg
+
 proc recordTickEvidence*(t: RecordedTick; r: TickRefusal;
-                         site = defaultSite()) =
+                         site = defaultSite(); anchors: TrustAnchors = nil) =
   ## The tick's records: its detection, if it is one, and its heartbeat
   ## (DET-AO-8), which carries the applied sequence the off-host lag check
-  ## compares (DET-AO-10). Never raises: a record that cannot be written is
-  ## reported on stderr (the journal), and the outcome stands.
+  ## compares (DET-AO-10) and DET-AO-1's positive control over ``anchors``
+  ## (``manifestControl``; ``not-run`` without them). A missed control is a
+  ## DET-AO-1 detection of its own. Never raises: a record that cannot be
+  ## written is reported on stderr (the journal), and the outcome stands.
   let o = t.outcome
   var fields = @[("outcome", if t.raised: "tickRaised" else: $o.kind),
                  ("target", o.target), ("sequence", $o.sequence),
@@ -115,6 +171,23 @@ proc recordTickEvidence*(t: RecordedTick; r: TickRefusal;
     except CatchableError as e:
       stderr.write("repro-addon: cannot write the tick's evidence record: " &
         e.msg & "\n")
+  let control = manifestControl(o.target, anchors)
+  if control.startsWith("missed"):
+    try:
+      discard recordEvidence(EvidenceEvent(detector: edManifest,
+        category: ecDetection, trigger: "manifest-control-missed",
+        kind: "manifest-control-missed",
+        fields: @[("target", o.target), ("message", "DET-AO-1's positive " &
+          "control did not trip: " & control)], attest: true,
+        # Repeated on every tick until it is fixed: off-host only, so it
+        # does not fill the local record directory (the journal line below
+        # is the host's copy).
+        offHostOnly: true), site)
+      stderr.write("repro-addon: DET-AO-1's positive control did not trip: " &
+        control & "\n")
+    except CatchableError as e:
+      stderr.write("repro-addon: cannot write the control's record: " &
+        e.msg & "\n")
   try:
     var applied = ""
     let cur = readCurrentGenerationId(site.stateDir)
@@ -123,6 +196,7 @@ proc recordTickEvidence*(t: RecordedTick; r: TickRefusal;
       category: ecHeartbeat, trigger: "", kind: "tick",
       fields: fields & @[("intervalMs", $tickIntervalMs(site.confPath)),
                          ("appliedSequence", applied),
+                         ("control", control),
                          ("count", $t.addOnDrift.len)],
       attest: true, offHostOnly: true), site)
   except CatchableError as e:
@@ -144,4 +218,4 @@ proc engineAgentTick*(cfg: AgentConfig; deps: AgentDeps;
     return
   result = runAgentTickRecorded(cfg, deps)
   when not mutated("engine-tick-unrecorded"):
-    recordTickEvidence(result, TickRefusal(), site)
+    recordTickEvidence(result, TickRefusal(), site, cfg.anchors)

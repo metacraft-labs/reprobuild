@@ -81,12 +81,16 @@ proc applyFrom(h: HostFixture; gen: string; m: DeployManifest) =
   discard recordEvidence(EvidenceEvent(detector: edApply, category: ecAudit,
     trigger: "applied", kind: "apply", attest: true), h.evidence)
 
+let hostAnchors = peerAuth.loadTrustAnchors(root / "deploy-signers.anchors")
+  ## The deploy anchors every fixture host's tick proves DET-AO-1's control
+  ## with (the producer's key, as bootstrap installs it).
+
 proc tick(h: HostFixture; kind: AgentOutcomeKind; target: string;
           seqNo = 0'u64; message = ""; errorCode = "";
-          ctx = AgentApplyContext()) =
+          ctx = AgentApplyContext(); anchors = hostAnchors) =
   recordTickEvidence(RecordedTick(outcome: AgentOutcome(kind: kind,
     target: target, sequence: seqNo, message: message, errorCode: errorCode)),
-    ctx, h.evidence)
+    ctx, h.evidence, anchors)
 
 proc ship(h: HostFixture) =
   let r = runEvidenceShip(h.site, h.conf, h.evidence.host, forceHeartbeat = true)
@@ -114,7 +118,8 @@ suite "the add-on's detectors, from control to off-host alert":
   bootstrapHost(b)
   applyFrom(b, "g1", mb)
   b.tick(aoConverged, "h2", 1)
-  recordEgressCheck(EgressCheck(present: true), b.evidence, 30_000)
+  recordEgressCheck(EgressCheck(present: true, control: "tripped"),
+                    b.evidence, 30_000)
   recordStoreVerify(StoreVerifyReport(), defaultStoreVerifySite(b.evidence.stateDir).withEvidence(b.evidence))
   recordReassertEvidence(ReassertReport(status: "ok"), b.evidence.stateDir,
     atBoot = true, site = b.evidence, bootIdPath = b.site.bootIdPath)

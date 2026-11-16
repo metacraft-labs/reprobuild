@@ -26,8 +26,8 @@
 ##      matching ``pokInlineExecCall`` ``PrivilegedOperation``, wraps it
 ##      in a ``WireOperation`` (``PlannedOperation``) with an empty
 ##      baseline digest (``pokInlineExecCall`` is a one-shot spawn —
-##      ``dispatchOperation`` short-circuits the observe / drift gate
-##      for the kind, so the baseline is unused), and calls
+##      ``dispatchOperation`` short-circuits the observe step for the
+##      kind, and the broker never consults a baseline), and calls
 ##      ``dispatchOperation``.
 ##   3. The closure projects ``DispatchResult`` back into an
 ##      ``ElevatedExecResult``. Success: ``ok = true``, ``exitCode``
@@ -59,6 +59,8 @@
 ## §``ElevatedExecSpawner`` for the engine-side type and
 ## ``libs/repro_elevation/src/repro_elevation/dispatch.nim``
 ## §``dispatchOperation`` for the broker-side dispatch entry.
+
+import std/tables
 
 import repro_build_engine
 import repro_elevation
@@ -155,7 +157,17 @@ proc dispatchResultToElevatedExecResult*(
       exitCode: InfraApplyBrokerFailureExitCode,
       stdout: "", stderr: dr.detail, diagnostic: dr.detail)
 
-proc mkInfraApplyBrokerSpawn*(ctx: FixtureContext): ElevatedExecSpawner =
+type
+  ActionTimeouts* = TableRef[string, int]
+    ## Action id -> the edge's own deadline in seconds (the profile's
+    ## `timeoutSeconds`). The engine's ``ElevatedExecRequest`` carries the
+    ## action id but no deadline, so the dispatcher that knows both hands
+    ## this table to the spawner instead. Edges absent from it run under the
+    ## default deadline (``effectiveInlineExecTimeoutSeconds``).
+
+proc mkInfraApplyBrokerSpawn*(ctx: FixtureContext;
+                              actionTimeouts: ActionTimeouts = nil):
+    ElevatedExecSpawner =
   ## Build the closure ``repro infra apply`` attaches to
   ## ``BuildEngineConfig.brokerSpawn``. Each invocation translates an
   ## engine-side ``ElevatedExecRequest`` into a ``pokInlineExecCall``
@@ -183,6 +195,7 @@ proc mkInfraApplyBrokerSpawn*(ctx: FixtureContext): ElevatedExecSpawner =
   ## but a structured result keeps the diagnostic uniform with a
   ## broker-reported drift / error.
   let capturedCtx = ctx
+  let capturedTimeouts = actionTimeouts
   result = proc(req: ElevatedExecRequest):
       ElevatedExecResult {.gcsafe, closure.} =
     # ``dispatchOperation`` ends up calling ``runInlineExecCall`` for
@@ -197,7 +210,9 @@ proc mkInfraApplyBrokerSpawn*(ctx: FixtureContext): ElevatedExecSpawner =
     # scope of the cast is the whole body so any future helper added
     # below inherits the same constraint.
     {.cast(gcsafe).}:
-      let op = elevatedExecRequestToPrivilegedOperation(req)
+      var op = elevatedExecRequestToPrivilegedOperation(req)
+      if capturedTimeouts != nil:
+        op.iecTimeoutSeconds = capturedTimeouts.getOrDefault(req.actionId, 0)
       let planned = PlannedOperation(operation: op, baselineDigestHex: "")
       var dr: DispatchResult
       try:

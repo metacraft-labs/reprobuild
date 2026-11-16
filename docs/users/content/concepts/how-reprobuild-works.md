@@ -1,11 +1,11 @@
 ---
 title: How reprobuild works
-description: The one graph behind everything reprobuild does, followed from a project file to built, tested and running software, a configured operating system and a fleet of machines, with a link to the page that explains each stage.
+description: How Reprobuild combines BuildXL's monitored dependency graph, Nix's content-addressed store and generations, and Terraform's plan-and-apply reconciliation from one project file up to ReproOS and fleets.
 kind: explanation
 persona: evaluator
 order: 1
 verifies:
-  commands: [build, reap, graph, show-conventions, lock update, test, cache publish, cache substitute, shell, exec, run, up, develop, workspace, home apply, home rollback, infra plan, infra apply, system rollback, deploy-agent]
+  commands: [build, reap, graph, show-conventions, lock update, test, cache publish, cache substitute, shell, exec, run, up, watch, hcr, pressure, develop, workspace, home apply, home rollback, infra plan, infra apply, system rollback, deploy-agent]
   tests:
     - tests/integration/t_monitored_zero_output_edge_input_completeness.nim
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
@@ -39,34 +39,43 @@ unverified:
   - claim: "The release archive includes repro-binary-cache, a cache server you can run yourself."
     reason: "Checked by scripts/verify_release.sh when a release is cut, not by a test this page can cite."
     owner: unassigned
+  - claim: "Incremental rebuilds compete with Ninja while RunQuota coordinates CPU and memory across concurrent sessions, and repro watch --hcr reloads modified code into running processes."
+    reason: "Benchmark harness runs and HCR user-docs scenarios are not yet wired into scenarios/."
+    owner: unassigned
 ---
 
 # How reprobuild works
 
-This page explains the idea that lets one build system build and test software,
-configure the operating system it runs on and keep a fleet of machines in a
-declared state. It then follows a project through each stage, with a link to the
-page that covers each one in depth.
+Reprobuild combines three proven ideas into one engine: BuildXL's monitored
+automatic dependency tracking, Nix's pinned toolchains in a content-addressed
+store with atomic generations, and Terraform's plan-and-apply reconciliation of
+live state. This page explains the single graph behind all three, then follows a
+project through each stage, with a link to the page that covers each one in
+depth.
 
 ## One graph, of files and of states
 
-A build tool keeps a graph whose nodes are files: an object file depends on a
-source file, and a program on its objects. reprobuild's graph has the same edges,
-but a node can also be a state: a tool in the store, a service that is running, a
-user account, a file that a profile manages, a setting applied to a machine. An
-action produces each one, and before it acts reprobuild compares the state it
-would produce with the state that exists, as Terraform does.
+A classical build tool keeps a graph whose outputs are files: an object file
+depends on a source file, and a program on its objects. Reprobuild keeps the
+same dependency edges, and allows an action's output to be a state as well as a
+file: a tool in the store, a service that is running, a user account, a file
+that a profile manages, a setting applied to a machine. Before it changes a
+state, reprobuild compares the state it would produce with the state that
+exists, shows the plan and reconciles the difference, as Terraform does.
 
 Every stage below is made of actions in that graph, so they share one set of
-rules. What an action depended on is recorded, not assumed, and an action whose
-inputs have not changed is not repeated. The rules hold whether the action
-compiles a file, starts a database or edits your `~/.bashrc`:
+rules. What an action read is recorded automatically, not assumed, and an action
+whose inputs have not changed is skipped at speeds competitive with Ninja.
+Across concurrent builds on one host, RunQuota coordinates CPU and memory leases
+(`repro pressure`) so parallel developer and AI-agent sessions do not exhaust
+RAM. Those rules hold whether the action compiles a file, reloads code into a
+running process (`repro watch --hcr`), starts a database or edits `~/.bashrc`:
 
 - `repro build` reuses an action whose fingerprint matches the recorded one.
 - `repro up`, run in several projects that declare one shared service, starts one instance of it and leaves it running for the others.
 - `repro home apply` changes nothing when your account already matches your profile.
-- `repro infra plan` shows what applying a system profile would change, and `repro infra apply` leaves a step's result alone when the result is already in place.
-- `repro deploy-agent`, run on each machine of a fleet, applies the signed state published for that machine, through the same steps.
+- `repro infra plan` shows what applying a system profile would change, and `repro infra apply` leaves an action's result alone when the result is already in place.
+- `repro deploy-agent`, run on each machine of a fleet, applies the signed state published for that machine, through the same actions.
 
 ## 1. A project file describes the project
 
@@ -181,6 +190,10 @@ the machine match, in dependency order, and removes what you no longer declare.
 `repro home apply` does the same for your account, with tools resolved the same
 way as a project's dependencies. Each change is recorded as a generation, and
 `repro system rollback` and `repro home rollback` return to an earlier one.
+Together with the package catalogs and hot code reloading, these system and home
+profiles form ReproOS: either as a complete operating system or layered onto an
+existing Linux distribution in add-on mode (`repro anywhere`), giving developers
+and AI agents one typed, roll-backable graph for every layer of a live machine.
 [Machines and profiles](machines-and-profiles.md) explains how.
 
 ## 11. A fleet converges on signed state
