@@ -1,14 +1,13 @@
-## NF-2 (Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`",
-## inherited through Unified-Locking-And-Hooks.md §13.6) — **a dirty sibling
-## leaves the lock alone, and the commit still succeeds**.
+## NF-2 (Nix-Flake-Coexistence.md §4 "Dirty siblings") — **a dirty sibling
+## leaves `flake.lock` alone, and the commit still succeeds**.
 ##
-##   > if a develop-mode dependency has uncommitted modifications, the project
-##   > lock file must not be updated
-##
-## …because "a develop-mode dependency that is dirty or only locally committed
-## means the effective build state is not properly lockable for other people
-## yet". `flake.lock` is a project lock file under §13.6, so it inherits this
-## verbatim and NF-2 invents no second rule.
+## A pin names a revision and cannot describe working-tree edits, so the
+## refresh is skipped as a whole while a sibling in its scope is dirty. This
+## rule once rested on a Workspace-And-Develop-Mode.md sentence that forbade
+## updating any project lock while a develop-mode dependency was dirty; that
+## sentence was withdrawn because `repro.lock`'s commit-time re-pin records a
+## dirty sibling's HEAD and says so (Unified-Locking-And-Hooks.md §13.3), and
+## §4 now states this skip as `flake.lock`'s own rule.
 ##
 ## ## The half of the policy that is easiest to get wrong
 ##
