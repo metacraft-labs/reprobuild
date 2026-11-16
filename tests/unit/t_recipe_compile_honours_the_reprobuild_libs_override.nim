@@ -159,9 +159,19 @@ suite "the reprobuild libs override reaches the recipe compile":
     check providerCompileLaunchEnv(home, modulePath).valueIn("PATH").
       split(PathSep) == base
     delEnv("REPROBUILD_PACKAGES_ROOT")
-    let siblingInterface = scratch / "reprobuild-packages/packages/interfaces/sqlite3"
+    let siblingCatalog = scratch / "reprobuild-packages"
+    let siblingInterface = siblingCatalog / "packages/interfaces/sqlite3"
     createDir(siblingInterface)
     writeFile(siblingInterface / "repro.nim",
       "import repro_project_dsl\npackage sqlite3:\n  build:\n    discard\n")
+    # A sibling at no known revision does not stand in for the pin
+    # (Provisioning-Contributions.md §"Lookup"): the pin is still selected
+    # and materialized, so the compile still needs Git.
+    check providerCompileLaunchEnv(home, modulePath).valueIn("PATH").
+      split(PathSep) == pinned
+    # The same sibling recorded at the pinned revision IS the pin, read in
+    # place: nothing is fetched, so no Git is declared.
+    writeFile(siblingCatalog / "catalog-revision",
+      "url=https://example.invalid/catalog.git\nrevision=" & revision & "\n")
     check providerCompileLaunchEnv(home, modulePath).valueIn("PATH").
       split(PathSep) == base
