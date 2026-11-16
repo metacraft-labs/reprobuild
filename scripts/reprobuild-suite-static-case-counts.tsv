@@ -29,6 +29,7 @@ libs/ct_test_unittest_parallel/tests/t_every_test_binary_speaks_list_json_protoc
 libs/ct_test_unittest_parallel/tests/t_smoke_ct_test_unittest_parallel.nim	nim	2
 libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_applies_through_the_switch.nim	nim	12
+libs/repro_addon/tests/t_addon_agent_cannot_weaken_the_floor.nim	nim	10
 libs/repro_addon/tests/t_addon_agent_install_staged_outputs.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_refuses_a_pin_not_for_addon.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
@@ -2655,6 +2656,7 @@ tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	6
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
+tests/unit/t_dev_env_directory_trust_binds_recipe.nim	nim	12
 tests/unit/t_dev_env_large_values.nim	nim	5
 tests/unit/t_dev_env_msvc_activation.nim	nim	6
 tests/unit/t_dev_env_path_ops.nim	nim	9

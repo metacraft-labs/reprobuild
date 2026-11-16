@@ -1,6 +1,7 @@
-## Files in a directory that only root may change, written, read and
-## removed through one descriptor of that directory (ReproOS Add-On Mode
-## spec §13 decisions 165 and 166; A11 code review rounds 17 and 18).
+## The uninstall records' directory: files in a directory that only root
+## may change, written, read and removed through one descriptor of that
+## directory (ReproOS Add-On Mode spec §13 decisions 165 and 178; A11 code
+## review rounds 17 and 18).
 ##
 ## The add-on keeps signed records -- the discard intents and completions,
 ## the state-removal token -- in ``/var/log/repro-addon``. Its parent is not
