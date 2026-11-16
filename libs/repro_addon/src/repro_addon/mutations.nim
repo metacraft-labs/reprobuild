@@ -638,10 +638,56 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
-## ``live-check-restart-before-stale-holds-cleared``
-##                                           the next apply restarts the
-##                                           recorded triggers under the dead
-##                                           apply's holds (round 11, H1)
+## ``dead-apply-holds-lifted``             round 11's order: the next apply
+##                                           lifts every hold a dead apply
+##                                           left, a judged service's
+##                                           included, and starts its
+##                                           triggers before its own check
+##                                           (round 12, M3; supersedes
+##                                           round 11's
+##                                           live-check-restart-before-stale-
+##                                           holds-cleared, whose early
+##                                           restart no longer exists)
+## ``recover-lifts-unit-holds``            recover lifts a dead apply's hold
+##                                           on a judged service, not only
+##                                           the triggers' own (round 12, M3)
+## ``recover-keeps-trigger-holds``         recover starts a recorded trigger
+##                                           without lifting its own hold
+##                                           (round 12, recover's stale-hold
+##                                           clearing)
+## ``alias-names-unresolved``              a unit is matched by the name a
+##                                           file used, not systemd's Id=
+##                                           (round 12, M1)
+## ``judged-template-shown-by-name``       a judged template's requirers are
+##                                           read by showing the template,
+##                                           which systemd refuses (round 12,
+##                                           M1)
+## ``essential-judged-units-held``         a judged essential unit is held
+##                                           (round 12, M1)
+## ``essential-triggers-held``             an essential trigger is held
+##                                           (round 12, M1)
+## ``target-units-held``                   a .target that requires a judged
+##                                           unit is held (round 12, "never
+##                                           hold .target units")
+## ``full-apply-fixing-skips-starts``      a full apply commits a resolution
+##                                           without starting what it
+##                                           resolved (round 12, M2)
+## ``full-apply-clears-with-errors``       a full apply with errors clears
+##                                           resolved entries (round 12, M2)
+## ``full-apply-renders-full-profile``     a full apply compares the record
+##                                           with its text as the carried-
+##                                           state requirements extend it,
+##                                           not the generation as written
+##                                           (round 12, M2)
+## ``fixing-start-unreadable-skipped``     the fixing path skips a unit
+##                                           systemd cannot be asked about
+##                                           and clears its entry (round 12)
+## ``boot-record-starts-block``            at boot the records of triggers
+##                                           are started with blocking starts
+##                                           (round 12, M4)
+## ``boot-fixing-starts-block``            a boot replay's fixing starts block
+##                                           and its commit clears them
+##                                           unconfirmed (round 12, M4)
 ## ``empty-requires-resets``               an empty ``Requires=`` resets the
 ##                                           list (round 11, M4)
 ## ``template-requirers-skipped``          a template requirer is not held
@@ -1984,7 +2030,21 @@ const
                           "post-reload-requirers-released",
                           # A13 review round 11.
                           "restart-success-by-exit-code",
-                          "live-check-restart-before-stale-holds-cleared",
+                          # A13 review round 12.
+                          "dead-apply-holds-lifted",
+                          "recover-lifts-unit-holds",
+                          "recover-keeps-trigger-holds",
+                          "alias-names-unresolved",
+                          "judged-template-shown-by-name",
+                          "essential-judged-units-held",
+                          "essential-triggers-held",
+                          "target-units-held",
+                          "full-apply-fixing-skips-starts",
+                          "full-apply-clears-with-errors",
+                          "full-apply-renders-full-profile",
+                          "fixing-start-unreadable-skipped",
+                          "boot-record-starts-block",
+                          "boot-fixing-starts-block",
                           "empty-requires-resets",
                           "template-requirers-skipped",
                           "requirers-from-files-only",

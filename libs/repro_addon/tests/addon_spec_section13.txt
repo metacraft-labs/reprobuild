@@ -192,3 +192,4 @@
 176 Dependants block like triggers | dependant, block
 177 Requirers are read from systemd, and an essential unit is never held | essential, requirer, systemd, held
 178 Bootstrap makes the uninstall records' directory | uninstall records, records' directory, bootstrap, verify
+180 A dead full apply's holds are kept and adopted by the next check | dead, adopt, hold, check
