@@ -1534,7 +1534,8 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
                       tokenPath = stateRemovalTokenPath();
                       inputs: seq[PreBootstrapInput] = @[];
                       hook: InputStepHook = nil;
-                      identityOf: IdentityOf = stateDirIdentity) =
+                      identityOf: IdentityOf = stateDirIdentity;
+                      identityFile = "") =
   ## Removes the add-on's state, ``/var/lib/repro``, with its ledger copy
   ## last but for the rmdir of the add-on's own empty directories (§13
   ## decisions 150, 161 and 165): everything but the ledger copy and the
@@ -1556,7 +1557,18 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
   ## place (``putBackInputMetadata``). A crash at any point leaves either
   ## the ledger copy, so a re-run resumes and finishes the metadata, or the
   ## inputs already right.
+  ##
+  ## The records directory's identity (``identityFile``, by default
+  ## ``record_dir.recordsDirIdentityPath`` of the ledger copy's state; §13
+  ## decision 178, amended in A11 round 21) is kept with the ledger copy
+  ## and removed right after it, its directory joining the chain: while
+  ## the ledger copy is there, a re-run still compares the records
+  ## directory with it, so a swap refused once is refused again.
   if not dirExists(root): return
+  let idFile = if identityFile.len > 0: identityFile
+               else: recordsDirIdentityPath(parentDir(ledgerCopy))
+  let keepId = idFile.startsWith(root & "/") and
+    not mutated("identity-removed-before-ledger-copy")
   when mutated("ledger-copy-removed-with-the-rest"):
     removeHostRoot(r, root, evidence)    # FALSIFIER: round 12's one removeDir
     return
@@ -1572,7 +1584,8 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
             saved.add((i, if i.isDir: "" else: readFile(i.path)))
         removeAllBut(root, ledgerCopy)
       else:
-        removeAllBelowKeeping(root, preBootstrap & @[ledgerCopy])
+        removeAllBelowKeeping(root, preBootstrap & @[ledgerCopy] &
+                                    (if keepId: @[idFile] else: @[]))
       syncer(@[root & "/.state-removed"])   # the unlinks above, made durable
       when not mutated("input-metadata-after-ledger-copy") and
           not mutated("input-mode-owner-not-restored"):
@@ -1583,10 +1596,15 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
             "finishes it")
           return
       chain = stateDirChain(root, ledgerCopy, preBootstrap)
+      if keepId and dirExists(parentDir(idFile)) and
+          parentDir(idFile) notin chain and parentDir(idFile) notin preBootstrap:
+        chain.insert(parentDir(idFile), 0)   # deepest first
       writeStateRemovalToken(tokenPath, root, ledgerCopy, chain, preBootstrap,
                              identityOf)
       removeFile(ledgerCopy)
       if hook != nil: hook("ledger-copy-removed", ledgerCopy)
+      if keepId and (fileExists(idFile) or symlinkExists(idFile)):
+        removeFile(idFile)
       when mutated("inputs-removed-and-restored"):
         for (i, bytes) in saved.sortedByIt(it.i.path.len):
           if i.isDir: createDir(i.path)
@@ -1651,6 +1669,17 @@ proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
   if not t.ok:
     r.errors.add(tokenPath & ": " & t.why & "; nothing was removed")
     return
+  # A run that stopped between the ledger copy and the records directory's
+  # identity (A11 round 21) left the identity in the chain's first
+  # directory; the re-run, which compared the records directory with it
+  # to read this token, removes it before the rmdirs.
+  let idFile = recordsDirIdentityPath(parentDir(ledgerCopy))
+  if parentDir(idFile) in t.chain and
+      (fileExists(idFile) or symlinkExists(idFile)):
+    try: removeFile(idFile)
+    except OSError as ex:
+      r.errors.add(idFile & ": " & ex.msg & "; nothing was removed")
+      return
   let (failed, err, gone) = removeChain(t.chain)
   if failed.len > 0:
     reportEmptyDirsLeft(r, root, failed, err, t.chain)
@@ -1734,12 +1763,19 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # The records directory is the one bootstrap made (§13 decision 178,
   # amended): every checked open of it compares its identity with the one
   # recorded in the state.
-  bindRecordsDir(parentDir(tokenPath), recordsDirIdentityPath(stateDir))
+  when not mutated("uninstall-records-dir-unbound"):
+    bindRecordsDir(parentDir(tokenPath), recordsDirIdentityPath(stateDir),
+                   ledgerCopyPath(stateDir))
   defer: unbindRecordsDir(parentDir(tokenPath))
   when not mutated("state-removal-rerun-unwired"):
     if stateDir.startsWith(stateRoot & "/") and
         finishEmptyStateRoot(result, stateRoot, ledgerCopyPath(stateDir),
                              tokenPath):
+      if boundWithoutState(parentDir(tokenPath)):
+        result.notes.add(parentDir(tokenPath) & " was used without its " &
+          "recorded identity, which went with the state an earlier " &
+          "uninstall removed; the token it holds binds the directories " &
+          "it names, so nothing else was trusted from it")
       return
   let l = readLedger(ledgerCopyPath(stateDir))
   # Pre-bootstrap inputs the add-on took over stay where they are (spec
@@ -1848,6 +1884,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       # Stopped, then disabled by removing exactly its ledgered install
       # links in step 2 -- never `systemctl disable`, which would also
       # remove links the base made for units the add-on does not own.
+      # The boot-hold unit is never stopped: sysinit.target requires it
+      # (§13 decision 172), so its stop would stop sysinit.target and every
+      # unit that requires it -- every service with default dependencies,
+      # the base's sshd among them. It only runs at boot; removing its file
+      # and its link is enough.
+      if u.unit == BootHoldUnit:
+        when not mutated("uninstall-stops-boot-hold"):
+          continue
       systemctlOrRecord(["stop", "--", u.unit], result)
 
   # 1b. The deploy agent's fetch unit keeps its staging in a dynamic user's

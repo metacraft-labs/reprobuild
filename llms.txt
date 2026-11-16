@@ -66,6 +66,7 @@ When invoking `repro` from an automated tool call (with no interactive TTY):
 ## Reference
 
 - [Commands](https://docs.reprobuild.com/reference/commands.md): Every user-facing repro command and subcommand, generated from the CLI description and grouped both by domain and alphabetically. (local checkout: `docs/users/content/reference/commands/index.md`)
+- [Project file and profile syntax](https://docs.reprobuild.com/reference/dsl.md): The syntax of repro.nim, home.nim and system.nim — the imports, package and dependency sections, executables, libraries, build actions, configuration, tasks, services, typed tool interfaces, activities, hosts, resources and resource types. (local checkout: `docs/users/content/reference/dsl.md`)
 - [Command equivalents](https://docs.reprobuild.com/reference/command-equivalents.md): The reprobuild command closest to each command of Nix, Home Manager, Bazel, Buck2, direnv, mise, just, Docker Compose, process-compose, repo and Terraform. (local checkout: `docs/users/content/reference/command-equivalents.md`)
 - [Glossary](https://docs.reprobuild.com/reference/glossary.md): The one name reprobuild's documentation uses for each concept, with the synonyms it avoids. (local checkout: `docs/users/content/reference/glossary.md`)
 

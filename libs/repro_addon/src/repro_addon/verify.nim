@@ -25,9 +25,11 @@ type
       ## after each package upgrade, because the package's unit may have
       ## changed underneath the add-on's copy).
 
-proc runAddonVerify*(stateDir = DefaultStateDir): VerifyReport =
+proc runAddonVerify*(stateDir = DefaultStateDir;
+                     logDir = AddonLogDir): VerifyReport =
   ## ``degraded`` when the ledger itself cannot be read; ``drift`` when any
-  ## object differs from its entry; ``ok`` otherwise.
+  ## object differs from its entry; ``ok`` otherwise. ``logDir`` is the
+  ## records directory's place, another only in a test.
   if not fileExists(ledgerCopyPath(stateDir)):
     return VerifyReport(status: "degraded",
       findings: @["no add-on ledger at " & ledgerCopyPath(stateDir)])
@@ -55,27 +57,42 @@ proc runAddonVerify*(stateDir = DefaultStateDir): VerifyReport =
   # it).
   when not mutated("verify-skips-log-dir"):
     let idFile = recordsDirIdentityPath(stateDir)
-    bindRecordsDir(AddonLogDir, idFile)
-    defer: unbindRecordsDir(AddonLogDir)
-    let recorded = recordedIdentity(AddonLogDir).len > 0
+    bindRecordsDir(logDir, idFile, ledgerCopyPath(stateDir))
+    defer: unbindRecordsDir(logDir)
+    # Present at all counts: an empty or malformed identity file is not
+    # "nothing recorded" (A11 round 20).
+    let recorded = recordedIdentity(logDir).len > 0 or
+      fileExists(idFile) or symlinkExists(idFile)
     var st: Stat
-    if lstat(AddonLogDir.cstring, st) != 0:
+    if lstat(logDir.cstring, st) != 0:
       if recorded:
-        result.findings.add(AddonLogDir & " is gone, though bootstrap made " &
+        result.findings.add(logDir & " is gone, though bootstrap made " &
           "it (its identity is recorded in " & idFile & "); inspect " &
           "/var/log, then remove " & idFile & " to let the next use make " &
           "and record it again")
       else:
-        result.notes.add(AddonLogDir & " is absent; the add-on makes it " &
+        result.notes.add(logDir & " is absent; the add-on makes it " &
           "root's 0700 at its first use and records its identity")
     elif not S_ISDIR(st.st_mode):
-      result.findings.add(AddonLogDir & " is not a directory (a link or " &
+      result.findings.add(logDir & " is not a directory (a link or " &
         "another kind of file); the add-on did not put it there: inspect " &
         "it and remove it")
     else:
-      let why = checkedDirRefusal(AddonLogDir)
+      # The checked open refuses -- drift -- a directory whose identity
+      # differs from the recorded one, an unusable identity record, and a
+      # file system with no birth time (§13 decision 178, amended
+      # 2026-11-16). On a host bootstrapped before the identity was
+      # recorded, it records it now, and says so.
+      let why = checkedDirRefusal(logDir)
       if why.len > 0:
-        result.findings.add(AddonLogDir & ": " & why)
+        result.findings.add(logDir & ": " & why)
+      elif recordedAtFirstUse(logDir) and
+           not mutated("verify-first-use-silent"):
+        result.notes.add(logDir & "'s identity was not recorded (a " &
+          "host bootstrapped before the add-on recorded it); it is " &
+          "recorded now, in " & idFile & " (" &
+          recordedIdentity(logDir) & "): check that " & logDir &
+          " is the directory bootstrap made")
   if result.findings.len > 0:
     result.status = "drift"
 

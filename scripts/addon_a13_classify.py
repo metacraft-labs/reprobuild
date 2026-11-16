@@ -307,6 +307,18 @@ EXPECT.update({
     # Decision 171 as the owner decided it: an essential unit is held.
     "mutessential": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                      "engine build essential-requirers-held"),
+    # A13 review round 12. M3: the next full apply lifts a dead apply's
+    # holds and starts its triggers before its own check (round 11's
+    # order; mutstaleorder above falsified that order's previous form and
+    # stays for round-11 records).
+    "mutdeadhold": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                    "engine build dead-apply-holds-lifted"),
+    # M2: a full apply commits a resolution without starting it.
+    "mutfullfix": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                   "engine build full-apply-fixing-skips-starts"),
+    # M4: at boot the records' starts block and the record is cleared.
+    "mutbootblock": ("e2e_addon_adopt_hand_configured_service", "red",
+                     "add-on build boot-record-starts-block"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -323,6 +335,9 @@ TARGET.update({
     "mutdepblock": "dependants block like triggers:",
     "mutstaleorder": "H1: the next full apply clears a dead apply's stale hold",
     "mutessential": "decision 171: an apply in which an essential requirer would be held",
+    "mutdeadhold": "M3: a judged service a dead full apply held",
+    "mutfullfix": "M2: a full apply whose generation resolves a recorded trigger",
+    "mutbootblock": "M4: at boot the re-assertion queues the start",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -441,6 +456,27 @@ def on_target_rec(kind, rec):
         u = rec.get("decisionEssential", {})
         return (on_target(kind, steps) and u.get("refused") is False and
                 u.get("dropInWritten") is True)
+    if kind == "mutdeadhold":
+        # Red because the service a dead apply held started before the
+        # check that refused it, not for another reason: the check did
+        # refuse it.
+        u = rec.get("deadApplyAdopted", {})
+        return (on_target(kind, steps) and u.get("refusedForReason") is True and
+                u.get("started") is True)
+    if kind == "mutfullfix":
+        # Red because the apply committed and cleared the record with the
+        # socket left down, not for another reason.
+        u = rec.get("fullApplyFixing", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                u.get("staged") not in (None, "active") and
+                u.get("active") not in (None, "active") and
+                u.get("recordLeft") == "")
+    if kind == "mutbootblock":
+        # Red because the boot's re-assertion started and confirmed the
+        # trigger and cleared the record, instead of queueing it.
+        u = rec.get("bootQueuedRestart", {})
+        return (on_target(kind, steps) and u.get("queued") is False and
+                u.get("recordAfterBoot") == "")
     if kind == "mutdependants":
         # Red because the revert failed on the unit that requires the
         # trigger, started at its step 7, not for another reason: the port
@@ -605,6 +641,8 @@ def on_target_rec(kind, rec):
                 unjudged_held(rec.get("decision153Unjudged", {})) and
                 premise_measured(rec.get("decision153Premise", {})) and
                 rec.get("decisionH1", {}).get("ok") is True and
+                rec.get("deadApplyAdopted", {}).get("ok") is True and
+                rec.get("fullApplyFixing", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
                 rec.get("decisionEssential", {}).get("dropInWritten") is False)
@@ -662,9 +700,12 @@ def held_requirer(d153):
 def unjudged_held(d):
     """§13 decision 153 as the owner extended it in A13 review round 10:
     the unit outside the judged set that requires a refused unit stayed
-    held, not active, and the apply said why."""
+    held, not active, and the apply said why; and (A13 review round 12,
+    the owner decision "never hold .target units") a target that requires
+    it was not held."""
     return (isinstance(d, dict) and d.get("reported") is True and
-            d.get("heldInEtc") is True and d.get("active") not in (None, "active"))
+            d.get("heldInEtc") is True and d.get("active") not in (None, "active") and
+            d.get("targetHeld") is not True)
 
 
 def premise_measured(d):
@@ -925,7 +966,8 @@ def green_incomplete(kind, rec):
                            ("decision151Recovered", "ok"),
                            ("decision160Revert", "ok"), ("decision160Guard", "ok"),
                            ("fixingSwitch", "ok"), ("dependantsBlock", "ok"),
-                           ("decision160", "ok"), ("decision160Done", "ok")):
+                           ("decision160", "ok"), ("decision160Done", "ok"),
+                           ("bootQueuedRestart", "ok")):
             d = rec.get(key)
             if not isinstance(d, dict) or d.get(field) is not True:
                 return "%s %r, expected %s" % (key, d, field)

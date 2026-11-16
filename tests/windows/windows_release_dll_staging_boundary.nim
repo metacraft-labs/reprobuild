@@ -59,6 +59,12 @@ function Write-PeFixture([string]$Path, [uint16]$Machine) {
 }
 $binDir = Join-Path $Fixture 'bin'
 New-Item -ItemType Directory -Path $binDir | Out-Null
+# These controls stage the x64 leg's inputs (x64 PE fixtures, the x64 sqlite
+# fallback), so they name that leg rather than inherit the host's: on a
+# windows-aarch64 runner Copy-IntoBin would otherwise check them against
+# arm64 and refuse every one. The arm64 leg's own machine check is
+# controlled below.
+$script:releaseArch = 'x64'
 $x64 = Join-Path $Fixture 'selected-x64.dll'; $x86 = Join-Path $Fixture 'other-x86.dll'
 Write-PeFixture $x64 0x8664; Write-PeFixture $x86 0x14c
 $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $x64).Hash
@@ -75,6 +81,18 @@ Require $refused 'wrong preferred hash is refused'
 $refused = $false
 try { Copy-IntoBin -SrcPath $x86 -DestName 'x86.dll' } catch { $refused = $true }
 Require $refused 'x86 PE source is refused'
+
+# The windows-aarch64 leg (reprobuild-pm Distribution-And-Packaging.md §7.1)
+# accepts only ARM64 images and refuses the x64 fixture the x64 leg accepts.
+$script:releaseArch = 'arm64'
+$a64 = Join-Path $Fixture 'selected-arm64.dll'
+Write-PeFixture $a64 0xAA64
+Copy-IntoBin -SrcPath $a64 -DestName 'selected-arm64.dll'
+Require ((Get-FileHash -Algorithm SHA256 (Join-Path $binDir 'selected-arm64.dll')).Hash -eq (Get-FileHash -Algorithm SHA256 $a64).Hash) 'arm64 leg stages an ARM64 PE source'
+$refused = $false
+try { Copy-IntoBin -SrcPath $x64 -DestName 'x64-on-arm64.dll' } catch { $refused = $true }
+Require ($refused -and -not (Test-Path (Join-Path $binDir 'x64-on-arm64.dll'))) 'arm64 leg refuses an x64 PE source'
+$script:releaseArch = 'x64'
 
 # A genuine self-contained ZIP; no network or external fixture corpus.
 Add-Type -AssemblyName System.IO.Compression

@@ -50,15 +50,16 @@ const
     # `deploy_agent.nim`, `disk.nim`, `hardware.nim`, `home.nim` and
     # `infra_install_root.nim`; the fifth `dev_env_fast_path.nim` (the thin
     # client's `dev-env export` reader takes its flags from the
-    # description). What `infra.nim` and `infra_image.nim` still hold is no
+    # description); the sixth `workspace_restore.nim` (`repro workspace
+    # restore` takes its values from the description). What `infra.nim` and
+    # `infra_image.nim` still hold is no
     # argv parsing (a `git describe` suffix, a table of the flags a
     # bootstrap names), but it has the shape the scan counts.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 964),
+    ("libs/repro_cli_support/src/repro_cli_support.nim", 502),
     ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
     ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/project_pins.nim", 4),
-    ("libs/repro_cli_support/src/repro_cli_support/workspace_restore.nim", 8),
   ]
   MigratedProcs = [
     # The commands parsed from the description. The first group:
@@ -99,7 +100,34 @@ const
     "runDevEnvExportCommand", "runDevEnvDeactivateCommand",
     "devSessionCommandOf", "resolveDevSessionCommand", "runUpOrDevCommand",
     "runDownCommand", "runHcrCoordinateCommand", "runHcrPrepareObjectCommand",
-    "promptArgsOf", "runPromptCommand", "runPromptInitCommand"]
+    "promptArgsOf", "runPromptCommand", "runPromptInitCommand",
+    # The sixth group (workspaces and publication): `hooks` (and the managed
+    # hooks' internal `protocol`, `dispatch`, `cache-push`), `check`, `push`,
+    # `workspace` with every subcommand, `lock`, `locking`, `gateway`, `add`,
+    # `remove`; `sync`, `pull`, `branch` and `switch` share the generic
+    # readers of their `workspace` spellings (`syncArgsOf`, `pullArgsOf`,
+    # `branchArgsOf`, `switchArgsOf`, `roleChoiceOf`, `applyRepoSelection`,
+    # `reportSpecOf`, `hooksCommandOf`, `lockVerbInputsOf`), which
+    # `procBody` does not find; they read typed fields only.
+    "runHooksCommand", "runHooksProtocolCommand", "runHooksDispatchCommand",
+    "runCachePushCommand", "checkArgsOf", "resolveCheckScope", "pushArgsOf",
+    "runPushCommand", "defaultWorkspaceSyncArgs", "syncJobsOf",
+    "applyTagSelection", "runWorkspaceSyncWithProjects",
+    "branchRolesArgsOf", "runWorkspaceBranchRolesCommand",
+    "runWorkspaceEnableCommand", "runWorkspaceDisableCommand",
+    "setsRequestOf", "runWorkspaceSetsCommand", "runWorkspaceProjectsCommand",
+    "reposRequestOf", "runWorkspaceReposCommand", "workspaceStatusArgsOf",
+    "workspaceListArgsOf", "workspaceManifestsArgsOf", "sharedClonesArgsOf",
+    "workspaceForallArgsOf", "workspaceLockArgsOf",
+    "runWorkspaceMigrateCommand", "runWorkspaceMigrateLocksCommand",
+    "runWorkspacePublishEvidenceCommand", "bootstrapTargetDir",
+    "runWorkspaceBootstrapCommand", "runWorkspaceProvisionCommand",
+    "workspaceInitArgsOf", "runWorkspaceInitFromUrl", "runWorkspaceCommand",
+    "addArgsOf", "removeArgsOf", "gatewayDirOf", "runGatewayCommand",
+    "runGatewayMigrateCommand", "runReproLockingCommand",
+    "runReproLockingExplain", "runReproLockingAdoptManifest",
+    "runReproLockCommand", "runReproLockList", "runReproLockDiff",
+    "runReproLockUpdate", "projectsWorkspaceRoot"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.
