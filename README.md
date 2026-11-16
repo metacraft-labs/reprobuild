@@ -2,7 +2,7 @@
 
 [**Documentation**](https://docs.reprobuild.com) · [**Install**](https://docs.reprobuild.com/install) · [**Quickstart**](https://docs.reprobuild.com/tutorials/first-build) · [**CLI Reference**](https://docs.reprobuild.com/reference/commands) · [**llms.txt**](./llms.txt) · [**Agent Guide**](./docs/agents/Repro-Intro-for-Agents.md)
 
-> **Code, machines, and fleets — defined once, built once.**
+> **Code, machines, and fleets. Defined once, built once.**
 
 Look inside a typical repository and you'll find six descriptions of the same
 system: a `Dockerfile`, a Nix flake, a `Makefile` or task runner, a

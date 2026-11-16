@@ -70,7 +70,7 @@ proc releaseBootHolds*(stateDir: string; reload: proc () {.closure.};
                        writtenPath = BootHoldsWrittenList): seq[string] =
   ## After the re-assertion: when no switch is pending any more, lift the
   ## holds this boot wrote -- each only while it still holds exactly the
-  ## start hold's text -- and reload. A switch still pending keeps them.
+  ## start hold's text or the minimal hold's -- and reload. A switch still pending keeps them.
   if hasPendingMarker(stateDir): return
   if symlinkExists(writtenPath) or not fileExists(writtenPath): return
   var lifted: seq[string]
@@ -83,7 +83,9 @@ proc releaseBootHolds*(stateDir: string; reload: proc () {.closure.};
     var c = ""
     try: c = readFile(p)
     except IOError, OSError: continue
-    if c != StartHoldText: continue
+    # The start hold, or the minimal one the script writes when it cannot
+    # copy that text (A9 review round 17, finding 9).
+    if c != StartHoldText and c != MinimalHoldText: continue
     removeHolds([p])
     lifted.add(p)
   removeFile(writtenPath)

@@ -1638,6 +1638,26 @@ proc emitM9R2cArtifactSlots(packageName: string;
           newEmptyNode()))
       result.add(varSection)
 
+proc artifactSlotsNeedStdlibTypes(slots: NimNode): bool =
+  ## Whether the slot declarations ``emitM9R2cArtifactSlots`` produced name
+  ## a type from ``repro_dsl_stdlib/types`` (``Library`` / ``Executable``),
+  ## i.e. whether the package expansion must import that module.
+  ##
+  ## A ``files <n>`` slot is a ``BuildActionDef``, which ``repro_project_dsl``
+  ## already provides. Importing ``repro_dsl_stdlib/types`` for a package
+  ## whose only slots are ``files`` slots left the import unused, so a project
+  ## file declaring ``files assets:`` in a package of another name failed
+  ## ``nim check --warningAsError[UnusedImport]:on`` -- the check an editor
+  ## or a CI lint runs on a project file.
+  for section in slots:
+    if section.kind != nnkVarSection:
+      continue
+    for defs in section:
+      if defs.kind == nnkIdentDefs and defs.len >= 2 and
+          defs[^2].kind == nnkIdent and
+          ($defs[^2] == "Library" or $defs[^2] == "Executable"):
+        return true
+
 proc emitM3Artifacts(packageName: string;
                      classified: seq[ClassifiedSection]): NimNode =
   ## Walk the classified section list; for every entry whose ownership
@@ -10549,7 +10569,7 @@ macro packageImpl*(name: untyped;
   # ``buildCode`` since the build body never references them.
   let m9r2cArtifactSlotEmission =
     emitM9R2cArtifactSlots(packageName, classifiedSections)
-  if m9r2cArtifactSlotEmission.len > 0:
+  if artifactSlotsNeedStdlibTypes(m9r2cArtifactSlotEmission):
     result.add(quote do:
       import repro_dsl_stdlib/types)
   result.add(m9r2cArtifactSlotEmission)

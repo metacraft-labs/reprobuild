@@ -271,6 +271,27 @@ proc encodeCardinality*(v: VariantDecl): string =
 # Priority lattice
 # ---------------------------------------------------------------------------
 
+const NoContributionWeight* = 5
+  ## The ``#minimize`` weight of a value no contribution names: worse than
+  ## ``prDefault`` (4), so the solver prefers any contribution to none.
+
+proc valueWeights*(v: VariantDecl): Table[string, int] =
+  ## The ``#minimize`` weight each value of ``v``'s universe carries: the
+  ## best (lowest) weight among the contributions naming it, or
+  ## ``NoContributionWeight``. This is the weight ``encodePriorityFacts``
+  ## emits per value; it is exposed so a reader of a solution (NLF-M6's
+  ## materiality derivation) can tell whether the value the solve assigned
+  ## was the unique cheapest one or tied with another, without re-deriving
+  ## the lattice.
+  result = initTable[string, int]()
+  for c in v.contributions:
+    let w = priorityWeight(c.priority)
+    if c.value notin result or w < result[c.value]:
+      result[c.value] = w
+  for value in effectiveValues(v):
+    if value notin result:
+      result[value] = NoContributionWeight
+
 proc encodePriorityFacts*(v: VariantDecl): string =
   ## Emit one ``priority("name", "value", weight).`` fact per
   ## contribution against the variant. The ``#minimize`` block at
@@ -299,7 +320,7 @@ proc encodePriorityFacts*(v: VariantDecl): string =
   for value in effectiveValues(v):
     if value notin bestByValue:
       parts.add("priority(\"" & aspQuote(v.name) & "\", \"" &
-                aspQuote(value) & "\", 5).")
+                aspQuote(value) & "\", " & $NoContributionWeight & ").")
   parts.join("\n")
 
 # ---------------------------------------------------------------------------

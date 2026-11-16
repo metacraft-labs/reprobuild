@@ -33,6 +33,14 @@
 ##      unset ``pushurl``: ``git config --remove-section reprobuild.pushGateway``
 ##      (the documented way back in) and ``migrate`` wires the repo again;
 ##      ``health`` counts it ``wired`` and no longer ``opted-out``.
+##   4. A repo wired by a build that predates the record (simulated by removing
+##      the record while the ``pushurl`` stays): ``migrate`` reports it already
+##      wired and back-fills the record, so the plain-git opt-out then holds for
+##      it too. Without the back-fill this arm's second ``migrate`` re-wires.
+##   5. The back-fill writes only an ABSENT record. A record that disagrees with
+##      the live ``pushurl`` is left as it is, both when the gateway is complete
+##      (``already wired``) and when an incomplete gateway is rebuilt behind the
+##      same ``pushurl`` (``wired``): neither run rewrites it.
 ##
 ## Test doubles: none. The origin is a local bare reached over ``file://``, so
 ## there is no network. ``REPRO_WORKSPACE_CLONES`` points the cache root inside
@@ -210,3 +218,56 @@ suite "a plain-git pushurl unset is a per-repo push-gateway opt-out":
       let rewired = gatewayDetail(fx, "after opting back in")
       check "1 wired" in rewired
       check "0 opted-out" in rewired
+
+      # ARM 4 — a repo wired before the record existed: pushurl, no record.
+      discard must(q(gitBin) & " -C " & q(fx.repoPath) &
+        " config --remove-section reprobuild.pushGateway")
+      check pushurl(fx) == gateway
+      let backfillDry = migrate(fx, dryRun = true)
+      check backfillDry.code == 0
+      check "record its provenance" in backfillDry.output
+      check gitConfig(fx, "reprobuild.pushGateway.setBy") == ""
+      let backfill = migrate(fx)
+      check backfill.code == 0
+      check "lib-a: already wired" in backfill.output
+      check "recorded provenance" in backfill.output
+      check gitConfig(fx, "reprobuild.pushGateway.setBy") == "reprobuild"
+      check gitConfig(fx, "reprobuild.pushGateway.value") == gateway
+      check gitConfig(fx, "reprobuild.pushGateway.workspace") ==
+        absolutePath(fx.workspaceRoot)
+      # ...and the plain-git opt-out now holds for it as well.
+      discard must(q(gitBin) & " -C " & q(fx.repoPath) &
+        " config --unset remote.origin.pushurl")
+      let heldOut = migrate(fx)
+      check heldOut.code == 0
+      check "lib-a: opted-out" in heldOut.output
+      check pushurl(fx) == ""
+      # A second run on a recorded repo writes nothing new.
+      discard must(q(gitBin) & " -C " & q(fx.repoPath) &
+        " config --remove-section reprobuild.pushGateway")
+      discard migrate(fx)
+      let quiet = migrate(fx)
+      check "lib-a: already wired" in quiet.output
+      check "recorded provenance" notin quiet.output
+
+      # ARM 5 — a disagreeing record is never rewritten by the back-fill.
+      const elsewhere = "/elsewhere/not-this-gateway"
+      check gitConfig(fx, "reprobuild.pushGateway.setBy") == "reprobuild"
+      discard must(q(gitBin) & " -C " & q(fx.repoPath) &
+        " config reprobuild.pushGateway.value " & q(elsewhere))
+      let keep = migrate(fx)
+      check keep.code == 0
+      check "lib-a: already wired" in keep.output
+      check "recorded provenance" notin keep.output
+      check gitConfig(fx, "reprobuild.pushGateway.value") == elsewhere
+      # Make the gateway incomplete so the run rebuilds it behind the
+      # pushurl that already names it.
+      let preReceive = gateway / "hooks" / "pre-receive"
+      check fileExists(preReceive)
+      removeFile(preReceive)
+      let rebuilt = migrate(fx)
+      check rebuilt.code == 0
+      check "lib-a: wired ->" in rebuilt.output
+      check fileExists(preReceive)
+      check pushurl(fx) == gateway
+      check gitConfig(fx, "reprobuild.pushGateway.value") == elsewhere

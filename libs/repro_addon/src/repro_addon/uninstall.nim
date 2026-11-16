@@ -1734,12 +1734,18 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # The records directory is the one bootstrap made (§13 decision 178,
   # amended): every checked open of it compares its identity with the one
   # recorded in the state.
-  bindRecordsDir(parentDir(tokenPath), recordsDirIdentityPath(stateDir))
+  when not mutated("uninstall-records-dir-unbound"):
+    bindRecordsDir(parentDir(tokenPath), recordsDirIdentityPath(stateDir))
   defer: unbindRecordsDir(parentDir(tokenPath))
   when not mutated("state-removal-rerun-unwired"):
     if stateDir.startsWith(stateRoot & "/") and
         finishEmptyStateRoot(result, stateRoot, ledgerCopyPath(stateDir),
                              tokenPath):
+      if boundWithoutState(parentDir(tokenPath)):
+        result.notes.add(parentDir(tokenPath) & " was used without its " &
+          "recorded identity, which went with the state an earlier " &
+          "uninstall removed; the token it holds binds the directories " &
+          "it names, so nothing else was trusted from it")
       return
   let l = readLedger(ledgerCopyPath(stateDir))
   # Pre-bootstrap inputs the add-on took over stay where they are (spec
@@ -1848,6 +1854,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       # Stopped, then disabled by removing exactly its ledgered install
       # links in step 2 -- never `systemctl disable`, which would also
       # remove links the base made for units the add-on does not own.
+      # The boot-hold unit is never stopped: sysinit.target requires it
+      # (§13 decision 172), so its stop would stop sysinit.target and every
+      # unit that requires it -- every service with default dependencies,
+      # the base's sshd among them. It only runs at boot; removing its file
+      # and its link is enough.
+      if u.unit == BootHoldUnit:
+        when not mutated("uninstall-stops-boot-hold"):
+          continue
       systemctlOrRecord(["stop", "--", u.unit], result)
 
   # 1b. The deploy agent's fetch unit keeps its staging in a dynamic user's

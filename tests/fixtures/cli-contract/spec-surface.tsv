@@ -749,3 +749,507 @@ command	repro prompt
 flag	repro prompt	--format
 flag	repro prompt	--workspace-root
 command	repro prompt init
+command	repro workspace
+command	repro workspace restore
+flag	repro workspace restore	--at
+flag	repro workspace restore	--projects
+flag	repro workspace restore	--record
+flag	repro workspace restore	--record-store
+flag	repro workspace restore	--record-store-at
+flag	repro workspace restore	--snapshot
+command	repro workspace init
+flag	repro workspace init	--allow-missing-layers
+flag	repro workspace init	--clone-objects
+flag	repro workspace init	--json
+flag	repro workspace init	--manifest-branch
+flag	repro workspace init	--manifest-url
+flag	repro workspace init	--no-write-report
+flag	repro workspace init	--print-resolved-url
+flag	repro workspace init	--private-manifest-url
+flag	repro workspace init	--tool-provisioning
+flag	repro workspace init	--workspace-root
+flag	repro workspace init	--write-report
+command	repro workspace bootstrap
+flag	repro workspace bootstrap	--workspace-root
+command	repro workspace enable
+flag	repro workspace enable	--clone-objects
+flag	repro workspace enable	--default
+flag	repro workspace enable	--dry-run
+flag	repro workspace enable	--jobs
+flag	repro workspace enable	--jobs-checkout
+flag	repro workspace enable	--jobs-network
+flag	repro workspace enable	--json
+flag	repro workspace enable	--no-sync
+flag	repro workspace enable	--tags
+flag	repro workspace enable	--verbose
+flag	repro workspace enable	--workspace-root
+flag	repro workspace enable	--write-report
+command	repro workspace disable
+flag	repro workspace disable	--force
+flag	repro workspace disable	--keep-checkouts
+flag	repro workspace disable	--workspace-root
+command	repro workspace sets
+flag	repro workspace sets	--all
+flag	repro workspace sets	--disabled
+flag	repro workspace sets	--enabled
+flag	repro workspace sets	--json
+flag	repro workspace sets	--workspace-root
+command	repro workspace sets list
+flag	repro workspace sets list	--all
+flag	repro workspace sets list	--disabled
+flag	repro workspace sets list	--enabled
+flag	repro workspace sets list	--json
+flag	repro workspace sets list	--workspace-root
+command	repro workspace sets resolve
+flag	repro workspace sets resolve	--at
+flag	repro workspace sets resolve	--json
+flag	repro workspace sets resolve	--workspace-root
+command	repro workspace sets add
+flag	repro workspace sets add	--message
+flag	repro workspace sets add	--no-template
+flag	repro workspace sets add	--template
+flag	repro workspace sets add	--workspace-root
+flag	repro workspace sets add	-m
+command	repro workspace sets remove
+flag	repro workspace sets remove	--prune-orphan-repos
+flag	repro workspace sets remove	--workspace-root
+command	repro workspace projects
+flag	repro workspace projects	--all
+flag	repro workspace projects	--disabled
+flag	repro workspace projects	--enabled
+flag	repro workspace projects	--json
+flag	repro workspace projects	--workspace-root
+command	repro workspace projects list
+flag	repro workspace projects list	--all
+flag	repro workspace projects list	--disabled
+flag	repro workspace projects list	--enabled
+flag	repro workspace projects list	--json
+flag	repro workspace projects list	--workspace-root
+command	repro workspace projects resolve
+flag	repro workspace projects resolve	--at
+flag	repro workspace projects resolve	--json
+flag	repro workspace projects resolve	--workspace-root
+command	repro workspace projects add
+flag	repro workspace projects add	--message
+flag	repro workspace projects add	--no-template
+flag	repro workspace projects add	--template
+flag	repro workspace projects add	--workspace-root
+flag	repro workspace projects add	-m
+command	repro workspace projects remove
+flag	repro workspace projects remove	--prune-orphan-repos
+flag	repro workspace projects remove	--workspace-root
+command	repro workspace repos
+flag	repro workspace repos	--all
+flag	repro workspace repos	--disabled
+flag	repro workspace repos	--enabled
+flag	repro workspace repos	--json
+flag	repro workspace repos	--project
+flag	repro workspace repos	--set
+flag	repro workspace repos	--workspace-root
+command	repro workspace repos list
+flag	repro workspace repos list	--all
+flag	repro workspace repos list	--disabled
+flag	repro workspace repos list	--enabled
+flag	repro workspace repos list	--json
+flag	repro workspace repos list	--project
+flag	repro workspace repos list	--set
+flag	repro workspace repos list	--workspace-root
+command	repro workspace repos add
+flag	repro workspace repos add	--branch
+flag	repro workspace repos add	--mainline
+flag	repro workspace repos add	--message
+flag	repro workspace repos add	--path
+flag	repro workspace repos add	--profile
+flag	repro workspace repos add	--project
+flag	repro workspace repos add	--remote
+flag	repro workspace repos add	--revision
+flag	repro workspace repos add	--set
+flag	repro workspace repos add	--workspace-root
+flag	repro workspace repos add	-m
+command	repro workspace repos remove
+flag	repro workspace repos remove	--delete-fragment
+flag	repro workspace repos remove	--project
+flag	repro workspace repos remove	--set
+flag	repro workspace repos remove	--workspace-root
+command	repro workspace status
+flag	repro workspace status	--ahead-behind
+flag	repro workspace status	--file-details
+flag	repro workspace status	--files
+flag	repro workspace status	--fix
+flag	repro workspace status	--json
+flag	repro workspace status	--no-write-report
+flag	repro workspace status	--stashes
+flag	repro workspace status	--tool-provisioning
+flag	repro workspace status	--unmerged
+flag	repro workspace status	--verbose
+flag	repro workspace status	--workspace-root
+flag	repro workspace status	--write-report
+flag	repro workspace status	-v
+command	repro workspace lock
+flag	repro workspace lock	--no-write-report
+flag	repro workspace lock	--record-store-root
+flag	repro workspace lock	--sha
+flag	repro workspace lock	--tool-provisioning
+flag	repro workspace lock	--trigger-repo
+flag	repro workspace lock	--workspace-root
+flag	repro workspace lock	--write-report
+command	repro workspace list
+flag	repro workspace list	--json
+flag	repro workspace list	--no-write-report
+flag	repro workspace list	--workspace-root
+flag	repro workspace list	--write-report
+command	repro workspace manifests
+flag	repro workspace manifests	--json
+flag	repro workspace manifests	--no-write-report
+flag	repro workspace manifests	--workspace-root
+flag	repro workspace manifests	--write-report
+command	repro workspace branch-roles
+flag	repro workspace branch-roles	--except
+flag	repro workspace branch-roles	--filter
+flag	repro workspace branch-roles	--json
+flag	repro workspace branch-roles	--lts
+flag	repro workspace branch-roles	--mainline
+flag	repro workspace branch-roles	--only
+flag	repro workspace branch-roles	--production
+flag	repro workspace branch-roles	--stable
+flag	repro workspace branch-roles	--staging
+flag	repro workspace branch-roles	--tags
+flag	repro workspace branch-roles	--to
+flag	repro workspace branch-roles	--unstable
+flag	repro workspace branch-roles	--workspace-root
+command	repro workspace forall
+flag	repro workspace forall	--command
+flag	repro workspace forall	--fail-fast
+flag	repro workspace forall	--ignore-errors
+flag	repro workspace forall	--json
+flag	repro workspace forall	--keep-going
+flag	repro workspace forall	--no-write-report
+flag	repro workspace forall	--quiet
+flag	repro workspace forall	--workspace-root
+flag	repro workspace forall	--write-report
+flag	repro workspace forall	-c
+command	repro workspace shared-clones
+flag	repro workspace shared-clones	--force
+flag	repro workspace shared-clones	--json
+flag	repro workspace shared-clones	--no-write-report
+flag	repro workspace shared-clones	--workspace-root
+flag	repro workspace shared-clones	--write-report
+command	repro workspace sync
+flag	repro workspace sync	--clone-objects
+flag	repro workspace sync	--dry-run
+flag	repro workspace sync	--except
+flag	repro workspace sync	--fail-fast
+flag	repro workspace sync	--filter
+flag	repro workspace sync	--force
+flag	repro workspace sync	--force-sync
+flag	repro workspace sync	--jobs
+flag	repro workspace sync	--jobs-checkout
+flag	repro workspace sync	--jobs-network
+flag	repro workspace sync	--json
+flag	repro workspace sync	--lts
+flag	repro workspace sync	--mainline
+flag	repro workspace sync	--merge
+flag	repro workspace sync	--no-interleaved
+flag	repro workspace sync	--no-rebase-on-force-push
+flag	repro workspace sync	--no-write-report
+flag	repro workspace sync	--only
+flag	repro workspace sync	--production
+flag	repro workspace sync	--progress
+flag	repro workspace sync	--rebase
+flag	repro workspace sync	--rebase-on-force-push
+flag	repro workspace sync	--stable
+flag	repro workspace sync	--staging
+flag	repro workspace sync	--tags
+flag	repro workspace sync	--to
+flag	repro workspace sync	--tool-provisioning
+flag	repro workspace sync	--unstable
+flag	repro workspace sync	--verbose
+flag	repro workspace sync	--workspace-root
+flag	repro workspace sync	--write-report
+flag	repro workspace sync	--yes
+flag	repro workspace sync	-j
+flag	repro workspace sync	-v
+command	repro workspace pull
+flag	repro workspace pull	--clone-objects
+flag	repro workspace pull	--force
+flag	repro workspace pull	--no-write-report
+flag	repro workspace pull	--tool-provisioning
+flag	repro workspace pull	--workspace-root
+flag	repro workspace pull	--write-report
+command	repro workspace new
+flag	repro workspace new	--branch
+flag	repro workspace new	--clone-objects
+flag	repro workspace new	--existing-branch
+flag	repro workspace new	--fetch
+flag	repro workspace new	--from
+flag	repro workspace new	--include-changes
+flag	repro workspace new	--json
+flag	repro workspace new	--lts
+flag	repro workspace new	--mainline
+flag	repro workspace new	--no-fetch
+flag	repro workspace new	--no-write-report
+flag	repro workspace new	--production
+flag	repro workspace new	--projects
+flag	repro workspace new	--stable
+flag	repro workspace new	--staging
+flag	repro workspace new	--tool-provisioning
+flag	repro workspace new	--unpublished
+flag	repro workspace new	--unstable
+flag	repro workspace new	--workspace-root
+flag	repro workspace new	--write-report
+command	repro workspace switch
+flag	repro workspace switch	--fetch
+flag	repro workspace switch	--force
+flag	repro workspace switch	--json
+flag	repro workspace switch	--lts
+flag	repro workspace switch	--mainline
+flag	repro workspace switch	--new-branch
+flag	repro workspace switch	--no-fetch
+flag	repro workspace switch	--no-write-report
+flag	repro workspace switch	--production
+flag	repro workspace switch	--stable
+flag	repro workspace switch	--staging
+flag	repro workspace switch	--to
+flag	repro workspace switch	--tool-provisioning
+flag	repro workspace switch	--unstable
+flag	repro workspace switch	--workspace-root
+flag	repro workspace switch	--write-report
+flag	repro workspace switch	--yes
+flag	repro workspace switch	-b
+command	repro workspace provision
+flag	repro workspace provision	--arch
+flag	repro workspace provision	--install-root
+command	repro workspace migrate
+flag	repro workspace migrate	--dry-run
+flag	repro workspace migrate	--json
+flag	repro workspace migrate	--no-write-report
+flag	repro workspace migrate	--workspace-root
+flag	repro workspace migrate	--write-report
+command	repro workspace migrate-locks
+flag	repro workspace migrate-locks	--apply
+flag	repro workspace migrate-locks	--dry-run
+flag	repro workspace migrate-locks	--record-store-root
+flag	repro workspace migrate-locks	--tool-provisioning
+flag	repro workspace migrate-locks	--workspace-root
+command	repro workspace publish-evidence
+flag	repro workspace publish-evidence	--project
+flag	repro workspace publish-evidence	--tool-provisioning
+flag	repro workspace publish-evidence	--workspace-root
+command	repro sync
+flag	repro sync	--clone-objects
+flag	repro sync	--dry-run
+flag	repro sync	--except
+flag	repro sync	--fail-fast
+flag	repro sync	--filter
+flag	repro sync	--force
+flag	repro sync	--force-sync
+flag	repro sync	--jobs
+flag	repro sync	--jobs-checkout
+flag	repro sync	--jobs-network
+flag	repro sync	--json
+flag	repro sync	--lts
+flag	repro sync	--mainline
+flag	repro sync	--merge
+flag	repro sync	--no-interleaved
+flag	repro sync	--no-rebase-on-force-push
+flag	repro sync	--no-write-report
+flag	repro sync	--only
+flag	repro sync	--production
+flag	repro sync	--progress
+flag	repro sync	--rebase
+flag	repro sync	--rebase-on-force-push
+flag	repro sync	--stable
+flag	repro sync	--staging
+flag	repro sync	--tags
+flag	repro sync	--to
+flag	repro sync	--tool-provisioning
+flag	repro sync	--unstable
+flag	repro sync	--verbose
+flag	repro sync	--workspace-root
+flag	repro sync	--write-report
+flag	repro sync	--yes
+flag	repro sync	-j
+flag	repro sync	-v
+command	repro pull
+flag	repro pull	--clone-objects
+flag	repro pull	--force
+flag	repro pull	--no-write-report
+flag	repro pull	--tool-provisioning
+flag	repro pull	--workspace-root
+flag	repro pull	--write-report
+command	repro branch
+flag	repro branch	--branch
+flag	repro branch	--clone-objects
+flag	repro branch	--existing-branch
+flag	repro branch	--fetch
+flag	repro branch	--from
+flag	repro branch	--include-changes
+flag	repro branch	--json
+flag	repro branch	--lts
+flag	repro branch	--mainline
+flag	repro branch	--no-fetch
+flag	repro branch	--no-write-report
+flag	repro branch	--production
+flag	repro branch	--projects
+flag	repro branch	--stable
+flag	repro branch	--staging
+flag	repro branch	--tool-provisioning
+flag	repro branch	--unpublished
+flag	repro branch	--unstable
+flag	repro branch	--workspace-root
+flag	repro branch	--write-report
+command	repro switch
+flag	repro switch	--fetch
+flag	repro switch	--force
+flag	repro switch	--json
+flag	repro switch	--lts
+flag	repro switch	--mainline
+flag	repro switch	--new-branch
+flag	repro switch	--no-fetch
+flag	repro switch	--no-write-report
+flag	repro switch	--production
+flag	repro switch	--stable
+flag	repro switch	--staging
+flag	repro switch	--to
+flag	repro switch	--tool-provisioning
+flag	repro switch	--unstable
+flag	repro switch	--workspace-root
+flag	repro switch	--write-report
+flag	repro switch	--yes
+flag	repro switch	-b
+command	repro push
+flag	repro push	--certify
+flag	repro push	--current-repo
+flag	repro push	--json
+flag	repro push	--merge
+flag	repro push	--no-certify
+flag	repro push	--no-write-report
+flag	repro push	--rebase
+flag	repro push	--sync
+flag	repro push	--tool-provisioning
+flag	repro push	--workspace-root
+flag	repro push	--write-report
+command	repro check
+flag	repro check	--current-repo
+flag	repro check	--json
+flag	repro check	--mode
+flag	repro check	--no-write-report
+flag	repro check	--pushed-refs
+flag	repro check	--tool-provisioning
+flag	repro check	--workspace-root
+flag	repro check	--write-report
+command	repro hooks
+command	repro hooks ensure
+flag	repro hooks ensure	--json
+flag	repro hooks ensure	--no-write-report
+flag	repro hooks ensure	--profile
+flag	repro hooks ensure	--record-store
+flag	repro hooks ensure	--shell
+flag	repro hooks ensure	--shell-autocomplete
+flag	repro hooks ensure	--shell-direnv
+flag	repro hooks ensure	--vcs
+flag	repro hooks ensure	--workspace-root
+flag	repro hooks ensure	--write-report
+command	repro hooks reinstall
+flag	repro hooks reinstall	--json
+flag	repro hooks reinstall	--no-write-report
+flag	repro hooks reinstall	--record-store
+flag	repro hooks reinstall	--shell
+flag	repro hooks reinstall	--shell-autocomplete
+flag	repro hooks reinstall	--shell-direnv
+flag	repro hooks reinstall	--vcs
+flag	repro hooks reinstall	--workspace-root
+flag	repro hooks reinstall	--write-report
+command	repro hooks uninstall
+flag	repro hooks uninstall	--json
+flag	repro hooks uninstall	--no-write-report
+flag	repro hooks uninstall	--record-store
+flag	repro hooks uninstall	--shell
+flag	repro hooks uninstall	--shell-autocomplete
+flag	repro hooks uninstall	--shell-direnv
+flag	repro hooks uninstall	--vcs
+flag	repro hooks uninstall	--workspace-root
+flag	repro hooks uninstall	--write-report
+command	repro lock
+command	repro lock list
+command	repro lock solve
+flag	repro lock solve	--activity
+flag	repro lock solve	--dry-run
+flag	repro lock solve	--highest
+flag	repro lock solve	--inputs
+flag	repro lock solve	--json
+flag	repro lock solve	--lock
+flag	repro lock solve	--lowest
+flag	repro lock solve	--platform
+flag	repro lock solve	--registry
+flag	repro lock solve	--strategy
+flag	repro lock solve	--write
+command	repro lock refresh
+flag	repro lock refresh	--allow-pin-regression
+flag	repro lock refresh	--allow-stale-manifest
+flag	repro lock refresh	--highest
+flag	repro lock refresh	--inputs
+flag	repro lock refresh	--json
+flag	repro lock refresh	--lock
+flag	repro lock refresh	--lowest
+flag	repro lock refresh	--platform
+flag	repro lock refresh	--provisioning
+flag	repro lock refresh	--registry
+flag	repro lock refresh	--repin
+flag	repro lock refresh	--strategy
+flag	repro lock refresh	--write
+command	repro lock update
+flag	repro lock update	--allow-pin-regression
+flag	repro lock update	--repo-root
+flag	repro lock update	--to
+command	repro lock validate
+flag	repro lock validate	--highest
+flag	repro lock validate	--inputs
+flag	repro lock validate	--json
+flag	repro lock validate	--lock
+flag	repro lock validate	--lowest
+flag	repro lock validate	--platform
+flag	repro lock validate	--registry
+flag	repro lock validate	--strategy
+flag	repro lock validate	--write
+command	repro lock diff
+command	repro lock explain
+flag	repro lock explain	--fixture
+flag	repro lock explain	--json
+command	repro locking
+command	repro locking explain
+flag	repro locking explain	--json
+flag	repro locking explain	--project
+flag	repro locking explain	--tool-provisioning
+flag	repro locking explain	--workspace-root
+command	repro locking adopt-manifest
+flag	repro locking adopt-manifest	--project
+flag	repro locking adopt-manifest	--tool-provisioning
+flag	repro locking adopt-manifest	--workspace-root
+command	repro gateway
+command	repro gateway pre-receive
+flag	repro gateway pre-receive	--gateway-dir
+command	repro gateway post-receive
+flag	repro gateway post-receive	--gateway-dir
+command	repro gateway migrate
+flag	repro gateway migrate	--dry-run
+flag	repro gateway migrate	--workspace-root
+command	repro add
+flag	repro add	--binary
+flag	repro add	--depends-of
+flag	repro add	--develop
+flag	repro add	--dry-run
+flag	repro add	--json
+flag	repro add	--no-develop
+flag	repro add	--no-membership
+flag	repro add	--remote
+flag	repro add	--revision
+flag	repro add	--tool-provisioning
+flag	repro add	--workspace-root
+command	repro remove
+flag	repro remove	--dry-run
+flag	repro remove	--force
+flag	repro remove	--json
+flag	repro remove	--tool-provisioning
+flag	repro remove	--workspace-root
+flag	repro remove	--yes

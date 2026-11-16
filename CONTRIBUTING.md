@@ -66,6 +66,16 @@ tests on a host that allows ptrace. `repro build .#apps` writes the
 binary cache's list through a graph edge, and on such a host that edge
 fails too.
 
+## Windows Toolchain Pins
+
+`windows/toolchain-versions.env` pins the Windows cold-start toolchain for
+both architectures. Unsuffixed keys are the x64 leg; a windows-aarch64 pin
+carries `_WIN_ARM64` after its component (`OPENSSL_WIN_ARM64_SHA256`), and
+`NIM_VERSION`, `CLINGO_VERSION` and `OPENSSL_VERSION` are shared by both.
+`windows/tests/test-toolchain-arch-pins.ps1` checks those rules and the
+`Get-ToolchainArchPin` reader; it needs no network and runs under any
+PowerShell, including `pwsh` on Linux.
+
 ## Windows OpenSSL Download Checks
 
 Run `windows/tests/test-openssl-mirrors.ps1` with PowerShell to exercise

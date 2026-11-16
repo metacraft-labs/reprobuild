@@ -161,12 +161,23 @@ a sentence is not "is this true?" but "what keeps this true?".
 |---|---|
 | Command output | A capture from the page's scenario, never a transcription |
 | A version number | Interpolated at build time, never typed |
-| A code sample | Compiled in CI from the fence (`nim runnable`) or the file the page includes |
+| A code sample | A test that compiles it: see **Nim samples** below |
 | A file or path | The scenario asserts it exists, or a step on the page creates it |
 | A command, flag or default | The generated CLI reference |
 | A behaviour | A passing test named in `verifies.tests` |
 | A number | A benchmark result, with its conditions |
 | A screenshot or recording | A named scenario, captured deterministically |
+
+**Nim samples.** A fence written ```` ```nim title="repro.nim" ```` holds a
+complete file, named by `title`, and a test saves it under that name and
+compiles it with `nim check`, treating an unused import as an error. A fence
+written ```` ```nim fragment ```` holds an excerpt and is not compiled. A
+grammar shape that is not Nim is fenced ```` ```text ````. The test fails on a
+fence in any other form, so a sample cannot escape it by its spelling. Today
+that test is
+`tests/integration/t_dsl_reference_snippets_compile_and_docs_build.nim`,
+and it reads one page, `reference/dsl.md`; a page that adds Nim samples adds
+itself to a test that reads it.
 
 **Placeholders.** Write a value that has a source of its own as
 `{{ name }}`; the build replaces it, and a placeholder with no value stops the

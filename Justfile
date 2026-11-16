@@ -931,11 +931,25 @@ lint:
     # so the disagreement surfaces when the RULE is edited rather than when
     # the first file of a new shape lands on it.
     python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
+    # The canonical `reprobuild/dsl/<module>` re-export tree against the
+    # standard library it is generated from. Same class as the suite gates
+    # above -- a tracked artifact that is a pure function of the tree, red
+    # whenever a stdlib module lands without `just regen-reprobuild-dsl-modules`
+    # -- so it runs behind them for the same reason. Before it was here the
+    # only check was one case inside a long integration test, and a stdlib
+    # module added upstream left the tree stale with nothing to say so at
+    # commit time. Reads two directory trees, no compiler, under a second.
+    python3 ./scripts/generate_reprobuild_dsl_modules.py --check 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
 
 fmt: format
+
+# Regenerate the `reprobuild/dsl/<module>` re-export modules from the
+# standard-library tree (libs/reprobuild/README.md).
+regen-reprobuild-dsl-modules:
+    python3 ./scripts/generate_reprobuild_dsl_modules.py
 
 # Regenerate the four tracked artifacts that are pure functions of the tree:
 # repro_tests.nim, scripts/reprobuild-test-shape-parity.tsv,

@@ -96,7 +96,36 @@ const
     "repro allow", "repro deny", "repro dev-env", "repro dev-env export",
     "repro dev-env deactivate", "repro up", "repro down", "repro dev",
     "repro hcr", "repro hcr coordinate", "repro hcr prepare-object",
-    "repro prompt", "repro prompt init"]
+    "repro prompt", "repro prompt init",
+    # The sixth group (workspaces and publication). The internal subcommands
+    # the managed hooks run (`hooks protocol|dispatch|cache-push`) are not
+    # compared.
+    "repro workspace", "repro workspace restore", "repro workspace init",
+    "repro workspace bootstrap", "repro workspace enable",
+    "repro workspace disable", "repro workspace sets",
+    "repro workspace sets list", "repro workspace sets resolve",
+    "repro workspace sets add", "repro workspace sets remove",
+    "repro workspace projects", "repro workspace projects list",
+    "repro workspace projects resolve", "repro workspace projects add",
+    "repro workspace projects remove", "repro workspace repos",
+    "repro workspace repos list", "repro workspace repos add",
+    "repro workspace repos remove", "repro workspace status",
+    "repro workspace lock", "repro workspace list",
+    "repro workspace manifests", "repro workspace branch-roles",
+    "repro workspace forall", "repro workspace shared-clones",
+    "repro workspace sync", "repro workspace pull", "repro workspace new",
+    "repro workspace switch", "repro workspace provision",
+    "repro workspace migrate", "repro workspace migrate-locks",
+    "repro workspace publish-evidence", "repro sync", "repro pull",
+    "repro branch", "repro switch", "repro push", "repro check",
+    "repro hooks", "repro hooks ensure", "repro hooks reinstall",
+    "repro hooks uninstall", "repro lock", "repro lock list",
+    "repro lock solve", "repro lock refresh", "repro lock update",
+    "repro lock validate", "repro lock diff", "repro lock explain",
+    "repro locking", "repro locking explain", "repro locking adopt-manifest",
+    "repro gateway", "repro gateway pre-receive",
+    "repro gateway post-receive", "repro gateway migrate", "repro add",
+    "repro remove"]
     ## The commands whose flags and environment variables are compared.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
@@ -113,7 +142,15 @@ const
     # on how long repeated changes may postpone a cycle, and hot code
     # reloading (which `repro watch --hcr` implements).
     "flag\trepro dev\t--max-debounce", "flag\trepro dev\t--hcr",
-    "flag\trepro dev\t--hcr-debug", "flag\trepro dev\t--hcr-mode"]
+    "flag\trepro dev\t--hcr-debug", "flag\trepro dev\t--hcr-mode",
+    # The proposed scope flags of `repro hooks` (only the default scope is
+    # implemented), the proposed `repro lock solve` options, and `repro
+    # workspace status --verbose`, which the page describes and the command
+    # does not take.
+    "flag\trepro hooks ensure\t--profile",
+    "flag\trepro lock solve\t--activity", "flag\trepro lock solve\t--dry-run",
+    "flag\trepro workspace status\t--verbose",
+    "flag\trepro workspace status\t-v"]
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
@@ -211,6 +248,9 @@ const
   WithoutHealthFix = declaredSurface("health", "fix", true)
   # A command of the fifth group, compared since its parsing moved.
   WithoutDownStopTimeout = declaredSurface("down", "stopTimeout", true)
+  # A command of the sixth group, compared since its parsing moved: the
+  # pre-push gate's own input.
+  WithoutCheckPushedRefs = declaredSurface("check", "pushedRefs", true)
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -328,6 +368,10 @@ suite "CS-M6: the specification pages match the declarations":
   test "removing a fifth-group command's flag fails the comparison":
     check differences(WithoutDownStopTimeout, specified()) ==
       @["flag\trepro down\t--stop-timeout: specified, not declared"]
+
+  test "removing a sixth-group command's flag fails the comparison":
+    check differences(WithoutCheckPushedRefs, specified()) ==
+      @["flag\trepro check\t--pushed-refs: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==
