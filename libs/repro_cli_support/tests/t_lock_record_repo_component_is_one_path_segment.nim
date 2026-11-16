@@ -312,7 +312,8 @@ suite "RA-32 — a slash in a repo name must not deepen the lock path":
         let argv = cmd.splitWhitespace()
         check argv.len >= 3
         check argv[0 .. 2] == @["repro", "workspace", "migrate-locks"]
-        let code = runWorkspaceMigrateLocksCommand(argv[3 .. ^1])
+        # Through the same parser and dispatch `repro` uses.
+        let code = runReproCommandLineInProcess(argv[1 .. ^1])
         checkpoint("`" & cmd & "` -> exit " & $code)
         check code == 0
 

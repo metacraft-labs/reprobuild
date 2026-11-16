@@ -80,7 +80,9 @@ suite "membership model — retired names fail as unknown":
 
     let retired = runRepro(reproBin, ws, ["workspace", "sync", "--groups=default"])
     check retired.code != 0
-    check retired.output.contains("--groups=default")
+    # Refused by the parser as an unknown flag, which names the flag (the
+    # value written with it is not repeated).
+    check retired.output.contains("unknown flag '--groups'")
     # The rule is "fails as unknown", not "warns and continues". A run that
     # said `deprecated` and proceeded would have exited 0 above; assert the
     # vocabulary too so a future well-meant compatibility shim trips here.
@@ -119,7 +121,7 @@ suite "membership model — retired names fail as unknown":
 
     let retired = runRepro(reproBin, ws, ["workspace", "enable", "--groups=x"])
     check retired.code != 0
-    check retired.output.contains("--groups=x")
+    check retired.output.contains("unknown flag '--groups'")
 
   test "t_repo_fragment_groups_key_is_refused_and_tags_parses":
     let d = createTempDir("repro-retired-fragment-", "")
