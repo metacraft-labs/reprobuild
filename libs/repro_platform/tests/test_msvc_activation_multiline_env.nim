@@ -18,7 +18,8 @@
 ##
 ## WHAT IS ASSERTED, end to end over the production procs
 ## (``vsDevCmdChildEnv`` -> ``set`` -> ``parseCmdSetOutput`` ->
-## ``msvcEnvTableFromSetLines`` -> ``mergeActionEnvWithMsvcEnv`` -> layered
+## ``msvcEnvTableFromSetLines`` -> ``msvcDevEnvFromActivation`` ->
+## ``mergeActionEnvWithMsvcEnv`` -> layered
 ## over the inherited environment, the way the Windows process launcher layers
 ## an action's ``KEY=VALUE`` entries):
 ##   1. every inherited variable reaches the action with its own value, the
@@ -98,11 +99,16 @@ proc actionEnvironment(parent: seq[(string, string)]):
     OrderedTable[string, (string, string)] =
   let shellEnv = vsDevCmdChildEnv(parent)
   let lines = parseCmdSetOutput(cmdSetDump(vsDevCmdActivate(shellEnv)))
-  var table = msvcEnvTableFromSetLines(lines, vsDevCmdInjectedNames(parent))
-  table["CC"] = "cl.exe"
-  let devEnv = MsvcDevEnv(available: true, env: table)
+  let table = msvcEnvTableFromSetLines(lines, vsDevCmdInjectedNames(parent))
+  let devEnv = msvcDevEnvFromActivation(table, parent, [("CC", "cl.exe")])
   let actionEnv = @["REPROBUILD_NO_RUNQUOTA=1", r"PWD=C:\work\profile"]
-  layered(parent, mergeActionEnvWithMsvcEnv(devEnv, actionEnv))
+  # The launch inherits the parent's search lists (``Path`` here) and the
+  # merge puts the activation's toolchain entries in front of them.
+  var inheritedLists: seq[(string, string)] = @[]
+  for (name, value) in parent:
+    if cmpIgnoreCase(name, "Path") == 0:
+      inheritedLists.add((name, value))
+  layered(parent, mergeActionEnvWithMsvcEnv(devEnv, actionEnv, inheritedLists))
 
 suite "MSVC activation and multi-line environment values":
   test "inherited variables, the multi-line one included, reach the action intact":
