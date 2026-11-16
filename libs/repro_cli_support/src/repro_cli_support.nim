@@ -89874,27 +89874,36 @@ proc reportSelectorsCertifyingNothing(part: CertificatePlanPart;
   ## saying why). A plan for no name at all (a path selector without a
   ## ``#<name>`` fragment) is named by its anchor when it certifies nothing.
   let declared = part.certificates.entries.len > 0
-  let why =
+  # What the plan lacks, and what to do about it. The consequence clause is
+  # the caller's: a name selector selected tests that ran without a
+  # certificate, a fragment-less path built the default graph, which runs
+  # no test collection at all.
+  let missing =
     if declared:
-      "it selects no certificate-producing node: no node marked with " &
-        "`certificate \"<name>\", <handle>` (nor the implicit `test` node) " &
-        "is wholly in its plan, so the tests it selects ran without one — " &
-        "select a declared name ('repro certificates list') or mark the " &
+      "no node marked with `certificate \"<name>\", <handle>` (nor the " &
+        "implicit `test` node) is wholly in its plan"
+    else:
+      "the project declares none (no `certificate \"<name>\", <handle>` " &
+        "and no `test` node)"
+  let remedy =
+    if declared:
+      " — select a declared name ('repro certificates list') or mark the " &
         "node in repro.nim"
     else:
-      "it selects no certificate-producing node: the project declares none " &
-        "(no `certificate \"<name>\", <handle>` and no `test` node), so " &
-        "the tests it selects ran without one"
+      " — mark the node in repro.nim"
   if part.bySelector.len == 0:
     if nodes.len == 0 and anchorSelector.len > 0:
       stderr.writeLine("repro test: no certificate for '" & anchorSelector &
         "' — a path selector without a #<name> fragment builds the " &
         "project's default graph, which leaves out the test, bench and lint " &
-        "collections; " & why)
+        "collections, and that graph contains no certificate-producing " &
+        "node: " & missing & remedy)
     return
   for selector in selectorsCertifyingNothing(part):
     stderr.writeLine("repro test: no certificate for '" &
-      selectorSpelling(selector, spellings) & "' — " & why)
+      selectorSpelling(selector, spellings) & "' — it selects no " &
+      "certificate-producing node: " & missing & ", so the tests it " &
+      "selects ran without one" & remedy)
 
 proc reportUnselectedCertificates(unselected: seq[string]) =
   ## The one line naming the project's marked nodes this run did not select.
