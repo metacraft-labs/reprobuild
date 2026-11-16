@@ -2038,6 +2038,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_managed_file_writes_share_one_writer.nim",
+    binary: "build/test-bin/t_managed_file_writes_share_one_writer",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_modified_output_restores_the_recorded_result.nim",
     binary: "build/test-bin/t_modified_output_restores_the_recorded_result",
     defines: @[],

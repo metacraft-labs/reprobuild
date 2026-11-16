@@ -113,6 +113,13 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # note in `runBuild`.
 import repro_core/nix_store_roots
 import repro_core/nix_configuration_env
+# The ONE managed-file writer behind ``ensureLine`` / ``ensureSnippet`` (and
+# the home-profile ``fs.managedBlock``): sentinel format, locator, splice and
+# atomic write. reprobuild-pm spec/CLI/internal/fs-file-utilities.md §3-§4.
+from repro_core/managed_block import ManagedBlockKey, ManagedBlockError,
+  managedBlockKey, validateManagedBlockKey, spliceManagedBlock,
+  ensureLineContent, readManagedFile, updateManagedFile, alAfterBlankLine,
+  ProjectBlockScope
 from repro_core/process_streams import drainStream
 # ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
 # second time on POSIX. This scheduler thread is not alone once the worker
@@ -3794,6 +3801,40 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     networkMode: networkMode,
     netDestinations: @netDestinations)
 
+const ManagedFileWriterKinds* = {bakEnsureLine, bakEnsureSnippet}
+  ## The built-ins that rewrite part of their output file through the
+  ## managed-file writer (``repro_core/managed_block``) and may therefore
+  ## share that file with each other, under ``validateGraph``'s rules.
+
+proc ensureSnippetEntries*(packageName, blockId, snippet: string;
+                           scope = ProjectBlockScope): seq[string] =
+  ## The ``builtinEntries`` payload of a ``bakEnsureSnippet`` action: the
+  ## block's key and its content, never sentinel text. reprobuild-pm
+  ## spec/CLI/internal/fs-file-utilities.md §3: the sentinels are rendered by
+  ## the managed-file writer from ``(scope, packageName, blockId)``, so no
+  ## caller can invent a format the other writers cannot read. The DSL
+  ## lowering and every direct constructor encode through this one proc.
+  @[scope, packageName, blockId, snippet]
+
+proc ensureSnippetPayload*(action: BuildAction):
+    tuple[key: ManagedBlockKey; snippet: string] =
+  ## Decode ``ensureSnippetEntries``. Raises ``BuildEngineError`` for a
+  ## payload of the wrong shape and ``ManagedBlockError`` for a key that is
+  ## not a valid ``project`` block key (fs-file-utilities.md §3:
+  ## ``fs.ensureSnippet`` is the project-scope entry point).
+  if action.builtinEntries.len != 4:
+    raise newException(BuildEngineError, "ensureSnippet action " & action.id &
+      " requires the payload (scope, packageName, blockId, snippet); got " &
+      $action.builtinEntries.len & " entries")
+  let key = managedBlockKey(action.builtinEntries[0],
+    action.builtinEntries[1], action.builtinEntries[2])
+  if key.scope != ProjectBlockScope:
+    raise newException(ManagedBlockError, "ensureSnippet action " &
+      action.id & " writes a '" & key.scope &
+      "' block; ensureSnippet writes project blocks only")
+  validateManagedBlockKey(key)
+  (key: key, snippet: action.builtinEntries[3])
+
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
 
@@ -4467,7 +4508,11 @@ proc validateGraph(g: BuildGraph) =
 
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
-  var outputs = initHashSet[string]()
+  # Managed-file writers (``ensureLine`` / ``ensureSnippet``) may share an
+  # output file: each owns only its line or block in it. Whether two of them
+  # may coexist is decided by the managed-file pass below, so a duplicate
+  # between two of them is deferred to it; any other duplicate is refused.
+  var outputs = initTable[string, bool]()
   for action in g.actions:
     if action.id.len == 0:
       raiseEngine("action id is required")
@@ -4477,10 +4522,13 @@ proc validateGraph(g: BuildGraph) =
     byId[action.id] = action
     if action.kind == bakProcess and action.argv.len == 0 and action.outputs.len == 0 and action.optionalOutputs.len == 0:
       raiseEngine("action has neither command nor outputs: " & action.id)
+    let managedWriter = action.kind in ManagedFileWriterKinds
     for output in action.outputs & action.optionalOutputs:
-      if outputs.contains(output):
+      if outputs.hasKey(output):
+        if managedWriter and outputs[output]:
+          continue
         raiseEngine("duplicate declared output: " & output)
-      outputs.incl(output)
+      outputs[output] = managedWriter
   for action in g.actions:
     for dep in action.deps:
       if not ids.contains(dep):
@@ -4520,6 +4568,54 @@ proc validateGraph(g: BuildGraph) =
           if dep notin seen:
             stack.add(dep)
     false
+
+  # reprobuild-pm spec/CLI/internal/fs-file-utilities.md §4. Managed-file
+  # writers read their output and replace it, so for any two that write the
+  # same FILE (compared by location, not by spelling):
+  #   * declaring the same block -- the same ``(scope, packageName,
+  #     blockId)`` -- is refused whatever their order: a block has one owner
+  #     (Generated-Configuration-Files.md §"Sentinel uniqueness");
+  #   * otherwise they are a double write unless a dependency chain orders
+  #     them (Filesystem-Policy-And-Observed-Inputs.md §"Double Writes"):
+  #     two concurrent read-modify-replace runs lose one update.
+  # A malformed ``ensureSnippet`` payload is left to the action, which fails
+  # naming it when it runs.
+  var managedWriters: seq[tuple[actionId, raw, file: string;
+    hasKey: bool; key: ManagedBlockKey]] = @[]
+  for action in g.actions:
+    if action.kind notin ManagedFileWriterKinds or action.outputs.len != 1:
+      continue
+    var entry = (actionId: action.id, raw: action.outputs[0],
+      file: outputRemovalLocation(action.cwd, action.outputs[0]),
+      hasKey: false, key: ManagedBlockKey())
+    if action.kind == bakEnsureSnippet and action.builtinEntries.len == 4:
+      entry.hasKey = true
+      entry.key = managedBlockKey(action.builtinEntries[0],
+        action.builtinEntries[1], action.builtinEntries[2])
+    managedWriters.add(entry)
+  for i in 0 ..< managedWriters.len:
+    for j in (i + 1) ..< managedWriters.len:
+      let a = managedWriters[i]
+      let b = managedWriters[j]
+      if a.file.len == 0 or a.file != b.file:
+        continue
+      if a.hasKey and b.hasKey and a.key == b.key:
+        raiseEngine("managed block '" & $a.key & "' in '" & a.raw &
+          "' is declared by two actions, '" & a.actionId & "' and '" &
+          b.actionId & "': a block has one owner, whatever the order of " &
+          "its writers. Rename one block id or merge the two snippets " &
+          "into one block. Spec: CLI/internal/fs-file-utilities.md §4, " &
+          "Generated-Configuration-Files.md §\"Sentinel uniqueness\".")
+      if reachable(a.actionId, b.actionId) or
+          reachable(b.actionId, a.actionId):
+        continue
+      raiseEngine("double-write reject: '" & a.actionId & "' and '" &
+        b.actionId & "' both rewrite one file ('" & a.raw & "' and '" &
+        b.raw & "') with no dependency chain between them; " &
+        "each reads the file and replaces it, so concurrent runs would " &
+        "lose one update. Add a dependency edge from one to the other. " &
+        "Spec: CLI/internal/fs-file-utilities.md §4, " &
+        "Filesystem-Policy-And-Observed-Inputs.md §\"Double Writes\".")
 
   var declaredIndex: seq[tuple[actionId: string; root: string;
     optional: bool; ordinary: bool]] = @[]
@@ -5309,21 +5405,25 @@ proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
 
 proc inferDeclaredActionDeps(g: BuildGraph): BuildGraph =
   result = g
-  var outputProducer = initTable[string, string]()
+  # A path normally has one producer; several managed-file writers
+  # (``ensureLine`` / ``ensureSnippet``, ordered by dependencies -- see
+  # ``validateGraph``) may share one file, and a reader of that file then
+  # depends on every one of them, not only on whichever came first.
+  var outputProducers = initTable[string, seq[string]]()
   for action in g.actions:
     for output in action.outputs & action.optionalOutputs:
       let normalized = normalizedDeclaredActionPath(action, output)
-      if normalized.len > 0 and not outputProducer.hasKey(normalized):
-        outputProducer[normalized] = action.id
+      if normalized.len > 0:
+        outputProducers.mgetOrPut(normalized, @[]).addUnique(action.id)
 
   for i in 0 ..< result.actions.len:
     for input in result.actions[i].inputs:
       let normalized = normalizedDeclaredActionPath(result.actions[i], input)
-      if normalized.len == 0 or not outputProducer.hasKey(normalized):
+      if normalized.len == 0 or not outputProducers.hasKey(normalized):
         continue
-      let producerId = outputProducer[normalized]
-      if producerId != result.actions[i].id:
-        result.actions[i].deps.addUnique(producerId)
+      for producerId in outputProducers[normalized]:
+        if producerId != result.actions[i].id:
+          result.actions[i].deps.addUnique(producerId)
 
 proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
@@ -18183,69 +18283,6 @@ when not defined(windows):
      response: exchange.response, attempts: exchange.attempts,
      diagnostic: exchange.diagnostic)
 
-proc ensureSnippetContent(content, openSentinel, closeSentinel, openSearch,
-                          closeSearch, snippet: string): string =
-  ## The bytes ``ensureSnippet`` wants the file holding ``content`` to hold.
-  ## A result equal to ``content`` means "already up to date, do not write".
-  ##
-  ## The file is often TRACKED (``nimRepropathsConfig`` targets a project's
-  ## ``config.nims``), so every byte outside the sentinel block -- each line
-  ## terminator, the presence or absence of a final one, the count of trailing
-  ## blank lines -- is copied through verbatim, never re-joined from split
-  ## lines. Re-joining is what used to add one "\n" per build: ``splitLines``
-  ## yields a trailing "" for a file ending in "\n", and the rejoin appended
-  ## another terminator after it. It also rewrote CRLF files to LF.
-  ##
-  ## Lines are recognised as ``splitLines`` does (``\r\n``, ``\n`` or a lone
-  ## ``\r``). The block's own lines, and any terminator added when appending
-  ## it, use CRLF when the file's first terminator is CRLF and LF otherwise,
-  ## so a CRLF checkout (e.g. Windows with ``core.autocrlf``) stays CRLF.
-  var eol = "\n"
-  let firstBreak = content.find({'\r', '\n'})
-  if firstBreak >= 0 and content.continuesWith("\r\n", firstBreak):
-    eol = "\r\n"
-  let newBlock =
-    if eol == "\n": openSentinel & "\n" & snippet & "\n" & closeSentinel
-    else: (openSentinel & "\n" & snippet & "\n" & closeSentinel).
-      replace("\r\n", "\n").replace("\n", eol)
-  # Byte offsets of the block: from the start of the (last) open-sentinel
-  # line before the first close-sentinel line, to the end of that close line's
-  # text -- its terminator is outside the block and therefore preserved.
-  var blockStart = -1
-  var blockEnd = -1
-  var lineStart = 0
-  var lastLineStart = 0
-  while lineStart <= content.len:
-    var lineEnd = lineStart
-    while lineEnd < content.len and content[lineEnd] notin {'\r', '\n'}:
-      inc lineEnd
-    let line = content[lineStart ..< lineEnd].strip()
-    if line.startsWith(openSearch):
-      blockStart = lineStart
-    elif line.startsWith(closeSearch) and blockStart != -1:
-      blockEnd = lineEnd
-      break
-    lastLineStart = lineStart
-    if lineEnd >= content.len:
-      break
-    lineStart = lineEnd + 1
-    if content[lineEnd] == '\r' and lineStart < content.len and
-        content[lineStart] == '\n':
-      inc lineStart
-  if blockStart != -1 and blockEnd != -1:
-    return content[0 ..< blockStart] & newBlock & content[blockEnd .. ^1]
-  # Absent block: append it after one blank line. These are byte-for-byte the
-  # bytes the action has always appended to an LF file, so a file that
-  # already received the block is not touched again by this rewrite: one
-  # terminator closes an unterminated non-blank last line, one more makes the
-  # blank separator, and the block ends with a terminator.
-  result = content
-  if content[lastLineStart .. ^1].strip().len > 0:
-    result.add(eol)
-  result.add(eol)
-  result.add(newBlock)
-  result.add(eol)
-
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -18297,52 +18334,27 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
     of bakEnsureLine:
       if action.outputs.len != 1:
         raiseEngine("ensureLine action requires exactly one output: " & action.id)
+      # fs-file-utilities.md §2/§4: the line is written by the managed-file
+      # writer, so a changing write replaces the file atomically and an
+      # up-to-date file is not written (its mtime is kept).
       let destination = action.builtinPath(action.outputs[0])
-      let destExt = extendedPath(destination)
-      let lineToEnsure = action.builtinText
-      var content = ""
-      var linesList: seq[string] = @[]
-      if fileExists(destExt):
-        content = readFile(destExt)
-        linesList = content.splitLines()
-      var found = false
-      let lineToEnsureStrip = lineToEnsure.strip()
-      for l in linesList:
-        if l.strip() == lineToEnsureStrip:
-          found = true
-          break
-      if not found:
-        createDir(destExt.splitPath.head)
-        prepareBuiltinFileOutput(destination)
-        var newContent = content
-        if newContent.len > 0 and not newContent.endsWith("\n") and not newContent.endsWith("\r"):
-          newContent.add("\n")
-        newContent.add(lineToEnsure)
-        newContent.add("\n")
-        writeFile(destExt, newContent)
+      let prior = readManagedFile(destination)
+      discard updateManagedFile(destination, prior,
+        ensureLineContent(prior, action.builtinText))
     of bakEnsureSnippet:
       if action.outputs.len != 1:
         raiseEngine("ensureSnippet action requires exactly one output: " & action.id)
-      if action.builtinEntries.len < 5:
-        raiseEngine("ensureSnippet action requires openSentinel, closeSentinel, openSearch, closeSearch, and snippet")
+      # fs-file-utilities.md §3: the block is identified by its key, never
+      # by caller-supplied sentinel text, and spliced by the same writer
+      # ``fs.managedBlock`` uses. A duplicated or unterminated block raises
+      # ``ManagedBlockError`` naming the file and the block, which fails the
+      # action below.
       let destination = action.builtinPath(action.outputs[0])
-      let destExt = extendedPath(destination)
-      let openSentinel = action.builtinEntries[0]
-      let closeSentinel = action.builtinEntries[1]
-      let openSearch = action.builtinEntries[2]
-      let closeSearch = action.builtinEntries[3]
-      let snippet = action.builtinEntries[4]
-      var content = ""
-      if fileExists(destExt):
-        content = readFile(destExt)
-      let newContent = ensureSnippetContent(content, openSentinel,
-        closeSentinel, openSearch, closeSearch, snippet)
-      # Write only on a real change: an up-to-date tracked file keeps its
-      # bytes and its mtime.
-      if content != newContent:
-        createDir(destExt.splitPath.head)
-        prepareBuiltinFileOutput(destination)
-        writeFile(destExt, newContent)
+      let payload = action.ensureSnippetPayload()
+      let prior = readManagedFile(destination)
+      discard updateManagedFile(destination, prior,
+        spliceManagedBlock(prior, payload.key, payload.snippet,
+          alAfterBlankLine, destination))
     of bakStamp:
       if action.outputs.len != 1:
         raiseEngine("stamp action requires exactly one output: " & action.id)
@@ -21155,6 +21167,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         RestoreOutcome(inputChanged: inputChanged)
       else:
         RestoreOutcome(declined: reason)
+    if action.kind in ManagedFileWriterKinds:
+      # ``ensureLine`` / ``ensureSnippet`` own a line or a block of their
+      # output, not the file: the recorded bytes include everything else the
+      # file held when the action last ran (the user's lines, other writers'
+      # blocks). Restoring them would revert those bytes, so a hit whose
+      # output is not what the last run left re-runs the action, which
+      # rewrites only its own line or block (reprobuild-pm
+      # spec/CLI/internal/fs-file-utilities.md §4, "Not memoized across
+      # hosts").
+      return decline("the output of a managed-file writer is not the " &
+        "recorded one; the action re-runs over it rather than restoring " &
+        "the whole file, which would revert bytes it does not own")
     if overwrites.len > 0 and action.unsafePreserveOutputs:
       let note = overwrites[0].path & " was modified (on disk " &
         overwrites[0].onDisk & ", recorded " & overwrites[0].restored &
