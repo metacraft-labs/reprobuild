@@ -1,0 +1,295 @@
+# RESEARCH ONLY -- never merged. Phase-1 feasibility probe for the native
+# windows-aarch64 release bundle (reprobuild-pm issue
+# 2026-10-23-native-windows-arm64-sdk-has-no-bound-gcc-nim-runtime-closure).
+# Runs on the Windows-on-Arm ephemeral class and measures, natively:
+#   1. llvm-mingw 20261104 (ucrt, aarch64-hosted) compiles and runs C/C++;
+#   2. Nim 2.2.8 can be brought to a native arm64 compiler that rebuilds
+#      itself to a fixpoint (koch boot) with that C compiler;
+#   3. clingo 5.8.0 builds from its tag tarball for ARM64 with MSVC (static
+#      CRT) and with llvm-mingw, and a native Nim program loads clingo.dll;
+#   4. the pinned candidate runtime DLLs (MSYS2 clangarm64 OpenSSL 3.6.3 and
+#      zstd 1.5.7, sqlite.org 3.54.1 arm64) load from a native Nim image.
+name: research-windows-arm64-toolchain
+
+on:
+  push:
+    branches: [research/windows-arm64-native-toolchain-probe]
+    paths: [.github/workflows/research-windows-arm64-toolchain.yml]
+
+jobs:
+  probe:
+    runs-on: [self-hosted, windows, arm64]
+    timeout-minutes: 240
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      WORK: C:\r
+    steps:
+      - name: Host facts
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path $env:WORK | Out-Null
+          "PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+          (Get-CimInstance Win32_OperatingSystem) | Select-Object Caption, Version, BuildNumber | Format-List
+          (Get-CimInstance Win32_ComputerSystem) | Select-Object NumberOfLogicalProcessors, TotalPhysicalMemory | Format-List
+          Get-PSDrive C | Format-List
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) { & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath }
+          git --version
+
+      - name: Fetch pinned inputs
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $pins = @(
+            @{ n = "llvm-mingw.zip"; u = "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-ucrt-aarch64.zip"; s = "7d7f8387a8706639b0b47a629d6e23f8b3ef9acce67e9832b8cd4c5bb2816eab" },
+            @{ n = "nim-x64.zip"; u = "https://nim-lang.org/download/nim-2.2.8_x64.zip"; s = "11fe2415a64a791b899cc78e2eeacdde93b5f122f2fabc447db36d38002bfb8c" },
+            @{ n = "clingo.tar.gz"; u = "https://github.com/potassco/clingo/archive/refs/tags/v5.8.0.tar.gz"; s = "4ddd5975e79d7a0f8d126039f1b923a371b1a43e0e0687e1537a37d6d6d5cc7c" },
+            @{ n = "cmake.zip"; u = "https://github.com/Kitware/CMake/releases/download/v4.1.2/cmake-4.1.2-windows-arm64.zip"; s = "396bb14c77d12615dfbd666ef6ecd67d3442eb449c321aad25d738216fd9962d" },
+            @{ n = "openssl.pkg.tar.zst"; u = "https://repo.msys2.org/mingw/clangarm64/mingw-w64-clang-aarch64-openssl-3.6.3-1-any.pkg.tar.zst"; s = "e46e21bd5f1a3c36e391dbb0c7e5cf4fb6a35b2acd52e1992bfdd90fa415a310" },
+            @{ n = "zstd.pkg.tar.zst"; u = "https://repo.msys2.org/mingw/clangarm64/mingw-w64-clang-aarch64-zstd-1.5.7-2-any.pkg.tar.zst"; s = "f1444d0e664c6e60b324453ca3158ea159b1e880ba57ea229fbdc58e7ba5d9d2" },
+            @{ n = "sqlite.zip"; u = "https://www.sqlite.org/2026/sqlite-dll-win-arm64-3540100.zip"; s = "3a73fa9659ed4d5e0d49757d83134a9c8f54b6915d4a689cbfe59d4db509231c" }
+          )
+          Set-Location $env:WORK
+          foreach ($p in $pins) {
+            $t = Measure-Command { Invoke-WebRequest -Uri $p.u -OutFile $p.n }
+            $h = (Get-FileHash -Algorithm SHA256 $p.n).Hash.ToLowerInvariant()
+            if ($h -ne $p.s) { throw "sha256 mismatch for $($p.n): $h" }
+            "{0,-22} ok  {1,6:N1}s" -f $p.n, $t.TotalSeconds
+          }
+          $tar = "$env:SystemRoot\System32\tar.exe"
+          foreach ($z in @("llvm-mingw.zip", "nim-x64.zip", "cmake.zip", "sqlite.zip")) {
+            $d = [IO.Path]::GetFileNameWithoutExtension($z)
+            New-Item -ItemType Directory -Force -Path $d | Out-Null
+            $t = Measure-Command { & $tar -xf $z -C $d }
+            if ($LASTEXITCODE -ne 0) { throw "extract $z failed" }
+            "extracted $z in {0:N1}s" -f $t.TotalSeconds
+          }
+          New-Item -ItemType Directory -Force -Path msys2, clingo-src | Out-Null
+          foreach ($z in @("openssl.pkg.tar.zst", "zstd.pkg.tar.zst")) { & $tar -xf $z -C msys2; if ($LASTEXITCODE) { throw "extract $z" } }
+          & $tar -xf clingo.tar.gz -C clingo-src; if ($LASTEXITCODE) { throw "extract clingo" }
+
+      - name: PE machine helper
+        run: |
+          @'
+          function Get-PeMachine([string]$Path) {
+            $b = [IO.File]::ReadAllBytes($Path)
+            $pe = [BitConverter]::ToInt32($b, 0x3c)
+            return ('0x{0:x4}' -f [BitConverter]::ToUInt16($b, $pe + 4))
+          }
+          '@ | Set-Content -Path "$env:WORK\pe.ps1"
+
+      - name: 1. llvm-mingw native C/C++ smoke
+        id: cc
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:WORK\pe.ps1"
+          $bin = "$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin"
+          "gcc.exe machine: $(Get-PeMachine "$bin\clang-23.exe")"
+          $env:PATH = "$bin;$env:PATH"
+          gcc --version
+          Set-Location $env:WORK
+          'int main(void){ return sizeof(void*); }' | Set-Content t.c
+          gcc t.c -o t.exe; .\t.exe; "sizeof(void*)=$LASTEXITCODE  machine=$(Get-PeMachine t.exe)"
+          @'
+          #include <stdexcept>
+          #include <thread>
+          #include <cstdio>
+          int main(){ int r=0; std::thread th([&]{ try { throw std::runtime_error("x"); } catch(const std::exception&){ r=42; } }); th.join(); std::printf("c++ eh+thread %d\n", r); return r==42?0:1; }
+          '@ | Set-Content t.cpp
+          g++ -O2 t.cpp -o tcpp.exe -static; .\tcpp.exe; if ($LASTEXITCODE) { throw "c++ smoke failed" }
+          "tcpp.exe machine=$(Get-PeMachine tcpp.exe)"
+
+      - name: 2a. Nim 2.2.8 arm64 compiler from the x64 seed (seed runs emulated)
+        id: nimseed
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:WORK\pe.ps1"
+          $env:PATH = "$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
+          $src = "$env:WORK\nim-x64\nim-2.2.8"
+          Get-ChildItem "$src\dist" | Select-Object -ExpandProperty Name
+          $t = Measure-Command {
+            & "$src\bin\nim.exe" c --hints:off -d:release --cpu:arm64 --os:windows --cc:gcc `
+              --nimcache:"$env:WORK\nc-seed" -o:"$src\bin\nim-arm64.exe" "$src\compiler\nim.nim" 2>&1 | Out-Host
+            if ($LASTEXITCODE) { throw "seed compile failed" }
+          }
+          "seed cross-compile: {0:N0}s" -f $t.TotalSeconds
+          "nim-arm64.exe machine=$(Get-PeMachine "$src\bin\nim-arm64.exe")"
+          & "$src\bin\nim-arm64.exe" -v
+
+      - name: 2b. Native koch boot to fixpoint
+        id: nimboot
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:WORK\pe.ps1"
+          $env:PATH = "$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
+          $src = "$env:WORK\nim-x64\nim-2.2.8"
+          Set-Location $src
+          Move-Item -Force bin\nim.exe bin\nim-x64-seed.exe
+          Copy-Item bin\nim-arm64.exe bin\nim.exe
+          $t = Measure-Command {
+            & bin\nim.exe c --hints:off -d:release -o:koch-arm64.exe koch.nim 2>&1 | Out-Host
+            if ($LASTEXITCODE) { throw "koch compile failed" }
+            & .\koch-arm64.exe boot -d:release --hints:off 2>&1 | Select-Object -Last 25 | Out-Host
+            if ($LASTEXITCODE) { throw "koch boot failed" }
+          }
+          "koch boot: {0:N0}s" -f $t.TotalSeconds
+          "bin\nim.exe machine=$(Get-PeMachine bin\nim.exe)"
+          & bin\nim.exe -v
+
+      - name: 2c. Native Nim runtime smoke (threads, exceptions, osproc)
+        id: nimsmoke
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:WORK\pe.ps1"
+          $env:PATH = "$env:WORK\nim-x64\nim-2.2.8\bin;$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
+          Set-Location $env:WORK
+          @'
+          import std/[os, osproc, strutils, typedthreads, tables, json]
+          proc worker(x: ptr int) {.thread.} = x[] = 7
+          var v = 0
+          var th: Thread[ptr int]
+          createThread(th, worker, addr v); joinThread(th)
+          doAssert v == 7
+          try: raise newException(ValueError, "boom")
+          except ValueError as e: doAssert e.msg == "boom"
+          let o = execProcess("cmd.exe", args = ["/c", "echo child-ok"], options = {poUsePath})
+          doAssert "child-ok" in o
+          var t = initTable[string, int](); t["a"] = 1
+          echo %*{"cpu": hostCPU, "os": hostOS, "thread": v, "table": t.len}
+          '@ | Set-Content smoke.nim
+          nim c --hints:off -d:release smoke.nim 2>&1 | Out-Host
+          if ($LASTEXITCODE) { throw "smoke compile failed" }
+          "smoke.exe machine=$(Get-PeMachine smoke.exe)"
+          .\smoke.exe; if ($LASTEXITCODE) { throw "smoke run failed" }
+
+      - name: 3a. clingo 5.8.0 with MSVC ARM64, static CRT
+        id: clingomsvc
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:WORK\pe.ps1"
+          $cmake = "$env:WORK\cmake\cmake-4.1.2-windows-arm64\bin\cmake.exe"
+          & $cmake --version
+          $s = "$env:WORK\clingo-src\clingo-5.8.0"
+          $b = "$env:WORK\clingo-msvc"
+          $t = Measure-Command {
+            & $cmake -S $s -B $b -G "Visual Studio 17 2022" -A ARM64 `
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
+              -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+              -DCLINGO_BUILD_WITH_PYTHON=OFF -DCLINGO_BUILD_WITH_LUA=OFF `
+              -DCLINGO_BUILD_SHARED=ON -DCLINGO_BUILD_APPS=ON -DCLINGO_BUILD_TESTS=OFF 2>&1 | Select-Object -Last 15 | Out-Host
+            if ($LASTEXITCODE) { throw "configure failed" }
+            & $cmake --build $b --config Release --parallel 2>&1 | Select-Object -Last 15 | Out-Host
+            if ($LASTEXITCODE) { throw "build failed" }
+          }
+          "clingo MSVC build: {0:N0}s" -f $t.TotalSeconds
+          $dll = Get-ChildItem -Recurse $b -Filter clingo.dll | Select-Object -First 1
+          $exe = Get-ChildItem -Recurse $b -Filter clingo.exe | Select-Object -First 1
+          "clingo.dll=$($dll.FullName) machine=$(Get-PeMachine $dll.FullName) size=$($dll.Length)"
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -property installationPath
+          $dumpbin = Get-ChildItem -Recurse "$vs\VC\Tools\MSVC" -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostarm64\\arm64' } | Select-Object -First 1
+          if ($dumpbin) { & $dumpbin.FullName /dependents $dll.FullName | Out-Host }
+          New-Item -ItemType Directory -Force "$env:WORK\clingo-msvc-out" | Out-Null
+          Copy-Item $dll.FullName, $exe.FullName "$env:WORK\clingo-msvc-out\"
+          'a :- not b. b :- not a.' | Set-Content "$env:WORK\p.lp"
+          & "$env:WORK\clingo-msvc-out\clingo.exe" --version | Select-Object -First 1
+          & "$env:WORK\clingo-msvc-out\clingo.exe" "$env:WORK\p.lp" 0 | Out-Host
+          if ($LASTEXITCODE -ne 10 -and $LASTEXITCODE -ne 30) { throw "clingo solve exit $LASTEXITCODE" }
+
+      - name: 3b. clingo 5.8.0 with llvm-mingw
+        id: clingomingw
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:WORK\pe.ps1"
+          $env:PATH = "$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
+          $cmake = "$env:WORK\cmake\cmake-4.1.2-windows-arm64\bin\cmake.exe"
+          $s = "$env:WORK\clingo-src\clingo-5.8.0"
+          $b = "$env:WORK\clingo-mingw"
+          $t = Measure-Command {
+            & $cmake -S $s -B $b -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release `
+              -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ `
+              -DCMAKE_POLICY_VERSION_MINIMUM=3.5 `
+              "-DCMAKE_SHARED_LINKER_FLAGS=-static" "-DCMAKE_EXE_LINKER_FLAGS=-static" `
+              -DCLINGO_BUILD_WITH_PYTHON=OFF -DCLINGO_BUILD_WITH_LUA=OFF `
+              -DCLINGO_BUILD_SHARED=ON -DCLINGO_BUILD_APPS=ON -DCLINGO_BUILD_TESTS=OFF 2>&1 | Select-Object -Last 15 | Out-Host
+            if ($LASTEXITCODE) { throw "configure failed" }
+            & $cmake --build $b --parallel 4 2>&1 | Select-Object -Last 15 | Out-Host
+            if ($LASTEXITCODE) { throw "build failed" }
+          }
+          "clingo llvm-mingw build: {0:N0}s" -f $t.TotalSeconds
+          $dll = Get-ChildItem -Recurse $b -Filter "*clingo*.dll" | Select-Object -First 1
+          "dll=$($dll.FullName) machine=$(Get-PeMachine $dll.FullName) size=$($dll.Length)"
+          llvm-readobj --coff-imports $dll.FullName | Select-String "Name:" | Out-Host
+
+      - name: 3c. Native Nim loads clingo.dll (MSVC build) and solves
+        id: clingoffi
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:PATH = "$env:WORK\nim-x64\nim-2.2.8\bin;$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
+          Set-Location "$env:WORK\clingo-msvc-out"
+          @'
+          type ClingoControl = pointer
+          proc clingo_version(ma, mi, re: ptr cint) {.importc, dynlib: "clingo.dll", cdecl.}
+          proc clingo_control_new(args: ptr cstring, n: csize_t, logger: pointer, data: pointer,
+            limit: cuint, ctl: ptr ClingoControl): bool {.importc, dynlib: "clingo.dll", cdecl.}
+          proc clingo_control_add(ctl: ClingoControl, name: cstring, params: ptr cstring, n: csize_t,
+            prg: cstring): bool {.importc, dynlib: "clingo.dll", cdecl.}
+          proc clingo_control_free(ctl: ClingoControl) {.importc, dynlib: "clingo.dll", cdecl.}
+          var a, b, c: cint
+          clingo_version(addr a, addr b, addr c)
+          var ctl: ClingoControl
+          doAssert clingo_control_new(nil, 0, nil, nil, 20, addr ctl)
+          doAssert clingo_control_add(ctl, "base", nil, 0, "a :- not b. b :- not a.")
+          clingo_control_free(ctl)
+          echo "clingo ", a, ".", b, ".", c, " via FFI, hostCPU=", hostCPU
+          '@ | Set-Content ffi.nim
+          nim c --hints:off -d:release ffi.nim 2>&1 | Out-Host
+          if ($LASTEXITCODE) { throw "ffi compile failed" }
+          .\ffi.exe; if ($LASTEXITCODE) { throw "ffi run failed" }
+
+      - name: 4. Native Nim with OpenSSL (import libs), zstd and sqlite DLLs
+        id: runtime
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference = "Stop"
+          . "$env:WORK\pe.ps1"
+          $env:PATH = "$env:WORK\nim-x64\nim-2.2.8\bin;$env:WORK\llvm-mingw\llvm-mingw-20261104-ucrt-aarch64\bin;$env:PATH"
+          $m = "$env:WORK\msys2\clangarm64"
+          $o = "$env:WORK\rt"
+          New-Item -ItemType Directory -Force $o | Out-Null
+          Copy-Item "$m\bin\libcrypto-3-arm64.dll", "$m\bin\libssl-3-arm64.dll", "$m\bin\libzstd.dll", "$env:WORK\sqlite\sqlite3.dll" $o
+          Set-Location $o
+          @'
+          import std/[net, dynlib]
+          let ctx = newContext(verifyMode = CVerifyNone)
+          echo "openssl ctx ok"
+          for (name, sym) in [("libzstd.dll", "ZSTD_versionNumber"), ("sqlite3.dll", "sqlite3_libversion_number")]:
+            let h = loadLib(name)
+            doAssert h != nil, name
+            let f = cast[proc(): cuint {.cdecl, gcsafe.}](h.symAddr(sym))
+            doAssert f != nil, sym
+            echo name, " ", f()
+          '@ | Set-Content rt.nim
+          nim c --hints:off -d:release -d:ssl --dynlibOverride:ssl --dynlibOverride:crypto `
+            "--passL:-L$m\lib" --passL:-lssl --passL:-lcrypto rt.nim 2>&1 | Out-Host
+          if ($LASTEXITCODE) { throw "rt compile failed" }
+          "rt.exe machine=$(Get-PeMachine rt.exe)"
+          llvm-readobj --coff-imports rt.exe | Select-String "Name:" | Out-Host
+          $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot"
+          .\rt.exe; if ($LASTEXITCODE) { throw "rt run failed" }
+
+      - name: Outcomes
+        if: always()
+        run: |
+          "cc=${{ steps.cc.outcome }} nimseed=${{ steps.nimseed.outcome }} nimboot=${{ steps.nimboot.outcome }} nimsmoke=${{ steps.nimsmoke.outcome }}"
+          "clingomsvc=${{ steps.clingomsvc.outcome }} clingomingw=${{ steps.clingomingw.outcome }} clingoffi=${{ steps.clingoffi.outcome }} runtime=${{ steps.runtime.outcome }}"
