@@ -2244,9 +2244,9 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
         when not mutated("fixing-start-unreadable-skipped"):
           # FALSIFYING MUTATION (when absent): a unit systemd cannot be
           # asked about is skipped, and the commit clears its entry.
-          result.add("systemctl show " & e.unit & " (on record as one a " &
-            "revert could not start; this generation changes it, so it " &
-            "must be started and confirmed, §13 decision 160): systemd " &
+          result.add("systemctl show " & e.unit & " (on the record of " &
+            "triggers to restart; this generation changes it, so its " &
+            "restart must be confirmed, §13 decision 160): systemd " &
             "could not be asked: " & ex.msg)
         continue
       if props.getOrDefault("LoadState") != "loaded": continue
@@ -2256,8 +2256,8 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
         let q = if host.startNoBlock != nil: host.startNoBlock(e.unit)
                 else: (ok: false, output: "no queued start on this host")
         if not q.ok:
-          result.add("systemctl start --no-block " & e.unit & " (on record " &
-            "as one a revert could not start, §13 decision 160): " &
+          result.add("systemctl start --no-block " & e.unit & " (on the " &
+            "record of triggers to restart, §13 decision 160): " &
             q.output.strip())
         continue
       let s = startConfirmed(host, e.unit, mustStayActive = pass == 0)
@@ -5001,7 +5001,11 @@ proc closureSpace*(locks: seq[AptClosureLock];
   ## What realising ``locks`` will need: every closure not yet realised at
   ## its store-published prefix, and every member of one not yet published
   ## there, counted once, each listed in ``sources`` as ``cached``,
-  ## ``download`` or ``reuse-because-unserved``. The archive is always the
+  ## ``download`` or ``reuse-because-unserved``. A member already published
+  ## whose archive is not cached is listed as ``download-for-postinst`` (the
+  ## union reads its maintainer script, §8.3 item 4 "Alternatives"; it is
+  ## not unpacked again) or, when the archive does not serve it,
+  ## ``postinst-unknown-because-unserved``. The archive is always the
   ## source when it is cached or served; an older realiser's verified
   ## prefix (``reusableLegacyMember``) stands in only when the archive
   ## answers that it does not serve the member (404/410), and then costs
@@ -5021,6 +5025,31 @@ proc closureSpace*(locks: seq[AptClosureLock];
       if d.sha256 in seen: continue
       seen.incl(d.sha256)
       if fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb"):
+        # Published already (an older union of it, another closure): not
+        # unpacked again, but the new union reads its ``postinst`` for the
+        # alternatives links (§8.3 item 4, "Alternatives"), so its archive
+        # is fetched again unless cached. One the archive no longer serves
+        # leaves its registrations unknown (the union's record says so);
+        # it is not a refusal.
+        if fileExists(cacheDir / (d.sha256 & ".deb")): continue
+        let url = debUrl(lock, d)
+        var verdict = dsServed
+        var detail = ""
+        if probe != nil: (verdict, detail) = probe(url)
+        case verdict
+        of dsServed:
+          result.sources.add("download-for-postinst\t" & d.name & " " &
+            d.version & "\t" & url)
+          result.downloadBytes += d.size
+          result.largestDebBytes = max(result.largestDebBytes, d.size)
+        of dsUnserved:
+          result.sources.add("postinst-unknown-because-unserved\t" & d.name &
+            " " & d.version & "\t" & url & ": " & detail)
+        of dsUnknown:
+          result.unavailable.add(d.name & " " & d.version & ": " & url &
+            " could not be probed (" & detail & "); the new union reads " &
+            "its postinst, and only an archive that does not serve it may " &
+            "be gone without")
         continue
       inc result.members
       let cached = fileExists(cacheDir / (d.sha256 & ".deb"))
