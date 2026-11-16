@@ -946,6 +946,13 @@ proc renderAddonSections*(r: AddonApplyResult): string =
       "older floor version; the unit file changes and the unit " &
       "restarts):\n")
     for u in r.floorIntroduced: result.add("  " & u & "\n")
+  if r.floorWeakened.len > 0:
+    # Units whose confinement the generation weakens (§10.1): an agent
+    # apply refuses them, so the operator's plan names them apart.
+    result.add("service floor weakened (a new waiver, a new exception or " &
+      "a waived unit on a privileged account; only an operator's apply " &
+      "makes it):\n")
+    for u in r.floorWeakened: result.add("  " & u & "\n")
   if r.floorExceptions.len > 0:
     # Every weakening of the hardening floor, in every plan (§10.1, CONF-2).
     result.add("service floor exceptions:\n")
