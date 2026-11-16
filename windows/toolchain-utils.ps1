@@ -108,6 +108,116 @@ function Assert-PeMachine {
   }
 }
 
+function Get-PeImportNames {
+  ## The DLL names in a PE image's import directory (data directory 1), in
+  ## table order. Delay-load imports are not included: nothing in the release
+  ## closure delay-loads. PE/COFF layout:
+  ## https://learn.microsoft.com/windows/win32/debug/pe-format#the-idata-section
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $bytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $Path).ProviderPath)
+  $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+  if ([BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw "Not a PE image: $Path" }
+  $sections = [BitConverter]::ToUInt16($bytes, $pe + 6)
+  $optSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
+  $opt = $pe + 24
+  $magic = [BitConverter]::ToUInt16($bytes, $opt)
+  $dataDirs = $opt + $(if ($magic -eq 0x20b) { 112 } else { 96 })
+  $importRva = [BitConverter]::ToUInt32($bytes, $dataDirs + 8)
+  if ($importRva -eq 0) { return @() }
+  $sectionTable = $opt + $optSize
+  $toOffset = {
+    param([uint32]$rva)
+    for ($i = 0; $i -lt $sections; $i++) {
+      $h = $sectionTable + $i * 40
+      $virtSize = [BitConverter]::ToUInt32($bytes, $h + 8)
+      $va = [BitConverter]::ToUInt32($bytes, $h + 12)
+      $rawSize = [BitConverter]::ToUInt32($bytes, $h + 16)
+      $raw = [BitConverter]::ToUInt32($bytes, $h + 20)
+      $span = [Math]::Max($virtSize, $rawSize)
+      if ($rva -ge $va -and $rva -lt $va + $span) { return [int]($rva - $va + $raw) }
+    }
+    return -1
+  }
+  $names = New-Object System.Collections.Generic.List[string]
+  $entry = & $toOffset $importRva
+  while ($entry -ge 0 -and $entry + 20 -le $bytes.Length) {
+    $nameRva = [BitConverter]::ToUInt32($bytes, $entry + 12)
+    if ($nameRva -eq 0) { break }
+    $at = & $toOffset $nameRva
+    if ($at -lt 0) { throw "Import name outside every section: $Path" }
+    $end = [Array]::IndexOf($bytes, [byte]0, $at)
+    $names.Add([Text.Encoding]::ASCII.GetString($bytes, $at, $end - $at))
+    $entry += 20
+  }
+  # Not `,$names`: a wrapped array would iterate as ONE element in a caller's
+  # foreach, and the closure audit would check nothing.
+  return $names.ToArray()
+}
+
+function Assert-WindowsDllClosure {
+  ## The release closure audit (reprobuild-pm Distribution-And-Packaging.md
+  ## §7.1, W5): every DLL an image in $BinDir imports, transitively, is either
+  ## in $BinDir and of the leg's machine, or an operating-system DLL (an
+  ## api-ms-win-*/ext-ms-win-* API set, or a file in System32). Anything else
+  ## is a DLL the archive would need and does not carry. Throws listing every
+  ## violation.
+  param(
+    [Parameter(Mandatory = $true)][string]$BinDir,
+    [Parameter(Mandatory = $true)][string]$Arch
+  )
+  $system32 = Join-Path $env:SystemRoot "System32"
+  $violations = New-Object System.Collections.Generic.List[string]
+  $images = @(Get-ChildItem -LiteralPath $BinDir -File | Where-Object { $_.Extension -in @('.exe', '.dll') })
+  foreach ($image in $images) {
+    try {
+      Assert-PeMachine -Path $image.FullName -Arch $Arch -Consumer "closure-audit"
+    } catch {
+      $violations.Add($_.Exception.Message)
+      continue
+    }
+    foreach ($import in (Get-PeImportNames -Path $image.FullName)) {
+      if ($import -match '^(?i)(api|ext)-ms-win-') { continue }
+      $local = Join-Path $BinDir $import
+      if (Test-Path -LiteralPath $local -PathType Leaf) { continue }   # its machine is checked as an image
+      if (Test-Path -LiteralPath (Join-Path $system32 $import) -PathType Leaf) { continue }
+      $violations.Add("$($image.Name) imports $import, which is neither in bin/ nor an operating-system DLL")
+    }
+  }
+  if ($violations.Count -ne 0) {
+    throw ("closure audit failed for $BinDir`n  " + ($violations -join "`n  "))
+  }
+  Write-Host "closure audit: $($images.Count) image(s) in $BinDir, every import resolved"
+}
+
+function Get-WindowsArchRuntimeNames {
+  ## The one per-arch table of names the Windows legs differ in (reprobuild-pm
+  ## Distribution-And-Packaging.md §7.1, W4): OpenSSL's DLL suffix (OpenSSL's
+  ## mingw targets name their DLLs libssl-3-x64.dll / libssl-3-arm64.dll), the
+  ## matching Nim `-d:sslVersion` value Nim's std/openssl loads them by, and the
+  ## MSYS2 environment and package prefix the OpenSSL/zstd archives come from.
+  param([Parameter(Mandatory = $true)][string]$Arch)
+  switch ($Arch) {
+    "x64" {
+      return @{
+        OpenSslDlls = @("libssl-3-x64.dll", "libcrypto-3-x64.dll")
+        NimSslVersion = "3-x64"
+        Msys2Env = "ucrt64"
+        Msys2PackagePrefix = "mingw-w64-ucrt-x86_64"
+      }
+    }
+    "arm64" {
+      return @{
+        OpenSslDlls = @("libssl-3-arm64.dll", "libcrypto-3-arm64.dll")
+        NimSslVersion = "3-arm64"
+        Msys2Env = "clangarm64"
+        Msys2PackagePrefix = "mingw-w64-clang-aarch64"
+      }
+    }
+    default { throw "unsupported Windows architecture '$Arch' (expected x64 or arm64)." }
+  }
+}
+
 # ── Per-architecture pins in windows/toolchain-versions.env ─────────────────
 # Distribution-And-Packaging.md §7.1 ("windows/toolchain-versions.env
 # conventions"), reprobuild-pm:
