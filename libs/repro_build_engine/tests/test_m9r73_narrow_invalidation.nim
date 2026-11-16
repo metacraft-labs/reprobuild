@@ -190,10 +190,11 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
         osPid: 1, threadId: 1, path: "/sys/devices/system/cpu/online"),
       MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
         osPid: 1, threadId: 1, path: "/dev/null"),
-      # HOST runtime state under `/run`, which is what the `/run` prefix is
-      # for: a pid file rewritten by a daemon nobody in this build controls.
-      MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
-        osPid: 1, threadId: 1, path: "/run/systemd/userdb/io.systemd.Machine"),
+      # `/run` is no longer dropped by prefix: what is there is judged on
+      # disk (`repro_core/paths.volatileInputVerdict`), and this fixture
+      # cannot create a socket under the real `/run`. That half is covered by
+      # `t_volatile_runtime_input_by_file_type` (the decision) and
+      # `t_a_tool_reached_through_run_is_an_input` (the fold, end to end).
     ]
     writeFile(rmdfPath, encodeCanonical(records))
 
@@ -205,6 +206,59 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     check evidence.monitorReads == @[stablePath]
     check evidence.monitorWrites.len == 0
     check evidence.monitorProbes.len == 0
+    # Every elision is counted: the `/proc` read, the `/sys` open and the
+    # `/dev/null` write. None of it makes the record host-bound.
+    check evidence.kernelStateDrops == 3
+    check evidence.runtimeStateDrops == 0
+    check evidence.hostBoundInput == ""
+
+  test "under /run a recorded input is judged by what it is: an absent path and the system profile are kept":
+    ## On NixOS the system `PATH` (`/run/current-system/sw/bin`), the setuid
+    ## wrappers and the GPU drivers are links into the store under `/run`.
+    ## The fold used to drop every read there by prefix, so a
+    ## `nixos-rebuild switch` left the edges that ran those tools hitting
+    ## with stale outputs. Now only a socket, FIFO or device node under
+    ## `/run` is dropped. An absent path is kept as an absence probe (a later
+    ## tool shadowing it must re-run the edge), and a write keeps the prefix
+    ## rule: it is not an input.
+    resetTmp()
+    let rmdfPath = TmpDir / "run-by-file-type.iomon"
+    let absent = "/run/repro-test-absent-" & $getCurrentProcessId() &
+      "/bin/tool"
+    let written = "/run/repro-test-absent-" & $getCurrentProcessId() &
+      "/tool.pid"
+    let records = @[
+      MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
+        osPid: 1, threadId: 1, path: absent),
+      MonitorRecord(kind: mrFileWrite, observationKind: moFileWrite,
+        osPid: 1, threadId: 1, path: written),
+    ]
+    writeFile(rmdfPath, encodeCanonical(records))
+
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    check foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen) ==
+      mesComplete
+    check evidence.monitorProbes == @[absent]
+    check evidence.monitorWrites.len == 0
+    check evidence.runtimeStateDrops == 1
+    check evidence.kernelStateDrops == 0
+    # A write is not an input, so it never makes the record host-bound.
+    check evidence.hostBoundInput == ""
+
+    # The real system profile, where this host has one: a link into the
+    # store, and an input like any other.
+    if fileExists("/run/current-system/sw/bin/sh"):
+      let profile = TmpDir / "run-profile.iomon"
+      writeFile(profile, encodeCanonical(@[
+        MonitorRecord(kind: mrProcessExec, observationKind: moFileRead,
+          osPid: 1, threadId: 1, path: "/run/current-system/sw/bin/sh")]))
+      var kept: PathSetEvidence
+      var keptSeen: EvidenceSeenSets
+      check foldMonitorDepFileEvidence(profile, "", kept, keptSeen) ==
+        mesComplete
+      check kept.monitorReads == @["/run/current-system/sw/bin/sh"]
+      check kept.runtimeStateDrops == 0
 
   test "the XDG runtime directory is an ordinary place to keep build inputs":
     ## The companion of the case above, and the reason its `/run` example
@@ -238,8 +292,11 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
         osPid: 1, threadId: 1, path: outputPath),
       MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
         osPid: 1, threadId: 1, path: probedPath),
-      # Still volatile: a sibling prefix that merely LOOKS like the XDG
-      # one, and the non-numeric spelling, must not be let through with it.
+      # Not the XDG directory: a sibling prefix that merely LOOKS like it,
+      # and the non-numeric spelling. The prefix rule does not let them
+      # through (`t_volatile_runtime_input_by_file_type` pins that), so the
+      # disk decides, and absent they are kept as absences like any other
+      # path under `/run` that is not a socket, FIFO or device.
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/run/userland/state.db"),
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
@@ -252,9 +309,14 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
     let status = foldMonitorDepFileEvidence(rmdfPath, "", evidence, seen)
 
     check status == mesComplete
-    check evidence.monitorReads == @[inputPath]
+    check evidence.monitorReads ==
+      @[inputPath, "/run/user/by-name/state.db", "/run/userland/state.db"]
     check evidence.monitorWrites == @[outputPath]
     check evidence.monitorProbes == @[probedPath]
+    check not dropsAsVolatileRuntimeState("/run/user/1000/build-scratch/x",
+      evidence.volatileScope)
+    check dropsAsVolatileRuntimeState("/run/userland/state.db",
+      evidence.volatileScope)
 
   test "under a volatile prefix, the project's own reads and listings and ordinary-file places are kept, runtime state is dropped":
     ## A project's tree can sit under a prefix that otherwise holds runtime
@@ -292,6 +354,8 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
         osPid: 1, threadId: 1, path: "/dev/shm"),
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/dev/urandom"),
+      # Under `/run`, outside both trees: judged on disk, and absent here,
+      # so kept as an absence (only a socket, FIFO or device is dropped).
       MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
         osPid: 1, threadId: 1, path: "/run/admin-mount/state"),
       # Outside both trees too, but in places that hold only ordinary files:
@@ -311,20 +375,24 @@ suite "M9.R.73.2 narrow Level 1 path-set invalidation":
 
     check status == mesComplete
     check evidence.monitorReads ==
-      @[inputPath, siblingInput, mountedInput, mediaInput]
+      @[inputPath, siblingInput, mountedInput, "/run/admin-mount/state",
+        mediaInput]
     check evidence.monitorWrites == @[outputPath]
     check evidence.monitorProbes == @[project]
     check evidence.monitorDirectoryEnumerations == @[project]
 
     # With no scope (an invocation that has none) the same records keep
-    # only what is in a directory under `/dev/shm` or on `/run/media` (the
-    # project's files among them). The listing of the project root and the
-    # mount at `/run/<dir>` need the scope.
+    # what is in a directory under `/dev/shm` or on `/run/media` (the
+    # project's files among them), and, under `/run`, what the disk does not
+    # show to be a runtime object: these paths do not exist here, so they
+    # are kept as absences. The listing of the project root `/dev/shm/<name>`
+    # needs the scope: by path alone it is a shared-memory object.
     var bare: PathSetEvidence
     var bareSeen: EvidenceSeenSets
     check foldMonitorDepFileEvidence(rmdfPath, "", bare, bareSeen) ==
       mesComplete
-    check bare.monitorReads == @[inputPath, siblingInput, mediaInput]
+    check bare.monitorReads == @[inputPath, siblingInput, mountedInput,
+      "/run/admin-mount/state", mediaInput]
     check bare.monitorDirectoryEnumerations.len == 0
 
   test "a root the fold cannot tell from runtime state is refused, naming it and why":
