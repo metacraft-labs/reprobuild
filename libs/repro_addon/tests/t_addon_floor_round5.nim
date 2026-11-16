@@ -332,7 +332,7 @@ suite "round 5, finding 2: sockets and other activators":
       dropInStanza("b.socket", "[Socket]\nExecStartPre=/bin/true\n"))
 
   test "the effective check of an activator":
-    var show = parseShow("FragmentPath=/etc/systemd/system/a.socket\n" &
+    var show = parseShow("FragmentPath=/etc/systemd/system/a.socket\nAfter=sysinit.target\n" &
       "DropInPaths=\n")
     var lines = parseShowLines("Listen=/run/a/a.sock (Stream)\n" &
       "Listen=/etc/a-target (Special)\n")

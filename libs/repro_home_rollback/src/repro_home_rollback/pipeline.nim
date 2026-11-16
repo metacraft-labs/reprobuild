@@ -540,38 +540,6 @@ proc rewriteManagedBlock(hostFilePath, blockId: string;
     try: removeFile(extendedPath(hostFilePath)) except OSError: discard
   moveFile(extendedPath(tmp), extendedPath(hostFilePath))
 
-proc removeManagedBlock(hostFilePath, blockId: string) =
-  ## Strip the sentinel-delimited region (and the sentinel lines)
-  ## from the host file. Leaves the file alone if the sentinels are
-  ## missing.
-  if not fileExists(extendedPath(hostFilePath)):
-    return
-  let existing = readFile(extendedPath(hostFilePath))
-  let openS = OpenSentinelPrefix & blockId & OpenSentinelSuffix
-  let closeS = CloseSentinelPrefix & blockId & CloseSentinelSuffix
-  let openIdx = existing.find(openS)
-  let closeIdx = existing.find(closeS)
-  if openIdx < 0 or closeIdx < 0 or closeIdx <= openIdx:
-    return
-  # Drop the open line, the body, the close line, and the trailing
-  # newline if any.
-  let openLineStart = block:
-    var s = openIdx
-    while s > 0 and existing[s - 1] != '\n':
-      dec s
-    s
-  let closeLineEnd = block:
-    var e = closeIdx + closeS.len
-    if e < existing.len and existing[e] == '\n':
-      inc e
-    e
-  let rewritten = existing[0 ..< openLineStart] & existing[closeLineEnd .. ^1]
-  let tmp = hostFilePath & ".repro.tmp"
-  writeFile(extendedPath(tmp), rewritten)
-  if fileExists(extendedPath(hostFilePath)):
-    try: removeFile(extendedPath(hostFilePath)) except OSError: discard
-  moveFile(extendedPath(tmp), extendedPath(hostFilePath))
-
 # ---- Launcher restoration ----
 
 proc removeLauncherArtifact(stateDir, currentGenIdHex: string;
@@ -854,7 +822,11 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
       for op in plan.blockOps:
         case op.kind
         of rokRemoveBlock:
-          removeManagedBlock(op.hostFilePath, op.blockId)
+          # The apply's removal path: the bytes around the block are kept
+          # as they are now (never reverted to the file's state at first
+          # write), and a file left empty is deleted
+          # (Generated-Configuration-Files.md §"Deletion semantics").
+          destroyManagedBlockResource(op.hostFilePath, op.blockId)
         of rokRestoreBlock, rokUpdateBlock:
           rewriteManagedBlock(op.hostFilePath, op.blockId,
             op.targetRecord.postWriteBlockBytes)

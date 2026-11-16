@@ -754,6 +754,11 @@ proc bootHoldTextPath*(stateDir: string): string =
   ## shell copies into place (``generation0.bootHoldScript``).
   stateDir / "addon" / "boot-hold.conf"
 
+proc bootConfirmFlagPath*(stateDir: string): string =
+  ## Left by a boot re-assertion that leaves a pending switch to the
+  ## boot-confirm unit (§13 decision 157); the unit removes it.
+  stateDir / "addon" / "boot-confirm"
+
 proc clearBootHoldRecord*(stateDir: string) =
   ## The record goes once the switch's start holds are lifted, or with its
   ## marker: a boot then puts back nothing the switch no longer holds.

@@ -99,6 +99,9 @@
 ##   unit killed with ``RestartSec=0`` and with ``RestartSec=3``; the next
 ##   apply accepts the directory the restart made, and with the delay a root
 ##   tree made 3 s into the restarted run is refused;
+## - **a ``RestartSteps=`` restart** (systemd 254 and later; §13 decision
+##   156 as amended): after two restarts whose delays grow, the next apply
+##   accepts the directory the second made;
 ## - **a socket the revert holds** (§13 decision 155): a base template of the
 ##   stem makes the socket's listener refused; the revert keeps the socket
 ##   held, stopped and not listening;
@@ -144,7 +147,9 @@
 ## ``t_addon_floor_round15``, not here: the end-of-step record usually
 ## catches the directory under this host's timing, so these cases are its
 ## positive control only), ``recreated-bound-from-inactive-exit-only`` (the
-## restart's directory is refused), ``revert-held-left-running`` (the
+## restart's directory is refused), ``restart-delay-from-next`` (the
+## directory the second ``RestartSteps=`` restart made is refused, debian-13),
+## ``revert-held-left-running`` (the
 ## control unit the revert holds keeps running),
 ## ``activators-unheld`` (the held service's socket has no
 ## persistent hold and listens after the reboot; the switch's trigger holds,
@@ -572,6 +577,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active",
          recw.stdout & recw.stderr)
     notPending("the recovery of the revert with an unwritable hold")
+    # The header's claim, checked (A9 review round 16, finding 11): the
+    # three activators the boot kept down are back once the revert commits.
+    var actBack = ""
+    for a in Activators:
+      actBack.add(a & " " & g.exec("systemctl is-active " & a & "; true").stdout.strip() & "\n")
+    step("and the socket, path unit and timer the boot kept down are back",
+         actBack.count(" active\n") == Activators.len, actBack)
     discard g.run("rm -rf /var/lib/a9r-st")
     r = g.applyProfile(repro, "w2", sta("w2"))
     step("then the unit applies and starts, its hold cleared, its socket listening",
@@ -590,7 +602,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let srp = proc (d: string): string =
       control & unitResource("a9r-sr.service", "User=a9e\nStateDirectory=a9r-sr\n",
                              binary, enabled = false, description = d) &
-        socketResource("a9r-sr.socket", "ListenStream=/run/a9r-sr\nService=a9r-sr.service\n")
+        socketResource("a9r-sr.socket", "ListenStream=/run/a9r-sr\nService=a9r-sr.service\n") &
+        # A9 review round 16, finding 5: a timer declared as a
+        # systemd.systemTimer resource, which the revert holds and stops too.
+        "systemd.systemTimer {\n  name = \"a9r-sr.timer\"\n  content = \"[Timer]\n" &
+        "OnCalendar=daily\nUnit=a9r-sr.service\n\"\n}\n"
     const SrHold = "/etc/systemd/system/a9r-sr.socket.d/" & HoldName
     r = g.applyProfile(repro, "r1", srp("r1"))
     step("a floored service only its socket starts applies", r.exitCode == 0,
@@ -620,6 +636,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.exitCode == 0 and g.exec("test -e " & SrHold).exitCode != 0 and
          g.exec("systemctl is-active a9r-sr.socket").stdout.strip() == "active",
          r.stdout & r.stderr)
+    step("and the timer resource the revert stopped is running again (A9 review " &
+         "round 16, finding 5)",
+         g.exec("systemctl is-active a9r-sr.timer").stdout.strip() == "active",
+         g.exec("systemctl show -p ActiveState -p UnitFileState a9r-sr.timer; " &
+                "cat /var/lib/repro/system/revert-stopped 2>&1").stdout)
     # Back to the floored unit the next case refuses, so its revert has a
     # unit to hold.
     discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st")
@@ -742,6 +763,39 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         notPending("the refused apply over a tree made into a restarted run")
       discard g.run("systemctl stop a9r-r.service; true")
       discard g.applyProfile(repro, "rs" & delay & "-c", control)
+    # §13 decision 156 as amended (A9 review round 16, finding 2): with
+    # RestartSteps= the delay before restart n grows from RestartSec=
+    # towards RestartMaxDelaySec=; RestartUSecNext is the NEXT one. Two
+    # restarts: the second waits 2 s (1 s * (4 / 1) ^ (1 / 2)) where
+    # RestartUSecNext says 4 s, and a 6 s ExecStartPre= puts the main
+    # process well after the run's start, so reading the next delay moves
+    # the run's start past the directory's birth. systemd 254 and later.
+    let sdv = g.exec("systemctl --version | head -1 | cut -d' ' -f2").stdout.strip()
+    var sdMajor = 0
+    try: sdMajor = parseInt(sdv) except ValueError: discard
+    if sdMajor >= 254:
+      let rsp = proc (d: string): string =
+        control & unitResource("a9r-rp.service", "User=a9e\nRuntimeDirectory=a9r-rp\n" &
+          "Restart=on-failure\nRestartSec=1\nRestartSteps=2\nRestartMaxDelaySec=4\n",
+          binary, description = d, exceptions = Sleep, kind = "exec",
+          exec = "ExecStartPre=/bin/sleep 6\nExecStart=/bin/sleep infinity\n")
+      r = g.applyProfile(repro, "rp-1", rsp("rp-1"))
+      step("a Restart= unit with RestartSteps= applies", r.exitCode == 0, r.stdout & r.stderr)
+      let evp = g.exec("systemctl kill -s KILL a9r-rp.service; sleep 10; " &
+        "systemctl kill -s KILL a9r-rp.service; sleep 12; " &
+        "systemctl show --timestamp=us+utc -p NRestarts -p RestartUSecNext " &
+        "-p InactiveExitTimestamp -p ExecMainStartTimestamp -p ActiveState a9r-rp.service; " &
+        "stat -c '%n %U %.9W' /run/a9r-rp").stdout
+      record["restartSteps"] = %evp
+      r = g.applyProfile(repro, "rp-2", rsp("rp-2"))
+      step("after the second RestartSteps= restart the next apply accepts the " &
+           "directory it made (§13 decision 156)",
+           r.exitCode == 0 and "NRestarts=2" in evp, evp & r.stdout & r.stderr)
+      notPending("the apply after RestartSteps= restarts")
+      discard g.run("systemctl stop a9r-rp.service; true")
+      discard g.applyProfile(repro, "rp-c", control)
+    else:
+      record["restartSteps"] = %("systemd " & sdv & " has no RestartSteps=")
     # §13 decision 141, the upper bound: a tree a root process makes seconds
     # into a run that began outside a switch is not systemd's.
     discard g.run("systemctl restart a9r-st.service; sleep 3; rm -rf /var/lib/a9r-st; " &

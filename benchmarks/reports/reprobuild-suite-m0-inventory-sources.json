@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2837,
+    "nimTestBinaries": 2840,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 772,
+    "pureUnitTests": 773,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2884
+    "testEntries": 2887
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 7,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -33,6 +33,7 @@
         "libs/repro_addon/tests/t_addon_agent_repin.nim",
         "libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim",
         "libs/repro_addon/tests/t_addon_floor_round13.nim",
+        "libs/repro_addon/tests/t_addon_floor_round16.nim",
         "libs/repro_addon/tests/t_addon_floor_round8.nim",
         "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
         "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim"
@@ -1638,9 +1639,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1564,
+      "integration": 1566,
       "platform/destructive": 182,
-      "pure unit": 772,
+      "pure unit": 773,
       "unclassified": 343
     },
     "graphOwnedTestArtifacts": [
@@ -1855,9 +1856,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2837,
+    "nimTestBinaryCount": 2840,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2884
+    "testEntryCount": 2887
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9002,8 +9003,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 14,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9366,7 +9367,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 19,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9473,7 +9474,25 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round15.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 13,
+      "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round16",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round16.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17596,7 +17615,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31439,6 +31458,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_addon_boot_replay_confirms_floored_unit",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_boot_replay_confirms_floored_unit.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_addon_bootstrap_changes_nothing_preexisting",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -35013,6 +35049,24 @@
       "source": "tests/e2e/home-resources/t_integration_resource_move.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_repro_home_managed_block_removal_keeps_user_content",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-rollback/t_e2e_repro_home_managed_block_removal_keeps_user_content.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

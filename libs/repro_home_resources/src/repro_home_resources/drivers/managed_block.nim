@@ -138,7 +138,13 @@ proc applyManagedBlockResource*(hostFile, blockId, content: string):
 
 proc destroyManagedBlockResource*(hostFile, blockId: string) =
   ## Remove the managed-block sentinels and content from the host
-  ## file (leaves the surrounding user content intact).
+  ## file. Every byte outside the block is kept exactly as it is now --
+  ## including edits the user made after the block was first written, so
+  ## the file is never reverted to an earlier snapshot -- and the host
+  ## file is deleted only when nothing at all is left in it once the
+  ## block is gone (Generated-Configuration-Files.md §"Deletion
+  ## semantics"). This is the one removal path for a `repro-managed:`
+  ## block: apply, rollback and the hook installers all call it.
   enforceTestHomeFence(hostFile, "fs.managedBlock destroy")
   if not fileExists(extendedPath(hostFile)):
     return
@@ -156,6 +162,11 @@ proc destroyManagedBlockResource*(hostFile, blockId: string) =
   if closeLineEnd < content.len and content[closeLineEnd] == '\n':
     inc closeLineEnd
   let rewritten = content[0 ..< openLineStart] & content[closeLineEnd .. ^1]
+  if rewritten.len == 0:
+    # The block was all the file held: a zero-block file is never left
+    # behind. Any byte of the user's -- a blank line included -- keeps it.
+    removeFile(extendedPath(hostFile))
+    return
   let tmp = hostFile & ".repro.tmp"
   writeFile(extendedPath(tmp), rewritten)
   if fileExists(extendedPath(hostFile)):
