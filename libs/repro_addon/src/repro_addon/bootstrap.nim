@@ -248,10 +248,6 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       " while the bootstrap waited for the host apply lock; nothing was " &
       "written apart from that lock (" & hostApplyLockPath() & ", outside " &
       "every add-on root). Re-run the preflight and review what changed.")
-  # A state-removal token an earlier uninstall left (§13 decision 165)
-  # belongs to that uninstall, not to this install: a later re-run must
-  # never act on it. Removed durably before anything is written.
-  clearStateRemovalToken()
   if plan.preBootstrap.roots.len > 0 and stateDir != DefaultStateDir:
     # The preflight inspected the default state directory; a bootstrap
     # into another one would leave the inspected /var/lib/repro/system
@@ -260,6 +256,10 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       "inputs under /var/lib/repro, which the preflight inspected at the " &
       "default state directory " & DefaultStateDir & "; --state-dir " &
       stateDir & " is refused; nothing was written")
+  # A state-removal token an earlier uninstall left (§13 decision 165)
+  # belongs to that uninstall, not to this install: a later re-run must
+  # never act on it. Removed durably before anything is written.
+  clearStateRemovalToken()
   for p in [opts.deploySignersPath, opts.cachePublishersPath]:
     if p.len > 0:
       discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file

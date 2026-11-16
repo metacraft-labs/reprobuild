@@ -1138,7 +1138,9 @@ when defined(posix):
       ## Those the hold stopped (``triggersToStop``).
     requirers: seq[string]
       ## The generation's units outside ``units`` that require one of them
-      ## (``profileRequirersOf``), held with them (§13 decision 153 as extended in A13 review round 10).
+      ## (``profileRequirersOf``), held with them: one that requires a
+      ## refused unit stays held (§13 decision 153, extended to every
+      ## requirer in A13 review round 10).
     remembered: seq[string]
       ## Every one active before the hold, stopped or left alone
       ## (``rememberedTriggers``), on record in ``stateDir`` until released.
@@ -1294,7 +1296,8 @@ when defined(posix):
     for u in c.units:
       if u notin refused: passed.add(u)
     # The generation's units that require a judged one were held with them
-    # (§13 decision 153 as extended in A13 review round 10): they go with the units they require.
+    # and one that requires a refused unit stays held (§13 decision 153,
+    # every requirer): they go with the units they require.
     for u in c.requirers:
       if u notin passed: passed.add(u)
     # §13 decision 153: a passed unit that requires a refused one stays

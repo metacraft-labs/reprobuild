@@ -33,6 +33,8 @@ import repro_profile/disk_identity
 
 from repro_core/source_root import resolveReprobuildSourceRoot
 
+import ./cli_program
+
 proc diskoCompilerRoot*(): string =
   ## Locate the reprobuild sources needed when compiling a user-authored
   ## ``hardware.nim`` file. The command may be invoked from any working
@@ -283,97 +285,20 @@ proc loadDiskoFromSource*(diskoNim: string): DiskPlanOutcome =
   result.text = renderPlan(result.spec)
 
 # ---------------------------------------------------------------------
-# Argument parsing — shared parser for the `repro disk` subcommands.
+# What a `repro disk` subcommand was given (its command line is parsed from
+# repro's description, `repro_cli_support/cli_description`).
 # ---------------------------------------------------------------------
 
 type
-  DiskSubcommand* = enum
-    dscPlan
-    dscApply
-    dscMount
-    dscUnmount
-    dscGenerate
-    dscImage
-    dscNone     ## no/invalid subcommand supplied
-
   DiskCliOptions* = object
-    sub*: DiskSubcommand
     source*: string         ## path to disko.nim / hardware.nim
-    target*: string         ## /mnt (mount/unmount/apply target-prefix)
+    target*: string         ## /mnt (mount/unmount prefix)
     device*: string         ## --device override for apply
     output*: string         ## --output for image
     probe*: string          ## --probe root for generate
     sizeStr*: string        ## --size for image
     identity*: string       ## --identity override for apply
     confirm*: bool
-
-proc parseDiskArgs*(args: seq[string]): DiskCliOptions =
-  if args.len == 0:
-    result.sub = dscNone
-    return
-  case args[0]
-  of "plan":     result.sub = dscPlan
-  of "apply":    result.sub = dscApply
-  of "mount":    result.sub = dscMount
-  of "unmount":  result.sub = dscUnmount
-  of "generate": result.sub = dscGenerate
-  of "image":    result.sub = dscImage
-  else:
-    raise newException(ValueError,
-      "unknown `repro disk` subcommand: `" & args[0] & "`; " &
-      "expected one of plan/apply/mount/unmount/generate/image")
-  var i = 1
-  while i < args.len:
-    let a = args[i]
-    case a
-    of "--confirm": result.confirm = true
-    of "--target":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--target requires a PATH")
-      result.target = args[i + 1]; inc i
-    of "--device":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--device requires a PATH")
-      result.device = args[i + 1]; inc i
-    of "--output":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--output requires a PATH")
-      result.output = args[i + 1]; inc i
-    of "--probe":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--probe requires a PATH")
-      result.probe = args[i + 1]; inc i
-    of "--size":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--size requires a value")
-      result.sizeStr = args[i + 1]; inc i
-    of "--identity":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--identity requires a PATH")
-      result.identity = args[i + 1]; inc i
-    else:
-      if a.startsWith("--target="):
-        result.target = a["--target=".len .. ^1]
-      elif a.startsWith("--device="):
-        result.device = a["--device=".len .. ^1]
-      elif a.startsWith("--output="):
-        result.output = a["--output=".len .. ^1]
-      elif a.startsWith("--probe="):
-        result.probe = a["--probe=".len .. ^1]
-      elif a.startsWith("--size="):
-        result.sizeStr = a["--size=".len .. ^1]
-      elif a.startsWith("--identity="):
-        result.identity = a["--identity=".len .. ^1]
-      elif a.startsWith("--"):
-        raise newException(ValueError,
-          "unknown `repro disk " & $result.sub & "` flag: " & a)
-      else:
-        # First positional argument = source file path.
-        if result.source.len > 0:
-          raise newException(ValueError,
-            "extra positional argument: " & a)
-        result.source = a
-    inc i
 
 # ---------------------------------------------------------------------
 # Subcommand handlers.
@@ -385,8 +310,8 @@ const PendingNotice* =
 
 proc runDiskPlan(opts: DiskCliOptions): int =
   if opts.source.len == 0:
-    stderr.writeLine("repro disk plan: missing source file argument\n" &
-      "usage: repro disk plan <disko.nim>")
+    stderr.writeLine("repro disk plan: the source file is empty; see " &
+      "`repro disk plan --help`")
     return 2
   let outcome = loadDiskoFromSource(opts.source)
   if outcome.failure:
@@ -442,9 +367,8 @@ proc resolveDiskIdentity*(layoutPath, explicitPath: string;
 
 proc runDiskApply(opts: DiskCliOptions): int =
   if opts.source.len == 0:
-    stderr.writeLine("repro disk apply: missing source file argument\n" &
-      "usage: repro disk apply <disko.nim> [--device DEV] " &
-      "[--identity PATH] --confirm")
+    stderr.writeLine("repro disk apply: the source file is empty; see " &
+      "`repro disk apply --help`")
     return 2
   if not opts.confirm:
     # --confirm is the explicit destructive opt-in. Print the plan
@@ -530,8 +454,8 @@ proc runDiskApply(opts: DiskCliOptions): int =
 
 proc runDiskMount(opts: DiskCliOptions): int =
   if opts.source.len == 0 or opts.target.len == 0:
-    stderr.writeLine("repro disk mount: missing arguments\n" &
-      "usage: repro disk mount <disko.nim> --target /mnt")
+    stderr.writeLine("repro disk mount: --target is required; see " &
+      "`repro disk mount --help`")
     return 2
   let outcome = loadDiskoFromSource(opts.source)
   if outcome.failure:
@@ -551,8 +475,8 @@ proc runDiskMount(opts: DiskCliOptions): int =
 
 proc runDiskUnmount(opts: DiskCliOptions): int =
   if opts.source.len == 0 or opts.target.len == 0:
-    stderr.writeLine("repro disk unmount: missing arguments\n" &
-      "usage: repro disk unmount <disko.nim> --target /mnt")
+    stderr.writeLine("repro disk unmount: --target is required; see " &
+      "`repro disk unmount --help`")
     return 2
   let outcome = loadDiskoFromSource(opts.source)
   if outcome.failure:
@@ -572,8 +496,8 @@ proc runDiskGenerate(opts: DiskCliOptions): int =
 
 proc runDiskImage(opts: DiskCliOptions): int =
   if opts.source.len == 0 or opts.output.len == 0:
-    stderr.writeLine("repro disk image: missing arguments\n" &
-      "usage: repro disk image <disko.nim> --output PATH --size SIZE")
+    stderr.writeLine("repro disk image: --output is required; see " &
+      "`repro disk image --help`")
     return 2
   stderr.writeLine("repro disk image: " & PendingNotice)
   stderr.writeLine("  source: " & opts.source)
@@ -582,34 +506,30 @@ proc runDiskImage(opts: DiskCliOptions): int =
     stderr.writeLine("  size:   " & opts.sizeStr)
   return 2
 
-proc renderDiskUsage(): string =
-  "usage: repro disk {plan|apply|mount|unmount|generate|image} ...\n" &
-  "  repro disk plan <disko.nim>            (v1: full)\n" &
-  "  repro disk apply <disko.nim> --confirm [--device DEV] [--identity PATH] (M9.R.22b: full)\n" &
-  "     --identity PATH   seed document for the filesystem and GPT\n" &
-  "                       identifiers; defaults to <disko>.identity.json\n" &
-  "                       beside the layout, and to unpinned (and so\n" &
-  "                       irreproducible) identifiers when neither exists\n" &
-  "  repro disk mount <disko.nim> --target /mnt [--confirm] (M9.R.22b: full)\n" &
-  "  repro disk unmount <disko.nim> --target /mnt (M9.R.22b: full)\n" &
-  "  repro disk generate --probe /          (M9.R.22c: pending)\n" &
-  "  repro disk image <disko.nim> --output PATH --size SIZE   (M9.R.22c: pending)\n"
+proc runDiskCommand*(conf: ReproCommandLineDisk): int =
+  ## ``repro disk <subcommand>``.
+  case conf.command
+  of ReproCommandLineDiskCommand.plan:
+    runDiskPlan(DiskCliOptions(source: conf.plan.source))
+  of ReproCommandLineDiskCommand.apply:
+    let c = conf.apply
+    runDiskApply(DiskCliOptions(source: c.source, device: c.device,
+      identity: c.identity, confirm: c.confirm))
+  of ReproCommandLineDiskCommand.mount:
+    let c = conf.mount
+    runDiskMount(DiskCliOptions(source: c.source, target: c.target,
+      confirm: c.confirm))
+  of ReproCommandLineDiskCommand.unmount:
+    let c = conf.unmount
+    runDiskUnmount(DiskCliOptions(source: c.source, target: c.target))
+  of ReproCommandLineDiskCommand.generate:
+    runDiskGenerate(DiskCliOptions(probe: conf.generate.probe))
+  of ReproCommandLineDiskCommand.image:
+    let c = conf.image
+    runDiskImage(DiskCliOptions(source: c.source, output: c.output,
+      sizeStr: c.size))
 
 proc runDiskCommand*(args: seq[string]): int =
-  ## ``repro disk <subcommand>`` dispatcher.
-  let opts =
-    try: parseDiskArgs(args)
-    except ValueError as e:
-      stderr.writeLine("repro disk: " & e.msg)
-      stderr.writeLine(renderDiskUsage())
-      return 2
-  case opts.sub
-  of dscNone:
-    stderr.writeLine(renderDiskUsage())
-    return 2
-  of dscPlan:     return runDiskPlan(opts)
-  of dscApply:    return runDiskApply(opts)
-  of dscMount:    return runDiskMount(opts)
-  of dscUnmount:  return runDiskUnmount(opts)
-  of dscGenerate: return runDiskGenerate(opts)
-  of dscImage:    return runDiskImage(opts)
+  ## ``repro disk <args>`` in this process, through the generated parser.
+  runReproArgs(@["disk"] & args, proc (c: ReproCommandLine): int =
+    runDiskCommand(c.disk))

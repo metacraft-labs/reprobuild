@@ -2169,7 +2169,7 @@ Requires=gen.service
       held.add(u)
     check "grp.target" in held and "bound.service" in held
 
-  test "decision 168: a generation that resolves only some of the recorded triggers is refused":
+  test "decision 170: a generation that resolves only some of the recorded triggers is refused":
     let dir = getTempDir() / ("t-r10-partial-" & $getCurrentProcessId())
     removeDir(dir)
     createDir(dir)

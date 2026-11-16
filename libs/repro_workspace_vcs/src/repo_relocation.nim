@@ -59,7 +59,7 @@
 
 {.push raises: [].}
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, sets, strutils]
 import git_tool
 
 proc cRename(oldname, newname: cstring): cint
@@ -165,6 +165,66 @@ const
     ## rather than taken from the front, so the sample is not systematically
     ## confined to one subtree (a rewrite that stripped one directory of
     ## artifacts would otherwise be able to empty the whole sample).
+
+  relocationBlobQuorum* = 3
+    ## How many of the sampled DISTINCTIVE blobs must be present in the
+    ## candidate (capped at the sample size; see `blobSampleSatisfied`).
+    ##
+    ## More than one because a single byte-identical file is not lineage: a
+    ## vendored file, a copied helper or a generated stub can coincide between
+    ## unrelated repositories even after the coincident classes below are
+    ## excluded. A small absolute number rather than a fraction because a
+    ## legitimate candidate may be far behind the tip it is compared with, and
+    ## every file changed since its last fetch is a sampled blob it cannot
+    ## have; a fraction would refuse exactly the long-neglected checkout a
+    ## rename most often meets.
+
+  relocationMinDistinctiveBlobSize* = 32
+    ## Blobs shorter than this many bytes are not sampled. Short contents —
+    ## the empty file, a newline, `1.0.0`, `*.pyc`, a one-line `__version__` —
+    ## recur across unrelated repositories, so their ids are content
+    ## coincidences rather than evidence of shared history.
+
+  emptyBlobSha1* = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    ## `git hash-object -t blob /dev/null` in a SHA-1 repository: every empty
+    ## `__init__.py`, `.gitkeep` and placeholder file in every repository.
+  emptyBlobSha256* =
+    "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813"
+    ## The same, in a SHA-256 repository (`git init --object-format=sha256`).
+
+  boilerplateBasenamePrefixes = ["LICENSE", "LICENCE", "COPYING", "UNLICENSE",
+    "COPYRIGHT", "NOTICE", "CODE_OF_CONDUCT"]
+    ## Upper-cased basename prefixes of files that are, as a rule, copied
+    ## verbatim from a template (GitHub's licence and community-file pickers,
+    ## the SPDX texts): `LICENSE`, `LICENSE-MIT`, `LICENSE.md`,
+    ## `COPYING.LESSER`, `CODE_OF_CONDUCT.md`. A blob found at such a path is
+    ## not sampled even when it is long.
+  boilerplateBasenames = [".gitignore", ".gitattributes", ".editorconfig",
+    ".gitkeep", ".keep", ".dockerignore", ".npmignore", ".prettierignore"]
+    ## Exact basenames of configuration files usually taken from a template
+    ## (github/gitignore and the like).
+
+proc isBoilerplatePath*(path: string): bool =
+  ## Whether a tree entry at `path` is a file whose content is commonly copied
+  ## verbatim between unrelated repositories (licence texts, template
+  ## ignore/attribute files), so that its blob id is no evidence of lineage.
+  ## Judged by basename, so `vendor/x/LICENSE` is boilerplate too.
+  let base = path.extractFilename
+  if base in boilerplateBasenames:
+    return true
+  let upper = base.toUpperAscii()
+  for prefix in boilerplateBasenamePrefixes:
+    if upper.startsWith(prefix):
+      return true
+  false
+
+proc blobSampleSatisfied*(present, sampled: int): bool =
+  ## The object-presence verdict of §3.3(b): at least
+  ## `min(relocationBlobQuorum, sampled)` of the `sampled` distinctive blobs
+  ## are present in the candidate. An empty sample is never satisfied — a tip
+  ## with no distinctive blob offers nothing to compare, and "nothing to
+  ## compare" must not read as agreement.
+  sampled > 0 and present >= min(relocationBlobQuorum, sampled)
 
 proc runGit(probe: RelocationGitProbe; args: openArray[string]):
     tuple[code: int; output: string] =
@@ -740,24 +800,50 @@ proc mergeBase*(probe: RelocationGitProbe;
 
 proc sampleBlobIds*(probe: RelocationGitProbe; dir, treeish: string;
                     limit = relocationBlobSampleSize): seq[string] =
-  ## Up to `limit` blob ids from `treeish`'s tree, spread evenly across the
-  ## listing. The source of the "objects the repository at the NEW url has"
-  ## half of the identity check.
+  ## Up to `limit` DISTINCTIVE blob ids from `treeish`'s tree, spread evenly
+  ## across the listing. The source of the "objects the repository at the NEW
+  ## url has" half of the identity check (§3.3b).
+  ##
+  ## Distinctive means: not the empty blob, not shorter than
+  ## `relocationMinDistinctiveBlobSize`, not at a boilerplate path
+  ## (`isBoilerplatePath`), and not already picked — a blob reachable at
+  ## several paths is one object and is sampled once, so it cannot count
+  ## towards `relocationBlobQuorum` more than once. Every exclusion removes a
+  ## class of blob that unrelated repositories share by content alone; a
+  ## sample containing one would let an unrelated directory pass the check
+  ## that authorises moving it.
   if treeish.len == 0:
     return @[]
-  let res = runGit(probe, ["-C", dir, "ls-tree", "-r", treeish])
+  # `-l` adds the object size; `-z` NUL-terminates records and stops git from
+  # C-quoting unusual paths, so the basename test sees the real name.
+  let res = runGit(probe, ["-C", dir, "ls-tree", "-r", "-l", "-z", treeish])
   if res.code != 0:
     return @[]
   var blobs: seq[string]
-  for line in res.output.splitLines():
-    # `<mode> SP <type> SP <oid> TAB <path>`
-    let tab = line.find('\t')
+  var seen = initHashSet[string]()
+  for record in res.output.split('\0'):
+    # `<mode> SP <type> SP <oid> SP+ <size> TAB <path>`
+    # (https://git-scm.com/docs/git-ls-tree#_output_format)
+    let tab = record.find('\t')
     if tab < 0:
       continue
-    let fields = line[0 ..< tab].splitWhitespace()
-    if fields.len < 3 or fields[1] != "blob":
+    let fields = record[0 ..< tab].splitWhitespace()
+    if fields.len < 4 or fields[1] != "blob":
       continue
-    blobs.add(fields[2])
+    let oid = fields[2]
+    let size =
+      try: parseInt(fields[3])
+      except ValueError: -1
+    if size < relocationMinDistinctiveBlobSize:
+      continue
+    if oid == emptyBlobSha1 or oid == emptyBlobSha256:
+      continue
+    if isBoilerplatePath(record[tab + 1 .. ^1]):
+      continue
+    if oid in seen:
+      continue
+    seen.incl(oid)
+    blobs.add(oid)
   if blobs.len == 0:
     return @[]
   if blobs.len <= limit:

@@ -167,7 +167,7 @@
 151 Triggers are stopped for a hold | trigger, stopped, hold, socket, active
 152 The triggers to fire again come from each held unit | trigger, fire again, held unit, template, instance
 153 A unit that requires a refused unit stays held | requires, refused unit, stays held
-154 Decision 137's missing spellings are defects
+154 Decision 137's missing spellings are defects | spelling, blanks, Accept=yes, instance, template
 155 Activators are held like the services they start | activator, socket, held, hold
 156 A `Restart=` restart's run begins after its delay | restart, delay
 157 The boot replay confirms from a unit ordered after the re-assertion | boot replay, confirm, re-assertion, unit
@@ -182,6 +182,9 @@
 166 The pre-bootstrap inputs are left in place | pre-bootstrap input, left in place, mode and owner
 167 Bootstrap reads a takeover's prior mode before the takeover | prior mode, takeover, marker
 168 Every sequence floor stays while the key is kept | floor, kept
+169 Leave dependants out | dependant, leaves out
+170 Allow the fixing apply | fixing, resolve, partial fix
+171 Every requirer of a refused unit stays held | requirer, refused unit, held
 172 The boot-hold unit is required, and no ordering cycles through it | boot-hold, RequiredBy, ordering cycle, sysinit.target, required
 173 The agent's units are re-pointed too | agent, re-point, agent-apply, agent-fetch
 174 Only the static add-on image is installed | static, image, dynamic engine

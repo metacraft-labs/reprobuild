@@ -1738,7 +1738,7 @@ proc unresolvedRestartEntries*(stateDir: string; p: SystemProfile):
     seq[TriggerRestartEntry] =
   ## The record's trigger entries ``p`` does not resolve. An apply goes
   ## through only when this is empty: a generation that resolves some of
-  ## the recorded triggers but not all is refused (decision 168).
+  ## the recorded triggers but not all is refused (decision 170).
   var resolvedAny = false
   for e in readTriggerRestartEntries(stateDir):
     if e.dependantOf.len > 0: continue

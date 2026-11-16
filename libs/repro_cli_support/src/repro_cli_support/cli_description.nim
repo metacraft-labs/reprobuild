@@ -330,6 +330,142 @@ proc selfFlags(): tuple[version, package, platform,
       help = "The project whose pin to act on (default: the one enclosing " &
         "the current directory)"
 
+proc hostIdentityFlag(): NimNode {.compileTime.} =
+  ## `--host`, the host identity a machine command acts as. An `Option`,
+  ## because `--host=` (given, empty) is refused by the resolver rather
+  ## than read as "no flag".
+  quote do:
+    flag host is Option[string],
+      help = "The host identity to act as (default: `$REPRO_HOST`, else " &
+        "the lower-cased OS host name; `--host` that `$REPRO_HOST` " &
+        "contradicts is refused)"
+
+proc homePackageEditFlags(): NimNode {.compileTime.} =
+  ## What `repro home add` and `repro home remove` share: where the
+  ## reference is written, its guard, and whether apply follows.
+  quote do:
+    flag data is string,
+      help = "Edit a row of this data file (one the profile's `data:` " &
+        "section declares) instead of the profile"
+    flag whenPredicate is string, perSource = [cli = "when"],
+      help = "Guard the reference with a runtime predicate (`when`)"
+    flag ifPredicate is string, perSource = [cli = "if"],
+      help = "Guard the reference with a compile-time predicate (`if`); " &
+        "give one of --when and --if"
+    boolFlag noApply is bool,
+      help = "Edit the profile only; do not apply afterwards"
+
+proc homeTargetPlatformFlags(): NimNode {.compileTime.} =
+  ## The platform a remote target or a plan for another machine is
+  ## resolved for.
+  quote do:
+    flag targetPlatform is string,
+      help = "The target's platform: linux, macos, windows or bsd"
+    flag targetArch is string,
+      help = "The target's architecture: x86_64, arm64 or arm32"
+
+proc homeRemoteTargetFlags(): NimNode {.compileTime.} =
+  ## How `repro home enable|disable --host NAME --now` reaches and applies
+  ## to another machine over SSH.
+  let platform = homeTargetPlatformFlags()
+  quote do:
+    flag host is Option[string],
+      help = "The `hosts:` entry to edit (default: this machine); with " &
+        "--now, the host to apply to over SSH"
+    boolFlag now is bool,
+      help = "With --host naming another machine, apply there right away"
+    boolFlag noApply is bool,
+      help = "Edit the profile only; do not apply afterwards"
+    flag remoteRepro is string, default = "repro",
+      help = "The `repro` the target runs"
+    flag targetStoreRoot is string, help = "The target's store root"
+    flag targetStoreDaemon is string, values = ["dev"],
+      help = "The target's store daemon profile (only `dev`)"
+    flag targetStoreEndpoint is string,
+      help = "The target store daemon's endpoint"
+    flag targetStateDir is string, help = "The target's home state directory"
+    flag targetHomeDir is string, help = "The target's home directory"
+    flag ssh is string, default = "ssh", help = "The ssh program"
+    flag port is int, help = "The SSH port"
+    flag sshOption is seq[string],
+      help = "An option passed to ssh (`-o`); repeat it for several"
+    `platform`
+    flag targetWsl is Option[bool], optionalValue = some(true),
+      help = "Whether the target is a WSL distribution (`--target-wsl` " &
+        "alone is true)"
+
+proc homeBundleStoreFlags(): NimNode {.compileTime.} =
+  ## The roots the internal bundle-transfer commands work on.
+  quote do:
+    flag storeRoot is string, help = "The store root"
+
+proc homeRemoteActivateFlags(): NimNode {.compileTime.} =
+  ## The target side of a remote home apply, run over SSH as `repro home
+  ## __remote-activate` (or its older spelling `repro __remote-activate`).
+  quote do:
+    flag storeRoot is string, help = "The target's store root (required)"
+    flag stateDir is string,
+      help = "The target's home state directory (required)"
+    flag bundleDigest is string,
+      help = "The transferred bundle's digest (or --bundle)"
+    flag expectedDigest is string, help = "The digest the bundle must have"
+    flag bundle is string, help = "Read the bundle from this file"
+
+proc infraLocationFlags(): NimNode {.compileTime.} =
+  ## Where a system command finds its state and profile.
+  quote do:
+    flag stateDir is string,
+      help = "The system state directory (default: the platform's)"
+    flag profile is string,
+      help = "The system profile (default: the one in the state directory)"
+
+proc infraRegistryFlags(): NimNode {.compileTime.} =
+  ## The host a system command acts as, and the home profile whose
+  ## `hosts:` registry says who manages its system.
+  let host = hostIdentityFlag()
+  quote do:
+    `host`
+    flag homeProfileDir is string,
+      help = "The home profile whose `hosts:` registry says who manages " &
+        "each host's system (default: the `home.nim` beside the system " &
+        "profile)"
+
+proc infraDriftFlags(): NimNode {.compileTime.} =
+  ## Acknowledging external drift (`--reconcile-drift` and `--accept-drift`
+  ## are one switch at plan time).
+  quote do:
+    boolFlag acceptDrift is bool,
+      help = "Accept the external drift the plan finds"
+    boolFlag reconcileDrift is bool,
+      help = "Replace drifted resources (at plan time, the same as " &
+        "--accept-drift)"
+
+proc addonTargetFlags(): NimNode {.compileTime.} =
+  ## The add-on host a profile is compiled for on another machine (`repro
+  ## anywhere`, `repro infra image`). Each value is also accepted as
+  ## `--flag=VALUE`.
+  let host = hostIdentityFlag()
+  quote do:
+    `host`
+    flag profile is string, help = "The system profile (required)"
+    flag addonBinary is string, help = "The add-on binary (required)"
+    flag addonSha256 is string,
+      help = "The add-on binary's expected SHA-256 (required)"
+    flag homeProfileDir is string,
+      help = "A home-profile directory whose `hosts:` registry is read"
+
+proc cargoTargetDirFlags(): NimNode {.compileTime.} =
+  ## The target directory and live-set count `repro cargo gc` and
+  ## `record-live` share.
+  quote do:
+    flag targetDir is string,
+      help = "The target directory (default: `$CARGO_TARGET_DIR`, else " &
+        "`./target`; with a split `build.build-dir`, the build directory)"
+    flag keepSets is string,
+      help = "How many recent live sets protect their units (N >= 1; " &
+        "default 3, also `$REPRO_CARGO_GC_KEEP_SETS` and `keep_sets` under " &
+        "`[cargo_gc]` in the configuration file)"
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
@@ -349,6 +485,49 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let selfPackage = self.package
   let selfPlatform = self.platform
   let selfProject = self.project
+  # Group 4 (machines). A shared group is spliced once per command, so each
+  # splice gets its own tree.
+  let homeAddEdit = homePackageEditFlags()
+  let homeRemoveEdit = homePackageEditFlags()
+  let homeEnableRemote = homeRemoteTargetFlags()
+  let homeDisableRemote = homeRemoteTargetFlags()
+  let homeListHost = hostIdentityFlag()
+  let homeWhyHost = hostIdentityFlag()
+  let homeApplyHost = hostIdentityFlag()
+  let homeApplyPlatform = homeTargetPlatformFlags()
+  let homePlanHost = hostIdentityFlag()
+  let homeExportHost = hostIdentityFlag()
+  let homeFactsHost = hostIdentityFlag()
+  let homeBuildBundleStore = homeBundleStoreFlags()
+  let homeBuildBundlePlatform = homeTargetPlatformFlags()
+  let homeReceiveBundleStore = homeBundleStoreFlags()
+  let homeTransferBundleStore = homeBundleStoreFlags()
+  let homeRemoteActivate = homeRemoteActivateFlags()
+  let remoteActivate = homeRemoteActivateFlags()
+  let systemAddLocation = infraLocationFlags()
+  let systemRemoveLocation = infraLocationFlags()
+  let systemListLocation = infraLocationFlags()
+  let systemWhyLocation = infraLocationFlags()
+  let systemSyncLocation = infraLocationFlags()
+  let systemAuditLocation = infraLocationFlags()
+  let systemSyncRegistry = infraRegistryFlags()
+  let systemSyncDrift = infraDriftFlags()
+  let systemRollbackLocation = infraLocationFlags()
+  let systemRollbackRegistry = infraRegistryFlags()
+  let systemRollbackDrift = infraDriftFlags()
+  let infraPlanLocation = infraLocationFlags()
+  let infraPlanRegistry = infraRegistryFlags()
+  let infraPlanDrift = infraDriftFlags()
+  let infraApplyLocation = infraLocationFlags()
+  let infraApplyRegistry = infraRegistryFlags()
+  let infraApplyDrift = infraDriftFlags()
+  let infraCacheKeysLocation = infraLocationFlags()
+  let infraImageTarget = addonTargetFlags()
+  let anywhereTarget = addonTargetFlags()
+  let deployAgentHost = hostIdentityFlag()
+  let compileProfileHost = hostIdentityFlag()
+  let cargoGcTargetDir = cargoTargetDirFlags()
+  let cargoRecordLiveTargetDir = cargoTargetDirFlags()
   result = unbound quote do:
     help "Reproducible builds, development environments and workspaces"
     # Command-line flags are kebab-case (`--tool-provisioning`); keys in
@@ -929,30 +1108,496 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
 
     # ---- Machines --------------------------------------------------------
     subcmd "home", help = "Manage your home profile":
-      pos args is seq[string], required = false, passThrough = true
+      # Every subcommand reads the profile from here, so it is the
+      # namespace's own flag (it may precede or follow the subcommand).
+      flag profileDir is string,
+        help = "The home-profile directory (default: the platform's)"
+      subcmd "add", help = "Add a package reference to an activity":
+        flag activity is string, default = "default",
+          help = "The activity the reference is added to"
+        `homeAddEdit`
+        flag catalog is string,
+          help = "Package catalogs to load first, comma-separated (default: " &
+            "`$REPRO_HOME_PACKAGE_CATALOG`)"
+        pos package is string,
+          help = "`<package>`, `<package>@<version>`, or `<package>@latest` " &
+            "to pin the version an unpinned reference resolves to"
+      subcmd "remove", help = "Remove a package reference":
+        flag activity is Option[string],
+          help = "Remove only from this activity (default: every activity)"
+        `homeRemoveEdit`
+        pos package is string,
+          help = "`<package>` (every reference) or `<package>@<version>` " &
+            "(only the pinned one)"
+      subcmd "enable", help = "Enable an activity for a host":
+        `homeEnableRemote`
+        pos activity is string, help = "The activity to enable"
+      subcmd "disable", help = "Disable an activity for a host":
+        `homeDisableRemote`
+        pos activity is string, help = "The activity to disable"
+      subcmd "list", help = "List the profile's package references and " &
+          "whether this host plans them":
+        `homeListHost`
+      subcmd "why", help = "Explain why a package is in the profile":
+        `homeWhyHost`
+        pos package is string, help = "The package"
+      subcmd "history":
+        help "List the home-profile generations, oldest first"
+      subcmd "apply", help = "Apply the home profile as a new generation " &
+          "(only the concerns this host's `applies:` lists are executed)":
+        boolFlag plan is bool,
+          help = "Preview the full apply without changing anything"
+        `homeApplyHost`
+        boolFlag allowDrift is bool,
+          help = "With --plan: exit 0 even when drift is detected"
+        boolFlag reconcileDrift is bool, alias = "--accept-overwrite",
+          help = "Replace a drifted target instead of failing, recording " &
+            "the prior content so rollback can restore it"
+        boolFlag relock is bool,
+          help = "Ignore the selections `home.lock` pins and select every " &
+            "package again"
+        boolFlag uninstallFromScoop is bool,
+          help = "Remove from Scoop the packages this apply drops (only " &
+            "what Reprobuild installed and nothing holds)"
+        `homeApplyPlatform`
+      subcmd "plan", help = "Show what the next apply would do; exit " &
+          "non-zero on drift":
+        `homePlanHost`
+        boolFlag allowDrift is bool, help = "Exit 0 even when drift is detected"
+        boolFlag reconcileDrift is bool,
+          help = "Plan replacing drifted targets"
+      subcmd "export", help = "Print the evaluated home-profile intent " &
+          "(activities, config, hosts, resources, the host's selection, " &
+          "provenance) as JSON, or check a committed export; exit 1 when " &
+          "stale or failed, 3 when it cannot describe --target":
+        `homeExportHost`
+        flag format is string, default = "json",
+          help = "The output format (only `json`)"
+        flag check is Option[string],
+          help = "Compare this committed export with a fresh one instead of " &
+            "printing: exit 0 when selection, intent and platforms agree, 1 " &
+            "with the differences (provenance never fails it)"
+        flag target is string,
+          help = "Also evaluate the guards for this platform (x86_64-linux, " &
+            "aarch64-darwin, ...) and the host, as `evaluation`; refused " &
+            "(exit 3) when the export would be wrong for it"
+      subcmd "facts", help = "Report the host facts an apply would " &
+          "produce (packages, files, environment, user services; paths " &
+          "relative to a private home), the Reprobuild side of `repro home " &
+          "compare`; exit 3 when the profile cannot be described for " &
+          "--target":
+        `homeFactsHost`
+        flag target is string,
+          help = "The platform to plan for (x86_64-linux, aarch64-darwin, " &
+            "...; default: the one repro runs on)"
+        flag output is Option[string],
+          help = "Write the document here instead of to standard output"
+      subcmd "compare", help = "Compare a Nix-side and a Reprobuild-side " &
+          "host-facts document per category (same, only-in-nix, " &
+          "only-in-reprobuild, different, unmapped); exit 1 on a difference " &
+          "not allowlisted or a stale allowlist row, 2 when they cannot be " &
+          "compared":
+        flag facts is seq[string],
+          help = "A host-facts document; give exactly two, one per side"
+        flag allow is seq[string],
+          help = "A TOML allowlist of known differences (`[[allow]]` rows " &
+            "with `category` and a non-empty `reason`; at most one file)"
+        flag format is string, default = "text",
+          help = "The output format: `text` or `json`"
+        boolFlag showSame is bool, help = "Also list the entries that agree"
+      subcmd "rollback", help = "Revert to a past generation (default: the " &
+          "previous one)":
+        boolFlag acceptOverwrite is bool,
+          help = "Overwrite managed files edited since that generation"
+        boolFlag uninstallFromScoop is bool,
+          help = "Remove from Scoop the packages the rollback drops"
+        pos generation is string, required = false,
+          help = "The generation to roll back to"
+      subcmd "gc", help = "Delete store prefixes no live generation " &
+          "references":
+        boolFlag dryRun is bool,
+          help = "Print the candidates and their footprint; delete nothing"
+        boolFlag force is bool, short = 'y',
+          help = "Skip the confirmation prompt"
+        flag keepGenerations is Option[int],
+          help = "Keep the N most recent generations' prefixes (N >= 1, " &
+            "default 2; the active generation is always kept)"
+        flag store is string,
+          help = "The store root (default: `$REPRO_STORE_ROOT`, else the " &
+            "platform's)"
+      subcmd "set", help = "Set a managed configurable in the profile's " &
+          "`config:` section, then apply":
+        flag whenPredicate is Option[string], perSource = [cli = "when"],
+          help = "Guard the value with a runtime predicate"
+        boolFlag noApply is bool,
+          help = "Edit the profile only; do not apply afterwards"
+        pos key is string, help = "`<package>.<configurable>`"
+        pos value is string, help = "The value"
+      subcmd "get", help = "Print a managed configurable's value in the " &
+          "current generation":
+        pos key is string, help = "`<package>.<configurable>`"
+      subcmd "adopt", help = "Claim an existing object the profile declares " &
+          "into management without changing it":
+        pos address is string, help = "The resource address"
+      subcmd "resource", help = "Edit resource records":
+        subcmd "move", help = "Rename a resource record without re-applying":
+          pos oldAddress is string, help = "The current address"
+          pos newAddress is string, help = "The new address"
+      subcmd "migrate-from-env-scripts", help = "Write the pins of a " &
+          "`toolchain-versions.env` file into the profile as package " &
+          "references":
+        flag envFile is string,
+          help = "A `toolchain-versions.env`-shaped file (default: " &
+            "`$METACRAFT_ROOT/windows/toolchain-versions.env`; required " &
+            "when METACRAFT_ROOT is unset)"
+        flag activity is string, default = "migrated_from_env_scripts",
+          help = "The activity block that receives the references (a Nim " &
+            "identifier)"
+        boolFlag dryRun is bool,
+          help = "Print the proposed `home.nim` diff; write nothing"
+      # The remote-apply steps repro runs of itself (locally, and on the
+      # target over SSH).
+      subcmd "__build-bundle", visibility = internal,
+          help = "Build an activation bundle of a generation":
+        boolFlag evaluate is bool,
+          help = "Evaluate the profile for target facts first (implied by " &
+            "the --target-* flags)"
+        flag generation is Option[string],
+          help = "The generation to bundle (default: `current`)"
+        flag stateDir is string, help = "The home state directory"
+        `homeBuildBundleStore`
+        flag homeDir is string, help = "The home directory to evaluate for"
+        flag out is string, help = "Also write the bundle here"
+        flag targetHost is string, help = "The target host"
+        `homeBuildBundlePlatform`
+        flag targetWsl is Option[bool], optionalValue = some(true),
+          help = "Whether the target is a WSL distribution"
+      subcmd "__receive-bundle", visibility = internal,
+          help = "Query or receive an activation bundle (the target side)":
+        `homeReceiveBundleStore`
+        flag query is string, help = "The bundle digest to look up"
+        flag queryPrefix is seq[string], help = "A prefix to look up"
+        flag expectedDigest is string, help = "The digest the bundle must have"
+        flag bundle is string,
+          help = "Read the bundle from this file instead of stdin"
+      subcmd "__transfer-bundle", visibility = internal,
+          help = "Send an activation bundle to a target over SSH":
+        flag bundleDigest is string, help = "The bundle's digest"
+        `homeTransferBundleStore`
+        flag target is string, help = "The SSH destination"
+        flag remoteRepro is string, default = "repro",
+          help = "The `repro` the target runs"
+        flag targetStoreRoot is string, help = "The target's store root"
+        flag ssh is string, default = "ssh", help = "The ssh program"
+        flag sshOption is seq[string], help = "An option passed to ssh"
+        flag port is int, help = "The SSH port"
+      subcmd "__remote-activate", visibility = internal,
+          help = "Activate a received bundle (the target side)":
+        `homeRemoteActivate`
     subcmd "system", help = "Manage the machine's system configuration":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "add", help = "Add a resource to the system profile":
+        `systemAddLocation`
+        pos kind is string, help = "The resource kind"
+        pos fields is seq[string], required = false,
+          help = "The resource's fields, as `key=value`"
+      subcmd "remove", help = "Remove a resource from the system profile":
+        `systemRemoveLocation`
+        pos address is string, help = "The resource address"
+      subcmd "list", help = "List the system profile's resources":
+        `systemListLocation`
+      subcmd "why", help = "Explain why a resource is in the system profile":
+        `systemWhyLocation`
+        pos address is string, help = "The resource address"
+      subcmd "sync", help = "Plan and apply the system profile in one step":
+        `systemSyncLocation`
+        `systemSyncRegistry`
+        `systemSyncDrift`
+        boolFlag elevate is bool, negatable = true, default = true,
+          help = "Run the privileged operations (`--no-elevate` skips them)"
+        boolFlag acceptPasswdDestroy is bool,
+          help = "Allow destroying user and group records"
+        boolFlag forceUnlock is bool,
+          help = "Take the apply lock even when another apply holds it"
+      subcmd "history", help = "List the system generations":
+        flag stateDir is string,
+          help = "The system state directory (default: the platform's)"
+      subcmd "rollback", help = "Re-apply a past system generation " &
+          "(default: the previous one)":
+        `systemRollbackLocation`
+        `systemRollbackRegistry`
+        `systemRollbackDrift`
+        flag generation is string,
+          help = "The generation, as an alternative to the positional"
+        boolFlag acceptFeatureDestroy is bool,
+          help = "Allow removing Windows optional features"
+        boolFlag acceptPasswdDestroy is bool,
+          help = "Allow destroying user and group records"
+        boolFlag forceUnlock is bool,
+          help = "Take the apply lock even when another apply holds it"
+        pos target is string, required = false,
+          help = "The generation to roll back to"
+      subcmd "audit", help = "Print a generation's audit log (default: " &
+          "the current one)":
+        # `--profile` is accepted, as the page specifies, and not consulted
+        # for the read.
+        `systemAuditLocation`
+        pos generation is string, required = false,
+          help = "The generation"
+      # The add-on's own command line (repro_addon/cli), shared with the
+      # static add-on binary, which parses these.
+      subcmd "addon", help = "Manage an add-on host (Linux)":
+        pos args is seq[string], required = false, passThrough = true
+      subcmd "state", help = "Save and restore the declared state set " &
+          "(Linux)":
+        pos args is seq[string], required = false, passThrough = true
+      subcmd "secret", help = "Seal and materialise system secrets (Linux)":
+        pos args is seq[string], required = false, passThrough = true
+      subcmd "adopt", help = "Claim an object on an add-on host (Linux)":
+        pos args is seq[string], required = false, passThrough = true
     subcmd "infra", help = "Plan and apply infrastructure":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "anywhere", help = "Install the reprobuild system add-on on a host":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "deploy-agent", help = "Run the deployment agent":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "plan", help = "Compile the system profile and show what an " &
+          "apply would change; writes nothing but the plan":
+        `infraPlanLocation`
+        `infraPlanRegistry`
+        `infraPlanDrift`
+      subcmd "apply", help = "Apply a plan `repro infra plan` printed, as a " &
+          "new system generation":
+        `infraApplyLocation`
+        `infraApplyRegistry`
+        `infraApplyDrift`
+        flag plan is string,
+          help = "The plan id (on an add-on host, the add-on plan id)"
+        boolFlag elevate is bool, negatable = true, default = true,
+          help = "Run the privileged operations (`--no-elevate` skips them)"
+        boolFlag noPreview is bool,
+          help = "Compute and apply a fresh plan without a preview"
+        boolFlag acceptFeatureDestroy is bool,
+          help = "Allow removing Windows optional features"
+        boolFlag acceptPasswdDestroy is bool,
+          help = "Allow destroying user and group records"
+        boolFlag forceUnlock is bool,
+          help = "Take the apply lock even when another apply holds it"
+        flag keepGenerations is Option[int],
+          help = "An add-on host's generation retention: how many to keep"
+        flag keepDays is Option[int],
+          help = "An add-on host's generation retention: for how many days"
+        pos planId is string, required = false,
+          help = "The plan id, as an alternative to --plan"
+      subcmd "cache-keys", help = "Print the binary-cache entry key of every " &
+          "build-action edge of the profile, for a platform":
+        `infraCacheKeysLocation`
+        flag platformCpu is Option[string],
+          help = "The consuming host's CPU (default: this host's)"
+        flag platformOs is Option[string],
+          help = "The consuming host's OS (default: this host's)"
+        flag platformAbi is Option[string],
+          help = "The consuming host's ABI (default: this host's)"
+        flag platformLibc is Option[string],
+          help = "The consuming host's libc (default: this host's; empty " &
+            "for none)"
+      subcmd "install-root", help = "Mirror the live root onto a target " &
+          "disk and make it bootable (the installer's last step)":
+        flag target is string, default = "/mnt",
+          help = "The mounted target root"
+        flag source is string, default = "/", help = "The live root to mirror"
+        flag device is string, help = "The disk GRUB is installed on"
+        flag disko is string,
+          help = "The disk layout the target's fstab is generated from"
+        flag hostname is string, default = "reproos",
+          help = "The target's host name"
+        flag kernel is string, help = "The kernel image to install"
+        flag initrd is string, help = "The initrd to install"
+        flag exclude is seq[string],
+          help = "Another path to leave out; repeat it for several"
+        boolFlag noRsync is bool, help = "Skip the mirror step"
+        boolFlag noGrub is bool, help = "Skip installing GRUB"
+        boolFlag noFstab is bool, help = "Skip generating fstab"
+        boolFlag dryRun is bool, help = "Print the steps; change nothing"
+      subcmd "image", help = "Synthesise a ready-to-flash disk image of an " &
+          "add-on host (Linux; needs no privilege)":
+        `infraImageTarget`
+        flag output is string, help = "The image to write (required)"
+        flag compress is string, default = "none",
+          help = "`xz` or `none`"
+        flag debCache is string, help = "A cache directory for packages"
+        flag workDir is string, help = "The working directory"
+        boolFlag keepWork is bool, help = "Keep the working directory"
+        flag assemblyTimeout is int, help = "The assembly timeout, in seconds"
+    subcmd "anywhere", help = "Bootstrap a booted distribution host into " &
+        "ReproOS add-on mode over SSH (Linux): without --expect-plan print " &
+        "the plan and exit 3, with it apply":
+      flag mode is string, help = "The mode: `addon`, the only one (required)"
+      `anywhereTarget`
+      flag knownHosts is string,
+        help = "The SSH known-hosts file (required)"
+      flag sshKey is string, help = "The SSH key"
+      flag sshPort is int, help = "The SSH port"
+      flag arch is string,
+        help = "The host's architecture: amd64, arm64 or armhf (default: " &
+          "the add-on binary's)"
+      flag deploySigners is string, help = "The deploy signers file"
+      flag cachePublishers is string, help = "The cache publishers file"
+      flag cacheUrl is string, help = "The binary cache"
+      flag agentTarget is string, help = "The deploy agent's target"
+      flag manifest is seq[string],
+        help = "A manifest the deploy agent polls; repeat it for several"
+      flag pollInterval is int, help = "The deploy agent's poll interval (s)"
+      flag expectPlan is string,
+        help = "The plan digest acknowledged; apply only that plan"
+      flag recipientOut is string,
+        help = "Write the host's secrets recipient here"
+      flag appliedProfileOut is string,
+        help = "Write the applied profile here"
+      pos destination is string, required = false,
+        help = "`root@ADDRESS`, the SSH destination (required)"
+    subcmd "deploy-agent", help = "Run one deploy-agent tick: poll the " &
+        "manifests, verify them and apply the newest for the target":
+      call:
+        flag target is string, help = "The deployment target (required)"
+        flag manifest is seq[string],
+          help = "A manifest path or URL to poll (at least one); repeat it " &
+            "for several"
+        flag allowedSigners is string,
+          help = "The allowed signers' public keys (required)"
+        flag stateDir is string,
+          help = "The agent's state directory (default: " &
+            "`./.repro-deploy-agent`)"
+        flag cacheRoot is string,
+          help = "The fetch cache (default: `<state dir>/cache`)"
+        `deployAgentHost`
+        flag secretsKey is string,
+          help = "The recipient key that opens sealed sections"
+        flag secretsDir is string,
+          help = "Where secrets are materialised (default: `<state " &
+            "dir>/secrets`)"
+        flag fetchTimeoutMs is int, default = 30_000,
+          help = "The manifest fetch timeout, in milliseconds"
+      subcmd "keygen", help = "Create the recipient key on this host (or " &
+          "keep the existing one) and print its public key":
+        flag secretsKey is string, help = "The key file (required)"
+      subcmd "compile-profile", visibility = internal,
+          help = "Compile a staged manifest profile and apply nothing":
+        boolFlag stdio is bool,
+          help = "Read the profile on stdin and print the result"
+        boolFlag probeCCompiler is bool,
+          help = "Print the compilers a compile would use, and compile nothing"
+        flag staged is string, help = "The staged profile module"
+        flag canonicalOut is string, help = "Write the canonical text here"
+        flag actionsOut is string, help = "Write the build actions here"
+        flag stateDir is string, help = "The compile state directory"
+        flag digestOut is string, help = "Write the profile digest here"
+        flag revisionOut is string, help = "Write the compiler revision here"
+        `compileProfileHost`
+        flag platform is string, help = "The target's platform"
+        flag arch is string, help = "The target's architecture"
+        flag systemMode is string, help = "`addOn` or `full`"
+        flag systemActivities is seq[string], separator = ",",
+          help = "The system activities, comma-separated"
     subcmd "hardware", help = "Probe the machine's hardware":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "probe", help = "Render the live system's hardware as a " &
+          "`hardware.nim` and write it (default: /etc/repro/hardware.nim)":
+        boolFlag dryRun is bool,
+          help = "Print the rendered source instead of writing it"
+        flag output is string, help = "Write here instead of the default"
+        boolFlag regenerate is bool,
+          help = "Overwrite an existing file (otherwise refused, exit 2)"
     subcmd "disk", help = "Plan, apply and mount disk layouts":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "plan", help = "Print the partition and mount plan of a layout":
+        pos source is string, help = "The layout (`disko.nim`)"
+      subcmd "apply", help = "Create the layout's partitions, filesystems " &
+          "and pools (destructive; needs --confirm)":
+        boolFlag confirm is bool,
+          help = "Run it; without, print the plan and exit 2"
+        flag device is string,
+          help = "Only the disk whose device is this path"
+        flag identity is string,
+          help = "The identity document seeding the filesystem and GPT " &
+            "identifiers (default: `<disko>.identity.json` beside the layout)"
+        pos source is string, help = "The layout (`disko.nim`)"
+      subcmd "mount", help = "Print the mount plan, and with --confirm mount it":
+        flag target is string, help = "The mount prefix (required)"
+        boolFlag confirm is bool, help = "Mount (otherwise only print)"
+        pos source is string, help = "The layout (`disko.nim`)"
+      subcmd "unmount", help = "Unmount the layout under a prefix":
+        flag target is string, help = "The mount prefix (required)"
+        pos source is string, help = "The layout (`disko.nim`)"
+      subcmd "generate", help = "Generate a layout from a live system " &
+          "(not implemented yet; exits 2)":
+        flag probe is string, help = "The root to probe (default: `/`)"
+      subcmd "image", help = "Build a disk image of a layout (not " &
+          "implemented yet; exits 2)":
+        flag output is string, help = "The image to write (required)"
+        flag size is string, help = "The image size"
+        pos source is string, help = "The layout (`disko.nim`)"
+    # Not parsed from this description yet: its `--help` documents its exit
+    # codes, which needs a command's long description (not in this clispec
+    # yet).
     subcmd "attest",
         help = "Compute and check launch measurements of attested images":
       pos args is seq[string], required = false, passThrough = true
-    subcmd "cargo", help = "Garbage-collect cargo target directories":
-      pos args is seq[string], required = false, passThrough = true
+    subcmd "cargo", help = "Manage cargo target directories and run cargo " &
+        "as a build edge":
+      subcmd "gc", help = "Delete the cargo build units no recent cargo " &
+          "invocation used (exit 75 while cargo holds the lock)":
+        `cargoGcTargetDir`
+        flag minAge is string,
+          help = "Keep units written within this duration (`30m`, `36h`, " &
+            "`14d`, `2w`, `0`; default 14d, also `$REPRO_CARGO_GC_MIN_AGE` " &
+            "and `min_age` under `[cargo_gc]`)"
+        boolFlag dryRun is bool,
+          help = "Print what would be deleted, with byte counts"
+        flag cargoHome is Option[string], optionalValue = some(""),
+          help = "Also sweep `CARGO_HOME/registry/src` (`--cargo-home=DIR` " &
+            "names it)"
+      subcmd "record-live", help = "Record which units a `cargo " &
+          "--message-format=json` invocation used":
+        `cargoRecordLiveTargetDir`
+        flag fromFile is string, perSource = [cli = "from"],
+          help = "Read the stream from this file (default, or `-`: stdin)"
+        boolFlag tee is bool, help = "Copy the stream to standard output"
+      subcmd "run", help = "Run cargo as a build edge and report its final " &
+          "products":
+        flag width is int, short = 'j', help = "Passed to cargo as `-j`"
+        flag products is string, help = "Write the products here"
+        flag fragment is string,
+          help = "Write a dynamic-graph fragment declaring the products here"
+        flag actionId is string, help = "The action the fragment declares"
+        flag relativeTo is string, help = "Write paths relative to this"
+        boolFlag libs is bool, help = "Also list the project's rlibs"
+        pos cargo is seq[string], required = false,
+          help = "The cargo command, after `--`"
+      # `repro cargo help`: the same as `repro cargo --help`.
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
 
     # ---- About repro itself ----------------------------------------------
-    subcmd "health", help = "Diagnose the reprobuild environment":
-      pos args is seq[string], required = false, passThrough = true
+    subcmd "pressure", help = "Show build-wait pressure from the RunQuota " &
+        "daemon (exit 1 when it cannot be reached or predates it)":
+      flag group is string,
+        help = "Only the session groups of this name, and their sessions"
+      boolFlag json is bool, help = "Print the daemon's answer as JSON"
+    subcmd "health", help = "Diagnose the reprobuild environment; exit 1 " &
+        "when any check fails":
+      flag workspaceRoot is string,
+        help = "The workspace (default: the current directory)"
+      boolFlag json is bool, help = "Print the checks as JSON"
+      boolFlag offline is bool, help = "Skip the forge identity probes"
+      boolFlag fix is bool, help = "Perform the safe remediations"
+      boolFlag verbose is bool, short = 'v', help = "Show every check's detail"
+      pos project is string, required = false,
+        help = "The project to diagnose (default: the workspace's)"
     subcmd "debug", help = "Inspect the filesystem monitor and artifacts":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "io", help = "Filesystem monitoring":
+        # The monitor's own command line (the io-mon library's, shared
+        # with `repro internal io monitor`).
+        subcmd "monitor", help = "Run a command under the filesystem " &
+            "monitor, or inspect a monitor dependency file":
+          pos args is seq[string], required = false, passThrough = true
+      subcmd "artifact", help = "Decode an internal binary artifact":
+        flag format is string,
+          help = "The output format: `text` (the default) or `json`"
+        boolFlag json is bool, help = "Shortcut for `--format=json`"
+        pos path is string, help = "The artifact"
     subcmd "help", help = "Show the help of repro or of one command":
       pos topic is seq[string], required = false,
         help = "The command whose help to show, for example `workspace sync`"
@@ -1032,9 +1677,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       pos args is seq[string], required = false, passThrough = true
     subcmd "__repro-cmake-regenerate", visibility = hidden:
       pos args is seq[string], required = false, passThrough = true
-    # The home-profile activation a remote `repro home apply` runs over ssh.
+    # The older spelling of `repro home __remote-activate`.
     subcmd "__remote-activate", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `remoteActivate`
 
 proc reproCommandLineModel*(): CliModel[NoCliExtension,
     ReproCommandLineParamExt] {.compileTime.} =

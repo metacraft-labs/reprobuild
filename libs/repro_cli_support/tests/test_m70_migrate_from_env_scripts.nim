@@ -43,6 +43,7 @@ import std/[options, os, sets, strutils, unittest]
 
 import repro_cli_support/migrate_from_env_scripts
 import repro_cli_support/home
+import repro_cli_support/cli_program
 from repro_test_support import testCaseScratchSlug
 
 let TmpDir = "build/test-tmp/m70-migrate-from-env-scripts" /
@@ -539,7 +540,8 @@ suite "M70 default env-file path is machine-neutral":
 
   test "usage text names no drive letter and says --env-file is required":
     putEnv("METACRAFT_ROOT", "")
-    let usage = renderMigrateUsage()
+    # The help repro prints, generated from its command-line description.
+    let usage = ReproCommandLine.helpText(["home", "migrate-from-env-scripts"])
     check "D:/" notin usage
     check "D:\\" notin usage
     check "$METACRAFT_ROOT/windows/toolchain-versions.env" in usage
