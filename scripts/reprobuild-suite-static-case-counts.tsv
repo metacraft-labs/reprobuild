@@ -2651,6 +2651,7 @@ tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
 tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	5
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
+tests/unit/t_dev_env_directory_trust_binds_recipe.nim	nim	12
 tests/unit/t_dev_env_large_values.nim	nim	5
 tests/unit/t_dev_env_msvc_activation.nim	nim	6
 tests/unit/t_dev_env_path_ops.nim	nim	9

@@ -10,6 +10,7 @@ verifies:
   commands: [shell hook, allow, deny, dev-env export, dev-env deactivate]
   tests:
     - tests/integration/t_dev_env_allow.nim
+    - tests/unit/t_dev_env_directory_trust_binds_recipe.nim
     - tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim
 unverified:
   - claim: "The hook looks upwards from the current directory, stopping at your home directory, for repro.nim, reprobuild.nim or .repro/dev-env.lock."
@@ -17,9 +18,6 @@ unverified:
     owner: unassigned
   - claim: "The hook prints a message, and does not activate, in a directory you have not allowed."
     reason: "Read from the dev-env export code path; t_dev_env_allow.nim covers allow and deny but is not cited for the message."
-    owner: unassigned
-  - claim: "Trust is recorded against the directory's absolute path, so later changes to the project file are activated without a new prompt."
-    reason: "Read from runReproAllowCommand (a file under the configuration directory named by a hash of the path). A test that edits repro.nim after allow and asserts activation is needed."
     owner: unassigned
 ---
 
@@ -90,10 +88,13 @@ The environment switches on. From now on it switches on whenever you enter
 this directory, and off when you leave it.
 
 :::danger
-Trust follows the directory, not its contents. After `repro allow`, a change to
-the project's `repro.nim`, such as one that arrives with `git pull`, takes
-effect the next time you enter the directory, without asking you again. Allow
-only directories whose changes you would run yourself.
+`repro allow` trusts the project's recipe as it is now: `repro.nim`, the local
+Nim modules it imports, `config.nims` and `nim.cfg`, and the dev-env lock. If
+any of them changes, for example through `git pull`, the directory stops being
+trusted and the hook prints the "not allowed/trusted" message until you run
+`repro allow` again. Read the change before you re-allow. Files that the
+recipe loads by some other route are not covered, so allow only directories
+whose contents you would run yourself.
 :::
 
 ## Withdraw trust
