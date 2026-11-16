@@ -106367,6 +106367,15 @@ proc runReproCommandLine(programName: string; args: seq[string];
     # `repro cargo gc|record-live|run`: the cargo target-directory janitor
     # and the thin cargo edge (`repro_cli_support/cargo_gc.nim`).
     return cli_cargo_gc.runCargoCommand(conf.cargo)
+  of ReproCommandLineCommand.pressure:
+    # Build-wait pressure from the RunQuota daemon this build would use;
+    # the command lives in `repro_runquota` beside the reports the engine
+    # sends (`repro_runquota/build_pressure`).
+    try:
+      return runPressureCommand(conf.pressure.group, conf.pressure.json)
+    except CatchableError as err:
+      stderr.writeLine("repro pressure: error: " & err.msg)
+      return 1
   of ReproCommandLineCommand.health:
     # RA-30 — top-level `repro health` (the environment doctor): every
     # layer diagnosed, each failure paired with the exact remedy; `--fix`
