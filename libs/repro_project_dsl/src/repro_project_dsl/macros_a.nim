@@ -2686,6 +2686,11 @@ proc packageLiteral(pkg: PackageDef): string =
           escForCode(cmd.ext.providerEntrypointId) &
         ", dependencyPolicy: " & dependencyPolicyCode(cmd.ext.dependencyPolicy) &
         ", nonDeterminism: " & $cmd.ext.nonDeterminism &
+        # The tool's declared input-check policy. The typed wrapper takes it
+        # at macro time, but the registered ``PackageDef`` is this literal,
+        # so leaving it out made every registered command read
+        # ``acfpUnstated`` whatever its ``cli:`` block declared.
+        ", inputCheckPolicy: " & $cmd.ext.inputCheckPolicy &
         ", nonDeterminismJustification: " &
           escForCode(cmd.ext.nonDeterminismJustification) &
         ", subTools: @[" & escapedCodeList(cmd.ext.subTools) &
