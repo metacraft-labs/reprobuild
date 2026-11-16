@@ -1,9 +1,11 @@
 ## ``import reprobuild/dsl`` -- the core Reprobuild project DSL, alone.
 ##
-## The ``package`` macro and its sections (``uses``, ``nativeBuildDeps``,
-## ``buildDeps``, ``runtimeDeps``, ``executable``, ``library``, ``build``,
-## ``tasks``, ``task``, ``service``, ``config``) and the core runtime
-## (``glob``, ``shell``, ``aggregate``, the build-action and package types).
+## The ``package`` macro and its sections (``uses:``, ``buildDeps:``,
+## ``nativeBuildDeps:``, ``runtimeDeps:``, ``executable``, ``library``,
+## ``files``, ``build:``, ``config:``, ``devEnv:`` with its ``activity``,
+## ``task`` and environment statements, ``service``) and the core runtime
+## (``target``, ``aggregate``, ``collect``, ``defaultBuildAction``, the
+## build-action and package types).
 ## Unlike the ``reprobuild`` umbrella it does not load the standard prelude
 ## (typed filesystem operations, configurables, active build context), which
 ## makes it the import for a helper module that only needs the core
