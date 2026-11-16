@@ -563,7 +563,7 @@ libs/repro_home_apply/tests/test_m69_apply_end_to_end.nim	nim	4
 libs/repro_home_apply/tests/test_m69_catalog_lookup.nim	nim	9
 libs/repro_home_apply/tests/test_m69_env_export.nim	nim	11
 libs/repro_home_apply/tests/test_m69_env_userpath_multi_package.nim	nim	4
-libs/repro_home_generations/tests/t_generation_markers_never_vanish_while_replaced.nim	nim	2
+libs/repro_home_generations/tests/t_generation_markers_never_vanish_while_replaced.nim	nim	3
 libs/repro_home_generations/tests/t_smoke_home_generations.nim	nim	8
 libs/repro_home_intent/tests/t_host_identity_resolver.nim	nim	7
 libs/repro_home_intent/tests/t_smoke_home_intent.nim	nim	37
@@ -2415,6 +2415,7 @@ tests/integration/t_stdlib_python_tarball_arms_realize.nim	nim	1
 tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	nim	1
 tests/integration/t_store_bundle_cli.nim	nim	1
 tests/integration/t_store_copy_cli.nim	nim	1
+tests/integration/t_store_daemon_client_refuses_a_daemon_of_another_user.nim	nim	5
 tests/integration/t_store_daemon_m66_dev.nim	nim	6
 tests/integration/t_store_roots_resolve_or_report_unresolved.nim	nim	1
 tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim	nim	6
@@ -2624,6 +2625,7 @@ tests/unit/t_binary_decoder_provider_graph_counts.nim	nim	5
 tests/unit/t_binary_decoder_provider_session_counts.nim	nim	7
 tests/unit/t_binary_decoder_resource_legacy_counts.nim	nim	1
 tests/unit/t_binary_decoder_secondary_counts.nim	nim	16
+tests/unit/t_blob_gc_help_names_the_unrecoverable_loss.nim	nim	2
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
 tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim	nim	2
 tests/unit/t_build_wait_pressure_schedule.nim	nim	6
@@ -2651,7 +2653,7 @@ tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
 tests/unit/t_declared_package_deps_from_recipe.nim	nim	6
-tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	5
+tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	6
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4
 tests/unit/t_dev_env_large_values.nim	nim	5

@@ -64,6 +64,7 @@ import blake3
 import ssz_serialization
 import repro_core                       # writeString / readString / writeU32Le …
 import repro_core/file_lock             # per-record locks (§4.6)
+from repro_core/durable_replace import replaceFileDurably
 export file_lock.ReproFileLock, file_lock.LockBusyHook, file_lock.isHeld
 from repro_home_generations/pointer import Digest256, DigestSize
 import repro_resources/instance
@@ -856,54 +857,6 @@ proc uniqueSuffix(): string =
   $getCurrentProcessId() & "-" & $(tempCounter.fetchAdd(1) + 1) & "-" &
     $now.toUnix() & $now.nanosecond
 
-when not defined(windows):
-  when defined(macosx):
-    # <fcntl.h>: plain fsync(2) on macOS only hands the data to the drive,
-    # whose cache may still lose it on power loss; F_FULLFSYNC asks the
-    # drive to flush too. https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html
-    const F_FULLFSYNC = cint(51)
-
-  proc syncFd(fd: cint): bool =
-    when defined(macosx):
-      # Not every filesystem supports F_FULLFSYNC (e.g. some network
-      # mounts); fall back to fsync rather than failing the write.
-      if posix.fcntl(fd, F_FULLFSYNC) == 0:
-        return true
-    posix.fsync(fd) == 0
-
-  proc syncDirectory(dir: string) =
-    ## Make the rename itself durable: on POSIX a rename is a directory
-    ## entry update, persisted only once the DIRECTORY is fsynced.
-    ## Best-effort — a filesystem that cannot fsync a directory (EINVAL on
-    ## some) still got the atomic rename, which is the pre-existing contract.
-    let fd = posix.open(cstring(dir), posix.O_RDONLY)
-    if fd < 0:
-      return
-    discard syncFd(fd)
-    discard posix.close(fd)
-
-proc writeFileDurable(path: string; bytes: openArray[byte]) =
-  ## Write + flush + sync `path` (a fresh temp). Raises on any failure; the
-  ## caller removes the temp.
-  var f: File
-  if not open(f, path, fmWrite):
-    raise newException(IOError, "cannot open '" & path & "' for writing: " &
-      osErrorMsg(osLastError()))
-  try:
-    if bytes.len > 0 and f.writeBuffer(unsafeAddr bytes[0], bytes.len) != bytes.len:
-      raise newException(IOError, "short write to '" & path & "'")
-    f.flushFile()
-    when defined(windows):
-      if flushFileBuffers(Handle(getOsFileHandle(f))) == 0:
-        raise newException(IOError, "FlushFileBuffers of '" & path &
-          "' failed: " & osErrorMsg(osLastError()))
-    else:
-      if not syncFd(getFileHandle(f)):
-        raise newException(IOError, "fsync of '" & path & "' failed: " &
-          osErrorMsg(osLastError()))
-  finally:
-    f.close()
-
 proc writeStateRecord*(store: StateStore; rec: ResourceStateRecord) =
   ## Persist `rec` atomically AND durably (see the module doc): write a temp
   ## in the store directory, sync it, rename it over the destination, sync
@@ -920,26 +873,10 @@ proc writeStateRecord*(store: StateStore; rec: ResourceStateRecord) =
   let tmp = store.root /
     (TempPrefix & extractFilename(dest) & "." & uniqueSuffix())
   let bytes = encodeRecord(rec)
-  try:
-    writeFileDurable(tmp, bytes)
-    when defined(windows):
-      # MOVEFILE_WRITE_THROUGH: return only once the rename is on disk —
-      # the Windows counterpart of the POSIX directory fsync below (NTFS
-      # offers no fsync of a directory handle from user code).
-      let wsrc = newWideCString(tmp)
-      let wdst = newWideCString(dest)
-      if moveFileExW(wsrc, wdst,
-          MOVEFILE_REPLACE_EXISTING or MOVEFILE_WRITE_THROUGH) == 0:
-        raiseOSError(osLastError(), "rename '" & tmp & "' -> '" & dest & "'")
-    else:
-      # rename(2) within one directory: atomic replace.
-      moveFile(tmp, dest)
-  except CatchableError:
-    try: removeFile(tmp)
-    except CatchableError: discard
-    raise
-  when not defined(windows):
-    syncDirectory(store.root)
+  # Synced temp, rename over the record (write-through on Windows), synced
+  # directory: `repro_core/durable_replace`. The temp keeps this store's
+  # `TempPrefix`, which listing skips and `scanStateRecords` sweeps.
+  replaceFileDurably(dest, bytes, tmpPath = tmp)
 
 proc buildStateRecord*(inst: ResourceInstance; binding: ResourceBinding;
                        holders: Table[string, Time] = initTable[string, Time]();
