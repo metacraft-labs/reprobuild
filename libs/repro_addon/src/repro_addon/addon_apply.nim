@@ -4230,27 +4230,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # "overrideBaseLayer"`; every acknowledgement is listed in the plan.
       # Before the collision pass observes anything. Generation 0's own
       # objects are never in the set's terms (they are the add-on's).
-      if isOmarchyBase(result.baseIdentity.id):
-        let layer = readOmarchyPathSet()
-        let check = baseLayerCheck(layer, user)
-        let why = baseLayerRefusalDetail(layer, check)
-        if why.len > 0:
-          raise newAddOnError(adBaseLayerOwned, why)
-        result.baseLayerOverrides = check.overrides
-      else:
-        # No configuration layer sits on this base: an acknowledgement has
-        # nothing to acknowledge, and the plan says so.
-        for r in user.resources:
-          let c = case r.kind
-            of srkFsSystemFile: r.sfCollision
-            of srkSystemdSystemUnit: r.suCollision
-            else: ""
-          if c == OverrideBaseLayer:
-            result.baseLayerOverrides.add(r.address & "\t" &
-              (if r.kind == srkFsSystemFile: r.sfPath else: r.suName) &
-              "\tacknowledges nothing: the base is " &
-              result.baseIdentity.id & ", which has no configuration " &
-              "layer above the distribution")
+      # On any other base an acknowledgement is listed as acknowledging
+      # nothing (``omarchy.baseLayerPass``).
+      result.baseLayerOverrides = baseLayerPass(result.baseIdentity.id, user)
   let baseIdentityText = renderBaseIdentity(result.baseIdentity)
   # A package that arrived since the add-on took a unit name (spec §4.3):
   # reported on every plan and apply as actionable drift.

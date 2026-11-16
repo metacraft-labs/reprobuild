@@ -362,6 +362,61 @@ suite "the plan-time check of an operator profile":
     let why = baseLayerRefusal(broken, baseLayerCheck(broken, profileOf("")))
     check why.startsWith("EAddOnBaseLayerOwned: the omarchy package is not installed")
 
+suite "the preflight's verdict and the apply's pass":
+  test "the preflight's omarchy-path-set check passes a readable set":
+    fixtureBase()
+    let v = omarchyPathSetCheck(readOmarchyPathSet(root))
+    check v.ok
+    check v.detail.startsWith("Omarchy 4.5.0-3: 12 /etc path(s) named by 4 file(s)")
+
+  test "the preflight's check fails a set that cannot be read":
+    fixtureBase()
+    removeFile(root / "var/lib/pacman/local/sudo-1.9.17-1/files")
+    let v = omarchyPathSetCheck(readOmarchyPathSet(root))
+    check not v.ok
+    check v.detail.startsWith("EAddOnBaseLayerOwned: ")
+
+  test "the apply's pass refuses an intersecting profile on Omarchy":
+    fixtureBase()
+    try:
+      discard baseLayerPass("omarchy", profileOf(
+        "addOn {\n  managedEtcPrefixes = [\"/etc/ssh/\"]\n}\n"), root)
+      check false
+    except EAddOn as e:
+      check e.diagnostic == adBaseLayerOwned
+      check "managed prefix /etc/ssh/ covers" in e.msg
+
+  test "the apply's pass refuses every profile, an empty one too, when the set cannot be read":
+    fixtureBase()
+    removeFile(root / Install & "config/sudo.sh")
+    for text in ["", "addOn {\n  managedEtcPrefixes = [\"/etc/app/\"]\n}\n"]:
+      try:
+        discard baseLayerPass("omarchy", profileOf(text), root)
+        check false
+      except EAddOn as e:
+        check e.diagnostic == adBaseLayerOwned
+        check "missing" in e.msg
+
+  test "the apply's pass returns the acknowledgements on Omarchy":
+    fixtureBase()
+    let lines = baseLayerPass("omarchy", profileOf(
+      "addOn {\n  managedEtcPrefixes = [\"/etc/sudoers.d/repro-fx\"]\n}\n" &
+      "fs.systemFile {\n  path = \"/etc/sudoers.d/repro-fx\"\n  content = \"# x\n\"\n" &
+        "  collision = \"overrideBaseLayer\"\n}\n"), root)
+    check lines.len == 1 and "\t/etc/sudoers.d/repro-fx\t/etc/sudoers.d (named by" in lines[0]
+
+  test "on a base that is not Omarchy the set is never read, and each acknowledgement acknowledges nothing":
+    fixtureBase()
+    removeDir(root / "var/lib/pacman/local/omarchy-4.5.0-3")
+    let lines = baseLayerPass("arch", profileOf(
+      "addOn {\n  managedEtcPrefixes = [\"/etc/ssh/\"]\n}\n" &
+      "fs.systemFile {\n  path = \"/etc/ssh/a\"\n  content = \"x\n\"\n" &
+        "  collision = \"overrideBaseLayer\"\n}\n" &
+      "systemd.systemUnit {\n  name = \"a.service\"\n  content = \"[Service]\n\"\n" &
+        "  collision = \"overrideBaseLayer\"\n}\n"), root)
+    check lines.len == 2
+    for l in lines: check "acknowledges nothing: the base is arch" in l
+
 suite "overrideBaseLayer on a base with no configuration layer":
   test "the profile parser accepts it on a file and on a unit":
     let p = profileOf(

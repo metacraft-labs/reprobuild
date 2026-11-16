@@ -9525,8 +9525,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_omarchy_base_layer.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 32,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

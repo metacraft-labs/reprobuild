@@ -513,3 +513,50 @@ proc baseLayerRefusal*(s: OmarchyPathSet; c: BaseLayerCheck): string =
   ## ``EAddOnBaseLayerOwned``, or "".
   let d = baseLayerRefusalDetail(s, c)
   if d.len == 0: "" else: diagnosticMessage(adBaseLayerOwned, d)
+
+# ---------------------------------------------------------------------------
+# The two call sites' decisions, kept here so they are tested on a fixture
+# root (the preflight and the apply read the host's root).
+# ---------------------------------------------------------------------------
+
+proc omarchyPathSetCheck*(ps: OmarchyPathSet): tuple[ok: bool; detail: string] =
+  ## The preflight's ``omarchy-path-set`` verdict (spec §4.3.2): a set that
+  ## cannot be read fails it with ``EAddOnBaseLayerOwned``, since an empty
+  ## one would let every path through; otherwise the version, the size of
+  ## the set and how many paths a package also owns.
+  if ps.problem.len > 0:
+    return (false, diagnosticMessage(adBaseLayerOwned, ps.problem))
+  var bothOwners = 0
+  for e in ps.paths:
+    if e.owners.len > 0: inc bothOwners
+  (true, "Omarchy " & ps.packageVersion & ": " & $ps.paths.len &
+    " /etc path(s) named by " & $ps.scriptCount & " file(s) under " &
+    OmarchyShareDir & "/{" & OmarchyScriptDirs.join(",") & "}/, " &
+    $bothOwners & " of them also in a package's %FILES%")
+
+proc baseLayerPass*(baseId: string; user: SystemProfile; root = "/"):
+    seq[string] =
+  ## The apply's base-layer pass (spec §4.3.2; §13 decision 179) for the
+  ## operator profile ``user`` on the base ``baseId`` at ``root``: the
+  ## acknowledgement lines every plan lists. On an Omarchy base it raises
+  ## ``EAddOnBaseLayerOwned`` for an intersecting declaration, and for a set
+  ## that cannot be read whatever the profile declares (fail closed; the way
+  ## out is repairing the package database or reinstalling ``omarchy``, or
+  ## uninstalling). On any other base each acknowledgement is listed as
+  ## acknowledging nothing.
+  if isOmarchyBase(baseId):
+    let layer = readOmarchyPathSet(root)
+    let check = baseLayerCheck(layer, user)
+    let why = baseLayerRefusalDetail(layer, check)
+    if why.len > 0:
+      raise newAddOnError(adBaseLayerOwned, why)
+    return check.overrides
+  for r in user.resources:
+    let (c, subject) = case r.kind
+      of SystemResourceKind.srkFsSystemFile: (r.sfCollision, r.sfPath)
+      of SystemResourceKind.srkSystemdSystemUnit: (r.suCollision, r.suName)
+      else: ("", "")
+    if c == OverrideBaseLayer:
+      result.add(r.address & "\t" & subject & "\tacknowledges nothing: the " &
+        "base is " & baseId & ", which has no configuration layer above the " &
+        "distribution")

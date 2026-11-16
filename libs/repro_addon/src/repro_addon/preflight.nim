@@ -996,16 +996,8 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     # by every plan. A set that cannot be read fails the preflight, since
     # an empty one would let every path through.
     result.omarchyPaths = readOmarchyPathSet()
-    let ps = result.omarchyPaths
-    var bothOwners = 0
-    for e in ps.paths:
-      if e.owners.len > 0: inc bothOwners
-    result.add("omarchy-path-set", ps.problem.len == 0,
-      if ps.problem.len > 0: diagnosticMessage(adBaseLayerOwned, ps.problem)
-      else: "Omarchy " & ps.packageVersion & ": " & $ps.paths.len &
-            " /etc path(s) named by " & $ps.scriptCount & " file(s) under " &
-            OmarchyShareDir & "/{" & OmarchyScriptDirs.join(",") & "}/, " &
-            $bothOwners & " of them also owned by a package")
+    let verdict = omarchyPathSetCheck(result.omarchyPaths)
+    result.add("omarchy-path-set", verdict.ok, verdict.detail)
   if omarchyBase or result.omarchyAccount.len > 0:
     let why =
       if omarchyBase and inp.profilePath.len == 0:
