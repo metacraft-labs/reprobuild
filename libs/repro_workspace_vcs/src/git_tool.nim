@@ -20,6 +20,7 @@
 import std/[os, osproc, streams, strtabs, strutils]
 
 import repro_core/codec
+import repro_core/process_env
 import repro_hash
 import repro_hash/text as hashText
 import repro_interface_artifacts
@@ -153,6 +154,18 @@ proc isGitObjectStoreEnvKey*(key: string): bool =
     if key == candidate:
       return true
 
+proc scrubbedGitRepositoryEnvFrom*(pairs: openArray[(string, string)];
+    preserveObjectStore = false;
+    caseInsensitive = HostEnvNamesAreCaseInsensitive): StringTableRef =
+  ## ``scrubbedGitRepositoryEnv`` over an explicit environment, so the
+  ## Windows name semantics can be exercised on any host.
+  var kept: seq[(string, string)]
+  for (key, value) in pairs:
+    if not isRepositoryLocalGitEnvKey(key) or
+        (preserveObjectStore and isGitObjectStoreEnvKey(key)):
+      kept.add((key, value))
+  envTableFrom(kept, caseInsensitive)
+
 proc scrubbedGitRepositoryEnv*(preserveObjectStore = false): StringTableRef =
   ## Return the ambient process environment without Git's repository-local
   ## bindings. All unrelated environment entries are preserved byte-for-byte.
@@ -161,11 +174,15 @@ proc scrubbedGitRepositoryEnv*(preserveObjectStore = false): StringTableRef =
   ## that reads the INVOKING repository (never a sibling) at a moment when the
   ## objects it must see live in the push quarantine rather than in the
   ## repository's own store.
-  result = newStringTable(modeCaseSensitive)
+  ##
+  ## The table follows the host's name semantics (``repro_core/process_env``):
+  ## callers set ``PATH`` and other variables on it by name, and on Windows a
+  ## case-sensitive copy would keep the inherited ``Path`` beside the new
+  ## ``PATH`` and hand the child both.
+  var pairs: seq[(string, string)]
   for key, value in envPairs():
-    if not isRepositoryLocalGitEnvKey(key) or
-        (preserveObjectStore and isGitObjectStoreEnvKey(key)):
-      result[key] = value
+    pairs.add((key, value))
+  scrubbedGitRepositoryEnvFrom(pairs, preserveObjectStore)
 
 const GitReceivedObjectStoreEnv* = [
   "GIT_QUARANTINE_PATH",
@@ -226,7 +243,7 @@ proc withReceivedObjectStore*(env: StringTableRef;
   ## receive side at this one's object store.
   result = env
   if result.isNil:
-    result = newStringTable(modeCaseSensitive)
+    result = newEnvTable()
   if not store.captured:
     return
   for binding in store.bindings:
