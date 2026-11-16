@@ -506,16 +506,6 @@ const LegacyVerbSynopses = [
     "repro lint [build options]\n"),
   ("clean",
     "repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]\n"),
-  ("hooks",
-    "repro hooks ensure|reinstall|uninstall [--vcs] [--record-store] [--shell-direnv] [--shell bash|zsh|fish|powershell] [--json] [--write-report[=PATH]] [path]\n"),
-  ("check",
-    "repro check --mode=pre-push [--workspace-root=PATH] [--current-repo=PATH] [--pushed-refs=FILE] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n"),
-  ("push",
-    "repro push [<project>] [--sync] [--merge|--rebase] [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n"),
-  ("branch",
-    "repro branch [<path>] [--branch=NAME] [--existing-branch] [--include-changes] [--projects=A,B] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n"),
-  ("switch",
-    "repro switch <branch> [-b|--new-branch] [--yes] [--workspace-root=PATH] [--tool-provisioning=path|nix|tarball|scoop] [--json] [--write-report[=PATH]]\n"),
   ("watch",
     "repro watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr] [--hcr-mode=direct|shlib] [--hcr-debug=embedded|external|none] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n"),
   ("develop",
@@ -531,11 +521,7 @@ const LegacyVerbSynopses = [
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
-  ("workspace",
-    "repro workspace|ws {bootstrap [<dir>] | init <project|url> [<path>] | new <path> [--branch=NAME] [--existing-branch] [--projects=A,B] | restore <source> <destination> --projects=A,B [--at=REV] (--record=PATH|PROJECT/REPO@SHA | --snapshot=NAME) [--record-store=SOURCE] [--record-store-at=REV] | sync [<project>...] | pull | switch <branch> [-b] | status [<project>] | lock [<project>] | list | enable <project>... [--default] [--no-sync] | disable <project>... [--keep-checkouts] [--force] | projects {list [--enabled|--disabled] | add <name> [-m DESC] | remove <name>} | repos {list [--project=NAME] | add <repo> --remote=URL [--project=NAME]... | remove <repo>} | branch-roles [--to=<role>|--mainline|--unstable|--staging|--stable|--production|--lts] [<project>...] [--only=LIST] [--except=LIST] [--filter=GLOB] [--tags=LIST] [--json] | manifests | shared-clones | forall -c <command> | provision | publish-evidence | migrate-locks [--dry-run|--apply]} [--workspace-root=PATH]\n" &
-      "\n" &
-      "clone objects: --clone-objects=shared|private=<dir>|none (dissociate alias)\n" &
-      "workspace reports: the workspace verbs (init, sync, pull, lock, status, list, manifests, shared-clones, forall, develop, hooks ensure, check, push, branch, switch) write a JSON report file ONLY when --write-report is given: --write-report writes <workspaceRoot>/.repro/build/reports/<verb>-report.json, --write-report=PATH writes exactly PATH. --json prints the same document to stdout and never touches disk.\n"),
+
 ]
 
 proc legacyVerbSynopsis*(verb: string): string =
@@ -24619,76 +24605,36 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
       echo "  " & k & ": " & $report.summary[k]
   report.exitCode
 
-const HooksUsage = """usage: repro hooks <ensure|reinstall|uninstall> [--vcs] [--shell-direnv]
-                   [--shell=bash|zsh|fish|pwsh] [--workspace-root=PATH]
-                   [--record-store] [--json] [--write-report[=PATH]] [PATH]
+proc reportSpecOf[T](c: T): ReportSpec =
+  ## ``--write-report[=PATH]`` / ``--no-write-report`` of a workspace verb's
+  ## configuration: requested by either spelling of ``--write-report`` (an
+  ## empty ``=PATH`` is the bare form), suppressed by ``--no-write-report``.
+  result.requested = c.writeReport.isSome
+  if c.writeReport.isSome:
+    result.path = c.writeReport.get
+  result.suppressed = c.noWriteReport
 
-  ensure      install or repair the managed hooks (idempotent)
-  reinstall   rewrite the managed hooks from scratch
-  uninstall   remove the managed hooks
-
-  --vcs            the managed git hooks of every workspace repo
-                   (or of the repo at PATH)
-  --record-store   register PATH as a Git-checkout record backend; implies --vcs
-  --shell-direnv   the direnv .envrc activation block
-  --shell=NAME     a native shell activation hook
-With no selector flag both --vcs and --shell-direnv are implied.
-"""
-
-proc parseHooksCommand(args: openArray[string]): ParsedHooksCommand =
-  if args.len == 0:
+proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
+  ## ``repro hooks ensure|reinstall|uninstall`` from its configuration.
+  ## With no selector flag both ``--vcs`` and ``--shell-direnv`` are
+  ## implied.
+  result.action = action
+  result.shellDirenv = c.shellDirenv
+  result.vcs = c.vcs
+  if c.recordStore:
+    result.recordStore = true
+    result.vcs = true
+  if c.shellAutocomplete:
     raise newException(ValueError,
-      "repro hooks requires ensure, reinstall, or uninstall")
-  case args[0]
-  of "ensure":
-    result.action = hakEnsure
-  of "reinstall":
-    result.action = hakReinstall
-  of "uninstall":
-    result.action = hakUninstall
-  else:
-    raise newException(ValueError,
-      "unsupported hooks action: " & args[0])
-  var i = 1
-  while i < args.len:
-    let arg = args[i]
-    case arg
-    of "--shell-direnv":
-      result.shellDirenv = true
-    of "--vcs":
-      result.vcs = true
-    of "--record-store":
-      result.recordStore = true
-      result.vcs = true
-    of "--shell-autocomplete":
-      raise newException(ValueError,
-        "repro hooks --shell-autocomplete is not implemented yet")
-    of "--shell":
-      result.nativeShells.add(parseNativeShell(valueFromFlag(args, i,
-        "--shell")))
-    of "--workspace-root":
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    of "--json":
-      result.json = true
-    else:
-      if arg.startsWith("--shell="):
-        var value = arg["--shell=".len .. ^1]
-        if value.len == 0:
-          raise newException(ValueError,
-            "missing value for --shell")
-        result.nativeShells.add(parseNativeShell(value))
-      elif arg.startsWith("--workspace-root="):
-        result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-      elif consumeReportFlag(arg, result.report):
-        discard
-      elif arg.startsWith("-"):
-        raise newException(ValueError, "unsupported hooks flag: " & arg)
-      elif result.targetPath.len > 0:
-        raise newException(ValueError,
-          "repro hooks accepts at most one path argument")
-      else:
-        result.targetPath = arg
-    inc i
+      "repro hooks --shell-autocomplete is not implemented yet")
+  for value in c.shell:
+    if value.len == 0:
+      raise newException(ValueError, "missing value for --shell")
+    result.nativeShells.add(parseNativeShell(value))
+  result.workspaceRoot = c.workspaceRoot
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.targetPath = c.path
   if result.recordStore and (result.action == hakUninstall or
       result.shellDirenv or result.nativeShells.len > 0):
     raise newException(ValueError,
@@ -24718,7 +24664,40 @@ proc revalidatePushRepo(identity: GitToolIdentity; workspaceRoot: string;
     sourceHookLocationDigest = ""):
     tuple[ok: bool; diagnostic: string; remediation: string]
 
-proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
+type
+  CheckMode* = enum
+    cmPrePush
+
+  CheckArgs* = object
+    mode*: CheckMode
+    workspaceRoot*: string
+    currentRepo*: string
+    pushedRefsPath*: string
+    json*: bool
+    toolProvisioning*: ToolProvisioningMode
+    hookRemoteName*: string
+    hookRemoteLocation*: string
+    skipCertificateGate*: bool
+      ## Suppress the certificate-coverage stage of the pre-push gate. Set
+      ## ONLY by ``evaluateIssuancePreconditions`` (the certificate issuance
+      ## path), which REUSES the gate to decide whether a cert
+      ## is issuable: issuing a certificate must never itself require a
+      ## certificate (a chicken-and-egg that would make a project's FIRST
+      ## ``required`` cert un-issuable). The real pre-push hook leaves this
+      ## ``false`` so the gate enforces the policy as designed.
+    issuingForCurrentHead*: bool
+      ## Set ONLY by ``evaluateIssuancePreconditions``. The current
+      ## repository's OWN HEAD is exempt from the "unpublished" stage: its
+      ## publication is the push a certificate is being minted FOR, and the
+      ## receiving-side push gateway refuses that push until the certificate
+      ## exists. Requiring
+      ## publication first deadlocked the two. Every sibling in the closure
+      ## must still be published, and the current repo must still be clean.
+    report*: ReportSpec
+      ## Opt-in ``--write-report[=PATH]`` artifact.
+
+proc resolveCheckScope*(parsed: var CheckArgs)
+proc runCheckCommand*(parsed: CheckArgs; hookRemoteName = "";
                       hookRemoteLocation = "";
                       publicationMembers: seq[HookPublicationMember] = @[];
                       publicationWorkspace = ""): int
@@ -24740,16 +24719,28 @@ type
 proc certificatePolicyStaleness*(projectDir: string): CertificatePolicyStaleness
 const CertificatePolicySnapshotStale* = "certificate_policy_snapshot_stale"
   ## The finding's name, as `repro health` and the pre-push gate print it.
-proc runPostCommitLockCommand*(args: openArray[string]): int
+type
+  PostCommitArgs = object
+    ## What the managed commit hooks hand their lock refresh: the
+    ## repository the hook fired in. The dispatcher sets ``currentRepo``
+    ## (from ``--repo-root``) and nothing else; the other fields keep their
+    ## defaults on every route in.
+    currentRepo: string
+    workspaceRoot: string
+    triggerSha: string
+    triggerRepo: string
+    toolProvisioning: ToolProvisioningMode
+
+proc runPostCommitLockCommand*(currentRepo: string): int
 # NF-2: the `pre-commit` arm. Declared here for the dispatcher; the body sits
-# beside `runPostCommitLockCommand` because it shares that path's argv parser,
-# workspace resolution and stand-down gate.
-proc runPreCommitLockCommand*(args: openArray[string]): int
+# beside `runPostCommitLockCommand` because it shares that path's
+# arguments, workspace resolution and stand-down gate.
+proc runPreCommitLockCommand*(currentRepo: string): int
 # TC-8g: the `pre-commit` certificate-gate phase. Declared here for the
 # dispatcher; the body sits after the client pre-push `certificateGate`, whose
 # store lookup and coverage evaluation it shares.
 proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int
-proc runCachePushCommand*(args: openArray[string]): int
+proc runCachePushCommand*(repoRoot, workspaceName: string): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 
 proc probeFailureReason(probe, repoPath, diagnostic: string): string =
@@ -24784,8 +24775,8 @@ proc emitLeafReports(reports: openArray[LeafCheckReport]) =
   for line in reportLines:
     stderr.writeLine(line)
 
-proc runManifestRefreshHookCommand*(hookName: string;
-                                    args: openArray[string]): int
+proc runManifestRefreshHookCommand*(hookName, currentRepo: string;
+                                    hookArgs: openArray[string]): int
 # Workspace-Membership-Model.md — the ``post-merge`` hook's local-state
 # reconciliation. Returns one report line per checkout it changed or deferred
 # and NOTHING when the workspace is already consistent. Declared here because
@@ -24796,7 +24787,7 @@ proc reconcileLocalStateForHook(workspaceRoot: string):
 
 proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
 
-proc runHooksDispatchCommand(args: openArray[string]): int =
+proc runHooksDispatchCommand(c: ReproCommandLineHooksDispatch): int =
   ## ``repro hooks dispatch <hook-name> [--repo-root=PATH]
   ## [--refs-file=PATH] -- [hook args...]``. Invoked by the managed
   ## VCS-hook scripts the M17 installer drops into every participating
@@ -24805,11 +24796,7 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
   ## the ``post-commit`` arm with an in-process call to the best-effort
   ## lock refresh. M19a will register the post-merge / post-checkout
   ## bodies on top of the same contract.
-  if args.len == 0:
-    raise newException(ValueError,
-      "repro hooks dispatch requires a hook name (one of: " &
-      VcsHookNames.join(", ") & ")")
-  let hookName = args[0]
+  let hookName = c.hookName
   var found = false
   for known in VcsHookNames:
     if known == hookName:
@@ -24819,42 +24806,25 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     raise newException(ValueError,
       "unsupported hook name for dispatch: " & hookName &
         " (expected one of: " & VcsHookNames.join(", ") & ")")
-  # Parse the standard dispatch argv shape: ``--repo-root=PATH`` and
-  # (for pre-push) ``--refs-file=PATH``, optionally followed by ``--``
-  # and the hook's own positional arguments. The values are forwarded
-  # to the body via the documented ``repro check`` flag names so the
-  # gate logic stays oblivious to the dispatch wrapper.
-  var repoRoot = ""
-  var refsFile = ""
+  # The standard dispatch shape: ``--repo-root=PATH`` and (for pre-push)
+  # ``--refs-file=PATH``, optionally followed by ``--`` and the hook's own
+  # positional arguments. The values are handed to the gate as the
+  # documented ``repro check`` inputs so the gate logic stays oblivious to
+  # the dispatch wrapper.
+  let repoRoot = c.repoRoot
+  let refsFile = c.refsFile
   var protocol = 0
-  var phase = "refresh"
-  var displaced = false
-  var hookArgs: seq[string]
-  var i = 1
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--":
-      if i + 1 < args.len:
-        hookArgs = @args[(i + 1) .. ^1]
-      break
-    if arg == "--repo-root" or arg.startsWith("--repo-root="):
-      repoRoot = valueFromFlag(args, i, "--repo-root")
-    elif arg == "--refs-file" or arg.startsWith("--refs-file="):
-      refsFile = valueFromFlag(args, i, "--refs-file")
-    elif arg == "--protocol" or arg.startsWith("--protocol="):
-      let raw = valueFromFlag(args, i, "--protocol")
-      if raw != "2":
-        raise newException(ValueError,
-          "unsupported managed-hook protocol " & raw & " (required: 2)")
-      protocol = 2
-    elif arg == "--phase" or arg.startsWith("--phase="):
-      # TC-8g — `pre-commit` only: `refresh` (the lock refresh, the default)
-      # or `certificate-gate` (the dispatcher's third phase).
-      phase = valueFromFlag(args, i, "--phase")
-    elif arg == "--dispatcher-displaced" or
-        arg.startsWith("--dispatcher-displaced="):
-      displaced = valueFromFlag(args, i, "--dispatcher-displaced") == "1"
-    inc i
+  if c.protocol.isSome:
+    if c.protocol.get != "2":
+      raise newException(ValueError,
+        "unsupported managed-hook protocol " & c.protocol.get &
+          " (required: 2)")
+    protocol = 2
+  # `pre-commit` only: `refresh` (the lock refresh, the default) or
+  # `certificate-gate` (the dispatcher's third phase).
+  let phase = c.phase
+  let displaced = c.dispatcherDisplaced == "1"
+  let hookArgs = c.hookArgs
   let dispatchRoot = if repoRoot.len > 0: repoRoot else: getCurrentDir()
   if hookName != "pre-push" and isRecordStoreCheckout(dispatchRoot):
     stderr.writeLine("repro hooks: record store is not a workspace; " & hookName & " is a no-op")
@@ -24896,10 +24866,7 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
       raise newException(ValueError,
         "unsupported pre-commit phase: " & phase &
           " (expected: refresh, certificate-gate)")
-    var preArgs: seq[string]
-    if repoRoot.len > 0:
-      preArgs.add("--current-repo=" & repoRoot)
-    return runPreCommitLockCommand(preArgs)
+    return runPreCommitLockCommand(repoRoot)
   of "pre-push":
     # M18 publication gate. Translate the dispatch argv into the
     # documented ``repro check`` surface and propagate the exit code
@@ -25038,16 +25005,15 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # store returned before that: neither carries content anyone certified.
     discard propagateCertificates(prePushRepoRoot, remoteName, remoteLocation,
       refsBytes, proc (line: string) = stderr.writeLine(line))
-    var checkArgs = @["--mode=pre-push"]
-    if repoRoot.len > 0:
-      checkArgs.add("--current-repo=" & repoRoot)
-    checkArgs.add("--pushed-refs=" & refsFile)
+    var checkArgs = CheckArgs(mode: cmPrePush, currentRepo: repoRoot,
+      pushedRefsPath: refsFile, toolProvisioning: tpmPathOnly)
     # The gate can REFUSE a push, and git gives the operator no argv to
     # thread a ``--write-report`` through. Same reasoning as post-commit: a
     # hook-driven invocation opts in on the operator's behalf so the
     # refusal always leaves machine-readable evidence behind. Operator
     # invocations of `repro check` stay opt-in.
-    checkArgs.add("--write-report")
+    checkArgs.report.requested = true
+    resolveCheckScope(checkArgs)
     return runCheckCommand(checkArgs, remoteName, remoteLocation,
       componentMembers, componentWorkspace)
   of "post-commit":
@@ -25064,10 +25030,7 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # entry has its gate back before the commit's push can happen.
     for line in selfHealManagedHooks(repoRoot):
       stderr.writeLine(line)
-    var postArgs: seq[string]
-    if repoRoot.len > 0:
-      postArgs.add("--current-repo=" & repoRoot)
-    return runPostCommitLockCommand(postArgs)
+    return runPostCommitLockCommand(repoRoot)
   of "post-merge", "post-checkout":
     # M19a best-effort manifest-layer refresh. Always exits 0 — git
     # must not see a non-zero hook status. The dispatcher peels the
@@ -25080,19 +25043,9 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # publication gate uninstalled either.
     for line in selfHealManagedHooks(repoRoot):
       stderr.writeLine(line)
-    var refreshArgs: seq[string]
-    if repoRoot.len > 0:
-      refreshArgs.add("--current-repo=" & repoRoot)
-    # Find the ``--`` separator in the original args and forward
-    # everything after it as the hook-supplied positional argv.
-    var j = 1
-    while j < args.len and args[j] != "--":
-      inc j
-    if j < args.len:
-      refreshArgs.add("--")
-      for k in (j + 1) ..< args.len:
-        refreshArgs.add(args[k])
-    return runManifestRefreshHookCommand(hookName, refreshArgs)
+    # The hook-supplied positional arguments (after ``--``) are forwarded
+    # so the wrapper can short-circuit when ``prev == new``.
+    return runManifestRefreshHookCommand(hookName, repoRoot, hookArgs)
   else:
     # M17 ground state for any remaining hook names: accept argv,
     # return 0, emit nothing. (All four canonical hooks are now wired,
@@ -25100,68 +25053,61 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # fallback when ``VcsHookNames`` later grows.)
     return 0
 
-proc runHooksCommand(args: openArray[string]): int =
-  if args.len > 0 and args[0] == "protocol":
-    # ``--require=2`` is the dispatcher-protocol probe. ``--hook-contract=``
-    # is the stronger question a generated hook body asks before it hands its
-    # work over: "do you generate the hook I am?". A binary that predates the
-    # flag falls through to the raise below and fails the handshake — which is
-    # the correct answer for it, not an accident.
-    var requireSeen = false
-    var contract = ""
-    var contractSeen = false
-    for i in 1 ..< args.len:
-      let arg = args[i]
-      if arg == "--require=2":
-        requireSeen = true
-      elif arg == "--require-source-component":
-        # This build understands source-component capabilities. Old engines
-        # reject the flag, so callers can prove support before any transport.
-        discard
-      elif arg.startsWith("--hook-contract="):
-        contractSeen = true
-        contract = arg["--hook-contract=".len .. ^1]
-      else:
-        raise newException(ValueError,
-          "repro hooks protocol accepts only --require=2 " &
-          "[--hook-contract=TOKEN] [--require-source-component]")
-    if not requireSeen:
-      raise newException(ValueError,
-        "repro hooks protocol requires exactly --require=2")
-    if contractSeen:
-      # One implementation of the verdict, shared with every in-process asker
-      # (`hooks ensure`'s preflight, `health`'s skew check, the migration
-      # refusal). Two copies of this answer would let the tool tell a sibling
-      # process something it does not believe itself.
-      let verdict = managedHookContractServiceVerdict(contract)
-      if verdict.code != 0:
-        if verdict.diagnostic.len > 0:
-          stderr.writeLine(verdict.diagnostic)
-        return verdict.code
-    stdout.writeLine("2")
-    return 0
-  if args.len > 0 and args[0] == "dispatch":
-    let dispatchArgs =
-      if args.len > 1: args[1 .. ^1]
-      else: @[]
-    return runHooksDispatchCommand(dispatchArgs)
-  if args.len > 0 and args[0] == "cache-push":
+proc runHooksProtocolCommand(c: ReproCommandLineHooksProtocol): int =
+  ## ``repro hooks protocol --require=2 [--hook-contract=TOKEN]
+  ## [--require-source-component]``. ``--require=2`` is the dispatcher-protocol
+  ## probe. ``--hook-contract=`` is the stronger question a generated hook
+  ## body asks before it hands its work over: "do you generate the hook I
+  ## am?". A binary that predates a flag refuses it as unknown and fails the
+  ## handshake — which is the correct answer for it, not an accident.
+  ## ``--require-source-component`` proves this build understands
+  ## source-component capabilities (old engines reject the flag), so callers
+  ## can prove support before any transport.
+  if c.require.len > 0 and c.require != "2":
+    raise newException(ValueError,
+      "repro hooks protocol accepts only --require=2 " &
+      "[--hook-contract=TOKEN] [--require-source-component]")
+  if c.require.len == 0:
+    raise newException(ValueError,
+      "repro hooks protocol requires exactly --require=2")
+  if c.hookContract.isSome:
+    # One implementation of the verdict, shared with every in-process asker
+    # (`hooks ensure`'s preflight, `health`'s skew check, the migration
+    # refusal). Two copies of this answer would let the tool tell a sibling
+    # process something it does not believe itself.
+    let verdict = managedHookContractServiceVerdict(c.hookContract.get)
+    if verdict.code != 0:
+      if verdict.diagnostic.len > 0:
+        stderr.writeLine(verdict.diagnostic)
+      return verdict.code
+  stdout.writeLine("2")
+  0
+
+proc runHooksCommand(c: ReproCommandLineHooks): int =
+  ## ``repro hooks <ensure|reinstall|uninstall|protocol|dispatch|cache-push>``
+  ## from its configuration.
+  var parsed: ParsedHooksCommand
+  case c.command
+  of ReproCommandLineHooksCommand.protocol:
+    return runHooksProtocolCommand(c.protocol)
+  of ReproCommandLineHooksCommand.dispatch:
+    return runHooksDispatchCommand(c.dispatch)
+  of ReproCommandLineHooksCommand.cachePush:
     # RA-4: internal entry point invoked by the detached post-commit
     # ``spawnAsyncCachePush`` child. Not part of the operator-facing
     # surface; always exits 0 (best-effort cache-ref push).
-    let cacheArgs =
-      if args.len > 1: args[1 .. ^1]
-      else: @[]
-    return runCachePushCommand(cacheArgs)
-  if args.len > 0 and (args[0] == "help" or "--help" in args or
-      "-h" in args):
-    # An explicit help request prints usage to stdout and exits 0 (the
-    # convention every repro help request follows). It used to reach the flag parser
-    # and fail as "unsupported hooks flag: --help". Bare ``repro hooks`` keeps
-    # its error: it names a missing action, not a request for help.
-    stdout.write(HooksUsage)
+    return runCachePushCommand(c.cachePush.repoRoot,
+      c.cachePush.workspaceName)
+  of ReproCommandLineHooksCommand.help:
+    # `repro hooks help [<word>...]` is `repro help hooks [<word>...]`.
+    stdout.write(ReproCommandLine.helpText(@["hooks"] & c.help.topic))
     return 0
-  let parsed = parseHooksCommand(args)
+  of ReproCommandLineHooksCommand.ensure:
+    parsed = hooksCommandOf(c.ensure, hakEnsure)
+  of ReproCommandLineHooksCommand.reinstall:
+    parsed = hooksCommandOf(c.reinstall, hakReinstall)
+  of ReproCommandLineHooksCommand.uninstall:
+    parsed = hooksCommandOf(c.uninstall, hakUninstall)
   case parsed.action
   of hakEnsure:
     if parsed.shellDirenv:
@@ -41498,69 +41444,40 @@ proc resolveOrgRootRepoUrl(spec: string;
 proc sysEnv(name: string): string = getEnv(name)
   ## Default environment lookup for RA-31 resolution (overridable in tests).
 
-proc parseWorkspaceInitArgs(args: openArray[string]): WorkspaceInitArgs =
-  ## Parse ``repro workspace init`` argv. The single positional is the
-  ## project-or-variant bare name. Optional flags:
-  ##   ``--workspace-root=PATH``
-  ##   ``--tool-provisioning=path|nix|tarball|scoop``
-  ##   ``--allow-missing-layers`` (M25)
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
-  result.allowMissingLayers = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
-      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
-          "--clone-objects"))
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--allow-missing-layers":
-      # M25 — opt-in flag. Public-only users pass this when a workspace
-      # lists a private manifest layer they cannot fetch; the composer
-      # drops the unreachable layer and the init proceeds with the
-      # public subset.
-      result.allowMissingLayers = true
-    elif arg == "--manifest-url" or arg.startsWith("--manifest-url="):
-      # RA-11 — bootstrap manifest URL (init outside an existing
-      # workspace). Clones the manifest repo into the bootstrap cache.
-      # RA-8 — an explicit flag is the highest-precedence source in the
-      # manifest resolution order.
-      result.manifestUrl = valueFromFlag(args, i, "--manifest-url")
-      result.manifestUrlExplicit = true
-    elif arg == "--manifest-branch" or arg.startsWith("--manifest-branch="):
-      result.manifestBranch = valueFromFlag(args, i, "--manifest-branch")
-    elif arg == "--private-manifest-url" or
-        arg.startsWith("--private-manifest-url="):
-      # RA-11 — private companion manifest, cloned into the parallel
-      # private cache.
-      result.privateManifestUrl = valueFromFlag(args, i,
-        "--private-manifest-url")
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace init` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace init`: " & arg)
-    inc i
+proc workspaceInitArgsOf(c: ReproCommandLineWorkspaceInit;
+                         projectName, workspaceRoot: string):
+    WorkspaceInitArgs =
+  ## ``repro workspace init`` (the in-workspace form) from its
+  ## configuration, for the project-or-variant ``projectName`` (may be "")
+  ## in ``workspaceRoot`` (the current directory when "").
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  if c.cloneObjects.len > 0:
+    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  # An opt-in flag. Public-only users pass this when a workspace lists a
+  # private manifest layer they cannot fetch; the composer drops the
+  # unreachable layer and the init proceeds with the public subset.
+  result.allowMissingLayers = c.allowMissingLayers
+  # The bootstrap manifest URL (init outside an existing workspace): the
+  # manifest repo is cloned into the bootstrap cache. An explicit flag is
+  # the highest-precedence source in the manifest resolution order.
+  result.manifestUrl = c.manifestUrl
+  result.manifestUrlExplicit = c.manifestUrl.len > 0
+  result.manifestBranch = c.manifestBranch
+  # The private companion manifest, cloned into the parallel private
+  # cache.
+  result.privateManifestUrl = c.privateManifestUrl
+  result.json = c.json
+  result.report = reportSpecOf(c)
   # RA-8 — the positional project name is OPTIONAL: when omitted, the
-  # project-to-init is taken from the host bootstrap config's
-  # ``[projects] default`` (resolved later in ``resolveBootstrapConfig``).
-  # ``executeWorkspaceInit`` raises a clear error if neither a positional
-  # nor a config default resolves a project name.
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  # project-to-init is taken from the host bootstrap config's ``[projects]
+  # default`` (resolved later in ``resolveBootstrapConfig``).
+  # ``executeWorkspaceInit`` raises a clear error if neither a positional nor
+  # a config default resolves a project name.
+  result.projectName = projectName
+  result.workspaceRoot =
+    if workspaceRoot.len > 0: absolutePath(workspaceRoot) else: getCurrentDir()
 
 proc visibilityLabel(v: WorkspaceVisibility): string =
   ## Lowercase tier label used in the structured init report so the
@@ -43231,7 +43148,7 @@ proc writeWorkspaceInitReport(report: WorkspaceInitReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspaceInitCommand*(args: openArray[string];
+proc runWorkspaceInitCommand*(parsed: WorkspaceInitArgs;
     rootClone = WorkspaceInitClonedEntry()): int =
   ## ``repro workspace init <project-or-variant> [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]
@@ -43245,7 +43162,6 @@ proc runWorkspaceInitCommand*(args: openArray[string];
   ##         NOT auto-modify them; the user has work to do. Distinct
   ##         from exit-1 ("init blew up") so scripts can tell the two
   ##         apart.
-  let parsed = parseWorkspaceInitArgs(args)
   var outcome = executeWorkspaceInit(parsed)
   outcome.report.rootClone = rootClone
   writeWorkspaceInitReport(outcome.report,
@@ -43273,52 +43189,6 @@ proc runWorkspaceInitCommand*(args: openArray[string];
   0
 
 # ---- RA-31: `repro workspace init <url> [local-path]` cold-start front-end --
-
-type
-  ColdStartInitArgs = object
-    cloneObjects: string
-    ## Parsed argv for the RA-31 cold-start ``init <url> [local-path]`` form.
-    url: string                          ## the <url> argument (form 1/2/3)
-    localPath: string                    ## optional explicit destination dir
-    toolProvisioning: ToolProvisioningMode
-    printResolvedUrl: bool               ## ``--print-resolved-url`` dry-run
-    passthrough: seq[string]             ## remaining flags forwarded to init
-
-proc parseColdStartInitArgs(args: openArray[string]): ColdStartInitArgs =
-  ## Parse the cold-start ``init`` argv. The first positional is ``<url>``;
-  ## an optional second positional is ``local-path``. ``--print-resolved-url``
-  ## resolves and prints the root-repo URL WITHOUT cloning (a dry run); any
-  ## unrecognised flag is forwarded to the inner ``init`` (so e.g.
-  ## ``--allow-missing-layers`` still works).
-  result.toolProvisioning = tpmPathOnly
-  var positionals: seq[string]
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--print-resolved-url":
-      result.printResolvedUrl = true
-    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
-      let policy = parseCloneObjects(valueFromFlag(args, i, "--clone-objects"))
-      result.cloneObjects = policy
-      result.passthrough.add("--clone-objects=" & policy)
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-      result.passthrough.add(arg)
-    elif arg.startsWith("-"):
-      result.passthrough.add(arg)
-    else:
-      positionals.add(arg)
-    inc i
-  if positionals.len >= 1:
-    result.url = positionals[0]
-  if positionals.len >= 2:
-    result.localPath = positionals[1]
-  if positionals.len > 2:
-    raise newException(ValueError,
-      "unexpected positional argument to `repro workspace init`: " &
-        positionals[2])
 
 proc looksLikeColdStartUrl(spec: string): bool =
   ## A ``<url>`` argument (full URL, ``host:org`` shorthand, or bare org) is
@@ -43415,7 +43285,7 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
       return (ok: false, diagnostic: "could not make root submodules independent: " & owned.output)
   (ok: true, diagnostic: "")
 
-proc runWorkspaceInitFromUrl*(args: openArray[string];
+proc runWorkspaceInitFromUrl*(c: ReproCommandLineWorkspaceInit;
                               env: proc(name: string): string = sysEnv): int =
   ## RA-31 — the cold-start one-command join. ``repro workspace init <url>
   ## [local-path]``:
@@ -43429,7 +43299,17 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
   ##      bootstraps the manifest cache (RA-11), verifies provenance
   ##      (RA-17), and syncs the member repos.
   ## Ends by pointing the user at ``repro health``.
-  let parsed = parseColdStartInitArgs(args)
+  # The cold-start form: the first positional is ``<url>``, the optional
+  # second ``local-path``; ``--print-resolved-url`` resolves and prints the
+  # root-repo URL WITHOUT cloning (a dry run); every other option is the
+  # inner ``init``'s (so e.g. ``--allow-missing-layers`` still works).
+  let parsed = (url: c.target, localPath: c.localPath,
+    printResolvedUrl: c.printResolvedUrl,
+    toolProvisioning:
+      (if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+       else: tpmPathOnly),
+    cloneObjects:
+      (if c.cloneObjects.len > 0: parseCloneObjects(c.cloneObjects) else: ""))
   let resolution = resolveOrgRootRepoUrl(parsed.url, env)
 
   # ``--print-resolved-url``: resolution-only dry run (hermetic, no clone).
@@ -43484,12 +43364,10 @@ proc runWorkspaceInitFromUrl*(args: openArray[string];
   # reads the cloned ``repro-workspace.toml`` (the settings file), clones
   # the manifest into the bootstrap cache, verifies provenance if configured,
   # and syncs the declared member repos — we DO NOT duplicate that logic.
-  var innerArgs = @["--workspace-root=" & destAbs]
-  for flag in parsed.passthrough:
-    innerArgs.add(flag)
+  let innerArgs = workspaceInitArgsOf(c, "", destAbs)
   stdout.writeLine("workspace init: reading bootstrap config and syncing " &
     "the workspace …")
-  let innerPolicy = parseWorkspaceInitArgs(innerArgs).cloneObjects
+  let innerPolicy = innerArgs.cloneObjects
   let inner = runWorkspaceInitCommand(innerArgs,
     rootClone = WorkspaceInitClonedEntry(name: "<workspace-root>", path: ".",
       remote: resolution.url, cloneObjects: cloneObjectsLabel(innerPolicy),
@@ -44032,44 +43910,41 @@ proc parseSyncJobsValue(raw, flag: string): int =
       flag & " expects a positive integer, got: " & raw)
   value
 
-proc parseSyncRepoSelector(args: openArray[string]; i: var int;
-                           sel: var WorkspaceSyncArgs): bool =
-  ## Consume ``args[i]`` when it is one of the repo-NAME selectors every
-  ## workspace sweep shares — ``--tags``, ``--only``, ``--except``,
-  ## ``--filter`` — recording it in ``sel`` and returning true; false (and
-  ## ``i`` untouched) otherwise. One parser for ``repro workspace sync`` and
-  ## ``repro workspace branch-roles``, so an operator who checks a role column
-  ## with a selector set is shown exactly the repos the same selectors would
-  ## sync. ``narrowSyncRepoSet`` applies what this records.
-  let arg = args[i]
-  result = true
-  if arg == "--tags" or arg.startsWith("--tags="):
-    # RA-18 subset selection. A comma-separated list; an entry prefixed
-    # with ``-`` (e.g. ``--tags=default,-heavy``) is an EXCLUDE term,
-    # otherwise an INCLUDE term. Mirrors ``repo``'s ``--groups`` syntax,
-    # under the word the membership model left free for a filter.
-    for raw in valueFromFlag(args, i, "--tags").split(','):
-      let term = raw.strip()
-      if term.len == 0:
-        continue
-      if term.startsWith("-"):
-        let t = term[1 .. ^1]
-        if t.len > 0:
-          sel.excludeTags.add(t)
-      else:
-        sel.includeTags.add(term)
-  elif arg == "--only" or arg.startsWith("--only="):
-    for raw in valueFromFlag(args, i, "--only").split(','):
-      let n = raw.strip()
-      if n.len > 0 and n notin sel.onlyRepos:
-        sel.onlyRepos.add(n)
-  elif arg == "--except" or arg.startsWith("--except="):
-    for raw in valueFromFlag(args, i, "--except").split(','):
-      let n = raw.strip()
-      if n.len > 0 and n notin sel.exceptRepos:
-        sel.exceptRepos.add(n)
-  elif arg == "--filter" or arg.startsWith("--filter="):
-    let g = valueFromFlag(args, i, "--filter").strip()
+proc applyTagSelection(tags: seq[string]; sel: var WorkspaceSyncArgs) =
+  ## Subset selection by tag. Each entry of ``--tags`` (repeatable,
+  ## comma-separated) prefixed with ``-`` (e.g. ``--tags=default,-heavy``) is
+  ## an EXCLUDE term, otherwise an INCLUDE term. Mirrors ``repo``'s
+  ## ``--groups`` syntax, under the word the membership model left free for a
+  ## filter.
+  for raw in tags:
+    let term = raw.strip()
+    if term.len == 0:
+      continue
+    if term.startsWith("-"):
+      let t = term[1 .. ^1]
+      if t.len > 0:
+        sel.excludeTags.add(t)
+    else:
+      sel.includeTags.add(term)
+
+proc applyRepoSelection[T](c: T; sel: var WorkspaceSyncArgs) =
+  ## The repo-NAME selectors every workspace sweep shares — ``--tags``,
+  ## ``--only``, ``--except``, ``--filter`` — recorded in ``sel``. One
+  ## reading for ``repro workspace sync`` and ``repro workspace
+  ## branch-roles``, so an operator who checks a role column with a selector
+  ## set is shown exactly the repos the same selectors would sync.
+  ## ``narrowSyncRepoSet`` applies what this records.
+  applyTagSelection(c.tags, sel)
+  for raw in c.only:
+    let n = raw.strip()
+    if n.len > 0 and n notin sel.onlyRepos:
+      sel.onlyRepos.add(n)
+  for raw in c.exceptRepos:
+    let n = raw.strip()
+    if n.len > 0 and n notin sel.exceptRepos:
+      sel.exceptRepos.add(n)
+  for raw in c.filter:
+    let g = raw.strip()
     # Same rule ``develop`` applies: taking the last of two different values
     # would make the answer depend on argv order.
     if sel.filterGlob.len > 0 and sel.filterGlob != g:
@@ -44078,8 +43953,6 @@ proc parseSyncRepoSelector(args: openArray[string]; i: var int;
         sel.filterGlob & "' and '" & g & "'). It takes a single value. " &
         "Use --only=a,b to name several repos exactly.")
     sel.filterGlob = g
-  else:
-    result = false
 
 # ---- branch-role flags (Workspace-Branch-Roles.md §4.1, §4.2) ---------------
 #
@@ -44088,13 +43961,6 @@ proc parseSyncRepoSelector(args: openArray[string]; i: var int;
 # One parser and one validator serve every verb, so "which role did the
 # operator name" and "is that a role this workspace has" cannot be answered
 # differently by different commands.
-
-const branchRoleShorthands = ["--mainline", "--unstable", "--staging",
-                              "--stable", "--production", "--lts"]
-  ## Each built-in role's shorthand, which means exactly `--to=<role>` (and,
-  ## on `repro branch`, `--from=<role>`). Custom roles get none (§2.4): a flag
-  ## per workspace-defined word would make the command line's meaning depend
-  ## on the workspace it runs in.
 
 type
   BranchRolesUsageError = object of ValueError
@@ -44113,54 +43979,40 @@ type
       ## Reports never carry it: a shorthand and its `--to=` spelling must
       ## produce byte-identical reports (§4.1), so they name `role` only.
 
-proc retiredFlagHint(arg: string): string =
-  ## The suffix an "unsupported flag" error carries when ``arg`` is a RETIRED
-  ## spelling, naming what replaced it; "" for any other flag. The flag still
-  ## fails as unknown — this only saves the operator a search for the new
-  ## name.
-  let name = if '=' in arg: arg[0 ..< arg.find('=')] else: arg
-  case name
-  of "--from-mainlines":
-    " (a retired spelling; use `--from=mainline`, or its shorthand " &
-      "`--mainline`)"
-  else: ""
-
 proc branchRolesUsage(msg: string) =
   raise newException(BranchRolesUsageError, msg)
 
-proc consumeBranchRoleFlag(args: openArray[string]; i: var int;
-                           choice: var RoleChoice; verb: string;
-                           roleFlag = "--to"): bool =
-  ## Consume `args[i]` when it names a branch role — `<roleFlag>=<role>`
-  ## (`--to` on `sync`, `switch` and `branch-roles`; `--from` on `branch`) or
-  ## one of the six shorthands — recording it in `choice` and returning true;
-  ## false (and `i` untouched) otherwise.
+proc roleChoiceOf[T](c: T; roleValues: seq[string]; verb: string;
+                    roleFlag = "--to"): RoleChoice =
+  ## The branch role a command line named: ``<roleFlag>=<role>`` (``--to`` on
+  ## `sync`, `switch` and `branch-roles`; ``--from`` on `branch`, each given
+  ## as ``roleValues``) or one of the six shorthands of ``c``.
   ##
   ## §4.1: `--to` and the shorthands are mutually exclusive. Naming the SAME
   ## role twice is harmless (a script assembling argv from fragments does
   ## that); two different roles would make the run depend on argv order, so
   ## that is a usage error.
-  let arg = args[i]
-  var role, flag: string
-  if arg == roleFlag or arg.startsWith(roleFlag & "="):
-    role = valueFromFlag(args, i, roleFlag).strip()
+  var named: seq[tuple[role, flag: string]]
+  for raw in roleValues:
+    let role = raw.strip()
     if role.len == 0:
       branchRolesUsage(roleFlag & " needs a role name: " & roleFlag &
         "=<role>")
-    flag = roleFlag & "=" & role
-  elif arg in branchRoleShorthands:
-    role = arg[2 .. ^1]
-    flag = arg
-  else:
-    return false
-  if choice.role.len > 0 and choice.role != role:
-    branchRolesUsage("`" & verb & "` was given two roles (" & choice.flag &
-      " and " & flag & "). " & roleFlag & " and the shorthands are " &
-      "mutually exclusive: name one role.")
-  if choice.role.len == 0:
-    choice.role = role
-    choice.flag = flag
-  true
+    named.add((role, roleFlag & "=" & role))
+  if c.mainline: named.add(("mainline", "--mainline"))
+  if c.unstable: named.add(("unstable", "--unstable"))
+  if c.staging: named.add(("staging", "--staging"))
+  if c.stable: named.add(("stable", "--stable"))
+  if c.production: named.add(("production", "--production"))
+  if c.lts: named.add(("lts", "--lts"))
+  for (role, flag) in named:
+    if result.role.len > 0 and result.role != role:
+      branchRolesUsage("`" & verb & "` was given two roles (" & result.flag &
+        " and " & flag & "). " & roleFlag & " and the shorthands are " &
+        "mutually exclusive: name one role.")
+    if result.role.len == 0:
+      result.role = role
+      result.flag = flag
 
 proc requireDeclaredRole(workspaceRoot, role, roleFlag: string) =
   ## Refuse a role this workspace does not declare: a usage error (exit 2)
@@ -44225,15 +44077,12 @@ proc addRoleFields(obj: JsonNode; r: Option[ResolvedRole]; role: string) =
     obj["roleBranch"] = %""
     obj["fallbackPath"] = newJArray()
 
-proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
-  ## ``repro workspace sync`` argv parser. Unlike M9's ``init`` there is
-  ## no required positional: sync operates on the existing workspace
-  ## root. An optional positional ``<project>`` is accepted so the
-  ## non-composer (M6 / M7) path still works in a workspace that lacks
-  ## a ``.repo/workspace.toml`` — the milestone spec says sync works on
-  ## "the existing workspace", which in single-project mode requires
-  ## the project name to find ``projects/<name>.toml``.
-  result.workspaceRoot = ""
+proc defaultWorkspaceSyncArgs(workspaceRoot: string): WorkspaceSyncArgs =
+  ## A sync of the workspace at ``workspaceRoot`` (the current directory when
+  ## empty) with every option at its default.
+  result.workspaceRoot =
+    if workspaceRoot.len > 0: absolutePath(workspaceRoot)
+    else: getCurrentDir()
   result.toolProvisioning = tpmPathOnly
   result.progressMode = configuredBuildProgressMode()
   # ``--rebase-on-force-push`` is an OPT-IN, and this default is the
@@ -44251,75 +44100,63 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
   # and the planner now also withholds it where the replay has no base to
   # work from, so a refusal never names a command that cannot act.
   result.rebaseOnForcePush = false
-  var roleChoice: RoleChoice
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
-      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
-          "--clone-objects"))
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--jobs" or arg == "-j" or arg.startsWith("--jobs="):
-      result.jobs = parseSyncJobsValue(valueFromFlag(args, i, "--jobs"), "--jobs")
-    elif arg == "--jobs-network" or arg.startsWith("--jobs-network="):
-      result.jobsNetwork = parseSyncJobsValue(
-        valueFromFlag(args, i, "--jobs-network"), "--jobs-network")
-    elif arg == "--jobs-checkout" or arg.startsWith("--jobs-checkout="):
-      result.jobsCheckout = parseSyncJobsValue(
-        valueFromFlag(args, i, "--jobs-checkout"), "--jobs-checkout")
-    elif parseSyncRepoSelector(args, i, result):
-      # ``--tags`` / ``--only`` / ``--except`` / ``--filter``: shared with
-      # ``repro workspace branch-roles`` so the workspace keeps ONE selection
-      # language (``parseSyncRepoSelector``).
-      discard
-    elif consumeBranchRoleFlag(args, i, roleChoice, "repro sync"):
-      # ``--to=<role>`` or a shorthand; ``--mainline`` is ``--to=mainline``.
-      discard
-    elif arg == "--rebase":
-      result.mainlineFlavor = msfRebase
-    elif arg == "--merge":
-      result.mainlineFlavor = msfMerge
-    elif arg == "--no-interleaved":
-      result.noInterleaved = true
-    elif arg == "--fail-fast":
-      result.failFast = true
-    elif arg == "--force-sync":
-      result.forceSync = true
-    elif arg == "--rebase-on-force-push":
-      result.rebaseOnForcePush = true
-    elif arg == "--no-rebase-on-force-push":
-      result.rebaseOnForcePush = false
-    elif arg == "--yes" or arg == "--force":
-      result.assumeYes = true
-    elif arg == "--dry-run":
-      result.dryRun = true
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--verbose" or arg == "-v":
-      result.verbose = true
-    elif arg == "--progress" or arg.startsWith("--progress="):
-      result.progressMode = parseBuildProgressMode(
-        valueFromFlag(args, i, "--progress"))
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace sync` flag: " & arg)
-    else:
-      # RA-27: one or more positional ``<project>`` arguments SCOPE the sync
-      # to those projects' repos. The first one also seeds ``projectName``
-      # so the single-project resolution dispatch (workspaces with no
-      # composed ``workspace.toml``) keeps working; the full list drives the
-      # scoped-repo filter in ``resolveWorkspaceSyncProject``.
-      if result.projectName.len == 0:
-        result.projectName = arg
-      result.scopeProjects.add(arg)
-    inc i
+
+proc syncJobsOf(value: Option[int]; flag: string): int =
+  ## A ``--jobs*`` value: 0 (auto) when absent, else a positive integer. ``0``
+  ## is rejected (omit the flag for auto) so a typo like
+  ## ``--jobs-network=0`` doesn't quietly disable the pool bound.
+  if value.isNone:
+    return 0
+  if value.get <= 0:
+    raise newException(ValueError,
+      flag & " expects a positive integer, got: " & $value.get)
+  value.get
+
+proc syncArgsOf[T](c: T): WorkspaceSyncArgs =
+  ## ``repro sync`` / ``repro workspace sync`` from its configuration.
+  ## Unlike ``workspace init`` there is no required positional: sync
+  ## operates on the existing workspace root. Optional positional
+  ## ``<project>``s scope the sync: the first also seeds ``projectName`` so the
+  ## single-project resolution dispatch (workspaces with no composed
+  ## ``workspace.toml``) keeps working; the full list drives the scoped-repo
+  ## filter in ``resolveWorkspaceSyncProject``.
+  result = defaultWorkspaceSyncArgs(c.workspaceRoot)
+  if c.cloneObjects.len > 0:
+    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  if c.toolProvisioning.len > 0:
+    result.toolProvisioning = parseToolProvisioning(c.toolProvisioning)
+  result.jobs = syncJobsOf(c.jobs, "--jobs")
+  result.jobsNetwork = syncJobsOf(c.jobsNetwork, "--jobs-network")
+  result.jobsCheckout = syncJobsOf(c.jobsCheckout, "--jobs-checkout")
+  # ``--tags`` / ``--only`` / ``--except`` / ``--filter``: shared with
+  # ``repro workspace branch-roles`` so the workspace keeps ONE selection
+  # language (``applyRepoSelection``).
+  applyRepoSelection(c, result)
+  # ``--to=<role>`` or a shorthand; ``--mainline`` is ``--to=mainline``.
+  let roleChoice = roleChoiceOf(c, c.toRole, "repro sync")
+  if c.rebase and c.merge:
+    raise newException(ValueError,
+      "`repro sync` was given both --rebase and --merge; name one way to " &
+      "integrate a diverged branch")
+  if c.rebase:
+    result.mainlineFlavor = msfRebase
+  elif c.merge:
+    result.mainlineFlavor = msfMerge
+  result.noInterleaved = c.noInterleaved
+  result.failFast = c.failFast
+  result.forceSync = c.forceSync
+  result.rebaseOnForcePush = c.rebaseOnForcePush
+  result.assumeYes = c.yes
+  result.dryRun = c.dryRun
+  result.json = c.json
+  result.verbose = c.verbose
+  if c.progress.len > 0:
+    result.progressMode = parseBuildProgressMode(c.progress)
+  result.report = reportSpecOf(c)
+  for project in c.projects:
+    if result.projectName.len == 0:
+      result.projectName = project
+    result.scopeProjects.add(project)
   result.role = roleChoice.role
   result.roleFlag = roleChoice.flag
   # ``--rebase`` / ``--merge`` describe how to integrate a DIVERGED branch with
@@ -44336,9 +44173,6 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
       "that has diverged from that role's branch, and plain `sync` never " &
       "integrates (it fast-forwards toward the branch's own upstream or " &
       "reports).")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
 
 const
   LegacyRepoMigrationMarkerBody = "reprobuild migration complete\n"
@@ -52390,46 +52224,7 @@ proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
       stdout.writeLine(line)
   report.exitCode
 
-const WorkspaceSyncUsage = """usage: repro sync [<project>...] [options]
-       repro workspace sync [<project>...] [options]
-
-Fetch every selected repo and fast-forward it toward its own current-branch
-upstream; clone declared repos that are missing. A <project> positional (a
-project, variant or repo-set name) scopes the sync to that project's repos.
-To scope to individual repos use --only / --except / --filter.
-
-selection:
-  --only=a,b            only the named repos (exact names)
-  --except=a,b          drop the named repos
-  --filter=GLOB         repos whose name matches GLOB
-  --tags=t,-u           by manifest tag (a leading '-' excludes)
-reconciliation:
-  --to=<role>           reconcile toward the branch <role> resolves to in each
-                        repo (mainline, unstable, staging, stable, production,
-                        lts, or a custom role); an undeclared role falls back
-                        toward the mainline, a declared one never does
-  --mainline, --unstable, --staging, --stable, --production, --lts
-                        shorthands for --to=<role>
-  --rebase | --merge    how --to=<role> integrates a diverged branch
-  --rebase-on-force-push
-                        replay local commits onto a rewritten upstream
-  --force-sync          overwrite divergent/dirty checkouts (confirms)
-  --yes, --force        skip the --force-sync confirmation
-execution:
-  --jobs N, -j N        default parallelism for fetch and checkout
-  --jobs-network N      parallel fetches (default 8)
-  --jobs-checkout N     parallel checkouts (default: CPU count)
-  --dry-run             print the plan and exit 0; mutates nothing (no
-                        fetch, so --to=<role> plans against the current
-                        remote-tracking refs)
-  --json                one machine-readable document on stdout
-  --write-report[=PATH] persist the report as sync-report.json
-  --verbose, -v         include raw per-repo tool output
-  --workspace-root=PATH operate on another workspace
-  --tool-provisioning=path|nix|tarball|scoop
-"""
-
-proc runWorkspaceSyncWithProjects(args: openArray[string];
+proc runWorkspaceSyncWithProjects(parsed: WorkspaceSyncArgs;
     prospectiveProjects: seq[string]): int =
   ## ``repro workspace sync [<project>...] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]
@@ -52486,15 +52281,7 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
   ##         (``dirty`` or ``locally_unpublished``). The operator has
   ##         manual work to do. Distinct from exit-1 ("sync blew up")
   ##         so scripts can tell the two apart.
-  if "--help" in args or "-h" in args:
-    # Explicit help prints usage to stdout and exits 0 (the convention
-    # every repro help request follows). It used to be refused as "unsupported `repro workspace
-    # sync` flag: --help".
-    stdout.write(WorkspaceSyncUsage)
-    return 0
-  var parsed: WorkspaceSyncArgs
   try:
-    parsed = parseWorkspaceSyncArgs(args)
     # §4.4: a role this workspace does not declare is a usage error, decided
     # before anything is fetched.
     requireDeclaredRole(parsed.workspaceRoot, parsed.role, "--to")
@@ -52546,8 +52333,17 @@ proc runWorkspaceSyncWithProjects(args: openArray[string];
       outcome.report.repos)
   outcome.report.exitCode
 
-proc runWorkspaceSyncCommand*(args: openArray[string]): int =
-  runWorkspaceSyncWithProjects(args, @[])
+proc runWorkspaceSyncCommand*[T](c: T): int =
+  ## ``repro sync`` / ``repro workspace sync`` from its configuration. A
+  ## command-line mistake in naming a role is a usage error (exit 2), like
+  ## an undeclared role.
+  var parsed: WorkspaceSyncArgs
+  try:
+    parsed = syncArgsOf(c)
+  except BranchRolesUsageError as err:
+    stderr.writeLine("repro sync: " & err.msg)
+    return 2
+  runWorkspaceSyncWithProjects(parsed, @[])
 
 # ---- `repro workspace branch-roles` (Workspace-Branch-Roles.md §4.5) -------
 #
@@ -52563,24 +52359,6 @@ proc runWorkspaceSyncCommand*(args: openArray[string]): int =
 # writes no file: what a role resolves to never depends on what a remote has
 # (§2.2 "fallback is on declaration, never on ref existence"), so there is
 # nothing for a fetch to contribute and nothing for a query to change.
-
-const WorkspaceBranchRolesUsage = """usage: repro workspace branch-roles [--to=<role> | --mainline | --unstable | --staging | --stable | --production | --lts] [<project>...] [--only=A,B] [--except=A,B] [--filter=GLOB] [--tags=T,-U] [--json] [--workspace-root=PATH]
-
-Print, for every selected repo, the branch each branch role resolves to and
-the fallback chain that produced it. Nothing is fetched or changed.
-
-  --to=<role>   print only that role (a built-in role, or a custom role the
-                workspace declares under [branch-roles.<name>])
-  --mainline, --unstable, --staging, --stable, --production, --lts
-                shorthands for --to=<role>
-  --json        one JSON document on stdout
-
-Selectors are the ones `repro sync` takes. With no selector the workspace
-root repository is listed too, when repro-workspace.toml declares its roles.
-
-Exit codes: 0 printed; 1 the workspace manifests do not load; 2 usage error
-(an unknown flag, an undeclared role, two different roles).
-"""
 
 type
   WorkspaceBranchRolesArgs = object
@@ -52618,39 +52396,23 @@ type
     root*: BranchRolesEntry
     repos*: seq[BranchRolesEntry]
 
-proc parseWorkspaceBranchRolesArgs(args: openArray[string]):
+proc branchRolesArgsOf(c: ReproCommandLineWorkspaceBranchRoles):
     WorkspaceBranchRolesArgs =
-  ## Every flag this verb accepts, and nothing else: a sweep flag (`--jobs`,
-  ## `--rebase`, `--dry-run`) on a query is a mistake worth naming, not an
-  ## option to ignore.
-  var sel = WorkspaceSyncArgs(toolProvisioning: tpmPathOnly)
-  var choice: RoleChoice
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      sel.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif consumeBranchRoleFlag(args, i, choice,
-        "repro workspace branch-roles"):
-      # `--to=<role>` or a shorthand, under the parser `sync`, `switch` and
-      # `branch` share (§4.1).
-      discard
-    elif arg == "--json":
-      result.json = true
-    elif parseSyncRepoSelector(args, i, sel):
-      discard
-    elif arg.startsWith("-"):
-      branchRolesUsage("unsupported `repro workspace branch-roles` flag: " &
-        arg)
-    else:
-      # A positional names a project and SCOPES the set, as on `repro sync`.
-      if sel.projectName.len == 0:
-        sel.projectName = arg
-      sel.scopeProjects.add(arg)
-    inc i
-  if sel.workspaceRoot.len == 0:
-    sel.workspaceRoot = getCurrentDir()
-  sel.workspaceRoot = absolutePath(sel.workspaceRoot)
+  ## `repro workspace branch-roles` from its configuration: every flag this
+  ## query takes, and nothing else — a sweep flag (`--jobs`, `--rebase`,
+  ## `--dry-run`) on a query is a mistake the parser names, not an option to
+  ## ignore.
+  var sel = defaultWorkspaceSyncArgs(c.workspaceRoot)
+  # `--to=<role>` or a shorthand, read as `sync`, `switch` and `branch` read
+  # them.
+  let choice = roleChoiceOf(c, c.toRole, "repro workspace branch-roles")
+  result.json = c.json
+  applyRepoSelection(c, sel)
+  # A positional names a project and SCOPES the set, as on `repro sync`.
+  for project in c.projects:
+    if sel.projectName.len == 0:
+      sel.projectName = project
+    sel.scopeProjects.add(project)
   result.selection = sel
   result.role = choice.role
   result.roleFlag = choice.flag
@@ -52798,20 +52560,18 @@ proc renderBranchRolesTextLines*(report: BranchRolesReport): seq[string] =
          else: r.branch)
       result.add(line)
 
-proc runWorkspaceBranchRolesCommand*(args: openArray[string]): int =
+proc runWorkspaceBranchRolesCommand*(
+    c: ReproCommandLineWorkspaceBranchRoles): int =
   ## `repro workspace branch-roles [--to=<role> | <shorthand>] [selectors]
   ## [--json]` (Workspace-Branch-Roles.md §4.5). Exit 0 when printed, 1 when
   ## the workspace manifests do not load, 2 on a usage error.
-  if "--help" in args or "-h" in args:
-    stdout.write(WorkspaceBranchRolesUsage)
-    return 0
   var parsed: WorkspaceBranchRolesArgs
   var report: BranchRolesReport
   try:
-    # Every error the argv parser raises is a usage error, including the
-    # plain `ValueError`s of the selector parser it shares with sync
-    # (`--only` with no value, `--filter` given twice), so all of them exit 2.
-    parsed = parseWorkspaceBranchRolesArgs(args)
+    # Every error reading the configuration raises is a usage error,
+    # including the plain `ValueError`s of the selectors it shares with sync
+    # (`--filter` given twice), so all of them exit 2.
+    parsed = branchRolesArgsOf(c)
   except ValueError as err:
     stderr.writeLine("repro workspace branch-roles: " & err.msg)
     return 2
@@ -53027,40 +52787,22 @@ type
       ## `remove --force`: the work-loss refusal is the default, and this is
       ## how the operator says they have decided otherwise.
 
-proc parseWorkspacePullArgs(args: openArray[string]): WorkspacePullArgs =
-  ## ``repro workspace pull`` argv parser. Mirrors ``sync``'s shape: an
-  ## optional ``<project>`` positional (single-project mode) plus
-  ## ``--workspace-root=PATH`` / ``--tool-provisioning=...``.
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
-      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
-          "--clone-objects"))
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--force":
-      result.force = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace pull` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace pull`: " & arg)
-    inc i
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+proc pullArgsOf[T](c: T): WorkspacePullArgs =
+  ## ``repro pull`` / ``repro workspace pull`` from its configuration.
+  ## Mirrors ``sync``'s shape: an optional ``<project>`` positional
+  ## (single-project mode) plus ``--workspace-root=PATH`` /
+  ## ``--tool-provisioning=...``.
+  if c.cloneObjects.len > 0:
+    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.force = c.force
+  result.report = reportSpecOf(c)
+  result.projectName = c.project
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot)
+    else: getCurrentDir()
 
 proc resolveWorkspacePullProject(parsed: WorkspacePullArgs): ResolvedProject =
   ## MO-9 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder.
@@ -53549,7 +53291,7 @@ proc writeWorkspacePullReport(report: WorkspacePullReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspacePullCommand*(args: openArray[string]): int =
+proc runWorkspacePullCommand*[T](c: T): int =
   ## ``repro workspace pull [<project>] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]``.
   ##
@@ -53572,7 +53314,7 @@ proc runWorkspacePullCommand*(args: openArray[string]): int =
   ##         only by a detached HEAD). Those checkouts are untouched; the
   ##         report names each one and its remedy. ``--force`` converges them
   ##         anyway, which is the pre-gate behaviour.
-  let parsed = parseWorkspacePullArgs(args)
+  let parsed = pullArgsOf(c)
   let outcome = executeWorkspacePull(parsed)
   writeWorkspacePullReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "pull"))
@@ -53965,49 +53707,19 @@ type
       ## in-process (hook / pre-push) constructions of this object, which
       ## manage their own report destinations.
 
-proc parseWorkspaceLockArgs(args: openArray[string]): WorkspaceLockArgs =
-  ## ``repro workspace lock`` argv parser. The single optional
-  ## positional is the project name (only required when no
-  ## ``.repo/workspace.toml`` is present — same dispatch rule as
-  ## M10's sync command). Optional flags:
-  ##   ``--workspace-root=PATH``
-  ##   ``--record-store-root=PATH``
-  ##   ``--sha=SHA``           — explicit trigger commit (M16 hook)
-  ##   ``--trigger-repo=NAME``  — explicit trigger repo
-  ##   ``--tool-provisioning=path|nix|tarball|scoop``
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--record-store-root" or
-        arg.startsWith("--record-store-root="):
-      result.recordStoreRoot = valueFromFlag(args, i,
-        "--record-store-root")
-    elif arg == "--sha" or arg.startsWith("--sha="):
-      result.triggerSha = valueFromFlag(args, i, "--sha")
-    elif arg == "--trigger-repo" or arg.startsWith("--trigger-repo="):
-      result.triggerRepo = valueFromFlag(args, i, "--trigger-repo")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace lock` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace lock`: " & arg)
-    inc i
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+proc workspaceLockArgsOf(c: ReproCommandLineWorkspaceLock):
+    WorkspaceLockArgs =
+  ## ``repro workspace lock`` from its configuration.
+  result.recordStoreRoot = c.recordStoreRoot
+  result.triggerSha = c.sha
+  result.triggerRepo = c.triggerRepo
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.report = reportSpecOf(c)
+  result.projectName = c.project
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
   if result.recordStoreRoot.len > 0:
     result.recordStoreRoot = absolutePath(result.recordStoreRoot)
 
@@ -57135,7 +56847,7 @@ proc renderLockMigrationPlan*(plan: LockMigrationPlan): seq[string] =
     result.add("  leave     " & path &
       " (not a lock record; it becomes an untracked file on disk)")
 
-proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
+proc runWorkspaceMigrateLocksCommand*(c: ReproCommandLineWorkspaceMigrateLocks): int =
   ## `repro workspace migrate-locks [--dry-run|--apply]
   ## [--record-store-root=PATH] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop]`.
@@ -57146,60 +56858,17 @@ proc runWorkspaceMigrateLocksCommand*(args: openArray[string]): int =
   ##   - 1 — the store cannot be repaired automatically; the diagnostic names
   ##         the file and the manual step.
   ##   - 2 — bad usage.
-  var apply = false
-  var dryRun = false
-  var recordStoreRoot = ""
-  var workspaceRoot = ""
-  # Every other verb's parser seeds ``tpmPathOnly`` and lets
-  # ``--tool-provisioning`` override it. This one seeded
-  # ``tpmUnspecified``, which ``resolveGitTool`` rejects outright ("no
-  # provisioning mode was selected before resolving git; callers must
-  # parse --tool-provisioning before invoking resolveGitTool") — so the
-  # documented invocation ``repro workspace migrate-locks --dry-run``
-  # could never run, and the flag the message tells you to parse was in
-  # fact optional everywhere else.
-  var toolProvisioning = tpmPathOnly
-  var i = 0
-  # ``--flag=VALUE`` and ``--flag VALUE`` both accepted, resolved inline: a
-  # nested helper would have to capture ``args``, and an ``openArray`` cannot be
-  # captured by a closure.
-  var flagValue = ""
-  var flagName = ""
-  while i < args.len:
-    let arg = args[i]
-    flagName = ""
-    flagValue = ""
-    for candidate in ["--record-store-root", "--workspace-root",
-                      "--tool-provisioning"]:
-      if arg == candidate:
-        flagName = candidate
-        if i + 1 < args.len:
-          inc i
-          flagValue = args[i]
-        break
-      elif arg.startsWith(candidate & "="):
-        flagName = candidate
-        flagValue = arg[(candidate.len + 1) .. ^1]
-        break
-    if arg == "--apply": apply = true
-    elif arg == "--dry-run": dryRun = true
-    elif flagName.len > 0:
-      if flagValue.len == 0:
-        stderr.writeLine("repro workspace migrate-locks: " & flagName &
-          " requires a value")
-        return 2
-      case flagName
-      of "--record-store-root": recordStoreRoot = flagValue
-      of "--workspace-root": workspaceRoot = flagValue
-      else: toolProvisioning = parseToolProvisioning(flagValue)
-    elif arg.startsWith("--"):
-      stderr.writeLine("repro workspace migrate-locks: unknown flag " & arg)
-      return 2
-    else:
-      stderr.writeLine("repro workspace migrate-locks: " &
-        "unexpected argument " & arg)
-      return 2
-    inc i
+  let apply = c.apply
+  let dryRun = c.dryRun
+  var recordStoreRoot = c.recordStoreRoot
+  var workspaceRoot = c.workspaceRoot
+  # Every other verb seeds ``tpmPathOnly`` and lets ``--tool-provisioning``
+  # override it. This one used to seed ``tpmUnspecified``, which
+  # ``resolveGitTool`` rejects outright, so the documented invocation
+  # ``repro workspace migrate-locks --dry-run`` could never run.
+  let toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
   if apply and dryRun:
     stderr.writeLine("repro workspace migrate-locks: " &
       "--apply and --dry-run are mutually exclusive")
@@ -57500,7 +57169,7 @@ proc withheldLockRecordLine(item: WithheldLockRecord;
     "local draft. Publish the commit with `git -C " & item.checkout &
     " push`, then re-run `" & workspaceLockCommand(workspaceRoot) & "`."
 
-proc runWorkspaceLockCommand*(args: openArray[string]): int =
+proc runWorkspaceLockCommand*(c: ReproCommandLineWorkspaceLock): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
   ## [--record-store-root=PATH] [--sha=SHA] [--trigger-repo=NAME]
   ## [--tool-provisioning=path|nix|tarball|scoop]``.
@@ -57513,7 +57182,7 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ##         The lock would lie about what the recorded SHA
   ##         reproduces; the operator must commit, stash, or
   ##         discard first.
-  let parsed = parseWorkspaceLockArgs(args)
+  let parsed = workspaceLockArgsOf(c)
   let outcome = executeWorkspaceLock(parsed)
   writeWorkspaceLockReport(outcome.report,
     reportDestination(parsed.report, outcome.report.workspaceRoot, "lock"))
@@ -58351,41 +58020,6 @@ proc emitPostCommitWarning(tag, diagnostic, workspaceRoot: string) =
   except CatchableError:
     discard
 
-proc parsePostCommitArgs(args: openArray[string]):
-    tuple[currentRepo, workspaceRoot, triggerSha, triggerRepo: string;
-          toolProvisioning: ToolProvisioningMode] =
-  ## Minimal argv parser for the post-commit wrapper. The dispatcher
-  ## installs ``--current-repo=PATH`` and NOTHING ELSE, and ``repro hooks
-  ## dispatch post-commit`` is the ONLY route in — there is no ``repro
-  ## workspace post-commit`` verb — so every other flag below is unreachable
-  ## argv surface. Unknown flags are ignored; this must not raise on shape.
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--":
-      inc i
-      continue
-    if arg == "--current-repo" or arg.startsWith("--current-repo="):
-      try: result.currentRepo = valueFromFlag(args, i, "--current-repo")
-      except CatchableError: discard
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      try: result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-      except CatchableError: discard
-    elif arg == "--sha" or arg.startsWith("--sha="):
-      try: result.triggerSha = valueFromFlag(args, i, "--sha")
-      except CatchableError: discard
-    elif arg == "--trigger-repo" or arg.startsWith("--trigger-repo="):
-      try: result.triggerRepo = valueFromFlag(args, i, "--trigger-repo")
-      except CatchableError: discard
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      try:
-        result.toolProvisioning = parseToolProvisioning(
-          valueFromFlag(args, i, "--tool-provisioning"))
-      except CatchableError: discard
-    inc i
-
 # ---- RA-4 / RA-19: post-commit detached cache-ref push -------------------
 #
 # After the best-effort lock refresh, the post-commit hook fires a
@@ -58549,7 +58183,7 @@ proc resolveRepoFetchUrl(workspaceRoot, repoAbsPath: string): string =
   if matched.isNone: return ""
   matched.get().fetchUrl
 
-proc runCachePushCommand*(args: openArray[string]): int =
+proc runCachePushCommand*(repoRoot, workspaceName: string): int =
   ## Internal entry point for the detached post-commit cache push:
   ## ``repro hooks cache-push --repo-root=PATH --workspace-name=NAME``.
   ## Resolves the repo's upstream fetch URL, locates the shared bare for
@@ -58558,18 +58192,6 @@ proc runCachePushCommand*(args: openArray[string]): int =
   ## mechanism. Best-effort: always exits 0, never raises. Designed to be
   ## run from a detached background process (it is a no-op if the shared
   ## bare is absent or the repo is detached).
-  var repoRoot = ""
-  var workspaceName = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--repo-root" or arg.startsWith("--repo-root="):
-      try: repoRoot = valueFromFlag(args, i, "--repo-root")
-      except CatchableError: discard
-    elif arg == "--workspace-name" or arg.startsWith("--workspace-name="):
-      try: workspaceName = valueFromFlag(args, i, "--workspace-name")
-      except CatchableError: discard
-    inc i
   if repoRoot.len == 0 or workspaceName.len == 0:
     return 0
   try:
@@ -59577,14 +59199,15 @@ proc triggerIsMembershipRepo(toolProvisioning: ToolProvisioningMode;
   except CatchableError:
     false
 
-proc runPostCommitLockCommand*(args: openArray[string]): int =
+proc runPostCommitLockCommand*(currentRepo: string): int =
   ## ``repro hooks dispatch post-commit --repo-root=<repo>`` (and the
   ## operator-facing manual entry point) routes here. The M19 policy is
   ## "best-effort": every failure is captured into the JSON report +
   ## the log file, and the process exits 0 so the originating commit
   ## never sees a non-zero hook status. RA-4 additionally fires a
   ## detached, non-blocking cache-ref push (see ``spawnAsyncCachePush``).
-  let parsed = parsePostCommitArgs(args)
+  let parsed = PostCommitArgs(currentRepo: currentRepo,
+    toolProvisioning: tpmPathOnly)
   let timestamp = isoTimestampNow()
   let workspaceRoot = resolvePostCommitWorkspaceRoot(
     parsed.currentRepo, parsed.workspaceRoot)
@@ -63091,7 +62714,7 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
         " lock-consistency refused: " &
         consistencyFailureEvidence(consistency.violations))
 
-proc runPreCommitLockCommand*(args: openArray[string]): int =
+proc runPreCommitLockCommand*(currentRepo: string): int =
   ## ``repro hooks dispatch pre-commit --repo-root=<repo>`` routes here.
   ##
   ## Returns 0 — the commit proceeds — except in three cases, each of which
@@ -63118,7 +62741,8 @@ proc runPreCommitLockCommand*(args: openArray[string]): int =
   ## makes this hook run neither writer — it says so, and only the H1 / H2
   ## consistency rules judge the commit. Only this site honours it; the
   ## lock-update node does not.
-  let parsed = parsePostCommitArgs(args)
+  let parsed = PostCommitArgs(currentRepo: currentRepo,
+    toolProvisioning: tpmPathOnly)
   let timestamp = isoTimestampNow()
   # The managed hook body cd's to the repo root before dispatching, so an
   # absent ``--current-repo`` still names the right repo.
@@ -63320,35 +62944,6 @@ proc appendManifestRefreshLog(line: string) =
   except CatchableError:
     discard
 
-proc parseManifestRefreshArgs(args: openArray[string]):
-    tuple[currentRepo, workspaceRoot: string; positional: seq[string]] =
-  ## Minimal argv parser for the post-merge / post-checkout wrappers.
-  ## The dispatcher in ``runHooksDispatchCommand`` has already peeled
-  ## off ``--repo-root`` (and any other flag the canonical hook body
-  ## forwards), then placed the remaining hook-supplied positional
-  ## args (``post-merge`` ``<squash-flag>`` / ``post-checkout``
-  ## ``<prev> <new> <flag>``) after ``--``. Unknown flags are silently
-  ## ignored — the hook must never raise on argv shape.
-  var sawDoubleDash = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if not sawDoubleDash:
-      if arg == "--":
-        sawDoubleDash = true
-        inc i
-        continue
-      if arg == "--current-repo" or arg.startsWith("--current-repo="):
-        try: result.currentRepo = valueFromFlag(args, i, "--current-repo")
-        except CatchableError: discard
-      elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-        try: result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-        except CatchableError: discard
-      # Tolerate other flags (forward-compat) without recording them.
-    else:
-      result.positional.add(arg)
-    inc i
-
 proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
                                   timestamp: string) =
   ## Workspace-Membership-Model.md — the automatic half of local-state
@@ -63395,13 +62990,19 @@ proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
     stderr.writeLine("  `repro workspace migrate --dry-run` re-reports this " &
       "at any time")
 
-proc runManifestRefreshHookCommand*(hookName: string;
-                                    args: openArray[string]): int =
+proc runManifestRefreshHookCommand*(hookName, currentRepo: string;
+                                    hookArgs: openArray[string]): int =
   ## Best-effort manifest-layer refresh for ``post-merge`` /
   ## ``post-checkout`` dispatch. Always returns 0 — the originating git
   ## operation must never see a non-zero hook status. The operator-facing
   ## trace lives in ``$HOME/.cache/repro/manifest-refresh.log``.
-  let parsed = parseManifestRefreshArgs(args)
+  ##
+  ## ``currentRepo`` is the repository the hook fired in (the dispatcher's
+  ## ``--repo-root``, "" for the current directory); ``hookArgs`` are the
+  ## arguments git gave the hook (post-merge ``<squash-flag>``,
+  ## post-checkout ``<prev> <new> <flag>``).
+  let parsed = (currentRepo: currentRepo, workspaceRoot: "",
+    positional: @hookArgs)
   let timestamp = isoTimestampNow()
 
   # post-checkout short-circuit #1 — git's own third argument. The contract
@@ -63583,9 +63184,6 @@ proc runManifestRefreshHookCommand*(hookName: string;
 #   - 1 — IO / resolve / VCS-tool failure unrelated to the gate logic.
 
 type
-  CheckMode* = enum
-    cmPrePush
-
   CheckFailure* = object
     ## One structured failure record per gate failure. ``repo`` is the
     ## workspace-relative path of the offending repo (or the empty
@@ -63818,35 +63416,6 @@ proc renderCheckTextLines*(report: CheckReport): seq[string] =
         " not checked against the lock (listed above as `" &
         ConsistencyNotCheckedNotice.strip() & "`)")
 
-type
-  CheckArgs* = object
-    mode*: CheckMode
-    workspaceRoot*: string
-    currentRepo*: string
-    pushedRefsPath*: string
-    json*: bool
-    toolProvisioning*: ToolProvisioningMode
-    hookRemoteName*: string
-    hookRemoteLocation*: string
-    skipCertificateGate*: bool
-      ## TC-3 / RA-32 — suppress the certificate-coverage stage of the
-      ## pre-push gate. Set ONLY by ``evaluateIssuancePreconditions`` (the
-      ## TC-1 issuance path), which REUSES the gate to decide whether a cert
-      ## is issuable: issuing a certificate must never itself require a
-      ## certificate (a chicken-and-egg that would make a project's FIRST
-      ## ``required`` cert un-issuable). The real pre-push hook leaves this
-      ## ``false`` so the gate enforces the policy as designed.
-    issuingForCurrentHead*: bool
-      ## Agents-Push-Gate.md §4.1 — set ONLY by
-      ## ``evaluateIssuancePreconditions``. The current repository's OWN HEAD
-      ## is exempt from the "unpublished" stage: its publication is the push a
-      ## certificate is being minted FOR, and the receiving-side gateway
-      ## (TC-6) refuses that push until the certificate exists. Requiring
-      ## publication first deadlocked the two. Every sibling in the closure
-      ## must still be published, and the current repo must still be clean.
-    report*: ReportSpec
-      ## Opt-in ``--write-report[=PATH]`` artifact.
-
 proc parseCheckMode(value: string): CheckMode =
   case value
   of "pre-push": cmPrePush
@@ -63920,55 +63489,40 @@ proc defaultCheckCurrentRepo(explicitWorkspaceRoot: string): string =
     return ""
   top
 
-proc parseCheckArgs*(args: openArray[string]): CheckArgs =
+proc checkArgsOf*(c: ReproCommandLineCheck): CheckArgs =
   ## ``repro check --mode=pre-push [--workspace-root=PATH]
   ## [--current-repo=PATH] [--pushed-refs=FILE]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``. ``--mode``
-  ## is REQUIRED — there is no implicit mode in the M18 surface.
-  ##
-  ## An omitted ``--current-repo`` defaults to the git worktree containing the
-  ## current directory (``defaultCheckCurrentRepo``), so a hand run and the
-  ## managed hook judge the same repository.
-  result.toolProvisioning = tpmPathOnly
-  var modeSet = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--mode" or arg.startsWith("--mode="):
-      result.mode = parseCheckMode(valueFromFlag(args, i, "--mode"))
-      modeSet = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
-      result.currentRepo = valueFromFlag(args, i, "--current-repo")
-    elif arg == "--pushed-refs" or arg.startsWith("--pushed-refs="):
-      result.pushedRefsPath = valueFromFlag(args, i, "--pushed-refs")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro check` flag: " & arg)
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro check`: " & arg)
-    inc i
-  if not modeSet:
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]`` from its
+  ## configuration. ``--mode`` is REQUIRED — there is no implicit mode —
+  ## and its absence is the command's own refusal.
+  if c.mode.len == 0:
     raise newException(ValueError,
       "`repro check` requires --mode=pre-push (no other modes are " &
         "supported yet)")
-  if result.currentRepo.len == 0:
+  result.mode = parseCheckMode(c.mode)
+  result.workspaceRoot = c.workspaceRoot
+  result.currentRepo = c.currentRepo
+  result.pushedRefsPath = c.pushedRefs
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  resolveCheckScope(result)
+
+proc resolveCheckScope*(parsed: var CheckArgs) =
+  ## The repository and workspace a check judges when they were not named.
+  ## An omitted ``--current-repo`` defaults to the git worktree containing the
+  ## current directory (``defaultCheckCurrentRepo``), so a hand run and the
+  ## managed hook judge the same repository; the workspace is then found by
+  ## walking up from it.
+  if parsed.currentRepo.len == 0:
     # A hand run must judge the commit the hook judges (CLI/check.md §"Scope:
     # the same verdict by hand and from the hook"), so the repository is
     # defaulted BEFORE the workspace walk below and that walk then runs
     # exactly as it does for the hook.
-    result.currentRepo = defaultCheckCurrentRepo(result.workspaceRoot)
-  if result.workspaceRoot.len == 0:
+    parsed.currentRepo = defaultCheckCurrentRepo(parsed.workspaceRoot)
+  if parsed.workspaceRoot.len == 0:
     # When invoked from inside a participating repo (the usual hook
     # call site) we walk up from ``--current-repo`` to discover the
     # workspace root. The walk keys on the WORKSPACE, not on a ``.repro/``
@@ -63980,19 +63534,19 @@ proc parseCheckArgs*(args: openArray[string]): CheckArgs =
     # and no-op. Falling back to the process cwd is unsafe for managed
     # hooks: test runners and nested invocations often run from a real
     # workspace while dispatching against an unrelated standalone repo.
-    if result.currentRepo.len > 0:
-      result.workspaceRoot = enclosingWorkspaceRoot(result.currentRepo)
-      if result.workspaceRoot.len == 0:
-        result.workspaceRoot = enclosingReproShell(result.currentRepo)
-    if result.workspaceRoot.len == 0:
-      result.workspaceRoot =
-        if result.currentRepo.len > 0: absolutePath(result.currentRepo)
+    if parsed.currentRepo.len > 0:
+      parsed.workspaceRoot = enclosingWorkspaceRoot(parsed.currentRepo)
+      if parsed.workspaceRoot.len == 0:
+        parsed.workspaceRoot = enclosingReproShell(parsed.currentRepo)
+    if parsed.workspaceRoot.len == 0:
+      parsed.workspaceRoot =
+        if parsed.currentRepo.len > 0: absolutePath(parsed.currentRepo)
         else: getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
-  if result.currentRepo.len > 0:
-    result.currentRepo = absolutePath(result.currentRepo)
-  if result.pushedRefsPath.len > 0:
-    result.pushedRefsPath = absolutePath(result.pushedRefsPath)
+  parsed.workspaceRoot = absolutePath(parsed.workspaceRoot)
+  if parsed.currentRepo.len > 0:
+    parsed.currentRepo = absolutePath(parsed.currentRepo)
+  if parsed.pushedRefsPath.len > 0:
+    parsed.pushedRefsPath = absolutePath(parsed.pushedRefsPath)
 
 proc resolveCheckProject(parsed: CheckArgs):
     tuple[resolved: ResolvedProject;
@@ -69152,14 +68706,11 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
 
 # ---- ``repro gateway <phase>`` dispatch ------------------------------------
 
-proc parseGatewayDirFlag(args: openArray[string]): string =
-  ## Extract ``--gateway-dir <PATH>`` (or ``--gateway-dir=PATH``). Defaults to
-  ## ``GIT_DIR`` / cwd so an operator can run the verb manually inside the bare.
-  for i, a in args:
-    if a == "--gateway-dir" and i + 1 < args.len:
-      return args[i + 1]
-    if a.startsWith("--gateway-dir="):
-      return a["--gateway-dir=".len .. ^1]
+proc gatewayDirOf(explicit: string): string =
+  ## The gateway bare: ``--gateway-dir`` when given, else ``GIT_DIR`` / cwd so
+  ## an operator can run the verb manually inside the bare.
+  if explicit.len > 0:
+    return explicit
   let gitDir = getEnv("GIT_DIR")
   if gitDir.len > 0: return gitDir
   getCurrentDir()
@@ -69911,7 +69462,7 @@ proc namesOfGatewayReposInState*(obs: WorkspaceGatewayObservation;
       result.add(one.repo & (if one.reason.len > 0: " (" & one.reason & ")"
                              else: ""))
 
-proc runGatewayMigrateCommand(args: openArray[string]): int =
+proc runGatewayMigrateCommand(workspaceRoot: string; dryRun: bool): int =
   ## ``repro gateway migrate [--workspace-root=PATH] [--dry-run]``.
   ##
   ## EXPLICIT AND OPT-IN, and that is not an accident of implementation order:
@@ -69920,16 +69471,7 @@ proc runGatewayMigrateCommand(args: openArray[string]): int =
   ## invokes this verb — not `sync`, not `hooks ensure`, not dev-shell entry.
   ## What it exists for at step 1 is to make §7.6.5's refusal a thing in the
   ## code with a caller, rather than a sentence in a runbook.
-  var workspaceRoot = ""
-  var dryRun = false
-  for arg in args:
-    if arg.startsWith("--workspace-root="):
-      workspaceRoot = arg["--workspace-root=".len .. ^1]
-    elif arg == "--dry-run":
-      dryRun = true
-    else:
-      stderr.writeLine("repro gateway migrate: unsupported flag: " & arg)
-      return 2
+  var workspaceRoot = workspaceRoot
   if workspaceRoot.len == 0:
     workspaceRoot = getCurrentDir()
   workspaceRoot = os.normalizedPath(absolutePath(workspaceRoot))
@@ -69939,7 +69481,7 @@ proc runGatewayMigrateCommand(args: openArray[string]): int =
     else: echo line
   swept.code
 
-proc runGatewayCommand*(args: openArray[string]): int =
+proc runGatewayCommand*(phase, explicitGatewayDir: string): int =
   ## ``repro gateway <phase> [--gateway-dir PATH]`` — the thin entry point the
   ## gateway bare's hooks invoke. Two phases:
   ##   - ``pre-receive``  : read ``<old> <new> <ref>`` lines from stdin, run the
@@ -69959,18 +69501,7 @@ proc runGatewayCommand*(args: openArray[string]): int =
   ## child that touches a DIFFERENT repository, and it gets the quarantine
   ## back only as a read-only alternate (``forwardingObjectStoreEnv``).
   let received = receiveHookObjectStore()
-  if args.len == 0:
-    stderr.writeLine("repro gateway: expected a phase " &
-      "(pre-receive | post-receive) or 'migrate'")
-    return 2
-  let phase = args[0]
-  if phase == "migrate":
-    # Not a receive phase: it reads no stdin stream and there is no gateway
-    # config to load yet (it is the thing that creates them). Dispatched here,
-    # ahead of the config read below, for exactly that reason.
-    return runGatewayMigrateCommand(
-      if args.len > 1: args[1 .. ^1] else: @[])
-  let gatewayDir = parseGatewayDirFlag(args)
+  let gatewayDir = gatewayDirOf(explicitGatewayDir)
   let gitBin = findExe("git")
   if gitBin.len == 0:
     stderr.writeLine("repro gateway: git not found on PATH; " &
@@ -73261,7 +72792,7 @@ proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
       published[path] = objectId
   0
 
-proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
+proc runCheckCommand*(parsed: CheckArgs; hookRemoteName = "";
                       hookRemoteLocation = "";
                       publicationMembers: seq[HookPublicationMember] = @[];
                       publicationWorkspace = ""): int =
@@ -73276,12 +72807,7 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
   ##         develop-override cleanliness / lock) failed. Git aborts
   ##         the push.
   ##   - 1 — IO / resolve / VCS-tool failure unrelated to the gate.
-  var parsed =
-    try:
-      parseCheckArgs(args)
-    except ValueError as err:
-      stderr.writeLine("repro check: " & err.msg)
-      return 1
+  var parsed = parsed
   parsed.hookRemoteName = hookRemoteName
   parsed.hookRemoteLocation = hookRemoteLocation
   case parsed.mode
@@ -73721,51 +73247,29 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       " hooks ensure --vcs " & repoRoot & "' and retry")
   (true, "")
 
-proc parsePushArgs(args: openArray[string]): PushArgs =
+proc pushArgsOf(c: ReproCommandLinePush): PushArgs =
   ## ``repro push [<project>] [--sync] [--merge|--rebase]
   ## [--certify|--no-certify] [--workspace-root=PATH] [--current-repo=PATH]
-  ## [--tool-provisioning=...] [--json]``.
-  result.toolProvisioning = tpmPathOnly
-  result.certify = true ## CLI/push.md: certify by default; --no-certify opts out.
-  var wantSync = false
-  var explicitFlavor = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
-      result.currentRepo = valueFromFlag(args, i, "--current-repo")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--sync":
-      wantSync = true
-    elif arg == "--merge":
-      result.syncMode = psmMerge
-      explicitFlavor = true
-    elif arg == "--rebase":
-      result.syncMode = psmRebase
-      explicitFlavor = true
-    elif arg == "--certify":
-      result.certify = true
-    elif arg == "--no-certify":
-      result.certify = false
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro push` flag: " & arg)
-    else:
-      if result.projectName.len > 0:
-        raise newException(ValueError,
-          "`repro push` takes at most one <project> argument; got an " &
-          "extra positional: " & arg)
-      result.projectName = arg
-    inc i
+  ## [--tool-provisioning=...] [--json]`` from its configuration.
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  # Certify by default; --no-certify opts out.
+  result.certify = c.certify
+  result.workspaceRoot = c.workspaceRoot
+  result.currentRepo = c.currentRepo
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.projectName = c.project
+  if c.merge and c.rebase:
+    raise newException(ValueError,
+      "--merge and --rebase name two ways to reconcile; give one")
+  let wantSync = c.sync
+  let explicitFlavor = c.merge or c.rebase
+  if c.merge:
+    result.syncMode = psmMerge
+  elif c.rebase:
+    result.syncMode = psmRebase
   # ``--merge``/``--rebase`` imply ``--sync`` (you cannot pick a reconcile
   # flavor without reconciling). A bare ``--sync`` defaults to merge — the
   # same conservative, preserve-developer-intent default repo tooling uses
@@ -76441,7 +75945,7 @@ proc writePushReport(report: PushReport; destination: string) =
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2))
 
-proc runPushCommand*(args: openArray[string]): int =
+proc runPushCommand*(c: ReproCommandLinePush): int =
   ## ``repro push [<project>] [--sync] [--merge|--rebase]
   ## [--certify|--no-certify]`` per CLI/push.md.
   ##
@@ -76454,7 +75958,7 @@ proc runPushCommand*(args: openArray[string]): int =
   ##         errored.
   let parsed =
     try:
-      parsePushArgs(args)
+      pushArgsOf(c)
     except ValueError as err:
       stderr.writeLine("repro push: " & err.msg)
       return 1
@@ -76725,68 +76229,29 @@ type
       ## the shared-clone detector finds, instead of only reporting them.
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc parseWorkspaceStatusArgs(args: openArray[string]): WorkspaceStatusArgs =
-  ## ``repro workspace status`` argv parser. The single optional
-  ## positional is the project name (only required when no
-  ## ``.repro/workspace-state.toml`` is present — same dispatch rule as
-  ## M10's sync and M11's lock commands). Optional flags:
-  ##   ``--workspace-root=PATH``
-  ##   ``--tool-provisioning=path|nix|tarball|scoop``
-  ##   ``--json``  — print the JSON report to stdout in place of text.
-  ##   ``--stashes`` — query/display stash count.
-  ##   ``--files`` — query/display modified/untracked file counts and clean/dirty states.
-  ##   ``--ahead-behind`` — query/display ahead/behind commit counts.
-  ##   ``--unmerged`` — query/display unmerged branches.
-  ##   ``--file-details`` — list each changed path with its porcelain ``XY``
-  ##     status (staged/unstaged etc.), not just the modified/untracked counts.
-  ##     An additive opt-in: it does NOT participate in the "no selector → all
-  ##     on" default, so `status --file-details` augments the full default
-  ##     output rather than narrowing it. Implies file querying.
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--stashes":
-      result.stashes = true
-    elif arg == "--files":
-      result.files = true
-    elif arg == "--ahead-behind":
-      result.aheadBehind = true
-    elif arg == "--unmerged":
-      result.unmerged = true
-    elif arg == "--file-details":
-      result.fileDetails = true
-    elif arg == "--fix":
-      result.fix = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace status` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace status`: " &
-          arg)
-    inc i
+proc workspaceStatusArgsOf(c: ReproCommandLineWorkspaceStatus):
+    WorkspaceStatusArgs =
+  ## ``repro workspace status`` from its configuration. With no section
+  ## selector every section is reported.
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.json = c.json
+  result.stashes = c.stashes
+  result.files = c.files
+  result.aheadBehind = c.aheadBehind
+  result.unmerged = c.unmerged
+  result.fileDetails = c.fileDetails
+  result.fix = c.fix
+  result.report = reportSpecOf(c)
+  result.projectName = c.project
   if not (result.stashes or result.files or result.aheadBehind or result.unmerged):
     result.stashes = true
     result.files = true
     result.aheadBehind = true
     result.unmerged = true
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
 
 proc resolveWorkspaceStatusProject(parsed: WorkspaceStatusArgs):
     tuple[resolved: ResolvedProject;
@@ -77111,7 +76576,7 @@ proc writeWorkspaceStatusReport(report: WorkspaceStatusReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspaceStatusCommand*(args: openArray[string]): int =
+proc runWorkspaceStatusCommand*(c: ReproCommandLineWorkspaceStatus): int =
   ## ``repro workspace status [<project>] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
@@ -77119,7 +76584,7 @@ proc runWorkspaceStatusCommand*(args: openArray[string]): int =
   ##   - 0 — status gathered (with whatever drift the live workspace
   ##         exhibits — drift is information, not a failure).
   ##   - 1 — IO failure, missing project, or resolver error.
-  let parsed = parseWorkspaceStatusArgs(args)
+  let parsed = workspaceStatusArgsOf(c)
   let report = executeWorkspaceStatus(parsed)
   writeWorkspaceStatusReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "status"))
@@ -77200,33 +76665,14 @@ type
     json: bool
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc parseWorkspaceListArgs(args: openArray[string]): WorkspaceListArgs =
-  ## ``repro workspace list`` argv parser. Same dispatch rules as
-  ## status — optional positional ``<project>`` for single-project
-  ## mode, ``--workspace-root=PATH``, ``--json``. No
-  ## ``--tool-provisioning``: list does no live VCS work.
-  result.workspaceRoot = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace list` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace list`: " & arg)
-    inc i
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+proc workspaceListArgsOf(c: ReproCommandLineWorkspaceList):
+    WorkspaceListArgs =
+  ## ``repro workspace list`` from its configuration.
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.projectName = c.project
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
 
 proc resolveWorkspaceListProject(parsed: WorkspaceListArgs):
     ResolvedProject =
@@ -77301,14 +76747,14 @@ proc writeWorkspaceListReport(report: WorkspaceListReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspaceListCommand*(args: openArray[string]): int =
+proc runWorkspaceListCommand*(c: ReproCommandLineWorkspaceList): int =
   ## ``repro workspace list [<project>] [--workspace-root=PATH]
   ## [--json]``.
   ##
   ## Exit codes (per M12 design — read-only command):
   ##   - 0 — repo list emitted.
   ##   - 1 — IO failure, missing project, or resolver error.
-  let parsed = parseWorkspaceListArgs(args)
+  let parsed = workspaceListArgsOf(c)
   let report = executeWorkspaceList(parsed)
   writeWorkspaceListReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "list"))
@@ -80409,32 +79855,13 @@ type
     json: bool
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc parseWorkspaceManifestsArgs(args: openArray[string]):
+proc workspaceManifestsArgsOf(c: ReproCommandLineWorkspaceManifests):
     WorkspaceManifestsArgs =
-  ## ``repro workspace manifests`` argv parser. No project positional
-  ## (the workspace.toml carries the project name); accepts only
-  ## ``--workspace-root=PATH`` and ``--json``.
-  result.workspaceRoot = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace manifests` flag: " & arg)
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace manifests`: " &
-          arg)
-    inc i
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  ## ``repro workspace manifests`` from its configuration.
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
 
 proc layerProvenanceString(entry: ManifestLayer): string =
   ## Mirror compose.nim's ``layerLabel`` so this report's
@@ -80563,7 +79990,7 @@ proc writeWorkspaceManifestsReport(report: WorkspaceManifestsReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
+proc runWorkspaceManifestsCommand*(c: ReproCommandLineWorkspaceManifests): int =
   ## ``repro workspace manifests [--workspace-root=PATH] [--json]``.
   ##
   ## Exit codes (per M12 design — read-only command):
@@ -80572,7 +79999,7 @@ proc runWorkspaceManifestsCommand*(args: openArray[string]): int =
   ##         false`` and the text renderer prints the single
   ##         "no layered workspace" line).
   ##   - 1 — IO failure or malformed workspace.toml.
-  let parsed = parseWorkspaceManifestsArgs(args)
+  let parsed = workspaceManifestsArgsOf(c)
   let report = executeWorkspaceManifests(parsed)
   writeWorkspaceManifestsReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "manifests"))
@@ -80859,37 +80286,16 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
   for d in report.diagnostics:
     result.add("workspace shared-clones: error: " & d)
 
-proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
-  ## ``repro workspace shared-clones <verb> [<project>] [--workspace-root]
-  ## [--json]``. ``verb`` defaults to ``list`` when omitted.
-  result.verb = ""
-  result.workspaceRoot = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--force":
-      # RA-15: bypass the budget gate for the manual ``gc`` trigger.
-      result.force = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace shared-clones` flag: " & arg)
-    elif result.verb.len == 0:
-      result.verb = arg
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to " &
-          "`repro workspace shared-clones`: " & arg)
-    inc i
-  if result.verb.len == 0:
-    result.verb = "list"
+proc sharedClonesArgsOf(c: ReproCommandLineWorkspaceSharedClones):
+    SharedClonesArgs =
+  ## ``repro workspace shared-clones [<verb>] [<project>]`` from its
+  ## configuration.
+  result.json = c.json
+  # Bypass the budget gate for the manual ``gc`` trigger.
+  result.force = c.force
+  result.report = reportSpecOf(c)
+  result.verb = if c.verb.len > 0: c.verb else: "list"
+  result.projectName = c.project
   # ``gc`` and ``maintenance`` are aliases for the RA-15 maintenance pass.
   if result.verb == "maintenance":
     result.verb = "gc"
@@ -80897,9 +80303,8 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
         "list|rewire|consolidate|root|gc|maintenance|migrate, got: " & result.verb)
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
 
 proc liveWorkspaceRootsForCache(workspaceRoot: string;
                                 warnings: var seq[string]): seq[string] =
@@ -81204,11 +80609,11 @@ proc writeSharedClonesReport(report: SharedClonesReport;
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runWorkspaceSharedClonesCommand*(args: openArray[string]): int =
+proc runWorkspaceSharedClonesCommand*(c: ReproCommandLineWorkspaceSharedClones): int =
   ## ``repro workspace shared-clones <verb> [<project>]
   ## [--workspace-root=PATH] [--json] [--force]``. ``maintenance`` is an alias
   ## for ``gc``; ``--force`` bypasses the gc budget gate.
-  let parsed = parseSharedClonesArgs(args)
+  let parsed = sharedClonesArgsOf(c)
   let report = executeSharedClones(parsed)
   # ``root`` prints just the path; do not write a report file for it (it
   # makes no per-repo claims).
@@ -81303,64 +80708,24 @@ proc toJsonNode*(report: WorkspaceForallReport): JsonNode =
   result["skipped"] = %report.skipped
   result["exitCode"] = %report.exitCode
 
-proc parseWorkspaceForallArgs(args: openArray[string]):
+proc workspaceForallArgsOf(c: ReproCommandLineWorkspaceForall):
     WorkspaceForallArgs =
-  ## ``repro workspace forall [<project>] -c <cmd> [--workspace-root=PATH]
-  ## [--fail-fast] [--keep-going] [--quiet] [--json]``.
-  ##
-  ## ``-c`` / ``--command`` takes the shell command to run in every repo
-  ## (matching ``repo forall -c``). The first bare positional is an optional
-  ## project selector; anything after that is rejected so a stray word is
-  ## not silently swallowed.
-  result.workspaceRoot = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "-c":
-      # Short form: the next argv element is the command body.
-      if i + 1 >= args.len:
-        raise newException(ValueError, "-c requires a command")
-      inc i
-      result.command = args[i]
-      result.haveCommand = true
-    elif arg.startsWith("-c="):
-      result.command = arg.split("=", maxsplit = 1)[1]
-      result.haveCommand = true
-    elif arg == "--command" or arg.startsWith("--command="):
-      result.command = valueFromFlag(args, i, "--command")
-      result.haveCommand = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--fail-fast":
-      result.failFast = true
-    elif arg == "--keep-going" or arg == "--ignore-errors":
-      # Explicit affirmation of the default (run all, report each, exit
-      # non-zero if any failed). Accepted as a no-op so scripts can be
-      # explicit about the policy.
-      result.failFast = false
-    elif arg == "--quiet":
-      result.quiet = true
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro workspace forall` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro workspace forall`: " &
-          arg)
-    inc i
+  ## ``repro workspace forall -c '<command>'`` from its configuration.
+  ## ``--keep-going`` / ``--ignore-errors`` affirm the default (run all,
+  ## report each, exit non-zero if any failed) and win over ``--fail-fast``.
+  result.command = c.command
+  result.haveCommand = c.command.len > 0
+  result.failFast = c.failFast and not (c.keepGoing or c.ignoreErrors)
+  result.quiet = c.quiet
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.projectName = c.project
   if not result.haveCommand or result.command.len == 0:
     raise newException(ValueError,
       "`repro workspace forall` requires a command: " &
         "`repro workspace forall -c '<command>'`")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
 
 proc runForallInRepo(repo: HookRepoTarget; command, projectName: string):
     tuple[exitCode: int; output: string] =
@@ -81488,11 +80853,11 @@ proc writeWorkspaceForallReport(report: WorkspaceForallReport;
     # command's exit code.
     discard
 
-proc runWorkspaceForallCommand*(args: openArray[string]): int =
+proc runWorkspaceForallCommand*(c: ReproCommandLineWorkspaceForall): int =
   ## ``repro workspace forall [<project>] -c <cmd> [flags]``. The
   ## ``repo forall -c`` equivalent — runs ``<cmd>`` via the shell in every
   ## participating repo (RA-20).
-  let parsed = parseWorkspaceForallArgs(args)
+  let parsed = workspaceForallArgsOf(c)
   let report = executeWorkspaceForall(parsed)
   writeWorkspaceForallReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "forall"))
@@ -81886,7 +81251,7 @@ proc cutsFromRole(parsed: BranchArgs): bool =
   ## or a shorthand) rather than from the source HEADs.
   parsed.fromRole.role.len > 0
 
-proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
+proc branchArgsOf*[T](c: T; verb = "repro branch";
                       requirePath = false): BranchArgs =
   ## ``repro branch [<path>] [--branch=NAME] [--existing-branch]
   ## [--include-changes] [--workspace-root=PATH]
@@ -81910,74 +81275,44 @@ proc parseBranchArgs*(args: openArray[string]; verb = "repro branch";
   ## no-argument show form belongs to ``repro branch`` alone, and a ``new``
   ## that quietly answered a question instead of creating anything would be the
   ## same class of surprise the verb split exists to remove.
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
-  result.fetch = true
-  var explicitBranch = ""
-  var fetchGiven = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--clone-objects" or arg.startsWith("--clone-objects="):
-      result.cloneObjects = parseCloneObjects(valueFromFlag(args, i,
-          "--clone-objects"))
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--branch" or arg.startsWith("--branch="):
-      explicitBranch = valueFromFlag(args, i, "--branch")
-    elif arg == "--existing-branch":
-      result.existingBranch = true
-    elif consumeBranchRoleFlag(args, i, result.fromRole, verb,
-        roleFlag = "--from"):
-      # ``--from=<role>`` or a shorthand (§4.2).
-      discard
-    elif arg == "--fetch":
-      result.fetch = true
-      fetchGiven = true
-    elif arg == "--no-fetch":
-      result.fetch = false
-      fetchGiven = true
-    elif arg == "--include-changes":
-      result.includeChanges = true
-    elif arg == "--unpublished" or arg.startsWith("--unpublished="):
-      let raw = valueFromFlag(args, i, "--unpublished").strip().toLowerAscii()
-      case raw
-      of "refuse": result.unpublished = upRefuse
-      of "carry": result.unpublished = upCarry
-      of "declared": result.unpublished = upDeclared
-      else:
-        raise newException(ValueError,
-          "unsupported `--unpublished=" & raw & "` value; expected one of " &
-            "refuse (the default: stop and name the repos), carry (bring the " &
-            "unpublished commits, preserving their source branch name) or " &
-            "declared (start those repos from their manifest-declared " &
-            "revision instead)")
-    elif arg == "--projects" or arg.startsWith("--projects="):
-      # Comma-separated and repeatable both work, so the flag reads the same
-      # whether it is typed by hand or assembled by a script.
-      for name in valueFromFlag(args, i, "--projects").split(','):
-        let trimmed = name.strip()
-        if trimmed.len > 0 and trimmed notin result.projects:
-          result.projects.add(trimmed)
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `" & verb & "` flag: " & arg & retiredFlagHint(arg))
-    elif result.forkPath.len == 0:
-      result.forkPath = arg
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.workspaceRoot = c.workspaceRoot
+  if c.cloneObjects.len > 0:
+    result.cloneObjects = parseCloneObjects(c.cloneObjects)
+  let explicitBranch = c.branch
+  result.existingBranch = c.existingBranch
+  # ``--from=<role>`` or a shorthand.
+  result.fromRole = roleChoiceOf(c, c.fromRole, verb, roleFlag = "--from")
+  if c.fetch and c.noFetch:
+    raise newException(ValueError,
+      "`" & verb & "` was given both --fetch and --no-fetch; give one")
+  let fetchGiven = c.fetch or c.noFetch
+  result.fetch = not c.noFetch
+  result.includeChanges = c.includeChanges
+  if c.unpublished.len > 0:
+    let raw = c.unpublished.strip().toLowerAscii()
+    case raw
+    of "refuse": result.unpublished = upRefuse
+    of "carry": result.unpublished = upCarry
+    of "declared": result.unpublished = upDeclared
     else:
       raise newException(ValueError,
-        "unexpected positional argument to `" & verb & "`: " & arg &
-          " (the single positional is the destination PATH; use " &
-          "`--branch=NAME` to name the branch something else)")
-    inc i
+        "unsupported `--unpublished=" & raw & "` value; expected one of " &
+          "refuse (the default: stop and name the repos), carry (bring the " &
+          "unpublished commits, preserving their source branch name) or " &
+          "declared (start those repos from their manifest-declared " &
+          "revision instead)")
+  # Comma-separated and repeatable both work, so the flag reads the same
+  # whether it is typed by hand or assembled by a script.
+  for name in c.projects:
+    let trimmed = name.strip()
+    if trimmed.len > 0 and trimmed notin result.projects:
+      result.projects.add(trimmed)
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.forkPath = c.path
   result.workspaceRoot = resolveInvokedWorkspaceRoot(result.workspaceRoot)
   if result.forkPath.len == 0:
     if requirePath:
@@ -82462,14 +81797,14 @@ proc writeBranchReport(report: BranchReport; destination: string) =
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
+proc runBranchCommand*[T](c: T; verb = "repro branch";
                        requirePath = false): int =
   ## ``repro branch [<path>] [--branch=NAME] [--existing-branch]
   ## [--include-changes] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
   ## ``repro workspace new <path>`` is the same command under the workspace
-  ## namespace, invoked with ``requirePath = true`` — see ``parseBranchArgs``.
+  ## namespace, invoked with ``requirePath = true`` — see ``branchArgsOf``.
   ##
   ## See the M14 block comment above for the contract. With
   ## ``--write-report`` it writes a ``branch-report.json`` artifact under
@@ -82485,42 +81820,9 @@ proc runBranchCommand*(args: openArray[string]; verb = "repro branch";
   ##
   ## PS-6 — the new workspace inherits this workspace's enabled PROJECT SET;
   ## ``--projects=A,B`` replaces it. See ``executeBranchFork``.
-  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo verb & " [<path>] [--branch=NAME] [--existing-branch] " &
-      "[--include-changes] [--unpublished=refuse|carry|declared] " &
-      "[--projects=A,B] [--from=<role> | --mainline | --unstable | " &
-      "--staging | --stable | --production | --lts] " &
-      "[--fetch|--no-fetch] " &
-      "[--workspace-root=PATH] [--json] [--write-report[=PATH]]"
-    echo "  (no argument)     print the current workspace branch"
-    echo "  <path>            fork into a NEW workspace directory at <path>;"
-    echo "                    the branch is named after the path's basename"
-    echo "  --branch=NAME     name the branch something other than the basename"
-    echo "  --existing-branch check out an EXISTING branch instead of creating one"
-    echo "  --include-changes also copy the source's uncommitted work"
-    echo "  --unpublished=…   what to do with a source repo whose HEAD is on"
-    echo "                    no remote: refuse (default), carry (bring it,"
-    echo "                    keeping its source branch name) or declared"
-    echo "                    (start that repo from its manifest revision)"
-    echo "  --projects=A,B    give the new workspace THIS project set instead"
-    echo "                    of inheriting the current one (repeatable)"
-    echo "  --from=<role>     take the repo SET from this workspace but start"
-    echo "                    every repo from the branch <role> resolves to"
-    echo "                    there (mainline, unstable, staging, stable,"
-    echo "                    production, lts, or a custom role) instead of"
-    echo "                    from its HEAD; an undeclared role falls back"
-    echo "                    toward the mainline"
-    echo "  --mainline, --unstable, --staging, --stable, --production, --lts"
-    echo "                    shorthands for --from=<role>"
-    echo "  --fetch           refresh those role branches first (the default);"
-    echo "  --no-fetch        cut from the role refs already on disk"
-    echo ""
-    echo "  The new workspace inherits this workspace's enabled projects."
-    echo "  To switch THIS workspace onto a branch, use `repro switch`."
-    return 0
   var parsed: BranchArgs
   try:
-    parsed = parseBranchArgs(args, verb, requirePath)
+    parsed = branchArgsOf(c, verb, requirePath)
     # §4.4: a role this workspace does not declare is a usage error, decided
     # before anything is fetched or created.
     requireDeclaredRole(parsed.workspaceRoot, parsed.fromRole.role, "--from")
@@ -82869,7 +82171,7 @@ type
     toolProvisioning: ToolProvisioningMode
     report: ReportSpec   ## Opt-in ``--write-report[=PATH]`` artifact.
 
-proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
+proc switchArgsOf*[T](c: T): SwitchArgs =
   ## ``repro switch <branch> [-b|--new-branch] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``, or
   ## ``repro switch --mainline [...]``. The positional ``<branch>`` is
@@ -82879,42 +82181,21 @@ proc parseSwitchArgs*(args: openArray[string]): SwitchArgs =
   ## ``--fetch`` is the DEFAULT (CLI/switch.md §"Fetching"): "switch me to
   ## `dev`" means the `dev` that exists now, not whatever the last fetch left
   ## behind. ``--no-fetch`` restores purely local classification.
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
-  result.fetch = true
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "-b" or arg == "--new-branch":
-      result.newBranch = true
-    elif consumeBranchRoleFlag(args, i, result.role, "repro switch"):
-      # ``--to=<role>`` or a shorthand; ``--mainline`` is ``--to=mainline``.
-      discard
-    elif arg == "--fetch":
-      result.fetch = true
-    elif arg == "--no-fetch":
-      result.fetch = false
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--yes" or arg == "--force":
-      result.assumeYes = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro switch` flag: " & arg)
-    elif result.branchName.len == 0:
-      result.branchName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro switch`: " & arg)
-    inc i
+  result.workspaceRoot = c.workspaceRoot
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.newBranch = c.newBranch
+  # ``--to=<role>`` or a shorthand; ``--mainline`` is ``--to=mainline``.
+  result.role = roleChoiceOf(c, c.toRole, "repro switch")
+  if c.fetch and c.noFetch:
+    raise newException(ValueError,
+      "`repro switch` was given both --fetch and --no-fetch; give one")
+  result.fetch = not c.noFetch
+  result.json = c.json
+  result.assumeYes = c.yes
+  result.report = reportSpecOf(c)
+  result.branchName = c.branch
   # A role names the target per repo, so a positional branch or ``-b``
   # alongside it is a contradiction rather than a precedence question (§4.1).
   # Refusing is the only honest answer: silently letting one win would switch
@@ -83741,7 +83022,7 @@ proc writeSwitchReport(report: SwitchReport; destination: string) =
   createDir(parentDir(destination))
   writeFile(destination, pretty(report.toJsonNode(), indent = 2) & "\n")
 
-proc runSwitchCommand*(args: openArray[string]): int =
+proc runSwitchCommand*[T](c: T): int =
   ## ``repro switch <branch> [-b|--new-branch] [--workspace-root=PATH]
   ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
   ##
@@ -83751,30 +83032,9 @@ proc runSwitchCommand*(args: openArray[string]): int =
   ## ``--write-report=PATH``) so a script consumer has a parseable record of
   ## what happened, in addition to the stdout-formatted text lines.
   ## Without ``--write-report`` nothing is written to disk.
-  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro switch <branch>|--to=<role>|--mainline|--unstable|--staging|" &
-      "--stable|--production|--lts [-b|--new-branch] [--no-fetch] " &
-      "[--yes] [--workspace-root=PATH] [--json] [--write-report[=PATH]]"
-    echo "  <branch>          switch every participating repo onto <branch>,"
-    echo "                    stashing and restoring per-repo work in progress"
-    echo "  --to=<role>       switch each repo onto the branch <role> resolves"
-    echo "                    to there (mainline, unstable, staging, stable,"
-    echo "                    production, lts, or a custom role); an undeclared"
-    echo "                    role falls back toward the mainline"
-    echo "  --mainline, --unstable, --staging, --stable, --production, --lts"
-    echo "                    shorthands for --to=<role>; --mainline puts each"
-    echo "                    repo on ITS declared mainline (dev / latest / …)"
-    echo "  -b, --new-branch  create <branch> across every repo first"
-    echo "  --fetch           fetch before switching, and fast-forward the"
-    echo "                    branch landed on (DEFAULT)"
-    echo "  --no-fetch        classify against local refs only (offline)"
-    echo "  --yes, --force    skip the per-repo confirmation preview"
-    echo ""
-    echo "  To fork a NEW workspace directory instead, use `repro branch`."
-    return 0
   var parsed: SwitchArgs
   try:
-    parsed = parseSwitchArgs(args)
+    parsed = switchArgsOf(c)
     # §4.4: a role this workspace does not declare is a usage error, decided
     # before anything is fetched.
     requireDeclaredRole(parsed.workspaceRoot, parsed.role.role, "--to")
@@ -83907,47 +83167,35 @@ proc toJsonNode*(report: AddReport): JsonNode =
   result["diagnostic"] = %report.diagnostic
   result["exitCode"] = %report.exitCode
 
-proc parseAddArgs*(args: openArray[string]): AddArgs =
-  ## ``repro add <repo> --remote=URL [--revision=R] [--develop|--binary|
-  ## --no-develop|--no-membership] [--depends-of=REPO] [--workspace-root=PATH]
-  ## [--dry-run] [--json] [--tool-provisioning=...]``.
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
+proc addArgsOf*(c: ReproCommandLineAdd): AddArgs =
+  ## ``repro add <repo> --remote=<url> [--develop|--binary|--no-membership]
+  ## [--revision=REV] [--depends-of=REPO] [--dry-run] [--json]`` from its
+  ## configuration. The mode flags name one mode; two different ones are a
+  ## contradiction.
+  result.workspaceRoot = c.workspaceRoot
+  result.remoteUrl = c.remote
+  result.revision = c.revision
+  result.dependsOf = c.dependsOf
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
   result.mode = amPolicy
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--remote" or arg.startsWith("--remote="):
-      result.remoteUrl = valueFromFlag(args, i, "--remote")
-    elif arg == "--revision" or arg.startsWith("--revision="):
-      result.revision = valueFromFlag(args, i, "--revision")
-    elif arg == "--depends-of" or arg.startsWith("--depends-of="):
-      result.dependsOf = valueFromFlag(args, i, "--depends-of")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--develop":
-      result.mode = amDevelop
-    elif arg == "--binary" or arg == "--no-develop":
-      result.mode = amBinary
-    elif arg == "--no-membership":
-      result.mode = amNoMembership
-    elif arg == "--dry-run":
-      result.dryRun = true
-    elif arg == "--json":
-      result.json = true
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro add` flag: " & arg)
-    elif result.target.len == 0:
-      result.target = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro add`: " & arg)
-    inc i
+  var modes: seq[string]
+  if c.develop:
+    result.mode = amDevelop
+    modes.add("--develop")
+  if c.binary:
+    result.mode = amBinary
+    modes.add("--binary")
+  if c.noMembership:
+    result.mode = amNoMembership
+    modes.add("--no-membership")
+  if modes.len > 1:
+    raise newException(ValueError,
+      "`repro add` was given " & modes.join(" and ") & "; name one mode")
+  result.dryRun = c.dryRun
+  result.json = c.json
+  result.target = c.repo
   if result.target.len == 0:
     raise newException(ValueError,
       "`repro add` requires a repo name positional argument")
@@ -83955,9 +83203,9 @@ proc parseAddArgs*(args: openArray[string]): AddArgs =
     raise newException(ValueError,
       "`repro add` requires `--remote=<fetch-url>` so the develop-vs-binary " &
         "policy can classify the dependency's origin")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot =
+    if result.workspaceRoot.len > 0: absolutePath(result.workspaceRoot)
+    else: getCurrentDir()
 
 proc resolveAddProject(parsed: AddArgs): ResolvedProject =
   ## MO-10 — delegates the single-project resolution to the shared
@@ -84231,11 +83479,11 @@ proc renderAddTextLines*(report: AddReport): seq[string] =
     result.add("repro add: recorded depends edge: '" & report.dependsEdgeOn &
       "' -> '" & report.target & "'")
 
-proc runAddCommand*(args: openArray[string]): int =
+proc runAddCommand*(c: ReproCommandLineAdd): int =
   ## ``repro add <repo> --remote=URL [--develop|--binary|--no-membership]
   ## [--depends-of=REPO] …``. RA-22 develop-mode policy + workspace
   ## membership (CLI/add.md, Workspace-And-Develop-Mode.md).
-  let parsed = parseAddArgs(args)
+  let parsed = addArgsOf(c)
   let report = executeAdd(parsed)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
@@ -84305,41 +83553,22 @@ proc toJsonNode*(report: RemoveReport): JsonNode =
     repos.add(obj)
   result["repos"] = repos
 
-proc parseRemoveArgs*(args: openArray[string]): RemoveArgs =
-  ## ``repro remove <repo> [--workspace-root=PATH] [--force] [--dry-run]
-  ## [--tool-provisioning=...] [--json]``.
-  result.workspaceRoot = ""
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--force" or arg == "--yes":
-      result.force = true
-    elif arg == "--dry-run":
-      result.dryRun = true
-    elif arg == "--json":
-      result.json = true
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro remove` flag: " & arg)
-    elif result.target.len == 0:
-      result.target = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro remove`: " & arg)
-    inc i
+proc removeArgsOf*(c: ReproCommandLineRemove): RemoveArgs =
+  ## ``repro remove <repo> [--force|--yes] [--dry-run] [--json]`` from its
+  ## configuration.
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.force = c.force
+  result.dryRun = c.dryRun
+  result.json = c.json
+  result.target = c.repo
   if result.target.len == 0:
     raise newException(ValueError,
       "`repro remove` requires a repo name positional argument")
-  if result.workspaceRoot.len == 0:
-    result.workspaceRoot = getCurrentDir()
-  result.workspaceRoot = absolutePath(result.workspaceRoot)
+  result.workspaceRoot =
+    if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot)
+    else: getCurrentDir()
 
 proc resolveRemoveProject(parsed: RemoveArgs): ResolvedProject =
   ## MO-10 — delegates to the shared ``resolveWorkspaceProjectShared`` ladder
@@ -84764,11 +83993,11 @@ proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
     result.add("repro remove: dropped '" & report.target &
       "' from project '" & report.project & "'")
 
-proc runRemoveCommand*(args: openArray[string]): int =
+proc runRemoveCommand*(c: ReproCommandLineRemove): int =
   ## ``repro remove <repo> [--force] [--dry-run] [--json]
   ## [--workspace-root=PATH]``. RA-9 destructive-command safety: preview +
   ## confirm + refuse-cleanly-in-non-TTY for a workspace repo removal.
-  let parsed = parseRemoveArgs(args)
+  let parsed = removeArgsOf(c)
   let report = executeRemove(parsed)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
@@ -91786,91 +91015,89 @@ type
       ## re-pin of `Locking-And-Solver.md` §"Targeted re-pin". Empty is the
       ## ordinary whole-lock refresh.
 
-proc parseLockVerbArgs(rest: openArray[string]; verb: string;
-                       projectDir, inputsOverride, lockOverride,
-                       platformOverride: var string; asJson: var bool;
-                       gen: var LockVerbOptions): int =
-  ## Shared arg parser for ``repro lock solve`` / ``refresh`` / ``validate``:
-  ## ``[<projectDir>] [--inputs <file>] [--lock <file>] [--platform <p>]
-  ## [--strategy <default|lowest|highest|lowest-direct>] [--lowest]
-  ## [--highest] [--registry <url>] [--write] [--json]``, plus, for
-  ## ``refresh`` only, ``[--allow-pin-regression=<sibling>[,<sibling>…]]``
-  ## (see `gateRefreshedSiblingPins`) and ``[--repin=<package>[,<package>…]]``
-  ## (see `runLockGenerationVerb`), and ``--allow-stale-manifest``.
-  ## Returns 0 on success, 2 on a usage error
-  ## (diagnostic already emitted).
+type
+  LockVerbInputs = object
+    ## ``repro lock solve`` / ``refresh`` / ``validate`` read from their
+    ## configuration.
+    projectDir, inputsOverride, lockOverride, platformOverride: string
+    asJson: bool
+    gen: LockVerbOptions
+    solveFlags: seq[string]
+      ## The flags given that shape a solve (what to re-solve, under which
+      ## strategy, from which inputs or registries), for the refusal on a
+      ## host of another platform.
+
+proc lockVerbInputsOf[T](c: T; verb: string; r: var LockVerbInputs): int =
+  ## ``repro lock solve`` / ``refresh`` / ``validate`` from their
+  ## configuration: ``[<projectDir>] [--inputs <file>] [--lock <file>]
+  ## [--platform <p>] [--strategy <default|lowest|highest|lowest-direct>]
+  ## [--lowest] [--highest] [--registry <url>] [--write] [--json]``, plus,
+  ## for ``refresh`` only, ``[--provisioning]``,
+  ## ``[--allow-pin-regression=<sibling>[,<sibling>…]]`` (see
+  ## `gateRefreshedSiblingPins`), ``[--repin=<package>[,<package>…]]`` (see
+  ## `runLockGenerationVerb`) and ``--allow-stale-manifest``. Returns 0 on
+  ## success, 2 on a usage error (diagnostic already emitted).
   ##
   ## ``--lowest`` / ``--highest`` are the spellings `Locking-And-Solver.md`
   ## §"CLI Surface" names for `repro lock solve`, and NLF-M6 ships them as
-  ## SUGAR over ``--strategy``: they assign the same field, so there is one
-  ## strategy value and not two ways for it to be set. A later flag wins,
-  ## which is the ordinary last-flag-wins rule every other option here
-  ## follows.
+  ## SUGAR over ``--strategy``: one strategy value, and naming two different
+  ## ones is refused.
   ##
   ## ``--strategy`` is `Named-Lock-Files.md` §5.5's whole-build spelling.
   ## ``--registry`` names a metadata index the generation wave may reach; with
   ## none given the generation emits no ``netFetch`` edge at all and the
   ## declared candidate versions are the whole universe, which is the
   ## behaviour every pre-NLF-M5 invocation had.
-  var i = 0
-  while i < rest.len:
-    let arg = rest[i]
-    if arg == "--inputs" or arg.startsWith("--inputs="):
-      inputsOverride = valueFromFlag(rest, i, "--inputs")
-    elif arg == "--lock" or arg.startsWith("--lock="):
-      lockOverride = valueFromFlag(rest, i, "--lock")
-    elif arg == "--platform" or arg.startsWith("--platform="):
-      platformOverride = valueFromFlag(rest, i, "--platform")
-    elif arg == "--strategy" or arg.startsWith("--strategy="):
-      let raw = valueFromFlag(rest, i, "--strategy")
-      if not parseLockStrategy(raw, gen.strategy):
-        stderr.writeLine(
-          unknownStrategyDiagnostic("repro lock " & verb, raw))
-        return 2
-    elif arg == "--lowest":
-      gen.strategy = lsLowest
-    elif arg == "--highest":
-      gen.strategy = lsHighest
-    elif arg == "--registry" or arg.startsWith("--registry="):
-      gen.registries.add(valueFromFlag(rest, i, "--registry"))
-    elif arg == "--write":
-      gen.write = true
-    elif arg == "--provisioning":
-      # ReproOS M7 deliverable 5. Re-selection rewrites the committed lock's
-      # provisioning records, so it belongs to the verb that writes the
-      # committed lock by definition; `solve --write` keeps carrying them
-      # forward, and `validate` writes nothing.
-      if verb != "refresh":
-        stderr.writeLine("repro lock " & verb & ": --provisioning " &
-          "re-selects the committed lock's provisioning records and is " &
-          "accepted only by `repro lock refresh`")
-        return 2
-      gen.reselectProvisioning = true
-    elif arg == "--json":
-      asJson = true
-    elif verb == "refresh" and arg == "--allow-stale-manifest":
-      gen.allowStaleManifest = true
+  r.gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false)
+  r.inputsOverride = c.inputs
+  r.lockOverride = c.lock
+  r.platformOverride = c.platform
+  var strategies: seq[tuple[name: string, value: LockStrategy]]
+  if c.strategy.isSome:
+    var parsed: LockStrategy
+    if not parseLockStrategy(c.strategy.get, parsed):
+      stderr.writeLine(
+        unknownStrategyDiagnostic("repro lock " & verb, c.strategy.get))
+      return 2
+    strategies.add(("--strategy=" & c.strategy.get, parsed))
+  if c.lowest: strategies.add(("--lowest", lsLowest))
+  if c.highest: strategies.add(("--highest", lsHighest))
+  for s in strategies:
+    if s.value != strategies[0].value:
+      stderr.writeLine("repro lock " & verb & ": " & strategies[0].name &
+        " and " & s.name & " name two strategies; give one")
+      return 2
+  if strategies.len > 0:
+    r.gen.strategy = strategies[0].value
+  for registry in c.registry:
+    r.gen.registries.add(registry)
+  r.gen.write = c.write
+  r.asJson = c.json
+  when compiles(c.provisioning):
+    # `refresh` only. Re-selection rewrites the
+    # committed lock's provisioning records, so it belongs to the verb that
+    # writes the committed lock by definition; `solve --write` keeps carrying
+    # them forward, and `validate` writes nothing.
+    r.gen.reselectProvisioning = c.provisioning
+    if c.allowStaleManifest:
+      r.gen.allowStaleManifest = true
       stderr.writeLine("repro lock refresh: --allow-stale-manifest is " &
         "deprecated and has no effect: a manifest no longer decides which " &
         "sibling pins a lock keeps (dependencies come only from repro.nim)")
-    elif verb == "refresh" and (arg == "--allow-pin-regression" or
-        arg.startsWith("--allow-pin-regression=")):
-      let parsedAllow = parsePinRegressionAllowance(
-        valueFromFlag(rest, i, "--allow-pin-regression"))
+    for value in c.allowPinRegression:
+      let parsedAllow = parsePinRegressionAllowance(value)
       if parsedAllow.rejected.len > 0:
         stderr.writeLine("repro lock " & verb & ": --allow-pin-regression " &
           "names siblings, and there is no wildcard: '" &
           parsedAllow.rejected.join("', '") & "' names none")
         return 2
       for n in parsedAllow.names:
-        if n notin gen.allowRegression: gen.allowRegression.add(n)
-    elif verb == "refresh" and (arg == "--repin" or
-        arg.startsWith("--repin=")):
-      # Package names, comma-separated, each once. An empty element is a
-      # usage error rather than something to skip: `--repin=` or `--repin=a,,b`
-      # is a typo, and a re-pin that quietly named fewer packages than the
-      # caller meant would fail later on a held pin with a misleading cause.
-      let raw = valueFromFlag(rest, i, "--repin")
+        if n notin r.gen.allowRegression: r.gen.allowRegression.add(n)
+    # Package names, comma-separated, each once. An empty element is a usage
+    # error rather than something to skip: `--repin=` or `--repin=a,,b` is a
+    # typo, and a re-pin that quietly named fewer packages than the caller
+    # meant would fail later on a held pin with a misleading cause.
+    for raw in c.repin:
       for part in raw.split(','):
         let name = part.strip()
         if name.len == 0:
@@ -91878,20 +91105,16 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
             "packages (--repin=<package>[,<package>…]); '" & raw &
             "' contains an empty name")
           return 2
-        if name notin gen.repin: gen.repin.add(name)
-    elif arg.startsWith("--"):
-      stderr.writeLine("repro lock " & verb & ": unknown flag " & arg)
-      return 2
-    else:
-      if projectDir.len > 0:
-        stderr.writeLine("repro lock " & verb &
-          ": at most one <projectDir> positional accepted")
-        return 2
-      projectDir = arg
-    inc i
-  if projectDir.len == 0:
-    projectDir = getCurrentDir()
-  projectDir = absolutePath(projectDir)
+        if name notin r.gen.repin: r.gen.repin.add(name)
+    if c.repin.len > 0: r.solveFlags.add("--repin")
+    if c.provisioning: r.solveFlags.add("--provisioning")
+  if c.strategy.isSome: r.solveFlags.add("--strategy")
+  if c.lowest: r.solveFlags.add("--lowest")
+  if c.highest: r.solveFlags.add("--highest")
+  if c.inputs.len > 0: r.solveFlags.add("--inputs")
+  if c.registry.len > 0: r.solveFlags.add("--registry")
+  r.projectDir = absolutePath(
+    if c.projectDir.len > 0: c.projectDir else: getCurrentDir())
   return 0
 
 # ---------------------------------------------------------------------------
@@ -94015,7 +93238,7 @@ proc refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
       "re-pin, platform " & lockPlatform & " kept): " & plan.line)
   0
 
-proc runLockGenerationVerb(rest: openArray[string]; verb: string;
+proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
                            entryPoint: LockGenerationEntryPoint;
                            writeByDefault: bool): int =
   ## The shared body of ``repro lock solve`` and ``repro lock refresh``.
@@ -94024,12 +93247,12 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
   ## solve as a rule generator downstream — reached through different doors.
   ## What differs is `writeByDefault`, which is §5.4's "where the file lands
   ## and whether it is committed" and nothing else.
-  var projectDir, inputsOverride, lockOverride, platformOverride: string
-  var asJson = false
-  var gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false)
-  let rc = parseLockVerbArgs(rest, verb, projectDir, inputsOverride,
-                             lockOverride, platformOverride, asJson, gen)
-  if rc != 0: return rc
+  let projectDir = r.projectDir
+  let inputsOverride = r.inputsOverride
+  let lockOverride = r.lockOverride
+  let platformOverride = r.platformOverride
+  let asJson = r.asJson
+  var gen = r.gen
   # A workspace root that keeps its state file or its settings file only
   # under the retired name is refused, with the remedy, by every command.
   # The lock verbs make that refusal here, before anything else: the
@@ -94057,13 +93280,7 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
       # Every flag that shapes a solve (what to re-solve, under which
       # strategy, from which inputs or registries) asks for something the
       # sibling re-pin does not do, so it is refused rather than ignored.
-      var solveFlags: seq[string]
-      for arg in rest:
-        for flag in ["--repin", "--provisioning", "--strategy", "--lowest",
-            "--highest", "--inputs", "--registry"]:
-          if (arg == flag or arg.startsWith(flag & "=")) and
-              flag notin solveFlags:
-            solveFlags.add(flag)
+      let solveFlags = r.solveFlags
       if solveFlags.len > 0:
         stderr.writeLine("repro lock " & verb & ": " & lockP & " is solved " &
           "for " & lockPlatform & " and this host is " & hostPlatform & "; " &
@@ -94308,7 +93525,7 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     stderr.writeLine("repro lock " & verb & ": generation failed: " & e.msg)
     return 1
 
-proc runReproLockRefresh(rest: openArray[string]): int =
+proc runReproLockRefresh(r: LockVerbInputs): int =
   ## ``repro lock refresh`` — re-solve the project's solver inputs and
   ## (re)write the committed lock WITHOUT building. No build artifacts are
   ## produced; only the lock file is written. Exits 4, writing nothing, when
@@ -94329,7 +93546,7 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## (``provisioning_lock_selection.reselectCommittedProvisioning``) and
   ## prints the provisioning diff; it refuses, writing nothing, when the
   ## selection cannot be made in full.
-  runLockGenerationVerb(rest, "refresh", lgeLockRefresh,
+  runLockGenerationVerb(r, "refresh", lgeLockRefresh,
     writeByDefault = true)
 
 proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
@@ -94394,7 +93611,7 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
       " could not generate a hidden lock: " & e.msg)
     return 1
 
-proc runReproLockSolve(rest: openArray[string]): int =
+proc runReproLockSolve(r: LockVerbInputs): int =
   ## ``repro lock solve [--lowest|--highest|--strategy <s>] [--write]`` —
   ## generate a lock under a strategy.
   ##
@@ -94410,20 +93627,19 @@ proc runReproLockSolve(rest: openArray[string]): int =
   ## they are two intentions." — so ``solve`` now writes only under
   ## ``--write``. A caller that wants the old behaviour spells ``refresh``,
   ## which is unchanged.
-  runLockGenerationVerb(rest, "solve", lgeLockSolve, writeByDefault = false)
+  runLockGenerationVerb(r, "solve", lgeLockSolve, writeByDefault = false)
 
-proc runReproLockValidate(rest: openArray[string]): int =
+proc runReproLockValidate(r: LockVerbInputs): int =
   ## ``repro lock validate`` — check the committed lock is loadable,
   ## internally consistent, platform-resolvable, and (when the solver
   ## inputs are available) still consistent with a fresh solve. No build.
   ## Exit 0 = valid; exit 2 = invalid/tampered/stale (diagnostic emitted);
   ## exit 1 = IO error.
-  var projectDir, inputsOverride, lockOverride, platformOverride: string
-  var asJson = false
-  var gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false)
-  let rc = parseLockVerbArgs(rest, "validate", projectDir, inputsOverride,
-                             lockOverride, platformOverride, asJson, gen)
-  if rc != 0: return rc
+  let projectDir = r.projectDir
+  let lockOverride = r.lockOverride
+  let inputsOverride = r.inputsOverride
+  let platformOverride = r.platformOverride
+  let asJson = r.asJson
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
@@ -94868,7 +94084,7 @@ proc siblingVariantDeclarations(checkout: string):
     if inheritedOverrides.len > 0:
       putEnv(DevelopOverridesEnvVar, inheritedOverrides)
 
-proc runReproLockList(rest: openArray[string]): int =
+proc runReproLockList(projectDir: string): int =
   ## `repro lock list` — §4.2's first consumer of a captured doc comment, and
   ## the reason the capture is a requirement rather than a nicety:
   ##
@@ -94880,19 +94096,7 @@ proc runReproLockList(rest: openArray[string]): int =
   ## §4.2 also records that this is the FIRST such consumer: "No CLI surface
   ## prints a captured doc comment today … So `lockFile` would be the first
   ## declaration form whose captured doc text has a working consumer."
-  var projectDir = ""
-  var i = 0
-  while i < rest.len:
-    let arg = rest[i]
-    if arg.startsWith("--"):
-      stderr.writeLine("repro lock list: unknown flag " & arg)
-      return 2
-    if projectDir.len > 0:
-      stderr.writeLine("repro lock list: at most one <projectDir> positional " &
-        "accepted")
-      return 2
-    projectDir = arg
-    inc i
+  var projectDir = projectDir
   if projectDir.len == 0:
     projectDir = getCurrentDir()
   stdout.write(listingTextOf(
@@ -94949,13 +94153,10 @@ proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
       text.add("\n" & line)
   (1, text)
 
-proc runReproLockDiff(rest: openArray[string]): int =
+proc runReproLockDiff(oldLock, newLock: string): int =
   var paths: seq[string] = @[]
-  for arg in rest:
-    if arg.startsWith("--"):
-      stderr.writeLine("repro lock diff: unknown flag " & arg)
-      return 2
-    paths.add(arg)
+  for path in [oldLock, newLock]:
+    if path.len > 0: paths.add(path)
   if paths.len != 2:
     stderr.writeLine("usage: repro lock diff <old-lock> <new-lock>")
     return 2
@@ -94966,13 +94167,13 @@ proc runReproLockDiff(rest: openArray[string]): int =
     stdout.writeLine(report.text)
   report.rc
 
-proc runReproLockUpdate*(args: openArray[string]): int
+proc runReproLockUpdate*(c: ReproCommandLineLockUpdate): int
   ## HL-11 M4 — ``repro lock update <dependency> [--to <rev>]``. Forward
   ## declaration: the implementation lives beside the `flake.lock` refresh
   ## far below, whose rewriter it reuses and whose operator verb
   ## (`repro flake refresh-lock`) delegates to it.
 
-proc runReproLockCommand*(args: openArray[string]): int =
+proc runReproLockCommand*(c: ReproCommandLineLock): int =
   ## Top-level dispatcher for ``repro lock <verb> ...``.
   ##
   ## MO-1 (Workspace-Manifest-Optional) lands the committed solved-graph
@@ -94983,56 +94184,30 @@ proc runReproLockCommand*(args: openArray[string]): int =
   ## ``refresh`` writes, ``solve`` writes under ``--write``, which is §5.5's
   ## "two spellings, because they are two intentions". ``debug`` /
   ## ``visualize`` (Locking-And-Solver.md §"CLI Surface") remain future work.
-  if args.len == 0:
-    stderr.writeLine("repro lock: error: missing verb " &
-      "(one of: list, solve, refresh, update, validate, explain, diff)")
-    return 2
-  let rest =
-    if args.len > 1: args[1 .. ^1]
-    else: @[]
-  case args[0]
-  of "list":
-    return runReproLockList(rest)
-  of "update":
-    return runReproLockUpdate(rest)
-  of "refresh":
-    return runReproLockRefresh(rest)
-  of "solve":
-    return runReproLockSolve(rest)
-  of "validate":
-    return runReproLockValidate(rest)
-  of "diff":
-    return runReproLockDiff(rest)
-  of "explain":
-    var variantName = ""
-    var fixturePath = ""
-    var asJson = false
-    var i = 0
-    while i < rest.len:
-      let arg = rest[i]
-      if arg == "--json":
-        asJson = true
-        inc i
-      elif arg == "--fixture" or arg.startsWith("--fixture="):
-        if arg.startsWith("--fixture="):
-          fixturePath = arg["--fixture=".len .. ^1]
-        else:
-          if i + 1 >= rest.len:
-            stderr.writeLine("repro lock explain: --fixture requires a path")
-            return 2
-          fixturePath = rest[i + 1]
-          inc i
-        inc i
-      elif arg.startsWith("--"):
-        stderr.writeLine("repro lock explain: unknown flag " & arg)
-        return 2
-      else:
-        if variantName.len > 0:
-          stderr.writeLine("repro lock explain: at most one variant " &
-                           "positional accepted")
-          return 2
-        variantName = arg
-        inc i
+  var r: LockVerbInputs
+  case c.command
+  of ReproCommandLineLockCommand.list:
+    return runReproLockList(c.list.projectDir)
+  of ReproCommandLineLockCommand.update:
+    return runReproLockUpdate(c.update)
+  of ReproCommandLineLockCommand.refresh:
+    let rc = lockVerbInputsOf(c.refresh, "refresh", r)
+    if rc != 0: return rc
+    return runReproLockRefresh(r)
+  of ReproCommandLineLockCommand.solve:
+    let rc = lockVerbInputsOf(c.solve, "solve", r)
+    if rc != 0: return rc
+    return runReproLockSolve(r)
+  of ReproCommandLineLockCommand.validate:
+    let rc = lockVerbInputsOf(c.validate, "validate", r)
+    if rc != 0: return rc
+    return runReproLockValidate(r)
+  of ReproCommandLineLockCommand.diff:
+    return runReproLockDiff(c.diff.oldLock, c.diff.newLock)
+  of ReproCommandLineLockCommand.explain:
+    let variantName = c.explain.variant
+    let fixturePath = c.explain.fixture
+    let asJson = c.explain.json
     if variantName.len == 0:
       stderr.writeLine("repro lock explain: missing <variant> positional")
       return 2
@@ -95074,9 +94249,13 @@ proc runReproLockCommand*(args: openArray[string]): int =
     except EVariantNotInSolution as e:
       stderr.writeLine("repro lock explain: " & e.msg)
       return 1
-  else:
-    stderr.writeLine("repro lock: unknown verb '" & args[0] & "'")
-    return 2
+
+proc runReproLockCommand*(args: openArray[string]): int =
+  ## ``repro lock <args>`` through the generated parser, for in-process
+  ## callers and tests: a usage error is reported and returns 2.
+  runReproArgs(@["lock"] & @args, proc (conf: ReproCommandLine): int =
+    runReproLockCommand(conf.lock))
+
 
 # ---------------------------------------------------------------------------
 # RA-26 — `repro prompt` ambient workspace-state segment (+ `repro prompt
@@ -95553,28 +94732,22 @@ proc bootstrapHostFiles(): seq[BootstrapFilePlan] =
       content: bootstrapProjectsDocContent),
   ]
 
-proc parseBootstrapTargetDir(args: openArray[string]): string =
+proc bootstrapTargetDir(dir, workspaceRoot: string): string =
   ## ``repro workspace bootstrap [<dir>] [--workspace-root=PATH]``. The target
-  ## host directory defaults to the cwd. An explicit positional or
+  ## host directory defaults to the cwd. An explicit positional (first) or
   ## ``--workspace-root`` overrides it.
-  result = getCurrentDir()
-  for arg in args:
-    if arg.startsWith("--workspace-root="):
-      result = arg["--workspace-root=".len .. ^1]
-    elif not arg.startsWith("-"):
-      result = arg
+  if dir.len > 0: dir
+  elif workspaceRoot.len > 0: workspaceRoot
+  else: getCurrentDir()
 
-proc runWorkspaceBootstrapCommand*(args: openArray[string]): int =
+proc runWorkspaceBootstrapCommand*(dir, workspaceRoot: string): int =
   ## ``repro workspace bootstrap [<dir>]`` — scaffold the host ergonomics
   ## files (``.envrc`` / ``AGENTS.md`` / ``workspace-projects.md``) into an
   ## empty host directory. IDEMPOTENT: an existing file is never clobbered —
   ## it is reported as ``skipped`` and left byte-for-byte untouched. Reports
   ## what was written vs skipped on stdout; exit 0 always (a re-run is a safe
   ## no-op, not an error).
-  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro workspace bootstrap [<dir>] [--workspace-root=PATH]"
-    return 0
-  let targetDir = parseBootstrapTargetDir(args)
+  let targetDir = bootstrapTargetDir(dir, workspaceRoot)
   createDir(targetDir)
   var results: seq[BootstrapFileResult]
   for plan in bootstrapHostFiles():
@@ -95711,22 +94884,14 @@ when defined(windows):
     except CatchableError:
       result = -1
 
-proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
+proc runWorkspaceProvisionCommand*(installRoot, arch: string): int =
   ## ``repro workspace provision`` — ensure the host toolchain and activate
   ## the workspace env. On Linux/macOS this is a no-op (the Nix devShell /
   ## ``.envrc`` already provides the toolchain) and we say so. On Windows it
   ## walks ``windowsProvisioningPlan`` and runs each non-skipped ensure step
   ## through PowerShell, then activates the env.
-  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro workspace provision [--install-root=PATH] [--arch=x64|arm64]"
-    return 0
-  var installRoot = ""
-  var arch = "x64"
-  for arg in args:
-    if arg.startsWith("--install-root="):
-      installRoot = arg["--install-root=".len .. ^1]
-    elif arg.startsWith("--arch="):
-      arch = arg["--arch=".len .. ^1]
+  var installRoot = installRoot
+  let arch = if arch.len > 0: arch else: "x64"
   when defined(windows):
     if installRoot.len == 0:
       let localAppData = getEnv("LOCALAPPDATA")
@@ -95761,12 +94926,11 @@ proc runWorkspaceProvisionCommand*(args: openArray[string]): int =
 
 # ---- RA-6: workspace-root + default-set helpers ----------------------------
 
-proc parseProjectsWorkspaceRoot(args: openArray[string]): string =
+proc projectsWorkspaceRoot(explicit: string): string =
+  ## The workspace a membership or definition verb acts on: ``explicit``
+  ## (its ``--workspace-root``) when given, else the workspace enclosing the
+  ## current directory, else the current directory.
   result = getCurrentDir()
-  var explicit = ""
-  for arg in args:
-    if arg.startsWith("--workspace-root="):
-      explicit = arg["--workspace-root=".len .. ^1]
   if explicit.len > 0:
     return absolutePath(explicit)
   let ascended = ascendToWorkspaceRoot(result)
@@ -95870,12 +95034,6 @@ proc projectSetRepoPathsMissingOnDisk(workspaceRoot: string;
     if not dirExists(workspaceRoot / path / ".git"):
       result.add(path)
 
-proc parseMembershipProjects(rest: openArray[string]): seq[string] =
-  ## Positional project names from a membership verb's argv.
-  for arg in rest:
-    if not arg.startsWith("-"):
-      result.add(arg)
-
 proc defaultProjectsToEnable(workspaceRoot: string): seq[string] =
   ## The `--default` set: `REPRO_DEFAULT_PROJECTS` (primary), then the RA-8
   ## host config. With NEITHER set the result is empty and the caller no-ops —
@@ -95889,7 +95047,7 @@ proc defaultProjectsToEnable(workspaceRoot: string): seq[string] =
   if result.len == 0:
     result = readDefaultProjectsFromHostConfig(workspaceRoot)
 
-proc runWorkspaceEnableCommand*(args: openArray[string]): int =
+proc runWorkspaceEnableCommand*(c: ReproCommandLineWorkspaceEnable): int =
   ## ``repro workspace enable <project>... [--default] [--no-sync]`` — activate
   ## already-DEFINED projects in this workspace.
   ##
@@ -95899,44 +95057,27 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   ## Membership itself stays idempotent, while the clone phase still creates
   ## anything missing — which makes a re-run the repair path for a partially
   ## cloned workspace.
-  var normalizedArgs: seq[string]
-  var argIndex = 0
-  while argIndex < args.len:
-    let arg = args[argIndex]
-    if arg == "--clone-objects" or arg.startsWith("--clone-objects="):
-      let policy = parseCloneObjects(valueFromFlag(args, argIndex,
-          "--clone-objects"))
-      normalizedArgs.add("--clone-objects=" & policy)
-    else:
-      normalizedArgs.add(arg)
-    inc argIndex
-  let workspaceRoot = parseProjectsWorkspaceRoot(normalizedArgs)
-  var explicit = parseMembershipProjects(normalizedArgs)
-  var useDefault = false
-  var noSync = false
-  var dryRun = false
-  # Flags the materialization phase understands are forwarded to it rather
-  # than rejected here: `enable`'s real work IS a sync, so the report and the
-  # JSON digest describing what happened are that sync's.
-  var forwarded: seq[string]
-  for arg in normalizedArgs:
-    if arg == "--default":
-      useDefault = true
-    elif arg == "--no-sync":
-      noSync = true
-    elif arg == "--dry-run":
-      dryRun = true
-      forwarded.add(arg)
-    elif arg.startsWith("--workspace-root="):
-      discard
-    elif arg == "--json" or arg == "--verbose" or
-        arg == "--write-report" or arg.startsWith("--write-report=") or
-        arg.startsWith("--jobs") or arg.startsWith("--tags=") or
-        arg.startsWith("--clone-objects="):
-      forwarded.add(arg)
-    elif arg.startsWith("-"):
-      stderr.writeLine("repro workspace enable: unknown flag " & arg)
-      return 2
+  let workspaceRoot = projectsWorkspaceRoot(c.workspaceRoot)
+  var explicit = c.projects
+  let useDefault = c.useDefault
+  let noSync = c.noSync
+  let dryRun = c.dryRun
+  # The options the materialization phase understands are handed to it:
+  # `enable`'s real work IS a sync, so the report and the JSON digest
+  # describing what happened are that sync's.
+  var syncArgs = defaultWorkspaceSyncArgs(workspaceRoot)
+  if c.cloneObjects.len > 0:
+    syncArgs.cloneObjects = parseCloneObjects(c.cloneObjects)
+  syncArgs.jobs = syncJobsOf(c.jobs, "--jobs")
+  syncArgs.jobsNetwork = syncJobsOf(c.jobsNetwork, "--jobs-network")
+  syncArgs.jobsCheckout = syncJobsOf(c.jobsCheckout, "--jobs-checkout")
+  applyTagSelection(c.tags, syncArgs)
+  syncArgs.dryRun = dryRun
+  syncArgs.json = c.json
+  syncArgs.verbose = c.verbose
+  syncArgs.report.requested = c.writeReport.isSome
+  if c.writeReport.isSome:
+    syncArgs.report.path = c.writeReport.get
 
   # A state or settings file that exists but does not parse is refused here,
   # before anything is recorded: the resolution step below tolerates an
@@ -96017,10 +95158,10 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
   except CatchableError as err:
     unresolved = err.msg
 
-  var syncArgs = @(toAdd)
-  syncArgs.add("--workspace-root=" & workspaceRoot)
-  for flag in forwarded:
-    syncArgs.add(flag)
+  for project in toAdd:
+    if syncArgs.projectName.len == 0:
+      syncArgs.projectName = project
+    syncArgs.scopeProjects.add(project)
 
   # Validation above is shared with a real enable; nothing below this preview
   # may persist membership or refresh derived workspace files.
@@ -96068,7 +95209,7 @@ proc runWorkspaceEnableCommand*(args: openArray[string]): int =
     return 0
   stdout.writeLine("repro workspace enable: checking out " &
     $missing.len & " repo(s) introduced by " & toAdd.join(", "))
-  return runWorkspaceSyncCommand(syncArgs)
+  return runWorkspaceSyncWithProjects(syncArgs, @[])
 
 # ---- Workspace-Membership-Model.md: local-state reconciliation -------------
 #
@@ -96587,7 +95728,7 @@ proc renderLocalStateTextLines(report: WorkspaceLocalStateReport): seq[string] =
     " checkout(s) inspected, " & $changed & " " & verb & "reconciled, " &
     $deferred & " skipped, " & $failed & " failed")
 
-proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
+proc runWorkspaceMigrateCommand*(c: ReproCommandLineWorkspaceMigrate): int =
   ## ``repro workspace migrate [--dry-run] [--json] [--workspace-root=PATH]``
   ##
   ## Reconcile every checkout's LOCAL git state with the resolved manifest:
@@ -96607,28 +95748,10 @@ proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
   ##   1 — a git operation was attempted and failed.
   ##   2 — at least one checkout was skipped to protect work that exists
   ##       nowhere else. Nothing in it was modified.
-  var workspaceRoot = ""
-  var dryRun = false
-  var json = false
-  var reportSpec = ReportSpec()
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--dry-run":
-      dryRun = true
-    elif arg == "--json":
-      json = true
-    elif consumeReportFlag(arg, reportSpec):
-      discard
-    elif arg.startsWith("-"):
-      stderr.writeLine("repro workspace migrate: unknown flag " & arg)
-      return 2
-    else:
-      stderr.writeLine("repro workspace migrate: unexpected argument " & arg)
-      return 2
-    inc i
+  var workspaceRoot = c.workspaceRoot
+  let dryRun = c.dryRun
+  let json = c.json
+  let reportSpec = reportSpecOf(c)
   if workspaceRoot.len == 0:
     workspaceRoot = getCurrentDir()
   workspaceRoot = os.normalizedPath(absolutePath(workspaceRoot))
@@ -96711,7 +95834,7 @@ proc reconcileLocalStateForHook(workspaceRoot: string):
     result.loud.add("local-state reconciliation skipped: " & err.msg)
     result.skipped = true
 
-proc runWorkspaceDisableCommand*(args: openArray[string]): int =
+proc runWorkspaceDisableCommand*(c: ReproCommandLineWorkspaceDisable): int =
   ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —
   ## deactivate projects in this workspace and remove the working trees that
   ## ONLY they declared.
@@ -96720,20 +95843,10 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   ## is: disabling narrows the active set, it does not ask to delete shared
   ## infrastructure. The union rule that makes two projects share one checkout
   ## path (`project_set.nim`) is the same rule that decides what survives here.
-  let workspaceRoot = parseProjectsWorkspaceRoot(args)
-  var toRemove = parseMembershipProjects(args)
-  var keepCheckouts = false
-  var force = false
-  for arg in args:
-    if arg == "--keep-checkouts":
-      keepCheckouts = true
-    elif arg == "--force":
-      force = true
-    elif arg.startsWith("--workspace-root="):
-      discard
-    elif arg.startsWith("-"):
-      stderr.writeLine("repro workspace disable: unknown flag " & arg)
-      return 2
+  let workspaceRoot = projectsWorkspaceRoot(c.workspaceRoot)
+  var toRemove = c.projects
+  let keepCheckouts = c.keepCheckouts
+  let force = c.force
   if toRemove.len == 0:
     stderr.writeLine("repro workspace disable: no project named " &
       "(pass one or more <project> names)")
@@ -96893,7 +96006,7 @@ proc runWorkspaceDisableCommand*(args: openArray[string]): int =
       " checkout(s) unique to the disabled project(s)")
   if removalFailures > 0: 1 else: 0
 
-proc runReproLockingExplain(args: openArray[string]): int =
+proc runReproLockingExplain(c: ReproCommandLineLockingExplain): int =
   ## HL-1 (Unified-Locking-And-Hooks §4) — ``repro locking explain``. For the
   ## current workspace, resolve each repo's ``(tier, backend)`` by composing
   ## the configuration LAYERS (built-in → system → dotfiles → parent workspace
@@ -96901,27 +96014,13 @@ proc runReproLockingExplain(args: openArray[string]): int =
   ## LAYER declared it (with the declaring file's path). ``--json`` emits the
   ## machine-readable form the tests consume. This is the introspection verb a
   ## user runs to debug a layered config without guessing.
-  var workspaceRoot = ""
-  var projectName = ""
-  var mode = tpmUnspecified
-  var asJson = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--json":
-      asJson = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--project" or arg.startsWith("--project="):
-      projectName = valueFromFlag(args, i, "--project")
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg.startsWith("-"):
-      stderr.writeLine("repro locking explain: unknown flag " & arg)
-      return 2
-    elif projectName.len == 0:
-      projectName = arg
-    inc i
+  var workspaceRoot = c.workspaceRoot
+  # `--project` wins over the positional, which names the project too.
+  let projectName = if c.project.len > 0: c.project else: c.projectName
+  var mode =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmUnspecified
+  let asJson = c.json
   if workspaceRoot.len == 0:
     workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
@@ -96959,7 +96058,8 @@ proc runReproLockingExplain(args: openArray[string]): int =
         (if a.layerSource.len > 0: " [" & a.layerSource & "]" else: "")
   return 0
 
-proc runReproLockingAdoptManifest(args: openArray[string]): int =
+proc runReproLockingAdoptManifest(c: ReproCommandLineLockingAdoptManifest):
+    int =
   ## HL-2 (Unified-Locking-And-Hooks §10 Migration) — ``repro locking
   ## adopt-manifest``. Scaffold an explicit TEAM route mapping the workspace's
   ## record-store checkout (``existingRecordStoreRoot``: ``.repro/records``,
@@ -96977,24 +96077,12 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
   ## checkout of the record repository first (``repro init`` clones
   ## ``[records] url``), and a checkout at its conventional location already
   ## declares the route by its presence (§10).
-  var workspaceRoot = ""
-  var projectName = ""
-  var mode = tpmUnspecified
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--project" or arg.startsWith("--project="):
-      projectName = valueFromFlag(args, i, "--project")
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg.startsWith("-"):
-      stderr.writeLine("repro locking adopt-manifest: unknown flag " & arg)
-      return 2
-    elif projectName.len == 0:
-      projectName = arg
-    inc i
+  var workspaceRoot = c.workspaceRoot
+  # `--project` wins over the positional, which names the project too.
+  let projectName = if c.project.len > 0: c.project else: c.projectName
+  var mode =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmUnspecified
   if workspaceRoot.len == 0:
     workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
@@ -97064,23 +96152,13 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     "(tier, backend) for each repo.")
   return 0
 
-proc runReproLockingCommand*(args: openArray[string]): int =
-  ## Top-level dispatcher for ``repro locking <verb> ...``. HL-1 ships
-  ## ``explain``; HL-2 adds ``adopt-manifest``.
-  if args.len == 0:
-    stderr.writeLine("repro locking: error: missing verb (one of: explain, " &
-      "adopt-manifest)")
-    return 2
-  let rest = if args.len > 1: args[1 .. ^1] else: @[]
-  case args[0]
-  of "explain":
-    return runReproLockingExplain(rest)
-  of "adopt-manifest":
-    return runReproLockingAdoptManifest(rest)
-  else:
-    stderr.writeLine("repro locking: error: unknown verb '" & args[0] &
-      "' (one of: explain, adopt-manifest)")
-    return 2
+proc runReproLockingCommand*(c: ReproCommandLineLocking): int =
+  ## ``repro locking explain|adopt-manifest`` from its configuration.
+  case c.command
+  of ReproCommandLineLockingCommand.explain:
+    runReproLockingExplain(c.explain)
+  of ReproCommandLineLockingCommand.adoptManifest:
+    runReproLockingAdoptManifest(c.adoptManifest)
 
 # ---------------------------------------------------------------------------
 # NF-1 — `repro flake override-args`: the flake override arguments come from
@@ -100968,51 +100046,6 @@ const
     ## The target is behind or diverged from a current resolution and nothing
     ## names the dependency as an allowed regression; nothing was written.
     ## The same status `repro lock refresh` refuses a regression with.
-  LockUpdateUsage* = """repro lock update <dependency> [--to <rev>] [--repo-root=<dir>]
-                  [--allow-pin-regression=<name>[,<name>...]]
-
-Move every resolution of one repository, in repro.lock and in flake.lock, to
-one revision, rewriting an exact recipe pin that excludes it. This is the
-command for an INTENDED upgrade; the commit-time re-pin never moves a recipe
-pin.
-
-  <dependency>   a flake input name, a repro.lock dependency name or a
-                 workspace repo name; all of them must mean one repository
-                 (identified by canonical URL). Qualify an ambiguous name as
-                 input:<name>, dep:<name> or repo:<name>.
-  --to <rev>     the target revision (a commit id, or a ref resolved in the
-                 sibling checkout). Default: the sibling checkout's HEAD; with
-                 no checkout, the branch tip of a flake input that follows a
-                 branch.
-  --repo-root    the repo whose recipes and locks are updated (default: the
-                 git top-level of the current directory).
-  --allow-pin-regression=<names>
-                 allow a target behind, or diverged from, a current
-                 resolution. REPRO_ALLOW_PIN_REGRESSION is read too.
-
-Recipes: an exact flake.nix pin (rev=<sha> or github:o/r/<sha>) is rewritten
-and the node re-locked through nix (`nix flake update <input>`); an exact
-repro.nim uses: version is replaced by the version whose producer versions:
-entry maps to the target. A uses: range that admits the target is left alone;
-one that excludes it is refused, naming its line.
-
-Converting an exact flake.nix pin to branch tracking is one step: remove the
-revision from the input's url and run this command. A flake.lock node that
-still records the removed revision (original.rev) is re-locked through nix
-from flake.nix first, then moved to the target like any branch-following
-input.
-
-A target that exists only in the sibling checkout (reachable from no
-remote-tracking ref) is refused when a flake.lock resolution would name it,
-because nix cannot fetch it for anybody else: publish it first. A move of
-repro.lock alone is written with a warning, and the push gate refuses the
-push until the target is published.
-
-Nothing is written unless everything can be. Nothing is staged or committed.
-
-Exit status: 0 done (or nothing to do), 1 failed (nothing written),
-2 nothing to act on, 3 a recipe constraint refuses the target,
-4 a pin regression was not allowed."""
 
 type
   LockUpdateRequest* = object
@@ -101939,51 +100972,26 @@ proc printLockUpdateOutcome(o: LockUpdateOutcome; label: string) =
   for line in o.notes: stderr.writeLine(label & ": note: " & line)
   for line in o.refusal: stderr.writeLine(label & ": " & line)
 
-proc runReproLockUpdate*(args: openArray[string]): int =
+proc runReproLockUpdate*(c: ReproCommandLineLockUpdate): int =
   ## ``repro lock update <dependency> [--to <rev>] [--repo-root=<dir>]
-  ## [--allow-pin-regression=<names>]`` — see ``LockUpdateUsage`` and
+  ## [--allow-pin-regression=<names>]`` — see `repro lock update --help` and
   ## ``executeLockUpdate``.
   var req = LockUpdateRequest(label: LockUpdateLabel)
-  var i = 0
-  try:
-    while i < args.len:
-      let arg = args[i]
-      if arg == "--help" or arg == "-h":
-        stdout.writeLine(LockUpdateUsage)
-        return 0
-      elif arg == "--to" or arg.startsWith("--to="):
-        req.target = valueFromFlag(args, i, "--to")
-      elif arg == "--repo-root" or arg.startsWith("--repo-root="):
-        req.repoRoot = valueFromFlag(args, i, "--repo-root")
-      elif arg == "--allow-pin-regression" or
-          arg.startsWith("--allow-pin-regression="):
-        let parsed = parsePinRegressionAllowance(
-          valueFromFlag(args, i, "--allow-pin-regression"))
-        if parsed.rejected.len > 0:
-          stderr.writeLine(LockUpdateLabel & ": --allow-pin-regression " &
-            "names dependencies, and there is no wildcard: '" &
-            parsed.rejected.join("', '") & "' names none")
-          return LockUpdateExitUsage
-        for n in parsed.names:
-          if n notin req.allowRegression: req.allowRegression.add(n)
-      elif arg.startsWith("-"):
-        stderr.writeLine(LockUpdateLabel & ": unknown flag " & arg)
-        stderr.writeLine(LockUpdateUsage)
-        return LockUpdateExitUsage
-      elif req.dependency.len > 0:
-        stderr.writeLine(LockUpdateLabel & ": at most one <dependency> " &
-          "positional accepted (got '" & req.dependency & "' and '" & arg &
-          "')")
-        return LockUpdateExitUsage
-      else:
-        req.dependency = arg
-      inc i
-  except ValueError as err:
-    stderr.writeLine(LockUpdateLabel & ": " & err.msg)
-    return LockUpdateExitUsage
+  req.target = c.to
+  req.repoRoot = c.repoRoot
+  for value in c.allowPinRegression:
+    let parsed = parsePinRegressionAllowance(value)
+    if parsed.rejected.len > 0:
+      stderr.writeLine(LockUpdateLabel & ": --allow-pin-regression " &
+        "names dependencies, and there is no wildcard: '" &
+        parsed.rejected.join("', '") & "' names none")
+      return LockUpdateExitUsage
+    for n in parsed.names:
+      if n notin req.allowRegression: req.allowRegression.add(n)
+  req.dependency = c.dependency
   if req.dependency.len == 0:
-    stderr.writeLine(LockUpdateLabel & ": missing <dependency>")
-    stderr.writeLine(LockUpdateUsage)
+    stderr.writeLine(LockUpdateLabel & ": missing <dependency> (see " &
+      "`repro lock update --help`)")
     return LockUpdateExitUsage
   if req.repoRoot.len == 0:
     let top = lockUpdateGitTopLevel(getCurrentDir())
@@ -103262,7 +102270,8 @@ proc runReproFlakeCommand*(args: openArray[string]): int =
       "' (one of: override-args, refresh-lock, override-status)")
     return 2
 
-proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
+proc runWorkspacePublishEvidenceCommand*(
+    c: ReproCommandLineWorkspacePublishEvidence): int =
   ## Workspace-Manifest-Optional MO-13 (correcting MO-5) —
   ## ``repro workspace publish-evidence``. Gather each evidence-only private
   ## repo's source-free ``WorkspaceVcsEvidence`` triple and publish it to the
@@ -103270,21 +102279,12 @@ proc runWorkspacePublishEvidenceCommand*(args: openArray[string]): int =
   ## this from a clean, published checkout at the locked revision; a teammate
   ## who cannot clone the private source then verifies the boundary from the
   ## published evidence (the MO-5 gate-side consume path).
-  var workspaceRoot = ""
-  var projectName = ""
-  var mode = tpmUnspecified
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--project" or arg.startsWith("--project="):
-      projectName = valueFromFlag(args, i, "--project")
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
-    elif not arg.startsWith("-") and projectName.len == 0:
-      projectName = arg
-    i.inc
+  var workspaceRoot = c.workspaceRoot
+  # `--project` wins over the positional, which names the project too.
+  let projectName = if c.project.len > 0: c.project else: c.projectName
+  let mode =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmUnspecified
   if workspaceRoot.len == 0:
     workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
@@ -103667,8 +102667,75 @@ proc validateFragmentPath(value: string): string =
       return "--path may not contain a '..' segment, got '" & value & "'"
   ""
 
-proc runWorkspaceSetsCommand*(args: openArray[string];
-                              spelling = "sets"): int =
+type
+  WorkspaceSetsRequest = object
+    ## ``repro workspace sets|projects <sub> ...`` read from its
+    ## configuration; each subcommand fills the fields it declares.
+    sub: string
+      ## ``list`` (also the bare namespace), ``resolve``, ``add``, ``remove``.
+    workspaceRoot: string
+    enabled, disabled, all, json: bool
+      ## ``list`` (``json`` also ``resolve``).
+    names: seq[string]
+      ## ``resolve``'s set names.
+    at: Option[string]
+      ## ``resolve --at=REV``.
+    name: string
+      ## ``add`` / ``remove``'s set name.
+    message: string
+    templateName: string
+    noTemplate: bool
+      ## ``add``.
+    pruneOrphanRepos: bool
+      ## ``remove``.
+
+template setsRequestOfImpl(c: untyped; Cmd: typedesc): WorkspaceSetsRequest =
+  var req = WorkspaceSetsRequest(sub: "list")
+  case c.command
+  of Cmd.call:
+    req.workspaceRoot = c.call.workspaceRoot
+    req.enabled = c.call.enabled
+    req.disabled = c.call.disabled
+    req.all = c.call.all
+    req.json = c.call.json
+  of Cmd.list:
+    req.workspaceRoot = c.list.workspaceRoot
+    req.enabled = c.list.enabled
+    req.disabled = c.list.disabled
+    req.all = c.list.all
+    req.json = c.list.json
+  of Cmd.resolve:
+    req.sub = "resolve"
+    req.workspaceRoot = c.resolve.workspaceRoot
+    req.names = c.resolve.names
+    req.at = c.resolve.at
+    req.json = c.resolve.json
+  of Cmd.add:
+    req.sub = "add"
+    req.workspaceRoot = c.add.workspaceRoot
+    req.name = c.add.name
+    req.message = c.add.message
+    req.templateName = c.add.templateName
+    req.noTemplate = c.add.noTemplate
+  of Cmd.remove:
+    req.sub = "remove"
+    req.workspaceRoot = c.remove.workspaceRoot
+    req.name = c.remove.name
+    req.pruneOrphanRepos = c.remove.pruneOrphanRepos
+  of Cmd.help:
+    req.sub = "help"
+    req.names = c.help.topic
+  req
+
+proc setsRequestOf(c: ReproCommandLineWorkspaceSets): WorkspaceSetsRequest =
+  setsRequestOfImpl(c, ReproCommandLineWorkspaceSetsCommand)
+
+proc setsRequestOf(c: ReproCommandLineWorkspaceProjects):
+    WorkspaceSetsRequest =
+  setsRequestOfImpl(c, ReproCommandLineWorkspaceProjectsCommand)
+
+proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
+                             spelling = "sets"): int =
   ## ``repro workspace sets list|resolve|add|remove`` — the DEFINITION axis
   ## for repo sets. `add` / `remove` write, commit and push to the manifest
   ## repo; `list` and `resolve` are read-only.
@@ -103685,48 +102752,14 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
   ## treats the two directories as ONE namespace, which is the model's claim
   ## that "project" was a role and not a kind.
   let verb = "repro workspace " & spelling
-  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo verb & " list [--enabled|--disabled|--all] [--json]"
-    echo verb & " resolve <name>... [--at=REV] [--json]"
-    echo verb & " add <name> [--template=NAME|--no-template] [-m DESC]"
-    echo verb & " remove <name> [--prune-orphan-repos]"
-    echo "  list   every DEFINED repo-set, marked enabled/disabled for this " &
-      "workspace."
-    echo "  resolve  the repos a workspace enabling exactly <name>... would " &
-      "participate in (read-only; enabled or not, checked out or not)."
-    echo "  --at=REV  resolve from the manifest repository's commit REV " &
-      "instead of its working tree (no layers; nothing is written)."
-    echo "  add    define a NEW " &
-      (if spelling == "sets": "repo-set (repo-sets/<name>.toml)"
-       else: "project (projects/<name>.toml)") &
-      ". To activate an existing one, use `repro ws enable <name>`."
-    echo "  --template=NAME  scaffold from templates/<NAME>.toml. Without it, " &
-      "the host config's [projects] default_template applies — and is " &
-      "REPORTED when it does."
-    echo "  --no-template    opt out of that default and write the empty stub."
-    echo "  remove delete the definition. Disable it here first."
-    return 0
-  let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
-  let rest = if args.len > 0 and not args[0].startsWith("-"): args[1 .. ^1]
-             else: @(args)
-  let workspaceRoot = parseProjectsWorkspaceRoot(args)
+  let sub = req.sub
+  let workspaceRoot = projectsWorkspaceRoot(req.workspaceRoot)
 
   if sub == "list":
-    var wantEnabled = false
-    var wantDisabled = false
-    var asJson = false
-    for arg in rest:
-      case arg
-      of "--enabled": wantEnabled = true
-      of "--disabled": wantDisabled = true
-      of "--all": wantEnabled = false; wantDisabled = false
-      of "--json": asJson = true
-      else:
-        if arg.startsWith("--workspace-root="):
-          discard
-        elif arg.startsWith("-"):
-          stderr.writeLine(verb & " list: unknown flag " & arg)
-          return 2
+    # `--all` lists both, whatever else was given.
+    let wantEnabled = req.enabled and not req.all
+    let wantDisabled = req.disabled and not req.all
+    let asJson = req.json
     let active = readWorkspaceProjects(workspaceRoot)
     let defined = definedProjectNames(workspaceRoot)
     # Ordering is meaning, not cosmetics: the primary project answers "what am
@@ -103788,24 +102821,18 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
     # its working tree (reprobuild-pm issue 2026-10-09 "workspace metadata is
     # readable only from a working tree"). `atRevision` stays "" without it.
     var atRevision = ""
-    for arg in rest:
-      if arg == "--json":
-        asJson = true
-      elif arg.startsWith("--workspace-root="):
-        discard # parsed by parseProjectsWorkspaceRoot above
-      elif arg.startsWith("--at="):
-        atRevision = arg["--at=".len .. ^1]
-        if atRevision.len == 0:
-          stderr.writeLine(verb & " resolve: --at= needs a revision " &
-            "(a commit id, branch or tag of the manifest repository)")
-          return 2
-      elif arg.startsWith("-"):
-        stderr.writeLine(verb & " resolve: unknown flag " & arg)
+    asJson = req.json
+    if req.at.isSome:
+      atRevision = req.at.get
+      if atRevision.len == 0:
+        stderr.writeLine(verb & " resolve: --at= needs a revision " &
+          "(a commit id, branch or tag of the manifest repository)")
         return 2
-      elif arg notin names:
+    for name in req.names:
+      if name notin names:
         # A name given twice counts once; first occurrence keeps its place,
         # because the FIRST name is the primary and order is union order.
-        names.add(arg)
+        names.add(name)
     if names.len == 0:
       stderr.writeLine(verb & " resolve: missing <name>... (usage: " & verb &
         " resolve <name>... [--at=REV] [--json])")
@@ -103932,30 +102959,10 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
 
   case sub
   of "add":
-    var name = ""
-    var desc = ""
-    var requestedTemplate = ""
-    var noTemplate = false
-    var i = 0
-    while i < rest.len:
-      let a = rest[i]
-      if a == "-m" or a == "--message":
-        if i + 1 < rest.len:
-          desc = rest[i + 1]; inc i
-      elif a.startsWith("--message="):
-        desc = a["--message=".len .. ^1]
-      elif a.startsWith("--template="):
-        requestedTemplate = a["--template=".len .. ^1]
-      elif a == "--no-template":
-        noTemplate = true
-      elif a.startsWith("--workspace-root="):
-        discard
-      elif a.startsWith("-"):
-        stderr.writeLine(verb & " add: unknown flag " & a)
-        return 2
-      else:
-        name = a
-      inc i
+    let name = req.name
+    let desc = req.message
+    let requestedTemplate = req.templateName
+    let noTemplate = req.noTemplate
     if name.len == 0:
       stderr.writeLine(verb & " add: missing <name>")
       return 2
@@ -104081,18 +103088,8 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       "` to activate it here")
     return res.code
   of "remove":
-    var name = ""
-    var pruneOrphans = false
-    for a in rest:
-      if a == "--prune-orphan-repos":
-        pruneOrphans = true
-      elif a.startsWith("--workspace-root="):
-        discard
-      elif a.startsWith("-"):
-        stderr.writeLine(verb & " remove: unknown flag " & a)
-        return 2
-      else:
-        name = a
+    let name = req.name
+    let pruneOrphans = req.pruneOrphanRepos
     if name.len == 0:
       stderr.writeLine(verb & " remove: missing <name>")
       return 2
@@ -104204,16 +103201,90 @@ proc runWorkspaceSetsCommand*(args: openArray[string];
       "' (expected: list, resolve, add, remove)")
     return 2
 
-proc runWorkspaceProjectsCommand*(args: openArray[string]): int =
+proc runWorkspaceSetsCommand*(c: ReproCommandLineWorkspaceSets): int =
+  ## ``repro workspace sets …`` from its configuration.
+  let req = setsRequestOf(c)
+  if req.sub == "help":
+    stdout.write(ReproCommandLine.helpText(@["workspace", "sets"] &
+      req.names))
+    return 0
+  runWorkspaceSetsCommand(req, "sets")
+
+proc runWorkspaceProjectsCommand*(c: ReproCommandLineWorkspaceProjects): int =
   ## ``repro workspace projects …`` — the retained spelling of `sets`.
   ##
   ## Kept because the manifest repo still carries `projects/*.toml`, and a verb
   ## that named the thing an operator is looking at cannot fail as unknown
   ## while that is true. It is retired from the docs, not from the CLI, and it
   ## is removed with the third migration step rather than the second.
-  runWorkspaceSetsCommand(args, "projects")
+  let req = setsRequestOf(c)
+  if req.sub == "help":
+    stdout.write(ReproCommandLine.helpText(@["workspace", "projects"] &
+      req.names))
+    return 0
+  runWorkspaceSetsCommand(req, "projects")
 
-proc runWorkspaceReposCommand*(args: openArray[string]): int =
+type
+  WorkspaceReposRequest = object
+    ## ``repro workspace repos <sub> ...`` read from its configuration; each
+    ## subcommand fills the fields it declares.
+    sub: string
+      ## ``list`` (also the bare namespace), ``add``, ``remove``, ``help``.
+    workspaceRoot: string
+    sets: seq[string]
+      ## ``--set=`` and its retained spelling ``--project=``, in order (the
+      ## help topic for ``help``).
+    enabled, disabled, all, json: bool
+      ## ``list``.
+    repo: string
+    remote, revision, profile, path, message: string
+    mainline: seq[string]
+      ## ``--mainline=`` and its second spelling ``--branch=``.
+    deleteFragment: bool
+
+proc reposRequestOf(c: ReproCommandLineWorkspaceRepos): WorkspaceReposRequest =
+  result.sub = "list"
+  case c.command
+  of ReproCommandLineWorkspaceReposCommand.call:
+    let l = c.call
+    result.workspaceRoot = l.workspaceRoot
+    result.sets = l.set & l.project
+    result.enabled = l.enabled
+    result.disabled = l.disabled
+    result.all = l.all
+    result.json = l.json
+  of ReproCommandLineWorkspaceReposCommand.list:
+    let l = c.list
+    result.workspaceRoot = l.workspaceRoot
+    result.sets = l.set & l.project
+    result.enabled = l.enabled
+    result.disabled = l.disabled
+    result.all = l.all
+    result.json = l.json
+  of ReproCommandLineWorkspaceReposCommand.add:
+    let a = c.add
+    result.sub = "add"
+    result.workspaceRoot = a.workspaceRoot
+    result.repo = a.repo
+    result.sets = a.set & a.project
+    result.remote = a.remote
+    result.revision = a.revision
+    result.mainline = a.mainline
+    result.profile = a.profile
+    result.path = a.path
+    result.message = a.message
+  of ReproCommandLineWorkspaceReposCommand.remove:
+    let r = c.remove
+    result.sub = "remove"
+    result.workspaceRoot = r.workspaceRoot
+    result.repo = r.repo
+    result.sets = r.set & r.project
+    result.deleteFragment = r.deleteFragment
+  of ReproCommandLineWorkspaceReposCommand.help:
+    result.sub = "help"
+    result.sets = c.help.topic
+
+proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
   ## ``repro workspace repos list|add|remove`` — the DEFINITION axis for repos:
   ## the fragments under ``repos/`` and the membership edges that wire them
   ## into repo-sets (``members``) or projects (``includes``).
@@ -104222,41 +103293,13 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
   ## precisely what keeps two sets from conflicting over a checkout path
   ## (`resolver.nim`'s dedup-by-path rule). That is why the target is a
   ## repeatable flag here rather than a positional implying exactly one.
-  if args.len > 0 and args[0] in ["--help", "-h", "help"]:
-    echo "repro workspace repos list [--set=NAME|--project=NAME] " &
-      "[--enabled|--disabled|--all] [--json]"
-    echo "repro workspace repos add <repo> --remote=URL --mainline=B " &
-      "[--profile=NAME] [--set=NAME|--project=NAME]... [--revision=REV] " &
-      "[--path=DIR] [-m DESC]"
-    echo "repro workspace repos remove <repo> " &
-      "[--set=NAME|--project=NAME]... [--delete-fragment]"
-    echo "  --set          repeatable; the repo-set to name the repo in. " &
-      "Defaults to this workspace's primary set."
-    echo "  --project      the retained spelling of --set, for a manifest " &
-      "repo still carrying projects/<name>.toml."
-    echo "  --remote=URL   reuses the matching url-prefix (or, for a project " &
-      "target, the matching [[remote]]) when one already serves that URL; " &
-      "otherwise adds one org-named prefix."
-    echo "  --mainline=B   the repo's mainline, written as `[repo] " &
-      "mainline`. REQUIRED when declaring a new repo, unless the profile " &
-      "it follows supplies one: the --profile given, else the workspace's " &
-      "`[workspace] default_profile`. None is inferred. --branch=B is " &
-      "another spelling of the same flag."
-    echo "  --profile=NAME the `[profiles.NAME]` of the workspace settings " &
-      "file the repo follows, written as `[repo] profile`. The profile " &
-      "must be declared."
-    echo "  --revision=REV an exact commit this fragment sits at, validated " &
-      "against the remote. Use alongside --mainline (\"tracks B, sits at " &
-      "REV\") for a vendored source tree. Ordinary repos take --mainline " &
-      "alone and let a lock record the commit."
-    echo "  --path=DIR     checkout directory; defaults to <repo>."
-    echo "  -m DESC        writes repos/<repo>.md, the source of the " &
-      "generated project docs."
+  let req = reposRequestOf(c)
+  if req.sub == "help":
+    stdout.write(ReproCommandLine.helpText(@["workspace", "repos"] &
+      req.sets))
     return 0
-  let sub = if args.len > 0 and not args[0].startsWith("-"): args[0] else: "list"
-  let rest = if args.len > 0 and not args[0].startsWith("-"): args[1 .. ^1]
-             else: @(args)
-  let workspaceRoot = parseProjectsWorkspaceRoot(args)
+  let sub = req.sub
+  let workspaceRoot = projectsWorkspaceRoot(req.workspaceRoot)
   let manifestRoot = manifestRepoRootFor(workspaceRoot)
   if not dirExists(manifestRoot):
     stderr.writeLine("repro workspace repos: no manifest repo at " &
@@ -104267,22 +103310,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     # ONE namespace, whichever flag spelling named it. `--project=` is the
     # retained spelling of `--set=`; the variable is named for the model rather
     # than for the older of the two words.
-    var scopeSet = ""
-    var wantEnabled = false
-    var wantDisabled = false
-    var asJson = false
-    for arg in rest:
-      if arg.startsWith("--project=") or arg.startsWith("--set="):
-        scopeSet = arg[arg.find('=') + 1 .. ^1]
-      elif arg == "--enabled": wantEnabled = true
-      elif arg == "--disabled": wantDisabled = true
-      elif arg == "--all": wantEnabled = false; wantDisabled = false
-      elif arg == "--json": asJson = true
-      elif arg.startsWith("--workspace-root="):
-        discard
-      elif arg.startsWith("-"):
-        stderr.writeLine("repro workspace repos list: unknown flag " & arg)
-        return 2
+    # The last `--set=` / `--project=` given scopes the list.
+    let scopeSet = if req.sets.len > 0: req.sets[^1] else: ""
+    # `--all` lists both, whatever else was given.
+    let wantEnabled = req.enabled and not req.all
+    let wantDisabled = req.disabled and not req.all
+    let asJson = req.json
     let active = readWorkspaceProjects(workspaceRoot)
     # "enabled" for a repo means "declared by at least one enabled project" —
     # i.e. it is part of this workspace's participating set. Computed from the
@@ -104367,59 +103400,31 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   let gitBin = identity.binaryPath
 
-  var repo = ""
+  let repo = req.repo
+  # `--set=` and `--project=` name the SAME namespace; which file backs the
+  # name is `membershipFileFor`'s answer, not the operator's to state twice.
   var projects: seq[string]
-  var remote = ""
-  var revision = ""
+  for p in req.sets:
+    if p notin projects: projects.add(p)
+  let remote = req.remote
+  let revision = req.revision
   var mainline = ""
-  var profile = ""
-  var checkoutPath = ""
-  var desc = ""
-  var deleteFragment = false
-  var i = 0
-  while i < rest.len:
-    let a = rest[i]
-    # `--set=` and `--project=` name the SAME namespace; which file backs the
-    # name is `membershipFileFor`'s answer, not the operator's to state twice.
-    if a.startsWith("--project=") or a.startsWith("--set="):
-      let p = a[a.find('=') + 1 .. ^1]
-      if p notin projects: projects.add(p)
-    elif a.startsWith("--remote="):
-      remote = a["--remote=".len .. ^1]
-    elif a.startsWith("--revision="):
-      revision = a["--revision=".len .. ^1]
-    elif a.startsWith("--mainline=") or a.startsWith("--branch="):
-      # `--branch=` is a second spelling of `--mainline=`. Two values that
-      # disagree are a contradiction, not a precedence question. An empty
-      # value names no mainline, as an empty value does for every other flag
-      # here, so it neither conflicts with nor clears one given elsewhere.
-      let value = a[a.find('=') + 1 .. ^1]
-      if value.len > 0:
-        if mainline.len > 0 and mainline != value:
-          stderr.writeLine("repro workspace repos " & sub & ": --mainline " &
-            "given twice with different values ('" & mainline & "' and '" &
-            value & "')")
-          return 2
-        mainline = value
-    elif a.startsWith("--profile="):
-      profile = a["--profile=".len .. ^1]
-    elif a.startsWith("--path="):
-      checkoutPath = a["--path=".len .. ^1]
-    elif a == "--delete-fragment":
-      deleteFragment = true
-    elif a == "-m" or a == "--message":
-      if i + 1 < rest.len:
-        desc = rest[i + 1]; inc i
-    elif a.startsWith("--message="):
-      desc = a["--message=".len .. ^1]
-    elif a.startsWith("--workspace-root="):
-      discard
-    elif a.startsWith("-"):
-      stderr.writeLine("repro workspace repos " & sub & ": unknown flag " & a)
-      return 2
-    else:
-      repo = a
-    inc i
+  # `--branch=` is a second spelling of `--mainline=`. Two values that
+  # disagree are a contradiction, not a precedence question. An empty value
+  # names no mainline, as an empty value does for every other flag here, so
+  # it neither conflicts with nor clears one given elsewhere.
+  for value in req.mainline:
+    if value.len > 0:
+      if mainline.len > 0 and mainline != value:
+        stderr.writeLine("repro workspace repos " & sub & ": --mainline " &
+          "given twice with different values ('" & mainline & "' and '" &
+          value & "')")
+        return 2
+      mainline = value
+  let profile = req.profile
+  let checkoutPath = req.path
+  let desc = req.message
+  let deleteFragment = req.deleteFragment
   if repo.len == 0:
     stderr.writeLine("repro workspace repos " & sub & ": missing <repo>")
     return 2
@@ -105224,46 +104229,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "hooks":
-    try:
-      let hookArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runHooksCommand(hookArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro hooks: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "lock":
-    # Spec-Implementation M2e — ``repro lock <verb>``. M2e ships the
-    # ``explain`` verb under this namespace per
-    # Locking-And-Solver.md §"CLI Surface" (which earmarks
-    # ``solve`` / ``debug`` / ``visualize`` for the same family).
-    try:
-      let lockArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproLockCommand(lockArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro lock: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "locking":
-    # HL-1 (Unified-Locking-And-Hooks §4) — ``repro locking <verb>``. Ships the
-    # ``explain`` introspection verb that reports each repo's resolved
-    # ``(tier, backend)`` and the configuration LAYER that declared it.
-    try:
-      let lockingArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproLockingCommand(lockingArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro locking: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "flake":
     # NF-1 (Nix-Flake-Coexistence.md §5) — ``repro flake <verb>``. Ships
     # ``override-args``, which emits the ``--override-input`` arguments for the
@@ -105283,519 +104248,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro flake: error: " & err.msg)
       return 2
-  if programName == "repro" and args.len > 0 and args[0] == "check":
-    # M18 — top-level `repro check` subcommand per CLI/check.md. The
-    # M17 pre-push dispatcher routes through this same entry point so
-    # the gate logic stays in one place and the operator can invoke
-    # it manually for diagnosis.
-    try:
-      let checkArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runCheckCommand(checkArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro check: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "gateway":
-    # TC-6 — the receiving-side push gateway. The bare gateway repo's
-    # ``pre-receive`` / ``post-receive`` hooks invoke ``repro gateway
-    # <phase>`` so the AUTHORITATIVE certificate verify and the
-    # forward-to-upstream (both pre-receive; post-receive does nothing) live
-    # here, not in shell. This is the
-    # ``--no-verify``-proof enforcement point (Test-Certificates.md
-    # §"Enforcement").
-    try:
-      let gatewayArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runGatewayCommand(gatewayArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro gateway: error: " & err.msg &
-        "; REJECTING (fail closed)")
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "restore":
-    try:
-      return runWorkspaceRestoreCommand(args[2 .. ^1], existingRecordStoreRoot)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace restore: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "init":
-    # M9 — `repro workspace init <project-or-variant>`. The milestone
-    # spec names the path ``apps/repro/subcmds/workspace_init.nim``;
-    # this repo's convention is "subcommands live in repro_cli_support,
-    # apps/<x>.nim stays a single-line shim", so the implementation
-    # lives in this file as ``runWorkspaceInitCommand`` instead.
-    try:
-      let initArgs =
-        if args.len > 2:
-          @(args[2 .. ^1])
-        else:
-          newSeq[string]()
-      # RA-31 — the cold-start ``init <url> [local-path]`` front-end fires
-      # when a positional argument is present, the in-workspace flags
-      # (``--workspace-root`` / ``--manifest-url``) are absent, and the cwd
-      # has no ``.repo/manifests`` checkout yet. That combination uniquely
-      # identifies the cold-start "join the workspace" form; everything else
-      # routes to the legacy in-workspace ``init <project-or-variant>``.
-      var hasPositional = false
-      var hasWorkspaceRoot = false
-      var hasManifestUrl = false
-      for a in initArgs:
-        if a == "--workspace-root" or a.startsWith("--workspace-root="):
-          hasWorkspaceRoot = true
-        elif a == "--manifest-url" or a.startsWith("--manifest-url="):
-          hasManifestUrl = true
-        elif a == "--print-resolved-url":
-          # The resolution-only dry run is always a cold-start form.
-          hasPositional = true
-        elif not a.startsWith("-"):
-          hasPositional = true
-      let cwdProjects = getCurrentDir() / "projects"
-      if hasPositional and not hasWorkspaceRoot and not hasManifestUrl and
-          not dirExists(cwdProjects):
-        return runWorkspaceInitFromUrl(initArgs)
-      return runWorkspaceInitCommand(initArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace init: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "sync":
-    # M10 — `repro workspace sync`. Sibling of the M9 ``init`` hook
-    # immediately above: the spec names a file path
-    # ``apps/repro/subcmds/workspace_sync.nim`` for symmetry but the
-    # repo convention places the implementation here in
-    # ``repro_cli_support`` so the dispatcher reaches it via
-    # ``runWorkspaceSyncCommand``.
-    try:
-      let syncArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceSyncCommand(syncArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace sync: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "branch-roles":
-    # Workspace-Branch-Roles.md §4.5 — `repro workspace branch-roles`, the
-    # read-only query of what each branch role resolves to per repo. Same
-    # dispatch convention as the M9–M12 family; implementation in
-    # ``runWorkspaceBranchRolesCommand``, which returns 2 itself for a usage
-    # error.
-    try:
-      let brArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceBranchRolesCommand(brArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace branch-roles: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "pull":
-    # RA-11 — `repro workspace pull`. Distinct from `sync`: converges
-    # every repo to its manifest-declared revision on a local tracking
-    # branch (``ensureRepoTrackingBranches``), rather than honoring each
-    # repo's current branch. Same dispatch convention as the M9–M12
-    # family; implementation in ``runWorkspacePullCommand``.
-    try:
-      let pullArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspacePullCommand(pullArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace pull: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "lock":
-    # M11 — `repro workspace lock`. Follows the same convention as
-    # M9/M10: the milestone spec names
-    # ``apps/repro/subcmds/workspace_lock.nim`` but the implementation
-    # lives in ``repro_cli_support`` for symmetry, reachable via
-    # ``runWorkspaceLockCommand``.
-    try:
-      let lockArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceLockCommand(lockArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace lock: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "migrate":
-    # Workspace-Membership-Model.md — `repro workspace migrate`. Reconcile
-    # every checkout's LOCAL git state (remote names / URLs, detached HEADs)
-    # with the resolved manifest. The managed `post-merge` hook runs the same
-    # reconciliation automatically; this is the surface that can be re-run,
-    # dry-run, and read.
-    try:
-      let migrateArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceMigrateCommand(migrateArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace migrate: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "migrate-locks":
-    # RA-32 — `repro workspace migrate-locks`. The EXPLICIT repair for a
-    # manifest store holding a lock record at a non-canonical path. Same
-    # dispatch convention as the M9-M12 family. Nothing invokes this
-    # implicitly: not `repro push`, not the pre-push gate, not the publisher.
-    try:
-      let migrateArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceMigrateLocksCommand(migrateArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace migrate-locks: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "status":
-    # M12 — `repro workspace status`. Same dispatch convention as
-    # M9/M10/M11: the milestone spec names
-    # ``apps/repro/subcmds/workspace_status.nim`` but the implementation
-    # lives in ``repro_cli_support`` so the dispatcher reaches it via
-    # ``runWorkspaceStatusCommand``.
-    try:
-      let statusArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceStatusCommand(statusArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace status: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "list":
-    # M12 — `repro workspace list`. Sibling of the status hook. See
-    # ``runWorkspaceListCommand`` for the implementation.
-    try:
-      let listArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceListCommand(listArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace list: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "new":
-    # WV-6 — `repro workspace new <path>` is the workspace-namespaced spelling
-    # of the top-level `repro branch <path>`, pairing the two surfaces on one
-    # implementation. The namespaced verb names what it PRODUCES (a new
-    # workspace) rather than repeating the top-level verb.
-    try:
-      let branchArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runBranchCommand(branchArgs, verb = "repro workspace new",
-        requirePath = true)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace new: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "switch":
-    # WV-5 — the workspace-namespaced spelling of the top-level `repro switch`.
-    try:
-      let switchArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runSwitchCommand(switchArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace switch: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "publish-evidence":
-    # Workspace-Manifest-Optional MO-13 (correcting MO-5) —
-    # `repro workspace publish-evidence`. Publish each evidence-only private
-    # repo's source-free WorkspaceVcsEvidence to its MO-4-assigned backend.
-    try:
-      let peArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspacePublishEvidenceCommand(peArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace publish-evidence: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "manifests":
-    # M12 — `repro workspace manifests`. Last of the three M12 hooks;
-    # implementation in ``runWorkspaceManifestsCommand``.
-    try:
-      let manifestsArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceManifestsCommand(manifestsArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace manifests: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "shared-clones":
-    # RA-5 — `repro workspace shared-clones`. Inspect
-    # or repair the shared object-cache wiring. Same dispatch convention
-    # as the M9–M12 family: the implementation lives in
-    # ``repro_cli_support`` as ``runWorkspaceSharedClonesCommand``.
-    try:
-      let scArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceSharedClonesCommand(scArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace shared-clones: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "forall":
-    # RA-20 — `repro workspace forall -c <cmd>`. The `repo forall -c`
-    # equivalent: runs the command via the shell in every participating
-    # repo (enumerated via the same `enumerateParticipatingRepos` the M17
-    # hook installer uses). Same dispatch convention as the M9–M12 family;
-    # implementation in `runWorkspaceForallCommand`.
-    try:
-      let forallArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runWorkspaceForallCommand(forallArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace forall: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "bootstrap":
-    # RA-6 — `repro workspace bootstrap [<dir>]`. Scaffold the host
-    # ergonomics files (`.envrc` / `AGENTS.md` / `workspace-projects.md`)
-    # into an empty host directory; idempotent on re-run.
-    try:
-      let bsArgs =
-        if args.len > 2: args[2 .. ^1]
-        else: @[]
-      return runWorkspaceBootstrapCommand(bsArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace bootstrap: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "provision":
-    # RA-19 — `repro workspace provision`. Ensure the host toolchain and
-    # activate the workspace env. No-op on POSIX (the Nix devShell / .envrc
-    # already provides the toolchain); on Windows it walks
-    # `windowsProvisioningPlan` and runs each non-skipped ensure step.
-    try:
-      let pvArgs =
-        if args.len > 2: args[2 .. ^1]
-        else: @[]
-      return runWorkspaceProvisionCommand(pvArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace provision: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "enable":
-    # WV-2 — `repro workspace enable <project>...`. MEMBERSHIP: record the
-    # named projects in the active set AND materialize the repos the enlarged
-    # set introduces. `--default` auto-layers from REPRO_DEFAULT_PROJECTS
-    # (then the RA-8 host config).
-    try:
-      let pArgs =
-        if args.len > 2: args[2 .. ^1]
-        else: @[]
-      return runWorkspaceEnableCommand(pArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace enable: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "disable":
-    # WV-2 — `repro workspace disable <project>...`. MEMBERSHIP: drop the
-    # named projects from the active set and remove the checkouts only they
-    # declared, gated on work that exists nowhere else.
-    try:
-      let pArgs =
-        if args.len > 2: args[2 .. ^1]
-        else: @[]
-      return runWorkspaceDisableCommand(pArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace disable: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "sets":
-    # Workspace-Membership-Model.md —
-    # `repro workspace sets list|resolve|add|remove`. DEFINITION: inspect,
-    # resolve or author repo-set definitions in the manifest repo.
-    # Enabling one in this workspace is `enable`.
-    try:
-      let pArgs =
-        if args.len > 2: args[2 .. ^1]
-        else: @[]
-      return runWorkspaceSetsCommand(pArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace sets: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "projects":
-    # WV-3 — `repro workspace projects list|resolve|add|remove`, the
-    # retained spelling of `sets`. Kept while the manifest repo still carries
-    # `projects/*.toml`; it differs from `sets` in exactly one respect, which
-    # directory `add` scaffolds into.
-    try:
-      let pArgs =
-        if args.len > 2: args[2 .. ^1]
-        else: @[]
-      return runWorkspaceProjectsCommand(pArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace projects: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
-      args[1] == "repos":
-    # WV-4 — `repro workspace repos list|add|remove`. DEFINITION: inspect or
-    # author repo fragments and the `includes` edges wiring them into projects.
-    try:
-      let pArgs =
-        if args.len > 2: args[2 .. ^1]
-        else: @[]
-      return runWorkspaceReposCommand(pArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro workspace repos: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "branch":
-    # M14 / WV-6 — `repro branch [<path>]`. Top-level subcommand per
-    # ``reprobuild-specs/CLI/branch.md``: NOT under ``repro workspace``.
-    # Same convention deviation as M9–M12: the milestone spec names a
-    # planner path but the implementation lives in ``repro_cli_support``
-    # for symmetry, reachable via ``runBranchCommand``.
-    try:
-      let branchArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runBranchCommand(branchArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro branch: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "switch":
-    # WV-5 — `repro switch <branch> [-b]`. Top-level subcommand per
-    # ``reprobuild-specs/CLI/switch.md``: switches every participating repo to
-    # the named branch (creating it first under ``-b``) and updates the M13
-    # metadata. ``checkout`` / ``co`` are RETIRED spellings and deliberately
-    # absent — they fail as unknown subcommands (see Retired-Names.md).
-    try:
-      let switchArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runSwitchCommand(switchArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro switch: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "add":
-    # RA-22 — `repro add <repo>` (workspace membership / develop-mode policy
-    # per CLI/add.md + Workspace-And-Develop-Mode.md §"Workspace Membership").
-    # Policy (RA-8 `[develop] org_urls`) decides develop vs binary by default;
-    # `--develop`/`--binary` override; `--no-membership` clones without adding.
-    # Implementation in ``runAddCommand``.
-    try:
-      let addArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runAddCommand(addArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro add: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "remove":
-    # RA-9 — `repro remove <repo>` (workspace context per CLI/remove.md +
-    # the RA-10 path/name note). Destructive-command safety: previews the
-    # per-repo effect, gates a dirty discard behind ``--force``, and
-    # refuses cleanly in a non-interactive context rather than hanging.
-    # Implementation in ``runRemoveCommand``.
-    try:
-      let removeArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runRemoveCommand(removeArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro remove: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "push":
-    # RA-25 — `repro push [<project>]` (closure-ordered push + lock publish +
-    # certify) per CLI/push.md. The inverse of the RA-21 publication gate:
-    # pushes the pushed repo's develop-mode dependency closure in dependency-
-    # first order, then publishes the workspace lock (loud on failure).
-    # ``--sync`` (+``--merge``/``--rebase``) reconciles upstream first.
-    # Implementation in ``runPushCommand``.
-    try:
-      let pushArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runPushCommand(pushArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro push: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "sync":
-    # Top-level `repro sync [<project>]` shortcut per CLI/sync.md. Mirrors
-    # the `repro switch`/`push` top-level arms above: routes to the same
-    # handler `repro workspace sync` uses (``runWorkspaceSyncCommand``),
-    # forwarding the remaining args unchanged so every flag (scoped
-    # ``<project>``, ``--jobs*``, ``--tags``, ``--force-sync``,
-    # ``--dry-run``, ``--json``, ``--verbose``) behaves identically.
-    try:
-      let syncArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runWorkspaceSyncCommand(syncArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro sync: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "pull":
-    # Top-level `repro pull [<project>]` shortcut per CLI/sync.md. Mirrors
-    # the `repro sync` shortcut just above: routes to the same handler
-    # `repro workspace pull` uses (``runWorkspacePullCommand``), forwarding
-    # the remaining args unchanged.
-    try:
-      let pullArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runWorkspacePullCommand(pullArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro pull: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
       let watchArgs =
@@ -106026,7 +104478,7 @@ const LegacyVerbsAnsweringHelp = [
   # `--help` until `allow` moved onto the description), so `repro help` must
   # never hand it one. An entry goes when its command moves onto the
   # description.
-  "branch", "clean", "hooks", "switch", "sync", "workspace"]
+  "clean"]
 
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string): int =
@@ -106064,6 +104516,126 @@ proc runReproHelp(programName: string; topic: seq[string];
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
+
+proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
+  ## ``repro workspace <subcommand>`` (``repro ws``) from its configuration.
+  ## An error a subcommand raises is reported as ``repro workspace <sub>:
+  ## error: ...``, exit 1.
+  type Cmd = ReproCommandLineWorkspaceCommand
+  var label = "repro workspace"
+  try:
+    case c.command
+    of Cmd.restore:
+      label = "repro workspace restore"
+      let r = c.restore
+      return runWorkspaceRestoreCommand(r.source, r.destination, r.projects,
+        r.at, r.record, r.snapshot, r.recordStore, r.recordStoreAt,
+        existingRecordStoreRoot)
+    of Cmd.init:
+      label = "repro workspace init"
+      # The cold-start ``init <url> [local-path]`` form runs when a
+      # positional (or ``--print-resolved-url``) is present, the in-workspace
+      # flags (``--workspace-root`` / ``--manifest-url``) are absent, and the
+      # current directory has no ``projects/`` yet. That combination
+      # uniquely identifies the cold-start "join the workspace" form;
+      # everything else is the in-workspace ``init <project-or-variant>``.
+      let i = c.init
+      let hasPositional = i.target.len > 0 or i.localPath.len > 0 or
+        i.printResolvedUrl
+      if hasPositional and i.workspaceRoot.len == 0 and
+          i.manifestUrl.len == 0 and not dirExists(getCurrentDir() / "projects"):
+        return runWorkspaceInitFromUrl(i)
+      if i.localPath.len > 0:
+        raise newException(ValueError,
+          "unexpected positional argument to `repro workspace init`: " &
+            i.localPath)
+      if i.printResolvedUrl:
+        raise newException(ValueError,
+          "unsupported `repro workspace init` flag: --print-resolved-url " &
+            "(it applies to the `init <url>` form only)")
+      return runWorkspaceInitCommand(
+        workspaceInitArgsOf(i, i.target, i.workspaceRoot))
+    of Cmd.bootstrap:
+      label = "repro workspace bootstrap"
+      case c.bootstrap.command
+      of ReproCommandLineWorkspaceBootstrapCommand.help:
+        stdout.write(ReproCommandLine.helpText(@["workspace", "bootstrap"] &
+          c.bootstrap.help.topic))
+        return 0
+      of ReproCommandLineWorkspaceBootstrapCommand.call:
+        return runWorkspaceBootstrapCommand(c.bootstrap.call.dir,
+          c.bootstrap.call.workspaceRoot)
+    of Cmd.enable:
+      label = "repro workspace enable"
+      return runWorkspaceEnableCommand(c.enable)
+    of Cmd.disable:
+      label = "repro workspace disable"
+      return runWorkspaceDisableCommand(c.disable)
+    of Cmd.sets:
+      label = "repro workspace sets"
+      return runWorkspaceSetsCommand(c.sets)
+    of Cmd.projects:
+      label = "repro workspace projects"
+      return runWorkspaceProjectsCommand(c.projects)
+    of Cmd.repos:
+      label = "repro workspace repos"
+      return runWorkspaceReposCommand(c.repos)
+    of Cmd.status:
+      label = "repro workspace status"
+      return runWorkspaceStatusCommand(c.status)
+    of Cmd.lock:
+      label = "repro workspace lock"
+      return runWorkspaceLockCommand(c.lock)
+    of Cmd.list:
+      label = "repro workspace list"
+      return runWorkspaceListCommand(c.list)
+    of Cmd.manifests:
+      label = "repro workspace manifests"
+      return runWorkspaceManifestsCommand(c.manifests)
+    of Cmd.branchRoles:
+      label = "repro workspace branch-roles"
+      return runWorkspaceBranchRolesCommand(c.branchRoles)
+    of Cmd.forall:
+      label = "repro workspace forall"
+      return runWorkspaceForallCommand(c.forall)
+    of Cmd.sharedClones:
+      label = "repro workspace shared-clones"
+      return runWorkspaceSharedClonesCommand(c.sharedClones)
+    of Cmd.sync:
+      label = "repro workspace sync"
+      return runWorkspaceSyncCommand(c.sync)
+    of Cmd.pull:
+      label = "repro workspace pull"
+      return runWorkspacePullCommand(c.pull)
+    of Cmd.new:
+      label = "repro workspace new"
+      return runBranchCommand(c.new, verb = "repro workspace new",
+        requirePath = true)
+    of Cmd.switch:
+      label = "repro workspace switch"
+      return runSwitchCommand(c.switch)
+    of Cmd.provision:
+      label = "repro workspace provision"
+      case c.provision.command
+      of ReproCommandLineWorkspaceProvisionCommand.help:
+        stdout.write(ReproCommandLine.helpText(@["workspace", "provision"] &
+          c.provision.help.topic))
+        return 0
+      of ReproCommandLineWorkspaceProvisionCommand.call:
+        return runWorkspaceProvisionCommand(c.provision.call.installRoot,
+          c.provision.call.arch)
+    of Cmd.migrate:
+      label = "repro workspace migrate"
+      return runWorkspaceMigrateCommand(c.migrate)
+    of Cmd.migrateLocks:
+      label = "repro workspace migrate-locks"
+      return runWorkspaceMigrateLocksCommand(c.migrateLocks)
+    of Cmd.publishEvidence:
+      label = "repro workspace publish-evidence"
+      return runWorkspacePublishEvidenceCommand(c.publishEvidence)
+  except CatchableError as err:
+    stderr.writeLine(label & ": error: " & err.msg)
+    return 1
 
 proc runReproCommandLine(programName: string; args: seq[string];
                          publicCliPath: string): int =
@@ -106314,6 +104886,127 @@ proc runReproCommandLine(programName: string; args: seq[string];
         return runPromptCommand(conf.prompt.call)
     except CatchableError as err:
       stderr.writeLine("repro prompt: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.hooks:
+    try:
+      return runHooksCommand(conf.hooks)
+    except CatchableError as err:
+      stderr.writeLine("repro hooks: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.check:
+    # Top-level `repro check`. The pre-push dispatcher routes through
+    # `runCheckCommand` too, so the gate logic stays in one place and the
+    # operator can invoke it manually for diagnosis. A missing `--mode` is
+    # the command's own refusal, exit 1, so it stays apart from exit 2, a
+    # failed gate.
+    var parsed: CheckArgs
+    try:
+      parsed = checkArgsOf(conf.check)
+    except ValueError as err:
+      stderr.writeLine("repro check: " & err.msg)
+      return 1
+    try:
+      return runCheckCommand(parsed)
+    except CatchableError as err:
+      stderr.writeLine("repro check: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.push:
+    try:
+      return runPushCommand(conf.push)
+    except CatchableError as err:
+      stderr.writeLine("repro push: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.sync:
+    try:
+      return runWorkspaceSyncCommand(conf.sync)
+    except CatchableError as err:
+      stderr.writeLine("repro sync: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.pull:
+    try:
+      return runWorkspacePullCommand(conf.pull)
+    except CatchableError as err:
+      stderr.writeLine("repro pull: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.branch:
+    case conf.branch.command
+    of ReproCommandLineBranchCommand.help:
+      # `repro branch help [<word>...]` is `repro help branch [<word>...]`.
+      return runReproHelp(programName, @["branch"] & conf.branch.help.topic,
+        publicCliPath)
+    of ReproCommandLineBranchCommand.call:
+      try:
+        return runBranchCommand(conf.branch.call)
+      except CatchableError as err:
+        stderr.writeLine("repro branch: error: " & err.msg)
+        return 1
+  of ReproCommandLineCommand.switch:
+    case conf.switch.command
+    of ReproCommandLineSwitchCommand.help:
+      return runReproHelp(programName, @["switch"] & conf.switch.help.topic,
+        publicCliPath)
+    of ReproCommandLineSwitchCommand.call:
+      try:
+        return runSwitchCommand(conf.switch.call)
+      except CatchableError as err:
+        stderr.writeLine("repro switch: error: " & err.msg)
+        return 1
+  of ReproCommandLineCommand.workspace:
+    return runWorkspaceCommand(conf.workspace)
+  of ReproCommandLineCommand.gateway:
+    # The receiving-side push gateway. The bare gateway repo's
+    # ``pre-receive`` / ``post-receive`` hooks invoke ``repro gateway
+    # <phase>`` so the AUTHORITATIVE certificate verify and the
+    # forward-to-upstream (both pre-receive; post-receive does nothing) live
+    # here, not in shell. This is the ``--no-verify``-proof enforcement
+    # point. ``migrate`` is not a receive
+    # phase: it reads no stdin stream and there is no gateway config to load
+    # yet (it is the thing that creates them).
+    let g = conf.gateway
+    try:
+      case g.command
+      of ReproCommandLineGatewayCommand.preReceive:
+        return runGatewayCommand("pre-receive", g.preReceive.gatewayDir)
+      of ReproCommandLineGatewayCommand.postReceive:
+        return runGatewayCommand("post-receive", g.postReceive.gatewayDir)
+      of ReproCommandLineGatewayCommand.migrate:
+        return runGatewayMigrateCommand(g.migrate.workspaceRoot,
+          g.migrate.dryRun)
+    except CatchableError as err:
+      stderr.writeLine("repro gateway: error: " & err.msg &
+        "; REJECTING (fail closed)")
+      return 1
+  of ReproCommandLineCommand.locking:
+    # ``repro locking <verb>``: the
+    # ``explain`` introspection verb reports each repo's resolved ``(tier,
+    # backend)`` and the configuration LAYER that declared it.
+    try:
+      return runReproLockingCommand(conf.locking)
+    except CatchableError as err:
+      stderr.writeLine("repro locking: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.lock:
+    # ``repro lock <verb>``.
+    try:
+      return runReproLockCommand(conf.lock)
+    except CatchableError as err:
+      stderr.writeLine("repro lock: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.add:
+    # `repro add <repo>`: workspace membership and develop-mode
+    # policy. The policy (`[develop] org_urls`) decides develop vs binary by
+    # default; `--develop`/`--binary` override; `--no-membership` clones
+    # without adding.
+    try:
+      return runAddCommand(conf.add)
+    except CatchableError as err:
+      stderr.writeLine("repro add: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.remove:
+    try:
+      return runRemoveCommand(conf.remove)
+    except CatchableError as err:
+      stderr.writeLine("repro remove: error: " & err.msg)
       return 1
   of ReproCommandLineCommand.debug:
     case conf.debug.command

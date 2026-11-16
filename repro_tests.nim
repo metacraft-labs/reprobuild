@@ -19085,7 +19085,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_certificates_travel_with_pushed_commit.nim",
@@ -19607,6 +19607,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim",
     binary: "build/test-bin/t_cs_m6_stores_and_daemons_command_lines",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g03",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_cs_m6_workspace_command_lines.nim",
+    binary: "build/test-bin/t_cs_m6_workspace_command_lines",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
