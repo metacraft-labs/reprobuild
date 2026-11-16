@@ -88,12 +88,12 @@ The environment switches on. From now on it switches on whenever you enter
 this directory, and off when you leave it.
 
 :::danger
-`repro allow` trusts the project's recipe as it is now: `repro.nim`, the local
+`repro allow` trusts the project file as it is now: `repro.nim`, the local
 Nim modules it imports, `config.nims` and `nim.cfg`, and the dev-env lock. If
 any of them changes, for example through `git pull`, the directory stops being
 trusted and the hook prints the "not allowed/trusted" message until you run
 `repro allow` again. Read the change before you re-allow. Files that the
-recipe loads by some other route are not covered, so allow only directories
+project file loads by some other route are not covered, so allow only directories
 whose contents you would run yourself.
 :::
 

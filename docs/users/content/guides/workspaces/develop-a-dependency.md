@@ -106,4 +106,4 @@ your repositories.
 ## Related
 
 - [Join a workspace](join-a-workspace.md)
-- [How reprobuild works](../../concepts/how-reprobuild-works.md), stage 7
+- [How reprobuild works](../../concepts/how-reprobuild-works.md), stage 9

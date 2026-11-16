@@ -12,9 +12,6 @@ unverified:
   - claim: "repro hooks ensure --shell-direnv writes an .envrc that hands activation to reprobuild."
     reason: "The flag is in the hooks usage text; no test is cited for the written .envrc."
     owner: unassigned
-  - claim: "Trust is recorded against the directory, so a later change to repro.nim is activated without asking again."
-    reason: "Read from the allow implementation; a test that edits repro.nim after repro allow is needed."
-    owner: unassigned
 ---
 
 # Coming from direnv, devenv and mise
@@ -76,16 +73,17 @@ The build uses the same environment. The tools your shell gets are the tools
 the build resolves, from the same project file and the same lock file. There is
 no second description of the toolchain to keep in step.
 
-Trust follows the directory, not its contents. `repro allow` records trust
-against the directory's path. After that, a change to `repro.nim`, such as one
-that arrives with `git pull`, is activated the next time you enter the directory
-without asking again. Allow only directories whose changes you would run
-yourself.
+Trust covers the project file and its local imports. `repro allow` records
+trust over `repro.nim`, the local Nim modules it imports, `config.nims`,
+`nim.cfg` and the dev-env lock. When any of those files changes, such as on
+`git pull`, the shell hook refuses automatic activation until you inspect the
+change and run `repro allow` again, matching `direnv allow`'s content check across
+the whole project-file closure.
 
 ## What reprobuild does not do
 
 - It does not run arbitrary shell code when it activates an environment.
-- It does not ask for trust again when a project file changes.
+- It does not cover files loaded outside the project file's static Nim imports in its trust hash, so allow only directories whose contents you would run yourself.
 - It does not switch tool versions for directories that have no project file.
 
 ## When the other tool remains the better choice
