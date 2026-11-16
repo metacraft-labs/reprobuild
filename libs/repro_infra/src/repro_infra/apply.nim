@@ -963,9 +963,16 @@ proc recordLiveCheckTriggers*(stateDir: string; triggers: openArray[string]) =
     if fileExists(p): removeFile(p)
     return
   createDir(stateDir)
-  let tmp = p & ".tmp"
-  writeFile(tmp, triggers.join("\n") & "\n")
-  moveFile(tmp, p)
+  when defined(posix):
+    # Durable (A13 review round 10, L4): written in full to a temporary
+    # file, fsync'd, renamed into place and the directory fsync'd
+    # (``start_holds.writeHoldFile``), so a crash after the apply stopped a
+    # trigger cannot leave a record that names none.
+    writeHoldFile(p, triggers.join("\n") & "\n")
+  else:
+    let tmp = p & ".tmp"
+    writeFile(tmp, triggers.join("\n") & "\n")
+    moveFile(tmp, p)
 
 proc readLiveCheckTriggers*(stateDir: string): seq[string] =
   let p = stateDir / LiveCheckTriggersFile
@@ -973,6 +980,38 @@ proc readLiveCheckTriggers*(stateDir: string): seq[string] =
   for l in readFile(p).splitLines():
     let t = l.strip()
     if t.len > 0 and t notin result: result.add(t)
+
+proc startConfirmed*(host: LiveHost; unit: string; mustStayActive: bool):
+    tuple[ok: bool; why: string] =
+  ## Start ``unit`` and confirm through systemd that it really started (A13
+  ## review round 11, H1): ``systemctl start`` of a unit whose condition a
+  ## hold fails exits 0 and leaves it inactive ("skipped"), so the exit
+  ## code alone says nothing. After the start, systemd's own view decides:
+  ## the unit is active, activating or reloading; or -- only when
+  ## ``mustStayActive`` is false, for a service that runs and exits -- it
+  ## is inactive with ``Result=success`` and its last condition and assert
+  ## checks passed. A socket, path or timer unit must stay active.
+  if host.resetFailed != nil: host.resetFailed(unit)
+  let s = host.start(unit)
+  if not s.ok: return (false, s.output.strip())
+  when ApplyMutation == "restart-success-by-exit-code":
+    # FALSIFYING MUTATION: the exit code is taken as the outcome.
+    return (true, "")
+  var props: Table[string, string]
+  try: props = host.show(unit)
+  except CatchableError as e: return (false, "systemd could not be asked: " & e.msg)
+  let st = props.getOrDefault("ActiveState")
+  if st in ["active", "activating", "reloading"]: return (true, "")
+  let skipped = props.getOrDefault("ConditionResult") == "no" or
+                props.getOrDefault("AssertResult") == "no"
+  if not mustStayActive and st == "inactive" and not skipped and
+      props.getOrDefault("Result", "success") == "success":
+    return (true, "")
+  (false, "the start exited 0 but systemd reports ActiveState=" & st &
+    " Result=" & props.getOrDefault("Result") & " ConditionResult=" &
+    props.getOrDefault("ConditionResult") & " AssertResult=" &
+    props.getOrDefault("AssertResult") &
+    (if skipped: " (its start was skipped: a hold or condition)" else: ""))
 
 proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
                       host: LiveHost): seq[string] =
@@ -990,17 +1029,20 @@ proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
     try: props = host.show(t)
     except CatchableError: continue
     if props.getOrDefault("LoadState") != "loaded": continue
-    if host.resetFailed != nil: host.resetFailed(t)
-    let s = host.start(t)
+    let s = startConfirmed(host, t, mustStayActive = true)
     if not s.ok:
       result.add("systemctl start " & t & " (a trigger stopped for the " &
-        "carried-state check's hold, §13 decision 151): " & s.output.strip())
+        "carried-state check's hold, §13 decision 151): " & s.why)
 
 proc unitRequirements*(texts: openArray[string]): seq[string] =
   ## The units a unit's ``[Unit]`` section ``Requires=`` or ``BindsTo=``,
   ## read from its file and then its drop-ins as systemd reads them
-  ## (``systemd_syntax.systemdLogicalLines``; an empty assignment resets
-  ## the list, systemd.unit(5)).
+  ## (``systemd_syntax.systemdLogicalLines``). An empty assignment is NOT
+  ## a reset: systemd's ``config_parse_unit_deps`` (src/core/load-fragment.c,
+  ## https://github.com/systemd/systemd/blob/v257/src/core/load-fragment.c)
+  ## adds each word it finds and nothing else, so ``Requires=`` with no
+  ## value leaves the earlier dependencies in place (measured by the A13
+  ## review on systemd 260, round 11).
   for text in texts:
     var section = ""
     for line in systemdLogicalLines(text):
@@ -1015,9 +1057,11 @@ proc unitRequirements*(texts: openArray[string]): seq[string] =
       let k = t[0 ..< eq].strip()
       if k notin ["Requires", "BindsTo"]: continue
       let v = t[eq + 1 .. ^1].strip()
-      if v.len == 0:
-        result.setLen(0)
-        continue
+      when ApplyMutation == "empty-requires-resets":
+        # FALSIFYING MUTATION: an empty assignment resets the list.
+        if v.len == 0:
+          result.setLen(0)
+          continue
       for u in v.splitWhitespace():
         if u notin result: result.add(u)
 
@@ -1032,21 +1076,100 @@ proc profileRequirersOf*(p: SystemProfile; units: openArray[string]): seq[string
   when ApplyMutation == "unjudged-requirers-released":
     # FALSIFYING MUTATION: only judged units are held as requirers.
     return
+  # Every unit the generation writes a file or a drop-in for: its own
+  # units (a template's hold covers its instances, so a template that
+  # requires a judged unit is held as a template and judged through its
+  # instances, as decision 153 judges one; A13 review round 11, M3), and
+  # the units it only drops in on.
+  var names: seq[string]
+  var texts = initTable[string, seq[string]]()
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+      if r.suName notin names: names.add(r.suName)
+      texts.mgetOrPut(r.suName, @[]).insert(renderedSystemUnitContent(r), 0)
+    elif r.kind == srkSystemdSystemDropIn:
+      if r.diUnit notin names: names.add(r.diUnit)
+  for n in names:
+    discard texts.mgetOrPut(n, @[])
+    for d in profileDropInsOf(p, n): texts[n].add(d)
   var reached = @units
   var changed = true
   while changed:
     changed = false
-    for r in p.resources:
-      if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
-      let n = r.suName
-      if isTemplateUnit(n) or heldBy(n, reached): continue
-      for d in unitRequirements(@[renderedSystemUnitContent(r)] &
-                                profileDropInsOf(p, n)):
+    for n in names:
+      when ApplyMutation == "template-requirers-skipped":
+        # FALSIFYING MUTATION: a template requirer is not held.
+        if isTemplateUnit(n): continue
+      if heldBy(n, reached): continue
+      for d in unitRequirements(texts[n]):
         if heldBy(d, reached):
           reached.add(n)
           result.add(n)
           changed = true
           break
+
+proc systemdRequirersOf*(units: openArray[string]; host: LiveHost): seq[string] =
+  ## The units systemd has loaded that ``Requires=`` or ``BindsTo=`` one of
+  ## ``units``, directly or through another such unit, as systemd's
+  ## effective dependencies say: each unit's reverse properties
+  ## ``RequiredBy=`` and ``BoundBy=`` (which cover a unit file's lines, a
+  ## host drop-in, a ``.requires/`` link and an enabled ``[Install]
+  ## RequiredBy=``; the owner decision on decision 171, A13 review round
+  ## 11). A template is read through the names it is shown under.
+  when ApplyMutation == "requirers-from-files-only":
+    # FALSIFYING MUTATION: systemd's view is not read.
+    return
+  var queue = @units
+  var seen = @units
+  while queue.len > 0:
+    let u = queue.pop()
+    var props: Table[string, string]
+    try: props = host.show(u)
+    except CatchableError: continue
+    for key in ["RequiredBy", "BoundBy"]:
+      for d in props.getOrDefault(key).splitWhitespace():
+        if d in seen: continue
+        seen.add(d)
+        result.add(d)
+        queue.add(d)
+
+const EssentialUnits* = [
+  # Remote access (the management path: §7.5's list of units an agent apply
+  # may not touch) -- sshd, the console and serial logins, logind and the
+  # system bus, which every login needs.
+  "ssh.service", "sshd.service", "ssh.socket", "sshd.socket", "ssh@.service",
+  "sshd@.service", "getty@.service", "serial-getty@.service",
+  "console-getty.service", "container-getty@.service", "autovt@.service",
+  "getty.target", "systemd-logind.service", "dbus.service", "dbus.socket",
+  "dbus-broker.service", "systemd-user-sessions.service", "user@.service",
+  "user-runtime-dir@.service",
+  # The network and firewall the management path runs over.
+  "systemd-networkd.service", "systemd-networkd.socket",
+  "systemd-networkd-wait-online.service", "NetworkManager.service",
+  "NetworkManager-wait-online.service", "networking.service", "nftables.service",
+  "netfilter-persistent.service", "iptables.service", "ip6tables.service",
+  "ufw.service", "firewalld.service",
+  # The add-on itself: re-assertion and its boot hold and confirm, the
+  # deploy agent's fetch and apply.
+  "repro-addon-reassert.service", "repro-addon-boot-hold.service",
+  "repro-addon-boot-confirm.service", "repro-agent-apply.service",
+  "repro-agent-fetch.service", "repro-agent-fetch.timer"]
+  ## The units a full apply refuses to hold for the carried-state check:
+  ## an essential requirer is never held (the owner decision on decision
+  ## 171, A13 review round 11): holding one
+  ## could cut remote access to the host or stop the add-on from repairing
+  ## it. A template stands for its instances.
+
+proc isEssentialUnit*(u: string): bool =
+  u in EssentialUnits or (u.find('@') > 0 and templateOfUnit(u) in EssentialUnits)
+
+proc essentialHeld*(held: openArray[string]): seq[string] =
+  ## Those of ``held`` that are essential (``EssentialUnits``).
+  when ApplyMutation == "essential-requirers-held":
+    # FALSIFYING MUTATION: an essential unit is held like any other.
+    return
+  for u in held:
+    if isEssentialUnit(u) and u notin result: result.add(u)
 
 proc restartRecordedLiveCheckTriggers*(stateDir: string; host: LiveHost):
     seq[string] =
@@ -1198,6 +1321,24 @@ when defined(posix):
       let w = l.splitWhitespace()
       if w.len > 0 and w[0] notin result: result.add(w[0])
 
+  proc recordInterruptedLiveCheck(c: LiveCheck) =
+    ## The record an interrupted full apply leaves (see ``runInfraApply``).
+    if c.stateDir.len == 0 or c.units.len == 0: return
+    var all = readLiveCheckTriggers(c.stateDir)
+    for t in c.remembered & c.triggersActive & c.driverStarts:
+      if t in c.triggers and t notin all: all.add(t)
+    try: recordLiveCheckTriggers(c.stateDir, all)
+    except CatchableError: discard
+
+  proc requirersToHold(p: SystemProfile; units: openArray[string];
+                       host: LiveHost): seq[string] =
+    ## The units held with the judged ``units`` (§13 decision 171): the
+    ## generation's requirers, read from its files, and the loaded units
+    ## systemd's effective dependencies name (``systemdRequirersOf``).
+    result = profileRequirersOf(p, units)
+    for u in systemdRequirersOf(units, host):
+      if u notin units and u notin result: result.add(u)
+
   proc beginLiveCheck(p: SystemProfile; dir, root, stateDir: string;
                       planned: openArray[PlannedOperation]): LiveCheck =
     ## Hold every unit ``liveReachUnits`` names before the drivers write
@@ -1210,9 +1351,12 @@ when defined(posix):
     result.stateDir = stateDir
     result.units = liveReachUnits(p, dir, root)
     if result.units.len == 0: return
-    result.requirers = profileRequirersOf(p, result.units)
+    result.requirers = requirersToHold(p, result.units, liveHost())
     for u in result.requirers:
-      if runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0:
+      if isTemplateUnit(u):
+        for i in hostRunningInstances(u):
+          if i notin result.wasActive: result.wasActive.add(i)
+      elif runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0:
         result.wasActive.add(u)
     for u in result.units:
       if isTemplateUnit(u):
@@ -1308,6 +1452,25 @@ when defined(posix):
         refused.add(u)
         problems.add("ECarriedStatePending: " & u & " requires " & because &
           ", which the carried-state check refused; held because of it")
+      # And a unit systemd's effective dependencies name as requiring a
+      # refused one that was not held with the judged units -- one the
+      # generation's writes made a requirer (§13 decision 171): held now,
+      # in /etc, and stopped if a driver started it; an essential one is
+      # reported, not held.
+      var heldNow = c.units & c.requirers
+      for u in systemdRequirersOf(refused, host):
+        if u in heldNow or u in refused: continue
+        if isEssentialUnit(u):
+          problems.add("ECarriedStatePending: " & u & " requires a unit " &
+            "the carried-state check refused, and is essential, so it is " &
+            "not held; the apply reports it")
+          continue
+        refused.add(u)
+        discard writeHolds([u], CarriedCheckHoldName, liveCheckHoldText(),
+                           RuntimeUnitDir)
+        if host.isActive(u) and host.stop != nil: discard host.stop(u)
+        problems.add("ECarriedStatePending: " & u & " requires a unit the " &
+          "carried-state check refused; held because of it")
       var still: seq[string]
       for u in passed:
         if u notin refused: still.add(u)
@@ -1576,12 +1739,46 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     let liveRoot = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot
                    else: "/"
     var liveCheck: LiveCheck
+    var liveCheckFinished = false
+    # An apply that dies between its hold and its release (a driver or the
+    # broker raises) leaves on record every trigger the release would have
+    # started -- those remembered before the hold and those the drivers
+    # started under it -- for the next apply or `recover` (A13 review round
+    # 11, H1). The holds stay: the next apply clears them first.
+    defer:
+      if not liveCheckFinished:
+        recordInterruptedLiveCheck(liveCheck)
     # The triggers an earlier full apply stopped or left alone for its hold
     # and never released -- it died between the two -- come back first
     # (§13 decision 151; ``LiveCheckTriggersFile``).
+    # Before anything is written: an essential unit that would be held with
+    # the judged units refuses the apply (the owner decision on decision
+    # 171, A13 review round 11): holding it could cut remote access or the
+    # add-on's own repair.
+    if not opts.carriedStateChecked and opts.elevationMode != emNoElevate and
+        liveRoot == "/" and isProcessElevated():
+      let pEss = parseSystemProfile(profileText)
+      let judgedEss = liveReachUnits(pEss, liveDir, liveRoot)
+      if judgedEss.len > 0:
+        let ess = essentialHeld(requirersToHold(pEss, judgedEss, liveHost()))
+        if ess.len > 0:
+          raise newException(ECarriedStatePending, "ECarriedStatePending: " &
+            ess.join(", ") & " would be held for the carried-state check " &
+            "(it requires or binds to a unit the check judges), and holding " &
+            "an essential unit could cut remote access to the host or stop " &
+            "the add-on from repairing it; nothing was written (§13 " &
+            "decision 171 as the owner decided it, A13 review round 11)")
     if opts.elevationMode != emNoElevate and liveRoot == "/" and
         fileExists(opts.stateDir / LiveCheckTriggersFile) and
         isProcessElevated():
+      # The hold of the apply that died is still in /run: cleared first,
+      # or every start below is skipped by it and reports success (A13
+      # review round 11, H1).
+      when ApplyMutation != "live-check-restart-before-stale-holds-cleared":
+        try:
+          if clearStaleHolds(CarriedCheckHoldName).len > 0:
+            systemctlOrRaise(["daemon-reload"])
+        except OSError: discard
       for pr in restartRecordedLiveCheckTriggers(opts.stateDir, liveHost()):
         result.diagnostics.add(pr)
     # Only on the live host: a scratch root (a library test) has no systemd
@@ -1667,6 +1864,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
                               liveDir, liveRoot, result.liveJudged):
       inc result.errorCount
       result.diagnostics.add(pr)
+    liveCheckFinished = true
 
   # --- 4. Commit the generation + write the audit log. ---
   var commitTs = getTime().toUnix()

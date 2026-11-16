@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2849,
+    "nimTestBinaries": 2851,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 774,
+    "pureUnitTests": 775,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2896
+    "testEntries": 2898
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 7,
+      "count": 8,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -31,6 +31,7 @@
       "owner": "libs/repro_addon",
       "sources": [
         "libs/repro_addon/tests/t_addon_agent_repin.nim",
+        "libs/repro_addon/tests/t_addon_diagnostic_names_are_defined_once.nim",
         "libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim",
         "libs/repro_addon/tests/t_addon_floor_round13.nim",
         "libs/repro_addon/tests/t_addon_floor_round16.nim",
@@ -1640,8 +1641,8 @@
     "classificationCounts": {
       "graph-fixture": 23,
       "integration": 1571,
-      "platform/destructive": 183,
-      "pure unit": 774,
+      "platform/destructive": 184,
+      "pure unit": 775,
       "unclassified": 345
     },
     "graphOwnedTestArtifacts": [
@@ -1856,9 +1857,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2849,
+    "nimTestBinaryCount": 2851,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2896
+    "testEntryCount": 2898
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9024,8 +9025,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 31,
-      "staticCaseCount": 139,
+      "sourceSuiteCount": 32,
+      "staticCaseCount": 149,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9080,6 +9081,24 @@
       "source": "libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_diagnostic_names_are_defined_once",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_diagnostic_names_are_defined_once.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12421,6 +12440,23 @@
       "source": "libs/repro_build_engine/tests/t_self_written_set_is_derived.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_shipped_macos_tools",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_shipped_macos_tools.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32881,7 +32917,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_dev_session_control_api_refuses_unauthenticated_and_cross_origin_requests.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

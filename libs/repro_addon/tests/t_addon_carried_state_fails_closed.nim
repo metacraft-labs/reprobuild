@@ -59,7 +59,7 @@
 ## host apply lock is the real lock, at a test path (``REPRO_HOST_APPLY_LOCK``),
 ## held by a real second process (``flock``).
 
-import std/[json, os, osproc, sets, strutils, tables, unittest]
+import std/[json, os, osproc, sequtils, sets, strutils, tables, unittest]
 
 import repro_core/host_apply_lock
 
@@ -69,6 +69,7 @@ import repro_infra/start_holds
 from repro_test_support import testCaseScratchSlug
 import repro_elevation
 import repro_addon/[addon_apply, adoption_cli, reassert, state_sets, transitions]
+import repro_addon/agent_checks
 
 const
   Validator = """systemd.systemUnit {
@@ -81,6 +82,33 @@ ExecStart=/bin/true
   stateDirectories = ["carry:/var/lib/ethereum/validator"]
 }
 """
+
+proc simHost*(log: ref seq[string]; failing: seq[string] = @[];
+              skipped: seq[string] = @[]): LiveHost =
+  ## A host whose units start as systemd starts them: a unit that starts is
+  ## then reported ``ActiveState=active``; one in ``failing`` fails its
+  ## start; one in ``skipped`` has a condition hold, so its start exits 0
+  ## and leaves it inactive, ``ConditionResult=no`` -- what systemd does
+  ## (A13 review round 11, H1: a fake that marks every started unit active
+  ## hid exactly that).
+  let active = new seq[string]
+  LiveHost(
+    isActive: proc (u: string): bool = u in active[],
+    show: proc (u: string): Table[string, string] =
+      result = {"LoadState": "loaded"}.toTable
+      if u in active[]: result["ActiveState"] = "active"
+      else: result["ActiveState"] = "inactive"
+      if u in skipped: result["ConditionResult"] = "no",
+    start: proc (u: string): tuple[ok: bool, output: string] =
+      log[].add("start " & u)
+      if u in failing: return (false, "Job failed")
+      if u notin skipped and u notin active[]: active[].add(u)
+      (true, ""),
+    stop: proc (u: string): tuple[ok: bool, output: string] =
+      log[].add("stop " & u)
+      active[].keepItIf(it != u)
+      (true, ""),
+    resetFailed: proc (u: string) = log[].add("reset-failed " & u))
 
 proc stopped(): AlivenessFn =
   result = proc (u: string): UnitAliveness = uaEmpty
@@ -1596,13 +1624,16 @@ suite "held units' triggers, the triggers to fire again, and requirers of a refu
   # without a running systemd; the VM cases run the real manager.
   proc host9(active: seq[string]; shows: Table[string, Table[string, string]];
              log: ref seq[string]): LiveHost =
+    let started = new seq[string]
     LiveHost(
-      isActive: proc (u: string): bool = u in active,
+      isActive: proc (u: string): bool = u in active or u in started[],
       show: proc (u: string): Table[string, string] =
         if u notin shows: raise newException(OSError, "no unit " & u)
-        shows[u],
+        result = shows[u]
+        if u in started[]: result["ActiveState"] = "active",
       start: proc (u: string): tuple[ok: bool, output: string] =
         log[].add("start " & u)
+        started[].add(u)
         (true, ""),
       stop: proc (u: string): tuple[ok: bool, output: string] =
         log[].add("stop " & u)
@@ -1723,23 +1754,14 @@ suite "a trigger that cannot start again leaves the host pending (decision 160)"
     writeTriggersToRestart(dir, ["a.socket", "b.socket"])
     check hasTriggersToRestart(dir)
     var log = new seq[string]
-    let host = LiveHost(
-      isActive: proc (u: string): bool = false,
-      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
-      start: proc (u: string): tuple[ok: bool, output: string] =
-        log[].add("start " & u)
-        (u == "a.socket", "Job failed"),
-      resetFailed: proc (u: string) = log[].add("reset-failed " & u))
+    let host = simHost(log, failing = @["b.socket"])
     let r = retryTriggerRestarts(dir, host)
     check not r.ok
     check log[] == @["reset-failed a.socket", "start a.socket",
                      "reset-failed b.socket", "start b.socket"]
     check readTriggersToRestart(dir) == @["b.socket"]
     check "trigger a.socket started again" in r.lines
-    let again = retryTriggerRestarts(dir, LiveHost(
-      isActive: proc (u: string): bool = false,
-      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
-      start: proc (u: string): tuple[ok: bool, output: string] = (true, "")))
+    let again = retryTriggerRestarts(dir, simHost(new seq[string]))
     check again.ok
     check not hasTriggersToRestart(dir)
 
@@ -1765,10 +1787,7 @@ suite "a trigger that cannot start again leaves the host pending (decision 160)"
     createDir(dir)
     defer: removeDir(dir)
     writeTriggersToRestart(dir, ["a.socket"])
-    let host = LiveHost(
-      isActive: proc (u: string): bool = false,
-      show: proc (u: string): Table[string, string] = {"LoadState": "loaded"}.toTable,
-      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    let host = simHost(new seq[string])
     let r = afterRecovery(RecoveryOutcome(resolved: true,
       lines: @["replayed the switch to completion"]), dir, host)
     check r.resolved
@@ -1812,8 +1831,8 @@ suite "the triggers of held units, and a revert's record of them (A13 review rou
     LiveHost(
       isActive: proc (u: string): bool = u in active[],
       show: proc (u: string): Table[string, string] =
-        if u notin shows[]: raise newException(OSError, "no unit " & u)
-        shows[][u],
+        result = shows[].getOrDefault(u, {"LoadState": "loaded"}.toTable)
+        result["ActiveState"] = (if u in active[]: "active" else: "inactive"),
       start: proc (u: string): tuple[ok: bool, output: string] =
         log[].add("start " & u)
         if u in failing: return (false, "Job failed")
@@ -2037,11 +2056,16 @@ systemd.systemUnit {
     check not fileExists(dir / LiveCheckTriggersFile)
 
   test "leave dependants out: a unit that requires, binds to or takes its sockets from a recorded trigger is left out and started after it":
+    # systemd's effective dependencies, as ``systemctl show`` reports them
+    # (the reverse properties; a service's ``Sockets=`` is the socket's
+    # ``Triggers=``; ``Wants=`` is no dependency that fails a start).
     let shows = {
-      "dep.service": {"Requires": "t.socket"}.toTable,
-      "dep2.service": {"BindsTo": "dep.service"}.toTable,
-      "sk.service": {"Sockets": "t.socket"}.toTable,
-      "free.service": {"Wants": "t.socket"}.toTable}.toTable
+      "t.socket": {"RequiredBy": "dep.service", "Triggers": "sk.service",
+                   "WantedBy": "free.service"}.toTable,
+      "dep.service": {"BoundBy": "dep2.service"}.toTable,
+      "dep2.service": initTable[string, string](),
+      "sk.service": initTable[string, string](),
+      "free.service": initTable[string, string]()}.toTable
     let deps = step7Dependants(["dep2.service", "free.service", "dep.service",
                                 "sk.service"], ["t.socket"],
       proc (u: string): Table[string, string] = shows[u])
@@ -2149,7 +2173,9 @@ Requires=gen.service
     check "grp.target" in reqs
     check "bound.service" in reqs
     check "dropped.service" in reqs
-    check "reset.service" notin reqs        # an empty Requires= resets
+    # An empty Requires= is no reset (systemd's config_parse_unit_deps;
+    # A13 review round 11, M4, measured on systemd 260).
+    check "reset.service" in reqs
     check "wants.service" notin reqs        # Wants= is not a requirement
     check "gen.service" notin reqs
     check reqs.find("grp.target") < reqs.find("bound.service")
@@ -2205,3 +2231,256 @@ systemd.systemUnit {
     check "b.socket" in why
     check "a.socket" notin why.split("could not")[0]
     check readTriggersToRestart(dir) == @["a.socket", "b.socket"]
+
+
+suite "a restart is confirmed by systemd, and the records of triggers hold (A13 review round 11)":
+  # The reviewer's round-11 probes (P1-P6) as tests. The host is
+  # ``simHost``: a unit with a condition hold starts with exit 0 and stays
+  # inactive, as systemd does; no fake reports a start as running unless
+  # the unit was really started.
+  proc scratch11(tag: string): string =
+    result = getTempDir() / ("t-r11-" & tag & "-" & $getCurrentProcessId())
+    removeDir(result)
+    createDir(result)
+
+  const Gen11 = """systemd.systemUnit {
+  name = "s.socket"
+  content = "[Socket]
+ListenStream=/run/s
+"
+}
+systemd.systemUnit {
+  name = "s.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "dep.service"
+  content = "[Unit]
+Requires=s.socket
+[Service]
+ExecStart=/bin/true
+"
+}
+"""
+
+  proc entry11(p: SystemProfile; t: string; units: seq[string];
+               of0 = ""): TriggerRestartEntry =
+    result = TriggerRestartEntry(unit: t, dependantOf: of0)
+    for u in @[t] & units:
+      result.rendered.add((unit: u, digest: renderedUnitDigest(p, u)))
+
+  test "H1: a start a condition hold skips exits 0 and is not taken as a start":
+    var log = new seq[string]
+    let host = simHost(log, skipped = @["s.socket"])
+    let r = startConfirmed(host, "s.socket", mustStayActive = true)
+    check not r.ok
+    check "ConditionResult=no" in r.why
+    check triggerRestarts(["s.socket"], [], host).len == 1
+    check startConfirmed(simHost(log), "s.socket", mustStayActive = true).ok
+
+  test "H1: a recorded live-check trigger whose start a stale hold skips stays on record":
+    # Probe P5: the next apply's (or recover's) restart under the dead
+    # apply's hold exits 0; the record must keep the trigger.
+    let dir = scratch11("p5")
+    defer: removeDir(dir)
+    recordLiveCheckTriggers(dir, ["s.socket"])
+    var log = new seq[string]
+    let probs = restartRecordedLiveCheckTriggers(dir, simHost(log, skipped = @["s.socket"]))
+    check probs.len == 1
+    check readLiveCheckTriggers(dir) == @["s.socket"]
+    # And a recorded dependant whose start is skipped stays recorded.
+    let g = parseSystemProfile(Gen11)
+    writeTriggerRestartEntries(dir, [entry11(g, "s.socket", @["s.service"]),
+      entry11(g, "dep.service", @[], "s.socket")])
+    check not retryTriggerRestarts(dir, simHost(log, skipped = @["dep.service"])).ok
+    check readTriggersToRestart(dir) == @["dep.service"]
+
+  test "M4: an empty Requires= in a drop-in does not reset the requirement":
+    # Probe P1.
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "x.service"
+  content = "[Unit]
+Requires=gen.service
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemDropIn {
+  unit = "x.service"
+  name = "empty"
+  content = "[Unit]
+Requires=
+"
+}
+""")
+    check profileRequirersOf(p, ["gen.service"]) == @["x.service"]
+    check unitRequirements(["[Unit]\nRequires=a.service\n", "[Unit]\nRequires=\nBindsTo=b.service\n"]) ==
+      @["a.service", "b.service"]
+
+  test "M3: a template that requires a judged unit is held as a requirer":
+    # Probe P2: held as the template, judged through its instances.
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "tpl@.service"
+  content = "[Unit]
+Requires=gen.service
+[Service]
+ExecStart=/bin/true
+"
+}
+""")
+    check profileRequirersOf(p, ["gen.service"]) == @["tpl@.service"]
+
+  test "decision 171: the requirers systemd's effective dependencies name are found":
+    # RequiredBy=/BoundBy= cover a .requires/ link, an [Install]
+    # RequiredBy= and a host drop-in, which no file of the generation says.
+    var shows = initTable[string, Table[string, string]]()
+    shows["gen.service"] = {"RequiredBy": "link.target", "BoundBy": "bound.service"}.toTable
+    shows["link.target"] = {"RequiredBy": "outer.service"}.toTable
+    shows["bound.service"] = initTable[string, string]()
+    shows["outer.service"] = initTable[string, string]()
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    let found = systemdRequirersOf(["gen.service"], host)
+    check found.len == 3
+    check "link.target" in found and "bound.service" in found and
+      "outer.service" in found
+
+  test "decision 171: an essential unit that would be held refuses the apply":
+    check essentialHeld(["ssh.service", "getty@tty6.service", "app.service",
+                         "repro-agent-fetch.timer"]) ==
+      @["ssh.service", "getty@tty6.service", "repro-agent-fetch.timer"]
+    check essentialHeld(["app.service", "x@y.service"]).len == 0
+    # Every unit the management path names (§7.5) is essential too, so the
+    # two lists cannot drift apart.
+    for u in ManagementPathUnits:
+      if u.endsWith(".slice") or u.endsWith(".scope") or u == "user-.slice":
+        continue
+      checkpoint u
+      check isEssentialUnit(u) or isEssentialUnit(u.replace("@.", "@x."))
+
+  test "M1: a recorded dependant still failing blocks, as a trigger does":
+    # Probe P3: the trigger starts, the dependant does not; the dependant
+    # is an orphan on record and blocks every switch and full apply that
+    # does not resolve it by its own renderings.
+    let dir = scratch11("p3")
+    defer: removeDir(dir)
+    let g = parseSystemProfile(Gen11)
+    writeTriggerRestartEntries(dir, [entry11(g, "s.socket", @["s.service"]),
+      entry11(g, "dep.service", @[], "s.socket")])
+    var log = new seq[string]
+    let host = simHost(log, failing = @["dep.service"])
+    let why = switchTriggerRecordRefusal(dir, g, host)
+    check "dep.service" in why
+    check readTriggersToRestart(dir) == @["dep.service"]
+    check not checkPendingSwitches(dir,
+      proc (d: string): RecoveryOutcome {.closure, gcsafe.} =
+        RecoveryOutcome(resolved: false, lines: @["dep.service did not start"]),
+      pointer = dir / "no-pointer", target = g, hasTarget = true).ok
+    check clearResolvedRestartEntries(dir, g).len == 0
+    # A generation that changes the dependant resolves it.
+    let depChanged = parseSystemProfile(Gen11.replace("Requires=s.socket\n[Service]\nExecStart=/bin/true",
+                                                     "Requires=s.socket\n[Service]\nExecStart=/bin/false"))
+    check switchTriggerRecordRefusal(dir, depChanged, host) == ""
+    check clearResolvedRestartEntries(dir, depChanged) == @["dep.service"]
+
+  test "the fixing switch starts what it resolves, each confirmed, and fails when one does not start":
+    # The owner decision "the fixing switch starts them" (A13 review round
+    # 11, H2), and probe P6: a comment-only change resolves the entry but
+    # must then start the trigger.
+    let dir = scratch11("h2")
+    defer: removeDir(dir)
+    let g = parseSystemProfile(Gen11)
+    let entries = [entry11(g, "s.socket", @["s.service"]),
+                   entry11(g, "dep.service", @[], "s.socket")]
+    let comment = parseSystemProfile(Gen11.replace("ListenStream=/run/s\n",
+                                                  "ListenStream=/run/s\n# cosmetic\n"))
+    check restartEntryResolvedBy(entries[0], comment)
+    writeTriggerRestartEntries(dir, entries)
+    var log = new seq[string]
+    check startResolvedRestartEntries(dir, comment, simHost(log)).len == 0
+    check log[].filterIt(it.startsWith("start ")) ==
+      @["start s.socket", "start dep.service"]
+    # Still blocked: the trigger's start is skipped -- a failure, and the
+    # record keeps both entries for the revert.
+    log[].setLen(0)
+    let probs = startResolvedRestartEntries(dir, comment,
+                                            simHost(log, skipped = @["s.socket"]))
+    check probs.len == 1
+    check "s.socket" in probs[0]
+    check readTriggersToRestart(dir) == @["s.socket", "dep.service"]
+    # A generation that resolves nothing starts nothing.
+    log[].setLen(0)
+    check startResolvedRestartEntries(dir, g, simHost(log)).len == 0
+    check log[].len == 0
+
+  test "M2: recover changes the records of triggers only under the host apply lock":
+    let dir = scratch11("m2")
+    defer: removeDir(dir)
+    let lockPath = dir / "host-apply.lock"
+    putEnv(HostApplyLockEnvVar, lockPath)
+    putEnv(HostApplyLockWaitEnvVar, "1")
+    defer:
+      delEnv(HostApplyLockEnvVar)
+      delEnv(HostApplyLockWaitEnvVar)
+    writeTriggersToRestart(dir, ["s.socket"])
+    # Another process -- an apply changing the host -- holds the lock.
+    let holder = startProcess("flock", args = ["-x", lockPath, "sleep", "3"],
+                              options = {poUsePath})
+    defer:
+      if holder.running: holder.terminate()
+      discard holder.waitForExit()
+      holder.close()
+    var waited = 0
+    while waited < 50 and not fileExists(lockPath):
+      sleep(100)
+      inc waited
+    sleep(300)
+    var log = new seq[string]
+    let r = repairTriggerRecords(dir, simHost(log))
+    check not r.resolved
+    check log[].len == 0
+    check readTriggersToRestart(dir) == @["s.socket"]
+    discard holder.waitForExit()
+    # Once it is free, the repair runs.
+    let r2 = repairTriggerRecords(dir, simHost(log))
+    check r2.resolved
+    check not hasTriggersToRestart(dir)
+
+  test "L1: a service that takes its sockets from a recorded trigger is left out with it":
+    # systemd shows ``Sockets=`` on the socket as ``Triggers=`` the
+    # service; ``RequiredBy=``/``BoundBy=`` name the rest.
+    var shows = initTable[string, Table[string, string]]()
+    shows["t.socket"] = {"Triggers": "sk.service", "RequiredBy": "dep.service"}.toTable
+    shows["dep.service"] = {"BoundBy": "dep2.service"}.toTable
+    shows["sk.service"] = initTable[string, string]()
+    shows["dep2.service"] = initTable[string, string]()
+    let deps = step7Dependants(["dep2.service", "free.service", "dep.service",
+                                "sk.service"], ["t.socket"],
+      proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u])
+    var names: seq[string]
+    for (u, root) in deps:
+      check root == "t.socket"
+      names.add(u)
+    check names.len == 3
+    check "sk.service" in names and "free.service" notin names
+    check names.find("dep.service") < names.find("dep2.service")
