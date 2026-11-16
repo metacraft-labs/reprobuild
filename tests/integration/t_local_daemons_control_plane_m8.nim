@@ -156,8 +156,11 @@ proc startRunQuotaDaemon(tag: string): RunQuotaHandle =
   let stateDir = result.socketRoot / "state"
   createDir(stateDir)
   result.process = startProcess(requireRunQuotaDaemonBin(repoRoot()),
+    # CAPTURE IS TURNED ON EXPLICITLY. It is off by default, and these
+    # cases read back the rows their builds leave in the store.
     args = @["--socket", result.socketPath,
              "--host-identity-file", stateDir / "host-id",
+             "--measurement", "capture=on",
              "--ambient-sample-interval-millis", "0"],
     options = {poStdErrToStdOut})
   for _ in 0 ..< 400:
@@ -166,8 +169,18 @@ proc startRunQuotaDaemon(tag: string): RunQuotaHandle =
   if not socketIsBound(result.socketPath):
     raise newException(IOError,
       "runquotad did not bind " & result.socketPath)
+  # THE SOCKET IS BOUND BEFORE CAPTURE IS ARMED. ``runquotad`` binds its
+  # endpoint, prints its first line, and only then verifies and opens the
+  # observation store; the second and third startup lines follow the
+  # store's verdict, and the second says "capture enabled" once it passed.
+  # A build that ran before that would be served and not recorded.
+  var startupLines: seq[string]
   for _ in 0 ..< 3:
-    discard result.process.outputStream.readLine()
+    startupLines.add(result.process.outputStream.readLine())
+  if startupLines.len < 2 or not startupLines[1].contains("capture enabled"):
+    raise newException(IOError,
+      "runquotad at " & result.socketPath & " did not enable capture: " &
+      startupLines.join(" | "))
 
 proc stop(handle: var RunQuotaHandle) =
   if handle.process.isNil:

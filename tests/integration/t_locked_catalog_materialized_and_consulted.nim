@@ -5,11 +5,16 @@
 ## spec/Provisioning-Contributions.md, "Locks And Snapshots" and
 ## "Catalog Lookup And Provisioning".
 ##
-## Precedence rule:
+## Precedence rule (Provisioning-Contributions.md §"Lookup", amended
+## 2026-11-16):
 ## 1. $REPROBUILD_PACKAGES_ROOT (exclusive when set)
-## 2. Develop-mode sibling (beside consumer or any ancestor)
-## 3. Lock-pinned catalog (materialized under .repro/cross-repo-producers/reprobuild-packages/<rev>)
-## 4. Beside reprobuild checkout (bundled catalog)
+## 2. Catalogs inside the consumer's own repository
+## 3. ONE external catalog. When the lock pins it: a develop override, the
+##    workspace's declared checkout, a sibling AT the pinned revision, else
+##    the lock-pinned catalog (materialized under
+##    .repro/cross-repo-producers/reprobuild-packages/<rev>). A sibling at
+##    any other revision is ignored. With no pin: the nearest sibling, else
+##    the catalog beside the reprobuild checkout.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 
@@ -144,7 +149,7 @@ suite "locked catalog revision is materialized and consulted":
     check ("module=" & (interfaceDir / "repro")) in output
     check ("probe:locked at " & lockedSha) in output
 
-  test "develop-mode sibling takes precedence over lock-pinned catalog":
+  test "a sibling replaces the lock-pinned catalog only at the pinned revision":
     let scratch = createTempDir("repro-test-precedence-", "")
     defer: removeDir(scratch)
     let consumer = scratch / "consumer"
@@ -185,8 +190,19 @@ suite "locked catalog revision is materialized and consulted":
     let (code, output) = run(probeCompileCommand(probeScript), cwd = scratch)
     checkpoint(output)
     check code == 0
-    # Sibling MUST win over lock pin
-    check ("module=" & (siblingInterfaceDir / "repro")) in output
+    # A sibling at no known revision is not the pin: the pin wins.
+    check ("module=" & (lockedCatalogRoot / "packages" / "interfaces" /
+      "rplockedfixture" / "repro")) in output
+
+    # The same sibling, recorded (as a catalog copy records it) at the pinned
+    # revision, IS the pin and is used.
+    writeFile(siblingCatalogRoot / "catalog-revision",
+      "url=https://example.invalid/reprobuild-packages.git\n" &
+      "revision=" & lockedSha & "\n")
+    let atPin = run(probeCompileCommand(probeScript), cwd = scratch)
+    checkpoint(atPin.output)
+    check atPin.code == 0
+    check ("module=" & (siblingInterfaceDir / "repro")) in atPin.output
 
   test "repro build materializes un-materialized lock-pinned catalog from git remote":
     require findExe("git").len > 0

@@ -132,6 +132,11 @@ type
       ## bytes: a no-op (nothing is written), which the apply still reports
       ## (``accepted-out-of-band`` in the ledger diff), so the out-of-band
       ## write does not vanish from the record.
+    takesOverUnowned*: bool
+      ## An update of a file the ledger does not own: its bytes are the
+      ## profile's but its mode or group is not (``attributeMismatch``).
+      ## The apply keeps the bytes, sets the attributes, and takes the file
+      ## over with its bytes before preserved (``preWriteBytes``).
 
   CollisionLine* = object
     address*: string
@@ -451,6 +456,10 @@ type
     ownership*: PackageOwnership
     diversion*: DiversionRecord
     unit*: UnitProvision       ## units only
+    mode*: string              ## the leaf's permission bits (four octal
+                               ## digits), ``link`` for a link, "" if absent
+    group*: string             ## the leaf's group name (``#<gid>`` when it
+                               ## has none), ``link`` for a link, "" if absent
 
 proc observeTarget*(d: CollisionDriver; path: string;
                     unit = ""): TargetObservation =
@@ -482,6 +491,18 @@ proc observeTarget*(d: CollisionDriver; path: string;
     result.exists = true
   if result.exists:
     result.etcValue = etcEntryValue(path)
+    # The mode and group an `fs.systemFile` may declare are compared
+    # against these (``attributeMismatch``); a link reads as `link`.
+    var st: Stat
+    if lstat(path.cstring, st) == 0:
+      if S_ISLNK(st.st_mode):
+        result.mode = "link"
+        result.group = "link"
+      else:
+        result.mode = toOct(int(st.st_mode) and 0o7777, 4)
+        let g = getgrgid(st.st_gid)
+        result.group = if g != nil and g.gr_name != nil: $g.gr_name
+                       else: "#" & $int(st.st_gid)
   result.ownership = d.packageOwner(path)
   result.diversion = d.diversion(path)
   if unit.len > 0:
@@ -528,6 +549,8 @@ type
     divertedByProfile*: bool   ## a `linux.dpkgDiversion` of the path is declared
     reconcileDrift*: bool
     adopt*: bool               ## `repro system adopt` named this address
+    desiredMode*: string       ## an `fs.systemFile`'s declared `mode`, ""
+    desiredGroup*: string      ## an `fs.systemFile`'s declared `group`, ""
     stanza*: proc (bytes: string): string {.closure.}
       ## The resource as the profile would declare it with ``bytes`` as
       ## its content (an ``fs.systemFile``), for a refusal to print; nil
@@ -574,6 +597,21 @@ proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
      else: "Change it through a drop-in or configuration directory the " &
            "program reads, or leave it to the package."))
 
+proc attributeMismatch*(o: TargetObservation; inp: DecisionInputs): string =
+  ## "" when the file at the target has the mode and group the resource
+  ## declares (or it declares neither); otherwise what differs, e.g.
+  ## `mode 0644 (declared 0640)`. Such a file is not as declared even when
+  ## its bytes are: the apply changes its attributes, so the decision says
+  ## so (an update), never a silent chmod under `adopt` or `no-op`
+  ## (System-Profile-And-Infra-Apply.md, `fs.systemFile`, amended
+  ## 2026-11-16).
+  var parts: seq[string]
+  if inp.desiredMode.len > 0 and o.mode != inp.desiredMode:
+    parts.add("mode " & o.mode & " (declared " & inp.desiredMode & ")")
+  if inp.desiredGroup.len > 0 and o.group != inp.desiredGroup:
+    parts.add("group " & o.group & " (declared " & inp.desiredGroup & ")")
+  parts.join(", ")
+
 proc decideFile(d: CollisionDriver; o: TargetObservation;
                 inp: DecisionInputs): CollisionDecision =
   ## The file rows of the table, shared by ``etcFile`` targets and the
@@ -601,8 +639,14 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
         "then declare it again with `collision = \"divert\"` if the " &
         "add-on should still own its content")
       raise e
+  let attrs = if o.exists and o.isRegular: attributeMismatch(o, inp) else: ""
   if inp.ledgerOwns:
     if o.exists and o.sha256 == inp.ledgerSha256:
+      if o.sha256 == inp.desiredSha256 and attrs.len > 0:
+        result.verdict = cvUpdate
+        result.reason = "owned by the ledger, bytes as declared; " & attrs &
+          ": the apply sets the declared mode and group"
+        return
       result.verdict = (if o.sha256 == inp.desiredSha256: cvNoOp else: cvUpdate)
       result.reason = "owned by the ledger, digest matches"
       return
@@ -615,9 +659,13 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       # outside the switch applied the same profile: the deploy agent
       # before it applied through the switch, §9 "Migration"). Nothing
       # conflicts and nothing is written; the ledger records the bytes.
-      result.verdict = cvNoOp
+      # (Unless its mode or group is not the declared one: then the apply
+      # changes those, and says so.)
+      result.verdict = (if attrs.len > 0: cvUpdate else: cvNoOp)
       result.acceptedOutOfBand = true
-      result.reason = AcceptedOutOfBandReason
+      result.reason = AcceptedOutOfBandReason &
+        (if attrs.len > 0: "; " & attrs & ": the apply sets the declared " &
+           "mode and group" else: "")
       return
     if inp.adopt and not mutated("owned-drift-not-adoptable"):
       when mutated("adopt-without-profile"):
@@ -699,6 +747,18 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
     result.reason = "absent, no package owns it"
     return
   if o.sha256 == inp.desiredSha256:
+    if attrs.len > 0:
+      # The bytes are the profile's, the mode or group is not: an update
+      # that keeps the bytes and changes the attributes. The bytes before
+      # are preserved (``preWriteBytes``), as for an adoption, so removing
+      # the resource gives back the file as it was.
+      result.verdict = cvUpdate
+      result.takesOverUnowned = true
+      result.preWriteBytes = readFile(o.path)
+      result.reason = "present, unowned, bytes identical to the profile; " &
+        attrs & ": updated in place, the bytes kept and the declared mode " &
+        "and group set (the file before is preserved)"
+      return
     result.verdict = cvAdopt
     result.preWriteBytes = readFile(o.path)
     result.reason = "present, unowned, identical to the profile: adopted " &
@@ -708,7 +768,9 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
     result.verdict = cvAdopt
     result.preWriteBytes = readFile(o.path)
     result.reason = "present, unowned, claimed by `repro system adopt`: " &
-      "its current bytes become the add-on's"
+      "its current bytes become the add-on's" &
+      (if attrs.len > 0: "; " & attrs & ": the apply sets the declared " &
+         "mode and group" else: "")
     return
   if inp.reconcileDrift:
     result.verdict = cvReconcile

@@ -121,6 +121,7 @@ import repro_runquota
 # ``runquotad``'s query interface. This module is the ONLY read path;
 # nothing here opens the store's database file.
 import repro_runquota/stats_query
+import repro_runquota/store_status
 import runquota_daemon/host_config
 from runquota_process/cgroup_placement import CgroupRootEnvVar,
   currentCgroupRoot
@@ -11387,75 +11388,54 @@ var interfaceEdgeSessionResults: Table[string, ProjectInterfaceArtifact]
   ## have changed in between.
 
 proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
-  ## Provisioning-Contributions.md §Lookup:
-  ## Before compiling a recipe whose committed repro.lock pins reprobuild-packages,
-  ## the build engine materializes that revision under
-  ## .repro/cross-repo-producers/reprobuild-packages/<rev> (or verifies it is
-  ## already present) unless $REPROBUILD_PACKAGES_ROOT or a develop sibling
-  ## takes precedence.
+  ## Provisioning-Contributions.md §Lookup: before compiling a recipe whose
+  ## committed repro.lock pins reprobuild-packages, the build engine
+  ## materializes that revision under
+  ## ``<lockDir>/.repro/cross-repo-producers/reprobuild-packages/<rev>`` (or
+  ## verifies it is already present), unless $REPROBUILD_PACKAGES_ROOT is set
+  ## or a checkout is selected in the pin's place.
+  ##
+  ## Which catalog the recipe builds against is `selectExternalCatalog`'s
+  ## answer, the one the compile's own lookup and the extraction identity
+  ## (`catalogSelectionIdentity`) use, so the three cannot disagree. Only a
+  ## develop override, the workspace's own declared checkout or a checkout at
+  ## the pinned commit stand in for the pin; any other `reprobuild-packages`
+  ## beside the recipe or an ancestor is ignored and the pin is materialized.
   ## Returns the checkout root of the materialized catalog, or "" if skipped.
   if getEnv(ReprobuildPackagesRootEnv).len > 0:
     return ""
 
-  let startDir =
-    # Recipe-relative helpers deliberately receive a bare module filename.
-    # Resolve the lookup anchor against their cwd before walking ancestors;
-    # keep the compiler's location-independent argv unchanged.
-    if modulePath.len > 0: absolutePath(modulePath).parentDir
-    elif consumerRoot.len > 0: absolutePath(consumerRoot)
-    else: getCurrentDir()
-
-  # Develop-mode sibling beside consumer or any ancestor
-  var dir = startDir
-  for _ in 0 ..< 16:
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    let sibling = parent / ReprobuildPackagesRepositoryName
-    if dirExists(sibling):
-      # Develop-mode sibling takes precedence
-      return ""
-    dir = parent
-
-  # Inside a recipe compile edge the launcher has already prepared the pin
-  # and declared it (`LockedCatalogEnv`); reading the lock here would make the
-  # whole lock an input of the edge.
-  if modulePath.len > 0:
-    var declared: tuple[consumerRoot, revision: string]
-    if declaredLockedCatalog(absolutePath(modulePath), declared):
-      if declared.revision.len == 0:
-        return ""
-      let prepared = declared.consumerRoot / ".repro" / "cross-repo-producers" /
-        ReprobuildPackagesRepositoryName / declared.revision
-      if dirExists(extendedPath(prepared)):
-        return prepared
-      # Not materialized (a launcher that did not prepare it): fetch it the
-      # usual way below, which reads the lock for the pin's coordinates.
-
-  # Find enclosing repro.lock
-  var lockDir = ""
-  var lockFile = ""
-  dir = startDir
-  for _ in 0 ..< 16:
-    let candidate = dir / CommittedLockFileName
-    if fileExists(candidate):
-      lockDir = dir
-      lockFile = candidate
-      break
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    dir = parent
-
-  if lockFile.len == 0:
+  # The file the selection walks from. Recipe-relative helpers deliberately
+  # receive a bare module filename: resolve it against their cwd before
+  # walking ancestors, keeping the compiler's location-independent argv
+  # unchanged. With no module, a file IN the consumer root (or the cwd), so
+  # the walk starts at that directory.
+  let anchor =
+    if modulePath.len > 0: absolutePath(modulePath)
+    elif consumerRoot.len > 0: absolutePath(consumerRoot) / CommittedLockFileName
+    else: getCurrentDir() / CommittedLockFileName
+  let selection = selectExternalCatalog(anchor)
+  if selection.kind != eckLockPinned:
     return ""
 
+  # Inside a recipe compile edge the launcher has already prepared the pin
+  # and declared it (`LockedCatalogEnv`, which the selection honoured);
+  # reading the lock here would make the whole lock an input of the edge.
+  var declared: tuple[consumerRoot, revision: string]
+  if declaredLockedCatalog(anchor, declared) and
+      declared.revision == selection.revision and
+      dirExists(extendedPath(selection.root)):
+    return selection.root
+  # Not materialized (or a launcher that did not prepare it): fetch it from
+  # the lock that pins it, which holds the pin's coordinates.
   try:
-    let content = readFile(lockFile)
+    let content = readFile(selection.lockDir / CommittedLockFileName)
     let ld = parseLockedDependencies(content)
     for dep in ld.deps:
-      if dep.name == ReprobuildPackagesRepositoryName and dep.coordinates.kind == ckVcs:
-        return fetchLockPinnedProducer(dep, lockDir)
+      if dep.name == ReprobuildPackagesRepositoryName and
+          not isSelfLockedDep(dep) and dep.coordinates.kind == ckVcs and
+          dep.coordinates.revision == selection.revision:
+        return fetchLockPinnedProducer(dep, selection.lockDir)
   except CatchableError as err:
     if err of OSError or err of IOError:
       raise
@@ -33868,11 +33848,26 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
   # ``runquotad`` is the only sanctioned reader of the observation store,
   # so this is the whole of what ``repro stats`` can know about raw rows.
   let sharedStore = readSharedStore()
+  # THE STORE STATUS, reported by every view (``repro_runquota/store_status``):
+  # three top-level keys on every JSON object printed below, and one stderr
+  # line after a text-mode view when the store is not ready. It describes
+  # the store, not the view's filter: a ready store whose view matched
+  # nothing stays ``ready``.
+  let storeStatus = statsStoreStatus(sharedStore, projectRoot)
+  proc emitJson(node: JsonNode) =
+    addStoreStatus(node, storeStatus)
+    echo $node
   case view
   of "status":
-    stdout.write(statsStatusText(projectRoot, sharedStore))
+    if format == sofJson:
+      emitJson(statsStatusJson(projectRoot, sharedStore))
+    else:
+      stdout.write(statsStatusText(projectRoot, sharedStore))
   of "overview":
-    stdout.write(statsOverviewText(projectRoot, sharedStore))
+    if format == sofJson:
+      emitJson(statsOverviewJson(projectRoot, sharedStore))
+    else:
+      stdout.write(statsOverviewText(projectRoot, sharedStore))
   of "rank":
     if scope.len == 0:
       raise newException(ValueError, "stats rank requires --scope")
@@ -33901,7 +33896,7 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
       else:
         raise newException(ValueError, "unsupported stats scope: " & scope)
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderStatsRankText(outputNode))
   of "show":
@@ -33928,7 +33923,7 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
       else:
         raise newException(ValueError, "unsupported stats show scope: " & scope)
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderStatsShowText(outputNode))
   of "snapshot":
@@ -33942,7 +33937,7 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
     createDir(parentDir(path))
     writeFile(path, pretty(outputNode))
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderSnapshotText(outputNode, path))
   of "compare":
@@ -33951,11 +33946,13 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
         "stats compare requires --baseline and --candidate")
     let outputNode = compareSnapshotsJson(projectRoot, baseline, candidate)
     if format == sofJson:
-      echo $outputNode
+      emitJson(outputNode)
     else:
       stdout.write(renderCompareText(outputNode))
   else:
     raise newException(ValueError, "unsupported stats view: " & view)
+  if format != sofJson:
+    writeStoreStatusNotice("repro stats", storeStatus)
   0
 
 proc normalizedGraphPath(projectRoot, path: string): string =
