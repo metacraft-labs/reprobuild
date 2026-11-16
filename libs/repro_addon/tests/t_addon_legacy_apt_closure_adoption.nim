@@ -306,6 +306,31 @@ suite "realiser-v2 apt closure prefixes are adopted, rooted and collectable":
     space = closureSpace(@[lock], store, store / "cache", probe)
     check space.unavailable.len == 1 and "libnss3" in space.unavailable[0] and
       "could not be probed" in space.unavailable[0]
+    # Every member already published at its own path (the union before
+    # alternatives links was built from them): nothing is unpacked again,
+    # but the new union reads each postinst, so each archive is fetched
+    # again; one the archive does not serve leaves its registrations
+    # unknown, which is not a refusal (§8.3 item 4, "Alternatives").
+    answers["http://mirror.invalid/raspbian/pool/main/libnss3.deb"] = dsServed
+    answers["http://mirror.invalid/raspbian/pool/main/nut.deb"] = dsUnserved
+    for d in lock.debs:
+      createDir(aptDebPrefixPath(store, d))
+      writeFile(aptDebPrefixPath(store, d) / ".repro-apt-deb", d.sha256 & "\n")
+    space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.closures == 1 and space.members == 0
+    check space.unavailable.len == 0 and space.unpackBytes == 0
+    check space.sources == @[
+      "download-for-postinst\tlibnss3 3.110-1\t" &
+        "http://mirror.invalid/raspbian/pool/main/libnss3.deb",
+      "postinst-unknown-because-unserved\tnut 2.8.1\t" &
+        "http://mirror.invalid/raspbian/pool/main/nut.deb: fixture",
+      "download-for-postinst\tzz 1\t" &
+        "http://mirror.invalid/raspbian/pool/main/zz.deb"]
+    check space.downloadBytes == 400
+    answers["http://mirror.invalid/raspbian/pool/main/zz.deb"] = dsUnknown
+    space = closureSpace(@[lock], store, store / "cache", probe)
+    check space.unavailable.len == 1 and "zz 1" in space.unavailable[0]
+    for d in lock.debs: removeDir(aptDebPrefixPath(store, d))
     check probeVerdict(200) == dsServed and probeVerdict(206) == dsServed
     check probeVerdict(404) == dsUnserved and probeVerdict(410) == dsUnserved
     check probeVerdict(403) == dsUnknown and probeVerdict(500) == dsUnknown
