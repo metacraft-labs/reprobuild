@@ -631,10 +631,11 @@
 ##                                           refused unit is shown by name,
 ##                                           which systemd refuses (decision
 ##                                           153, round 10)
-## ``unjudged-requirers-released``         a unit the live check does not
-##                                           judge that requires a refused
-##                                           unit is not held (decision 153,
-##                                           round 10)
+## ``unjudged-requirers-released``         no unit the live check does not
+##                                           judge is held as a requirer, by
+##                                           any path: files, systemd's view
+##                                           before the writes, the post-reload
+##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
 ## ``live-check-restart-before-stale-holds-cleared``
@@ -646,7 +647,13 @@
 ## ``template-requirers-skipped``          a template requirer is not held
 ##                                           (round 11, M3)
 ## ``requirers-from-files-only``           systemd's reverse dependencies are
-##                                           not read (decision 171, round 11)
+##                                           not read before the writes
+##                                           (decision 177)
+## ``requirer-files-unread``               the generation's files are not
+##                                           read for requirers (decision 177)
+## ``post-reload-requirers-released``      a requirer systemd names only after
+##                                           the drivers' reload is not held
+##                                           (decision 177)
 ## ``essential-requirers-held``            an essential unit is held instead
 ##                                           of the apply refused (round 11)
 ## ``dependants-do-not-block``             a recorded dependant does not block
@@ -1904,6 +1911,8 @@ const
                           "live-check-triggers-in-memory",
                           "template-requirer-shown-by-name",
                           "unjudged-requirers-released",
+                          "requirer-files-unread",
+                          "post-reload-requirers-released",
                           # A13 review round 11.
                           "restart-success-by-exit-code",
                           "live-check-restart-before-stale-holds-cleared",
