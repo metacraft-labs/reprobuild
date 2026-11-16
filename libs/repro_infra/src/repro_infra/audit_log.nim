@@ -62,6 +62,8 @@
 import std/[os]
 when not defined(windows):
   import std/posix
+else:
+  from std/winlean import Handle, flushFileBuffers
 
 import blake3
 import repro_core
@@ -252,6 +254,12 @@ proc appendAuditRecord*(logPath: string; rec: AuditRecord) =
       raiseAuditLogCorrupt("file", "could not fsync the audit log: " & logPath)
     if created and parent.len > 0:
       fsyncDirPath(parent)
+  else:
+    # `flushFile` only reaches the OS cache; FlushFileBuffers is the Windows
+    # fsync (https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers).
+    if flushFileBuffers(Handle(getOsFileHandle(f))) == 0:
+      raiseAuditLogCorrupt("file", "could not flush the audit log to disk: " &
+        logPath)
 
 # ---------------------------------------------------------------------------
 # Whole-log reader (`repro system audit`).

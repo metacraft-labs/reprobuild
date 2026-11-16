@@ -382,9 +382,9 @@ export infra.runInfraCommand, infra.runSystemCommand
 export provisioning_lock_selection
 export catalog_publication
 export cli_hardware.runHardwareCommand
-export cli_disk.runDiskCommand, cli_disk.parseDiskArgs,
+export cli_disk.runDiskCommand,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
-       cli_disk.DiskCliOptions, cli_disk.DiskSubcommand,
+       cli_disk.DiskCliOptions,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
 export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
        cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
@@ -546,24 +546,6 @@ const LegacyVerbSynopses = [
       "repro develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n"),
   ("flake",
     "repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|<develop selectors>] [--flake=DIR] [--strip-suffix=LIST] [--workspace-root=PATH] [--json]\n"),
-  ("debug",
-    "repro debug io monitor [inspect <depfile> | [options] -- <command> [args...]]\n" &
-      "repro debug artifact <path> [--format=text|json]\n"),
-  ("home",
-    "repro home {add | remove | enable | disable | list | why | history | apply | plan | export | facts | compare | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n"),
-  ("infra",
-    "repro infra {plan | apply | install-root} ...\n"),
-  ("system",
-    "repro system {add | remove | list | why | sync | history | rollback | audit} ...\n"),
-  ("deploy-agent",
-    "repro deploy-agent --target <name> --manifest <PATH|URL> --allowed-signers <FILE> [--secrets-key <FILE> [--secrets-dir <DIR>]] ...\n" &
-      "repro deploy-agent keygen --secrets-key <FILE>\n"),
-  ("hardware",
-    "repro hardware {probe} [--dry-run | --output PATH | --regenerate]\n"),
-  ("cargo",
-    "repro cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n" &
-      "repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n" &
-      "repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID] [--relative-to DIR] [--libs] -- cargo ARGS...\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
@@ -34876,34 +34858,11 @@ proc renderLoweredGraphRecordText(record: LoweredGraphCacheRecord): string =
       " command=" & commandDisplay(action))
   lines.join("\n")
 
-proc runDebugArtifactCommand(args: openArray[string]): int =
-  var path = ""
-  var format = gofText
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--json":
-      format = gofJson
-      inc i
-    elif arg.startsWith("--format="):
-      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
-        allowDot = false)
-      inc i
-    elif arg == "--format":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--format requires a value")
-      format = parseGraphOutputFormat(args[i + 1], allowDot = false)
-      inc i, 2
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported debug artifact flag: " & arg)
-    elif path.len == 0:
-      path = arg
-      inc i
-    else:
-      raise newException(ValueError,
-        "unexpected debug artifact argument: " & arg)
-  if path.len == 0:
-    raise newException(ValueError, "debug artifact requires a path")
+proc runDebugArtifactCommand(c: ReproCommandLineDebugArtifact): int =
+  ## ``repro debug artifact <path> [--format text|json] [--json]``; as for
+  ## `graph` and `why`, `--format` wins over `--json`.
+  let path = c.path
+  let format = inspectionFormat(c.format, c.json, allowDot = false)
   let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
   case format
   of gofText:
@@ -77586,31 +77545,16 @@ type
       ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
       ## each with the URL ``--fix`` re-creates its pool from.
 
-proc parseHealthArgs(args: openArray[string]): HealthArgs =
+proc healthArgsOf(c: ReproCommandLineHealth): HealthArgs =
+  ## What `repro health` was given, from its configuration object (repro's
+  ## description, `repro_cli_support/cli_description`).
   result.forgeCache = newRepositoryIdentityCache()
-  result.workspaceRoot = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--offline":
-      result.offline = true
-    elif arg == "--fix":
-      result.fix = true
-    elif arg == "--verbose" or arg == "-v":
-      result.verbose = true
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro health` flag: " & arg)
-    elif result.projectName.len == 0:
-      result.projectName = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro health`: " & arg)
-    inc i
+  result.workspaceRoot = c.workspaceRoot
+  result.json = c.json
+  result.offline = c.offline
+  result.fix = c.fix
+  result.verbose = c.verbose
+  result.projectName = c.project
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
@@ -80465,17 +80409,14 @@ proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
     result.add("fix: could NOT migrate the workspace state file: " &
       getCurrentExceptionMsg())
 
-proc runHealthCommand*(args: openArray[string]): int =
-  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--offline]``.
+proc runHealthCommand*(c: ReproCommandLineHealth): int =
+  ## ``repro health [<project>] [--workspace-root=PATH] [--fix] [--json]
+  ## [--offline] [--verbose]``.
   ##
   ## Diagnose every layer and pair each failure with the exact remedy
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
-  if "--help" in args or "-h" in args:
-    stdout.writeLine("Usage: repro health [<project>] [--workspace-root=PATH] [--fix] [--json] [--verbose] [--offline]")
-    stdout.writeLine("  --offline  Skip forge identity API probes; other checks retain their existing fetch behavior.")
-    return 0
-  let parsed = parseHealthArgs(args)
+  let parsed = healthArgsOf(c)
   let stateFixActions =
     if parsed.fix: applyStateFileMigrationFix(parsed.workspaceRoot)
     else: @[]
@@ -105107,26 +105048,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len >= 3 and args[0] == "debug" and
-      args[1] == "io" and args[2] == "monitor":
-    let monitorArgs =
-      if args.len > 3:
-        args[3 .. ^1]
-      else:
-        @[]
-    return runIoMonitorCli("repro debug io monitor", monitorArgs)
-  if programName == "repro" and args.len >= 2 and args[0] == "debug" and
-      args[1] == "artifact":
-    try:
-      let artifactArgs =
-        if args.len > 2:
-          args[2 .. ^1]
-        else:
-          @[]
-      return runDebugArtifactCommand(artifactArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro debug artifact: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:
       let buildArgs =
@@ -105492,23 +105413,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro gateway: error: " & err.msg &
         "; REJECTING (fail closed)")
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "health":
-    # RA-30 — top-level `repro health` (the environment doctor) per
-    # CLI/health.md. Diagnoses every layer and pairs each failure with the
-    # exact remedy (Interactive-UX Principle 2); ``--fix`` performs only
-    # the safe remediations; ``--json`` for agents/CI; non-zero exit on any
-    # ``fail``. Same dispatch convention as the M14/M15 top-level commands;
-    # implementation in ``runHealthCommand``.
-    try:
-      let healthArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runHealthCommand(healthArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro health: error: " & err.msg)
       return 1
   if programName == "repro" and args.len >= 2 and args[0] == "workspace" and
       args[1] == "restore":
@@ -106036,63 +105940,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "__remote-activate":
-    let remoteArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHomeCommand(@["__remote-activate"] & remoteArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "home":
-    let homeArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHomeCommand(homeArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "infra":
-    let infraArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runInfraCommand(infraArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "anywhere":
-    when defined(linux):
-      return cli_anywhere.runAnywhereCli(if args.len > 1: args[1 .. ^1] else: @[])
-    else:
-      stderr.writeLine("repro anywhere --mode addon runs on Linux only")
-      return 2
-  if programName == "repro" and args.len > 0 and args[0] == "system":
-    let systemArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runSystemCommand(systemArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "deploy-agent":
-    # Windows-Runner-Binary-Cache-Deploy M5: one tick of the signed
-    # desired-state manifest pull loop (poll → verify against the
-    # allowed-signers set → apply the highest valid sequence for this
-    # target via the M4 runInfraApply path).
-    let deployArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return cli_deploy_agent.runDeployAgentCommand(deployArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "hardware":
-    # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
-    # from the live system. The dispatcher lives in
-    # `repro_cli_support/hardware.nim`; see
-    # `reprobuild-specs/ReproOS-Configuration-Architecture.md` §3 for
-    # the surface contract.
-    let hardwareArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runHardwareCommand(hardwareArgs)
   if programName == "repro" and args.len > 0 and args[0] == "prompt":
     # RA-26 — `repro prompt` ambient workspace-state segment (+ `prompt
     # init <shell>`) per CLI/prompt.md. Reads only cheap cached state (no
@@ -106114,26 +105961,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro prompt: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "disk":
-    # M9.R.22.4: `repro disk` subcommand surface (plan/apply/mount/...)
-    # per `reprobuild-specs/ReproOS-Disko-Port.md` §4. The dispatcher
-    # lives in `repro_cli_support/disk.nim`.
-    let diskArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runDiskCommand(diskArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "cargo":
-    # `repro cargo gc|record-live`: the cargo target-directory janitor. The
-    # dispatcher lives in `repro_cli_support/cargo_gc.nim`; the logic in the
-    # `repro_cargo_gc` library.
-    let cargoArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return cli_cargo_gc.runCargoCommand(cargoArgs)
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
     # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
@@ -106320,15 +106147,6 @@ proc runReapCommand(conf: ReproCommandLineReap): int =
     stderr.writeLine("repro reap: error: " & err.msg)
     return 1
 
-proc reportReproUsageError(e: ref CliUsageError): int =
-  ## A command line the generated parser rejected: its one-line message
-  ## (clispec's error taxonomy, naming the command) and where to look next,
-  ## on stderr; the usage exit code (2).
-  stderr.writeLine("repro: " & e.msg)
-  stderr.writeLine("Run `repro --help` for the list of commands, or " &
-    "`repro help <command>` for one of them.")
-  e.exitCode
-
 const LegacyVerbsAnsweringHelp = [
   # The unmigrated commands whose own parser answers `--help` with their
   # usage (exit 0), so `repro help <command> [<word>...]` can ask it. Any
@@ -106336,8 +106154,7 @@ const LegacyVerbsAnsweringHelp = [
   # takes it as an operand (`repro allow --help` trusts a directory named
   # `--help`), so `repro help` must never hand it one. An entry goes when its
   # command moves onto the description.
-  "anywhere", "branch", "cargo", "clean", "health", "hooks", "switch",
-  "sync", "workspace"]
+  "branch", "clean", "hooks", "switch", "sync", "workspace"]
 
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string): int =
@@ -106388,18 +106205,9 @@ proc runReproCommandLine(programName: string; args: seq[string];
   ## its typed configuration; any other is handed to ``runLegacyCommand``
   ## with its unparsed arguments.
   var conf: ReproCommandLine
-  try:
-    conf = ReproCommandLine.load(reproArgvForParser(args),
-      CliSources(env: cliProcessEnv()))
-  except CliHelpRequest as e:
-    # `CliCompletionRequest` too: its text is the completion reply.
-    stdout.write(e.text)
-    return 0
-  except CliUsageError as e:
-    return reportReproUsageError(e)
-  except CliConfigError as e:
-    stderr.writeLine("repro: " & e.msg)
-    return 2
+  let answered = loadReproCommandLine(args, conf)
+  if answered >= 0:
+    return answered
   case conf.command
   of ReproCommandLineCommand.call:
     if conf.call.version:
@@ -106504,6 +106312,60 @@ proc runReproCommandLine(programName: string; args: seq[string];
       return 1
   of ReproCommandLineCommand.self:
     return runSelfCommand(conf.self)
+  of ReproCommandLineCommand.home:
+    return runHomeCommand(conf.home)
+  of ReproCommandLineCommand.remoteActivate:
+    return runRemoteActivateCommand(conf.remoteActivate)
+  of ReproCommandLineCommand.system:
+    return runSystemCommand(conf.system)
+  of ReproCommandLineCommand.infra:
+    return runInfraCommand(conf.infra)
+  of ReproCommandLineCommand.anywhere:
+    when defined(linux):
+      return cli_anywhere.runAnywhereCli(conf.anywhere)
+    else:
+      stderr.writeLine("repro anywhere --mode addon runs on Linux only")
+      return 2
+  of ReproCommandLineCommand.deployAgent:
+    # Windows-Runner-Binary-Cache-Deploy M5: one tick of the signed
+    # desired-state manifest pull loop (poll → verify against the
+    # allowed-signers set → apply the highest valid sequence for this
+    # target via the M4 runInfraApply path).
+    return cli_deploy_agent.runDeployAgentCommand(conf.deployAgent)
+  of ReproCommandLineCommand.hardware:
+    # M9.R.21.3: `repro hardware probe` writes /etc/repro/hardware.nim
+    # from the live system (`repro_cli_support/hardware.nim`).
+    return runHardwareCommand(conf.hardware)
+  of ReproCommandLineCommand.disk:
+    # M9.R.22.4: `repro disk plan|apply|mount|...` (`repro_cli_support/disk`).
+    return runDiskCommand(conf.disk)
+  of ReproCommandLineCommand.cargo:
+    # `repro cargo gc|record-live|run`: the cargo target-directory janitor
+    # and the thin cargo edge (`repro_cli_support/cargo_gc.nim`).
+    return cli_cargo_gc.runCargoCommand(conf.cargo)
+  of ReproCommandLineCommand.health:
+    # RA-30 — top-level `repro health` (the environment doctor): every
+    # layer diagnosed, each failure paired with the exact remedy; `--fix`
+    # performs only the safe remediations; non-zero exit on any `fail`.
+    try:
+      return runHealthCommand(conf.health)
+    except CatchableError as err:
+      stderr.writeLine("repro health: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.debug:
+    case conf.debug.command
+    of ReproCommandLineDebugCommand.io:
+      case conf.debug.io.command
+      of ReproCommandLineDebugIoCommand.monitor:
+        # The monitor's own command line (io-mon's), unparsed.
+        return runIoMonitorCli("repro debug io monitor",
+          conf.debug.io.monitor.args)
+    of ReproCommandLineDebugCommand.artifact:
+      try:
+        return runDebugArtifactCommand(conf.debug.artifact)
+      except CatchableError as err:
+        stderr.writeLine("repro debug artifact: error: " & err.msg)
+        return 1
   else:
     let passed = reproPassThrough(conf)
     if not passed.found:

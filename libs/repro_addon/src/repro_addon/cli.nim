@@ -1270,22 +1270,36 @@ proc runAddonInfraPlanCli*(args: seq[string]): int =
   if r >= 0: return r
   runAddonGeneration("repro infra plan", args, planOnly = true)
 
+proc runAddonRollbackCommand*(target: string; reconcileDrift: bool): int
+
 proc runAddonRollbackCli*(args: seq[string]): int =
   ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
-  ## add-on host: re-apply a retained generation through the switch.
-  let nr = noSwapIfSecrets()
-  if nr >= 0: return nr
-  var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
-                                  hostIdentity: readHostname())
+  ## add-on host, as the static add-on binary reads it: re-apply a retained
+  ## generation through the switch (``runAddonRollbackCommand``).
+  var target = ""
+  var reconcileDrift = false
   for a in args:
-    if a == "--reconcile-drift": opts.reconcileDrift = true
+    if a == "--reconcile-drift": reconcileDrift = true
     elif a.startsWith("-"):
       stderr.write("repro system rollback: unknown option " & a & "\n")
       return 2
-    elif opts.target.len == 0: opts.target = a
+    elif target.len == 0: target = a
     else:
       stderr.write("repro system rollback: unexpected argument " & a & "\n")
       return 2
+  runAddonRollbackCommand(target, reconcileDrift)
+
+proc runAddonRollbackCommand*(target: string; reconcileDrift: bool): int =
+  ## Re-apply the retained generation ``target`` (default: the previous
+  ## one) through the add-on switch; ``reconcileDrift`` replaces drifted
+  ## objects. The command a full engine's ``repro system rollback`` runs on
+  ## an add-on host, with its command line already read.
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
+  var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
+                                  hostIdentity: readHostname(),
+                                  target: target,
+                                  reconcileDrift: reconcileDrift)
   try:
     let r = runAddonRollback(opts)
     stdout.write("rolled back from " & r.fromGeneration & " to " &

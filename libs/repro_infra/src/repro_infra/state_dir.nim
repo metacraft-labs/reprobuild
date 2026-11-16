@@ -31,6 +31,9 @@ import std/[os]
 when defined(posix):
   import std/posix
 from repro_core/paths import extendedPath
+when defined(windows):
+  # POSIX writes these markers itself, with temp names add-on recovery knows.
+  from repro_core/durable_replace import replaceFileDurably
 
 import ./errors
 
@@ -189,10 +192,9 @@ proc writeCurrentGenerationId*(stateDir, generationId: string;
   ensureSystemStateDir(stateDir)
   let p = currentPath(stateDir)
   when defined(windows):
-    let tmpPath = p & ".tmp"
-    writeFile(extendedPath(tmpPath), generationId)
-    if fileExists(extendedPath(p)): removeFile(extendedPath(p))
-    moveFile(extendedPath(tmpPath), extendedPath(p))
+    # A synced `current.txt` replaces the old one with a write-through
+    # rename; the old marker is never removed first.
+    replaceFileDurably(p, generationId)
   else:
     let target = generationDir(stateDir, generationId)
     when InfraMutation == "current-remove-then-create":
