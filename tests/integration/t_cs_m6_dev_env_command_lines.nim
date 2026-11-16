@@ -174,7 +174,9 @@ suite "CS-M6: the development-environment command lines":
     let records = trustRecords(s)
     check records.len == 1
     if records.len == 1:
-      check records[0].endsWith("/-dash-dir")
+      # A record's first line is the trusted directory (the recipe digest
+      # follows it).
+      check records[0].splitLines()[0].endsWith("/-dash-dir")
     let denied = s.run(["deny", "--", "-dash-dir"])
     check denied.code == 0
     check "Denied/removed repro dev-env trust for:" in denied.output

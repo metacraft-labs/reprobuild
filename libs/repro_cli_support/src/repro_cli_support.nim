@@ -75,6 +75,7 @@ import repro_dev_env_activation
 import repro_depfile
 import repro_dev_env_artifacts
 import repro_dev_env_engine
+import repro_dev_env_engine/directory_trust
 import repro_interface_artifacts
 # Incremental-Test-Runner M7: the io-monitor CLI driver and shim discovery now
 # come from the shared ``io-mon`` library. Import the package hub rather than
@@ -17786,9 +17787,6 @@ proc artifactIdFingerprint(artifact: DevEnvArtifact): string =
   for b in artifact.artifactId:
     result.add(toHex(int(b), 2).toLowerAscii())
 
-proc allowFileHash(path: string): string =
-  digestHex(blake3DomainDigest(path.bytesOf(), hdMetadataEnvelope))
-
 proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
   let msg = "repro: dev-env directory " & path & " is not allowed/trusted.\n" &
             "Run 'repro allow' to trust it and activate the environment."
@@ -17819,11 +17817,8 @@ proc runReproAllowCommand(directory: string): int =
   ## description, so ``--help`` is help, never a directory.
   let path = if directory.len > 0: directory else: getCurrentDir()
   let root = os.normalizedPath(absolutePath(path))
-  let hash = allowFileHash(root)
-  let allowDir = getConfigDir() / "repro" / "allow"
   try:
-    createDir(allowDir)
-    writeFile(allowDir / hash, root)
+    writeAllowRecord(root)
     stderr.writeLine("Allowed repro dev-env for: " & root)
     return 0
   except CatchableError as err:
@@ -17835,8 +17830,7 @@ proc runReproDenyCommand(directory: string): int =
   ## (for the current directory when ``directory`` is empty).
   let path = if directory.len > 0: directory else: getCurrentDir()
   let root = os.normalizedPath(absolutePath(path))
-  let hash = allowFileHash(root)
-  let f = getConfigDir() / "repro" / "allow" / hash
+  let f = allowRecordPath(root)
   try:
     if fileExists(f):
       removeFile(f)
@@ -17873,15 +17867,8 @@ proc runDevEnvExportCommand(conf: ReproCommandLineDevEnvExport;
     parsed.projectRoot = os.normalizedPath(absolutePath(parsed.projectRoot))
 
   # Check if directory is allowed/trusted
-  let allowFilePath = getConfigDir() / "repro" / "allow" / allowFileHash(parsed.projectRoot)
-  var isAllowed = false
-  if fileExists(allowFilePath):
-    try:
-      let contents = readFile(allowFilePath).strip()
-      if contents == parsed.projectRoot:
-        isAllowed = true
-    except CatchableError:
-      discard
+  let trust = directoryTrustState(parsed.projectRoot)
+  var isAllowed = trust == dtTrusted
 
   if getEnv("REPRO_DEV_ENV_AUTO_ALLOW") == "1":
     isAllowed = true

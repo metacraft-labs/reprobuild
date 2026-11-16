@@ -29120,6 +29120,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_dev_env_directory_trust_binds_recipe.nim",
+    binary: "build/test-bin/t_dev_env_directory_trust_binds_recipe",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = createTempDir(\"t_dev_env_directory_trust\", \"\")"),
+  TestSpec(
     source: "tests/unit/t_dev_env_large_values.nim",
     binary: "build/test-bin/t_dev_env_large_values",
     defines: @[],
