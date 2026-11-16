@@ -299,10 +299,15 @@ proc checkGatedReadiness(c: L7Case; project: string): string =
   var process = startProcess(c.reproBin, args = @["up"],
     workingDir = project, env = c.envFor(),
     options = {poUsePath, poStdErrToStdOut})
+  # Read the output from the start: dev-env progress can fill the pipe
+  # before `service.readiness.waiting`, and a blocked `repro up` never
+  # writes the event the loop below is waiting for.
+  let drain = startOutputDrain(process)
   defer:
     if process.running():
       process.terminate()
       discard process.waitForExit()
+    discard drain.collect()
     process.close()
   var waiting = false
   while process.running():
@@ -318,9 +323,9 @@ proc checkGatedReadiness(c: L7Case; project: string): string =
   # Release even on failure so teardown cannot strand an instance.
   createDir(project / "state")
   writeFile(project / "state" / "release", "ready\n")
-  let output = process.outputStream.readAll()
-  checkpoint(output)
-  check process.waitForExit() == 0
+  let exitCode = process.waitForExit()
+  checkpoint(drain.collect())
+  check exitCode == 0
   check fileExists(project / "state" / "sso.ready")
   doAssert fileExists(eventsPath)
   result = readFile(eventsPath)

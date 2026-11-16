@@ -1383,6 +1383,16 @@ suite "e2e_repro_dev_sessions":
             "--ready-timeout=20000"],
           workingDir = c.repoRoot, env = c.envFor(),
           options = {poStdErrToStdOut})
+        # Read `up`'s output from the start: dev-env progress can fill the
+        # pipe before `session.json` exists, and a blocked `repro up` never
+        # writes the status the wait below is for.
+        let drain = startOutputDrain(up)
+        defer:
+          if up.running():
+            up.terminate()
+            discard up.waitForExit()
+          discard drain.collect()
+          up.close()
         discard waitForStatus(sessionMetadataPath(c.projectRoot),
           "starting", timeoutMs = 120_000)
         let sessionDir = sessionMetadataPath(c.projectRoot).parentDir
@@ -1401,9 +1411,8 @@ suite "e2e_repro_dev_sessions":
         require supervisorPid > 0
         require belongsToSession(supervisorPid, c.projectRoot)
         discard runShell(shellCommand(@["kill", "-KILL", $supervisorPid]))
-        let output = up.outputStream.readAll()
         let exitCode = up.waitForExit()
-        up.close()
+        let output = drain.collect()
         checkpoint("repro up output:\n" & output)
         check exitCode == 1
         check output.contains("dev session cannot start")
