@@ -243,6 +243,7 @@ suite "provider startup pass containment":
     try:
       discard refreshProviderGraph(RefreshConfig(
         storeRoot: getTempDir() / "startup-body-fixture-store",
+        projectId: "startupBodyRefuses",
         providerBinaryPath: getAppFilename(),
         providerArtifactId: "startup-body-fixture-provider",
         rootEntryPointId: "startupBodyRefuses.root",

@@ -24588,6 +24588,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "program-wide pragma {.passL"),
   TestSpec(
+    source: "tests/integration/t_provider_recompile_keeps_every_invocation_key.nim",
+    binary: "build/test-bin/t_provider_recompile_keeps_every_invocation_key",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim",
     binary: "build/test-bin/t_provider_session_protocol_is_isolated_from_recipe_output",
     defines: @[],
