@@ -25083,9 +25083,10 @@ proc runHooksDispatchCommand(args: openArray[string]): int =
     # re-pin moves lock resolutions, never a constraint); or the recipe and the
     # locks are inconsistent (§16.3 H1 / H2). Nothing else this hook meets is a
     # reason to reject a developer's work: a dirty sibling skips the flake refresh
-    # (Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" says
-    # the lock must not be updated, not that the commit must be refused), and
-    # every other failure is a tooling fault, logged. The PUSH is where a stale
+    # (Nix-Flake-Coexistence.md §4 "Dirty siblings") and is pinned at its HEAD
+    # in `repro.lock` with a warning (§13.3, "Dirty siblings are recorded and
+    # said out loud"), neither of which refuses the commit, and every other
+    # failure is a tooling fault, logged. The PUSH is where a stale
     # pin is refused (NF-3, §13.5), because that is the boundary where a wrong
     # pin can reach somebody else.
     #
@@ -99330,8 +99331,8 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
 # gate only verifies), §13.2 (two mechanisms, not alike), §13.3 (write the
 # sibling pins from observed local state, and only when they actually change),
 # §13.6 (`flake.lock` is a committed lock too);
-# reprobuild-specs/Workspace-And-Develop-Mode.md §"Reproducibility And `repro
-# check`" for the dirty-sibling policy inherited verbatim.
+# Nix-Flake-Coexistence.md §4 "Dirty siblings" for the dirty-sibling policy
+# (the refresh is skipped as a whole).
 #
 # The hook is `pre-commit` — see `VcsHookNames` and `runPreCommitLockCommand`
 # for why that is a backend-class consequence of §13.1 and not a preference.
@@ -100359,10 +100360,9 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
   ## The repos whose uncommitted work suppresses this refresh, each with the
   ## checkout to probe.
   ##
-  ## Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`" is
-  ## inherited VERBATIM here — "if a develop-mode dependency has uncommitted
-  ## modifications, the project lock file must not be updated" — and so is its
-  ## SCOPE: the committed repo's DEPENDENCY CLOSURE, never the workspace, since
+  ## Nix-Flake-Coexistence.md §4 "Dirty siblings" states the rule (a dirty
+  ## sibling in scope skips the whole `flake.lock` refresh) and this SCOPE:
+  ## the committed repo's DEPENDENCY CLOSURE, never the workspace, since
   ## "an unrelated dirty repo elsewhere in the workspace MUST NOT block a push
   ## of R". The closure comes from RA-21's existing ``developSetClosure``, the
   ## same walk the pre-push gate uses, rather than from a second implementation
@@ -100625,10 +100625,13 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
       "sibling revision to record"
     return
 
-  # (2) The inherited dirty-sibling policy. Workspace-And-Develop-Mode.md
-  # §"Reproducibility And `repro check`": "if a develop-mode dependency has
-  # uncommitted modifications, the project lock file must not be updated".
-  # `flake.lock` is a project lock file (§13.6), so it inherits this VERBATIM.
+  # (2) The dirty-sibling policy of `flake.lock`, Nix-Flake-Coexistence.md §4
+  # "Dirty siblings": a dirty sibling in scope skips the whole refresh. It was
+  # first inherited from a Workspace-And-Develop-Mode.md sentence that forbade
+  # updating "the project lock file" while a develop-mode dependency was dirty;
+  # that sentence was withdrawn because `repro.lock` is re-pinned at commit
+  # even then (Unified-Locking-And-Hooks.md §13.3 records a dirty sibling's
+  # HEAD and says so), and §4 now states this skip as `flake.lock`'s own rule.
   #
   # Note precisely what that does NOT say: it does not refuse the commit. The
   # refresh is skipped, the lock stays as it was, and the pre-push gate (NF-3)
@@ -101445,10 +101448,9 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         "resolve it in; pass the commit id; nothing was written")
     targetSource = "--to"
   elif checkoutHead.len > 0:
-    # The inherited dirty-sibling policy (Workspace-And-Develop-Mode.md
-    # §"Reproducibility And `repro check`": "if a develop-mode dependency has
-    # uncommitted modifications, the project lock file must not be
-    # updated"), which the per-input `flake.lock` refresh also obeys. A
+    # The reason the `flake.lock` refresh skips a dirty sibling
+    # (Nix-Flake-Coexistence.md §4 "Dirty siblings"): a pin names a revision
+    # and cannot describe modified working-tree content. A
     # DEFAULT target is "what the checkout is", and a modified checkout is
     # not its `HEAD`: recording `HEAD` would describe content the developer
     # is not building. An explicit `--to` names a commit, not the checkout,
@@ -106488,6 +106490,9 @@ proc runThinAppDispatch(programName: string): int =
   # every nested interface/resource compiler boundary. Explicit caller
   # overrides remain authoritative; this only fills missing environment keys.
   ensureBuiltSourcePackageEnvironment()
+  # darwin release archive: its own non-SIP tools bundle, when the caller set
+  # no tools root (a no-op elsewhere).
+  ensureShippedMacosToolsEnvironment()
   # There is no provider-nimcache session token to seed. It existed so the
   # ~84 from-source recipes of one `repro build` would meet in ONE shared
   # nimcache while two concurrent `repro` sessions would not -- a scope that
