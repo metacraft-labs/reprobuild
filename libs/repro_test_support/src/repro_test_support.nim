@@ -39,6 +39,10 @@ from repro_core/git_separated import gitRunSeparated
 import repro_test_support/registry_isolation
 export registry_isolation
 
+# Reading a child's output while the test waits on something else.
+import repro_test_support/output_drain
+export output_drain
+
 # Narrow, named import: ``runquota_ipc`` is RunQuota's own endpoint-trust
 # module, and ``runquotaRendezvousDir`` below delegates the "where may a
 # socket live" rule to it rather than keeping a second copy of the mode.

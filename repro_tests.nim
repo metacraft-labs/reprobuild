@@ -29186,6 +29186,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_dev_session_control_api_writes_every_byte_once.nim",
+    binary: "build/test-bin/t_dev_session_control_api_writes_every_byte_once",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_electron_builder_binaries.nim",
     binary: "build/test-bin/t_electron_builder_binaries",
     defines: @[],
@@ -29348,7 +29359,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
+    group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_hackage_vendor_manifest.nim",
@@ -30041,7 +30052,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15p_0_qt6_transitive_auto_inject.nim",

@@ -30,6 +30,9 @@ import blake3
 import repro_core
 import repro_core/owned_directory
 
+when defined(windows):
+  from std/winlean import WSAEINTR
+
 when defined(posix):
   import std/posix
   var O_NOFOLLOW {.importc, header: "<fcntl.h>".}: cint
@@ -318,3 +321,44 @@ proc refuseNonLoopbackBind*(bindValue, host: string; allowRemote: bool) =
     "the session control API to the network, where the session token is " &
     "the only thing standing between it and anyone who can reach the port; " &
     "pass " & AllowRemoteFlag & " as well to accept that")
+
+type ControlWriter* = proc (data: pointer; size: int): int {.closure.}
+  ## One write to a control-API connection: the number of bytes accepted,
+  ## or a negative number with the OS error set (``osLastError``), exactly
+  ## as ``std/net``'s low-level ``send(socket, pointer, size)`` reports.
+
+proc writeInterrupted(err: OSErrorCode): bool =
+  when defined(windows):
+    err.int32 == WSAEINTR
+  else:
+    err.int32 == EINTR
+
+proc writeFully*(write: ControlWriter; data: string) =
+  ## Write all of ``data`` through ``write``, resuming a short write at the
+  ## first byte not yet accepted, and raise ``OSError`` when the peer has
+  ## gone away.
+  ##
+  ## Written here rather than taken from ``std/net``'s ``send(socket,
+  ## string)`` because the Nim this project pins has two defects in that
+  ## loop (upstream nim-lang/Nim#26286 and #26287, absent from the fork):
+  ## with the default ``SafeDisconn`` flag it swallows EPIPE / ECONNRESET
+  ## and retries forever, so one client that resets its connection keeps
+  ## the single-threaded control-API listener spinning and ``repro down``
+  ## is never served again; and after a short write it sends again from
+  ## byte 0, so the client receives the start of the answer twice.
+  ## An interrupted write (EINTR) wrote nothing and is retried; any other
+  ## failure ends this one exchange, and the accept loop goes on.
+  var written = 0
+  while written < data.len:
+    let accepted = write(unsafeAddr data[written], data.len - written)
+    if accepted > 0:
+      written += accepted
+    elif accepted == 0:
+      # A stream socket accepts at least one byte or fails; zero would
+      # otherwise loop forever.
+      raise newException(OSError,
+        "the control-API connection accepted no bytes; it is closed")
+    else:
+      let err = osLastError()
+      if not writeInterrupted(err):
+        raiseOSError(err, "the control-API client went away")
