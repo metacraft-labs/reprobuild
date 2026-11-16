@@ -1349,8 +1349,9 @@ proc triggeredUnits*(name: string; texts: openArray[string]): seq[string] =
       elif isSocket and k == "Accept":
         let b = systemdBoolean(v)
         when InfraAddonMutation != "trigger-accept-unread":
-          # FALSIFYING MUTATION (when absent, §13 decision 154): Accept=
-          # is not read, so the socket triggers its namesake.
+          # FALSIFYING MUTATION (when absent, §13 decision 154): an
+          # Accept=yes spelling is not read, so the socket triggers its
+          # namesake instead of its template.
           if b >= 0: accept = b == 1
       elif isSocket and k.startsWith("Listen"):
         if v.len == 0: listeners.setLen(0)
