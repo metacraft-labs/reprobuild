@@ -2358,7 +2358,9 @@ ExecStart=/bin/true
         if u notin shows: raise newException(OSError, "no unit " & u)
         shows[u],
       start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
-    let found = systemdRequirersOf(["gen.service"], host)
+    # Read before anything is written (the layer ``requirers-from-files-
+    # only`` turns off): no file of this generation names them.
+    let found = preWriteRequirers(SystemProfile(), ["gen.service"], host)
     check found.len == 3
     check "link.target" in found and "bound.service" in found and
       "outer.service" in found
@@ -2484,3 +2486,23 @@ ExecStart=/bin/true
     check names.len == 3
     check "sk.service" in names and "free.service" notin names
     check names.find("dep.service") < names.find("dep2.service")
+
+
+  test "decision 177: a requirer systemd names only after the reload is held then, an essential one reported":
+    # The post-reload layer (``post-reload-requirers-released`` turns off
+    # only it): a unit the generation's writes made a requirer of a refused
+    # unit, which no layer before the writes could name.
+    var shows = initTable[string, Table[string, string]]()
+    shows["gen.service"] = {"RequiredBy": "req.service late.service sshd.service"}.toTable
+    shows["req.service"] = initTable[string, string]()
+    shows["late.service"] = initTable[string, string]()
+    shows["sshd.service"] = initTable[string, string]()
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    let late = postReloadRequirers(["gen.service"], ["gen.service", "req.service"], host)
+    check late.hold == @["late.service"]
+    check late.essential == @["sshd.service"]
