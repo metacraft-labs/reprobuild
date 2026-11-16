@@ -16,6 +16,10 @@ import runquota_core/image_digest
 import runquota_ipc except connectDefault
 import runquota_process
 import runquota_protocol
+import runquota_client/pressure_text
+import repro_runquota/build_pressure
+
+export build_pressure
 
 type
   ReproRunQuotaError* = object of CatchableError
@@ -93,6 +97,11 @@ type
     stdoutBytes*: uint64
     stderrBytes*: uint64
     elapsedMillis*: uint64
+    expectedUncontendedMillis*: uint64
+      ## The daemon's learned expected uncontended duration of this command
+      ## at its granted width, from the finish's acknowledgement; 0 when it
+      ## knew none or was not asked (the ``pressure-reports`` measurement
+      ## is off). What build-wait pressure measures a run's slowdown by.
     peakResidentMemoryBytes*: uint64
     processCount*: uint32
     backendName*: string
@@ -1965,6 +1974,50 @@ proc openRunQuotaSession*(name = "reprobuild action";
     result.client.close()
     raise newException(ReproRunQuotaError, err.msg)
 
+proc runQuotaEndpointText*(): string
+  ## Defined below, with the queue diagnostics.
+
+proc buildPressureEnabled*(): bool =
+  ## The ``pressure-reports`` measurement switch (``RUNQUOTA_MEASUREMENT``;
+  ## off by default).
+  pressureReportsEnabled()
+
+proc sendPressureReport*(session: ReproRunQuotaSession;
+                         report: PressureReportMessage): bool =
+  ## Send one build-wait pressure report on the build's session. One-way:
+  ## nothing is read back, and a daemon that predates pressure reports is
+  ## sent nothing. Returns whether it was written.
+  if session.isNil or not session.active:
+    return false
+  session.session.reportPressure(report)
+
+proc runPressureCommand*(group = ""; json = false): int =
+  ## ``repro pressure [--group G] [--json]``: the build-wait pressure of the
+  ## RunQuota daemon this process would use, as ``runquota pressure``
+  ## prints it. ``group`` limits the session groups (and their sessions) to
+  ## those of that name. Exit 0 when the daemon answered, 1 when it could
+  ## not be reached or predates pressure reports. The command line is
+  ## parsed by repro's generated parser, which exits 2 on bad arguments.
+  var answer = ""
+  try:
+    var client = connectDefault()
+    defer: client.close()
+    answer = client.queryPressure(psAll, group)
+  except CatchableError as err:
+    stderr.writeLine("repro pressure: " & err.msg & " (endpoint " &
+      runQuotaEndpointText() & ")")
+    return 1
+  if json:
+    echo answer
+    return 0
+  try:
+    echo renderPressureText(answer)
+  except CatchableError as err:
+    stderr.writeLine("repro pressure: could not read the daemon's answer: " &
+      err.msg)
+    return 1
+  0
+
 # ---------------------------------------------------------------------------
 # Domain extensions (M17)
 # ---------------------------------------------------------------------------
@@ -2750,7 +2803,8 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount,
         totals = completion.totals,
-        cpuProfile = completion.cpuProfile)
+        cpuProfile = completion.cpuProfile,
+        askExpectedDuration = pressureReportsEnabled())
       leaseFinishedSent = true
     finally:
       if running.lease.active:
@@ -2762,6 +2816,8 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
       running.child.info.backend.name,
       leaseFinishedSent,
       leaseReleased)
+    running.execution.expectedUncontendedMillis =
+      running.lease.expectedUncontendedMillis
     running.completed = true
     running.active = false
     running.execution

@@ -55,6 +55,7 @@ verb	lsp
 verb	mcp
 verb	outdated
 verb	package
+verb	pressure
 verb	prompt
 verb	pull
 verb	push

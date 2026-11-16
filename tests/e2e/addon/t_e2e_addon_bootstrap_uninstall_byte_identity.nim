@@ -127,14 +127,20 @@ const
   R3Token = "/var/log/repro-addon/uninstall-state-removal-pending.json"
 
 proc r3Stat(g: Guest): Table[string, string] =
-  ## Inode, mode and owner of every round-3 input, and each file's sha256.
+  ## Identity, mode and owner of every round-3 input, and each file's
+  ## sha256. The identity is the inode number AND the birth time (statx
+  ## ``%w``, with nanoseconds): ext4 hands a file created right after one
+  ## was unlinked the same inode number, so the number alone does not tell
+  ## a removed-and-rewritten input from the one that was there (A11 round
+  ## 17: the site falsifiers were green on it).
   var paths: seq[string]
   for (d, _) in R3Dirs: paths.add(d)
   for f in R3Files: paths.add(f)
-  let st = g.run("stat -c '%n %i %a %u:%g' " & paths.join(" ") & " 2>&1")
+  let st = g.run("stat -c '%n %i %a %u:%g %w' " & paths.join(" ") & " 2>&1")
   for line in st.splitLines():
     let f = line.splitWhitespace()
-    if f.len == 4: result[f[0]] = f[1] & " " & f[2] & " " & f[3]
+    if f.len >= 5:
+      result[f[0]] = f[1] & "@" & f[4 .. ^1].join("_") & " " & f[2] & " " & f[3]
   let sums = g.run("sha256sum " & R3Files.join(" ") & " 2>&1")
   for line in sums.splitLines():
     let f = line.splitWhitespace()
@@ -200,7 +206,7 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
     R3Target & ".seq.tmp " & Records & R3Target & ".seq && " &
     "printf '41\\n' > " & Records & "rpi3.seq.tmp && chmod 0600 " & Records &
     "rpi3.seq.tmp && mv " & Records & "rpi3.seq.tmp " & Records & "rpi3.seq")
-  let floorIno = g.exec("stat -c '%i' " & Records & R3Target & ".seq " &
+  let floorIno = g.exec("stat -c '%i %w' " & Records & R3Target & ".seq " &
                         Records & "rpi3.seq").stdout
   step("round 3: the agent's floors are written", ag.exitCode == 0, ag.stdout & ag.stderr)
   # The crash leg: system/ a mount point, so the rmdir after the ledger
@@ -220,7 +226,7 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
         (a[3] != b[3] and not f.endsWith(".seq")):
       intact = false
       why.add(f & ": " & a.join(" ") & " -> " & b.join(" ") & "\n")
-  let midFloors = g.exec("stat -c '%i' " & Records & R3Target & ".seq " &
+  let midFloors = g.exec("stat -c '%i %w' " & Records & R3Target & ".seq " &
                          Records & "rpi3.seq").stdout
   if midFloors != floorIno:
     intact = false
@@ -250,7 +256,7 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
   step("round 3: every input keeps its inode, bytes, prior mode and owner",
        diffs.len == 0, diffs.join("\n"))
   let floors = g.exec("cat " & Records & R3Target & ".seq " & Records &
-                      "rpi3.seq; stat -c '%i' " & Records & R3Target & ".seq " &
+                      "rpi3.seq; stat -c '%i %w' " & Records & R3Target & ".seq " &
                       Records & "rpi3.seq")
   step("round 3: both floors stay", floors.exitCode == 0 and
        floors.stdout == "8\n41\n" & floorIno,
