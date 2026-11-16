@@ -1119,7 +1119,7 @@ proc systemdRequirersOf*(units: openArray[string]; host: LiveHost): seq[string] 
   ## effective dependencies say: each unit's reverse properties
   ## ``RequiredBy=`` and ``BoundBy=`` (which cover a unit file's lines, a
   ## host drop-in, a ``.requires/`` link and an enabled ``[Install]
-  ## RequiredBy=``; the owner decision on decision 171, A13 review round
+  ## RequiredBy=``; every requirer, by the owner decision on decision 171, A13 review round
   ## 11). A template is read through the names it is shown under.
   var queue = @units
   var seen = @units
