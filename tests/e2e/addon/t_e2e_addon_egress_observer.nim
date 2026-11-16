@@ -15,6 +15,11 @@
 ##    fetch unit is refused by the unit's filter, counted by the table, and
 ##    recorded by the check (``addon-egress`` / ``egress-refused``), which
 ##    reaches the gate's sink.
+## 3a. **Its positive control trips under the real units** (DET-4; spec
+##    §10.4 "Scheduled positive controls"). The datagram every fetch sends
+##    to the control address passes the fetch unit's address-family filter,
+##    is counted by the table, is never recorded as a refused destination,
+##    and the check's heartbeat says its control tripped.
 ## 3c. **The re-assert sees the host's table** (A11 audit session 2, G4).
 ##    A reboot of the healthy host: the re-assert reports ``ok``, with no
 ##    finding about the table. Then the table is deleted and the re-assert
@@ -42,7 +47,7 @@
 ##
 ## *Mocking.* None.
 
-import std/[json, os, strutils, unittest]
+import std/[json, os, sequtils, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -51,6 +56,7 @@ import ./agent_e2e_support
 import ./evidence_e2e_support
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
+import repro_addon/egress_observer
 
 const
   Gate = "e2e_addon_egress_observer"
@@ -135,6 +141,23 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("the DET-AO-3 record reached the sink",
        sink.waitFor(host, "addon-egress", "egress-refused", 180, since = since),
        g.exec("journalctl -q -o cat -u repro-addon-egress-check.service | tail -20").stdout)
+  # 3a. The fetch's positive control (DET-4).
+  step("the table counted the fetch's control datagram",
+       EgressControlAddress in counted, counted)
+  var tripped = false
+  for _ in 0 ..< 30:
+    for e in sink.entries():
+      if e.seq > since and e.kind == ekRecord and
+          e.record.detector == "addon-egress" and
+          e.record.field("control") == "tripped": tripped = true
+    if tripped: break
+    discard g.exec("systemctl start repro-addon-evidence.service")
+    sleep(2000)
+  step("the egress check's heartbeat says its control tripped", tripped,
+       g.exec("journalctl -q -o cat -u repro-agent-fetch.service | tail -20").stdout)
+  step("the control address is never recorded as a refused destination",
+       not sink.entries().anyIt(it.kind == ekRecord and
+         it.record.field("destination") == EgressControlAddress), "")
   # 3b. A burst of records (A11 audit F2): thirty refused destinations from
   # the fetch slice make the check write thirty records at once. The path
   # unit must survive the burst and ship them within a minute.

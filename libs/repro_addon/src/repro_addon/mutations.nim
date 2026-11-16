@@ -1229,6 +1229,15 @@
 ##                                            however old it is
 ##                                            (``repro_test_support/
 ##                                            fresh_binary``; round 4)
+## ``egress-control-not-sent``                the fetch sends no DET-AO-3
+##                                            control datagram (DET-4)
+## ``manifest-control-skipped``               the tick never runs DET-AO-1's
+##                                            control (DET-4)
+## ``hook-control-skipped``                   the apt hook never runs
+##                                            DET-AO-6's control (DET-4)
+## ``check-ignores-controls``                 the off-host check never
+##                                            judges a positive control
+##                                            (DET-4)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1238,6 +1247,11 @@ from repro_deploy_agent/agent_mutations import KnownAgentMutations
 const
   AddonMutation* {.strdefine: "reproAddonMutation".} = ""
   KnownAddonMutations* = ["uninstall-skips-diversion-removal",
+                          # DET-4's scheduled positive controls (spec
+                          # §10.4 "Scheduled positive controls").
+                          "egress-control-not-sent",
+                          "manifest-control-skipped",
+                          "hook-control-skipped", "check-ignores-controls",
                           # Not a falsifier: a failure injected once
                           # (while /var/tmp/repro-addon-fail-before-ledger
                           # exists) after the flip and before the ledger
