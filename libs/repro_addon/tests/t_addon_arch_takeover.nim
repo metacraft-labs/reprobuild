@@ -415,6 +415,9 @@ suite "a switch's removal of a taken-over path":
     let kept = planTakeOverRemoval(e, d, revertOrReplay = true)
     check kept.keep and "EAddOnPackageOwned" in kept.drift and
       "(left in place)" in kept.drift
+    # The kept report names the package and the three digests.
+    check "package avahi" in kept.drift and md5Hex(Packaged1) in kept.drift and
+      md5Hex("edited by hand\n") in kept.drift and md5Hex(Packaged2) in kept.drift
     check readFile(path) == AddOnCopy                 # nothing was written
     writeFile(e.preserved, "swapped\n")
     expect AddonCollisionError:
@@ -453,6 +456,22 @@ suite "a switch's removal of a taken-over path":
     check u.package == "avahi-ng" and u.kind == tuPacnew
     discard applyTakeOverUndo(e, u)
     check readFile(path) == Packaged2 and not fileExists(pacnew)
+    dropPkg("avahi-ng", "1-1")
+
+  test "a later apply over a path another package took over says removal restores, not hands back":
+    discard takenOver(path, Packaged1, AddOnCopy)
+    dropPkg("avahi", "1:0.8-1")
+    pkg("avahi-ng", "1-1", ["etc/avahi/avahi-daemon.conf"],
+        [("etc/avahi/avahi-daemon.conf", md5Hex(Packaged2))])
+    let d = newPacmanDriver(root, noUnit)
+    var inp = file(path, AddOnCopy, "takeOver")
+    inp.ledgerOwns = true
+    inp.ledgerSha256 = sha256Hex(AddOnCopy)
+    inp.ledgerObservation = "backup:avahi"
+    let e = refusedWith[EAddOnPackageOwned](proc () = discard d.decide(inp, path))
+    require not e.isNil
+    check "avahi-ng now owns this backup file" in e.msg
+    check "restores the version" in e.msg and "hand the path back" notin e.msg
     dropPkg("avahi-ng", "1-1")
 
   test "a replay finishes an undo interrupted before the .pacnew was deleted":

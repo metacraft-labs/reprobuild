@@ -21,7 +21,8 @@
 ##   recover`` must finish the switch -- its other removal, a plain file of
 ##   the add-on's (``own.conf``), goes -- without restoring anything at the
 ##   take-over's path: the add-on's copy and the ledger entry stay, the
-##   edited ``.pacnew`` is untouched. Once the ``.pacnew`` holds the packaged version again, an
+##   edited ``.pacnew`` is untouched, and recover reports the path it kept
+##   (``left in place as drift``, with the ``EAddOnPackageOwned`` refusal). Once the ``.pacnew`` holds the packaged version again, an
 ##   apply restores it.
 ##
 ## Each step's restore, or its absence, is observed on the guest: the path's
@@ -48,7 +49,7 @@
 import std/[json, os, strutils, tables, times, unittest]
 
 import repro_test_support/reasoned_skip
-import repro_addon/[fingerprint, ledger]
+import repro_addon/[fingerprint, ledger, md5_hex]
 
 import ./arch_fixture_packages
 import ./arch_gate_support
@@ -214,6 +215,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["replayRecoverExit"] = %rec.exitCode
     step("replay: recover keeps the take-over (copy and ledger entry stay) and finishes the switch's other removal",
          g.exec("test -e " & PendingMarker).exitCode != 0 and
+           "left in place as drift" in saidRec and "EAddOnPackageOwned" in saidRec and
+           pathOf("replay") in saidRec and "package " & pkgOf("replay") in saidRec and
+           md5Hex(packaged("replay", 1)) in saidRec and
            g.sha256InGuest(Own) == "absent" and listed(g.ledgerOf(), Own) == 0 and
            g.sha256InGuest(pathOf("replay")) == sha256Hex(addOnBytes("replay")) and
            g.sha256InGuest(pathOf("replay") & ".pacnew") == editedSha and

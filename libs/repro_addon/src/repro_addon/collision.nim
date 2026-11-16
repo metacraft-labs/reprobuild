@@ -820,13 +820,25 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
     when not mutated("package-owner-absorbed"):
       var e = newAddOnPackageOwned(o.path, o.ownership.package,
                                    o.ownership.conffile, d.dropInHint(o.path))
-      e.msg.add(" -- package " & o.ownership.package & " came to own this " &
-        "ledger path after the add-on took it (" & inp.address &
-        "). Remove the resource to hand the path back to the package, " &
-        "then declare it again with " &
-        (if d.supportsDiversions: "`collision = \"divert\"`"
-         else: "`collision = \"takeOver\"` (a backup file only)") &
-        " if the add-on should still own its content")
+      if inp.ledgerObservation.startsWith("backup:"):
+        # A taken-over backup file is never handed back (spec §4.3.1): its
+        # removal restores the version the new owner's %BACKUP% names.
+        e.msg.add(" -- package " & o.ownership.package & " now owns this " &
+          "backup file, which the add-on took over from " &
+          packageOfObservation(inp.ledgerObservation) & " (" & inp.address &
+          "). Removing the resource restores the version " &
+          o.ownership.package & "'s %BACKUP% names (its .pacnew, by " &
+          "pacman's rule); declare it again with `collision = " &
+          "\"takeOver\"` afterwards if the add-on should still own its " &
+          "content")
+      else:
+        e.msg.add(" -- package " & o.ownership.package & " came to own this " &
+          "ledger path after the add-on took it (" & inp.address &
+          "). Remove the resource to hand the path back to the package, " &
+          "then declare it again with " &
+          (if d.supportsDiversions: "`collision = \"divert\"`"
+           else: "`collision = \"takeOver\"` (a backup file only)") &
+          " if the add-on should still own its content")
       raise e
   if inp.ledgerOwns:
     if o.exists and o.sha256 == inp.ledgerSha256:

@@ -247,6 +247,11 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
         m.revertReason & " (the revert was finished at boot)", false)
     result.lines.add("replayed the switch to completion: generation " &
       r.generationId & " is current")
+    # What the replay kept rather than undo (an object changed since the
+    # plan; a taken-over backup file whose restore no rule allows, spec
+    # §4.3.1) is reported, as the apply itself reports its drift.
+    for d in r.drift:
+      result.lines.add("left in place as drift: " & d)
     result.resolved = true
   except AddonRolledBack as e:
     result.lines.add("the replay did not complete and was reverted: " & e.msg)

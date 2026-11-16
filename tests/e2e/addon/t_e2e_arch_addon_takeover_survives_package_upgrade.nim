@@ -196,6 +196,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   proc step(name: string; ok: bool; detail: string) =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
+  # Every base starts from the add-on's first bytes: the table outlives a
+  # base, and a second base that inherited revision 2 would make its
+  # content-update case update nothing.
+  addOnVersion.clear()
   try:
     g = newArchGuest(b)
     g.boot()
@@ -279,7 +283,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let a = g.applyProfile(repro, "gen1b", profile(Cases))
       let es = entriesAt(g.ledgerOf(), pathOf("uninst"))
       step("uninst: a content update of a taken-over file stays a copy, its packaged bytes kept",
-           a.exitCode == 0 and g.isAddOnCopy("uninst") and es.len == 1 and
+           a.exitCode == 0 and "update\t" & pathOf("uninst") in (a.stdout & a.stderr) and
+             g.isAddOnCopy("uninst") and es.len == 1 and
              not es[0].isLink and es[0].form == "copy" and
              es[0].collision == "takeOver" and
              extractFilename(es[0].preserved) == sha256Hex(packaged("uninst", 1)),

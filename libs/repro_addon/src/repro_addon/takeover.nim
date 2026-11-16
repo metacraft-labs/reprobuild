@@ -301,20 +301,27 @@ proc planTakeOverRemoval*(e: LedgerEntry; driver: CollisionDriver;
   ## altered, raise for an ordinary apply -- the removal is refused before
   ## anything is written -- and keep the path, owned and reported, for a
   ## revert or a replay, which go back whatever is in the way.
+  # The decision is read into a local before any `TakeOverRemoval(...)` is
+  # built: Nim constructs a returned object in place in `result`, zeroing
+  # `result.undo` before the constructor's fields are evaluated, so a
+  # refusal built from `result.undo` there would name no package and no
+  # digests.
+  var undo: TakeOverUndo
   try:
-    result.undo = decideTakeOverUndo(e, driver)
+    undo = decideTakeOverUndo(e, driver)
   except AddonTakeOverError as ex:
     if revertOrReplay:
       return TakeOverRemoval(keep: true, drift: e.path & ": " & ex.msg &
         " (left in place)")
     raise newException(AddonCollisionError, "refusing the removal of " &
       e.resource & ": " & ex.msg)
-  if result.undo.kind == tuRefused:
+  if undo.kind == tuRefused:
+    let refused = refusal(e, undo)
     when not mutated("takeover-replay-refuses"):
       if revertOrReplay:
-        return TakeOverRemoval(keep: true, drift: refusal(e, result.undo).msg &
-          " (left in place)")
-    raise refusal(e, result.undo)
+        return TakeOverRemoval(keep: true, drift: refused.msg & " (left in place)")
+    raise refused
+  TakeOverRemoval(undo: undo)
 
 proc recheckTakeOverRemoval*(e: LedgerEntry; planned: TakeOverUndo;
                              havePlan: bool; driver: CollisionDriver):
