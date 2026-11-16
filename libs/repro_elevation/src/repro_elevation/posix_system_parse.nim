@@ -1204,7 +1204,7 @@ proc parseNftRuleSpecForComment*(rawOutput, comment: string): string =
   ## The line text is what the canonical-bytes digest covers: two
   ## rules with the same comment but different actions (e.g. an
   ## operator hand-edited `accept` to `drop`) digest differently,
-  ## so the broker's drift gate triggers a re-apply.
+  ## so the broker re-applies the desired rule.
   for line in rawOutput.splitLines():
     if comment notin line:
       continue
