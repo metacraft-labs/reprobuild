@@ -33,6 +33,7 @@ import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 
 from repro_core/paths import extendedPath, runquotaEndpointPath
 from repro_core/git_separated import gitRunSeparated
+import repro_core/process_env
 
 # The fake-registry-hive seam (`registryRootEnv`), kept in its own module so
 # `home_apply_guard` shares it without importing this one.
@@ -186,6 +187,25 @@ proc shellCommand*(args: openArray[string];
   result.args = @args
   result.env = @env
 
+proc cmdEnvTable*(cmd: CmdSpec; inherited: openArray[(string, string)];
+                  caseInsensitive = HostEnvNamesAreCaseInsensitive):
+    StringTableRef =
+  ## ``inherited`` overlaid with ``cmd.env``: the environment ``runShell`` and
+  ## ``runShellSplit`` start the child with. Built with the host's name
+  ## semantics (``repro_core/process_env``): on Windows an override of
+  ## ``PATH`` must replace the inherited ``Path``, not sit beside it, or the
+  ## child gets both and may resolve programs through the inherited one.
+  result = envTableFrom(inherited, caseInsensitive)
+  for entry in cmd.env:
+    result[entry.name] = entry.value
+
+proc cmdEnvTable*(cmd: CmdSpec): StringTableRef =
+  ## ``cmdEnvTable`` over this process's environment.
+  var inherited: seq[(string, string)]
+  for k, v in envPairs():
+    inherited.add((k, v))
+  cmdEnvTable(cmd, inherited)
+
 const runShellTimedOutCode* = -2
   ## ``runShell``'s exit code when ``timeoutMs`` expired and the child was
   ## terminated. Distinct from ``-1`` (``peekExitCode``'s "still running").
@@ -206,9 +226,7 @@ proc runShell*(cmd: CmdSpec; cwd = getCurrentDir();
   ## fails the case instead of wedging the suite.
   if cmd.args.len == 0:
     raise newException(ValueError, "shellCommand returned an empty argv")
-  var envTable = newStringTable()
-  for k, v in envPairs(): envTable[k] = v
-  for entry in cmd.env: envTable[entry.name] = entry.value
+  let envTable = cmdEnvTable(cmd)
   # ``poUsePath`` makes ``startProcess`` resolve ``cmd.args[0]`` against
   # the inherited (and overlay-modified) ``PATH``. Without it the
   # subprocess receives the unresolved command name as ``argv[0]``,
@@ -489,9 +507,7 @@ proc runShellSplit*(cmd: CmdSpec; cwd = getCurrentDir();
   ## ``runProgramSplit`` for when that is required.
   if cmd.args.len == 0:
     raise newException(ValueError, "shellCommand returned an empty argv")
-  var envTable = newStringTable()
-  for k, v in envPairs(): envTable[k] = v
-  for entry in cmd.env: envTable[entry.name] = entry.value
+  let envTable = cmdEnvTable(cmd)
   runProgramSplit(cmd.args[0], cmd.args[1..^1], cwd, envTable, timeoutMs)
 
 proc requireSuccess*(cmd: CmdSpec; cwd = getCurrentDir()): string =
