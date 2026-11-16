@@ -27613,6 +27613,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_ux_m1_reprobuild_module_hierarchy_and_lsp.nim",
+    binary: "build/test-bin/t_ux_m1_reprobuild_module_hierarchy_and_lsp",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let scratch = createTempDir(\"reprobuild-imports-\", \"\")"),
+  TestSpec(
     source: "tests/integration/t_v2_artifact_resolves_on_a_v3_host.nim",
     binary: "build/test-bin/t_v2_artifact_resolves_on_a_v3_host",
     defines: @[],
