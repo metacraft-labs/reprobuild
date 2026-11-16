@@ -95,7 +95,7 @@ libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
 libs/repro_addon/tests/t_addon_review_round4.nim	nim	6
 libs/repro_addon/tests/t_addon_review_round5.nim	nim	5
-libs/repro_addon/tests/t_addon_review_round8.nim	nim	32
+libs/repro_addon/tests/t_addon_review_round8.nim	nim	37
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
@@ -107,7 +107,7 @@ libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
-libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	46
+libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	51
 libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
@@ -2665,6 +2665,7 @@ tests/unit/t_dev_env_path_ops.nim	nim	9
 tests/unit/t_dev_env_prompt_watch_entries.nim	nim	3
 tests/unit/t_dev_env_prompt_watch_key.nim	nim	14
 tests/unit/t_dev_session_control_api_writes_every_byte_once.nim	nim	5
+tests/unit/t_dev_session_ready_file_is_never_seen_partial.nim	nim	3
 tests/unit/t_electron_builder_binaries.nim	nim	5
 tests/unit/t_engine_built_actions_key_their_argv.nim	nim	10
 tests/unit/t_every_tool_profile_is_sealed.nim	nim	6
