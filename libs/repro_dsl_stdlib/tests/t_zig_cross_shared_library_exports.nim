@@ -12,7 +12,8 @@
 ## `libsqlite3.so` and imported 11 `__aeabi_*` symbols from it. On the
 ## Raspberry Pi the soname resolves to the system's gcc-built sqlite, which
 ## exports none, and the image died with "undefined symbol: __aeabi_uidiv".
-## zig 0.13 refuses `--exclude-libs`, and zig 0.14.1 exports the same set.
+## zig 0.13 refuses `--exclude-libs`. zig 0.14.1 exports the same set plus
+## the 26 helpers its compiler-rt adds (`zig_0_14_arm_compiler_rt_symbols`).
 ##
 ## HOW. The wrappers and the map are the adapter's own text
 ## (`zigCrossWrapperScript`, `zigCrossCompilerRtMap`), written into a temp
@@ -26,14 +27,18 @@
 ## edge `emitZigCrossVersionScriptAction`) and refused otherwise; io-mon's
 ## shim script, which only versions `dlsym`, is the case the merge serves.
 ##
-## NO MOCKS: the real zig and the real linker. Without zig 0.13 or nm on
-## PATH the link cases skip with the reason, and fail in a gate run.
+## NO MOCKS: the real zig and the real linker. Without zig 0.13 or 0.14
+## or nm on PATH the link cases skip with the reason, and fail in a gate run.
+## Run them once per zig the recipes may declare (`zig >=0.13 <0.15`): the
+## dev shell's zig is 0.13; put a zig 0.14 first on PATH for the other.
 
 import std/[os, osproc, sequtils, sets, strutils, tempfiles, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_project_dsl
 import repro_dsl_stdlib/adapters/cross_zig
+import repro_dsl_stdlib/adapters/zig_0_13_arm_compiler_rt_symbols
+import repro_dsl_stdlib/adapters/zig_0_14_arm_compiler_rt_symbols
 
 const
   Glibc = "armv7-unknown-linux-gnueabihf"
@@ -42,13 +47,17 @@ unsigned f(unsigned a, unsigned b) { return a / b; }
 long long g(long long a, long long b) { return a / b; }
 """
 
+proc zigOnPathVersion(): string =
+  let (version, code) = execCmdEx("zig version")
+  if code != 0: "" else: version.strip()
+
 proc toolMissing(): string =
   ## Why the link cases cannot run here, or "" when they can.
   if findExe("zig").len == 0: return "zig is not on PATH"
   if findExe("nm").len == 0: return "nm is not on PATH"
-  let (version, code) = execCmdEx("zig version")
-  if code != 0 or not version.strip().startsWith("0.13."):
-    return "the list is zig 0.13's; zig on PATH is " & version.strip()
+  let version = zigOnPathVersion()
+  if not (version.startsWith("0.13.") or version.startsWith("0.14.")):
+    return "the list is zig 0.13's and 0.14's; zig on PATH is " & version
   ""
 
 template requireTools(body: untyped) =
@@ -145,6 +154,51 @@ suite "cross_zig: a shared library exports none of compiler-rt":
       check names.filterIt(it.startsWith("__aeabi")).len == 0
       let runtime = zigArmCompilerRtSymbols().toHashSet
       check names.filterIt(it in runtime).len == 0
+
+  test "a debug one-step link exports no UBSan runtime on any row":
+    # zig 0.14 links its UBSan runtime into a library compiled and linked in
+    # one invocation at its debug default, and the library exports it
+    # (`ZigCcUbsanTrapArg`). The wrappers and `zigCrossCc` add the trap flag,
+    # so at `-O0` and with no `-O` the library exports only its own symbols
+    # and the `_init` / `_fini` zig 0.13 adds. Under zig 0.14 the bare driver
+    # is linked the same way as a control: it must export the runtime, or
+    # this case no longer exercises what it guards.
+    requireTools:
+      let dir = createTempDir("zig-shared-ubsan-", "")
+      defer: removeDir(dir)
+      writeFile(dir / "l.c", LibSource)
+      let allowed = ["f", "g", "_init", "_fini"].toHashSet
+      for triple in [Glibc, "aarch64-unknown-linux-musl",
+                     "x86_64-unknown-linux-musl"]:
+        let t = zigCrossTarget(triple)
+        let wrappers = dir / ("w-" & triple)
+        writeWrappers(wrappers, triple)
+        for opt in ["-O0", ""]:
+          for (name, cc) in [("wrapper", quoteShell(wrappers / "cc")),
+                             ("zigCrossCc", zigCrossCc(t))]:
+            checkpoint(triple & " " & name & " [" & opt & "]")
+            let lib = dir / "l.so"
+            removeFile(lib)
+            let link = run(cc & " " & opt & " -shared -fPIC -o l.so l.c", dir)
+            checkpoint(link.output)
+            require link.code == 0
+            let names = exported(lib, dir)
+            checkpoint(names.join(" "))
+            check "f" in names
+            check "g" in names
+            check names.filterIt(it.startsWith("__ubsan_")).len == 0
+            # `zigCrossCc` carries no version script, so on a 32-bit ARM
+            # row compiler-rt is exported through it whatever the
+            # optimization; that is the map's concern, not this case's.
+            if name == "wrapper" or t.nimCpu != "arm":
+              check names.filterIt(it notin allowed).len == 0
+        if zigOnPathVersion().startsWith("0.14."):
+          let bare = run("zig cc " & zigDriverArgSeq(t).join(" ") &
+            " -O0 -shared -fPIC -o bare.so l.c", dir)
+          checkpoint(bare.output)
+          require bare.code == 0
+          check exported(dir / "bare.so", dir).anyIt(
+            it.startsWith("__ubsan_handle_"))
 
   test "a recipe's own version script decides alone":
     requireTools:
@@ -252,7 +306,15 @@ suite "cross_zig: a shared library exports none of compiler-rt":
         let fields = line.splitWhitespace()
         if fields.len == 3:
           actual.incl(fields[2])
-      let listed = zigArmCompilerRtSymbols().toHashSet
+      # The archive of the zig on PATH is exactly its version's list: 0.13's,
+      # or 0.13's plus the helpers 0.14 adds. Both directions are checked so
+      # that a list carrying names no zig defines is caught too.
+      let version = zigOnPathVersion()
+      checkpoint("zig on PATH: " & version)
+      var listed = ZigArmCompilerRtSymbols.toHashSet
+      if version.startsWith("0.14."):
+        listed.incl(ZigArmCompilerRtSymbolsAddedIn014.toHashSet)
+      check listed <= zigArmCompilerRtSymbols().toHashSet
       checkpoint("in the archive, not listed: " &
         toSeq(actual - listed).join(" "))
       checkpoint("listed, not in the archive: " &

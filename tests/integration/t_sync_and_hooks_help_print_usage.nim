@@ -56,15 +56,19 @@ suite "sync and hooks help":
     let empty = createTempDir("repro-help-", "")
     defer: removeDir(empty)
     for (argv, expected) in [
-        (@["sync", "--help"], "usage: repro sync"),
-        (@["sync", "-h"], "usage: repro sync"),
-        (@["workspace", "sync", "--help"], "usage: repro sync"),
-        (@["ws", "sync", "--help"], "usage: repro sync"),
-        (@["hooks", "ensure", "--help"], "usage: repro hooks"),
-        (@["hooks", "--help"], "usage: repro hooks")]:
+        # Their help is generated from the description (the hand-written
+        # usage texts went when the commands moved onto it).
+        (@["sync", "--help"], "Usage: repro sync"),
+        (@["sync", "-h"], "Usage: repro sync"),
+        (@["workspace", "sync", "--help"], "Usage: repro workspace sync"),
+        (@["ws", "sync", "--help"], "Usage: repro workspace sync"),
+        (@["hooks", "ensure", "--help"], "Usage: repro hooks ensure"),
+        (@["hooks", "--help"], "Usage: repro hooks")]:
       var cmd = @[repro]
       cmd.add(argv)
-      cmd.add("--workspace-root=" & empty)
+      if argv != @["hooks", "--help"]:
+        # The namespace itself takes no `--workspace-root`.
+        cmd.add("--workspace-root=" & empty)
       let res = runShell(shellCommand(cmd))
       checkpoint(argv.join(" ") & " -> exit " & $res.code & "\n" & res.output)
       check res.code == 0
@@ -91,11 +95,11 @@ suite "sync and hooks help":
     for word in ShownCommands:
       topics.add(@[word])
     # A deeper word of a command whose parser does not know `--help`, and
-    # has no usage synopsis. (`allow`, the example until it moved onto the
-    # description, now has a generated help of its own, and a word after it
-    # in `repro help`'s topic is an unknown command, as for every command
-    # parsed from the description.)
-    topics.add(@["gateway", "somewhere"])
+    # has no usage synopsis. (`allow` and then `gateway`, the examples until
+    # they moved onto the description, now have generated help of their own,
+    # and a word after them in `repro help`'s topic is an unknown command, as
+    # for every command parsed from the description.)
+    topics.add(@["ci", "somewhere"])
     for topic in topics:
       let res = runShell(shellCommand(@[repro, "help"] & topic, env),
         cwd = empty, timeoutMs = 60_000)

@@ -7428,6 +7428,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_lock_gen_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_lock_gen/tests/t_materiality_covers_unselected_and_dormant_constraints.nim",
+    binary: "build/test-bin/t_materiality_covers_unselected_and_dormant_constraints",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for strategy in [lsDefault, lsLowest, lsHighest, lsLowestDir..."),
+  TestSpec(
     source: "libs/repro_lock_gen/tests/t_materiality_interval_covers_the_gap.nim",
     binary: "build/test-bin/t_materiality_interval_covers_the_gap",
     defines: @[],
@@ -19726,6 +19737,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_cs_m6_workspace_command_lines.nim",
+    binary: "build/test-bin/t_cs_m6_workspace_command_lines",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g03",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_ct_test_surface_case_addressability.nim",
     binary: "build/test-bin/t_ct_test_surface_case_addressability",
     defines: @[],
@@ -19844,7 +19866,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_daemon_accept_loop_survives_probe.nim",
@@ -20625,7 +20647,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_emitted_overrides_match_the_develop_set.nim",

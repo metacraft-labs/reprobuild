@@ -920,25 +920,31 @@ proc installGenerationExecutors*(req: LockGenerationRequest) =
         # selected). The path set pairs them with the objects wave 1 actually
         # retrieved, so the recorded fact is over what was read rather than
         # over what was declared.
-        let intervals = deriveConsultedIntervals(packages, sol, preference)
-        var byPackage = initTable[string, ConsultedInterval]()
+        let intervals = deriveConsultedIntervals(packages, sol, preference,
+          req.variants)
+        # A package can carry several intervals — its selection interval and
+        # one per dormant constraint on it — and each becomes its own
+        # observation over the same version list.
+        var byPackage = initTable[string, seq[ConsultedInterval]]()
         for iv in intervals:
-          byPackage[iv.packageName] = iv
+          byPackage.mgetOrPut(iv.packageName, @[]).add(iv)
         var ps = SolvePathSet(observations: @[])
         for entry in plan:
           if not fileExists(entry.objectPath):
             continue
           if entry.kind == mokVersionList:
-            # A version list for a package the solve did not consult —
-            # unselected, pinned, or absent from the graph — contributes NO
-            # observation. That is §5.7's whole claim, and NLF-M9 is what makes
-            # it statable: the metadata was fetched (over-approximation) and
-            # then not consulted, so keying on it would over-invalidate on a
-            # publication that cannot move the answer.
+            # A version list for a package the solve did not consult — pinned,
+            # or absent from the graph — contributes NO observation. That is
+            # §5.7's whole claim: the metadata was fetched (over-approximation)
+            # and then not consulted, so keying on it would over-invalidate on
+            # a publication that cannot move the answer. An UNSELECTED package
+            # is not in that class: its chosen version is in the lock, and a
+            # dormant constraint on it was weighed (`deriveConsultedIntervals`).
             if not byPackage.hasKey(entry.packageName):
               continue
-            ps.observations.add(observeObject(entry.kind, entry.subject,
-              entry.objectPath, byPackage[entry.packageName]))
+            for iv in byPackage[entry.packageName]:
+              ps.observations.add(observeObject(entry.kind, entry.subject,
+                entry.objectPath, iv))
           else:
             # A document kind is read whole. `observeObject` classifies it and
             # ignores the interval it is handed, so passing an empty one is
