@@ -191,6 +191,38 @@ proc writeControlToken*(path, token: string) =
   else:
     writeFile(extendedPath(path), token)
 
+proc writeNewFileExclusive*(path, content: string) =
+  ## Create ``path`` as a NEW file holding ``content``: on POSIX
+  ## ``O_CREAT | O_EXCL | O_NOFOLLOW`` (mode ``0666`` narrowed by the umask,
+  ## as ``writeFile`` would leave it), so an existing entry -- a symlink
+  ## planted at a predictable name in a directory another account can
+  ## write -- is refused rather than written through. Raises ``OSError``;
+  ## a partially written file is removed.
+  when defined(posix):
+    let fd = posix.open(path.cstring,
+      O_WRONLY or O_CREAT or O_EXCL or O_NOFOLLOW or O_CLOEXEC, Mode(0o666))
+    if fd < 0:
+      raiseOSError(osLastError(), "cannot create " & path)
+    var ok = false
+    try:
+      var written = 0
+      while written < content.len:
+        let n = posix.write(fd, unsafeAddr content[written],
+          content.len - written)
+        if n < 0:
+          if errno == EINTR: continue
+          raiseOSError(osLastError(), "cannot write " & path)
+        written += n
+      ok = true
+    finally:
+      discard posix.close(fd)
+      if not ok:
+        discard unlink(path.cstring)
+  else:
+    if fileExists(extendedPath(path)) or symlinkExists(extendedPath(path)):
+      raise newException(OSError, "cannot create " & path & ": it exists")
+    writeFile(extendedPath(path), content)
+
 proc readControlToken*(path: string): string =
   ## The token at ``path``. A client that cannot read it is not the
   ## session's user, and is told which file it could not read.

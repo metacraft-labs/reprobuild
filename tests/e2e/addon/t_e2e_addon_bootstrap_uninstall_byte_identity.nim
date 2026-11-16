@@ -212,6 +212,18 @@ proc preBootstrapRound(g: Guest; repro: string; anchors: Anchors;
        logDir.exitCode == 0 and logDir.stdout.strip() == "root:root 700 directory" and
          "/var/log/repro-addon:" notin vf.stdout,
        logDir.stdout & logDir.stderr & "\n" & vf.stdout)
+  # §13 decision 178, amended: another root directory renamed into the
+  # records directory's place (what a group that can write /var/log can
+  # do) is not the one bootstrap made; verify reports it, then it is put
+  # back.
+  let swap = g.exec("mv /var/log/repro-addon /var/log/repro-addon.r19 && " &
+                    "mkdir -m 0700 /var/log/repro-addon")
+  let vs = g.exec(repro & " system addon verify")
+  discard g.exec("rmdir /var/log/repro-addon && " &
+                 "mv /var/log/repro-addon.r19 /var/log/repro-addon")
+  step("round 3: verify reports a directory swapped into the records directory's place",
+       swap.exitCode == 0 and "not the directory bootstrap made" in vs.stdout,
+       swap.stderr & "\n" & vs.stdout & vs.stderr)
   let taken = g.run("stat -c '%n %a %u:%g' /var/lib/repro/agent/state/deploy-agent /var/lib/repro/agent")
   step("round 3: the takeover gave the inputs the add-on's modes (recorded)", true, taken)
   # The deploy agent's writes: the floor bumped in place, a floor for a
