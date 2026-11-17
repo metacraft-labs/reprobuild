@@ -38,7 +38,9 @@
 ## an input of the command line, and is compared on neither side.
 ##
 ## `--help` and `-h` are compared on neither side: the parser builds them into
-## every command.
+## every command. `--help-all`, which the parser builds in only when a
+## command is declared `secondary`, is compared at the root (see
+## `surfaceOf`).
 ##
 ## The falsifying mutations prove the comparison can fail: the description
 ## with one flag's declaration removed, and with one command's declaration
@@ -87,7 +89,8 @@ const
     "repro home get", "repro home adopt", "repro home resource",
     "repro home resource move", "repro home migrate-from-env-scripts",
     "repro system", "repro system add", "repro system remove",
-    "repro system list", "repro system why", "repro system sync",
+    "repro system list", "repro system why", "repro system plan",
+    "repro system apply", "repro system sync",
     "repro system history", "repro system rollback", "repro system audit",
     "repro infra", "repro infra plan", "repro infra apply",
     "repro infra cache-keys", "repro infra install-root", "repro infra image",
@@ -150,8 +153,7 @@ const
     # profile commands implemented today.
     "flag\trepro infra apply\t--activity", "flag\trepro infra apply\t--json",
     "flag\trepro infra apply\t--staged", "flag\trepro infra apply\t--yes",
-    "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--json",
-    "flag\trepro infra plan\t--strict",
+    "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--strict",
     # The proposed surface of `repro dev` beyond what is implemented: a cap
     # on how long repeated changes may postpone a cycle, and hot code
     # reloading (which `repro watch --hcr` implements).
@@ -168,19 +170,14 @@ const
     "flag\trepro workspace status\t--verbose",
     "flag\trepro workspace status\t-v",
     # What the pages came to specify after the sixth group moved, for the
-    # command-line and DSL usability work that implements it: the root's
-    # `--help-all` (all of a command's help tiers), `repro capabilities
-    # --json` and `repro add`'s dependency-kind flags.
-    "flag\trepro\t--help-all", "flag\trepro capabilities\t--json",
+    # command-line and DSL usability work that implements it: `repro add`'s
+    # dependency-kind flags.
     "flag\trepro add\t--build", "flag\trepro add\t--native-build",
     "flag\trepro add\t--runtime",
     # `repro build`'s `--no-write-stats` (turn the raw observation capture
     # off for one build): specified, not implemented yet (its issue is the
     # derived stats store's).
     "flag\trepro build\t--no-write-stats",
-    # `repro home export|facts --nixos` (state whether the target host is
-    # NixOS): specified, not implemented yet.
-    "flag\trepro home export\t--nixos", "flag\trepro home facts\t--nixos",
     # The proposed V1 surface of `repro watch` beyond what is implemented
     # (`--debounce-ms` is): task and tier selection, an explicit `--target`,
     # a debounce duration and its cap, the HTTP session and a start without
@@ -223,51 +220,87 @@ proc commandWord(stmt: NimNode): string =
     return stmt[1].strVal
   ""
 
+proc removeDeclaration(scope: NimNode; command, name: string): bool =
+  ## Removes one declaration from `scope` (see `withoutDeclaration`),
+  ## looking into the `group` sections the shown top-level commands stand
+  ## in; whether it found it.
+  for i in 0 ..< scope.len:
+    let stmt = scope[i]
+    if stmt.kind == nnkCommand and stmt.len == 3 and
+        stmt[0].eqIdent("group") and stmt[^1].kind == nnkStmtList:
+      if removeDeclaration(stmt[^1], command, name):
+        return true
+      continue
+    if commandWord(stmt) != command:
+      continue
+    if name.len == 0:
+      scope.del(i)
+      return true
+    let body = stmt[^1]
+    for j in 0 ..< body.len:
+      if paramName(body[j]) == name:
+        body.del(j)
+        return true
+  false
+
 proc withoutDeclaration(body: NimNode; command, name: string): NimNode =
   ## The description with one declaration removed: parameter `name` of the
   ## top-level command `command`, or (`name` empty) the command itself.
   result = body.copyNimTree()
-  for i in 0 ..< result.len:
-    if commandWord(result[i]) != command:
+  if not removeDeclaration(result, command, name):
+    error("no declaration " & command & "/" & name & " to remove")
+
+proc removeEnv(scope: NimNode; command, name: string): bool =
+  ## Removes the `env = ...` of parameter `name` of the top-level command
+  ## `command` from `scope`, looking into the `group` sections as
+  ## `removeDeclaration` does; whether it found it.
+  for i in 0 ..< scope.len:
+    let stmt = scope[i]
+    if stmt.kind == nnkCommand and stmt.len == 3 and
+        stmt[0].eqIdent("group") and stmt[^1].kind == nnkStmtList:
+      if removeEnv(stmt[^1], command, name):
+        return true
       continue
-    if name.len == 0:
-      result.del(i)
-      return
-    let scope = result[i][^1]
-    for j in 0 ..< scope.len:
-      if paramName(scope[j]) == name:
-        scope.del(j)
-        return
-  error("no declaration " & command & "/" & name & " to remove")
+    if commandWord(stmt) != command:
+      continue
+    let body = stmt[^1]
+    for j in 0 ..< body.len:
+      if paramName(body[j]) == name:
+        for k in countdown(body[j].len - 1, 2):
+          if body[j][k].kind == nnkExprEqExpr and
+              body[j][k][0].eqIdent("env"):
+            body[j].del(k)
+            return true
+  false
 
 proc withoutEnv(body: NimNode; command, name: string): NimNode =
   ## The description with the `env = ...` of parameter `name` of the
   ## top-level command `command` removed: the flag stays, the variables it
   ## declares go.
   result = body.copyNimTree()
-  for i in 0 ..< result.len:
-    if commandWord(result[i]) != command:
-      continue
-    let scope = result[i][^1]
-    for j in 0 ..< scope.len:
-      if paramName(scope[j]) == name:
-        for k in countdown(scope[j].len - 1, 2):
-          if scope[j][k].kind == nnkExprEqExpr and
-              scope[j][k][0].eqIdent("env"):
-            scope[j].del(k)
-            return
-  error("no `env` of " & command & "/" & name & " to remove")
+  if not removeEnv(result, command, name):
+    error("no `env` of " & command & "/" & name & " to remove")
 
 proc surfaceOf(body: NimNode): seq[string] =
   ## The description's side, as the fixture's rows: `verb <word>` for each
   ## top-level command that is not hidden, then `flag`/`env` rows of every
   ## named command and of the root (whose flags its `call:` declares).
+  ##
+  ## `--help-all` is the one built-in spelling compared: clispec accepts it
+  ## only in a program that declares a `secondary` command (and then at
+  ## every command, where a command without one gives `--help`'s page), so
+  ## it is a row of the root, where the specification names it, exactly
+  ## when the description declares one.
   let model = parseCliModel[NoCliExtension, ReproCommandLineParamExt](body,
     NoCliExtension())
   for cmd in model.commands:
     if not cmd.anonymous and cmd.path.len == 1 and
         cmd.visibility != cvHidden:
       result.add("verb\t" & cmd.name)
+  for cmd in model.commands:
+    if not cmd.anonymous and cmd.tier == ctSecondary:
+      result.add("flag\trepro\t--help-all")
+      break
   for cmd in model.commands:
     # A `call:` holds the flags of the command it belongs to (the root's
     # own, or a namespace's that runs without a subcommand, such as `repro

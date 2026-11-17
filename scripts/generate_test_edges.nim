@@ -404,6 +404,16 @@ type
       ## the test file alone, because roughly thirty tests reach the CLI
       ## only through ``repro_test_support.prepareMonitorTools`` and the
       ## ``tests/e2e`` helper modules and spell no path of their own.
+    requiresMonitorShim: bool
+      ## ``true`` when running the test needs the graph-built monitor shim
+      ## (``build/lib/librepro_monitor_shim.<ext>``) on disk. When set,
+      ## ``repro.nim`` declares the shim as a typed input on the test's
+      ## EXECUTE edge and orders it after
+      ## ``reprobuild.test_fixtures.monitor_shim``, so a narrow selection
+      ## of the test builds the shim first and a rebuilt shim re-runs it.
+      ## Decided by the same import-closure analysis as
+      ## ``requiresReproBinary`` (``rtMonitorShim``); see
+      ## ``scripts/repro_binary_reachability.nim``.
     extraPassC: seq[string]
       ## Bootstrap-And-Self-Build B4: per-test ``--passC:`` flags. The
       ## generator emits one entry per ``--passC:<value>`` flag the
@@ -931,6 +941,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
   # files. Everything they import (transitively, inside this repo) is
   # parsed once and shared by every classification below.
   let reach = analyze(repoRoot, candidates)
+  let shimReach = analyze(repoRoot, candidates, rtMonitorShim)
 
   for rel in candidates:
     if rel in bundled:
@@ -966,6 +977,7 @@ proc discoverTests(repoRoot: string): seq[TestEdge] =
       needsSoftwareRootTestTrust: needsSoftwareRootTestTrustDefine(rel),
       needsMissingJsonEvidenceTest: needsMissingJsonEvidenceTestDefine(rel),
       requiresReproBinary: detectReproBinaryUsage(reach, repoRoot, rel),
+      requiresMonitorShim: shimReach.needsMonitorShim(rel),
       extraPassC: extraPassC,
       extraPassL: extraPassL,
       targetOs: targetOs,
@@ -1367,6 +1379,11 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result.add("    ## test's transitive import closure, so a test that\n")
   result.add("    ## reaches the CLI only through a shared helper carries\n")
   result.add("    ## it too; see ``scripts/repro_binary_reachability.nim``.\n")
+  result.add("    ## ``requiresMonitorShim``: running the test needs the\n")
+  result.add("    ## graph-built ``build/lib/librepro_monitor_shim.<ext>``,\n")
+  result.add("    ## so the EXECUTE edge declares it as a typed input and\n")
+  result.add("    ## orders after ``reprobuild.test_fixtures.monitor_shim``.\n")
+  result.add("    ## Computed by the same import-closure analysis.\n")
   result.add("    ## ``extraPassC`` / ``extraPassL`` (B4): per-test\n")
   result.add("    ## ``--passC:`` / ``--passL:`` flag lists, activated by\n")
   result.add("    ## the ``targetOs`` guard.\n")
@@ -1375,6 +1392,7 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
   result.add("    binary*: string\n")
   result.add("    defines*: seq[string]\n")
   result.add("    requiresReproBinary*: bool\n")
+  result.add("    requiresMonitorShim*: bool\n")
   result.add("    extraPassC*: seq[string]\n")
   result.add("    extraPassL*: seq[string]\n")
   result.add("    targetOs*: TargetOs\n")
@@ -1410,6 +1428,8 @@ proc render(edges: seq[TestEdge]; pythonTests: seq[string]): string =
       of soMacosArm64: "soMacosArm64"
     result.add("    defines: " & definesLit & ",\n")
     result.add("    requiresReproBinary: " & reqLit & ",\n")
+    result.add("    requiresMonitorShim: " &
+      (if edge.requiresMonitorShim: "true" else: "false") & ",\n")
     result.add("    extraPassC: " & seqLiteral(edge.extraPassC) & ",\n")
     result.add("    extraPassL: " & seqLiteral(edge.extraPassL) & ",\n")
     result.add("    targetOs: " & targetOsLit & ",\n")

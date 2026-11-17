@@ -624,9 +624,9 @@ proc fullApplyRecordProfile*(target: SystemProfile): SystemProfile =
   ## to restart as: ``restartRecordProfile``, the form every entry was
   ## rendered against (A13 review round 12, M2) -- so a generation that
   ## differs from it only in shape resolves nothing. ``runInfraApply``
-  ## passes the generation as its author wrote it, without the
-  ## carried-state requirements it adds (its falsifier,
-  ## ``full-apply-renders-full-profile``, is there).
+  ## passes the generation as its author wrote it, and the digest leaves
+  ## the carried-state requirement's drop-ins out on both sides
+  ## (``withoutRequirementDropIns``, A13 review round 13, M-A).
   restartRecordProfile(target)
 
 proc fullApplyStartResolved*(applyStateDir: string; target: SystemProfile;

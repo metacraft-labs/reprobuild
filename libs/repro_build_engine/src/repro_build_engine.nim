@@ -2249,7 +2249,7 @@ type
     traceEnabled: bool
     runQuotaBypassed*: bool
       ## RA-13: true when at least one action in this build launched without a
-      ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA``
+      ## RunQuota lease (explicit ``--no-runquota`` / ``REPROBUILD_NO_RUNQUOTA``
       ## bypass, or the unreachable-daemon fallback). In that state RunQuota is
       ## NOT the resource authority for this run: host limits, cross-session
       ## fairness, and named-pool capacity are enforced only by the engine's
@@ -21888,8 +21888,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         pending.actions.join(", ") & " waited for a lease at " &
         runQuotaEndpointText() & ": no grant-stream frame and no status " &
         "reply for " & $grantUnresponsiveMs() & "ms (the daemon may be " &
-        "wedged or mid-restart). Retry, restart runquotad, or bypass " &
-        "RunQuota for this command with REPROBUILD_NO_RUNQUOTA=1 (unsafe).")
+        "wedged or mid-restart). " & RunQuotaUnresponsiveRemedy)
     var blocked = true
     for item in running:
       if item.processKind != rpkInlineRunQuotaPending:

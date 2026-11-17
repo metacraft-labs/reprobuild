@@ -259,3 +259,46 @@ suite "M8 follow-up — output app name validation":
     check "\npackage greeter:\n" in body
     check (not body.contains("package hello"))
     check "packageId = \"greeter@" in body
+
+  test "test_harvester_refuses_a_name_sharing_an_identifier_with_an_existing_module":
+    let outDir = tempOutDir("identifier-collision")
+    writeFile(outDir / "foo_bar.nim", "import repro_project_dsl\n\npackage foo_bar:\n  defaultToolProvisioning \"path\"\n")
+    let (rc, output) = runHarvester(@[
+      "harvest", "--source", "scoop", "--bucket", FixturesDir / "bucket-simple",
+      "--app", "hello", "--app-alias", "hello=foobar", "--output-dir", outDir])
+    check rc == 2
+    check "same Nim identifier" in output
+    check "foo_bar" in output
+    check (not fileExists(outDir / "foobar.nim"))
+    # Under --dry-run too.
+    let dry = runHarvester(@[
+      "harvest", "--source", "scoop", "--bucket", FixturesDir / "bucket-simple",
+      "--app", "hello", "--app-alias", "hello=foobar", "--output-dir", outDir,
+      "--dry-run"])
+    check dry.rc == 2
+    # Control: a distinct name harvests, and re-harvesting it is not a collision.
+    for _ in 0 .. 1:
+      let ok = runHarvester(@[
+        "harvest", "--source", "scoop", "--bucket", FixturesDir / "bucket-simple",
+        "--app", "hello", "--app-alias", "hello=greeter", "--output-dir", outDir])
+      check ok.rc == 0
+
+  test "test_harvester_refuses_two_colliding_app_names_in_one_run":
+    let outDir = tempOutDir("identifier-collision-in-run")
+    let (rc, output) = runHarvester(@[
+      "harvest", "--source", "scoop", "--bucket", FixturesDir / "bucket-simple",
+      "--app", "hello", "--app", "hello2",
+      "--app-alias", "hello=foo_bar", "--app-alias", "hello2=foobar",
+      "--output-dir", outDir])
+    check rc == 2
+    check "same Nim identifier" in output
+    check (not fileExists(outDir / "foobar.nim"))
+
+  test "test_harvester_scan_mode_refuses_a_collision_with_an_existing_module":
+    let outDir = tempOutDir("identifier-collision-scan")
+    writeFile(outDir / "hel_lo.nim", "import repro_project_dsl\n\npackage hel_lo:\n  defaultToolProvisioning \"path\"\n")
+    let (rc, output) = runHarvester(@[
+      "harvest", "--source", "scoop", "--bucket", FixturesDir / "bucket-simple",
+      "--output-dir", outDir, "--dry-run"])
+    check rc == 2
+    check "same Nim identifier" in output

@@ -141,12 +141,11 @@ profile "referenceServices":
       linuxTmpfilesRule(name = "repro-vaultwarden.conf",
         content = "d /var/lib/vaultwarden 0700 vaultwarden vaultwarden -\n",
         address = "vaultwardenState", dependsOn = @["linux.sysusersEntry:vaultwarden"])
-      # Read only by systemd (`EnvironmentFile=`), as root: a private copy,
-      # never a link into the world-readable static tree (spec §7.2 step 5,
-      # the 2026-11-16 amendment). The parity gate checks it is 0640
-      # root:root and a regular file on both realisations.
+      # An `EnvironmentFile=` of a floored unit: a link into the static tree,
+      # never a copy (ReproOS Add-On Mode §13 decision 50). It holds no
+      # secret; the admin token is a `secretFile` below.
       fsSystemFile(path = "/etc/vaultwarden/config.env",
-        content = VaultwardenConfig, mode = "0640",
+        content = VaultwardenConfig,
         address = "vaultwardenConfig")
       secretFile(service = "vaultwarden", name = "admin-token",
         address = "vaultwardenAdminToken")

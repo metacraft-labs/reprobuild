@@ -244,7 +244,14 @@ suite "repro_runquota grant-wait — wedged-but-connected daemon (end-to-end)":
     except ReproRunQuotaError as err:
       raised = true
       # Principle 2: the diagnostic names the remedy.
-      check "runquota=off" in err.msg
+      # The remedy must be a flag `repro build` accepts. It named
+      # `--runquota=off`, which the build parser refuses (reprobuild-pm
+      # issues/2026-11-12-runquota-wedge-diagnostic-names-a-bypass-flag-repro-build-refuses.md).
+      check RunQuotaBypassFlag == "--no-runquota"
+      check ("`" & RunQuotaBypassFlag & "`") in err.msg
+      check "runquota=off" notin err.msg
+      check RunQuotaUnresponsiveRemedy in err.msg
+      check "REPROBUILD_NO_RUNQUOTA=1" in RunQuotaUnresponsiveRemedy
       check "wedged" in err.msg
     let elapsed = epochTime() - realStart
     check raised

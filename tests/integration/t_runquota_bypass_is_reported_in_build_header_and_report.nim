@@ -1,4 +1,4 @@
-## RA-13 — the no-lease / ``--runquota=off`` bypass is surfaced in the
+## RA-13 — the no-lease / ``--no-runquota`` bypass is surfaced in the
 ## build header AND the run report, and on bypass the engine's LOCAL pool
 ## gate still bounds a named pool (the fallback enforcement).
 ##

@@ -99,3 +99,21 @@ proc selectorModuleName*(selector: string): string =
     result = "package"
   elif result[0].isDigit() or isNimKeyword(result):
     result = IdentifierEscapePrefix & result
+
+proc nimIdentifierEqualityKey*(identifier: string): string =
+  ## Nim's identifier equality (manual §"Identifier equality"): the first
+  ## character exactly, the rest ignoring case and underscores. Two
+  ## identifiers with the same key are the same identifier to the compiler.
+  if identifier.len == 0:
+    return ""
+  result.add(identifier[0])
+  for i in 1 ..< identifier.len:
+    if identifier[i] != '_':
+      result.add(identifier[i].toLowerAscii())
+
+proc packageIdentifierKey*(name: string): string =
+  ## The key two package names share when their sanitized forms are the same
+  ## Nim identifier: ``foo-bar``, ``fooBar``, ``foo_bar`` and ``foobar`` all
+  ## map to ``foobar``. Such names cannot both be declared in one registry
+  ## (Package-Model.md §"Package names").
+  nimIdentifierEqualityKey(selectorModuleName(name))

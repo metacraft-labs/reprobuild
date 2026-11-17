@@ -9,7 +9,9 @@
 # `lib-tests` and `t_builtin_predicate_fixtures` alike.
 #
 # `wsl` is false for every target: WSL is a fact only the planner running on
-# the host knows (spec §Platform-neutral intent).
+# the host knows. `nixos` is a fact about the host too, but a consumer can state
+# it (`factsWith`); unstated it is null and refused when a guard reaches it
+# (spec §Platform-neutral intent).
 let
   table = {
     "x86_64-linux" = {
@@ -38,19 +40,24 @@ let
     };
   };
 in
-{
+rec {
   systems = builtins.attrNames table;
 
   # The facts predicates are evaluated against for `host` on `system`
   # (`targetHostContext`). Throws for a system that is not a target.
-  factsFor =
-    system: host:
+  # `nixos`: whether the target is NixOS, which its system name does not say;
+  # `null` is "not stated", and a guard that reaches the `nixos` predicate is
+  # refused then (predicate.nix).
+  factsWith =
+    nixos: system: host:
     if table ? ${system} then
       table.${system}
       // {
-        inherit host;
+        inherit host nixos;
         wsl = false;
       }
     else
       throw "reprobuild: unknown target system '${system}' (known: ${builtins.concatStringsSep ", " (builtins.attrNames table)})";
+
+  factsFor = factsWith null;
 }

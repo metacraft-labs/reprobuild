@@ -12,7 +12,9 @@
 ## `REPRO_BUNDLE_GITHUB_REMOTE` (default `https://github.com`), the base the
 ## repository's git URL is formed from; `REPRO_BUNDLE_GITHUB_RAW` (default
 ## `https://raw.githubusercontent.com`); `REPRO_BUNDLE_GITHUB_API` (default
-## `https://api.github.com`).
+## `https://api.github.com`). The two download bases must be `https://` (or
+## `file://`, which the tests use): nothing in a bundle is signed, so a plain
+## `http://` transport would let anyone on the path choose its content.
 
 import std/[algorithm, os, strutils, tempfiles]
 import repro_local_store/store_bundle
@@ -30,13 +32,25 @@ proc githubRemoteBase*(): string =
   getEnv("REPRO_BUNDLE_GITHUB_REMOTE", "https://github.com").strip(
     chars = {'/'}, leading = false)
 
+const CurlProtocols* = ["--proto", "=https,file", "--proto-redir", "=https"]
+  ## Every bundle download: https:// or file:// only, and a redirect only to
+  ## https://, so a server cannot downgrade a transfer to plain http
+  ## (https://curl.se/docs/manpage.html#--proto).
+
+proc downloadBase(variable, default: string): string =
+  ## `variable`'s value or `default`, refused unless it is https:// or
+  ## file://.
+  result = getEnv(variable, default).strip(chars = {'/'}, leading = false)
+  let lower = result.toLowerAscii()
+  if not (lower.startsWith("https://") or lower.startsWith("file://")):
+    bundleFail("refusing " & variable & "=" & result & ": the GitHub " &
+      "transport is fetched over https:// (or file:// in tests)")
+
 proc githubRawBase*(): string =
-  getEnv("REPRO_BUNDLE_GITHUB_RAW", "https://raw.githubusercontent.com").strip(
-    chars = {'/'}, leading = false)
+  downloadBase("REPRO_BUNDLE_GITHUB_RAW", "https://raw.githubusercontent.com")
 
 proc githubApiBase*(): string =
-  getEnv("REPRO_BUNDLE_GITHUB_API", "https://api.github.com").strip(
-    chars = {'/'}, leading = false)
+  downloadBase("REPRO_BUNDLE_GITHUB_API", "https://api.github.com")
 
 proc githubRemote*(repo: string): string =
   githubRemoteBase() & "/" & repo
@@ -109,9 +123,10 @@ proc githubDownload*(repo: string;
   var list = ""
   for (path, gitRef, dest) in jobs:
     list.add(dest & "\0" & path & "\0" & gitRef & "\0")
-  let script = "get() { curl -fsSL --retry 3 -o \"$1\" " &
+  let curl = "curl -fsSL --retry 3 " & shellJoin(CurlProtocols)
+  let script = "get() { " & curl & " -o \"$1\" " &
     quoteShell(githubRawBase() & "/" & repo) & "/\"$3/$2\" 2>/dev/null || " &
-    "curl -fsSL --retry 3 -H 'Accept: application/vnd.github.raw' -o \"$1\" " &
+    curl & " -H 'Accept: application/vnd.github.raw' -o \"$1\" " &
     quoteShell(githubApiBase() & "/repos/" & repo & "/contents") &
     "/\"$2?ref=${3//\\//%2F}\"; }; export -f get; xargs -0 -n3 -P " & $max(1, parallel) &
     " bash -c 'get \"$0\" \"$1\" \"$2\"'"

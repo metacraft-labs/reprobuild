@@ -104,6 +104,9 @@
 # 2026-11-15 added one product-api row:
 # t_dsl_body_hash_does_not_justify_fragment_reuse (two DSL recipe variants
 # compiled by the product compile, whose manifests are the assertion).
+# 2026-11-17 added one compiler-is-subject row:
+# t_dsl_package_names_sharing_an_identifier_are_refused (nim check of
+# package modules whose refusal message is the assertion).
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -233,6 +236,7 @@ libs/repro_profile_compile/tests/t_smoke_module_imports.nim	product-api	compileP
 libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim	compiler-is-subject	The real clang acceptance/rejection of -fno-temp-file and the dependency-report argv shapes are assertions: every shape must produce an object without a .d file. Those compiles measure compiler flags rather than materialize a helper; prebuilt objects would remove the behavior. The file also retains its product-API profile compile and diagnostic cases.
 libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	product-api	compileProfileBinary again; the subject is a Nim template-hygiene regression surfacing as a CompileFailure through the product's pipeline.
 libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim	product-api	compileProfileBinary is reprobuild's own profile compiler; the subject is the baseOs: section its profile macro builds from the operator's source (a staticRead body included) and the CompileFailure diagnostic it gives for a malformed field. The profiles are written at run time; the test body compiles no helper.
+libs/repro_project_dsl/tests/dsl_port/t_dsl_package_names_sharing_an_identifier_are_refused.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: checkModules (:19) runs an out-of-process `nim check` on generated package modules and the cases assert the `package` macro's refusal naming both colliding packages (or that a distinct pair compiles). A build edge cannot produce a compile that is required to fail; `compiles(...)` is vacuous for `package` blocks.
 libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	compiler-is-subject	The compiler's own dependency list is the subject: build() (:53) compiles a tree into build/bin and runs scripts/write_helper_deps.sh (nim --genDeps) over it, and the cases assert what freshRepoBinary reads from build/nimcache/foo/foo.deps -- a library module, the app's module after an incremental build, a file it includes and a module from outside the tree, each dated after the binary, refused. Each case rebuilds after editing source timestamps, so a shared read-only graph output cannot serve.
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	product-api	compileFloorProvider is extractInterfaceFromModule + compileProviderBinary.
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	product-api	compileFixtureProvider is extractInterfaceFromModule + compileProviderBinary over a provider recipe written per test.

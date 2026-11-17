@@ -41,6 +41,7 @@ import std/[os, parseopt, strutils, tables]
 import src/manifest_parser
 import src/bucket_clone
 import src/nim_emit
+import repro_project_dsl/selector_names
 import src/msys2_source
 import src/gh_releases_source
 import repro_dsl_stdlib/packages_schema
@@ -507,6 +508,24 @@ proc validateResolvedAppName(name: string) =
     name.multiReplace(("-", "_"), (".", "_")))
   quit(2)
 
+var packageIdentifierIndex: PackageIdentifierIndex
+var packageIdentifierIndexLoaded = false
+
+proc refuseIdentifierCollision(opts: CliOptions; toolName, outPath: string) =
+  ## Package-Model.md §"Package names": refuse (exit 2) a name whose sanitized
+  ## form is the Nim identifier of a different package already in the output
+  ## directory or accepted earlier in this run — also under ``--dry-run``.
+  if not packageIdentifierIndexLoaded:
+    packageIdentifierIndex = indexPackageIdentifiers(opts.outputDir)
+    packageIdentifierIndexLoaded = true
+  let (found, other, path) =
+    findPackageIdentifierCollision(packageIdentifierIndex, toolName, outPath)
+  if found:
+    stderr.writeLine("repro_catalog_harvester: " &
+      packageIdentifierCollisionMessage(toolName, other, path))
+    quit(2)
+  packageIdentifierIndex[packageIdentifierKey(toolName)] = (toolName, outPath)
+
 proc validateResolvedAppNames(opts: CliOptions) =
   ## Validate every output app name we can resolve BEFORE source-mode
   ## dispatch — fail-fast before any network I/O or bucket clone.
@@ -539,6 +558,21 @@ proc validateResolvedAppNames(opts: CliOptions) =
       if opts.ghOutputApp.len > 0: opts.ghOutputApp else: opts.ghRepo
     if resolved.len > 0:
       validateResolvedAppName(resolved)
+  # Names that collide with the output directory or with each other are
+  # refused here too, before any bucket or network access.
+  var names: seq[string] = @[]
+  case opts.source
+  of hsScoop:
+    for app in opts.apps:
+      names.add(if app in opts.appAliases: opts.appAliases[app] else: app)
+  of hsMsys2:
+    if opts.apps.len >= 1: names.add(opts.apps[0])
+  of hsGhReleases:
+    let resolved =
+      if opts.ghOutputApp.len > 0: opts.ghOutputApp else: opts.ghRepo
+    if resolved.len > 0: names.add(resolved)
+  for name in names:
+    refuseIdentifierCollision(opts, name, opts.outputDir / (harvestModuleName(name) & ".nim"))
 
 # ---------------------------------------------------------------------------
 # Harvest one app (potentially multi-version)
@@ -733,6 +767,7 @@ proc cmdHarvestMsys2(opts: CliOptions): int =
       continue
     let body = emitted.body
     let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
+    refuseIdentifierCollision(opts, toolName, outPath)
     if opts.dryRun:
       echo "DRY-RUN would write " & outPath & " (version=" &
         entry.version & ")"
@@ -829,6 +864,7 @@ proc cmdHarvestGhReleases(opts: CliOptions): int =
     return 3
   let body = emitted.body
   let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
+  refuseIdentifierCollision(opts, toolName, outPath)
   if opts.dryRun:
     echo "DRY-RUN would write " & outPath & " (version=" & entry.version & ")"
     var n = 0
@@ -902,6 +938,7 @@ proc cmdHarvest(opts: CliOptions): int =
         continue
       let body = emitted.body
       let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
+      refuseIdentifierCollision(opts, toolName, outPath)
       if opts.dryRun:
         echo "DRY-RUN would write " & outPath & " (" & $ordered.len &
           " version(s))"

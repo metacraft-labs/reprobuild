@@ -623,3 +623,166 @@ when false:
     checkpoint("importer reached through: " &
       reach.taintedSymbolsFor(importer).join(", "))
     check not reach.needsReproBinary(importer)
+
+# ---------------------------------------------------------------------------
+# The same rule for the monitor shim.
+#
+# ``build/lib/librepro_monitor_shim.<ext>`` is a graph-built fixture exactly as
+# the CLI is (edge ``reprobuild.test_fixtures.monitor_shim``), and the same
+# analysis decides which execute edges declare it (``requiresMonitorShim``,
+# ``rtMonitorShim``). Before it did, two hand-listed sources were the only
+# execute edges that depended on the shim, and every other test that opens it
+# passed only when something else had already built it. The anchor below is
+# the one the defect was found on (reprobuild-pm
+# ``issues/2026-11-16-tool-identity-env-plumbing-execute-edge-does-not-declare-the-monitor-shim.md``):
+# its shim-seed case unsets ``REPRO_MONITOR_SHIM_LIB`` and asks io-mon's
+# ``findShimLibrary`` to discover the in-tree copy.
+
+const ShimAnchorSource =
+  "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim"
+const ShimAnchorExecuteId =
+  "reprobuild.test_execute.test_tool_identity_env_plumbing"
+const ShimProducerId = "reprobuild.test_fixtures.monitor_shim"
+
+suite "test execute edges follow helpers to the monitor shim":
+
+  test "anchor: the generated table marks the anchor as needing the shim":
+    # The table is generated, so this pins the classifier's answer for the
+    # source the defect was found on; the engine arm below checks that the
+    # answer reaches the edge.
+    let repoRoot = findRepoRoot()
+    check "findShimLibrary(" in
+      nimSourceCodeOnly(readFile(repoRoot / ShimAnchorSource))
+    let table = readFile(repoRoot / "repro_tests.nim")
+    let at = table.find("source: \"" & ShimAnchorSource & "\"")
+    check at >= 0
+    let rowEnd = table.find("TestSpec(", at)
+    let row = table[at ..< (if rowEnd < 0: table.len else: rowEnd)]
+    checkpoint(row)
+    check "requiresMonitorShim: true" in row
+
+  test "engine: the anchor's execute-edge closure builds the monitor shim":
+    let repoRoot = findRepoRoot()
+    check fileExists(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt))
+    let closure = dryRunClosure(repoRoot, ".#" & ShimAnchorExecuteId)
+    let unmet = unmetSiblingPin(siblingPinDrift(repoRoot), closure)
+    if unmet.len > 0:
+      skipForUnmetPrecondition(unmet)
+    else:
+      checkpoint("exit=" & $closure.exitCode)
+      checkpoint("actions=" & closure.actions.join(", "))
+      if closure.exitCode != 0:
+        checkpoint(closure.output)
+      check closure.exitCode == 0
+      check ShimAnchorExecuteId in closure.actions
+      # THE GATE. Without it a narrow selection of the anchor runs before,
+      # or without, the edge that puts the shim in ``build/lib``.
+      check ShimProducerId in closure.actions
+
+  test "control: a pure-unit execute edge does not pull in the shim":
+    let repoRoot = findRepoRoot()
+    let closure = dryRunClosure(repoRoot, ".#" & ControlExecuteId)
+    let unmet = unmetSiblingPin(siblingPinDrift(repoRoot), closure)
+    if unmet.len > 0:
+      skipForUnmetPrecondition(unmet)
+    else:
+      checkpoint("exit=" & $closure.exitCode)
+      checkpoint("actions=" & closure.actions.join(", "))
+      if closure.exitCode != 0:
+        checkpoint(closure.output)
+      check closure.exitCode == 0
+      check ControlExecuteId in closure.actions
+      check ShimProducerId notin closure.actions
+
+  test "analysis: test code that names the in-tree shim taints its callers":
+    # A synthetic tree laid out like this repository: the test-support
+    # library, a product library, and tests.
+    let root = createTempDir("repro-reachability-shim-", "")
+    defer: removeDir(root)
+    createDir(root / "libs" / "repro_test_support" / "src")
+    createDir(root / "libs" / "engine_like" / "src")
+    createDir(root / "tests" / "integration")
+
+    # Spelled the way ``repro_test_support.monitorShimPath`` spells it.
+    writeFile(root / "libs" / "repro_test_support" / "src" /
+        "repro_test_support.nim", """
+import std/os
+
+proc fixtureShimPath*(repoRoot: string): string =
+  repoRoot / "build" / "lib" / "librepro_monitor_shim.so"
+
+proc prepareFixtureTools*(repoRoot: string): string =
+  fixtureShimPath(repoRoot)
+
+proc unrelatedSupport*(a, b: int): int =
+  a + b
+""")
+
+    # PRODUCT code resolving the same location. The engine does this for
+    # every monitored action and treats a missing shim as "monitoring
+    # bypassed", so it must not seed: otherwise every engine-driving test
+    # would declare the shim.
+    writeFile(root / "libs" / "engine_like" / "src" / "engine_like.nim", """
+import std/os
+
+proc discoverShim*(): string =
+  let candidate = getCurrentDir() / "build" / "lib" / "librepro_monitor_shim.so"
+  if fileExists(candidate): candidate else: ""
+
+proc runSomething*(): string =
+  discoverShim()
+""")
+
+    let viaHelper = "tests/integration/t_shim_through_helper.nim"
+    writeFile(root / viaHelper, """
+import repro_test_support
+
+discard prepareFixtureTools("/somewhere")
+""")
+
+    let viaDiscovery = "tests/integration/t_shim_through_discovery.nim"
+    # io-mon is not scanned, so the call is all the analysis can see; a
+    # local stand-in keeps the fixture free of an import it cannot resolve.
+    writeFile(root / viaDiscovery, """
+proc findShimLibrary(): string = "stand-in for io-mon's discovery"
+
+doAssert findShimLibrary().len > 0
+""")
+
+    let importer = "tests/integration/t_shim_support_imported_only.nim"
+    writeFile(root / importer, """
+import repro_test_support
+
+discard unrelatedSupport(1, 2)
+""")
+
+    let engineUser = "tests/integration/t_shim_engine_user.nim"
+    writeFile(root / engineUser, """
+import engine_like
+
+discard runSomething()
+""")
+
+    let nameOnly = "tests/integration/t_shim_name_only.nim"
+    writeFile(root / nameOnly, """
+const Lowered = "librepro_monitor_shim.dll"
+doAssert Lowered.len > 0
+""")
+
+    let shim = analyze(root,
+      @[viaHelper, viaDiscovery, importer, engineUser, nameOnly],
+      rtMonitorShim)
+    checkpoint("viaHelper reached through: " &
+      shim.taintedSymbolsFor(viaHelper).join(", "))
+    check shim.needsMonitorShim(viaHelper)
+    check "prepareFixtureTools" in shim.taintedSymbolsFor(viaHelper)
+    check shim.needsMonitorShim(viaDiscovery)
+    check not shim.needsMonitorShim(importer)
+    check not shim.needsMonitorShim(engineUser)
+    check not shim.needsMonitorShim(nameOnly)
+
+    # The two questions are independent: none of these sources reaches the
+    # CLI.
+    let cli = analyze(root, @[viaHelper, viaDiscovery], rtReproBinary)
+    check not cli.needsReproBinary(viaHelper)
+    check not cli.needsReproBinary(viaDiscovery)

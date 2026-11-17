@@ -1,0 +1,12 @@
+{
+  "host": "h",
+  "cases": [
+    { "system": "x86_64-linux", "nixos": true, "packages": ["bash", "nixos-only-tool"] },
+    { "system": "x86_64-linux", "nixos": false, "packages": ["bash", "other-linux-tool"] },
+    { "system": "aarch64-linux", "nixos": true, "packages": ["bash", "nixos-only-tool"] },
+    { "system": "aarch64-linux", "nixos": false, "packages": ["bash", "other-linux-tool"] },
+    { "system": "aarch64-darwin", "nixos": false, "packages": ["bash"] },
+    { "system": "x86_64-linux", "refused": true },
+    { "system": "aarch64-darwin", "refused": true }
+  ]
+}

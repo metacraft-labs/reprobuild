@@ -36,7 +36,15 @@ and both sides must follow.
   Each evaluation is evaluated for EVERY one of them, with the evaluation's
   `host`; the predicate must hold exactly on the systems in `holdsOn` and on
   no other. `macos` / `linux` / `windows` / `bsd` and `x86_64` / `arm64` /
-  `arm32` come from the system; `wsl` is false for every target.
+  `arm32` come from the system; `wsl` is false for every target; `nixos` is the stated fact (below).
+- `nixos` is a fact about the host, not about the system name, so an
+  evaluation states it: `"nixos": true` or `false`. An evaluation that leaves
+  it out has the fact unstated, and must be `"refused": true` when its
+  predicate names `nixos` anywhere (instead of `holdsOn`): every implementation
+  refuses it on every system, and none reads it as false. Naming it is enough:
+  the refusal does not depend on what the operands before it evaluate to, or
+  on the order operands are written or canonicalized in (a data file's `when`
+  is canonicalized by the planner and read as written by Nix).
 - A rejection must be refused by the validator. `unknown-identifier`: the
   predicate names an identifier that is not built in (Nim:
   `EUnknownPredicate` naming `identifier`). `invalid`: malformed or mistyped

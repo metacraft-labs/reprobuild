@@ -118,10 +118,15 @@ shows how to produce and check it, and `reprobuild.lib.readIntent` reads it
 ## Predicates
 
 Guards use the built-in predicate grammar: `windows`, `macos`, `linux`,
-`bsd`, `wsl`, `x86_64`, `arm64`, `arm32`, `host == "name"`,
+`bsd`, `wsl`, `nixos`, `x86_64`, `arm64`, `arm32`, `host == "name"`,
 `host != "name"`, `host in ["a", "b"]`, combined with `and`, `or`, `not` and
 parentheses. When `repro home export --target` evaluates them, `wsl` is false
-for every target and `host` is the selected host.
+for every target and `host` is the selected host. `nixos` is a fact about the
+host that the target's system name does not carry (Home Manager
+configurations exist for both a NixOS and another Linux), so the export states
+nothing for it: pass `--nixos` (or `--nixos=false`) with `--target`, and a
+profile whose guards reach `nixos` is refused (exit `3`) without it. On the
+machine itself the planner reads `ID=nixos` from `/etc/os-release`.
 
 All digests are lower-case hex. The document adds no absolute paths of its
 own (provenance paths are relative to the profile directory); anything
