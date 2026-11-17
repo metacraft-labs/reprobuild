@@ -7,7 +7,16 @@
 ##
 ## - ``repro-addon.target``: the target the add-on's units hang off, wanted
 ##   by ``multi-user.target``. Nothing of the base ``Requires=`` it, so a
-##   broken add-on cannot hold up the base's boot;
+##   broken add-on target cannot hold up the base's boot. The one exception
+##   is ``repro-addon-boot-hold.service``, which ``sysinit.target``
+##   requires (§13 decision 172): it never fails (its script exits 0 under
+##   ``ExecStart=-`` and ``timeout``), so the boot waits only for it to run;
+##   what it cannot cover -- a missing or unloadable unit file while the
+##   ``sysinit.target.requires`` link remains, a hang setting up its
+##   namespace past ``TimeoutStartSec=``, a fork or resource failure -- is
+##   the decision's stated residual: uninstall removes the link with the
+##   unit, and ``repro system addon verify`` reports a link left dangling
+##   or a unit systemd cannot load;
 ## - ``repro-store.mount``: ``/repro/store`` bind-mounted read-only over
 ##   itself, so no process on the host can write the store through the
 ##   ordinary mount namespace (the apply process gets a private writable
@@ -42,6 +51,7 @@ import std/[algorithm, strutils]
 
 import repro_elevation/posix_system_parse
 from repro_infra/profile import SecretsBootUnit
+from repro_infra/apply import EssentialUnits
 
 from ./effective_floor import StartHoldText
 import ./fingerprint
@@ -580,23 +590,57 @@ proc bootConfirmUnit*(reproExe: string): string =
   "[Install]\n" &
   "WantedBy=repro-addon.target\n"
 
+const
+  MinimalHoldText* = "[Unit]\nAssertPathExists=!/\n"
+    ## The hold the boot-hold script writes when it cannot copy the start
+    ## hold's text: the same always-failing assertion and nothing else.
+    ## ``boot_holds.releaseBootHolds`` lifts it as it lifts the start hold.
+  ConservativeHoldDir* = "/etc/systemd/system"
+    ## Where the units the add-on installs live: when the record cannot be
+    ## read, every socket, timer and path unit here is held.
+
+proc essentialActivatorPattern*(): string =
+  ## The shell ``case`` pattern of the socket, timer and path units among
+  ## A13's essential units (``repro_infra/apply.EssentialUnits``, §13
+  ## decision 177: an essential unit is never held) -- the one list, read
+  ## here, not a copy: the conservative boot hold never holds the
+  ## management path (an administrator's ``ssh.socket`` override on a base
+  ## that socket-activates sshd) or the add-on's own timer (A9 review round
+  ## 18, L2).
+  var names: seq[string]
+  when not mutated("conservative-hold-holds-essential"):
+    for u in EssentialUnits:
+      if u.endsWith(".socket") or u.endsWith(".timer") or u.endsWith(".path"):
+        names.add(u)
+  if names.len == 0: names.add("x-repro-addon-none")
+  names.join("|")
+
 proc bootHoldScript*(): string =
   ## The boot-hold unit's shell step, as ``/bin/sh -c`` runs it (``$``
   ## not yet doubled for systemd). Nothing once ``sysinit.target`` is
   ## reached (an apply that starts the unit). Otherwise:
   ##
-  ## - a record or hold text that is a link is refused, and the unit fails;
-  ## - each recorded line must be ``<unit>.d`` in the characters a unit
+  ## - the list of drop-in directories to hold is the pending switch's
+  ##   record; a record that is not a regular file (a link, a directory)
+  ##   or cannot be copied is not read, and every socket, timer and path
+  ##   unit in ``/etc/systemd/system`` is held instead: hold
+  ##   conservatively, never leave an activator free (A9 review round 17,
+  ##   finding 9). ``boot_holds.releaseBootHolds`` lifts them all once the
+  ##   switch is resolved;
+  ## - each listed line must be ``<unit>.d`` in the characters a unit
   ##   name uses (letters, digits, ``@ . _ : -``); any other line is
-  ##   skipped, so the record never steers a write outside the runtime unit
+  ##   skipped, so the list never steers a write outside the runtime unit
   ##   directory, and a drop-in directory that is a link is skipped too;
   ## - the hold copied is the recorded text only if its SHA-256 is the
   ##   start hold's (``StartHoldText``); otherwise -- no text, other bytes,
-  ##   a link -- each recorded unit gets a minimal hold with the same
-  ##   assertion (``[Unit]`` and ``AssertPathExists=!/``): fail closed,
-  ##   never an activator left free to start;
+  ##   a link -- each listed unit gets ``MinimalHoldText`` (``[Unit]`` and
+  ##   ``AssertPathExists=!/``);
   ## - every hold written is listed for the re-assertion to lift, and
-  ##   systemd is reloaded once.
+  ##   systemd is reloaded once, bounded by ``timeout``;
+  ## - it never exits non-zero: the unit is ``RequiredBy=sysinit.target``
+  ##   (§13 decision 172), and a failure would fail the boot's
+  ##   ``sysinit.target``. A step that fails is logged and the script goes
+  ##   on; it fails closed by holding, never by failing the unit.
   ##
   ## Absolute paths for every tool; ``set -f`` so no expansion globs. No
   ## double quote, ``#``, brace or backslash: the canonical profile text
@@ -604,26 +648,36 @@ proc bootHoldScript*(): string =
   ## quoted and is validated to characters that need none. No single quote
   ## either: the script is one single-quoted ``ExecStart=`` argument, and
   ## systemd joins ``'a''b'`` into ``ab`` (systemd.syntax(7), "Quoting").
-  ## A9 review round 16, finding 10.
+  ## A9 review rounds 16 (finding 10) and 17 (findings 2 and 9).
   let rt = RuntimeUnitDirPath
   let sha = sha256Hex(StartHoldText)
   let h = rt & "/$d/" & StartHoldFileName
+  let l = "/run/repro-addon/boot-hold-list"
+  let say = "echo repro-addon boot-holds: "
   "set -f; /usr/bin/systemctl is-active -q sysinit.target && exit 0; " &
-  "r=" & BootHoldRecordPath & "; t=" & BootHoldTextPath & "; " &
-  "if [ -L $r ]; then echo repro-addon boot-holds: the record is a link, refused; exit 1; fi; " &
-  "[ -f $r ] || exit 0; " &
+  "r=" & BootHoldRecordPath & "; t=" & BootHoldTextPath & "; l=" & l & "; " &
+  "[ -e $r ] || [ -L $r ] || exit 0; " &
+  "/usr/bin/mkdir -p /run/repro-addon || " & say & "cannot make /run/repro-addon; " &
+  "/usr/bin/rm -f $l; " &
+  "if [ -f $r ] && [ ! -L $r ] && /usr/bin/cp $r $l; then :; else " &
+    say & "the record is not a regular file, holding every socket, timer " &
+    "and path unit in " & ConservativeHoldDir & " but the essential ones; " &
+    "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
+    essentialActivatorPattern() & ") continue;; " &
+    "*.socket|*.timer|*.path) echo $u.d >> $l;; esac; done; fi; " &
   "ok=no; if [ -f $t ] && [ ! -L $t ]; then case $(/usr/bin/sha256sum $t) in " &
     sha & "*) ok=yes;; esac; fi; " &
-  "/usr/bin/mkdir -p /run/repro-addon; n=0; " &
+  "n=0; " &
   "while read -r d; do case x$d in x|x.*|*[!A-Za-z0-9@._:-]*) continue;; x*.d) ;; *) continue;; esac; " &
   "if [ -L " & rt & "/$d ]; then continue; fi; " &
   "/usr/bin/mkdir -p " & rt & "/$d || continue; /usr/bin/rm -f " & h & "; " &
-  "if [ $ok = yes ]; then /usr/bin/cp $t " & h & " || continue; " &
+  "if [ $ok = yes ] && /usr/bin/cp $t " & h & "; then :; " &
   "else echo [Unit] > " & h & "; echo AssertPathExists=!/ >> " & h & "; fi; " &
   "echo " & h & " >> " & BootHoldsWrittenList & "; " &
-  "n=$((n+1)); done < $r; " &
-  "if [ $n -gt 0 ]; then /usr/bin/systemctl daemon-reload || exit 1; fi; " &
-  "echo repro-addon boot-holds: held $n unit drop-in directories, text $ok"
+  "n=$((n+1)); done < $l; " &
+  "if [ $n -gt 0 ]; then /usr/bin/timeout 30 /usr/bin/systemctl daemon-reload || " &
+    say & "systemd was not reloaded; fi; " &
+  say & "held $n unit drop-in directories, text $ok; exit 0"
 
 proc bootHoldUnit*(): string =
   ## The boot-hold unit (§13 decision 159; A9 review round 15):
@@ -658,6 +712,9 @@ proc bootHoldUnit*(): string =
       "After=local-fs.target\nBefore=sysinit.target shutdown.target\n"
   "[Unit]\n" &
   "Description=Reprobuild add-on boot-time start holds\n" &
+  # A [Unit] key (systemd.unit(5)): only a dependency, such as shutdown's
+  # Conflicts=, stops it; see the [Service] comment below.
+  "RefuseManualStop=yes\n" &
   "DefaultDependencies=no\n" &
   order &
   "Conflicts=shutdown.target\n" &
@@ -665,11 +722,21 @@ proc bootHoldUnit*(): string =
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
-  "RemainAfterExit=yes\n" &
+  # Not RemainAfterExit=: once it has run it is inactive, so nothing a
+  # switch plans ever restarts it, and a stop of it -- which, required by
+  # sysinit.target, would stop every unit that requires sysinit.target --
+  # is refused unless a dependency asks for it, as shutdown's Conflicts=
+  # does (systemd.unit(5), RefuseManualStop=; §13 decision 172).
+  "RemainAfterExit=no\n" &
   "TimeoutStartSec=" & $BootHoldTimeoutSec & "\n" &
   # systemd expands $NAME in ExecStart= (systemd.service(5), "Command
   # lines"); $$ passes a single $ to the shell.
-  "ExecStart=/bin/sh -c '" & bootHoldScript().replace("$", "$$") & "'\n" &
+  # ``-``: an exit status that would fail the unit is recorded and treated
+  # as success (systemd.service(5), "ExecStart="), and ``timeout`` ends
+  # the script before TimeoutStartSec= could: a unit sysinit.target
+  # requires must never fail the boot (§13 decision 172).
+  "ExecStart=-/usr/bin/timeout -k 5 " & $(BootHoldTimeoutSec - 15) &
+    " /bin/sh -c '" & bootHoldScript().replace("$", "$$") & "'\n" &
   # Its own floor (CONF-1): it reads the state directory, writes under
   # /run only, and reloads systemd over its private socket, which checks
   # the peer's uid, not a capability -- so no capability at all. No
@@ -706,7 +773,18 @@ proc bootHoldUnit*(): string =
     "sysinit.target; PrivateUsers: its writes are root's\n" &
   "\n" &
   "[Install]\n" &
-  "WantedBy=sysinit.target\n"
+  # RequiredBy=, not WantedBy=: a job sysinit.target requires matters to
+  # the boot's anchor (multi-user.target requires basic.target, which
+  # requires sysinit.target), and systemd never deletes such a job to
+  # break an ordering cycle -- it deletes one that does not matter, or
+  # fails the transaction (``transaction_verify_order_one()``,
+  # src/core/transaction.c, https://github.com/systemd/systemd/blob/v257/src/core/transaction.c;
+  # §13 decision 172, A9 review round 17, finding 2).
+  (when mutated("boot-hold-wanted"):
+     # FALSIFYING MUTATION: wanted only, so a cycle may delete its job.
+     "WantedBy=sysinit.target\n"
+   else:
+     "RequiredBy=sysinit.target\n")
 
 proc secretsUnit(reproExe: string): string =
   # Boot-time secrets (§7.7, §10.3): re-materialise the current

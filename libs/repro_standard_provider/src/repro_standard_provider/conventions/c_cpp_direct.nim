@@ -1135,6 +1135,20 @@ proc emitCompileAction(projectRoot, ccExe: string;
     # M9.N Batch B: gcc compile step.
     toolIdentityRefs = @["gcc"])
 
+proc declareMemberProduct(action: var BuildActionDef;
+                          fieldName, typeName, path: string) =
+  ## Mark a member's terminal action as producing the member itself — its
+  ## executable or library — as a typed output, on the registered edge and
+  ## on the returned copy. It is what tells the engine that the output is
+  ## a result of the build rather than an intermediate: a portable cache
+  ## hit puts the declared outputs of such an action in place even when
+  ## the action that consumes them is served from the cache too
+  ## (Caching-Architecture.md, "What a portable hit puts in place"). Per-
+  ## source objects carry no typed output; they are intermediates.
+  appendRegisteredActionTypedOutput(action.id, fieldName, @[typeName], path)
+  action.typedOutputs.add(BuildActionTypedOutput(fieldName: fieldName,
+    types: @[typeName], path: path))
+
 proc emitLinkAction(projectRoot, ccExe: string;
                     member: CCppMember;
                     objFiles: seq[string];
@@ -1159,7 +1173,7 @@ proc emitLinkAction(projectRoot, ccExe: string;
       deps.add(lib.linkActionId)
     if inputs.find(lib.outputPath) < 0:
       inputs.add(lib.outputPath)
-  buildAction(
+  result = buildAction(
     id = "ccpp-direct-link-" & sanitizeNamePart(member.name),
     call = inlineExecCall(argv, projectRoot),
     deps = deps,
@@ -1170,6 +1184,7 @@ proc emitLinkAction(projectRoot, ccExe: string;
     commandStatsId = "ccpp-direct.executable.link",
     # M9.N Batch B: gcc link step.
     toolIdentityRefs = @["gcc"])
+  declareMemberProduct(result, "executable", "Executable", binaryOutput)
 
 proc emitArchiveAction(projectRoot, arExe: string;
                        member: CCppMember;
@@ -1178,10 +1193,10 @@ proc emitArchiveAction(projectRoot, arExe: string;
   ## ``ar rcs lib<name>.a <objs>`` archive action for a static library.
   let archiveOutput = staticLibraryPathFor(projectRoot, member.name)
   createDir(extendedPath(parentDir(archiveOutput)))
-  var argv = @[arExe, "rcs", archiveOutput]
+  var argv = @[arExe, DeterministicArModifiers, archiveOutput]
   for obj in objFiles:
     argv.add(obj)
-  buildAction(
+  result = buildAction(
     id = "ccpp-direct-archive-" & sanitizeNamePart(member.name),
     call = inlineExecCall(argv, projectRoot),
     deps = compileActionIds,
@@ -1192,6 +1207,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
     commandStatsId = "ccpp-direct.library-static.archive",
     # M9.N Batch B: ar archive step.
     toolIdentityRefs = @["ar"])
+  declareMemberProduct(result, "library", "StaticLibrary", archiveOutput)
 
 proc readScannedDepsSource(projectRoot: string): string =
   ## Read ``<projectRoot>/repro.scanned-deps.nim`` when present and the

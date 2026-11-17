@@ -1,26 +1,30 @@
-## Sentinel-delimited managed-block reader/writer for partial-ownership
-## files (e.g. `~/.bashrc`).
-##
-## Sentinel format (matches the example in Generated-Configuration-Files.md):
+## Sentinel-delimited managed blocks in partial-ownership home files (e.g.
+## `~/.bashrc`), addressed by block id alone:
 ##
 ##   # >>> repro:home:<blockId> >>>
 ##   ...managed content...
 ##   # <<< repro:home:<blockId> <<<
 ##
-## Updates rewrite only the bytes between the sentinels (exclusive on
-## both ends). Removal deletes the sentinels plus the managed content,
-## leaving the rest of the host file intact; a host file left empty is
-## deleted.
+## This module is the home-profile entry point onto the ONE managed-file
+## writer, `repro_core/managed_block` (Core-Invariants.md §"One
+## Implementation Per Concern"). The sentinel format, the locator (which
+## refuses a duplicated or unterminated block), the splice and the atomic
+## temp + fsync + rename write are that module's; this one only fixes the
+## key to the elided home form (Generated-Configuration-Files.md
+## §"Sentinel uniqueness") and keeps the API its callers use.
+##
+## Updates rewrite only the block. Removal deletes the sentinels plus the
+## managed content, leaving the rest of the host file intact; a host file
+## left empty is deleted (Generated-Configuration-Files.md §"Deletion
+## semantics").
 
-import std/[os, strutils]
+import std/os
 from repro_core/paths import extendedPath
+import repro_core/managed_block as shared
+
+export shared.ManagedBlockError, shared.ManagedBlockOverlap
 
 type
-  ManagedBlockError* = object of CatchableError
-  ManagedBlockOverlap* = object of ManagedBlockError
-    ## Two blocks with the same `blockId` collide, or the closing sentinel
-    ## appears before its opening sentinel.
-
   ManagedBlockUpdateResult* = object
     rewroteFile*: bool
     newContent*: string
@@ -35,11 +39,14 @@ const
   SentinelCloseLeader* = "# <<< repro:home:"
   SentinelCloseSuffix* = " <<<"
 
+proc homeKey(blockId: string): ManagedBlockKey =
+  managedBlockKey(HomeBlockScope, "", blockId)
+
 proc openSentinel*(blockId: string): string =
-  SentinelOpenPrefix & blockId & SentinelOpenSuffix
+  shared.openSentinel(homeKey(blockId))
 
 proc closeSentinel*(blockId: string): string =
-  SentinelCloseLeader & blockId & SentinelCloseSuffix
+  shared.closeSentinel(homeKey(blockId))
 
 # ---------------------------------------------------------------------------
 # Reader
@@ -59,95 +66,37 @@ proc locateBlock*(content, blockId: string): BlockRange =
   ##   - the opening-sentinel line (`openLineStart` .. `blockStart - 1`)
   ##   - the block content (`blockStart` .. `blockEnd - 1`) — exclusive
   ##   - the closing-sentinel line (`blockEnd` .. `closeLineEnd - 1`)
-  let openText = openSentinel(blockId)
-  let closeText = closeSentinel(blockId)
-  result.found = false
-  let openIdx = content.find(openText)
-  if openIdx < 0:
-    return
-  # Walk back to the start of the opening line.
-  var lineStart = openIdx
-  while lineStart > 0 and content[lineStart - 1] != '\n':
-    dec lineStart
-  # The block starts AFTER the newline that ends the opening-sentinel line.
-  var afterOpen = openIdx + openText.len
-  if afterOpen < content.len and content[afterOpen] == '\r': inc afterOpen
-  if afterOpen < content.len and content[afterOpen] == '\n':
-    inc afterOpen
-  else:
-    raise newException(ManagedBlockError,
-      "managed-block opening sentinel for '" & blockId &
-      "' is not terminated by a newline")
-  let closeIdx = content.find(closeText, start = afterOpen)
-  if closeIdx < 0:
-    raise newException(ManagedBlockError,
-      "managed-block '" & blockId & "' has an opening sentinel without " &
-      "a matching closing sentinel")
-  var closeLineStart = closeIdx
-  while closeLineStart > 0 and content[closeLineStart - 1] != '\n':
-    dec closeLineStart
-  if closeLineStart < afterOpen:
-    raise newException(ManagedBlockOverlap,
-      "managed-block '" & blockId & "' closing sentinel overlaps its opening")
-  var afterClose = closeIdx + closeText.len
-  if afterClose < content.len and content[afterClose] == '\r': inc afterClose
-  if afterClose < content.len and content[afterClose] == '\n':
-    inc afterClose
-  result.found = true
-  result.openLineStart = lineStart
-  result.blockStart = afterOpen
-  result.blockEnd = closeLineStart
-  result.closeLineEnd = afterClose
+  ## Raises `ManagedBlockError` for a duplicated or unterminated block.
+  let span = locateManagedBlock(content, homeKey(blockId))
+  result.found = span.found
+  if span.found:
+    result.openLineStart = span.openLineStart
+    result.blockStart = span.contentStart
+    result.blockEnd = span.contentEnd
+    result.closeLineEnd = span.closeLineEnd
 
 # ---------------------------------------------------------------------------
 # Writer
 # ---------------------------------------------------------------------------
 
-proc renderBlock(blockId, content: string): string =
-  result = openSentinel(blockId) & "\n"
-  result.add(content)
-  if not content.endsWith("\n"):
-    result.add('\n')
-  result.add(closeSentinel(blockId) & "\n")
-
 proc updateManagedBlock*(hostFile: string; blockId: string;
                         content: string): ManagedBlockUpdateResult =
   ## Insert or update the managed block in `hostFile` (which need not exist).
-  ## Writes the file atomically (write-temp + rename) when the bytes change.
-  ## Returns the prior + new managed-block payloads so callers can derive
-  ## the cache key.
-  var prior =
-    if fileExists(extendedPath(hostFile)): readFile(extendedPath(hostFile))
-    else: ""
+  ## Writes the file atomically (temp + fsync + rename) when the bytes
+  ## change. Returns the prior + new managed-block payloads so callers can
+  ## derive the cache key.
+  let key = homeKey(blockId)
+  let prior = readManagedFile(hostFile)
   result.priorContent = prior
-  let blockText = renderBlock(blockId, content)
-  let range = locateBlock(prior, blockId)
-  var newContent: string
-  if range.found:
-    result.blockExisted = true
-    result.priorBlockBytes = prior.substr(range.blockStart,
-      range.blockEnd - 1)
-    newContent = prior.substr(0, range.openLineStart - 1) & blockText &
-      prior.substr(range.closeLineEnd, prior.len - 1)
-  else:
-    result.blockExisted = false
-    result.priorBlockBytes = ""
-    var prefix = prior
-    if prefix.len > 0 and not prefix.endsWith("\n"):
-      prefix.add('\n')
-    newContent = prefix & blockText
+  let span = locateManagedBlock(prior, key, hostFile)
+  result.blockExisted = span.found
+  if span.found:
+    result.priorBlockBytes = prior.substr(span.contentStart,
+      span.contentEnd - 1)
   result.newBlockBytes = content
-  result.newContent = newContent
-  if newContent != prior:
-    createDir(extendedPath(parentDir(hostFile)))
-    let tmpPath = hostFile & ".reprotmp." & $getCurrentProcessId()
-    writeFile(extendedPath(tmpPath), newContent)
-    if fileExists(extendedPath(hostFile)):
-      removeFile(extendedPath(hostFile))
-    moveFile(extendedPath(tmpPath), extendedPath(hostFile))
-    result.rewroteFile = true
-  else:
-    result.rewroteFile = false
+  result.newContent = spliceManagedBlock(prior, key, content,
+    alDirectlyAfter, hostFile)
+  result.rewroteFile = updateManagedFile(hostFile, prior, result.newContent)
 
 proc removeManagedBlock*(hostFile: string; blockId: string): bool =
   ## Remove `blockId`'s sentinels and contents. Returns true if the file
@@ -155,18 +104,10 @@ proc removeManagedBlock*(hostFile: string; blockId: string): bool =
   ## are now; the file is deleted only when nothing is left in it
   ## (Generated-Configuration-Files.md §"Deletion semantics").
   if not fileExists(extendedPath(hostFile)): return false
-  let prior = readFile(extendedPath(hostFile))
-  let range = locateBlock(prior, blockId)
-  if not range.found: return false
-  let newContent = prior.substr(0, range.openLineStart - 1) &
-    prior.substr(range.closeLineEnd, prior.len - 1)
+  let prior = readManagedFile(hostFile)
+  let newContent = withoutManagedBlock(prior, homeKey(blockId), hostFile)
   if newContent == prior: return false
   if newContent.len == 0:
     removeFile(extendedPath(hostFile))
     return true
-  let tmpPath = hostFile & ".reprotmp." & $getCurrentProcessId()
-  writeFile(extendedPath(tmpPath), newContent)
-  if fileExists(extendedPath(hostFile)):
-    removeFile(extendedPath(hostFile))
-  moveFile(extendedPath(tmpPath), extendedPath(hostFile))
-  return true
+  updateManagedFile(hostFile, prior, newContent)

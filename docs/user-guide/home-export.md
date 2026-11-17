@@ -332,9 +332,14 @@ reference as `unresolved` for that target.
 
 A reference no definition it can see
 names at all might be an application defined in the `reprobuild-packages`
-catalog, so when there is one and no catalog checkout is reachable (beside
-the profile, beside the `reprobuild` checkout, or `$REPROBUILD_PACKAGES_ROOT`),
-the export fails instead of guessing. On a host that gives Reprobuild one of
+catalog, so when there is one and no catalog checkout is reachable
+(`$REPROBUILD_PACKAGES_ROOT`; when a `repro.lock` above the profile pins the
+catalog, a `repro develop` checkout of it, the workspace's own checkout, a
+checkout beside the profile at the pinned commit, or the pinned revision
+fetched under `.repro/`; otherwise a checkout beside the profile or a
+directory above it, else beside the `reprobuild` checkout), the export fails
+instead of guessing. A checkout beside the profile at some other commit does
+not replace the pin. On a host that gives Reprobuild one of
 `packages` / `applications` and Nix the other, `repro home apply` refuses a
 package whose selection on this host — which honors the local lock and can
 use the host's `PATH` — would put it in a different concern than the export

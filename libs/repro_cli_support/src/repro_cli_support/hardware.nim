@@ -25,6 +25,8 @@ import std/[os, strutils]
 import repro_profile/hardware_probe
 import repro_profile/types
 
+import ./cli_program
+
 const DefaultHardwarePath* = "/etc/repro/hardware.nim"
 
 type
@@ -79,45 +81,11 @@ proc runHardwareProbeFromSpec*(spec: SystemHardwareSpec;
     result.failureMsg = "write " & target & ": " & e.msg
 
 # ---------------------------------------------------------------------
-# Argument parser. Returns an option-bag + the leftover args.
-# Tests use it directly; the CLI handler also uses it so the parse
-# rules are pinned in one place.
+# CLI dispatch — `repro hardware <action> [args]`, its command line parsed
+# from repro's description (`repro_cli_support/cli_description`).
 # ---------------------------------------------------------------------
 
-proc parseHardwareProbeArgs*(args: seq[string]): HardwareProbeOptions =
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    case a
-    of "--dry-run": result.dryRun = true
-    of "--regenerate": result.regenerate = true
-    of "--output":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--output requires a PATH argument")
-      result.output = args[i + 1]
-      inc i
-    else:
-      if a.startsWith("--output="):
-        result.output = a["--output=".len .. ^1]
-      else:
-        raise newException(ValueError,
-          "unknown `repro hardware probe` argument: " & a)
-    inc i
-
-# ---------------------------------------------------------------------
-# CLI dispatch — `repro hardware <action> [args]`.
-# ---------------------------------------------------------------------
-
-proc renderUsage(): string =
-  "usage: repro hardware probe [--dry-run | --output PATH | --regenerate]"
-
-proc runHardwareProbeCli(args: seq[string]): int =
-  let opts {.used.} =
-    try: parseHardwareProbeArgs(args)
-    except ValueError as e:
-      stderr.writeLine("repro hardware probe: " & e.msg)
-      stderr.writeLine(renderUsage())
-      return 2
+proc runHardwareProbeCli(opts: HardwareProbeOptions): int =
   # Live probe — Linux-only. On non-Linux hosts we still let callers
   # render a known-good SystemHardwareSpec via --output-only paths;
   # but the standard ``probe`` action needs /proc + /sys.
@@ -142,16 +110,15 @@ proc runHardwareProbeCli(args: seq[string]): int =
       stderr.writeLine("repro hardware probe: wrote " & outcome.targetPath)
     return 0
 
-proc runHardwareCommand*(args: seq[string]): int =
-  ## ``repro hardware <action>`` dispatcher.
-  if args.len == 0:
-    stderr.writeLine("usage: repro hardware {probe} ...")
-    return 2
-  let sub = args[0]
-  let rest = if args.len > 1: args[1 .. ^1] else: @[]
-  case sub
-  of "probe": return runHardwareProbeCli(rest)
-  else:
-    stderr.writeLine("repro hardware: unknown subcommand: " & sub)
-    stderr.writeLine("usage: repro hardware {probe} ...")
-    return 2
+proc hardwareProbeOptionsOf*(p: ReproCommandLineHardwareProbe):
+    HardwareProbeOptions =
+  ## What ``repro hardware probe`` was given, from its configuration object
+  ## (repro's description, ``repro_cli_support/cli_description``).
+  HardwareProbeOptions(output: p.output, dryRun: p.dryRun,
+    regenerate: p.regenerate)
+
+proc runHardwareCommand*(conf: ReproCommandLineHardware): int =
+  ## ``repro hardware <action>``.
+  case conf.command
+  of ReproCommandLineHardwareCommand.probe:
+    runHardwareProbeCli(hardwareProbeOptionsOf(conf.probe))

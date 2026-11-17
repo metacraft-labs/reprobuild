@@ -324,6 +324,39 @@ proc statsStatusText*(projectRoot: string; view: SharedStoreView): string =
   if processLastFlushError.len > 0:
     result.add("last flush error: " & processLastFlushError & "\n")
 
+type
+  StatsOverviewTally = object
+    ## The overview's figures, computed once and rendered as text or JSON.
+    actions: HashSet[string]
+    outcomes: CountTable[string]
+    kinds: CountTable[string]
+    pools: CountTable[string]
+    statsKeys: HashSet[string]
+    totalDurationMs: int64
+
+proc overviewTally(view: SharedStoreView): StatsOverviewTally =
+  result.actions = initHashSet[string]()
+  result.outcomes = initCountTable[string]()
+  result.kinds = initCountTable[string]()
+  result.pools = initCountTable[string]()
+  result.statsKeys = initHashSet[string]()
+  for row in view.actionRows:
+    let actionId = row.value("action_id")
+    if actionId.len > 0:
+      result.actions.incl(actionId)
+    let outcome = row.value("cache_outcome")
+    if outcome.len > 0:
+      result.outcomes.inc(outcome)
+    let kind = row.value("action_kind")
+    if kind.len > 0:
+      result.kinds.inc(kind)
+    if row.hasValue("pool"):
+      result.pools.inc(row.value("pool"))
+  for execution in view.executions:
+    if execution.statsKey.len > 0:
+      result.statsKeys.incl(execution.statsKey)
+    result.totalDurationMs += execution.durationMillis
+
 proc statsOverviewText*(projectRoot: string; view: SharedStoreView): string =
   ## The one-screen summary, rendered from the shared store.
   ##
@@ -339,28 +372,7 @@ proc statsOverviewText*(projectRoot: string; view: SharedStoreView): string =
   if view.state == sssIncomplete:
     result.add("Sample: INCOMPLETE -- " & $view.loss.totalLost &
       " observations counted lost by runquotad\n")
-  var actions = initHashSet[string]()
-  var outcomes = initCountTable[string]()
-  var kinds = initCountTable[string]()
-  var pools = initCountTable[string]()
-  var statsKeys = initHashSet[string]()
-  var totalDurationMs = 0'i64
-  for row in view.actionRows:
-    let actionId = row.value("action_id")
-    if actionId.len > 0:
-      actions.incl(actionId)
-    let outcome = row.value("cache_outcome")
-    if outcome.len > 0:
-      outcomes.inc(outcome)
-    let kind = row.value("action_kind")
-    if kind.len > 0:
-      kinds.inc(kind)
-    if row.hasValue("pool"):
-      pools.inc(row.value("pool"))
-  for execution in view.executions:
-    if execution.statsKey.len > 0:
-      statsKeys.incl(execution.statsKey)
-    totalDurationMs += execution.durationMillis
+  let tally = overviewTally(view)
   proc tableText(table: CountTable[string]): string =
     var pairs: seq[string] = @[]
     for key, value in table:
@@ -375,10 +387,70 @@ proc statsOverviewText*(projectRoot: string; view: SharedStoreView): string =
     profileNames.add(profile.hostId & "/" & profile.profileId)
   result.add("Host profiles: " &
     (if profileNames.len == 0: "none" else: profileNames.join(",")) & "\n")
-  result.add("Actions: " & $actions.len & " launched=" & $view.actionRows.len &
-    "\n")
-  result.add("Action kinds: " & tableText(kinds) & "\n")
-  result.add("Cache: " & tableText(outcomes) & "\n")
-  result.add("Pools: " & tableText(pools) & "\n")
-  result.add("RunQuota: statsKeys=" & $statsKeys.len & "\n")
-  result.add("Timing total: " & $totalDurationMs & "ms\n")
+  result.add("Actions: " & $tally.actions.len & " launched=" &
+    $view.actionRows.len & "\n")
+  result.add("Action kinds: " & tableText(tally.kinds) & "\n")
+  result.add("Cache: " & tableText(tally.outcomes) & "\n")
+  result.add("Pools: " & tableText(tally.pools) & "\n")
+  result.add("RunQuota: statsKeys=" & $tally.statsKeys.len & "\n")
+  result.add("Timing total: " & $tally.totalDurationMs & "ms\n")
+
+proc statsWindowNode(view: SharedStoreView): JsonNode =
+  ## ``windowJson`` plus ``observationCount``, the shape every other
+  ## ``repro stats`` view carries as ``window``.
+  result = windowJson(view)
+  result["observationCount"] = %view.actionRows.len
+
+proc countTableJson(table: CountTable[string]): JsonNode =
+  result = newJObject()
+  for key, value in table:
+    result[key] = %value
+
+proc statsOverviewJson*(projectRoot: string; view: SharedStoreView): JsonNode =
+  ## ``repro stats overview --json`` (``reprobuild.stats.overview.v1``): the
+  ## figures ``statsOverviewText`` prints, under the same rule -- none of
+  ## them is present unless the window is presentable, and
+  ## ``availability`` says why when it is not.
+  result = %*{
+    "schemaId": "reprobuild.stats.overview.v1",
+    "command": "stats overview",
+    "projectRoot": projectRoot,
+    "storePath": derivedStatsStorePath(projectRoot),
+    "window": statsWindowNode(view),
+    "availability": {
+      "available": figuresArePresentable(view.state),
+      "reason": view.reason
+    }
+  }
+  if not figuresArePresentable(view.state):
+    return
+  let tally = overviewTally(view)
+  result["actionCount"] = %tally.actions.len
+  result["launchedCount"] = %view.actionRows.len
+  result["actionKinds"] = countTableJson(tally.kinds)
+  result["cacheOutcomes"] = countTableJson(tally.outcomes)
+  result["pools"] = countTableJson(tally.pools)
+  result["statsKeyCount"] = %tally.statsKeys.len
+  result["timingTotalMs"] = %tally.totalDurationMs
+
+proc statsStatusJson*(projectRoot: string; view: SharedStoreView): JsonNode =
+  ## ``repro stats status --json`` (``reprobuild.stats.status.v1``): what
+  ## ``statsStatusText`` prints about both stores.
+  result = %*{
+    "schemaId": "reprobuild.stats.status.v1",
+    "command": "stats status",
+    "projectRoot": projectRoot,
+    "storePath": derivedStatsStorePath(projectRoot),
+    "window": statsWindowNode(view),
+    "activeDerivedCapture":
+      (if currentCapture.enabled: currentCapture.captureGroupsText
+       else: "none"),
+    "derivedStore": {
+      "path": derivedStatsStorePath(projectRoot),
+      "backendLinked": false,
+      "queued": queuedStatsObservationCount(),
+      "flushed": flushedStatsObservationCount(),
+      "discarded": discardedStatsObservationCount(),
+      "lastFlushError": processLastFlushError
+    }
+  }

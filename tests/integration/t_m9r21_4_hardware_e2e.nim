@@ -41,7 +41,7 @@ suite "M9.R.21.4: hardware probe end-to-end":
       let spec = toSystemHardwareSpec(p)
       check spec.id == p.systemId
       check spec.cpuArch.len > 0
-      let opts = parseHardwareProbeArgs(@["--dry-run"])
+      let opts = HardwareProbeOptions(dryRun: true)
       let outcome = runHardwareProbeFromSpec(spec, opts)
       check not outcome.failure
       check "hardware \"" & spec.id & "\":" in outcome.text
@@ -118,7 +118,7 @@ suite "M9.R.21.4: hardware probe end-to-end":
         drivers: @["amdgpu"]
       audio:
         cards: @["hda-intel"]
-    let opts = parseHardwareProbeArgs(@["--dry-run"])
+    let opts = HardwareProbeOptions(dryRun: true)
     let outcome = runHardwareProbeFromSpec(spec, opts)
     check not outcome.failure
     check "hardware \"E2E-FIXTURE-XYZ123ABCD456EFGH7\":" in outcome.text

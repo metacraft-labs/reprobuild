@@ -46,6 +46,37 @@ type
     adNetworkGuard = "EAddOnNetworkGuard"
       ## A `network` generation failed one of the guard's invariants and was
       ## reverted.
+    adCollision = "EAddOnCollision"
+      ## A refusal of the collision decision table (spec §4.3) that has no
+      ## more specific diagnostic: a symbolic link on the target path, a
+      ## diversion by someone else, a diversion opt-in on a base without
+      ## diversions, a `linux.sysctl` key a later base fragment overrides,
+      ## a resource at a kept pre-bootstrap input's path (spec §6.1); and
+      ## the observation the table decides on failing (an incomplete dpkg
+      ## database, a unit `systemctl show` cannot report).
+      ## Raised as ``collision.AddonCollisionError``.
+    adContained = "EAddOnContained"
+      ## The host is contained (an evidence detector fired): an apply the
+      ## deploy agent drives is refused until an operator releases it.
+    adManagementPath = "EAddOnManagementPath"
+      ## A deploy-agent apply would write, divert or replace something that
+      ## can cut the management path: sshd, the login PAM stacks, the
+      ## firewall or network classes (spec §7.5, §4.5).
+    adCompiledProfile = "EAddOnCompiledProfile"
+      ## A compiled profile the signed manifest does not vouch for (the
+      ## compiled-profile pin, spec §7.5).
+    adEgressObserverUnavailable = "EAddOnEgressObserverUnavailable"
+      ## The base cannot host the egress observer: no `nft`, or a kernel
+      ## without the nftables features it needs. Bootstrap has no fallback.
+    adGuardTimer = "EAddOnGuardTimer"
+      ## A network guard timer could not be armed (spec §4.5, §8.4).
+      ## Specified; nothing raises it until the network guard lands.
+    adSwitchPending = "EAddOnSwitchPending"
+      ## An uninstall refused because a switch's pending marker exists
+      ## (spec §6.4). Specified; nothing raises it yet.
+    adSnapshotLeft = "EAddOnSnapshotLeft"
+      ## A `repro-addon` snapper snapshot could not be deleted (spec §7.2).
+      ## Specified; nothing raises it until root snapshots land.
 
   EAddOn* = object of CatchableError
     ## Base of every add-on refusal.

@@ -99,6 +99,45 @@ proc prefixVersionOf*(path: string): string =
   let dash = leaf.rfind('-')
   if dash > 0: leaf[0 ..< dash] else: ""
 
+proc isStaticElf*(path: string): bool =
+  ## Whether ``path`` is an ELF executable with no program interpreter
+  ## (``PT_INTERP``): the statically linked add-on image, not the dynamic
+  ## engine, which needs the host's loader and libc and so stops working
+  ## when a release upgrade replaces them (§13 decision 174). Reads the
+  ## ELF and program headers only (the System V gABI, "Program Header":
+  ## https://refspecs.linuxfoundation.org/elf/gabi4+/ch5.pheader.html);
+  ## anything unreadable or not ELF is false.
+  var f: File
+  if not open(f, path, fmRead): return false
+  defer: f.close()
+  var h: array[64, uint8]
+  if readBytes(f, h, 0, 64) < 52: return false
+  if h[0] != 0x7f or h[1] != uint8('E') or h[2] != uint8('L') or h[3] != uint8('F'):
+    return false
+  let is64 = h[4] == 2
+  let le = h[5] == 1
+  proc rd(b: openArray[uint8]; off, n: int): uint64 =
+    for i in 0 ..< n:
+      let byt = uint64(b[off + (if le: i else: n - 1 - i)])
+      result = result or (byt shl (8 * i))
+  let phoff = if is64: rd(h, 0x20, 8) else: rd(h, 0x1C, 4)
+  let phentsize = int(if is64: rd(h, 0x36, 2) else: rd(h, 0x2A, 2))
+  let phnum = int(if is64: rd(h, 0x38, 2) else: rd(h, 0x2C, 2))
+  if phnum <= 0 or phentsize < 8 or phnum > 4096: return false
+  var ph = newSeq[uint8](phentsize)
+  for i in 0 ..< phnum:
+    f.setFilePos(int64(phoff) + int64(i * phentsize))
+    if readBytes(f, ph, 0, phentsize) != phentsize: return false
+    if rd(ph, 0, 4) == 3'u64: return false      # PT_INTERP
+  true
+
+proc binaryPrefixesOf*(paths: openArray[string]): seq[string] =
+  ## The add-on binary prefixes among ``paths`` (store prefix paths, in
+  ## the order given), as the ``bin/repro`` each holds.
+  for p in paths:
+    if p.startsWith(StoreRoot / "prefixes" / BinaryPackage & "/"):
+      result.add(p / "bin" / "repro")
+
 # ---------------------------------------------------------------------------
 # Roots.
 # ---------------------------------------------------------------------------

@@ -32,16 +32,27 @@ the better choice.
 | recipe arguments | arguments after `--` |
 | a file target with prerequisites | an [action](../reference/glossary.md#action) in the build graph |
 
-A task is declared like this:
+## Before and after
+
+A `justfile` recipe:
+
+```just
+# Build the apps and run the full test suite
+test:
+    cargo test --workspace
+```
+
+becomes a task in the `devEnv:` block of `repro.nim`:
 
 ```nim
 devEnv:
   task "test",
-    command = "just test",
+    command = "cargo test --workspace",
     description = "Build the apps and run the full test suite"
 ```
 
-The command can stay a call to your existing `justfile` while you move over.
+The command can stay a call to your existing `justfile` (`command = "just test"`)
+while you move over.
 
 ## What works differently
 
@@ -49,8 +60,8 @@ A task runs inside the project's environment. reprobuild activates the
 [development environment](../reference/glossary.md#development-environment)
 first, so a task uses the project's tools whether or not your shell has them.
 
-Building is not a task. A make rule that produces a file is a build step, and
-in reprobuild a build step is an action: it is cached, run in parallel with
+Building is not a task. A make rule that produces a file is part of the build,
+and in reprobuild a build unit is an action: it is cached, run in parallel with
 independent actions, and run again only when something it read changes. Keep
 tasks for commands that are not builds, such as starting a release or seeding a
 database.

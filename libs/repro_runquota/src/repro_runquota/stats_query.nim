@@ -175,6 +175,19 @@ type
     endpoint*: string
     captureEnabled*: bool
     storePath*: string
+      ## The daemon's observation-store file, from the ``observations``
+      ## inspection subject; empty when the daemon did not say.
+    daemonStoreStatus*: string
+      ## WHY the daemon's capture is or is not on, in its own words: the
+      ## ``store_status`` of the ``observations`` inspection subject
+      ## (``open``, ``disabled``, ``verifying``, ``degraded-corrupt``,
+      ## ``degraded-unwritable``, ``degraded-no-sqlite-tool``,
+      ## ``refused-newer-schema``). ``captureEnabled`` cannot tell these
+      ## apart, and each needs a different remedy: in particular
+      ## ``verifying`` is the window after a daemon started with capture
+      ## on has bound its endpoint and before its store's integrity check
+      ## has returned (RunQuota ``docs/database.md``), which no restart
+      ## fixes. Empty when the daemon did not say.
     loss*: SharedStoreLoss
     executions*: seq[SharedExecution]
     actionRows*: seq[SharedActionRow]
@@ -402,6 +415,18 @@ proc parseLoss(payload: string): SharedStoreLoss =
   except CatchableError:
     result = SharedStoreLoss()
 
+proc parseStoreState(payload: string): tuple[status, path: string] =
+  ## ``store_status`` and ``store_path`` of the ``observations`` inspection
+  ## subject; empty strings for a payload that does not carry them.
+  try:
+    let root = parseJson(payload){"observations"}
+    if root.isNil or root.kind != JObject:
+      return
+    result.status = root{"store_status"}.getStr()
+    result.path = root{"store_path"}.getStr()
+  except CatchableError:
+    result = ("", "")
+
 proc endpointPath(): string =
   try:
     defaultEndpoint().path
@@ -454,7 +479,10 @@ proc readSharedStore*(scope = statsScopeWireOwner;
   # The loss counters FIRST, so a query that then fails still leaves the
   # view carrying what the daemon said it had already lost.
   try:
-    result.loss = parseLoss(client.inspectionJson("observations"))
+    let observations = client.inspectionJson("observations")
+    result.loss = parseLoss(observations)
+    (result.daemonStoreStatus, result.storePath) =
+      parseStoreState(observations)
   except CatchableError:
     result.loss = SharedStoreLoss()
 

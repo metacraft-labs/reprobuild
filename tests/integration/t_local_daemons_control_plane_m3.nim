@@ -105,11 +105,12 @@ suite "Local daemons/control-plane M3 build routing":
 
       let badFlag = requireFailure(buildCommand(tempRoot / "missing", tempRoot,
         ["--daemon=sideways"]), repoRoot())
-      check badFlag.contains("unsupported --daemon=sideways")
+      check badFlag.contains("invalid value 'sideways' for '--daemon'")
 
       let badEnv = requireFailure(buildCommand(tempRoot / "missing", tempRoot,
         env = [("REPRO_DAEMON", "sideways")]), repoRoot())
-      check badEnv.contains("unsupported REPRO_DAEMON=sideways")
+      check badEnv.contains("invalid value 'sideways' for '--daemon'")
+      check badEnv.contains("(from environment variable REPRO_DAEMON)")
 
       let autoProject = tempRoot / "auto-project"
       copyFixtureProject(autoProject)

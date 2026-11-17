@@ -21,7 +21,7 @@ if paramCount() > 0 and paramStr(1) == "--develop-child":
   for name in ["REPROBUILD_SYSTEM_CONFIG", "REPROBUILD_USER_CONFIG",
                "REPROBUILD_VCS_PRIVATE_CONFIG"]:
     putEnv(name, paramStr(2) / (name & ".absent"))
-  quit(runDevelopCommand(@["--all", "--list", "--json",
+  quit(runReproCommandLineInProcess(@["develop", "--all", "--list", "--json",
     "--tool-provisioning=path", "--workspace-root=" & paramStr(2)]))
 
 proc runDevelop(root: string): tuple[output: string, exitCode: int] =

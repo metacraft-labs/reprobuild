@@ -327,7 +327,7 @@ proc clangArchive*(opts: ArchiveOptions): BuildActionDef =
       subcommand: "",
       arguments: @[]))
   let modifiers =
-    if opts.modifiers.len > 0: opts.modifiers else: "rcs"
+    if opts.modifiers.len > 0: opts.modifiers else: DefaultArModifiers
   result.call.arguments.add(PublicCliArg(
     name: "modifiers",
     kind: cpkPositional,

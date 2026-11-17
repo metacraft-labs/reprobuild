@@ -5,7 +5,7 @@
 ## The failure this pins down
 ## --------------------------
 ## Everything a profile compile writes is named by the profile, not by the
-## run: the nimcache `<state-dir>/profile-cache/nimcache/<profile-key>` (and,
+## run: the nimcache `<state-dir>/profile-cache/nimcache/<key prefix>` (and,
 ## because `nim` runs in it, the `home_linkerArgs.txt` response file), the
 ## generated `.c` and `.o` files, the binary, the intent document, the
 ## envelope, and the `config.nims` / `.nimble` staged beside the profile,

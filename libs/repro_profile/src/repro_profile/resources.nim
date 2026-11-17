@@ -23,6 +23,8 @@
 
 import std/[options, tables]
 
+import repro_core/system_file_holding
+
 import ./types
 
 # Profile authors invoke `windowsScheduledTask(...,
@@ -1063,7 +1065,7 @@ template addOnToolPath*(targetResources: var seq[ResourceIntent];
   # the identifier appears, including a named argument's NAME, so
   # `address = address` would expand to `"" = ""`.
   fsSystemFile(targetResources, AddOnToolPathFile,
-    AddOnToolPathScript, "", "", "", "0644", "", address, dependsOn)
+    AddOnToolPathScript, "", "", "", "", "", "", "", address, dependsOn)
 
 template launchdSystemDaemon*(targetResources: var seq[ResourceIntent];
                               label: string;
@@ -1085,7 +1087,9 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
                        sourceUrl: string = "";
                        sha256: string = "";
                        sourceLocal: string = "";
-                       mode: string = "0644";
+                       mode: string = "";
+                       group: string = "";
+                       form: string = "";
                        collision: string = "";
                        address: string = "";
                        dependsOn: seq[string] = @[]) =
@@ -1109,6 +1113,25 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
   ## and `sourceUrl`) is a compile-time error here AND a validator
   ## reject downstream (defence in depth). All three absent means the
   ## resource declares an empty file — equivalent to `content = ""`.
+  ##
+  ## How the file is held (POSIX; refused on Windows by the driver):
+  ##
+  ##   * `mode`  — four octal digits, `0000`-`0777`: the file's exact
+  ##               permission bits after every apply. No setuid, setgid
+  ##               or sticky bit, and never writable by others. Omitted:
+  ##               the replaced regular file's bits are kept, else 0644.
+  ##   * `group` — the owning group's name: the file is `root:<group>`.
+  ##               The group must exist when the file is written.
+  ##               Omitted: `root:root`.
+  ##   * `form`  — `"link"` or `"copy"`, read only on a ReproOS add-on
+  ##               host. A file declaring `mode` or `group` is always a
+  ##               copy there, and `form = "link"` with either is refused.
+  ##
+  ## The three are refused here, by the adapter, by the text parser and by
+  ## the privileged operation's validator alike
+  ## (`repro_core/system_file_holding`). Each is emitted only when
+  ## declared, so a profile that declares none has the same intent as
+  ## before the fields existed.
   block:
     # Defence in depth #1: at-most-one-source mutual exclusion. The
     # downstream validator (`profile.parseSystemProfile` and the
@@ -1135,10 +1158,21 @@ template fsSystemFile*(targetResources: var seq[ResourceIntent];
         "fs.systemFile '" & path &
         "' sets `sha256` but no `sourceUrl` — the digest is only " &
         "meaningful when paired with a URL fetch")
+    # Defence in depth #3: how the file is held (`mode`, `group`,
+    # `form`), re-checked by the same three downstream layers.
+    let holdingError = systemFileHoldingError(mode, group, form)
+    if holdingError.len > 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & path & "' " & holdingError)
     var fields = initTable[string, FieldValue]()
     fields["path"] = strField(path)
     fields["content"] = strField(content)
-    fields["mode"] = strField(mode)
+    if mode.len > 0:
+      fields["mode"] = strField(mode)
+    if group.len > 0:
+      fields["group"] = strField(group)
+    if form.len > 0:
+      fields["form"] = strField(form)
     if sourceUrl.len > 0:
       fields["sourceUrl"] = strField(sourceUrl)
     if sha256.len > 0:
@@ -1596,8 +1630,8 @@ template linuxNixosSystemModule*(targetResources: var seq[ResourceIntent];
   ##
   ## REPROBUILD DOES NOT RUN `nixos-rebuild switch` — the operator
   ## triggers the rebuild separately. The driver only converges the
-  ## file's bytes; the broker's drift gate covers a hand-edited
-  ## fragment. The constraint mirrors `linux.nixDaemonSetting`'s "Nix
+  ## file's bytes; a hand-edited fragment differs from desired and the
+  ## next apply rewrites it. The constraint mirrors `linux.nixDaemonSetting`'s "Nix
   ## re-reads on each invocation" model: the file is the source of
   ## truth; the realization step is downstream.
   ##

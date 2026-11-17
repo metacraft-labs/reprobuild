@@ -88,7 +88,11 @@ const
     "handover",
     "handoverSignature", "newAttestationKey", "newCredentialHost",
     # A truncated egress check's summary names the destinations it owes.
-    "destinations", "truncated"]
+    "destinations", "truncated",
+    # Whether a detector's scheduled positive control tripped (DET-4: the
+    # add-on's tick, egress check and apt hook records): a fixed word, or
+    # ``missed: <why>``.
+    "control"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold
     ## credentials, a body can hold source.

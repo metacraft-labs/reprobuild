@@ -925,7 +925,15 @@ package reprobuild:
     # zig declared here. A native build never runs it. Declaring zig also
     # declares the wrapper edge's `sh` and coreutils
     # (Reprobuild-Standard-Library.md, `cross_zig`).
-    "zig >=0.13 <0.14"
+    #
+    # The range admits 0.14 as well as 0.13. This entry is part of every
+    # consumer's solve, not only of reprobuild's own cross build: a recipe
+    # that `uses:` reprobuild solves one zig for its whole closure, and
+    # codetracer-launcher, which such a recipe (codetracer) also uses,
+    # requires `zig >=0.14 <0.15`. A `<0.14` cap left the two with no common
+    # version and made that solve unsatisfiable. The stdlib zig package
+    # carries 0.14.1 on every platform it carries 0.13.0.
+    "zig >=0.13 <0.15"
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
     # are the PATH-resolvable binaries the reprobuild build needs;
     # they're sufficient for the path-mode tool resolver to succeed
@@ -977,6 +985,10 @@ package reprobuild:
       "dirname"
       "nm"
       "timeout"
+      # scripts/release/attic_push_with_retry.sh streams each `attic push`
+      # attempt into the log while keeping it for classification;
+      # tests/unit/test_release_cache_push.py runs it.
+      "tee"
     # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
     # actionlint over ``.github/workflows``. The flake shell carries it on
     # Linux and macOS (so path mode finds it there); on Windows there is no
@@ -2271,18 +2283,34 @@ package reprobuild:
           # once.
           if artifact.actionId notin executeDeps:
             executeDeps.add(artifact.actionId)
-      when defined(linux) or defined(macosx):
-        if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim" or
-            spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
-          # These cases load a shared library, not an executable fixture.
-          # The backend case also needs it for nested interface extraction
-          # before the fixture's compiler action can run.
-          requiredBinaries.add("build/lib/" & (when defined(macosx):
-            "librepro_monitor_shim.dylib" else: "librepro_monitor_shim.so"))
-          executeDeps.add("reprobuild.test_fixtures.monitor_shim")
-      when defined(windows):
-        if spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
-          requiredBinaries.add(monitorArtifactPath(MonitorShim64Name))
+      # THE MONITOR SHIM, for every test that opens the in-tree copy.
+      #
+      # The shim is a shared library, not an executable fixture, so it has
+      # no ``testFixtureArtifacts`` row; the generated
+      # ``spec.requiresMonitorShim`` flag says which tests need it. It is
+      # computed like ``requiresReproBinary``, over the test's import
+      # closure, so a test that reaches ``build/lib`` only through
+      # ``repro_test_support.monitorShimPath`` / ``prepareMonitorTools``, or
+      # through io-mon's ``findShimLibrary`` discovery, carries it too (see
+      # ``scripts/repro_binary_reachability.nim``, ``rtMonitorShim``).
+      #
+      # This used to be a two-entry list of source paths. Every other test
+      # that needed the file passed only when something else — ``just
+      # build``, or a wider selection that included the shim edge — had
+      # already put it in ``build/lib``: from a fresh checkout,
+      # ``repro build '.#test#test_tool_identity_env_plumbing'`` failed its
+      # shim-seed case (reprobuild-pm ``issues/2026-11-16-tool-identity-env-
+      # plumbing-execute-edge-does-not-declare-the-monitor-shim.md``).
+      #
+      # Both halves, as for a fixture row: the PATH as a typed input (so a
+      # rebuilt shim re-runs the test), the ACTION ID as an ordering dep (so
+      # a narrow selection builds it first).
+      if spec.requiresMonitorShim:
+        requiredBinaries.add(
+          when defined(windows): monitorArtifactPath(MonitorShim64Name)
+          elif defined(macosx): "build/lib/librepro_monitor_shim.dylib"
+          else: "build/lib/librepro_monitor_shim.so")
+        if "reprobuild.test_fixtures.monitor_shim" notin executeDeps:
           executeDeps.add("reprobuild.test_fixtures.monitor_shim")
       when defined(linux):
         if spec.source == "tests/unit/t_m9r83_install_mirror_action_shapes.nim":
@@ -2530,6 +2558,8 @@ package reprobuild:
         source == "tests/unit/test_release_smoke_dev_exec.py"
       let releaseTagTest =
         source == "tests/unit/test_release_tag_names_build.py"
+      let releaseCachePushTest =
+        source == "tests/unit/test_release_cache_push.py"
       let confinementSystemdAnalyzeTest =
         source == "tests/unit/test_daemon_worker_confinement_systemd_analyze.py"
       let pyExecute = pythonUnittest.run(
@@ -2557,11 +2587,20 @@ package reprobuild:
           @["scripts/release/smoke_release_dev_exec.sh",
             "scripts/release/with_windows_archive_runquota.ps1",
             ".github/workflows/release.yml",
-            "scripts/verify_release.sh", "repro.nim"]
+            "scripts/verify_release.sh", "repro.nim",
+            # The Windows monitor-shim snapshot it runs, and the artefact
+            # names it checks that snapshot against.
+            "scripts/release/snapshot_windows_monitor_stack.ps1",
+            "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/monitor_shim_artifacts.nim"]
         elif releaseTagTest:
           # The guard, and the workflow whose publish-job steps the test runs.
           # It copies the guard into the runner clone it builds.
           @["scripts/release/assert_tag_names_commit.sh",
+            ".github/workflows/release.yml"]
+        elif releaseCachePushTest:
+          # The retry script, and the workflow whose `publish-nix-cache` job
+          # shape the test checks and whose push step's `run:` block it runs.
+          @["scripts/release/attic_push_with_retry.sh",
             ".github/workflows/release.yml"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
@@ -2596,6 +2635,12 @@ package reprobuild:
       # against it, and the workflow steps' `run:` lines under bash.
       if releaseTagTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
+      # The retry script's own subprocesses, and the fake `attic`'s `grep`
+      # and `cat`; POSIX only, like the release job that runs the script.
+      when not defined(windows):
+        if releaseCachePushTest:
+          appendRegisteredActionToolIdentityRefs(pyExecute.id,
+            ["bash", "timeout", "tee", "grep", "mktemp", "rm", "cat"])
       if releaseSmokeTest:
         # Bind actual declared child tools into the filtered execute PATH.
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "just"])

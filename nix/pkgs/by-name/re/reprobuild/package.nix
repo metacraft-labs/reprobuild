@@ -151,16 +151,16 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "a9684dfc1e659af309acf646915dbfe400896b65";
-    hash = "sha256-k09Pe0+9Ue0+OK7nt/aULCRPW3MXMcK34btX65kMJAM=";
+    rev = "8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
+    hash = "sha256-2PXrPF+3a2dYMbyoFliukQRLVXc3wIBuvqDOYZWR/ko=";
   },
   # Added after the `src` commit too: confutils over a clispec description,
   # which repro's own command line is.
   confutilsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-confutils";
-    rev = "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
-    hash = "sha256-P20Zi4iwayGpeDyH1zG619F9eLuRgJolm5Zcv1Z564A=";
+    rev = "0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74";
+    hash = "sha256-zHFUtlFQEmS3jK8oGm2ItMgMcWAsW2U1LciY3QspuS8=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -248,7 +248,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.25";
+  version = "0.2.26";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above

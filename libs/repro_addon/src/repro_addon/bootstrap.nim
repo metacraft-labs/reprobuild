@@ -43,6 +43,7 @@ import repro_deploy_agent/secrets
 
 import ./addon_apply
 import ./uninstall
+import ./record_dir
 import ./attestation
 import ./evidence
 import ./evidence_keys
@@ -201,6 +202,105 @@ const
     (AgentStateDir, 0o700), (AgentStateRecordsDir, 0o700),
   ]
 
+proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
+                        logDir = UninstallOverrideDir): string {.discardable.} =
+  ## The trust anchors validated first (strict: a bad file raises and
+  ## nothing is written, a stale token included); then a state-removal
+  ## token an earlier uninstall left (§13 decision 165), which belongs to
+  ## that uninstall and not to this install, removed durably; then the
+  ## directory of the add-on's uninstall records made root's 0700 through
+  ## a descriptor that does not follow a link (§13 decision 178: an
+  ## existing root directory that passes the checks is tightened to 0700,
+  ## anything else is refused). Returns the directory's identity, taken on
+  ## the descriptor that made or tightened it, which bootstrap records.
+  ## Raises ``AddonBootstrapError`` naming the remedy when the directory
+  ## cannot be used -- including, with nothing written, when its file
+  ## system reports no birth time (§13 decision 178, amended 2026-11-16:
+  ## the owner's "Refuse at bootstrap").
+  when mutated("token-cleared-before-anchors"):
+    try: clearStateRemovalToken(logDir)     # FALSIFIER: before the anchors
+    except OSError: discard
+  for p in [deploySignersPath, cachePublishersPath]:
+    if p.len > 0:
+      discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
+  # The birth time is probed before anything is written (the directory's
+  # own when it exists, else its parent's). A new directory can still have
+  # none where its parent has one (an overlay mount at /var/log): then the
+  # empty directory bootstrap just made is removed again, and the stale
+  # token is cleared only once the identity is known (A11 round 21), so
+  # "nothing was written" stays true.
+  var noBirthTime = false
+  var leftBehind = ""     # why the directory bootstrap made is still there
+  try:
+    when not mutated("unbound-when-no-birth-time"):
+      noBirthTime = birthTimeProbe(logDir).len == 0
+    if not noBirthTime:
+      when mutated("token-cleared-before-identity"):
+        clearStateRemovalToken(logDir)   # FALSIFIER: round 20's order
+      var existed: Stat
+      let madeHere = lstat(logDir.cstring, existed) != 0
+      when not mutated("bootstrap-leaves-log-dir"):
+        result = ensureCheckedDir(logDir, tighten = true)
+        when not mutated("unbound-when-no-birth-time"):
+          noBirthTime = result.len == 0
+        if noBirthTime and madeHere and not mutated("token-cleared-before-identity"):
+          try: removeEmptyDirChecked(logDir)
+          except OSError as e:
+            leftBehind = e.msg
+      if not noBirthTime and not mutated("token-cleared-before-identity"):
+        clearStateRemovalToken(logDir)
+  except OSError as e:
+    raise newException(AddonBootstrapError, logDir &
+      " cannot hold the add-on's uninstall records (" & e.msg & "). It " &
+      "is not one this add-on made: inspect it, remove it (or the entry " &
+      "named " & StateRemovalTokenName & " in it), and run bootstrap " &
+      "again; nothing was written")
+  if noBirthTime and leftBehind.len > 0:
+    raise newException(AddonBootstrapError, "the file system holding " &
+      logDir & " reports no birth time (statx STATX_BTIME), so the add-on " &
+      "cannot record an identity for its uninstall records' directory. " &
+      "Bootstrap made " & logDir & " (empty) before it could tell, and " &
+      "could not remove it again (" & leftBehind & "); nothing else was " &
+      "written. Remove that empty directory, put /var/log on a file " &
+      "system that records birth times and run bootstrap again")
+  if noBirthTime:
+    raise newException(AddonBootstrapError, "the file system holding " &
+      logDir & " reports no birth time (statx STATX_BTIME), so the add-on " &
+      "cannot record an identity that tells its uninstall records' " &
+      "directory from another one put in its place, and it never uses " &
+      "that directory unbound. Put /var/log on a file system that records " &
+      "birth times (ext4, xfs, btrfs on a current kernel) and run " &
+      "bootstrap again; nothing was written")
+
+proc recordRecordsDirIdentity*(stateDir, ident: string) =
+  ## Bootstrap's record of the identity ``prepareRecordsDir`` took (§13
+  ## decision 178, amended), atomic, 0600 and durable in the root-only
+  ## state, so every later checked open refuses another directory put in
+  ## the place of the one it made.
+  when not mutated("bootstrap-identity-not-recorded"):
+    let path = recordsDirIdentityPath(stateDir)
+    createDir(parentDir(path))
+    writeFileAtomic(path, ident & "\n", 0o600)
+
+proc bootstrapRecordsDir*(stateDir, deploySignersPath,
+                          cachePublishersPath: string;
+                          logDir = UninstallOverrideDir;
+                          between: proc () = nil) =
+  ## Bootstrap's records-directory steps around ``between`` (the roots and
+  ## the state, in ``runAddonBootstrap``): ``prepareRecordsDir`` makes or
+  ## tightens the directory and takes its identity on that descriptor,
+  ## then ``between`` runs, then exactly that identity is recorded (§13
+  ## decision 178, amended; A11 rounds 20 and 21). One proc, so a test
+  ## drives the wiring bootstrap uses.
+  let ident = prepareRecordsDir(deploySignersPath, cachePublishersPath, logDir)
+  if between != nil: between()
+  when not mutated("bootstrap-leaves-log-dir"):
+    when mutated("bootstrap-wiring-reopens"):
+      # FALSIFIER: round 19's wiring, the identity of a fresh open.
+      recordRecordsDirIdentity(stateDir, identityOfCheckedDir(logDir))
+    else:
+      recordRecordsDirIdentity(stateDir, ident)
+
 proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   if opts.planDigest.len == 0:
@@ -248,10 +348,6 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       " while the bootstrap waited for the host apply lock; nothing was " &
       "written apart from that lock (" & hostApplyLockPath() & ", outside " &
       "every add-on root). Re-run the preflight and review what changed.")
-  # A state-removal token an earlier uninstall left (§13 decision 165)
-  # belongs to that uninstall, not to this install: a later re-run must
-  # never act on it. Removed durably before anything is written.
-  clearStateRemovalToken()
   if plan.preBootstrap.roots.len > 0 and stateDir != DefaultStateDir:
     # The preflight inspected the default state directory; a bootstrap
     # into another one would leave the inspected /var/lib/repro/system
@@ -260,41 +356,43 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
       "inputs under /var/lib/repro, which the preflight inspected at the " &
       "default state directory " & DefaultStateDir & "; --state-dir " &
       stateDir & " is refused; nothing was written")
-  for p in [opts.deploySignersPath, opts.cachePublishersPath]:
-    if p.len > 0:
-      discard peerAuth.loadTrustAnchors(p)   # strict: raises on a bad file
-
-  # 2. Roots: created, or taken over where the plan says they are
-  # pre-bootstrap inputs. The directories the plan lists beyond the
-  # add-on's own (the secrets tmpfs, the agent's state) are taken over
-  # with the mode they have.
   var entries: seq[LedgerEntry]
-  entries.add(establishRoot(plan, ReproRoot, 0o755,
-    asSubvolume = isBtrfs(parentDir(ReproRoot))))
-  entries.add(establishRoot(plan, StoreRoot, 0o755))
-  entries.add(establishRoot(plan, "/var/lib/repro", 0o755))
-  entries.add(establishRoot(plan, stateDir, 0o700))
-  entries.add(establishRoot(plan, AgentDir, 0o700))
-  entries.add(establishRoot(plan, "/etc/repro", 0o755))
-  entries.add(establishRoot(plan, AnchorsDir, 0o755))
-  for p in plan.preBootstrap.roots:
-    if p notin [ReproRoot, StoreRoot, "/var/lib/repro", stateDir, AgentDir,
-                "/etc/repro", AnchorsDir]:
-      var mode = -1
-      for (dir, m) in TakenOverDirModes:
-        if dir == p: mode = m
-      if mode < 0:
-        raise newException(AddonBootstrapError, "the plan lists " & p &
-          " as a pre-bootstrap input, which bootstrap has no mode for")
-      # The prior value first: rootEntry's arguments are evaluated left to
-      # right, and the takeover changes the mode and owner it records
-      # (§13 decision 167).
-      when mutated("prior-mode-captured-after-takeover"):
-        entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
-      else:
-        let before = baseRootValue(p)
-        entries.add(rootEntry(p, takeOverRootDir(p, mode), before))
-  ensureSystemStateDir(stateDir)
+  # The records directory first, then the roots and the state, then the
+  # directory's identity, the one prepareRecordsDir took (§13 decision 178,
+  # amended; ``bootstrapRecordsDir``).
+  bootstrapRecordsDir(stateDir, opts.deploySignersPath,
+                      opts.cachePublishersPath, between = proc () =
+      # 2. Roots: created, or taken over where the plan says they are
+      # pre-bootstrap inputs. The directories the plan lists beyond the
+      # add-on's own (the secrets tmpfs, the agent's state) are taken over
+      # with the mode they have.
+      entries.add(establishRoot(plan, ReproRoot, 0o755,
+        asSubvolume = isBtrfs(parentDir(ReproRoot))))
+      entries.add(establishRoot(plan, StoreRoot, 0o755))
+      entries.add(establishRoot(plan, "/var/lib/repro", 0o755))
+      entries.add(establishRoot(plan, stateDir, 0o700))
+      entries.add(establishRoot(plan, AgentDir, 0o700))
+      entries.add(establishRoot(plan, "/etc/repro", 0o755))
+      entries.add(establishRoot(plan, AnchorsDir, 0o755))
+      for p in plan.preBootstrap.roots:
+        if p notin [ReproRoot, StoreRoot, "/var/lib/repro", stateDir, AgentDir,
+                    "/etc/repro", AnchorsDir]:
+          var mode = -1
+          for (dir, m) in TakenOverDirModes:
+            if dir == p: mode = m
+          if mode < 0:
+            raise newException(AddonBootstrapError, "the plan lists " & p &
+              " as a pre-bootstrap input, which bootstrap has no mode for")
+          # The prior value first: rootEntry's arguments are evaluated left to
+          # right, and the takeover changes the mode and owner it records
+          # (§13 decision 167).
+          when mutated("prior-mode-captured-after-takeover"):
+            entries.add(rootEntry(p, takeOverRootDir(p, mode), baseRootValue(p)))
+          else:
+            let before = baseRootValue(p)
+            entries.add(rootEntry(p, takeOverRootDir(p, mode), before))
+      ensureSystemStateDir(stateDir)
+  )
   # Every apply's pending-switch check finds the add-on's state through
   # this, whatever --state-dir it was itself given (§7.7).
   writeAddonStateDirPointer(stateDir)

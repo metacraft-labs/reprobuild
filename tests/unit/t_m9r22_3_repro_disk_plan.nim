@@ -4,9 +4,9 @@
 ##
 ## Five cases verifying the plan output format + the subcommand
 ## surface area:
-##   1. ``parseDiskArgs`` recognises all six subcommands + their flag
-##      surface (--confirm / --target / --device / --output / --probe /
-##      --size).
+##   1. repro's generated command-line parser recognises all six
+##      subcommands + their flag surface (--confirm / --target / --device /
+##      --identity / --output / --probe / --size).
 ##   2. ``renderPlan`` on an empty SystemHardwareSpec → "no disko"
 ##      message; on a populated spec → contains the disk + partition +
 ##      operation-list sections.
@@ -25,6 +25,7 @@ import std/[options, os, osproc, strutils, tables, unittest]
 
 import repro_profile
 import repro_cli_support/disk as cli_disk
+import repro_cli_support/cli_program
 from repro_test_support import testCaseScratchSlug
 
 let TmpRoot = "build/m9r22_3_tmp" / testCaseScratchSlug()
@@ -75,46 +76,58 @@ hardware "01M9R22-PLAN-FIXTURE":
 
 suite "M9.R.22.3: `repro disk plan` CLI":
 
-  test "Test#1: parseDiskArgs recognises subcommands + flag surface":
-    # No args → dscNone.
-    let none = parseDiskArgs(@[])
-    check none.sub == dscNone
+  test "Test#1: the parser recognises subcommands + flag surface":
+    proc parse(args: seq[string]): ReproCommandLineDisk =
+      ReproCommandLine.load(@["disk"] & args, CliSources()).disk
+
+    # No subcommand is a usage error.
+    expect CliUsageError:
+      discard parse(@[])
 
     # Each subcommand resolves.
-    check parseDiskArgs(@["plan"]).sub == dscPlan
-    check parseDiskArgs(@["apply"]).sub == dscApply
-    check parseDiskArgs(@["mount"]).sub == dscMount
-    check parseDiskArgs(@["unmount"]).sub == dscUnmount
-    check parseDiskArgs(@["generate"]).sub == dscGenerate
-    check parseDiskArgs(@["image"]).sub == dscImage
+    check parse(@["plan", "a.nim"]).command == ReproCommandLineDiskCommand.plan
+    check parse(@["apply", "a.nim"]).command ==
+      ReproCommandLineDiskCommand.apply
+    check parse(@["mount", "a.nim"]).command ==
+      ReproCommandLineDiskCommand.mount
+    check parse(@["unmount", "a.nim"]).command ==
+      ReproCommandLineDiskCommand.unmount
+    check parse(@["generate"]).command == ReproCommandLineDiskCommand.generate
+    check parse(@["image", "a.nim"]).command ==
+      ReproCommandLineDiskCommand.image
 
-    # Flag parsing: --confirm + --target + --device + --output + --size.
-    let apply = parseDiskArgs(@["apply", "x.nim", "--device",
-      "/dev/sdX", "--target", "/mnt", "--confirm"])
-    check apply.sub == dscApply
+    # Flag parsing: --confirm + --device + --identity, --target, --output +
+    # --size, in both spellings.
+    let apply = parse(@["apply", "x.nim", "--device", "/dev/sdX",
+      "--identity=x.identity.json", "--confirm"]).apply
     check apply.source == "x.nim"
     check apply.device == "/dev/sdX"
-    check apply.target == "/mnt"
+    check apply.identity == "x.identity.json"
     check apply.confirm
 
-    let image = parseDiskArgs(@["image", "y.nim",
-      "--output=out.img", "--size=8G"])
-    check image.sub == dscImage
+    let mount = parse(@["mount", "x.nim", "--target", "/mnt"]).mount
+    check mount.target == "/mnt"
+    check not mount.confirm
+
+    let image = parse(@["image", "y.nim",
+      "--output=out.img", "--size=8G"]).image
     check image.source == "y.nim"
     check image.output == "out.img"
-    check image.sizeStr == "8G"
+    check image.size == "8G"
 
-    let gen = parseDiskArgs(@["generate", "--probe", "/"])
-    check gen.sub == dscGenerate
+    let gen = parse(@["generate", "--probe", "/"]).generate
     check gen.probe == "/"
 
-    # Unknown subcommand + extra positional arg → ValueError.
-    expect ValueError:
-      discard parseDiskArgs(@["doctor"])
-    expect ValueError:
-      discard parseDiskArgs(@["plan", "a.nim", "b.nim"])
-    expect ValueError:
-      discard parseDiskArgs(@["plan", "--nope"])
+    # Unknown subcommand, extra positional, unknown flag, a flag of another
+    # subcommand → usage error.
+    expect CliUsageError:
+      discard parse(@["doctor"])
+    expect CliUsageError:
+      discard parse(@["plan", "a.nim", "b.nim"])
+    expect CliUsageError:
+      discard parse(@["plan", "a.nim", "--nope"])
+    expect CliUsageError:
+      discard parse(@["plan", "a.nim", "--confirm"])
 
   test "Test#2: renderPlan formats empty + populated specs":
     # Empty spec → "no `disko:` block" message.

@@ -30,6 +30,12 @@
 ##   producer published for its sequence; a bootstrap digest that is not a
 ##   published artefact; a record of a host with a key that should carry an
 ##   attestation and does not;
+## * DET-4, the scheduled positive controls (spec §10.4): DET-AO-1's
+##   control rides on every tick heartbeat and DET-AO-3's on the egress
+##   check's; when the carrier is alive and no control tripped within
+##   ``silenceFactor`` tick intervals, the detector's ``control-missing``
+##   alert, status ``unproven``. DET-AO-6's rides on every ``hook-run``
+##   record: the latest must say ``tripped``;
 ## * DET-AO-10, lag: a host whose applied sequence is behind the producer's
 ##   latest published sequence for its target while that manifest is older
 ##   than its own maximum age.
@@ -95,7 +101,8 @@ type
     detector*: string
     status*: string
       ## live-idle | live-detecting | silent | never-reported | stalled |
-      ## contained (by an operator, decision 51) | retired | self-test
+      ## contained (by an operator, decision 51) | retired | self-test |
+      ## unproven (alive, and no positive control tripped: DET-4)
     detections*: int
     detail*: string
 
@@ -637,6 +644,14 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     var lastShipDelay = (0'i64, 0'u64)
     var appliedMs = 0'i64
     var tickBeats: seq[tuple[seq: uint64; ms: int64]]
+    var controls = initTable[string, tuple[firstMs: int64;
+                                            trippedMs: Option[int64]]]()
+      ## DET-4's scheduled controls carried by heartbeats (spec §10.4), per
+      ## detector: ``addon-manifest`` (DET-AO-1, on the tick's heartbeat)
+      ## and ``addon-egress`` (DET-AO-3, on the egress check's). When its
+      ## carrier first reported, and when a control last tripped.
+    var lastHookControl = none(tuple[seq: uint64; control: string])
+      ## DET-AO-6's control, on the latest ``hook-run`` record.
     var containment: seq[tuple[seq: uint64; ms: int64; contained: bool;
                                operator, reason: string]]
     var probe = none(tuple[seq: uint64; ms: int64; verbs: int; seen: uint8])
@@ -705,6 +720,15 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         announcements.add(e.receivedAtMs)
       if det == "addon-agent-tick" and r.category == ecHeartbeat:
         tickBeats.add((e.seq, e.receivedAtMs))
+      if r.category == ecHeartbeat and
+          det in ["addon-agent-tick", "addon-egress"]:
+        let k = if det == "addon-agent-tick": "addon-manifest" else: det
+        var c = if k in controls: controls[k]
+                else: (firstMs: e.receivedAtMs, trippedMs: none(int64))
+        if r.field("control") == "tripped": c.trippedMs = some(e.receivedAtMs)
+        controls[k] = c
+      if det == "addon-apt-hook" and r.trigger == "hook-run":
+        lastHookControl = some((seq: e.seq, control: r.field("control")))
       if det == KeysDetector and r.trigger == "rekey-handover":
         if h.retiredAt.isSome and e.seq > h.retiredAt.get:
           alert("DET-AO-9", "handover-after-retirement", e.seq, "a key " &
@@ -1035,6 +1059,49 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
               "; sequence " & $since.sequence & " was first published " &
               $(ageMs div 1000) & " s ago (maximum age " &
               $since.maxAgeSeconds & " s)")
+    # DET-4: the scheduled positive controls (spec §10.4 "Scheduled
+    # positive controls"). A detector whose carrier is alive while no
+    # control of it tripped within the window heartbeats and is not shown
+    # to fire: ``control-missing``, status ``unproven``. A missed control on
+    # the host is also a detection of its own; this catches the control
+    # that is not run at all, and the observer that no longer counts it.
+    when not mutated("check-ignores-controls"):
+      var unproven = initTable[string, string]()
+      let tickInterval = if "addon-agent-tick" in lastBeat:
+                           lastBeat["addon-agent-tick"].interval
+                         else: 0'i64
+      if h.target.len > 0 and not contained and tickInterval > 0 and
+          alive.getOrDefault("addon-agent-tick"):
+        # DET-AO-1's control runs on every tick, DET-AO-3's on every fetch,
+        # which is once per tick: both are judged over the tick interval.
+        let window = tickInterval * int64(factor)
+        for (k, detId, carrier) in [
+            ("addon-manifest", "DET-AO-1", "addon-agent-tick"),
+            ("addon-egress", "DET-AO-3", "addon-egress")]:
+          if not alive.getOrDefault(carrier) or k notin controls: continue
+          let c = controls[k]
+          let since = if c.trippedMs.isSome: c.trippedMs.get else: c.firstMs
+          if inp.nowMs - since > window:
+            let d = (if c.trippedMs.isSome:
+                       "its positive control last tripped " &
+                       $((inp.nowMs - since) div 1000) & " s ago"
+                     else: "its positive control never tripped") &
+              " (window " & $(window div 1000) & " s, " & $factor &
+              " tick intervals)"
+            alertUnsequenced(detId, "control-missing", k & ": " & d)
+            unproven[k] = d
+      if lastHookControl.isSome and lastHookControl.get.control != "tripped":
+        let d = "the latest apt hook run's positive control: " &
+          (if lastHookControl.get.control.len > 0: lastHookControl.get.control
+           else: "absent")
+        alert("DET-AO-6", "control-missing", lastHookControl.get.seq, d)
+        unproven["addon-apt-hook"] = d
+      for st in result.statuses.mitems:
+        # A silence or a containment says more than "unproven", and is kept.
+        if st.host == h.hostId and st.detector in unproven and
+            st.status in ["live-idle", "live-detecting"]:
+          st.status = "unproven"
+          st.detail = unproven[st.detector]
   # Acknowledged detections are handled, not alerts (D4).
   when not mutated("check-ignores-acks"):
     var open: seq[Alert]

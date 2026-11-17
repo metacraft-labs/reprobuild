@@ -55,6 +55,7 @@ verb	lsp
 verb	mcp
 verb	outdated
 verb	package
+verb	pressure
 verb	prompt
 verb	pull
 verb	push
@@ -79,6 +80,7 @@ verb	watch
 verb	why
 verb	workspace
 command	repro
+flag	repro	--help-all
 flag	repro	--version
 flag	repro	-V
 command	repro help
@@ -87,6 +89,7 @@ flag	repro version	--json
 command	repro completion
 command	repro capabilities
 flag	repro capabilities	--format
+flag	repro capabilities	--json
 command	repro show-conventions
 flag	repro show-conventions	--json
 flag	repro show-conventions	--project
@@ -148,6 +151,7 @@ flag	repro stats	--tool-provisioning
 flag	repro stats	--top
 flag	repro stats	--watch-session
 flag	repro stats	--work-root
+env	repro stats	RUNQUOTA_SOCKET
 command	repro daemon
 flag	repro daemon	--daemon-exe
 flag	repro daemon	--dev
@@ -367,3 +371,1254 @@ flag	repro self list	--store-root
 command	repro self prune-roots
 flag	repro self prune-roots	--json
 flag	repro self prune-roots	--store-root
+command	repro home
+flag	repro home	--profile-dir
+command	repro home add
+flag	repro home add	--activity
+flag	repro home add	--catalog
+flag	repro home add	--data
+flag	repro home add	--if
+flag	repro home add	--no-apply
+flag	repro home add	--when
+command	repro home remove
+flag	repro home remove	--activity
+flag	repro home remove	--data
+flag	repro home remove	--if
+flag	repro home remove	--no-apply
+flag	repro home remove	--when
+command	repro home enable
+flag	repro home enable	--host
+flag	repro home enable	--no-apply
+flag	repro home enable	--now
+flag	repro home enable	--port
+flag	repro home enable	--remote-repro
+flag	repro home enable	--ssh
+flag	repro home enable	--ssh-option
+flag	repro home enable	--target-arch
+flag	repro home enable	--target-home-dir
+flag	repro home enable	--target-platform
+flag	repro home enable	--target-state-dir
+flag	repro home enable	--target-store-daemon
+flag	repro home enable	--target-store-endpoint
+flag	repro home enable	--target-store-root
+flag	repro home enable	--target-wsl
+command	repro home disable
+flag	repro home disable	--host
+flag	repro home disable	--no-apply
+flag	repro home disable	--now
+flag	repro home disable	--port
+flag	repro home disable	--remote-repro
+flag	repro home disable	--ssh
+flag	repro home disable	--ssh-option
+flag	repro home disable	--target-arch
+flag	repro home disable	--target-home-dir
+flag	repro home disable	--target-platform
+flag	repro home disable	--target-state-dir
+flag	repro home disable	--target-store-daemon
+flag	repro home disable	--target-store-endpoint
+flag	repro home disable	--target-store-root
+flag	repro home disable	--target-wsl
+command	repro home list
+flag	repro home list	--host
+command	repro home why
+flag	repro home why	--host
+command	repro home history
+command	repro home apply
+flag	repro home apply	--accept-overwrite
+flag	repro home apply	--allow-drift
+flag	repro home apply	--host
+flag	repro home apply	--plan
+flag	repro home apply	--reconcile-drift
+flag	repro home apply	--relock
+flag	repro home apply	--target-arch
+flag	repro home apply	--target-platform
+flag	repro home apply	--uninstall-from-scoop
+command	repro home plan
+flag	repro home plan	--allow-drift
+flag	repro home plan	--host
+flag	repro home plan	--reconcile-drift
+command	repro home export
+flag	repro home export	--check
+flag	repro home export	--format
+flag	repro home export	--host
+flag	repro home export	--target
+command	repro home facts
+flag	repro home facts	--host
+flag	repro home facts	--output
+flag	repro home facts	--target
+command	repro home compare
+flag	repro home compare	--allow
+flag	repro home compare	--facts
+flag	repro home compare	--format
+flag	repro home compare	--show-same
+command	repro home rollback
+flag	repro home rollback	--accept-overwrite
+flag	repro home rollback	--uninstall-from-scoop
+command	repro home gc
+flag	repro home gc	--dry-run
+flag	repro home gc	--force
+flag	repro home gc	--keep-generations
+flag	repro home gc	--store
+flag	repro home gc	-y
+command	repro home set
+flag	repro home set	--no-apply
+flag	repro home set	--when
+command	repro home get
+command	repro home adopt
+command	repro home resource
+command	repro home resource move
+command	repro home migrate-from-env-scripts
+flag	repro home migrate-from-env-scripts	--activity
+flag	repro home migrate-from-env-scripts	--dry-run
+flag	repro home migrate-from-env-scripts	--env-file
+command	repro system
+command	repro system add
+flag	repro system add	--profile
+flag	repro system add	--state-dir
+command	repro system remove
+flag	repro system remove	--profile
+flag	repro system remove	--state-dir
+command	repro system list
+flag	repro system list	--profile
+flag	repro system list	--state-dir
+command	repro system why
+flag	repro system why	--profile
+flag	repro system why	--state-dir
+command	repro system sync
+flag	repro system sync	--accept-drift
+flag	repro system sync	--accept-passwd-destroy
+flag	repro system sync	--elevate
+flag	repro system sync	--force-unlock
+flag	repro system sync	--home-profile-dir
+flag	repro system sync	--host
+flag	repro system sync	--no-elevate
+flag	repro system sync	--profile
+flag	repro system sync	--reconcile-drift
+flag	repro system sync	--state-dir
+command	repro system history
+flag	repro system history	--state-dir
+command	repro system rollback
+flag	repro system rollback	--accept-drift
+flag	repro system rollback	--accept-feature-destroy
+flag	repro system rollback	--accept-passwd-destroy
+flag	repro system rollback	--force-unlock
+flag	repro system rollback	--generation
+flag	repro system rollback	--home-profile-dir
+flag	repro system rollback	--host
+flag	repro system rollback	--profile
+flag	repro system rollback	--reconcile-drift
+flag	repro system rollback	--state-dir
+command	repro system audit
+flag	repro system audit	--profile
+flag	repro system audit	--state-dir
+command	repro infra
+command	repro infra plan
+flag	repro infra plan	--accept-drift
+flag	repro infra plan	--activity
+flag	repro infra plan	--home-profile-dir
+flag	repro infra plan	--host
+flag	repro infra plan	--json
+flag	repro infra plan	--profile
+flag	repro infra plan	--reconcile-drift
+flag	repro infra plan	--state-dir
+flag	repro infra plan	--strict
+command	repro infra apply
+flag	repro infra apply	--accept-drift
+flag	repro infra apply	--accept-feature-destroy
+flag	repro infra apply	--accept-passwd-destroy
+flag	repro infra apply	--activity
+flag	repro infra apply	--elevate
+flag	repro infra apply	--force-unlock
+flag	repro infra apply	--home-profile-dir
+flag	repro infra apply	--host
+flag	repro infra apply	--json
+flag	repro infra apply	--keep-days
+flag	repro infra apply	--keep-generations
+flag	repro infra apply	--no-elevate
+flag	repro infra apply	--no-preview
+flag	repro infra apply	--plan
+flag	repro infra apply	--profile
+flag	repro infra apply	--reconcile-drift
+flag	repro infra apply	--staged
+flag	repro infra apply	--state-dir
+flag	repro infra apply	--yes
+command	repro infra cache-keys
+flag	repro infra cache-keys	--platform-abi
+flag	repro infra cache-keys	--platform-cpu
+flag	repro infra cache-keys	--platform-libc
+flag	repro infra cache-keys	--platform-os
+flag	repro infra cache-keys	--profile
+flag	repro infra cache-keys	--state-dir
+command	repro infra install-root
+flag	repro infra install-root	--device
+flag	repro infra install-root	--disko
+flag	repro infra install-root	--dry-run
+flag	repro infra install-root	--exclude
+flag	repro infra install-root	--hostname
+flag	repro infra install-root	--initrd
+flag	repro infra install-root	--kernel
+flag	repro infra install-root	--no-fstab
+flag	repro infra install-root	--no-grub
+flag	repro infra install-root	--no-rsync
+flag	repro infra install-root	--source
+flag	repro infra install-root	--target
+command	repro infra image
+flag	repro infra image	--addon-binary
+flag	repro infra image	--addon-sha256
+flag	repro infra image	--assembly-timeout
+flag	repro infra image	--compress
+flag	repro infra image	--deb-cache
+flag	repro infra image	--home-profile-dir
+flag	repro infra image	--host
+flag	repro infra image	--keep-work
+flag	repro infra image	--output
+flag	repro infra image	--profile
+flag	repro infra image	--work-dir
+command	repro anywhere
+flag	repro anywhere	--addon-binary
+flag	repro anywhere	--addon-sha256
+flag	repro anywhere	--agent-target
+flag	repro anywhere	--applied-profile-out
+flag	repro anywhere	--arch
+flag	repro anywhere	--cache-publishers
+flag	repro anywhere	--cache-url
+flag	repro anywhere	--deploy-signers
+flag	repro anywhere	--expect-plan
+flag	repro anywhere	--home-profile-dir
+flag	repro anywhere	--host
+flag	repro anywhere	--known-hosts
+flag	repro anywhere	--manifest
+flag	repro anywhere	--mode
+flag	repro anywhere	--poll-interval
+flag	repro anywhere	--profile
+flag	repro anywhere	--recipient-out
+flag	repro anywhere	--ssh-key
+flag	repro anywhere	--ssh-port
+command	repro deploy-agent
+flag	repro deploy-agent	--allowed-signers
+flag	repro deploy-agent	--cache-root
+flag	repro deploy-agent	--fetch-timeout-ms
+flag	repro deploy-agent	--host
+flag	repro deploy-agent	--manifest
+flag	repro deploy-agent	--secrets-dir
+flag	repro deploy-agent	--secrets-key
+flag	repro deploy-agent	--state-dir
+flag	repro deploy-agent	--target
+command	repro deploy-agent keygen
+flag	repro deploy-agent keygen	--secrets-key
+command	repro deploy-agent compile-profile
+flag	repro deploy-agent compile-profile	--actions-out
+flag	repro deploy-agent compile-profile	--arch
+flag	repro deploy-agent compile-profile	--canonical-out
+flag	repro deploy-agent compile-profile	--digest-out
+flag	repro deploy-agent compile-profile	--host
+flag	repro deploy-agent compile-profile	--platform
+flag	repro deploy-agent compile-profile	--probe-c-compiler
+flag	repro deploy-agent compile-profile	--revision-out
+flag	repro deploy-agent compile-profile	--staged
+flag	repro deploy-agent compile-profile	--state-dir
+flag	repro deploy-agent compile-profile	--stdio
+flag	repro deploy-agent compile-profile	--system-activities
+flag	repro deploy-agent compile-profile	--system-mode
+command	repro hardware
+command	repro hardware probe
+flag	repro hardware probe	--dry-run
+flag	repro hardware probe	--output
+flag	repro hardware probe	--regenerate
+command	repro disk
+command	repro disk plan
+command	repro disk apply
+flag	repro disk apply	--confirm
+flag	repro disk apply	--device
+flag	repro disk apply	--identity
+command	repro disk mount
+flag	repro disk mount	--confirm
+flag	repro disk mount	--target
+command	repro disk unmount
+flag	repro disk unmount	--target
+command	repro disk generate
+flag	repro disk generate	--probe
+command	repro disk image
+flag	repro disk image	--output
+flag	repro disk image	--size
+command	repro cargo
+command	repro cargo gc
+flag	repro cargo gc	--cargo-home
+flag	repro cargo gc	--dry-run
+flag	repro cargo gc	--keep-sets
+flag	repro cargo gc	--min-age
+flag	repro cargo gc	--target-dir
+command	repro cargo record-live
+flag	repro cargo record-live	--from
+flag	repro cargo record-live	--keep-sets
+flag	repro cargo record-live	--target-dir
+flag	repro cargo record-live	--tee
+command	repro cargo run
+flag	repro cargo run	--action-id
+flag	repro cargo run	--fragment
+flag	repro cargo run	--libs
+flag	repro cargo run	--products
+flag	repro cargo run	--relative-to
+flag	repro cargo run	--width
+flag	repro cargo run	-j
+command	repro health
+flag	repro health	--fix
+flag	repro health	--json
+flag	repro health	--offline
+flag	repro health	--verbose
+flag	repro health	--workspace-root
+flag	repro health	-v
+env	repro health	XDG_STATE_HOME
+command	repro debug
+command	repro debug artifact
+flag	repro debug artifact	--format
+flag	repro debug artifact	--json
+command	repro exec
+flag	repro exec	--activity
+flag	repro exec	--dev-env-stats
+flag	repro exec	--lock-slice
+flag	repro exec	--work-root
+command	repro run
+flag	repro run	--activity
+flag	repro run	--choose
+flag	repro run	--dev-env-stats
+flag	repro run	--lock-slice
+flag	repro run	--work-root
+command	repro shell
+flag	repro shell	--activity
+flag	repro shell	--command
+flag	repro shell	--dev-env-stats
+flag	repro shell	--lock-slice
+flag	repro shell	--print-env
+flag	repro shell	--shell
+flag	repro shell	--work-root
+flag	repro shell	-c
+env	repro shell	FILE_TYPE_PIPE
+env	repro shell	STDIN_FILENO
+env	repro shell	STD_INPUT_HANDLE
+command	repro shell hook
+flag	repro shell hook	--repro-bin
+command	repro allow
+command	repro deny
+command	repro dev-env
+command	repro dev-env export
+flag	repro dev-env export	--activity
+flag	repro dev-env export	--allow-stale
+flag	repro dev-env export	--develop-overrides
+flag	repro dev-env export	--pre-activation-env
+flag	repro dev-env export	--project-root
+command	repro dev-env deactivate
+flag	repro dev-env deactivate	--shell
+command	repro up
+flag	repro up	--activity
+flag	repro up	--force
+flag	repro up	--foreground
+flag	repro up	--http
+flag	repro up	--http-allow-remote
+flag	repro up	--lock-slice
+flag	repro up	--ready-timeout
+flag	repro up	--replace
+flag	repro up	--work-root
+command	repro down
+flag	repro down	--activity
+flag	repro down	--force
+flag	repro down	--lock-slice
+flag	repro down	--stop-timeout
+flag	repro down	--work-root
+command	repro dev
+flag	repro dev	--activity
+flag	repro dev	--debounce-ms
+flag	repro dev	--force
+flag	repro dev	--foreground
+flag	repro dev	--hcr
+flag	repro dev	--hcr-debug
+flag	repro dev	--hcr-mode
+flag	repro dev	--http
+flag	repro dev	--http-allow-remote
+flag	repro dev	--lock-slice
+flag	repro dev	--max-debounce
+flag	repro dev	--ready-timeout
+flag	repro dev	--replace
+flag	repro dev	--work-root
+command	repro hcr
+command	repro hcr coordinate
+flag	repro hcr coordinate	--artifacts
+flag	repro hcr coordinate	--patch-function
+flag	repro hcr coordinate	--project
+flag	repro hcr coordinate	--socket
+flag	repro hcr coordinate	--source-edit-driver
+flag	repro hcr coordinate	--target
+command	repro hcr prepare-object
+flag	repro hcr prepare-object	--all-code
+flag	repro hcr prepare-object	--function
+flag	repro hcr prepare-object	--input
+flag	repro hcr prepare-object	--output
+flag	repro hcr prepare-object	--segment
+command	repro prompt
+flag	repro prompt	--format
+flag	repro prompt	--workspace-root
+command	repro prompt init
+command	repro workspace
+command	repro workspace restore
+flag	repro workspace restore	--at
+flag	repro workspace restore	--projects
+flag	repro workspace restore	--record
+flag	repro workspace restore	--record-store
+flag	repro workspace restore	--record-store-at
+flag	repro workspace restore	--snapshot
+command	repro workspace init
+flag	repro workspace init	--allow-missing-layers
+flag	repro workspace init	--clone-objects
+flag	repro workspace init	--json
+flag	repro workspace init	--manifest-branch
+flag	repro workspace init	--manifest-url
+flag	repro workspace init	--no-write-report
+flag	repro workspace init	--print-resolved-url
+flag	repro workspace init	--private-manifest-url
+flag	repro workspace init	--tool-provisioning
+flag	repro workspace init	--workspace-root
+flag	repro workspace init	--write-report
+command	repro workspace bootstrap
+flag	repro workspace bootstrap	--workspace-root
+command	repro workspace enable
+flag	repro workspace enable	--clone-objects
+flag	repro workspace enable	--default
+flag	repro workspace enable	--dry-run
+flag	repro workspace enable	--jobs
+flag	repro workspace enable	--jobs-checkout
+flag	repro workspace enable	--jobs-network
+flag	repro workspace enable	--json
+flag	repro workspace enable	--no-sync
+flag	repro workspace enable	--tags
+flag	repro workspace enable	--verbose
+flag	repro workspace enable	--workspace-root
+flag	repro workspace enable	--write-report
+command	repro workspace disable
+flag	repro workspace disable	--force
+flag	repro workspace disable	--keep-checkouts
+flag	repro workspace disable	--workspace-root
+command	repro workspace sets
+flag	repro workspace sets	--all
+flag	repro workspace sets	--disabled
+flag	repro workspace sets	--enabled
+flag	repro workspace sets	--json
+flag	repro workspace sets	--workspace-root
+command	repro workspace sets list
+flag	repro workspace sets list	--all
+flag	repro workspace sets list	--disabled
+flag	repro workspace sets list	--enabled
+flag	repro workspace sets list	--json
+flag	repro workspace sets list	--workspace-root
+command	repro workspace sets resolve
+flag	repro workspace sets resolve	--at
+flag	repro workspace sets resolve	--json
+flag	repro workspace sets resolve	--workspace-root
+command	repro workspace sets add
+flag	repro workspace sets add	--message
+flag	repro workspace sets add	--no-template
+flag	repro workspace sets add	--template
+flag	repro workspace sets add	--workspace-root
+flag	repro workspace sets add	-m
+command	repro workspace sets remove
+flag	repro workspace sets remove	--prune-orphan-repos
+flag	repro workspace sets remove	--workspace-root
+command	repro workspace projects
+flag	repro workspace projects	--all
+flag	repro workspace projects	--disabled
+flag	repro workspace projects	--enabled
+flag	repro workspace projects	--json
+flag	repro workspace projects	--workspace-root
+command	repro workspace projects list
+flag	repro workspace projects list	--all
+flag	repro workspace projects list	--disabled
+flag	repro workspace projects list	--enabled
+flag	repro workspace projects list	--json
+flag	repro workspace projects list	--workspace-root
+command	repro workspace projects resolve
+flag	repro workspace projects resolve	--at
+flag	repro workspace projects resolve	--json
+flag	repro workspace projects resolve	--workspace-root
+command	repro workspace projects add
+flag	repro workspace projects add	--message
+flag	repro workspace projects add	--no-template
+flag	repro workspace projects add	--template
+flag	repro workspace projects add	--workspace-root
+flag	repro workspace projects add	-m
+command	repro workspace projects remove
+flag	repro workspace projects remove	--prune-orphan-repos
+flag	repro workspace projects remove	--workspace-root
+command	repro workspace repos
+flag	repro workspace repos	--all
+flag	repro workspace repos	--disabled
+flag	repro workspace repos	--enabled
+flag	repro workspace repos	--json
+flag	repro workspace repos	--project
+flag	repro workspace repos	--set
+flag	repro workspace repos	--workspace-root
+command	repro workspace repos list
+flag	repro workspace repos list	--all
+flag	repro workspace repos list	--disabled
+flag	repro workspace repos list	--enabled
+flag	repro workspace repos list	--json
+flag	repro workspace repos list	--project
+flag	repro workspace repos list	--set
+flag	repro workspace repos list	--workspace-root
+command	repro workspace repos add
+flag	repro workspace repos add	--branch
+flag	repro workspace repos add	--mainline
+flag	repro workspace repos add	--message
+flag	repro workspace repos add	--path
+flag	repro workspace repos add	--profile
+flag	repro workspace repos add	--project
+flag	repro workspace repos add	--remote
+flag	repro workspace repos add	--revision
+flag	repro workspace repos add	--set
+flag	repro workspace repos add	--workspace-root
+flag	repro workspace repos add	-m
+command	repro workspace repos remove
+flag	repro workspace repos remove	--delete-fragment
+flag	repro workspace repos remove	--project
+flag	repro workspace repos remove	--set
+flag	repro workspace repos remove	--workspace-root
+command	repro workspace status
+flag	repro workspace status	--ahead-behind
+flag	repro workspace status	--file-details
+flag	repro workspace status	--files
+flag	repro workspace status	--fix
+flag	repro workspace status	--json
+flag	repro workspace status	--no-write-report
+flag	repro workspace status	--stashes
+flag	repro workspace status	--tool-provisioning
+flag	repro workspace status	--unmerged
+flag	repro workspace status	--verbose
+flag	repro workspace status	--workspace-root
+flag	repro workspace status	--write-report
+flag	repro workspace status	-v
+command	repro workspace lock
+flag	repro workspace lock	--no-write-report
+flag	repro workspace lock	--record-store-root
+flag	repro workspace lock	--sha
+flag	repro workspace lock	--tool-provisioning
+flag	repro workspace lock	--trigger-repo
+flag	repro workspace lock	--workspace-root
+flag	repro workspace lock	--write-report
+command	repro workspace list
+flag	repro workspace list	--json
+flag	repro workspace list	--no-write-report
+flag	repro workspace list	--workspace-root
+flag	repro workspace list	--write-report
+command	repro workspace manifests
+flag	repro workspace manifests	--json
+flag	repro workspace manifests	--no-write-report
+flag	repro workspace manifests	--workspace-root
+flag	repro workspace manifests	--write-report
+command	repro workspace branch-roles
+flag	repro workspace branch-roles	--except
+flag	repro workspace branch-roles	--filter
+flag	repro workspace branch-roles	--json
+flag	repro workspace branch-roles	--lts
+flag	repro workspace branch-roles	--mainline
+flag	repro workspace branch-roles	--only
+flag	repro workspace branch-roles	--production
+flag	repro workspace branch-roles	--stable
+flag	repro workspace branch-roles	--staging
+flag	repro workspace branch-roles	--tags
+flag	repro workspace branch-roles	--to
+flag	repro workspace branch-roles	--unstable
+flag	repro workspace branch-roles	--workspace-root
+command	repro workspace forall
+flag	repro workspace forall	--command
+flag	repro workspace forall	--fail-fast
+flag	repro workspace forall	--ignore-errors
+flag	repro workspace forall	--json
+flag	repro workspace forall	--keep-going
+flag	repro workspace forall	--no-write-report
+flag	repro workspace forall	--quiet
+flag	repro workspace forall	--workspace-root
+flag	repro workspace forall	--write-report
+flag	repro workspace forall	-c
+command	repro workspace shared-clones
+flag	repro workspace shared-clones	--force
+flag	repro workspace shared-clones	--json
+flag	repro workspace shared-clones	--no-write-report
+flag	repro workspace shared-clones	--workspace-root
+flag	repro workspace shared-clones	--write-report
+command	repro workspace sync
+flag	repro workspace sync	--clone-objects
+flag	repro workspace sync	--dry-run
+flag	repro workspace sync	--except
+flag	repro workspace sync	--fail-fast
+flag	repro workspace sync	--filter
+flag	repro workspace sync	--force
+flag	repro workspace sync	--force-sync
+flag	repro workspace sync	--jobs
+flag	repro workspace sync	--jobs-checkout
+flag	repro workspace sync	--jobs-network
+flag	repro workspace sync	--json
+flag	repro workspace sync	--lts
+flag	repro workspace sync	--mainline
+flag	repro workspace sync	--merge
+flag	repro workspace sync	--no-interleaved
+flag	repro workspace sync	--no-rebase-on-force-push
+flag	repro workspace sync	--no-write-report
+flag	repro workspace sync	--only
+flag	repro workspace sync	--production
+flag	repro workspace sync	--progress
+flag	repro workspace sync	--rebase
+flag	repro workspace sync	--rebase-on-force-push
+flag	repro workspace sync	--stable
+flag	repro workspace sync	--staging
+flag	repro workspace sync	--tags
+flag	repro workspace sync	--to
+flag	repro workspace sync	--tool-provisioning
+flag	repro workspace sync	--unstable
+flag	repro workspace sync	--verbose
+flag	repro workspace sync	--workspace-root
+flag	repro workspace sync	--write-report
+flag	repro workspace sync	--yes
+flag	repro workspace sync	-j
+flag	repro workspace sync	-v
+command	repro workspace pull
+flag	repro workspace pull	--clone-objects
+flag	repro workspace pull	--force
+flag	repro workspace pull	--no-write-report
+flag	repro workspace pull	--tool-provisioning
+flag	repro workspace pull	--workspace-root
+flag	repro workspace pull	--write-report
+command	repro workspace new
+flag	repro workspace new	--branch
+flag	repro workspace new	--clone-objects
+flag	repro workspace new	--existing-branch
+flag	repro workspace new	--fetch
+flag	repro workspace new	--from
+flag	repro workspace new	--include-changes
+flag	repro workspace new	--json
+flag	repro workspace new	--lts
+flag	repro workspace new	--mainline
+flag	repro workspace new	--no-fetch
+flag	repro workspace new	--no-write-report
+flag	repro workspace new	--production
+flag	repro workspace new	--projects
+flag	repro workspace new	--stable
+flag	repro workspace new	--staging
+flag	repro workspace new	--tool-provisioning
+flag	repro workspace new	--unpublished
+flag	repro workspace new	--unstable
+flag	repro workspace new	--workspace-root
+flag	repro workspace new	--write-report
+command	repro workspace switch
+flag	repro workspace switch	--fetch
+flag	repro workspace switch	--force
+flag	repro workspace switch	--json
+flag	repro workspace switch	--lts
+flag	repro workspace switch	--mainline
+flag	repro workspace switch	--new-branch
+flag	repro workspace switch	--no-fetch
+flag	repro workspace switch	--no-write-report
+flag	repro workspace switch	--production
+flag	repro workspace switch	--stable
+flag	repro workspace switch	--staging
+flag	repro workspace switch	--to
+flag	repro workspace switch	--tool-provisioning
+flag	repro workspace switch	--unstable
+flag	repro workspace switch	--workspace-root
+flag	repro workspace switch	--write-report
+flag	repro workspace switch	--yes
+flag	repro workspace switch	-b
+command	repro workspace provision
+flag	repro workspace provision	--arch
+flag	repro workspace provision	--install-root
+command	repro workspace migrate
+flag	repro workspace migrate	--dry-run
+flag	repro workspace migrate	--json
+flag	repro workspace migrate	--no-write-report
+flag	repro workspace migrate	--workspace-root
+flag	repro workspace migrate	--write-report
+command	repro workspace migrate-locks
+flag	repro workspace migrate-locks	--apply
+flag	repro workspace migrate-locks	--dry-run
+flag	repro workspace migrate-locks	--record-store-root
+flag	repro workspace migrate-locks	--tool-provisioning
+flag	repro workspace migrate-locks	--workspace-root
+command	repro workspace publish-evidence
+flag	repro workspace publish-evidence	--project
+flag	repro workspace publish-evidence	--tool-provisioning
+flag	repro workspace publish-evidence	--workspace-root
+command	repro sync
+flag	repro sync	--clone-objects
+flag	repro sync	--dry-run
+flag	repro sync	--except
+flag	repro sync	--fail-fast
+flag	repro sync	--filter
+flag	repro sync	--force
+flag	repro sync	--force-sync
+flag	repro sync	--jobs
+flag	repro sync	--jobs-checkout
+flag	repro sync	--jobs-network
+flag	repro sync	--json
+flag	repro sync	--lts
+flag	repro sync	--mainline
+flag	repro sync	--merge
+flag	repro sync	--no-interleaved
+flag	repro sync	--no-rebase-on-force-push
+flag	repro sync	--no-write-report
+flag	repro sync	--only
+flag	repro sync	--production
+flag	repro sync	--progress
+flag	repro sync	--rebase
+flag	repro sync	--rebase-on-force-push
+flag	repro sync	--stable
+flag	repro sync	--staging
+flag	repro sync	--tags
+flag	repro sync	--to
+flag	repro sync	--tool-provisioning
+flag	repro sync	--unstable
+flag	repro sync	--verbose
+flag	repro sync	--workspace-root
+flag	repro sync	--write-report
+flag	repro sync	--yes
+flag	repro sync	-j
+flag	repro sync	-v
+command	repro pull
+flag	repro pull	--clone-objects
+flag	repro pull	--force
+flag	repro pull	--no-write-report
+flag	repro pull	--tool-provisioning
+flag	repro pull	--workspace-root
+flag	repro pull	--write-report
+command	repro branch
+flag	repro branch	--branch
+flag	repro branch	--clone-objects
+flag	repro branch	--existing-branch
+flag	repro branch	--fetch
+flag	repro branch	--from
+flag	repro branch	--include-changes
+flag	repro branch	--json
+flag	repro branch	--lts
+flag	repro branch	--mainline
+flag	repro branch	--no-fetch
+flag	repro branch	--no-write-report
+flag	repro branch	--production
+flag	repro branch	--projects
+flag	repro branch	--stable
+flag	repro branch	--staging
+flag	repro branch	--tool-provisioning
+flag	repro branch	--unpublished
+flag	repro branch	--unstable
+flag	repro branch	--workspace-root
+flag	repro branch	--write-report
+command	repro switch
+flag	repro switch	--fetch
+flag	repro switch	--force
+flag	repro switch	--json
+flag	repro switch	--lts
+flag	repro switch	--mainline
+flag	repro switch	--new-branch
+flag	repro switch	--no-fetch
+flag	repro switch	--no-write-report
+flag	repro switch	--production
+flag	repro switch	--stable
+flag	repro switch	--staging
+flag	repro switch	--to
+flag	repro switch	--tool-provisioning
+flag	repro switch	--unstable
+flag	repro switch	--workspace-root
+flag	repro switch	--write-report
+flag	repro switch	--yes
+flag	repro switch	-b
+command	repro push
+flag	repro push	--certify
+flag	repro push	--current-repo
+flag	repro push	--json
+flag	repro push	--merge
+flag	repro push	--no-certify
+flag	repro push	--no-write-report
+flag	repro push	--rebase
+flag	repro push	--sync
+flag	repro push	--tool-provisioning
+flag	repro push	--workspace-root
+flag	repro push	--write-report
+command	repro check
+flag	repro check	--current-repo
+flag	repro check	--json
+flag	repro check	--mode
+flag	repro check	--no-write-report
+flag	repro check	--pushed-refs
+flag	repro check	--tool-provisioning
+flag	repro check	--workspace-root
+flag	repro check	--write-report
+command	repro hooks
+env	repro hooks	INSTALL_PYTHON
+env	repro hooks	REPROBUILD_REPRO
+env	repro hooks	REPRO_CMD_SOURCE
+env	repro hooks	REPRO_INSTALLING_BUILD
+command	repro hooks ensure
+flag	repro hooks ensure	--json
+flag	repro hooks ensure	--no-write-report
+flag	repro hooks ensure	--profile
+flag	repro hooks ensure	--re-anchor
+flag	repro hooks ensure	--record-store
+flag	repro hooks ensure	--shell
+flag	repro hooks ensure	--shell-autocomplete
+flag	repro hooks ensure	--shell-direnv
+flag	repro hooks ensure	--vcs
+flag	repro hooks ensure	--workspace-root
+flag	repro hooks ensure	--write-report
+command	repro hooks reinstall
+flag	repro hooks reinstall	--json
+flag	repro hooks reinstall	--no-write-report
+flag	repro hooks reinstall	--re-anchor
+flag	repro hooks reinstall	--record-store
+flag	repro hooks reinstall	--shell
+flag	repro hooks reinstall	--shell-autocomplete
+flag	repro hooks reinstall	--shell-direnv
+flag	repro hooks reinstall	--vcs
+flag	repro hooks reinstall	--workspace-root
+flag	repro hooks reinstall	--write-report
+command	repro hooks uninstall
+flag	repro hooks uninstall	--json
+flag	repro hooks uninstall	--no-write-report
+flag	repro hooks uninstall	--re-anchor
+flag	repro hooks uninstall	--record-store
+flag	repro hooks uninstall	--shell
+flag	repro hooks uninstall	--shell-autocomplete
+flag	repro hooks uninstall	--shell-direnv
+flag	repro hooks uninstall	--vcs
+flag	repro hooks uninstall	--workspace-root
+flag	repro hooks uninstall	--write-report
+command	repro lock
+command	repro lock list
+command	repro lock solve
+flag	repro lock solve	--activity
+flag	repro lock solve	--dry-run
+flag	repro lock solve	--highest
+flag	repro lock solve	--inputs
+flag	repro lock solve	--json
+flag	repro lock solve	--lock
+flag	repro lock solve	--lowest
+flag	repro lock solve	--platform
+flag	repro lock solve	--registry
+flag	repro lock solve	--strategy
+flag	repro lock solve	--write
+command	repro lock refresh
+flag	repro lock refresh	--allow-pin-regression
+flag	repro lock refresh	--allow-stale-manifest
+flag	repro lock refresh	--highest
+flag	repro lock refresh	--inputs
+flag	repro lock refresh	--json
+flag	repro lock refresh	--lock
+flag	repro lock refresh	--lowest
+flag	repro lock refresh	--platform
+flag	repro lock refresh	--provisioning
+flag	repro lock refresh	--registry
+flag	repro lock refresh	--repin
+flag	repro lock refresh	--strategy
+flag	repro lock refresh	--write
+command	repro lock update
+flag	repro lock update	--allow-pin-regression
+flag	repro lock update	--repo-root
+flag	repro lock update	--to
+command	repro lock validate
+flag	repro lock validate	--highest
+flag	repro lock validate	--inputs
+flag	repro lock validate	--json
+flag	repro lock validate	--lock
+flag	repro lock validate	--lowest
+flag	repro lock validate	--platform
+flag	repro lock validate	--registry
+flag	repro lock validate	--strategy
+flag	repro lock validate	--write
+command	repro lock diff
+command	repro lock explain
+flag	repro lock explain	--fixture
+flag	repro lock explain	--json
+command	repro locking
+command	repro locking explain
+flag	repro locking explain	--json
+flag	repro locking explain	--project
+flag	repro locking explain	--tool-provisioning
+flag	repro locking explain	--workspace-root
+command	repro locking adopt-manifest
+flag	repro locking adopt-manifest	--project
+flag	repro locking adopt-manifest	--tool-provisioning
+flag	repro locking adopt-manifest	--workspace-root
+command	repro gateway
+command	repro gateway pre-receive
+flag	repro gateway pre-receive	--gateway-dir
+command	repro gateway post-receive
+flag	repro gateway post-receive	--gateway-dir
+command	repro gateway migrate
+flag	repro gateway migrate	--dry-run
+flag	repro gateway migrate	--workspace-root
+command	repro add
+flag	repro add	--binary
+flag	repro add	--build
+flag	repro add	--depends-of
+flag	repro add	--develop
+flag	repro add	--dry-run
+flag	repro add	--json
+flag	repro add	--native-build
+flag	repro add	--no-develop
+flag	repro add	--no-membership
+flag	repro add	--remote
+flag	repro add	--revision
+flag	repro add	--runtime
+flag	repro add	--tool-provisioning
+flag	repro add	--workspace-root
+command	repro remove
+flag	repro remove	--dry-run
+flag	repro remove	--force
+flag	repro remove	--json
+flag	repro remove	--tool-provisioning
+flag	repro remove	--workspace-root
+flag	repro remove	--yes
+command	repro develop
+flag	repro develop	--all
+flag	repro develop	--at
+flag	repro develop	--cmake
+flag	repro develop	--cmake-binary
+flag	repro develop	--direct
+flag	repro develop	--drop
+flag	repro develop	--dry-run
+flag	repro develop	--except
+flag	repro develop	--filter
+flag	repro develop	--indirect
+flag	repro develop	--into
+flag	repro develop	--json
+flag	repro develop	--list
+flag	repro develop	--list-overrides
+flag	repro develop	--lock-store
+flag	repro develop	--no-write-report
+flag	repro develop	--only
+flag	repro develop	--project
+flag	repro develop	--project-root
+flag	repro develop	--reset
+flag	repro develop	--source
+flag	repro develop	--strict
+flag	repro develop	--tag
+flag	repro develop	--tier
+flag	repro develop	--tool-provisioning
+flag	repro develop	--transitive-of
+flag	repro develop	--work-root
+flag	repro develop	--workspace-root
+flag	repro develop	--write-report
+command	repro flake
+command	repro flake override-args
+flag	repro flake override-args	--all
+flag	repro flake override-args	--at
+flag	repro flake override-args	--direct
+flag	repro flake override-args	--except
+flag	repro flake override-args	--filter
+flag	repro flake override-args	--flake
+flag	repro flake override-args	--indirect
+flag	repro flake override-args	--json
+flag	repro flake override-args	--lock-store
+flag	repro flake override-args	--only
+flag	repro flake override-args	--project
+flag	repro flake override-args	--strict
+flag	repro flake override-args	--strip-suffix
+flag	repro flake override-args	--tag
+flag	repro flake override-args	--tier
+flag	repro flake override-args	--tool-provisioning
+flag	repro flake override-args	--transitive-of
+flag	repro flake override-args	--workspace-root
+command	repro flake refresh-lock
+flag	repro flake refresh-lock	--all
+flag	repro flake refresh-lock	--at
+flag	repro flake refresh-lock	--current-repo
+flag	repro flake refresh-lock	--direct
+flag	repro flake refresh-lock	--except
+flag	repro flake refresh-lock	--filter
+flag	repro flake refresh-lock	--flake
+flag	repro flake refresh-lock	--indirect
+flag	repro flake refresh-lock	--json
+flag	repro flake refresh-lock	--lock-store
+flag	repro flake refresh-lock	--only
+flag	repro flake refresh-lock	--project
+flag	repro flake refresh-lock	--record-downgrade
+flag	repro flake refresh-lock	--strict
+flag	repro flake refresh-lock	--strip-suffix
+flag	repro flake refresh-lock	--tag
+flag	repro flake refresh-lock	--tier
+flag	repro flake refresh-lock	--tool-provisioning
+flag	repro flake refresh-lock	--transitive-of
+flag	repro flake refresh-lock	--workspace-root
+command	repro flake override-status
+flag	repro flake override-status	--all
+flag	repro flake override-status	--applied
+flag	repro flake override-status	--at
+flag	repro flake override-status	--direct
+flag	repro flake override-status	--except
+flag	repro flake override-status	--filter
+flag	repro flake override-status	--flake
+flag	repro flake override-status	--indirect
+flag	repro flake override-status	--json
+flag	repro flake override-status	--lock-store
+flag	repro flake override-status	--only
+flag	repro flake override-status	--project
+flag	repro flake override-status	--strict
+flag	repro flake override-status	--strip-suffix
+flag	repro flake override-status	--tag
+flag	repro flake override-status	--tier
+flag	repro flake override-status	--tool-provisioning
+flag	repro flake override-status	--transitive-of
+flag	repro flake override-status	--workspace-root
+command	repro build
+flag	repro build	--action-cache-root
+flag	repro build	--action-output
+flag	repro build	--daemon
+flag	repro build	--debug
+flag	repro build	--dry-run
+flag	repro build	--evidence
+flag	repro build	--force-rebuild
+flag	repro build	--hard-rebuild
+flag	repro build	--json
+flag	repro build	--list-targets
+flag	repro build	--list-targets-json
+flag	repro build	--lock
+flag	repro build	--log
+flag	repro build	--measure
+flag	repro build	--monitor-hosting
+flag	repro build	--no-output-cleanup
+flag	repro build	--no-restore-cached-outputs
+flag	repro build	--no-runquota
+flag	repro build	--no-unicode
+flag	repro build	--no-write-report
+flag	repro build	--no-write-stats
+flag	repro build	--only
+flag	repro build	--package
+flag	repro build	--peer-cache
+flag	repro build	--prepare-only
+flag	repro build	--print-solved-graph
+flag	repro build	--progress
+flag	repro build	--progress-bars
+flag	repro build	--publish
+flag	repro build	--publish-cache-hits
+flag	repro build	--publish-materialized
+flag	repro build	--rebuild
+flag	repro build	--rebuild-host-bound
+flag	repro build	--release
+flag	repro build	--restore-cached-outputs
+flag	repro build	--runquota
+flag	repro build	--show
+flag	repro build	--skip-cmake-regeneration
+flag	repro build	--soft-rebuild
+flag	repro build	--stats-groups
+flag	repro build	--strategy
+flag	repro build	--target
+flag	repro build	--tool-provisioning
+flag	repro build	--trust-profile
+flag	repro build	--unicode
+flag	repro build	--unsafe-preserve-outputs
+flag	repro build	--variant
+flag	repro build	--verbose
+flag	repro build	--very-verbose
+flag	repro build	--work-root
+flag	repro build	--write-benchmark
+flag	repro build	--write-diagnostics
+flag	repro build	--write-report
+flag	repro build	--write-stats
+flag	repro build	-v
+flag	repro build	-vv
+env	repro build	CARGO_BUILD_TARGET
+env	repro build	CARGO_HOME
+env	repro build	CARGO_NET_OFFLINE
+env	repro build	CONFIG_SHELL
+env	repro build	DYLD_FALLBACK_LIBRARY_PATH
+env	repro build	DYLD_LIBRARY_PATH
+env	repro build	EF_ARM_ABI_FLOAT_HARD
+env	repro build	EF_ARM_ABI_FLOAT_SOFT
+env	repro build	EI_CLASS
+env	repro build	EI_DATA
+env	repro build	EI_OSABI
+env	repro build	EM_386
+env	repro build	EM_AARCH64
+env	repro build	EM_ARM
+env	repro build	EM_BPF
+env	repro build	EM_RISCV
+env	repro build	EM_X86_64
+env	repro build	FAIL_REGEX
+env	repro build	IN_AGENT_SHELL
+env	repro build	LD_LIBRARY_PATH
+env	repro build	LIBRARY_PATH
+env	repro build	MACOSX_DEPLOYMENT_TARGET
+env	repro build	NIX_BUILD_CORES
+env	repro build	NIX_CFLAGS_COMPILE
+env	repro build	NIX_CONFIG
+env	repro build	NIX_CONF_DIR
+env	repro build	NIX_DONT_SET_RPATH
+env	repro build	NIX_HARDENING_ENABLE
+env	repro build	NIX_LDFLAGS
+env	repro build	NIX_PROFILES
+env	repro build	NIX_SSL_CERT_FILE
+env	repro build	NIX_STORE
+env	repro build	NIX_USER_CONF_FILES
+env	repro build	NIX_USER_PROFILE_DIR
+env	repro build	PKG_CONFIG
+env	repro build	PKG_CONFIG_PATH
+env	repro build	PT_INTERP
+env	repro build	REPROBUILD_LOG
+env	repro build	REPROBUILD_MEASURE
+env	repro build	REPROBUILD_MONITOR_HOSTING
+env	repro build	REPROBUILD_NO_RUNQUOTA
+env	repro build	REPROBUILD_PROGRESS
+env	repro build	REPROBUILD_PROGRESS_BARS
+env	repro build	REPROBUILD_SHOW
+env	repro build	REPRO_BINARY_CACHE_CERT_PATH
+env	repro build	REPRO_BINARY_CACHE_KEY_PATH
+env	repro build	REPRO_BINARY_CACHE_URL
+env	repro build	REPRO_DAEMON
+env	repro build	REPRO_PROGRESS
+env	repro build	REPRO_RESTORE_CACHED_OUTPUTS
+env	repro build	REPRO_RUNQUOTA_GRANT_HEARTBEAT
+env	repro build	REPRO_TARGET_OBJECT_EXEMPTIONS
+env	repro build	REPRO_TOOL_PROVISIONING
+env	repro build	REPRO_UNICODE
+env	repro build	REPRO_VARIANTS
+env	repro build	RUNQUOTA_SOCKET
+env	repro build	RUSTUP_HOME
+env	repro build	RUSTUP_TOOLCHAIN
+env	repro build	SOURCE_DATE_EPOCH
+env	repro build	SSL_CERT_FILE
+env	repro build	XDG_CONFIG_DIRS
+env	repro build	XDG_CONFIG_HOME
+command	repro bench
+flag	repro bench	--action-cache-root
+flag	repro bench	--action-output
+flag	repro bench	--daemon
+flag	repro bench	--debug
+flag	repro bench	--dry-run
+flag	repro bench	--evidence
+flag	repro bench	--force-rebuild
+flag	repro bench	--hard-rebuild
+flag	repro bench	--json
+flag	repro bench	--list-targets
+flag	repro bench	--list-targets-json
+flag	repro bench	--lock
+flag	repro bench	--log
+flag	repro bench	--measure
+flag	repro bench	--monitor-hosting
+flag	repro bench	--no-output-cleanup
+flag	repro bench	--no-restore-cached-outputs
+flag	repro bench	--no-runquota
+flag	repro bench	--no-unicode
+flag	repro bench	--no-write-report
+flag	repro bench	--only
+flag	repro bench	--package
+flag	repro bench	--peer-cache
+flag	repro bench	--prepare-only
+flag	repro bench	--print-solved-graph
+flag	repro bench	--progress
+flag	repro bench	--progress-bars
+flag	repro bench	--publish
+flag	repro bench	--publish-cache-hits
+flag	repro bench	--publish-materialized
+flag	repro bench	--rebuild
+flag	repro bench	--rebuild-host-bound
+flag	repro bench	--release
+flag	repro bench	--restore-cached-outputs
+flag	repro bench	--runquota
+flag	repro bench	--show
+flag	repro bench	--skip-cmake-regeneration
+flag	repro bench	--soft-rebuild
+flag	repro bench	--stats-groups
+flag	repro bench	--strategy
+flag	repro bench	--target
+flag	repro bench	--tool-provisioning
+flag	repro bench	--trust-profile
+flag	repro bench	--unicode
+flag	repro bench	--unsafe-preserve-outputs
+flag	repro bench	--variant
+flag	repro bench	--verbose
+flag	repro bench	--very-verbose
+flag	repro bench	--work-root
+flag	repro bench	--write-benchmark
+flag	repro bench	--write-diagnostics
+flag	repro bench	--write-report
+flag	repro bench	--write-stats
+flag	repro bench	-v
+flag	repro bench	-vv
+env	repro bench	REPROBUILD_LOG
+env	repro bench	REPROBUILD_MEASURE
+env	repro bench	REPROBUILD_MONITOR_HOSTING
+env	repro bench	REPROBUILD_NO_RUNQUOTA
+env	repro bench	REPROBUILD_PROGRESS
+env	repro bench	REPROBUILD_PROGRESS_BARS
+env	repro bench	REPROBUILD_SHOW
+env	repro bench	REPRO_DAEMON
+env	repro bench	REPRO_PROGRESS
+env	repro bench	REPRO_RESTORE_CACHED_OUTPUTS
+env	repro bench	REPRO_TOOL_PROVISIONING
+env	repro bench	REPRO_UNICODE
+command	repro lint
+flag	repro lint	--action-cache-root
+flag	repro lint	--action-output
+flag	repro lint	--daemon
+flag	repro lint	--debug
+flag	repro lint	--dry-run
+flag	repro lint	--evidence
+flag	repro lint	--force-rebuild
+flag	repro lint	--hard-rebuild
+flag	repro lint	--json
+flag	repro lint	--list-targets
+flag	repro lint	--list-targets-json
+flag	repro lint	--lock
+flag	repro lint	--log
+flag	repro lint	--measure
+flag	repro lint	--monitor-hosting
+flag	repro lint	--no-output-cleanup
+flag	repro lint	--no-restore-cached-outputs
+flag	repro lint	--no-runquota
+flag	repro lint	--no-unicode
+flag	repro lint	--no-write-report
+flag	repro lint	--only
+flag	repro lint	--package
+flag	repro lint	--peer-cache
+flag	repro lint	--prepare-only
+flag	repro lint	--print-solved-graph
+flag	repro lint	--progress
+flag	repro lint	--progress-bars
+flag	repro lint	--publish
+flag	repro lint	--publish-cache-hits
+flag	repro lint	--publish-materialized
+flag	repro lint	--rebuild
+flag	repro lint	--rebuild-host-bound
+flag	repro lint	--release
+flag	repro lint	--restore-cached-outputs
+flag	repro lint	--runquota
+flag	repro lint	--show
+flag	repro lint	--skip-cmake-regeneration
+flag	repro lint	--soft-rebuild
+flag	repro lint	--stats-groups
+flag	repro lint	--strategy
+flag	repro lint	--target
+flag	repro lint	--tool-provisioning
+flag	repro lint	--trust-profile
+flag	repro lint	--unicode
+flag	repro lint	--unsafe-preserve-outputs
+flag	repro lint	--variant
+flag	repro lint	--verbose
+flag	repro lint	--very-verbose
+flag	repro lint	--work-root
+flag	repro lint	--write-benchmark
+flag	repro lint	--write-diagnostics
+flag	repro lint	--write-report
+flag	repro lint	--write-stats
+flag	repro lint	-v
+flag	repro lint	-vv
+env	repro lint	REPROBUILD_LOG
+env	repro lint	REPROBUILD_MEASURE
+env	repro lint	REPROBUILD_MONITOR_HOSTING
+env	repro lint	REPROBUILD_NO_RUNQUOTA
+env	repro lint	REPROBUILD_PROGRESS
+env	repro lint	REPROBUILD_PROGRESS_BARS
+env	repro lint	REPROBUILD_SHOW
+env	repro lint	REPRO_DAEMON
+env	repro lint	REPRO_PROGRESS
+env	repro lint	REPRO_RESTORE_CACHED_OUTPUTS
+env	repro lint	REPRO_TOOL_PROVISIONING
+env	repro lint	REPRO_UNICODE
+command	repro clean
+flag	repro clean	--dry-run
+flag	repro clean	--project-root
+flag	repro clean	--work-root

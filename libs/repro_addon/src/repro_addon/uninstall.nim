@@ -69,6 +69,9 @@ import ./store_root
 from ./preflight import AgentStateDir, AgentStateRecordsDir, RecipientKeyPath
 import ./preflight as preflightPaths
 import ./switch
+import ./record_dir
+from repro_infra/carried_state import nil
+export RecordExistsError
 
 
 type
@@ -84,6 +87,12 @@ type
     logDir*: string
       ## Where the state-removal token goes ("" = ``/var/log/repro-addon``,
       ## beside the discard records; §13 decision 165).
+    custody*: CustodySite
+      ## The store custody site ("" ``stateDir`` = the default for
+      ## ``stateDir``): a test's own, with its own attestation key.
+    ship*: proc (): tuple[ok: bool; why: string] {.closure.}
+      ## How the gate ships the evidence outbox (nil = ``shipEvidenceNow``):
+      ## a test's stand-in for a sink that does not acknowledge.
     discardStoreEvidence*: bool
       ## Remove the store evidence directory's entries with the state; an
       ## uninstall that would remove any refuses without it, naming them
@@ -299,6 +308,24 @@ proc preBootstrapInputs*(l: Ledger; expectedOwner = (0, 0)):
       result.errors.add(e.path & ": the ledger's record of this " &
         "pre-bootstrap input cannot be read (" & ex.msg & ")")
 
+proc refuseCorruptInputs*(r: var UninstallResult;
+                          pb: tuple[inputs: seq[PreBootstrapInput];
+                                    drift, errors, notes: seq[string]];
+                          ledgerPath: string): bool =
+  ## True, with the errors and their remedy reported, when the ledger's
+  ## record of a pre-bootstrap input is corrupt (``preBootstrapInputs``):
+  ## the uninstall must then stop before step 1, with nothing removed.
+  if pb.errors.len == 0: return false
+  when mutated("corrupt-input-record-continues"):
+    for e in pb.errors: r.errors.add(e)
+    return false        # FALSIFIER: the run goes on with a corrupt ledger
+  for e in pb.errors: r.errors.add(e)
+  r.errors.add("nothing was removed: the ledger " & ledgerPath & " records " &
+    "a pre-bootstrap input in a way the preflight cannot have; restore it " &
+    "from the generation it came from (<state>/generations/<id>/" &
+    "addon-ledger) or correct that entry, then run uninstall again")
+  true
+
 proc inputPaths*(inputs: seq[PreBootstrapInput]): seq[string] =
   for i in inputs: result.add(i.path)
 
@@ -480,7 +507,7 @@ proc shipEvidenceNow*(stateDir: string): tuple[ok: bool; why: string] =
 const StateRoot* = "/var/lib/repro"
   ## The add-on's state, removed last, the ledger copy last within it but
   ## for the rmdir of the empty directories (§13 decisions 150 and 161).
-const UninstallOverrideDir* = "/var/log/repro-addon"
+const UninstallOverrideDir* = AddonLogDir
   ## Where §13 decision 62's override record is written: outside
   ## ``/var/lib/repro`` and ``/etc/repro``, which uninstall removes.
 
@@ -537,8 +564,6 @@ type
     ## record is written (§13 decision 112). The default is
     ## ``syncRemovedObjects``; a test passes one that records the call or
     ## fails.
-  RecordExistsError* = object of OSError
-    ## A discard record's name is taken: it is never written over.
 
 proc syncDirFd(dir: string) =
   let fd = posix.open(dir.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
@@ -549,12 +574,9 @@ proc syncDirFd(dir: string) =
   if fsync(fd) != 0:
     raise newException(OSError, "fsync of " & dir & " failed: " & $strerror(errno))
 
-proc writeFileExclusiveDurable*(path, text: string; mode = 0o600) =
-  ## Writes ``path`` only if no file of that name exists (round 9): the
-  ## bytes go to a temporary file in the same directory, which is fsynced
-  ## and then linked to ``path`` -- ``link(2)`` refuses an existing name,
-  ## where a rename would replace it -- and the directory is fsynced.
-  ## Raises ``RecordExistsError`` when the name is taken.
+proc writeFileExclusiveByPath(path, text: string; mode = 0o600) =
+  ## Only the falsifier ``record-dir-link-followed`` uses it: the writer
+  ## as it was before A11 round 18, by path.
   let dir = parentDir(path)
   let tmp = dir / ("." & extractFilename(path) & ".tmp-" &
                    $getCurrentProcessId() & "-" & $epochTime().int64)
@@ -592,6 +614,22 @@ proc writeFileExclusiveDurable*(path, text: string; mode = 0o600) =
       raise newException(OSError, "link to " & path & " failed: " & $strerror(e))
     discard posix.unlink(tmp.cstring)
   syncDirFd(dir)
+
+proc writeFileExclusiveDurable*(path, text: string; mode = 0o600) =
+  ## Writes ``path`` only if no file of that name exists (round 9),
+  ## durably: the bytes go to a temporary file in the same directory, which
+  ## is fsynced and then linked to ``path`` -- ``linkat(2)`` refuses an
+  ## existing name, where a rename would replace it -- and the directory is
+  ## fsynced. Every step goes through one checked descriptor of the
+  ## directory (``record_dir``; A11 round 18): a symbolic link planted in
+  ## the directory's place -- Ubuntu's ``/var/log`` is group-writable -- is
+  ## refused, never followed. Raises ``RecordExistsError`` when the name is
+  ## taken.
+  when mutated("record-dir-link-followed"):
+    writeFileExclusiveByPath(path, text, mode)  # FALSIFIER: round 17's path-based writer
+  else:
+    writeInCheckedDir(path, text, mode,
+                      replace = mutated("intent-overwrites-existing"))
 
 proc exclusiveRecordWriter*(path, text: string) =
   writeFileExclusiveDurable(path, text, 0o600)
@@ -633,6 +671,41 @@ proc syncRemovedObjects*(removed: seq[string]) =
       raise newException(OSError, "syncfs of the filesystem holding " & d &
         " failed: " & $strerror(e))
 
+type RecordReader* = proc (path: string): string {.closure.}
+
+proc recRead*(path: string): string =
+  ## A discard record (or marker) read through its directory's checked
+  ## descriptor (``record_dir``; A11 round 19): never through a link,
+  ## never a FIFO or device, never more than ``MaxRecordBytes``.
+  when mutated("record-read-by-path"):
+    readFile(path)       # FALSIFIER: the path-based read of round 18
+  else:
+    readInCheckedDir(path)
+
+proc recExists*(path: string): bool =
+  ## Whether a name exists in a records directory, looked up through its
+  ## checked descriptor; an untrusted directory counts as "present" so that
+  ## the caller goes on to the read, which refuses it.
+  when mutated("record-read-by-path"):
+    fileExists(path) or dirExists(path) or symlinkExists(path)  # FALSIFIER
+  else:
+    try: existsInCheckedDir(path)
+    except OSError: true
+
+proc recList*(dir: string): seq[string] =
+  ## The regular files of a records directory, enumerated through a
+  ## duplicate of its checked descriptor; empty when it is absent or may
+  ## not be trusted.
+  when mutated("record-read-by-path"):
+    if dirExists(dir):                       # FALSIFIER: walkDir by path
+      for kind, p in walkDir(dir):
+        if kind == pcFile: result.add(p)
+  else:
+    try:
+      for (name, regular) in listInCheckedDir(dir):
+        if regular: result.add(dir / name)
+    except OSError: discard
+
 proc writeOverrideRecord(custody: CustodySite; dir: string;
                          objects: seq[string]; why: string;
                          writer: DiscardRecordWriter):
@@ -664,8 +737,13 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
       signature = ""
     else:
       signature = signText(result.text, keyPath).signature
-  createDir(dir)
-  setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+  when mutated("record-dir-link-followed"):
+    createDir(dir)       # FALSIFIER: by path, a link in its place followed
+    setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+  else:
+    # Root's 0700, checked on a descriptor that does not follow a link
+    # (A11 round 18): never a planted link's target.
+    ensureCheckedDir(dir)
   # A unique name (round 9): the second-resolution stamp, and a sequence
   # number when a record, its signature or its completion already holds
   # it. The writer still refuses a name taken in between.
@@ -675,12 +753,12 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
     result.path = dir / (stamp & (if n == 0: "" else: "-" & $n) & DiscardIntentSuffix)
     when mutated("intent-overwrites-existing"):
       break
-    if not (symlinkExists(result.path) or fileExists(result.path) or
-            dirExists(result.path) or
-            symlinkExists(result.path & DiscardRecordSigExt) or
-            fileExists(result.path & DiscardRecordSigExt) or
-            dirExists(result.path & DiscardRecordSigExt) or
-            fileExists(completionPathOf(result.path))):
+    # Probed through the checked descriptor, raising when the directory
+    # may not be trusted: ``recExists`` counts that as "present", which here
+    # would never end (A11 round 19).
+    if not (existsInCheckedDir(result.path) or
+            existsInCheckedDir(result.path & DiscardRecordSigExt) or
+            existsInCheckedDir(completionPathOf(result.path))):
       break
     inc n
   # The signature goes first and the record last, so a record exists only
@@ -702,16 +780,17 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
     writer(result.path, result.text)
   except RecordExistsError:
     # Taken between the choice of name and the write: never written over.
-    try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
+    try: removeInCheckedDir(result.path & DiscardRecordSigExt) except OSError: discard
     raise
   except CatchableError as e:
-    let inPlace = fileExists(result.path) and
-      (try: readFile(result.path) == result.text except IOError: false)
+    var inPlace = false
+    try: inPlace = recRead(result.path) == result.text
+    except CatchableError: discard
     if inPlace and not mutated("override-rollback-removes-sig"):
       raise newException(OSError, "the intent record " & result.path &
         " and its signature are in place, but making them durable failed (" &
         e.msg & "); both are kept and state an authorisation only")
-    try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
+    try: removeInCheckedDir(result.path & DiscardRecordSigExt) except OSError: discard
     raise newException(OSError, "the intent record " & result.path &
       " could not be written (" & e.msg & ")")
 
@@ -742,14 +821,17 @@ proc writeDiscardCompletion*(custody: CustodySite; signer: TextSigner;
   writer(result.path & DiscardRecordSigExt, signWith(s, result.text) & "\n")
   writer(result.path, result.text)
 
-proc readSignedRecord(path, schema, expectedKeyHex: string):
+proc readSignedRecord(path, schema, expectedKeyHex: string;
+                      reader: RecordReader = recRead):
     tuple[ok: bool; why, text: string; doc: JsonNode] =
   ## A record at ``path`` of ``schema``, signed over exactly its bytes by
-  ## ``expectedKeyHex`` (``<path>.sig``).
-  let text = try: readFile(path)
-             except IOError as e: return (false, "cannot read " & path & ": " & e.msg, "", nil)
-  let sig = try: readFile(path & DiscardRecordSigExt).strip()
-            except IOError as e:
+  ## ``expectedKeyHex`` (``<path>.sig``). ``reader`` is the checked read
+  ## (``recRead``) for the add-on's own records, and the bounded read by
+  ## path for a record an operator names on the command line.
+  let text = try: reader(path)
+             except CatchableError as e: return (false, "cannot read " & path & ": " & e.msg, "", nil)
+  let sig = try: reader(path & DiscardRecordSigExt).strip()
+            except CatchableError as e:
               return (false, "cannot read the signature " & path &
                 DiscardRecordSigExt & ": " & e.msg, "", nil)
   var doc: JsonNode
@@ -797,7 +879,8 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
   if key.len == 0:      # only under verify-accepts-missing-key
     try: key = parseJson(readFile(intentPath)){"attestationKey"}.getStr()
     except CatchableError: discard
-  let intent = readSignedRecord(intentPath, DiscardRecordSchema, key)
+  let intent = readSignedRecord(intentPath, DiscardRecordSchema, key,
+                                readBoundedByPath)
   if not intent.ok:
     return (dsInvalid, intent.why, "", @[], @[], @[])
   result.keyHex = intent.doc{"attestationKey"}.getStr()
@@ -822,7 +905,8 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
                except CatchableError as e:
                  (false, cpath & " is not a record: " & e.msg, "", JsonNode(nil))
   else:
-    let done = readSignedRecord(cpath, DiscardCompletionSchema, key)
+    let done = readSignedRecord(cpath, DiscardCompletionSchema, key,
+                                readBoundedByPath)
   if not done.ok:
     result.status = dsInvalid
     result.why = "the completion record does not verify: " & done.why
@@ -905,12 +989,12 @@ proc validDiscardMarker*(custody: CustodySite; intentPath, intentText,
   ## exactly the intent's objects, and every object it names as removed is
   ## still gone.
   let path = discardMarkerPath(custody, intentPath)
-  if not fileExists(path):
+  if not recExists(path):
     return (false, "no discard marker " & path, @[], @[])
   var doc: JsonNode
   when mutated("marker-signature-unchecked"):
     # FALSIFIER: an unsigned or forged marker is taken at its word.
-    try: doc = parseJson(readFile(path))
+    try: doc = parseJson(recRead(path))
     except CatchableError as e: return (false, e.msg, @[], @[])
     if doc{"schema"}.getStr() != DiscardMarkerSchema:
       return (false, path & " is not a discard marker", @[], @[])
@@ -950,17 +1034,17 @@ proc unfinishedDiscardIntent*(custody: CustodySite;
   ## completed" for good. A record signed by another key, or one that does
   ## not verify, is not the host's authorisation and is left alone.
   let keyPath = custody.evidence.attestationKey
-  if not dirExists(dir) or not fileExists(keyPath): return
+  if not fileExists(keyPath): return
   var hostKey = ""
   try: hostKey = attestationPublicKeyHex(keyPath)
   except CatchableError: return
   var names: seq[string]
-  for kind, path in walkDir(dir):
-    if kind == pcFile and path.endsWith(DiscardIntentSuffix):
+  for path in recList(dir):
+    if path.endsWith(DiscardIntentSuffix):
       names.add(path)
   names.sort(order = SortOrder.Descending)
   for path in names:
-    if fileExists(completionPathOf(path)): continue
+    if recExists(completionPathOf(path)): continue
     let rec = readSignedRecord(path, DiscardRecordSchema, hostKey)
     if not rec.ok: continue
     var objects: seq[string]
@@ -1005,7 +1089,7 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
       # A partial completion (its signature alone, from a crash) would make
       # the exclusive writer refuse the name, so it goes first.
       let stale = completionPathOf(unfinished.path) & DiscardRecordSigExt
-      if fileExists(stale): discard tryRemoveFile(stale)
+      try: removeInCheckedDir(stale) except OSError: discard
       result.pending = unfinished.objects
       result.overrideRecord = unfinished.path
       result.overrideRecordText = unfinished.text
@@ -1148,7 +1232,7 @@ proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
     r.completionRecord = c.path
   except CatchableError as e:
     let cpath = completionPathOf(r.overrideRecord)
-    if fileExists(cpath):
+    if recExists(cpath):
       # It reached its name, so it is true and stays; only its durability
       # is unconfirmed (a crash now may still lose it, which leaves the
       # intent as "authorised, not completed": never an overclaim).
@@ -1158,7 +1242,7 @@ proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
           "record " & cpath & " written, but making it durable failed (" &
           e.msg & ")")
     else:
-      try: removeFile(cpath & DiscardRecordSigExt) except OSError: discard
+      try: removeInCheckedDir(cpath & DiscardRecordSigExt) except OSError: discard
       r.errors.add("the store evidence was discarded, but its completion " &
         "record could not be written (" & e.msg & "); the intent record " &
         r.overrideRecord & " stands as authorised, not completed")
@@ -1306,96 +1390,83 @@ proc stateDirChain*(root, ledgerCopy: string; preBootstrap: seq[string]):
     d = parentDir(d)
 
 proc tokenDirRefusal*(dir: string): string =
-  ## "" when ``dir``, the token's directory, may hold the token: a real
-  ## directory (not a link), owned by the user running uninstall (root),
-  ## and writable by no group or other (§13 decision 165, A11 round 16
-  ## R16-5). Anything else could let another user plant or swap the token
-  ## that tells a re-run what to remove.
-  when mutated("token-dir-unchecked"):
-    return ""          # FALSIFIER: any directory may hold the token
-  var st: Stat
-  if lstat(dir.cstring, st) != 0:
-    return dir & ": " & $strerror(errno)
-  if S_ISLNK(st.st_mode): return dir & " is a symbolic link"
-  if not S_ISDIR(st.st_mode): return dir & " is not a directory"
-  if st.st_uid != geteuid():
-    return dir & " is owned by uid " & $st.st_uid & ", not " & $geteuid()
-  if (int(st.st_mode) and 0o022) != 0:
-    return dir & " is writable by its group or by others (mode " &
-      toOct(int(st.st_mode) and 0o7777, 4) & ")"
-  ""
-
-proc ensureTokenDir(dir: string) =
-  ## The token's directory, created 0700 (and synced into its parent) when
-  ## absent, then checked; raises ``OSError`` when it may not hold a token.
-  if not dirExists(dir) and not symlinkExists(dir):
-    createDir(dir)
-    discard posix.chmod(dir.cstring, Mode(0o700))
-    syncDirFd(parentDir(dir))
-  let why = tokenDirRefusal(dir)
-  if why.len > 0:
-    raise newException(OSError, "refusing to write the state-removal " &
-      "token: " & why)
+  ## "" when ``dir`` may hold the token (``record_dir.openCheckedDir``'s
+  ## checks), else why not. An absent directory is not refused.
+  checkedDirRefusal(dir)
 
 proc removeTokenDurably(path: string) =
-  ## Unlink the token, then fsync its directory, so a crash cannot bring it
-  ## back for a re-run to act on.
-  if fileExists(path) or symlinkExists(path):
-    removeFile(path)
-    syncDirFd(parentDir(path))
+  removeInCheckedDir(path)
 
 proc clearStateRemovalToken*(logDir = UninstallOverrideDir) =
-  ## Bootstrap's step (§13 decision 165, R16-5): a token an earlier
-  ## uninstall left is removed, durably, before a new install writes
-  ## anything, so no later re-run acts on a removal of another install.
-  let path = stateRemovalTokenPath(logDir)
-  if fileExists(path) or symlinkExists(path):
-    let why = tokenDirRefusal(logDir)
-    if why.len > 0:
-      raise newException(OSError, "a state-removal token is at " & path &
-        ", and its directory may not be trusted: " & why)
-    removeTokenDurably(path)
+  ## Bootstrap's step (§13 decisions 165 and 178): a token an earlier
+  ## uninstall left is removed, durably, through the checked descriptor,
+  ## before a new install writes anything, so no later re-run acts on a
+  ## removal of another install. Raises ``OSError`` when it cannot be (a
+  ## directory of that name, or a log directory that may not be used).
+  removeInCheckedDir(stateRemovalTokenPath(logDir))
+
+proc stateDirIdentity*(d: string): string =
+  ## A directory's identity for the token (A11 round 18): its inode number
+  ## AND its birth time (``statx`` ``STATX_BTIME``), with its inode
+  ## generation where the file system has one -- never ``st_dev``, which is
+  ## not stable across a reboot on btrfs or device-mapper. The number alone
+  ## does not identify a directory: ext4 gives a new one the number an
+  ## unlinked one had. "" when ``d`` is not a directory; ``<ino>@-`` when
+  ## nothing but the number is known.
+  let id = carried_state.dirIdentity(d)
+  if id.dev < 0: return ""
+  result = $id.ino & "@" &
+    (if id.haveBtime: $id.btimeSec & "." & $id.btimeNsec else: "-")
+  if id.haveGen: result.add("g" & $id.gen)
+
+type IdentityOf* = proc (path: string): string {.closure.}
+
+proc sameStateDir(recorded, live: string): bool =
+  ## Whether ``live`` is the directory ``recorded`` names: equal, and at
+  ## least one discriminator beyond the inode number on both (a birth time
+  ## or a generation). Without one nothing tells a new directory with a
+  ## reused number apart, so the answer is no (fail closed).
+  when mutated("token-binds-inode-only"):
+    return recorded.split('@')[0] == live.split('@')[0]   # FALSIFIER
+  if recorded != live: return false
+  # A birth time is required (A11 round 19): a generation alone
+  # (``<ino>@-g<N>``) is not taken as enough.
+  let rest = live.split('@', 1)
+  rest.len == 2 and rest[1].len > 0 and not rest[1].startsWith("-")
 
 proc writeStateRemovalToken(path, root, ledgerCopy: string;
-                            chain, preBootstrap: seq[string]) =
-  ## Durably (a temporary file created exclusively without following a
-  ## link, fsynced, renamed, its directory fsynced, and a directory this
-  ## creates synced into its parent): the token must be on disk before the
-  ## ledger copy goes, or a crash between the two leaves a state no re-run
-  ## may finish. Its directory is checked first (``tokenDirRefusal``).
-  let dir = parentDir(path)
-  ensureTokenDir(dir)
+                            chain, preBootstrap: seq[string];
+                            identityOf: IdentityOf) =
+  ## Durably, all through the directory's checked descriptor
+  ## (``record_dir.writeInCheckedDir``, replacing a stale token). The
+  ## token must be on disk before the ledger copy goes, or a crash between
+  ## the two leaves a state no re-run may finish. It binds this install:
+  ## the identity of each directory of the chain (``stateDirIdentity``),
+  ## which a re-run must find unchanged.
+  var ids = newJObject()
+  for d in chain: ids[d] = %identityOf(d)
   let text = pretty(%*{"schema": StateRemovalTokenSchema, "root": root,
-    "ledgerCopy": ledgerCopy, "chain": chain,
+    "ledgerCopy": ledgerCopy, "chain": chain, "chainIdentity": ids,
     "preBootstrapRoots": preBootstrap}) & "\n"
-  let tmp = path & ".tmp"
-  if fileExists(tmp) or symlinkExists(tmp): removeFile(tmp)   # a stale one
-  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
-                      O_CLOEXEC or ONoFollow, 0o600)
-  if fd < 0: raiseOSError(osLastError(), "create " & tmp)
-  try:
-    var off = 0
-    while off < text.len:
-      let n = posix.write(fd, unsafeAddr text[off], text.len - off)
-      if n < 0: raiseOSError(osLastError(), "write " & tmp)
-      off += n
-    if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & tmp)
-  finally:
-    discard posix.close(fd)
-  moveFile(tmp, path)   # rename(2): same directory, replaces atomically
-  syncDirFd(dir)
+  writeInCheckedDir(path, text, 0o600, replace = true)
 
-proc readStateRemovalToken(path, root: string):
+proc readStateRemovalToken(path, root: string; identityOf: IdentityOf):
     tuple[ok: bool; why: string; chain: seq[string]] =
-  ## The chain a token names, checked: its schema, its root, and every
+  ## The chain a token names, checked: its schema, its root, every
   ## directory in it ``root`` or below it and none of them a pre-bootstrap
-  ## root it names. A token is root-only (``/var/log/repro-addon``); the
-  ## checks keep a damaged one from naming anything else.
-  let why = tokenDirRefusal(parentDir(path))
-  if why.len > 0: return (false, "its directory may not be trusted: " & why, @[])
-  if symlinkExists(path): return (false, "it is a symbolic link", @[])
+  ## root it names, and each one that still exists the very directory the
+  ## uninstall that wrote the token recorded (``sameStateDir``), so an old
+  ## token hidden and restored after a new install is refused. A token
+  ## without ``chainIdentity`` (written by a build before A11 round 17)
+  ## binds nothing and is refused the same way, with the same remedy.
+  const Remedy = "; if those directories are empty and the add-on's, " &
+    "remove them and the token yourself, then run uninstall again"
+  var text: string
+  try: text = readInCheckedDir(path)
+  except OSError as e:
+    return (false, "it may not be trusted: " & e.msg, @[])
   var j: JsonNode
-  try: j = parseJson(readFile(path))
+  try: j = parseJson(text)
   except CatchableError as e: return (false, e.msg, @[])
   if j.kind != JObject or j{"schema"}.getStr != StateRemovalTokenSchema:
     return (false, "not a " & StateRemovalTokenSchema & " record", @[])
@@ -1403,12 +1474,23 @@ proc readStateRemovalToken(path, root: string):
     return (false, "it names the state " & j{"root"}.getStr & ", not " & root, @[])
   var keep: seq[string]
   for k in j{"preBootstrapRoots"}.getElems: keep.add(k.getStr)
+  let ids = j{"chainIdentity"}
   for c in j{"chain"}.getElems:
     let d = c.getStr
     if not (d == root or d.startsWith(root & "/")) or d.contains("/../") or
         d.endsWith("/..") or d in keep:
       return (false, "its chain names " & d & ", which is not one of the " &
         "add-on's own directories under " & root, @[])
+    when not mutated("token-not-bound-to-install"):
+      let now = identityOf(d)
+      if now.len > 0:
+        if ids == nil or ids.kind != JObject:
+          return (false, "it records no identity for the directories it " &
+            "names (written by an earlier build)" & Remedy, @[])
+        if not sameStateDir(ids{d}.getStr, now):
+          return (false, d & " is not the directory the uninstall that " &
+            "wrote the token recorded (another install's token, or one this " &
+            "file system cannot tell apart)" & Remedy, @[])
     result.chain.add(d)
   result.chain.sort(proc (a, b: string): int = cmp(b.len, a.len))
   result.ok = true
@@ -1451,7 +1533,9 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
                       preBootstrap: seq[string] = @[];
                       tokenPath = stateRemovalTokenPath();
                       inputs: seq[PreBootstrapInput] = @[];
-                      hook: InputStepHook = nil) =
+                      hook: InputStepHook = nil;
+                      identityOf: IdentityOf = stateDirIdentity;
+                      identityFile = "") =
   ## Removes the add-on's state, ``/var/lib/repro``, with its ledger copy
   ## last but for the rmdir of the add-on's own empty directories (§13
   ## decisions 150, 161 and 165): everything but the ledger copy and the
@@ -1473,7 +1557,19 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
   ## place (``putBackInputMetadata``). A crash at any point leaves either
   ## the ledger copy, so a re-run resumes and finishes the metadata, or the
   ## inputs already right.
+  ##
+  ## The identity of the uninstall records' directory, recorded by
+  ## bootstrap (``identityFile``, by default
+  ## ``record_dir.recordsDirIdentityPath`` of the ledger copy's state; §13
+  ## decision 178, amended in A11 round 21), is kept with the ledger copy
+  ## and removed right after it, its directory joining the chain: while
+  ## the ledger copy is there, a re-run still compares the records
+  ## directory with it, so a swap refused once is refused again.
   if not dirExists(root): return
+  let idFile = if identityFile.len > 0: identityFile
+               else: recordsDirIdentityPath(parentDir(ledgerCopy))
+  let keepId = idFile.startsWith(root & "/") and
+    not mutated("identity-removed-before-ledger-copy")
   when mutated("ledger-copy-removed-with-the-rest"):
     removeHostRoot(r, root, evidence)    # FALSIFIER: round 12's one removeDir
     return
@@ -1489,7 +1585,8 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
             saved.add((i, if i.isDir: "" else: readFile(i.path)))
         removeAllBut(root, ledgerCopy)
       else:
-        removeAllBelowKeeping(root, preBootstrap & @[ledgerCopy])
+        removeAllBelowKeeping(root, preBootstrap & @[ledgerCopy] &
+                                    (if keepId: @[idFile] else: @[]))
       syncer(@[root & "/.state-removed"])   # the unlinks above, made durable
       when not mutated("input-metadata-after-ledger-copy") and
           not mutated("input-mode-owner-not-restored"):
@@ -1500,9 +1597,21 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
             "finishes it")
           return
       chain = stateDirChain(root, ledgerCopy, preBootstrap)
-      writeStateRemovalToken(tokenPath, root, ledgerCopy, chain, preBootstrap)
+      if keepId and dirExists(parentDir(idFile)) and
+          parentDir(idFile) notin chain and parentDir(idFile) notin preBootstrap:
+        chain.insert(parentDir(idFile), 0)   # deepest first
+      writeStateRemovalToken(tokenPath, root, ledgerCopy, chain, preBootstrap,
+                             identityOf)
       removeFile(ledgerCopy)
       if hook != nil: hook("ledger-copy-removed", ledgerCopy)
+      if keepId and (fileExists(idFile) or symlinkExists(idFile)):
+        try: removeFile(idFile)
+        except OSError as ex:
+          r.errors.add(idFile & ": " & ex.msg & "; the ledger copy is " &
+            "gone and the token " & tokenPath & " names what remains: " &
+            "uninstall, run again once the cause is cleared, finishes the " &
+            "removal")
+          return
       when mutated("inputs-removed-and-restored"):
         for (i, bytes) in saved.sortedByIt(it.i.path.len):
           if i.isDir: createDir(i.path)
@@ -1534,7 +1643,8 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       "again once the cause is cleared, finishes the removal" else: ""))
 
 proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
-                           tokenPath = stateRemovalTokenPath()): bool =
+                           tokenPath = stateRemovalTokenPath();
+                           identityOf: IdentityOf = stateDirIdentity): bool =
   ## §13 decisions 161 and 165: a re-run after an uninstall that removed
   ## the ledger copy and then could not rmdir one of the add-on's own
   ## directories. Only with the token that uninstall wrote (outside the
@@ -1548,7 +1658,7 @@ proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
   if fileExists(ledgerCopy): return false
   when mutated("state-removal-token-not-required"):
     # FALSIFIER: any tree of empty directories is removed, token or not.
-    if not fileExists(tokenPath):
+    if not recExists(tokenPath):
       if symlinkExists(root) or not dirExists(root) or
           not holdsOnlyEmptyDirs(root): return false
       var all: seq[string]
@@ -1558,14 +1668,27 @@ proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       discard removeChain(all)
       r.removed.add(root & " (left empty by an earlier uninstall)")
       return true
-  if not fileExists(tokenPath): return false
+  if not recExists(tokenPath): return false
   when mutated("empty-state-root-left-unfinished"):
     return false   # FALSIFIER: the re-run stops on the missing ledger
   result = true
-  let t = readStateRemovalToken(tokenPath, root)
+  let t = readStateRemovalToken(tokenPath, root, identityOf)
   if not t.ok:
     r.errors.add(tokenPath & ": " & t.why & "; nothing was removed")
     return
+  # A run that stopped between the ledger copy and the records directory's
+  # identity (A11 round 21) left the identity in the chain's first
+  # directory; the re-run, which compared the records directory with it
+  # to read this token, removes it before the rmdirs.
+  let idFile = recordsDirIdentityPath(parentDir(ledgerCopy))
+  if parentDir(idFile) in t.chain and
+      (fileExists(idFile) or symlinkExists(idFile)):
+    try: removeFile(idFile)
+    except OSError as ex:
+      r.errors.add(idFile & ": " & ex.msg & "; nothing was removed, and " &
+        "the token " & tokenPath & " is kept: uninstall, run again once " &
+        "the cause is cleared, finishes the removal")
+      return
   let (failed, err, gone) = removeChain(t.chain)
   if failed.len > 0:
     reportEmptyDirsLeft(r, root, failed, err, t.chain)
@@ -1646,21 +1769,56 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateRoot = if opts.stateRoot.len > 0: opts.stateRoot else: StateRoot
   let tokenPath = stateRemovalTokenPath(
     if opts.logDir.len > 0: opts.logDir else: UninstallOverrideDir)
+  # The records directory is the one bootstrap made (§13 decision 178,
+  # amended): every checked open of it compares its identity with the one
+  # recorded in the state.
+  when not mutated("uninstall-records-dir-unbound"):
+    bindRecordsDir(parentDir(tokenPath), recordsDirIdentityPath(stateDir),
+                   ledgerCopyPath(stateDir))
+  defer: unbindRecordsDir(parentDir(tokenPath))
   when not mutated("state-removal-rerun-unwired"):
     if stateDir.startsWith(stateRoot & "/") and
         finishEmptyStateRoot(result, stateRoot, ledgerCopyPath(stateDir),
                              tokenPath):
+      if boundWithoutState(parentDir(tokenPath)):
+        result.notes.add(parentDir(tokenPath) & " was used without its " &
+          "recorded identity, which went with the state an earlier " &
+          "uninstall removed; the token it holds binds the directories " &
+          "it names, so nothing else was trusted from it")
       return
+  let l = readLedger(ledgerCopyPath(stateDir))
+  # Pre-bootstrap inputs the add-on took over stay where they are (spec
+  # §6.1, §6.4; §13 decision 166): never deleted, never rewritten -- the
+  # agent's records are live, and the sequence floor must stay with its
+  # kept key, or a manifest this host already accepted would replay on it.
+  # Every removal below keeps them; only their mode and owner change,
+  # back to what they were, before the ledger copy goes. A changed
+  # content-pinned input is drift like any other.
+  let pb = preBootstrapInputs(l)
+  # A corrupt record of a pre-bootstrap input stops the run before
+  # anything is written or removed -- before the store-evidence gate too,
+  # so no signed intent is written (§13 decision 166, amended; A11 rounds
+  # 17 to 19).
+  when not mutated("corrupt-check-after-gate"):
+    if refuseCorruptInputs(result, pb, ledgerCopyPath(stateDir)): return
   # The altered store objects kept as evidence go with /var/lib/repro. They
   # are named, and nothing is removed, until the operator says to discard
   # them (having copied them out).
-  let custody = custodySite(stateDir)
+  let custody = if opts.custody.stateDir.len > 0: opts.custody
+                else: custodySite(stateDir)
   # Nothing pending before the gate, and an intent after it: an earlier
   # run's intent that carries a valid discard marker, which this run
   # completes and did not write (§13 decision 148).
   let nothingPending = pendingStoreEvidence(custody).len == 0
-  let gate = storeEvidenceGate(custody, opts,
-    proc (): tuple[ok: bool; why: string] = shipEvidenceNow(stateDir))
+  var ship = opts.ship
+  if ship == nil:
+    ship = proc (): tuple[ok: bool; why: string] = shipEvidenceNow(stateDir)
+  let gate = storeEvidenceGate(custody, opts, ship,
+    overrideDir = parentDir(tokenPath))
+  when mutated("corrupt-check-after-gate"):
+    # FALSIFIER: the corrupt-record stop after the gate, which may already
+    # have written a signed intent.
+    if refuseCorruptInputs(result, pb, ledgerCopyPath(stateDir)): return
   let evidenceKept = gate.pending
   let evidenceAtStart = evidenceKept.filterIt(
     fileExists(it) or dirExists(it) or symlinkExists(it))
@@ -1700,17 +1858,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   if gate.errors.len > 0:
     result.errors.add(gate.errors)
     return
-  let l = readLedger(ledgerCopyPath(stateDir))
-  # Pre-bootstrap inputs the add-on took over stay where they are (spec
-  # §6.1, §6.4; §13 decision 166): never deleted, never rewritten -- the
-  # agent's records are live, and the sequence floor must stay with its
-  # kept key, or a manifest this host already accepted would replay on it.
-  # Every removal below keeps them; only their mode and owner change,
-  # back to what they were, before the ledger copy goes. A changed
-  # content-pinned input is drift like any other.
-  let pb = preBootstrapInputs(l)
   for d in pb.drift: result.drift.add(d)
-  for e in pb.errors: result.errors.add(e)
   for n in pb.notes: result.notes.add(n)
   # With the key, every sequence floor stays, later ones too (§13 decision
   # 168): read now, before anything is removed.
@@ -1745,6 +1893,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       # Stopped, then disabled by removing exactly its ledgered install
       # links in step 2 -- never `systemctl disable`, which would also
       # remove links the base made for units the add-on does not own.
+      # The boot-hold unit is never stopped: sysinit.target requires it
+      # (§13 decision 172), so its stop would stop sysinit.target and every
+      # unit that requires it -- every service with default dependencies,
+      # the base's sshd among them. It only runs at boot; removing its file
+      # and its link is enough.
+      if u.unit == BootHoldUnit:
+        when not mutated("uninstall-stops-boot-hold"):
+          continue
       systemctlOrRecord(["stop", "--", u.unit], result)
 
   # 1b. The deploy agent's fetch unit keeps its staging in a dynamic user's
@@ -1769,6 +1925,29 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     removeOwned(li, result)
   for u in byClass[lcUnit]:
     removeOwned(u, result, driver)
+  # sysinit.target requires the boot-hold unit (§13 decision 172): a link
+  # left naming it once its file is gone -- one the ledger's removal kept
+  # because it had drifted -- would make every later boot wait for a unit
+  # that cannot load. Removed whatever it points at: the name is the
+  # add-on's (A9 review round 18, M1).
+  when not mutated("uninstall-leaves-boot-hold-requires"):
+    if not fileExists(unitPath(BootHoldUnit)):
+      for dir in ["sysinit.target.requires", "sysinit.target.wants"]:
+        let link = parentDir(unitPath(BootHoldUnit)) / dir / BootHoldUnit
+        if symlinkExists(link) or fileExists(link):
+          try:
+            removeFile(link)
+            result.removed.add(link & " (it named the boot-hold unit, now gone)")
+            # The ledger's entry for it is undone, and the drift its
+            # removal above reported (a link changed since) is resolved.
+            for li in byClass[lcInstallLink]:
+              if li.path == link: result.undone.incl(entryKey(li))
+            var kept: seq[string]
+            for dl in result.drift:
+              if not dl.startsWith(link & ":"): kept.add(dl)
+            result.drift = kept
+          except OSError as ex:
+            result.errors.add(link & ": " & ex.msg)
   for di in byClass[lcDropIn]:
     removeOwned(di, result, driver)
   # A revert's persistent holds (§13 decision 133) go with the drop-ins:

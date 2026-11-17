@@ -929,7 +929,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
   ## ``ar rcs lib<name>.a <objs>`` archive action for a static library.
   let archiveOutput = staticLibraryPathFor(projectRoot, member.name)
   createDir(extendedPath(parentDir(archiveOutput)))
-  var argv = @[arExe, "rcs", archiveOutput]
+  var argv = @[arExe, DeterministicArModifiers, archiveOutput]
   for obj in objFiles:
     argv.add(obj)
   buildAction(

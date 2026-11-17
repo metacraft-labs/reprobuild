@@ -24,7 +24,9 @@ import std/[json, os, posix, sequtils, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
-import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall]
+import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall, record_dir]
+from repro_addon/bootstrap import prepareRecordsDir, recordRecordsDirIdentity, bootstrapRecordsDir, AddonBootstrapError
+from repro_addon/verify import runAddonVerify
 from repro_addon/preflight import AgentStateRecordsDir
 
 let me = $getuid() & ":" & $getgid()
@@ -459,6 +461,8 @@ suite "only the add-on's own empty directories follow the ledger copy":
     writeFile(s.st / "system" / "late", "x")
     writeFile(s.token, $(%*{"schema": StateRemovalTokenSchema, "root": s.st,
       "ledgerCopy": s.lc, "chain": [s.st / "system", s.st],
+      "chainIdentity": {s.st / "system": stateDirIdentity(s.st / "system"),
+                        s.st: stateDirIdentity(s.st)},
       "preBootstrapRoots": newSeq[string]()}))
     var again: UninstallResult
     check finishEmptyStateRoot(again, s.st, s.lc, s.token)
@@ -755,9 +759,674 @@ suite "round 16":
     let sc = inputScene("tokentmp")
     let victim = sc.parent / "victim"
     writeFile(victim, "untouched\n")
-    createSymlink(victim, sc.token & ".tmp")
+    let tmpName = parentDir(sc.token) / ("." & extractFilename(sc.token) &
+                                         ".tmp-" & $getCurrentProcessId())
+    createSymlink(victim, tmpName)
     var r: UninstallResult
     removeWith(sc, r)
     check r.errors.len == 0
     check readFile(victim) == "untouched\n"
-    check not fileExists(sc.token) and not symlinkExists(sc.token & ".tmp")
+    check not fileExists(sc.token) and not symlinkExists(tmpName)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 17 (§13 decisions 165 and 166): the token binds the
+# install whose uninstall wrote it, and a corrupt record of a pre-bootstrap
+# input stops the uninstall before step 1. Falsifiers
+# ``token-not-bound-to-install`` and ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+suite "round 17":
+  test "a token whose directories are another install's is refused, nothing removed":
+    let s = v2Scene("rebound")
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token)
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    check r.errors.len == 1 and fileExists(s.token)
+    # A new install's state at the same path: another directory.
+    let saved = readFile(s.token)
+    removeDir(s.st)
+    createDir(s.st)
+    writeFile(s.token, saved)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of a pre-bootstrap input stops the uninstall, with its remedy":
+    let e = LedgerEntry(class: lcRoot, path: "/var/lib/repro/agent",
+      mode: "0700", owner: "0:0", replaced: "dir 0750 1000:1000",
+      collision: "adopt", observation: PriorCapturedBeforeTakeover)
+    let pb = preBootstrapInputs(Ledger(entries: @[e]))
+    var r: UninstallResult
+    check refuseCorruptInputs(r, pb, "/x/addon-ledger")
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check "restore it from the generation" in r.errors[1]
+    var fine: UninstallResult
+    check not refuseCorruptInputs(fine, preBootstrapInputs(Ledger()), "/x")
+
+# ---------------------------------------------------------------------------
+# A11 code review round 18 (§13 decisions 165, 166: the pre-bootstrap inputs
+# left in place): the token binds its
+# install by inode AND birth time, never the number alone (ext4 reuses
+# numbers), and fails closed where nothing but the number is known; a token
+# from an earlier build, with no identity, is refused with its remedy; a
+# corrupt record of an input stops the uninstall verb itself before the
+# store-evidence gate. The identities are faked (``identityOf``) so the
+# reuse of an inode number is certain, whatever this file system does.
+# Falsifiers ``token-binds-inode-only`` and
+# ``corrupt-input-record-continues``.
+# ---------------------------------------------------------------------------
+
+proc failedRootRun(s: tuple[parent, st, lc, token: string];
+                   ids: IdentityOf): UninstallResult =
+  setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+  removeStateRoot(result, s.st, s.lc, tokenPath = s.token, identityOf = ids)
+  setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+
+suite "round 18":
+  test "a reused inode number with another birth time is another install's directory":
+    let s = v2Scene("reuse")
+    let r = failedRootRun(s, proc (p: string): string =
+      (if dirExists(p): "5@100.1" else: ""))
+    check r.errors.len == 1 and fileExists(s.token)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token,
+      identityOf = proc (p: string): string =
+        (if dirExists(p): "5@200.2" else: ""))
+    checkpoint $again.errors
+    check again.errors.len == 1 and "another install's token" in again.errors[0]
+    check again.errors.len == 1 and "remove them and the token yourself" in again.errors[0]
+    check dirExists(s.st)
+
+  test "where nothing but the inode number is known, the re-run refuses":
+    let s = v2Scene("nobtime")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)
+
+  test "the same identity is finished":
+    let s = v2Scene("same")
+    let ids = proc (p: string): string = (if dirExists(p): "5@100.1" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 0 and not dirExists(s.st)
+
+  test "a token from an earlier build, with no identity, is refused with its remedy":
+    let s = v2Scene("oldtoken")
+    discard failedRootRun(s, stateDirIdentity)
+    let j = parseJson(readFile(s.token))
+    j.delete("chainIdentity")
+    removeFile(s.token)
+    writeFile(s.token, $j)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token)
+    checkpoint $again.errors
+    check again.errors.len == 1 and "earlier build" in again.errors[0]
+    check dirExists(s.st)
+
+  test "a corrupt record of an input stops the uninstall verb, nothing written":
+    let base = getTempDir() / ("repro-uninstall-corrupt-" & $getCurrentProcessId())
+    removeDir(base)
+    let st = base / "var-lib-repro"
+    createDir(st / "system")
+    let lc = ledgerCopyPath(st / "system")
+    writeLedger(lc, Ledger(generation: "g0", entries: @[LedgerEntry(
+      class: lcRoot, path: st / "agent", mode: "0700", owner: "0:0",
+      replaced: "dir 0750 1000:1000", collision: "adopt",
+      observation: PriorCapturedBeforeTakeover)]))
+    let before = readFile(lc)
+    createDir(base / "log")
+    let r = runAddonUninstall(UninstallOptions(stateDir: st / "system",
+      stateRoot: st, logDir: base / "log",
+      discardUnacknowledgedStoreEvidence: true))
+    checkpoint $r.errors
+    check r.errors.len == 2 and r.errors[1].startsWith("nothing was removed")
+    check readFile(lc) == before
+    var n = 0
+    for _ in walkDir(base / "log"): inc n
+    check n == 0
+    removeDir(base)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 19 (§13 decision 178, amended): the records
+# directory is the one bootstrap made -- its identity recorded, a swapped
+# directory refused, recorded at first use where nothing is recorded yet;
+# bootstrap tightens an existing root directory to 0700; a stale token
+# survives a bootstrap refused on its trust anchors; a token identity with
+# a generation but no birth time is refused. Falsifiers
+# ``records-dir-identity-unchecked``, ``records-dir-left-open``,
+# ``token-cleared-before-anchors`` and ``token-binds-inode-only``.
+# ---------------------------------------------------------------------------
+
+suite "round 19":
+  test "a directory swapped into the records directory's place is refused":
+    let base = getTempDir() / ("repro-r19-swap-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    writeFile(idFile, identityOfCheckedDir(dir) & "\n")
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    moveDir(dir, dir & ".away")
+    createDir(dir)
+    setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+    let why = checkedDirRefusal(dir)
+    checkpoint why
+    check "not the directory bootstrap made" in why
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "with nothing recorded, the first checked open records the identity":
+    let base = getTempDir() / ("repro-r19-tofu-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "state" / "addon")
+    let dir = base / "log"
+    let idFile = base / "state" / "addon" / RecordsDirIdentityName
+    ensureCheckedDir(dir)
+    bindRecordsDir(dir, idFile)
+    check checkedDirRefusal(dir) == ""
+    check fileExists(idFile) and readFile(idFile).strip() == identityOfCheckedDir(dir)
+    unbindRecordsDir(dir)
+    removeDir(base)
+
+  test "bootstrap's ensure tightens an existing root directory to 0700":
+    let base = getTempDir() / ("repro-r19-tight-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    setFilePermissions(base / "log", {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+    ensureCheckedDir(base / "log", tighten = true)
+    check modeOf(base / "log") == 0o700
+    removeDir(base)
+
+  test "a bootstrap refused on its trust anchors leaves a stale token":
+    let base = getTempDir() / ("repro-r19-anchors-" & $getCurrentProcessId())
+    removeDir(base)
+    createDir(base / "log")
+    let token = base / "log" / StateRemovalTokenName
+    writeFile(token, "{}")
+    writeFile(base / "bad.anchors", "not an anchor\n")
+    expect CatchableError:
+      prepareRecordsDir(base / "bad.anchors", "", logDir = base / "log")
+    check fileExists(token)
+    removeDir(base)
+
+  test "a generation without a birth time is not enough to finish":
+    let s = v2Scene("genonly")
+    let ids = proc (p: string): string = (if dirExists(p): "5@-g7" else: "")
+    discard failedRootRun(s, ids)
+    var again: UninstallResult
+    check finishEmptyStateRoot(again, s.st, s.lc, s.token, identityOf = ids)
+    check again.errors.len == 1 and "cannot tell apart" in again.errors[0]
+    check dirExists(s.st)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 20 (§13 decision 178, amended 2026-11-16): bootstrap
+# records the identity taken on the descriptor it tightened, and records it;
+# a records directory with no birth time is refused at bootstrap, by every
+# bound checked open and by verify; an empty or malformed identity file is
+# never "nothing recorded"; the first-use record is atomic, 0600, and a
+# failure to write it is a refusal, not an escape; verify says when it
+# recorded one; uninstall refuses a swapped directory; with the state gone
+# the binding says so. Falsifiers ``bootstrap-identity-reopened``,
+# ``bootstrap-identity-not-recorded``, ``unbound-when-no-birth-time``,
+# ``identity-file-torn-accepted``, ``verify-first-use-silent`` and
+# ``uninstall-records-dir-unbound``. ``identityOverride`` fakes a file
+# system with no birth time: no test host has one at hand, and the code
+# under test is the caller's reaction to an empty identity, not statx.
+# ---------------------------------------------------------------------------
+
+var swapAt20 = ""
+proc swapAfterTighten() {.nimcall.} =
+  moveDir(swapAt20, swapAt20 & ".away")
+  createDir(swapAt20)
+  setFilePermissions(swapAt20, {fpUserRead, fpUserWrite, fpUserExec})
+proc noBirthTime(fd: cint): string {.nimcall.} = ""
+
+proc base20(name: string): string =
+  result = getTempDir() / ("repro-r20-" & name & "-" & $getCurrentProcessId())
+  removeDir(result)
+  createDir(result / "state" / "system" / "addon")
+
+proc fdCount(): int =
+  for _ in walkDir("/proc/self/fd"): inc result
+
+suite "round 20":
+  test "bootstrap records the identity of the directory it tightened":
+    let base = base20("race")
+    let log = base / "log"
+    swapAt20 = log
+    afterTightenHook = swapAfterTighten
+    let ident = prepareRecordsDir("", "", logDir = log)
+    afterTightenHook = nil
+    checkpoint ident & " vs away " & identityOfCheckedDir(log & ".away") &
+      " vs swapped " & identityOfCheckedDir(log)
+    check ident == identityOfCheckedDir(log & ".away")
+    check ident != identityOfCheckedDir(log)
+    removeDir(base)
+
+  test "bootstrap writes that identity, 0600":
+    let base = base20("record")
+    let log = base / "log"
+    let ident = prepareRecordsDir("", "", logDir = log)
+    recordRecordsDirIdentity(base / "state" / "system", ident)
+    let idFile = recordsDirIdentityPath(base / "state" / "system")
+    check fileExists(idFile) and readFile(idFile).strip() == ident
+    check ident.len > 0 and modeOf(idFile) == 0o600
+    removeDir(base)
+
+  test "no birth time: bootstrap refuses, nothing written":
+    let base = base20("nobtime-boot")
+    let log = base / "log"
+    identityOverride = noBirthTime
+    var msg = ""
+    try: discard prepareRecordsDir("", "", logDir = log)
+    except AddonBootstrapError as e: msg = e.msg
+    identityOverride = nil
+    checkpoint msg
+    check "reports no birth time" in msg and "nothing was written" in msg
+    check not dirExists(log)
+    # an existing directory, with a stale token: kept as it is
+    createDir(log)
+    writeFile(log / StateRemovalTokenName, "{}")
+    identityOverride = noBirthTime
+    expect AddonBootstrapError:
+      discard prepareRecordsDir("", "", logDir = log)
+    identityOverride = nil
+    check fileExists(log / StateRemovalTokenName)
+    removeDir(base)
+
+  test "no birth time: every bound checked open and verify refuse":
+    let base = base20("nobtime-use")
+    let st = base / "state" / "system"
+    let log = base / "log"
+    let idFile = recordsDirIdentityPath(st)
+    ensureCheckedDir(log)
+    identityOverride = noBirthTime
+    bindRecordsDir(log, idFile)
+    let why = checkedDirRefusal(log)
+    expect OSError:
+      discard existsInCheckedDir(log / "x")
+    unbindRecordsDir(log)
+    writeLedger(ledgerCopyPath(st), Ledger(generation: "g0"))
+    let v = runAddonVerify(st, logDir = log)
+    identityOverride = nil
+    checkpoint why & " / " & $v.findings
+    check "no birth time" in why
+    check not fileExists(idFile)
+    check v.status == "drift" and v.findings.anyIt("no birth time" in it)
+    removeDir(base)
+
+  test "an empty or malformed identity file is refused, never re-recorded":
+    for content in ["", "\n", "garbage\n", "12@\n", "12@3.4gx\n"]:
+      let base = base20("torn")
+      let log = base / "log"
+      let idFile = recordsDirIdentityPath(base / "state" / "system")
+      ensureCheckedDir(log)
+      writeFile(idFile, content)
+      moveDir(log, log & ".away")
+      createDir(log)
+      setFilePermissions(log, {fpUserRead, fpUserWrite, fpUserExec})
+      bindRecordsDir(log, idFile)
+      let why = checkedDirRefusal(log)
+      unbindRecordsDir(log)
+      checkpoint repr(content) & ": " & why
+      check "recorded identity is unusable" in why
+      check readFile(idFile) == content
+      removeDir(base)
+
+  test "the first-use record is 0600, atomic, and its failure a refusal":
+    let base = base20("tofu")
+    let st = base / "state" / "system"
+    let log = base / "log"
+    let idFile = recordsDirIdentityPath(st)
+    ensureCheckedDir(log)
+    bindRecordsDir(log, idFile)
+    check checkedDirRefusal(log) == ""
+    unbindRecordsDir(log)
+    check modeOf(idFile) == 0o600
+    check readFile(idFile).strip() == identityOfCheckedDir(log)
+    var leftovers = 0
+    for _ in walkFiles(parentDir(idFile) / ".*tmp*"): inc leftovers
+    check leftovers == 0
+    removeFile(idFile)
+    setFilePermissions(parentDir(idFile), {fpUserRead, fpUserExec})
+    bindRecordsDir(log, idFile)
+    let before = fdCount()
+    var escaped = ""
+    var why = ""
+    try: why = checkedDirRefusal(log)
+    except CatchableError as e: escaped = e.msg
+    let after = fdCount()
+    unbindRecordsDir(log)
+    setFilePermissions(parentDir(idFile), {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint "why=" & why & " escaped=" & escaped
+    check escaped.len == 0 and "cannot be recorded" in why
+    check after == before
+    check not fileExists(idFile)
+    removeDir(base)
+
+  test "verify says it recorded the identity at first use":
+    let base = base20("verify-note")
+    let st = base / "state" / "system"
+    let log = base / "log"
+    ensureCheckedDir(log)
+    writeLedger(ledgerCopyPath(st), Ledger(generation: "g0"))
+    let v = runAddonVerify(st, logDir = log)
+    checkpoint $v.notes & " " & $v.findings
+    check v.findings.len == 0
+    check v.notes.anyIt("recorded now" in it)
+    let again = runAddonVerify(st, logDir = log)
+    check not again.notes.anyIt("recorded now" in it)
+    removeDir(base)
+
+  test "uninstall's token re-run refuses a directory swapped into the records' place":
+    let base = base20("uninstall-swap")
+    let stRoot = base / "state"
+    let st = stRoot / "system"
+    let log = base / "log"
+    ensureCheckedDir(log)
+    writeFile(recordsDirIdentityPath(st), identityOfCheckedDir(log) & "\n")
+    moveDir(log, log & ".away")
+    createDir(log)
+    setFilePermissions(log, {fpUserRead, fpUserWrite, fpUserExec})
+    var msg = ""
+    try:
+      let r = runAddonUninstall(UninstallOptions(stateDir: st,
+        stateRoot: stRoot, logDir: log,
+        discardUnacknowledgedStoreEvidence: true))
+      msg = r.errors.join("; ")
+    except CatchableError as e:
+      msg = $e.name & ": " & e.msg
+    checkpoint msg
+    check "not the directory bootstrap made" in msg
+    removeDir(base)
+
+  test "with the state gone, the binding says it compared nothing":
+    let base = base20("gone")
+    let log = base / "log"
+    ensureCheckedDir(log)
+    let idFile = recordsDirIdentityPath(base / "nostate" / "system")
+    bindRecordsDir(log, idFile)
+    check checkedDirRefusal(log) == ""
+    check boundWithoutState(log)
+    unbindRecordsDir(log)
+    check not fileExists(idFile)
+    removeDir(base)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 21 (§13 decision 178, amended): the records
+# directory's identity is kept with the ledger copy, so a swap refused once
+# is refused on the re-run; the state counts as gone only with the ledger
+# copy gone too; bootstrap's own wiring records the identity
+# prepareRecordsDir took; a new directory with no birth time is removed
+# again and the stale token kept; the uninstall verb reports the unbound
+# re-run; the generation grammar. Falsifiers
+# ``identity-removed-before-ledger-copy``,
+# ``state-gone-from-addon-dir-alone``, ``bootstrap-wiring-reopens`` and
+# ``token-cleared-before-identity``.
+# ---------------------------------------------------------------------------
+
+proc swap21(d: string) =
+  moveDir(d, d & ".away")
+  createDir(d)
+  setFilePermissions(d, {fpUserRead, fpUserWrite, fpUserExec})
+
+var parentIno21: Ino
+proc onlyParentHasBirthTime(fd: cint): string {.nimcall.} =
+  var st: Stat
+  if fstat(fd, st) == 0 and st.st_ino == parentIno21: "1@2.3" else: ""
+
+suite "round 21":
+  test "a swap refused at the token write is refused again on the re-run":
+    let s = v2Scene("r21-rerun")
+    let sys = s.st / "system"
+    let log = parentDir(s.token)
+    let idFile = recordsDirIdentityPath(sys)
+    ensureCheckedDir(log)
+    writeFile(idFile, identityOfCheckedDir(log) & "\n")
+    bindRecordsDir(log, idFile, s.lc)
+    swap21(log)
+    var r1: UninstallResult
+    removeStateRoot(r1, s.st, s.lc, tokenPath = s.token)
+    unbindRecordsDir(log)
+    checkpoint $r1.errors
+    check r1.errors.anyIt("not the directory bootstrap made" in it)
+    check fileExists(s.lc) and fileExists(idFile)
+    bindRecordsDir(log, idFile, s.lc)
+    let why = checkedDirRefusal(log)
+    var r2: UninstallResult
+    removeStateRoot(r2, s.st, s.lc, tokenPath = s.token)
+    unbindRecordsDir(log)
+    checkpoint why & " / " & $r2.errors
+    check "not the directory bootstrap made" in why
+    check r2.errors.anyIt("not the directory bootstrap made" in it)
+    check not fileExists(s.token)
+    removeDir(s.parent)
+
+  test "the identity goes right after the ledger copy, its directory with the chain":
+    let s = v2Scene("r21-order")
+    let sys = s.st / "system"
+    let log = parentDir(s.token)
+    let idFile = recordsDirIdentityPath(sys)
+    writeFile(idFile, identityOfCheckedDir(log) & "\n")
+    var seen: seq[string]
+    let hook = proc (step, path: string) =
+      if step == "ledger-copy-removed":
+        seen.add($fileExists(idFile))
+    var r: UninstallResult
+    removeStateRoot(r, s.st, s.lc, tokenPath = s.token, hook = hook)
+    checkpoint $r.errors & " " & $seen
+    check r.errors.len == 0 and seen == @["true"]
+    check not dirExists(s.st)
+    removeDir(s.parent)
+
+  test "with the ledger copy present and the identity's directory gone, refused":
+    let base = base20("r21-noaddon")
+    let sys = base / "state" / "system"
+    removeDir(sys / "addon")
+    writeLedger(ledgerCopyPath(sys), Ledger(generation: "g0"))
+    let log = base / "log"
+    ensureCheckedDir(log)
+    swap21(log)
+    bindRecordsDir(log, recordsDirIdentityPath(sys), ledgerCopyPath(sys))
+    let why = checkedDirRefusal(log)
+    let unbound = boundWithoutState(log)
+    unbindRecordsDir(log)
+    let v = runAddonVerify(sys, logDir = log)
+    checkpoint why & " / " & v.status & " " & $v.findings
+    check "ledger copy" in why and not unbound
+    check v.status == "drift" and v.findings.anyIt("ledger copy" in it)
+    removeDir(base)
+
+  test "bootstrap's wiring records the identity prepareRecordsDir took":
+    let base = base20("r21-wiring")
+    let sys = base / "state" / "system"
+    let log = base / "log"
+    swapAt20 = log
+    afterTightenHook = swapAfterTighten
+    var between = 0
+    bootstrapRecordsDir(sys, "", "", logDir = log,
+                        between = proc () = inc between)
+    afterTightenHook = nil
+    let recorded = readFile(recordsDirIdentityPath(sys)).strip()
+    checkpoint recorded & " away " & identityOfCheckedDir(log & ".away") &
+      " swapped " & identityOfCheckedDir(log)
+    check between == 1
+    check recorded == identityOfCheckedDir(log & ".away")
+    check recorded != identityOfCheckedDir(log)
+    removeDir(base)
+
+  test "a new directory with no birth time is removed again, nothing written":
+    let base = base20("r21-overlay")
+    var st: Stat
+    check stat(base.cstring, st) == 0
+    parentIno21 = st.st_ino
+    let log = base / "log"
+    identityOverride = onlyParentHasBirthTime
+    var msg = ""
+    try: discard prepareRecordsDir("", "", logDir = log)
+    except AddonBootstrapError as e: msg = e.msg
+    identityOverride = nil
+    checkpoint msg
+    check "nothing was written" in msg
+    check not dirExists(log)
+    removeDir(base)
+
+  test "the uninstall verb reports a re-run with the state gone":
+    let s = v2Scene("r21-gone")
+    let sys = s.st / "system"
+    let log = parentDir(s.token)
+    writeFile(recordsDirIdentityPath(sys), identityOfCheckedDir(log) & "\n")
+    setFilePermissions(s.parent, {fpUserRead, fpUserExec})
+    var first: UninstallResult
+    removeStateRoot(first, s.st, s.lc, tokenPath = s.token)
+    setFilePermissions(s.parent, {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint $first.errors
+    check fileExists(s.token) and not fileExists(s.lc)
+    check not fileExists(recordsDirIdentityPath(sys))
+    let r = rerun(s)
+    checkpoint $r.errors & " / " & $r.notes
+    check r.errors.len == 0
+    check r.notes.anyIt("used without its recorded identity" in it)
+    check not dirExists(s.st)
+    removeDir(s.parent)
+
+  test "a generation is one optional minus and at least one digit":
+    for good in ["1@2.3", "1@2.3g7", "1@2.3g-7", "12@0.0g123"]:
+      check validIdentity(good)
+    for bad in ["1@2.3g-", "1@2.3g--4", "1@2.3g", "1@2.3g4-", "1@2.3g-g4"]:
+      checkpoint bad
+      check not validIdentity(bad)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 22 (§13 decision 178, amended): with no recorded
+# identity and no ledger copy the records' directory is never recorded at
+# first use, even where the identity's directory survived (a failed rmdir,
+# or a crash before it): a swapped directory there is used only with the
+# unbound note; verify reports an absent records' directory whose
+# identity's directory is gone beside a ledger copy; bootstrap takes back
+# the directory it made through its parent's descriptor and says so when
+# it cannot; a failure to remove the identity names the token. Falsifiers
+# ``first-use-without-ledger-copy`` (the swapped directory reused, alone)
+# and ``verify-absent-dir-without-identity-noted``.
+# ---------------------------------------------------------------------------
+
+proc failedAddonRmdir(s: tuple[parent, st, lc, token: string]) =
+  ## A run whose rmdir of <state>/addon fails after the identity is gone:
+  ## an entry appears there once the ledger copy is removed.
+  let blocker = s.st / "system" / "addon" / "blocker"
+  var r: UninstallResult
+  removeStateRoot(r, s.st, s.lc, tokenPath = s.token,
+    hook = proc (step, path: string) =
+      if step == "ledger-copy-removed": writeFile(blocker, ""))
+  doAssert fileExists(s.token) and not fileExists(s.lc)
+  doAssert not fileExists(recordsDirIdentityPath(s.st / "system"))
+  removeFile(blocker)
+
+var dirToFreeze22 = ""
+proc freezeParent22() {.nimcall.} =
+  setFilePermissions(parentDir(dirToFreeze22), {fpUserRead, fpUserExec})
+
+suite "round 22":
+  test "a swapped directory after a failed rmdir of <state>/addon is used only with the note":
+    let s = v2Scene("r22-cp5")
+    let log = parentDir(s.token)
+    writeFile(recordsDirIdentityPath(s.st / "system"),
+              identityOfCheckedDir(log) & "\n")
+    failedAddonRmdir(s)
+    check dirExists(s.st / "system" / "addon")
+    let token = readFile(s.token)
+    swap21(log)
+    writeFile(s.token, token)
+    let r = rerun(s)
+    checkpoint $r.errors & " / " & $r.notes
+    check r.errors.len > 0 or r.notes.anyIt(log in it and "without its recorded identity" in it)
+    check not fileExists(recordsDirIdentityPath(s.st / "system"))
+    removeDir(s.parent)
+
+  test "the same re-run without a swap finishes, with the note":
+    let s = v2Scene("r22-cp5c")
+    let log = parentDir(s.token)
+    writeFile(recordsDirIdentityPath(s.st / "system"),
+              identityOfCheckedDir(log) & "\n")
+    failedAddonRmdir(s)
+    let r = rerun(s)
+    checkpoint $r.errors & " / " & $r.notes
+    check r.errors.len == 0 and not dirExists(s.st) and not fileExists(s.token)
+    check r.notes.anyIt("without its recorded identity" in it)
+    removeDir(s.parent)
+
+  test "verify: no ledger copy is degraded, never a first use":
+    let s = v2Scene("r22-cp5b")
+    let log = parentDir(s.token)
+    writeFile(recordsDirIdentityPath(s.st / "system"),
+              identityOfCheckedDir(log) & "\n")
+    failedAddonRmdir(s)
+    swap21(log)
+    let v = runAddonVerify(s.st / "system", logDir = log)
+    checkpoint v.status & " " & $v.findings & " " & $v.notes
+    check v.status != "ok"
+    check not fileExists(recordsDirIdentityPath(s.st / "system"))
+    removeDir(s.parent)
+
+  test "verify: a ledger copy, no identity directory and no records directory is drift":
+    let base = base20("r22-va")
+    let sys = base / "state" / "system"
+    removeDir(sys / "addon")
+    writeLedger(ledgerCopyPath(sys), Ledger(generation: "g0"))
+    let v = runAddonVerify(sys, logDir = base / "log")
+    checkpoint v.status & " " & $v.findings & " " & $v.notes
+    check v.status == "drift" and v.findings.anyIt("is absent" in it)
+    removeDir(base)
+
+  test "a failure to remove the identity names the token and the re-run":
+    let parent = getTempDir() / ("repro-r22-idfail-" & $getCurrentProcessId())
+    removeDir(parent)
+    let st = parent / "var-lib-repro"
+    let sys = st / "system"
+    createDir(sys / "addon")
+    let lc = ledgerCopyPath(sys)
+    writeLedger(lc, Ledger(generation: "g0"))
+    let log = parent / "log"
+    ensureCheckedDir(log)
+    let idFile = recordsDirIdentityPath(sys)
+    writeFile(idFile, identityOfCheckedDir(log) & "\n")
+    setFilePermissions(sys / "addon", {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, st, lc, tokenPath = log / StateRemovalTokenName)
+    setFilePermissions(sys / "addon", {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint $r.errors
+    check r.errors.len == 1 and "the token" in r.errors[0] and
+      "run again" in r.errors[0]
+    check fileExists(log / StateRemovalTokenName) and fileExists(idFile)
+    removeDir(parent)
+
+  test "a directory bootstrap cannot take back is named, not 'nothing was written'":
+    let base = base20("r22-left")
+    var st: Stat
+    check stat(base.cstring, st) == 0
+    parentIno21 = st.st_ino
+    let log = base / "log"
+    dirToFreeze22 = log
+    afterTightenHook = freezeParent22
+    identityOverride = onlyParentHasBirthTime
+    var msg = ""
+    try: discard prepareRecordsDir("", "", logDir = log)
+    except AddonBootstrapError as e: msg = e.msg
+    identityOverride = nil
+    afterTightenHook = nil
+    setFilePermissions(base, {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint msg
+    check "could not remove it again" in msg and "nothing else was written" in msg
+    check "nothing was written" notin msg
+    check dirExists(log)
+    removeDir(base)

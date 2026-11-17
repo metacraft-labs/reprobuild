@@ -189,13 +189,9 @@ evidence. Failing that, make the action `cacheable = false`. See §5.
 `collect(name, actions)` registers a **build graph collection** — a named
 set of graph nodes the engine materialises as a unit
 (`libs/repro_project_dsl/src/repro_project_dsl/runtime_core.nim:1861`).
-The conventional names are `default`, `test`, `bench`, `docs`, `lint`
-and `package` (`reprobuild-specs/Build-Graph-Collections.md`
-§"Conventional Collections Shipped By Stdlib").
-
-> **Read that spec's normative rules, not its status line.** Its header
-> still says *"Draft design, not yet implemented"*, which is stale:
-> `collect` is implemented, and so is the exclude rule below.
+The conventional names shipped by the standard library are `default`,
+`test`, `bench`, `docs`, `lint` and `package`; both `collect` and the
+exclude rule below are implemented.
 
 ### `test` versus `lint`
 
@@ -273,35 +269,25 @@ the *common* form — and the only one under test, in
 `.#a` itself. Learn the rule rather than one instance of it: **one
 path/fragment selector maximum, first; bare names after it.**
 
-**Gotcha 2 — a bare name that matches something on disk is a path.**
-`classifyBuildSelector` (`repro_cli_support.nim:812`) classifies a
-selector as path-shaped if it contains `/`, `\`, `.` or `#`, **or names
-an existing path on disk**:
+**Gotcha 2 — a path is spelled as a path; a bare name never is.**
+`classifyBuildSelector` (`repro_cli_support.nim`) classifies a selector
+as path-shaped only by its spelling: it contains `/`, `\`, `.` or `#`.
+It does not look at the disk. A bare `test` is the name `test` even in a
+project with a `test/` directory, so `repro build test` and the verb
+alias `repro test` both select the `test` collection, and the directory
+is `repro build ./test`.
 
-```nim
-  if fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
-    result.kind = bskPath
-    return
-```
+Older builds also took a bare name that named an existing path as a
+path, so what a name meant depended on what the current directory held.
+That is why some recipes spell their collections `.#test` / `.#lint`
+(CodeTracer's `repro.nim` does). The fragment spelling still selects the
+same collection and stays correct; it is no longer required.
 
-CodeTracer has a `test/` directory, so from its repo root a bare `repro
-build test` resolves to that directory and never reaches the collection
-resolver. The escape hatch is the fragment form, and the recipe says so
-at the declaration (`codetracer/repro.nim:1700`):
+A bare name that names no target but does name a file or directory fails
+with `unknown_target`, and the diagnostic names the `./<name>` spelling.
 
-> SELECT THEM AS `repro build .#test` / `repro build .#lint`. The
-> fragment form is REQUIRED for `test`, not decoration: this repo has a
-> `test/` directory […] `lint` has no such directory today, but is
-> spelled the same way so the two lines cannot drift apart the day one is
-> added.
-
-Spelling both the same way when only one needs it is the idiom worth
-copying. But `.#` is a **workaround for a repo layout**, not a general
-rule: in a repo with no colliding directory, `repro build test` and the
-verb alias `repro test` are both fine.
-
-> Note the character scan runs *before* the disk probe, so a selector
-> containing a `.` is path-shaped even when no such file exists.
+> Note the character scan applies even when no such file exists: a
+> selector containing a `.` is path-shaped.
 
 ---
 
@@ -573,8 +559,7 @@ published entry serves a stale artefact indefinitely.
 
 `MonitorEvidenceStatus`
 (`libs/repro_build_engine/src/repro_build_engine.nim:933`) implements the
-four-rung ladder from `reprobuild-specs/Failure-Semantics.md`
-§"Monitoring Failures":
+engine's four-rung monitoring-failure ladder:
 
 | Grade | Level | What the engine does |
 |---|---|---|
@@ -593,10 +578,9 @@ skipped this session per Failure-Semantics.md §Monitoring Failures
 Only one loss class is Level 1 today — kill-before-flush
 (`classifyEventLossDetail`, `repro_build_engine.nim:5203`). Everything
 else, including any detail string the classifier does not recognise,
-defaults to Level 2, which is the fail-closed direction.
-`reprobuild-specs/Monitor-Loss-Path-Invalidation.md` calls narrowing a
-class to Level 1 a **soundness gate**: it demands a written proof for
-that class, and "without a row here, the classifier defaults to Level 2".
+defaults to Level 2, which is the fail-closed direction. Narrowing a loss
+class to Level 1 is a **soundness gate** that requires a written proof for
+that class; without one, the classifier defaults to Level 2.
 
 > **Level 1 and Level 2 are genuinely different, and two comments used
 > to say they were not.** `mesKnownScopeLoss` was annotated *"Level 1
@@ -711,14 +695,12 @@ inject any child with a Cygwin fork runtime next to its image left every
 MSYS child uninstrumented (`io-mon@3e12f24`). Each took a week-class
 investigation to characterise.
 
-**Do not re-derive any of this.** The systemic constraint behind it —
+**Do not re-derive any of this.** The systemic constraint behind it is
 Cygwin's `fork()` requiring identical DLL virtual addresses in parent and
-child; the bare `STATUS_INVALID_FILE_FOR_SECTION` (`0xC0000020`) exit
-with no stdout, no stderr and no debugger stop; four independent triggers
-with the same signature; and a fifth failure that *hangs* instead — is
-written up in
-`codetracer-specs/Architecture/Hooking-Cygwin-Binaries-On-Windows.md`.
-Read that before concluding a monitoring gap is in your recipe.
+child, which can produce a bare `STATUS_INVALID_FILE_FOR_SECTION`
+(`0xC0000020`) exit with no stdout, no stderr and no debugger stop across
+multiple independent triggers (plus a related hang case). Account for that
+constraint before concluding a monitoring gap is in your recipe.
 
 The practical idiom: **when an edge will not cache, ask what process tree
 it actually created before you touch the recipe.** `repro debug io
@@ -751,10 +733,9 @@ thing:
   consumers — a protocol placeholder.
 
 Host-fact `when` predicates *do* exist, but only in the Home-Profile
-Intent layer (`reprobuild-specs/Home-Profile-Intent-Layer.md`,
-`libs/repro_home_intent/`), where they select packages in an activity
-rather than build actions, and evaluate against a fixed fact set you
-cannot extend by running a command.
+Intent layer (`libs/repro_home_intent/`), where they select packages in
+an activity rather than build actions, and evaluate against a fixed fact
+set you cannot extend by running a command.
 
 ### The pattern
 
@@ -845,19 +826,17 @@ Without a primitive you can still build it, but you own the parts:
 
 The nearest supported alternative is a **variant** — a
 solver-participating `Configurable` resolved at stage 2 and folded into
-the lowered-graph cache key (`reprobuild-specs/Configurable-System.md`;
-the `shell()` docstring points at it for exactly this purpose). A variant
+the lowered-graph cache key (the `shell()` docstring points at it for
+exactly this purpose). A variant
 is a recipe-level switch, not a host observation, so it answers "build it
 two ways" and not "is `rr` usable here". Where the capability can be
 *decided by the person invoking the build* rather than probed, a variant
 is the supported mechanism and this whole section is unnecessary.
 
-> Related but distinct, and also unfinished:
-> `reprobuild-specs/Edge-Determinism-And-Soft-Rebuild.md` proposes a typed
-> per-edge `determinism` property (`strong` / `weak` / `host-bound` /
-> `volatile`) with a `soft-rebuild` / `hard-rebuild` CLI. It is marked
-> ☐ **"Status: Design draft"** and is not implemented. Do not write
-> `determinism …` in a recipe expecting it to do anything.
+> Related but distinct, and also unfinished: a typed per-edge
+> `determinism` property (`strong` / `weak` / `host-bound` / `volatile`)
+> with a `soft-rebuild` / `hard-rebuild` CLI is not implemented. Do not
+> write `determinism …` in a recipe expecting it to do anything.
 
 ---
 
@@ -957,9 +936,9 @@ test were actually present.
   `BuildProgressMode` lives (and could not: the type is module-private to
   `repro_cli_support`, which sits above runquota in the dependency
   order), so there is no path by which the mode could be consulted. This
-  is deliberate and the spec now says so —
-  `reprobuild-specs/CLI/build.md` §"The one thing `quiet` does not
-  silence". If you see it, the build is queued, not wedged. If you
+  is deliberate: a bounded wait that `repro` itself cannot shorten must
+  still surface a heartbeat rather than appear hung. If you see it, the
+  build is queued, not wedged. If you
   see nothing at all for minutes, that is what the bounded deadline is
   for: after 10 minutes of genuine transport silence (no grant frame
   *and* no successful status probe) the client raises an actionable
@@ -1253,8 +1232,8 @@ processes hold it at once. The answers were never the same answer.
 
 There is no DSL vocabulary for any of this yet. Every convention picks
 its own path by hand, correctly but independently, and nothing collects
-the directories when an edge's identity changes. The design is drafted
-in `reprobuild-specs/Tool-Owned-Caches.md`; nothing of it ships yet.
+the directories when an edge's identity changes. Tool-owned cache
+placement does not ship yet.
 When it does, one part of it is worth knowing in advance, because it is
 the part that invites a bad habit.
 
@@ -1285,13 +1264,12 @@ costs a permanent naming obligation on every edge.
 | Topic | Status | Note |
 |---|---|---|
 | Capability facts / probes / skip reasons (§7) | ☐ Not implemented | Pattern only; no DSL vocabulary. `gevHostFact` is a placeholder with no producers or consumers. |
-| Typed per-edge `determinism` (§7) | ☐ Design draft | `reprobuild-specs/Edge-Determinism-And-Soft-Rebuild.md`. |
-| A spec for entropy blessings (§4) | ☐ Missing | No spec document exists. The source comments are the authority; the diagnostics no longer cite a file that does not exist. |
-| `Build-Graph-Collections.md` status header (§3) | ⚠ Stale | Says "not yet implemented"; `collect` and the exclude rule ship. |
+| Typed per-edge `determinism` (§7) | ☐ Not implemented | Design only; do not write `determinism …` in recipes. |
+| Entropy blessings (§4) | ☐ Source-defined | The source comments in `repro_build_engine` are the authority. |
 | `mesKnownScopeLoss` comments (§5) | ✓ Fixed | Both comments now say what the code does: Level 1 publishes and narrows, Level 2 withholds and disables session-wide. |
-| Tool-owned cache placement (§11) | ☐ Not implemented | No DSL vocabulary; conventions each pick a path by hand. Draft: `reprobuild-specs/Tool-Owned-Caches.md`. |
+| Tool-owned cache placement (§11) | ☐ Not implemented | No DSL vocabulary; conventions each pick a path by hand. |
 | Provider nimcache session token (§11) | ✓ Fixed | Removed with the position-keyed nimcache. The token dodged a collision that correct scoping eliminates, and cost every `repro` run a cold start; the lock survives, now scoped per position, so the residual is two instances of one edge. |
-| `--progress=quiet` vs runquota output (§9) | ✓ Reconciled | `reprobuild-specs/CLI/build.md` §"The one thing `quiet` does not silence" now states the heartbeat as a deliberate exception, and says why: `Interactive-UX-And-Progress.md` Principle 1 outranks "disable all progress output" for a wait the build cannot bound. The spec was the thing that was wrong. |
+| `--progress=quiet` vs runquota output (§9) | ✓ Reconciled | The RunQuota queue heartbeat is a deliberate exception to `--progress=quiet` so an unbounded queue wait never appears hung. |
 
 ## Related documentation
 
@@ -1302,12 +1280,3 @@ costs a permanent naming obligation on every edge.
   watch --ct-incremental`.
 - [Reprobuild for Experienced Developers & AI
   Agents](../agents/Repro-Intro-for-Agents.md).
-- `reprobuild-specs/Build-Graph-Collections.md` — collections, exclude
-  rules, CLI resolution.
-- `reprobuild-specs/Failure-Semantics.md` §"Monitoring Failures" and
-  `reprobuild-specs/Monitor-Loss-Path-Invalidation.md` — the grade
-  ladder.
-- `reprobuild-specs/Compiles-Are-Normal-Edges.md` — why the monitor, and
-  not a declared list, supplies inputs.
-- `codetracer-specs/Architecture/Hooking-Cygwin-Binaries-On-Windows.md` —
-  the Windows/Cygwin observability constraint.
