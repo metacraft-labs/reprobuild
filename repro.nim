@@ -985,6 +985,10 @@ package reprobuild:
       "dirname"
       "nm"
       "timeout"
+      # scripts/release/attic_push_with_retry.sh streams each `attic push`
+      # attempt into the log while keeping it for classification;
+      # tests/unit/test_release_cache_push.py runs it.
+      "tee"
     # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
     # actionlint over ``.github/workflows``. The flake shell carries it on
     # Linux and macOS (so path mode finds it there); on Windows there is no
@@ -2538,6 +2542,8 @@ package reprobuild:
         source == "tests/unit/test_release_smoke_dev_exec.py"
       let releaseTagTest =
         source == "tests/unit/test_release_tag_names_build.py"
+      let releaseCachePushTest =
+        source == "tests/unit/test_release_cache_push.py"
       let confinementSystemdAnalyzeTest =
         source == "tests/unit/test_daemon_worker_confinement_systemd_analyze.py"
       let pyExecute = pythonUnittest.run(
@@ -2570,6 +2576,11 @@ package reprobuild:
           # The guard, and the workflow whose publish-job steps the test runs.
           # It copies the guard into the runner clone it builds.
           @["scripts/release/assert_tag_names_commit.sh",
+            ".github/workflows/release.yml"]
+        elif releaseCachePushTest:
+          # The retry script, and the workflow whose `publish-nix-cache` job
+          # shape the test checks and whose push step's `run:` block it runs.
+          @["scripts/release/attic_push_with_retry.sh",
             ".github/workflows/release.yml"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
@@ -2604,6 +2615,12 @@ package reprobuild:
       # against it, and the workflow steps' `run:` lines under bash.
       if releaseTagTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
+      # The retry script's own subprocesses, and the fake `attic`'s `grep`
+      # and `cat`; POSIX only, like the release job that runs the script.
+      when not defined(windows):
+        if releaseCachePushTest:
+          appendRegisteredActionToolIdentityRefs(pyExecute.id,
+            ["bash", "timeout", "tee", "grep", "mktemp", "rm", "cat"])
       if releaseSmokeTest:
         # Bind actual declared child tools into the filtered execute PATH.
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "just"])
