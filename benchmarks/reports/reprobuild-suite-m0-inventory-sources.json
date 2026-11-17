@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2944,
+    "nimTestBinaries": 2945,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 785,
+    "pureUnitTests": 786,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2992
+    "testEntries": 2993
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1646,7 +1646,7 @@
       "graph-fixture": 24,
       "integration": 1633,
       "platform/destructive": 193,
-      "pure unit": 785,
+      "pure unit": 786,
       "unclassified": 357
     },
     "graphOwnedTestArtifacts": [
@@ -1861,9 +1861,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2944,
+    "nimTestBinaryCount": 2945,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2992
+    "testEntryCount": 2993
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21475,6 +21475,21 @@
       "source": "libs/repro_lock_files/tests/t_declarations_are_emitted_eagerly.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_one_version_per_name_runtimes_inherit_forbidden",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_lock_files",
+      "requiresReproBinary": false,
+      "source": "libs/repro_lock_files/tests/t_one_version_per_name_runtimes_inherit_forbidden.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
