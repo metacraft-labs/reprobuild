@@ -12,7 +12,7 @@ import repro_test_support
 # libs/repro_local_store/src/repro_local_store/store.nim
 # (`realizationDirName`, `casBlobRelative`).
 const
-  PrefixDirNameRe = r"^[^/]+-[0-9a-f]{16}$"
+  PrefixDirNameRe = r"^[^/]+-[0-9a-f]{40}$"
   CasBlobNameRe = r"^[0-9a-f]{64}$"
   CasShardDirRe = r"^[0-9a-f]{2}$"
 
@@ -27,7 +27,7 @@ proc assertSpecLayoutAfterRealize(storeRoot, realizedPrefixPath: string) =
   ## NOTE: the intermediate `<package-segment>` directory under
   ## `prefixes/` is adapter-specific (synthetic, tarball, and nix each
   ## pick a different shape), so we assert the nesting depth and the
-  ## trailing `<version>-<16hex>` regex but do not require a uniform
+  ## trailing `<version>-<40hex>` regex but do not require a uniform
   ## package-segment shape. The `cas/` subtree may be empty for direct-
   ## rename realizations; we assert only the sharding contract for any
   ## blobs that happen to be present.

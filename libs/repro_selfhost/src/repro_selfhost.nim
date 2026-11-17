@@ -33,9 +33,11 @@
 ##
 ## 3. This module reads that ``LockedDep`` (``selfPinForProject``) and
 ##    computes where the matching prefix lives (``selfPrefixId`` ->
-##    ``selfPrefixRelativePath``), using the STORE's own
-##    ``computeRealizationHash`` / ``prefixRelativePath``, not a private
-##    scheme.
+##    ``selfPrefixAbsolutePath``), using the STORE's own
+##    ``computeRealizationHash`` / ``resolvePrefixRelativePath``, not a
+##    private scheme. On a store an older build wrote, a pin it installed
+##    is found under that build's 16-hex directory name, which its receipt
+##    records; everything new is at the 40-hex name.
 ##
 ## 4. ``repro self install`` realizes an image there and attaches it to an
 ##    ``rkPin`` root named after the consuming project. ``repro store gc``
@@ -57,14 +59,16 @@
 ##
 ## WHAT THIS MODULE DELIBERATELY DOES NOT IMPORT. Not ``repro_local_store``
 ## (SQLite), not the build engine, not the CLI. ``repro_lock`` plus the
-## store's pure naming/hash pair is the whole dependency set, so the resolving
-## launcher that links it starts without loading a database.
+## store's naming/hash pair and its index-free resolver (which reads at most
+## one receipt) is the whole dependency set, so the resolving launcher that
+## links it starts without loading a database.
 
 import std/[os, strutils]
 
 import repro_lock
 import repro_local_store/prefix_paths
 import repro_local_store/realization_hash
+import repro_local_store/prefix_location
 
 export prefix_paths
 
@@ -527,18 +531,38 @@ proc selfPrefixId*(pin: SelfPin): PrefixIdBytes =
 
 proc prefixRelativePathFor*(pkg: PinnedPackage; version,
                             storeHash: string): string =
+  ## ``prefixes/<package>/<version>-<40 hex>``: where a pinned image is
+  ## placed, from the store's own arithmetic. Store-independent; use the
+  ## ``storeRoot`` overload to find one that may already be installed.
   prefixRelativePath(pkg.name, version, prefixIdFor(pkg, version, storeHash))
 
 proc prefixRelativePathFor*(version, storeHash: string): string =
   prefixRelativePathFor(reprobuildPin(), version, storeHash)
 
+proc prefixRelativePathFor*(storeRoot: string; pkg: PinnedPackage; version,
+                            storeHash: string): string =
+  ## Where the pinned image IS on the store at ``storeRoot``: its 40-hex
+  ## path, or the 16-hex path an older build installed it at when that
+  ## prefix is still there (``resolvePrefixRelativePath``).
+  resolvePrefixRelativePath(storeRoot, pkg.name, version,
+    prefixIdFor(pkg, version, storeHash))
+
 proc selfPrefixRelativePath*(pin: SelfPin): string =
-  ## ``prefixes/<package>/<version>-<hash16>``, from the store's own
-  ## arithmetic.
+  ## ``prefixes/<package>/<version>-<40 hex>``, from the store's own
+  ## arithmetic: where the pin is placed. See ``selfPrefixAbsolutePath``.
   prefixRelativePathFor(pinnedPackageOf(pin), pin.version, pin.storeHash)
 
+proc selfPrefixRelativePath*(storeRoot: string; pin: SelfPin): string =
+  ## Where the pin's prefix is on the store at ``storeRoot``
+  ## (``prefixRelativePathFor``'s ``storeRoot`` overload).
+  prefixRelativePathFor(storeRoot, pinnedPackageOf(pin), pin.version,
+                        pin.storeHash)
+
 proc selfPrefixAbsolutePath*(storeRoot: string; pin: SelfPin): string =
-  storeRoot / selfPrefixRelativePath(pin)
+  ## The pin's prefix on the store at ``storeRoot``, as the store itself
+  ## names it: an image an older build installed is found under that build's
+  ## 16-hex name, and ``repro self install`` (``realizePrefix``) agrees.
+  storeRoot / selfPrefixRelativePath(storeRoot, pin)
 
 proc selfExecutableIn*(prefixAbsolutePath: string): string =
   prefixAbsolutePath / "bin" / selfExecutableName()

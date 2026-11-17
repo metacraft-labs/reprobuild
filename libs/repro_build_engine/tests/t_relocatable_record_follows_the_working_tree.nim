@@ -214,9 +214,14 @@ suite "a relocatable record follows the working tree":
     let edge = relocatableAction(tempRoot, proj, relocatable = false)
     let deeper = tempRoot / "gamma" / "x" / "work" / "proj"
     createDir(deeper)
-    # Not keyed on the cwd's depth: the identity it always had.
-    check edge.weakFingerprint ==
+    # Keyed on its cwd itself, not on the cwd's depth: an ordinary edge's
+    # key covers its cwd (`action()` mixes it in through `keyedOnArgv`,
+    # reprobuild-pm Caching-Architecture.md §"BuildXL-Inspired
+    # Fingerprinting", rider of 2026-11-16), so another tree is another key.
+    check edge.weakFingerprint !=
       relocatableAction(tempRoot, deeper, relocatable = false).weakFingerprint
+    check edge.weakFingerprint ==
+      relocatableAction(tempRoot, proj, relocatable = false).weakFingerprint
     check edge.weakFingerprint !=
       relocatableAction(tempRoot, proj).weakFingerprint
     check edge.recordedInputNames([proj / "input.txt"]) ==

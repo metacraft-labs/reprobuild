@@ -833,7 +833,15 @@ suite "a tool under a content-addressed root is in the cache key without being a
     ## letting it: "What the env var still could do is nominate a MUTABLE tree
     ## as content-addressed within one consistent setting, and that is what
     ## `isRealizationDirName` bounds: the only thing elided under this root is
-    ## a directory whose own name states a 16-hex realization digest."
+    ## a directory whose own name states a realization digest (40 hex, or the
+    ## 16 of a prefix an older build named)."
+    ##
+    ## (Since the store's directory name was widened to 40 hex, the predicate
+    ## is two copies of the shape below, `endsWithDigestOfWidth(name, 40)` or
+    ## `endsWithDigestOfWidth(name, 16)`. The history that follows is of the
+    ## 16-hex copy, which the original aliases still grade; two aliases below
+    ## grade the 40-hex copy's arms the same way, and a legacy-named
+    ## realization beside the 40-hex one is the second denominator.)
     ##
     ## That bound was graded by NOTHING. MEASURED (2026-09-09): with
     ## `isRealizationDirName`'s body replaced by `true` — the two shape checks
@@ -988,10 +996,21 @@ suite "a tool under a content-addressed root is in the cache key without being a
       # and the IndexDefect is all you get, which says far less about what the
       # arm is FOR. MEASURED both ways.
       let realization = realizationDirName("5.2", digest)
+      # The store names a realization with 40 hex, and keeps a prefix an
+      # older build named with 16 where it lies, so the predicate has TWO
+      # accepting shapes, each a separator arm and a digit arm. The
+      # 16-hex witnesses above grade the 16-hex shape's arms; these two grade
+      # the 40-hex shape's: a 44-hex bare digest (the separator 41 from the
+      # end is a digit, and 17 from the end too), and a name with `-` exactly
+      # 41 from the end over a 40-character tail that is not hex.
       let aliases = @[
         (relDir: "prefixes/bash/c0c1c2c3c4c5c6c7c8c9dadbdcdddedf",
          tag: "bare-digest"),
         (relDir: "prefixes/bash/bash-mutable-checkout", tag: "checkout"),
+        (relDir: "prefixes/bash/c0c1c2c3c4c5c6c7c8c9dadbdcdddedfc0c1c2c3c4c5",
+         tag: "bare-wide-digest"),
+        (relDir: "prefixes/bash/bash-mutable-checkout-of-the-bash-sources-xyz",
+         tag: "wide-checkout"),
         (relDir: "prefixes/bash/latest/tmp/" & realization, tag: "too-deep"),
         (relDir: "scratch/prefixes/x/latest/build/" & realization,
          tag: "nested-too-deep"),
@@ -1017,6 +1036,13 @@ suite "a tool under a content-addressed root is in the cache key without being a
 
       # The realization name is recognised ...
       check contentAddressedRoot(realTool) == realDir
+      # ... and so is the 16-hex name of a prefix an older build realized,
+      # which the store keeps where it lies.
+      let legacyDir = storeRoot / legacyPrefixRelativePath("bash", "5.2",
+        digest)
+      createDir(legacyDir / "bin")
+      copyFileWithPermissions(shells[0], legacyDir / "bin" / "sh")
+      check contentAddressedRoot(legacyDir / "bin" / "sh") == legacyDir
       let seed = weakFingerprintFromText("execdep/store-alias")
       # ... and for a recognised root the mix MOVES the fingerprint. Asserted
       # once, here, so that each alias's identity below is a statement about

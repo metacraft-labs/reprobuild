@@ -8,10 +8,13 @@
 ##
 ## M5 SELF-HOST is the caller that made the second half necessary. The
 ## resolving launcher (``repro`` trampoline) has to turn a project's committed
-## pin into ``<store>/prefixes/reprobuild/<version>-<hash16>/bin/repro`` before
+## pin into ``<store>/prefixes/reprobuild/<version>-<hash>/bin/repro`` before
 ## any reprobuild exists to ask, and a launcher that opens the store index to
 ## answer that question has recursed on its own dependency problem — the same
-## argument ``apps/repro-launcher`` records for staying on kernel32.
+## argument ``apps/repro-launcher`` records for staying on kernel32. The
+## directory name carries the first 40 hex (160 bits) of this hash
+## (``prefix_paths.realizationDirName``); a prefix an older build named with
+## 16 is found through its receipt (``prefix_location``).
 ##
 ## ``store.nim`` imports and re-exports this module, so every existing
 ## ``repro_local_store`` consumer keeps seeing ``computeRealizationHash``

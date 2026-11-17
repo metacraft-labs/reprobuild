@@ -297,16 +297,28 @@ suite "a unit an older closure realiser bound is relocated, not refused":
     let current = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
     let legacy = legacyAptClosurePrefixPaths(AddOnSystemStoreRoot, lock)
     # Realiser 2's union, then realiser 3's before unions carried their
-    # alternatives links (§8.3 item 4, "Alternatives").
-    check legacy.len == 2 and current notin legacy
+    # alternatives links, then realiser 3's last (§8.3 item 4), each at
+    # its own path and none realiser 4's (the store's 40-hex name).
+    check legacy.len == 3 and current notin legacy
+    check legacy[1] != legacy[2]
     check legacy[0].startsWith(AddOnSystemStoreRoot & "/prefixes/apt-closure-ipmitool/1.0-1-")
     check legacy[1] == preAlternativesAptClosurePrefixPath(
       AddOnSystemStoreRoot, lock)
+    check legacy[2] == storeNamedAptClosurePrefixPath(AddOnSystemStoreRoot, lock)
     let rendered = renderedSystemUnitContent(r)
     let old = legacyClosureRenderings(r)
-    check old.len == 2 and current notin old[0] and legacy[0] in old[0]
+    check current notin old[0] and legacy[0] in old[0]
     check old[0] == rendered.replace(current & "/", legacy[0] & "/")
+    check old.len == 3
     check old[1] == rendered.replace(current & "/", legacy[1] & "/")
+    check current notin old[2] and legacy[2] in old[2]
+    check old[2] == rendered.replace(current & "/", legacy[2] & "/")
+    # A unit realiser 3 bound is relocated too.
+    block:
+      let tmp3 = createTempDir("addon-closure-reloc3-", "")
+      defer: removeDir(tmp3)
+      writeFile(tmp3 / "x.service", old[2])
+      check relocatesClosure(r, tmp3 / "x.service")
     let tmp = createTempDir("addon-closure-reloc-", "")
     defer: removeDir(tmp)
     writeFile(tmp / "x.service", old[0])
@@ -336,6 +348,8 @@ suite "a unit an older closure realiser bound is relocated, not refused":
     let old = legacyClosureBytes(manifest, tool)
     check old == @[renderAddOnToolManifest(legacy, "/usr/bin/ipmitool"),
       renderAddOnToolManifest(preAlternativesAptClosurePrefixPath(
+        AddOnSystemStoreRoot, lock), "/usr/bin/ipmitool"),
+      renderAddOnToolManifest(storeNamedAptClosurePrefixPath(
         AddOnSystemStoreRoot, lock), "/usr/bin/ipmitool")]
     check old[0] == manifest.sfContent.replace(current, legacy)
     check legacyClosureBytes(wrapper, tool).len == 0

@@ -62,13 +62,23 @@ const
   AptClosureLockHeader* = "repro-apt-closure-lock v1"
     ## First line of every lock. A future incompatible format changes this.
 
-  AptClosureRealiserVersion* = "3"
+  AptClosureRealiserVersion* = "4"
     ## Part of the closure identity. Bump it whenever the realiser changes
     ## the BYTES or LAYOUT it writes (hardening, folding, union rules), so a
     ## prefix written by an older realiser is never mistaken for a new one.
     ## "3": every prefix is published through the store (a sealed
     ## ``.repro-receipt`` and an index row) at the store's own path for its
     ## realization hash, so the collector sees it and a root can hold it.
+    ## "4": that path's directory name carries 160 bits of the realization
+    ## hash instead of 64 (Local-Content-Addressed-Store.md §"Realization
+    ## Hash (normative)"). The bump is what moves the closures: these paths
+    ## are pure functions of the lock, computed by a planner that may not be
+    ## on the host and baked into ``BindReadOnlyPaths=``, so they cannot ask
+    ## the store which name an existing prefix has. With new ids no v4
+    ## prefix ever had a 16-hex name, so the store's 40-hex path for each is
+    ## the only path it can have. Realiser 3's prefixes stay where they lie,
+    ## indexed and held by the generations that bind them
+    ## (``StoreNamedAptRealiser``).
 
   AptClosureUnionLayout* = "alternatives-1"
     ## Part of the UNION's realization hash only (not the members'): the
@@ -484,16 +494,19 @@ proc pathSafeVersion*(version: string): string =
 
 proc debStorePackage(d: AptLockedDeb): string = "apt-deb-" & d.name
 
+proc aptDebPrefixIdFor(d: AptLockedDeb; realiser: string): PrefixIdBytes =
+  computeRealizationHash(debStorePackage(d), d.version, AptDebStoreAdapter,
+    lockIdentity = d.sha256, declaredExecutablePath = "",
+    provenanceChecksum = "sha256:" & d.sha256,
+    extra = [realiser, d.architecture])
+
 proc aptDebPrefixId*(d: AptLockedDeb): PrefixIdBytes =
   ## The store realization hash of a member's prefix: a pure function of
   ## the member's archive bytes (its SHA-256), its name, version and
   ## architecture, and the realiser version. The prefix's directory is the
   ## store's own path for it (``prefixRelativePath``), so the store's
   ## recovery, index and collector treat it like any other prefix.
-  computeRealizationHash(debStorePackage(d), d.version, AptDebStoreAdapter,
-    lockIdentity = d.sha256, declaredExecutablePath = "",
-    provenanceChecksum = "sha256:" & d.sha256,
-    extra = [AptClosureRealiserVersion, d.architecture])
+  aptDebPrefixIdFor(d, AptClosureRealiserVersion)
 
 proc aptClosureIdentityFor(lock: AptClosureLock; realiser: string): string =
   var shas: seq[string] = @[]
@@ -515,18 +528,20 @@ proc rootDeb(lock: AptClosureLock): AptLockedDeb =
   raiseLock("root " & lock.roots[0] & " is not a member")
 
 proc aptDebPrefixPath*(storeRoot: string; d: AptLockedDeb): string =
-  ## ``<store>/prefixes/apt-deb-<name>/<version>-<hash16>``: the store's
+  ## ``<store>/prefixes/apt-deb-<name>/<version>-<40 hex>``: the store's
   ## path for ``aptDebPrefixId`` (name and version restricted to
   ## ``[A-Za-z0-9._-]``, every other character written ``_``, so an
-  ## epoch's ``:`` never reaches a ``BindReadOnlyPaths=`` line).
+  ## epoch's ``:`` never reaches a ``BindReadOnlyPaths=`` line). Pure: a
+  ## realiser-4 id was never named at the store's older 16-hex width, so
+  ## this is the only path its prefix can have (``AptClosureRealiserVersion``).
   storeRoot / prefixRelativePath(debStorePackage(d), d.version,
     aptDebPrefixId(d))
 
-proc unionPrefixIdWith(lock: AptClosureLock;
+proc unionPrefixIdWith(lock: AptClosureLock; realiser: string;
                        extra: openArray[string]): PrefixIdBytes =
   let r = rootDeb(lock)
   computeRealizationHash("apt-closure-" & r.name, r.version,
-    AptClosureStoreAdapter, lockIdentity = aptClosureIdentity(lock),
+    AptClosureStoreAdapter, lockIdentity = aptClosureIdentityFor(lock, realiser),
     declaredExecutablePath = "", extra = extra)
 
 proc aptClosurePrefixId*(lock: AptClosureLock): PrefixIdBytes =
@@ -534,26 +549,62 @@ proc aptClosurePrefixId*(lock: AptClosureLock): PrefixIdBytes =
   ## function of the first root's name and version, of the closure's
   ## content identity (``aptClosureIdentity``) and of the union's layout
   ## (``AptClosureUnionLayout``).
-  unionPrefixIdWith(lock, [AptClosureRealiserVersion, AptClosureUnionLayout])
+  unionPrefixIdWith(lock, AptClosureRealiserVersion,
+    [AptClosureRealiserVersion, AptClosureUnionLayout])
 
 proc aptClosurePrefixPath*(storeRoot: string; lock: AptClosureLock): string =
-  ## ``<store>/prefixes/apt-closure-<first root>/<root version>-<hash16>``,
+  ## ``<store>/prefixes/apt-closure-<first root>/<root version>-<40 hex>``,
   ## the store's path for ``aptClosurePrefixId``. A pure function of the
   ## lock: the planner and the host agree on it without either touching the
-  ## network.
+  ## network or the store (see ``aptDebPrefixPath`` for why no other name is
+  ## possible).
   let r = rootDeb(lock)
   storeRoot / prefixRelativePath("apt-closure-" & r.name, r.version,
     aptClosurePrefixId(lock))
+
+const StoreNamedAptRealiser* = "3"
+  ## The realiser before ``AptClosureRealiserVersion`` "4": it published
+  ## every prefix through the store, indexed and sealed, at the store's
+  ## path for its id when that path's name carried 16 hex
+  ## (``legacyPrefixRelativePath``). Its prefixes are ordinary indexed
+  ## prefixes the store's recovery keeps where they lie and the collector
+  ## takes once no generation's root holds them; units an earlier
+  ## generation bound to them are relocated (``legacyAptClosurePrefixPaths``),
+  ## and a member is published from one when its archive is no longer
+  ## served (``reusableLegacyMember``).
+
+proc storeNamedAptDebPrefixId*(d: AptLockedDeb): PrefixIdBytes =
+  ## Realiser 3's id for ``d``'s member prefix.
+  aptDebPrefixIdFor(d, StoreNamedAptRealiser)
+
+proc storeNamedAptDebPrefixPath*(storeRoot: string; d: AptLockedDeb): string =
+  ## Where realiser 3 published ``d``'s member prefix.
+  storeRoot / legacyPrefixRelativePath(debStorePackage(d), d.version,
+    storeNamedAptDebPrefixId(d))
+
+proc storeNamedAptClosurePrefixId*(lock: AptClosureLock): PrefixIdBytes =
+  ## Realiser 3's id for the closure's union prefix, in the union layout
+  ## it last used (``AptClosureUnionLayout``).
+  unionPrefixIdWith(lock, StoreNamedAptRealiser,
+    [StoreNamedAptRealiser, AptClosureUnionLayout])
+
+proc storeNamedAptClosurePrefixPath*(storeRoot: string;
+                                     lock: AptClosureLock): string =
+  ## Where realiser 3 published the closure's union prefix.
+  let r = rootDeb(lock)
+  storeRoot / legacyPrefixRelativePath("apt-closure-" & r.name, r.version,
+    storeNamedAptClosurePrefixId(lock))
 
 proc preAlternativesAptClosurePrefixPath*(storeRoot: string;
                                           lock: AptClosureLock): string =
   ## Where realiser 3 put this closure's union before unions carried their
   ## alternatives links (``AptClosureUnionLayout``): a store-published
-  ## prefix, its id without the layout component. Same members, other
-  ## path; a unit bound to it is relocated, not refused.
+  ## prefix at the store's older 16-hex width, its id without the layout
+  ## component. Same members, other path; a unit bound to it is relocated,
+  ## not refused.
   let r = rootDeb(lock)
-  storeRoot / prefixRelativePath("apt-closure-" & r.name, r.version,
-    unionPrefixIdWith(lock, [AptClosureRealiserVersion]))
+  storeRoot / legacyPrefixRelativePath("apt-closure-" & r.name, r.version,
+    unionPrefixIdWith(lock, StoreNamedAptRealiser, [StoreNamedAptRealiser]))
 
 const LegacyAptClosureRealisers* = ["2"]
   ## Realiser versions whose closure prefixes predate the store-published
@@ -565,15 +616,17 @@ const LegacyAptClosureRealisers* = ["2"]
 
 proc legacyAptClosurePrefixPaths*(storeRoot: string;
                                   lock: AptClosureLock): seq[string] =
-  ## Where each older realiser (``LegacyAptClosureRealisers``) put this
-  ## closure's union prefix, oldest first, then where realiser 3 put it
-  ## before unions carried alternatives
-  ## (``preAlternativesAptClosurePrefixPath``).
+  ## Where each older realiser put this closure's union prefix: each
+  ## unpublished-layout realiser's (``LegacyAptClosureRealisers``), oldest
+  ## first, then realiser 3's before unions carried alternatives
+  ## (``preAlternativesAptClosurePrefixPath``), then realiser 3's last
+  ## (``storeNamedAptClosurePrefixPath``).
   let r = rootDeb(lock)
   for v in LegacyAptClosureRealisers:
     result.add(storeRoot / "prefixes" / ("apt-closure-" & r.name) /
       (pathSafeVersion(r.version) & "-" & aptClosureIdentityFor(lock, v)))
   result.add(preAlternativesAptClosurePrefixPath(storeRoot, lock))
+  result.add(storeNamedAptClosurePrefixPath(storeRoot, lock))
 
 proc aptClosurePrefixIds*(lock: AptClosureLock): seq[PrefixIdBytes] =
   ## Every store prefix a realised closure consists of: the union first,
@@ -1191,6 +1244,15 @@ const ReusedLegacyProvenance* = "reused-from-realiser-2:"
   ## marker's SHA-256 it was matched by. Such a receipt carries no
   ## ``provenanceChecksum``: no archive was verified for it.
 
+const ReusedStoreNamedProvenance* = "reused-from-realiser-3:"
+  ## The ``provenanceUrl`` scheme of a member published from realiser 3's
+  ## prefix of the same member (``realiseDeb``): that prefix's path, its
+  ## realization hash, and the provenance its own receipt records. Such a
+  ## receipt carries no ``provenanceChecksum`` either: this realisation
+  ## verified no archive. What it rests on is stronger than realiser 2's
+  ## marker: an indexed prefix the store verified against the tree digest
+  ## recorded when realiser 3 published it.
+
 proc publishThroughStore(st: var Store; tmp, final: string;
                          prefixId: PrefixIdBytes; hint: StoreReceiptHint;
                          mechanism = "apt-unpack";
@@ -1252,9 +1314,40 @@ proc linkTree(src, dst: string; skip: openArray[string]) =
     of pcFile: createHardlink(s, d)
     of pcLinkToFile, pcLinkToDir: createSymlink(expandSymlink(s), d)
 
+proc readMarker(path: string): string
+
+proc storeNamedMember(storeRoot: string; d: AptLockedDeb): string =
+  ## Realiser 3's prefix of exactly this member, "" when there is none that
+  ## its receipt and marker vouch for: at ``storeNamedAptDebPrefixPath``, a
+  ## directory whose receipt records realiser 3's id for this member AT THAT
+  ## PATH (``legacyPrefixOccupant``), under the member adapter and the
+  ## lock's SHA-256, with a marker naming the same SHA-256. The store index
+  ## check (the row, and the tree against its recorded digest) is
+  ## ``realiseDeb``'s, which holds the store open; a planner without it
+  ## (``closureSpace``) gets the candidate.
+  let dir = storeNamedAptDebPrefixPath(storeRoot, d)
+  let rel = "prefixes/" & dir.parentDir.extractFilename & "/" &
+    dir.extractFilename
+  if legacyPrefixOccupant(storeRoot, rel, storeNamedAptDebPrefixId(d)) !=
+      lpoThisId:
+    return ""
+  if readMarker(dir / DebPrefixMarker) != d.sha256 & "\n": return ""
+  try:
+    let rec = readReceiptFile(dir / ReceiptFileName)
+    if rec.adapter != AptDebStoreAdapter or rec.lockIdentity != d.sha256:
+      return ""
+  except CatchableError:
+    return ""
+  dir
+
+proc realiserTwoMember(storeRoot: string; d: AptLockedDeb): string
+
 proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
   ## An older realiser's prefix of exactly this member, "" when there is
-  ## none that verifies: at ``legacyAptDebPrefixPath``, its marker naming
+  ## none that verifies. Realiser 3's first (``storeNamedMember``): the
+  ## store's own indexed prefix of the same archive bytes at that
+  ## realiser's 16-hex path. Otherwise realiser 2's: at
+  ## ``legacyAptDebPrefixPath``, its marker naming
   ## the lock's SHA-256 (and its directory name that realiser's hash of
   ## it), its tree within the store's policy (``legacyDebPrefix``), and an
   ## adopted receipt, when there is one, recording the same digest at the
@@ -1269,6 +1362,13 @@ proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
   ## became version 2 (dba543f5d9), so a tree from that window was unpacked
   ## by the weaker one. A member published from it says so in its receipt
   ## (``realiseDeb``) instead of claiming the archive's digest.
+  let storeNamed = storeNamedMember(storeRoot, d)
+  if storeNamed.len > 0: return storeNamed
+  realiserTwoMember(storeRoot, d)
+
+proc realiserTwoMember(storeRoot: string; d: AptLockedDeb): string =
+  ## Realiser 2's prefix of exactly this member (``reusableLegacyMember``'s
+  ## second source), "" when there is none that verifies.
   let dir = legacyAptDebPrefixPath(storeRoot, d)
   if not dirExists(dir): return ""
   let v = legacyDebPrefix(dir)
@@ -1315,17 +1415,46 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
   # Karadjov, 2026-11-01). An inconclusive fetch refuses. The receipt of
   # such a member names where it came from and the marker it rests on, not
   # the archive's digest, which nothing re-checked.
+  #
+  # Realiser 3's prefix is tried first: since the bump to "4" every member
+  # is published anew, and on a host whose archive no longer serves a
+  # member the prefix realiser 3 published of it is the one a running unit
+  # binds. It is used only when the store index records it at its path
+  # and its tree verifies against the digest recorded when it was
+  # published.
   var deb = ""
   var legacy = ""
   try:
     deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
   except EAptDebUnserved as e:
     if unserved != nil: unserved[] = true
-    legacy = reusableLegacyMember(storeRoot, d)
+    # Realiser 3's prefix only when the store index records it at its path
+    # and its tree verifies; otherwise realiser 2's, as before.
+    let storeNamed = storeNamedMember(storeRoot, d)
+    let storeNamedId = storeNamedAptDebPrefixId(d)
+    if storeNamed.len > 0 and
+        st.lookupPrefix(storeNamedId).row.realizedPath ==
+          "prefixes/" & storeNamed.parentDir.extractFilename & "/" &
+            storeNamed.extractFilename and
+        ensureIndexed(st, storeNamed, storeNamedId):
+      legacy = storeNamed
+    else:
+      legacy = realiserTwoMember(storeRoot, d)
     if legacy.len == 0:
       raise newException(EAptDebUnserved, e.msg & "; and no older " &
         "realiser's prefix of " & d.name & " " & d.version & " verifies")
   if legacy.len > 0:
+    let fromStoreNamed = legacy == storeNamedAptDebPrefixPath(storeRoot, d)
+    var provenance = ReusedLegacyProvenance & legacy &
+      "#marker-sha256=" & d.sha256
+    var mechanism = "reused-realiser-2-prefix"
+    if fromStoreNamed:
+      let rec = readReceiptFile(legacy / ReceiptFileName)
+      provenance = ReusedStoreNamedProvenance & legacy &
+        "#prefix-id=" & prefixIdHex(storeNamedAptDebPrefixId(d)) &
+        "#its-provenance=" & rec.provenanceUrl &
+        "#its-checksum=" & rec.provenanceChecksum
+      mechanism = "reused-realiser-3-prefix"
     createDir(parentDir(result))
     reclaimStaleScratch(parentDir(result))
     let tmp = tempSibling(result, "apt-deb")
@@ -1338,10 +1467,9 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
         StoreReceiptHint(adapter: AptDebStoreAdapter,
           packageName: debStorePackage(d), version: d.version,
           lockIdentity: d.sha256,
-          provenanceUrl: ReusedLegacyProvenance & legacy &
-            "#marker-sha256=" & d.sha256 & "#unserved=" & debUrl(lock, d) &
+          provenanceUrl: provenance & "#unserved=" & debUrl(lock, d) &
             "#contents-not-reverified-against-the-deb"),
-        mechanism = "reused-realiser-2-prefix", log = log)
+        mechanism = mechanism, log = log)
     except CatchableError:
       if dirExists(tmp): removeDir(tmp)
       raise

@@ -247,6 +247,14 @@ package clang:
         flag standard is string,
           alias = "-std=",
           format = concat
+        # The full SONAME (``LinkOptions.soname``), baked into a shared
+        # library's ``DT_SONAME``. Spelled ``-Wl,-soname,<value>`` -- the
+        # comma form, as ``zig cc`` spells it (``packages/zig.nim``) -- so
+        # one rendering is valid for every driver that passes it through to
+        # ld (https://sourceware.org/binutils/docs/ld/Options.html).
+        flag soname is string,
+          alias = "-Wl,-soname,",
+          format = concat
         flag output is string,
           alias = "-o",
           role = output,
@@ -313,6 +321,9 @@ proc clangLink*(opts: LinkOptions): BuildActionDef =
     output = opts.target,
     shared = (opts.kind == lokShared),
     staticLink = (opts.kind == lokStatic),
+    # Only a shared library carries a SONAME; on an executable
+    # ``-soname`` would stamp a ``DT_SONAME`` no loader reads.
+    soname = (if opts.kind == lokShared: opts.soname else: ""),
     libs = libs,
     libDirs = libDirs)
 

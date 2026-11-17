@@ -233,6 +233,25 @@ proc installMirrorStoreRelativePath*(depName, version,
   except ValueError:
     ""
 
+proc isInstallMirrorStorePath(rel, depName, version,
+                               realizationHashHex: string): bool =
+  ## Whether ``rel`` is a store path the install mirror of this realization
+  ## can have: its canonical 40-hex path
+  ## (``installMirrorStoreRelativePath``), or the 16-hex path a build before
+  ## the widening published it at, which the store keeps it at while its
+  ## index records it there (``prefix_paths.legacyPrefixRelativePath``). The
+  ## publisher records the path the store answered; this only refuses a
+  ## path that names some other prefix.
+  if rel.len == 0: return false
+  if rel == installMirrorStoreRelativePath(depName, version,
+                                           realizationHashHex):
+    return true
+  try:
+    rel == legacyPrefixRelativePath(depName, version,
+      parseRealizationHashHex(realizationHashHex)).replace("\\", "/")
+  except ValueError:
+    false
+
 proc writeRealizationInfoFile*(recipesRoot, depName, version,
                                realizationHashHex: string;
                                storeRelativePath = "") =
@@ -247,7 +266,7 @@ proc writeRealizationInfoFile*(recipesRoot, depName, version,
       storeRelativePath.replace("\\", "/")
     else:
       canonicalRel
-  if rel.len == 0 or rel != canonicalRel:
+  if not isInstallMirrorStorePath(rel, depName, version, realizationHashHex):
     return
   let path = realizationInfoPath(recipesRoot, depName)
   let payload = "platform=" & currentRealizationPlatformTag() & "\n" &
@@ -306,7 +325,9 @@ proc readRealizationInfoFile*(recipesRoot, depName: string): RealizationInfo =
       result.version, result.realizationHashHex)
     if result.storeRelativePath.len == 0:
       result.storeRelativePath = canonicalRel
-    elif result.storeRelativePath != canonicalRel:
+    elif not isInstallMirrorStorePath(result.storeRelativePath, depName,
+                                      result.version,
+                                      result.realizationHashHex):
       result.storeRelativePath = ""
 
 proc hashedDepMirrorRoot*(recipesRoot, depName: string): string =

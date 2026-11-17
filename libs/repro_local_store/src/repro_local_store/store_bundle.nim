@@ -1347,14 +1347,19 @@ proc entryMatches(e: BundleEntry; checkContent: bool;
   ""
 
 proc prefixIntact(prefix: string): bool =
-  ## A local prefix that a receipt seals under its own name (§5 step 3).
+  ## A local prefix that a receipt seals under its own name (§5 step 3): its
+  ## 40-hex name, or an older build's 16-hex name the receipt records as
+  ## exactly this path (``prefixDirMatchesReceipt``). ``prefix`` lies at
+  ## ``<root>/prefixes/<package>/<leaf>``, so its path relative to the root
+  ## it was recorded against is the last three segments.
   let receiptPath = prefix / ReceiptFileName
   if not fileExists(receiptPath):
     return false
   try:
     let receipt = readReceiptFile(receiptPath)
-    prefix.extractFilename == realizationDirName(receipt.version,
-      receipt.realizationHash)
+    let relDir = "prefixes/" & prefix.parentDir.extractFilename & "/" &
+      prefix.extractFilename
+    prefixDirMatchesReceipt(relDir, receipt)
   except CatchableError:
     false
 
