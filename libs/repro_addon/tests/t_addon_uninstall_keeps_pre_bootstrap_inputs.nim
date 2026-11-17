@@ -1306,3 +1306,127 @@ suite "round 21":
     for bad in ["1@2.3g-", "1@2.3g--4", "1@2.3g", "1@2.3g4-", "1@2.3g-g4"]:
       checkpoint bad
       check not validIdentity(bad)
+
+# ---------------------------------------------------------------------------
+# A11 code review round 22 (§13 decision 178, amended): with no recorded
+# identity and no ledger copy the records' directory is never recorded at
+# first use, even where the identity's directory survived (a failed rmdir,
+# or a crash before it): a swapped directory there is used only with the
+# unbound note; verify reports an absent records' directory whose
+# identity's directory is gone beside a ledger copy; bootstrap takes back
+# the directory it made through its parent's descriptor and says so when
+# it cannot; a failure to remove the identity names the token. Falsifiers
+# ``first-use-without-ledger-copy`` (the swapped directory reused, alone)
+# and ``verify-absent-dir-without-identity-noted``.
+# ---------------------------------------------------------------------------
+
+proc failedAddonRmdir(s: tuple[parent, st, lc, token: string]) =
+  ## A run whose rmdir of <state>/addon fails after the identity is gone:
+  ## an entry appears there once the ledger copy is removed.
+  let blocker = s.st / "system" / "addon" / "blocker"
+  var r: UninstallResult
+  removeStateRoot(r, s.st, s.lc, tokenPath = s.token,
+    hook = proc (step, path: string) =
+      if step == "ledger-copy-removed": writeFile(blocker, ""))
+  doAssert fileExists(s.token) and not fileExists(s.lc)
+  doAssert not fileExists(recordsDirIdentityPath(s.st / "system"))
+  removeFile(blocker)
+
+var dirToFreeze22 = ""
+proc freezeParent22() {.nimcall.} =
+  setFilePermissions(parentDir(dirToFreeze22), {fpUserRead, fpUserExec})
+
+suite "round 22":
+  test "a swapped directory after a failed rmdir of <state>/addon is used only with the note":
+    let s = v2Scene("r22-cp5")
+    let log = parentDir(s.token)
+    writeFile(recordsDirIdentityPath(s.st / "system"),
+              identityOfCheckedDir(log) & "\n")
+    failedAddonRmdir(s)
+    check dirExists(s.st / "system" / "addon")
+    let token = readFile(s.token)
+    swap21(log)
+    writeFile(s.token, token)
+    let r = rerun(s)
+    checkpoint $r.errors & " / " & $r.notes
+    check r.errors.len > 0 or r.notes.anyIt(log in it and "without its recorded identity" in it)
+    check not fileExists(recordsDirIdentityPath(s.st / "system"))
+    removeDir(s.parent)
+
+  test "the same re-run without a swap finishes, with the note":
+    let s = v2Scene("r22-cp5c")
+    let log = parentDir(s.token)
+    writeFile(recordsDirIdentityPath(s.st / "system"),
+              identityOfCheckedDir(log) & "\n")
+    failedAddonRmdir(s)
+    let r = rerun(s)
+    checkpoint $r.errors & " / " & $r.notes
+    check r.errors.len == 0 and not dirExists(s.st) and not fileExists(s.token)
+    check r.notes.anyIt("without its recorded identity" in it)
+    removeDir(s.parent)
+
+  test "verify: no ledger copy is degraded, never a first use":
+    let s = v2Scene("r22-cp5b")
+    let log = parentDir(s.token)
+    writeFile(recordsDirIdentityPath(s.st / "system"),
+              identityOfCheckedDir(log) & "\n")
+    failedAddonRmdir(s)
+    swap21(log)
+    let v = runAddonVerify(s.st / "system", logDir = log)
+    checkpoint v.status & " " & $v.findings & " " & $v.notes
+    check v.status != "ok"
+    check not fileExists(recordsDirIdentityPath(s.st / "system"))
+    removeDir(s.parent)
+
+  test "verify: a ledger copy, no identity directory and no records directory is drift":
+    let base = base20("r22-va")
+    let sys = base / "state" / "system"
+    removeDir(sys / "addon")
+    writeLedger(ledgerCopyPath(sys), Ledger(generation: "g0"))
+    let v = runAddonVerify(sys, logDir = base / "log")
+    checkpoint v.status & " " & $v.findings & " " & $v.notes
+    check v.status == "drift" and v.findings.anyIt("is absent" in it)
+    removeDir(base)
+
+  test "a failure to remove the identity names the token and the re-run":
+    let parent = getTempDir() / ("repro-r22-idfail-" & $getCurrentProcessId())
+    removeDir(parent)
+    let st = parent / "var-lib-repro"
+    let sys = st / "system"
+    createDir(sys / "addon")
+    let lc = ledgerCopyPath(sys)
+    writeLedger(lc, Ledger(generation: "g0"))
+    let log = parent / "log"
+    ensureCheckedDir(log)
+    let idFile = recordsDirIdentityPath(sys)
+    writeFile(idFile, identityOfCheckedDir(log) & "\n")
+    setFilePermissions(sys / "addon", {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, st, lc, tokenPath = log / StateRemovalTokenName)
+    setFilePermissions(sys / "addon", {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint $r.errors
+    check r.errors.len == 1 and "the token" in r.errors[0] and
+      "run again" in r.errors[0]
+    check fileExists(log / StateRemovalTokenName) and fileExists(idFile)
+    removeDir(parent)
+
+  test "a directory bootstrap cannot take back is named, not 'nothing was written'":
+    let base = base20("r22-left")
+    var st: Stat
+    check stat(base.cstring, st) == 0
+    parentIno21 = st.st_ino
+    let log = base / "log"
+    dirToFreeze22 = log
+    afterTightenHook = freezeParent22
+    identityOverride = onlyParentHasBirthTime
+    var msg = ""
+    try: discard prepareRecordsDir("", "", logDir = log)
+    except AddonBootstrapError as e: msg = e.msg
+    identityOverride = nil
+    afterTightenHook = nil
+    setFilePermissions(base, {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint msg
+    check "could not remove it again" in msg and "nothing else was written" in msg
+    check "nothing was written" notin msg
+    check dirExists(log)
+    removeDir(base)
