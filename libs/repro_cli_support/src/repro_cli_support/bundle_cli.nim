@@ -189,7 +189,7 @@ else:
               r.bashrcFile & ")"
         return 0
       of "inspect":
-        # Store-Bundles §7.1 / docs/workspace-bundles.md: verified, and
+        # docs/store-bundles.md §7 / docs/workspace-bundles.md: verified, and
         # writes nothing.
         let r = inspectBundle(a.positional)
         if emitJson:

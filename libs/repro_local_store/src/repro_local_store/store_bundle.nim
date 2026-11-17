@@ -188,6 +188,12 @@ const
   BundlesDirName* = "bundles"
   FrozenDevEnvDirName* = "frozen-dev-env"
   ImportedMarkerName* = "imported"
+  MaxContentsBytes* = 1024 * 1024 * 1024
+    ## The largest `contents` list import reads. It is read into memory
+    ## before its SHA-256 is compared, from a stream the bundle's own,
+    ## unsigned manifest describes, so without a bound a crafted first
+    ## member could exhaust the importer's memory. A gibibyte is several
+    ## million entries; export refuses to write a larger list.
   ReadChunk = 1 shl 20
 
 # ---------------------------------------------------------------------------
@@ -1054,6 +1060,9 @@ proc exportBundle*(c: BundleClosure; opts: ExportOptions): ExportReport =
   let zstdExe = requireTool("zstd")
   let id = bundleIdOf(c)
   let contentsText = renderContents(c)
+  if contentsText.len > MaxContentsBytes:
+    fail("the bundle's contents list is " & $contentsText.len &
+      " bytes, more than import reads (" & $MaxContentsBytes & ")")
   let contentsPath = contentsPathFor(c.roots.storeRoot, id)
   createDir(contentsPath.parentDir)
   writeFile(contentsPath, contentsText)
@@ -1174,12 +1183,13 @@ proc captureReader(shared: ptr CaptureShared) {.thread.} =
       break
     if n == 0:
       break
+    # Keep at most `limit` bytes in all. Past the limit the bytes are read
+    # and dropped, so the command still runs to its end; the caller sees a
+    # capture of exactly `limit` bytes and decides what that means.
+    let keep = min(n, shared.limit - total)
     total += n
-    if total <= shared.limit:
-      shared.chan.send(buf[0 ..< n])
-    # Past the limit the bytes are read and dropped, so the command still
-    # runs to its end; the caller sees a truncated capture and its hash
-    # check refuses it.
+    if keep > 0:
+      shared.chan.send(buf[0 ..< keep])
 
 proc feedParts*(dir: string; parts: seq[BundlePart]; command: string;
                stopEarly: bool; captured: ptr string = nil;
@@ -1391,7 +1401,10 @@ proc peekContents(dir: string; m: ParsedManifest): string =
     # A truncated stream makes the pipeline fail; only the hash decides.
     var text = ""
     discard feedParts(dir, m.parts[0 ..< count], command, stopEarly = true,
-      captured = addr text)
+      captured = addr text, captureLimit = MaxContentsBytes + 1)
+    if text.len > MaxContentsBytes:
+      fail("bundle contents entry is larger than " & $MaxContentsBytes &
+        " bytes; nothing was imported")
     if lowerHex(sha256.digest(text).data) == m.contentsSha:
       return text
   fail("bundle contents entry does not match the manifest's SHA-256 " &

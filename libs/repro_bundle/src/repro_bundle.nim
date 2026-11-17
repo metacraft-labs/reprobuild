@@ -127,7 +127,8 @@ proc createBundle*(opts: CreateOptions): CreateReport =
   latest["repro"] = %*{"version": producer.version,
     "revision": producer.revision}
   # What the restoring machine must provide at these absolute paths
-  # (Workspace-Bundles §5); filled in as the halves are made.
+  # (docs/workspace-bundles.md, "Reading a bundle before restoring it");
+  # filled in as the halves are made.
   var provision = %*{"workspaceDir": ws}
   var halves = newJObject()
   var nixHalf: NixHalf
@@ -159,7 +160,8 @@ proc createBundle*(opts: CreateOptions): CreateReport =
     var roots = opts.nativeRoots
     if ws notin roots.workspaceRoots:
       roots.workspaceRoots.insert(ws, 0)
-    # The selection, not the whole workspace root (Workspace-Bundles §4):
+    # The selection, not the whole workspace root (docs/workspace-bundles.md,
+    # "What a bundle of a selection carries"):
     # every checkout under it that the selector did not name is excluded.
     # The store and the action cache are walked by their own rules.
     let selection = nativeSelection(ws, members,
@@ -208,7 +210,7 @@ proc createBundle*(opts: CreateOptions): CreateReport =
   moveFile(result.restoreScript & ".partial", result.restoreScript)
 
 # ---------------------------------------------------------------------------
-# inspect (Store-Bundles §7.1)
+# inspect (docs/store-bundles.md §7)
 # ---------------------------------------------------------------------------
 
 const InspectSchema* = "reprobuild.bundle-inspect.v1"

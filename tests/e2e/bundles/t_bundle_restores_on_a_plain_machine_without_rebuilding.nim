@@ -49,8 +49,10 @@
 ## hit or, the one recorded limit, a miss that names a file of the
 ## exporter's own `/bin/sh` closure, which the bundle does not carry: the
 ## Nim compiler starts the C compiler through `/bin/sh`, the edge records
-## what that reads, and a Debian `/bin/sh` is not a NixOS one (reprobuild-pm
-## issue `2026-11-17-recipe-compiles-record-the-host-bin-sh-…`).
+## what that reads, and a Debian `/bin/sh` is not a NixOS one. That limit is
+## a known defect, not the intended behaviour: once those compiles no longer
+## depend on the host's `/bin/sh`, this gate requires every one of them to
+## hit as well.
 ##
 ## `REPRO_BUNDLE_E2E_KEEP=1` keeps the scratch directory (bundles, the
 ## published repository, the reports and each container's `.repro` state)
@@ -392,8 +394,7 @@ suite "a bundle restores on a plain machine without rebuilding":
         # except for the one recorded limit: the compiler they run starts the
         # C compiler through the machine's `/bin/sh`, whose files the edge
         # records as inputs, and a plain Debian machine's `/bin/sh` is not
-        # the exporter's (reprobuild-pm issue
-        # 2026-11-17-recipe-compiles-record-the-host-bin-sh-so-a-bundle-restored-on-another-distribution-recompiles-them).
+        # the exporter's (a known defect; see the header).
         # Such a miss must name a file of the exporter that the bundle does
         # not carry, and nothing else.
         check restored{"providerCompileActions"}.getElems().len > 0

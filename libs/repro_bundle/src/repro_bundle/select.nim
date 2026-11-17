@@ -63,7 +63,7 @@ proc byDepth*(members: seq[BundleMember]): seq[BundleMember] =
 proc nativeSelection*(workspaceRoot: string; members: seq[BundleMember];
                       skip: openArray[string] = []): BundleSelection =
   ## The selection a bundle of `members` carries in its native half
-  ## (Store-Bundles §2.1, Workspace-Bundles §4): every Git checkout under the
+  ## (docs/store-bundles.md §2.1): every Git checkout under the
   ## workspace root that is not a checked-out member is excluded, and a
   ## member inside an excluded checkout is included again. `skip` names
   ## subtrees the walk does not enter (the store and the action cache when

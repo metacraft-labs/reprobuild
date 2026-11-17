@@ -7909,6 +7909,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
+    binary: "build/test-bin/t_store_bundle_contents_confine_a_selection",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_local_store_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_store_bundle_roundtrip.nim",
     binary: "build/test-bin/t_store_bundle_roundtrip",
     defines: @[],

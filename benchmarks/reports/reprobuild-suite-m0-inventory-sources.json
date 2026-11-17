@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2916,
+    "nimTestBinaries": 2917,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 782,
+    "pureUnitTests": 783,
     "staticallyDetectedRuntimeCompilerFlowTests": 145,
-    "testEntries": 2964
+    "testEntries": 2965
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -616,7 +616,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_local_store",
@@ -625,6 +625,7 @@
       "owner": "libs/repro_local_store",
       "sources": [
         "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
+        "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
         "libs/repro_local_store/tests/t_store_copy.nim"
       ],
       "targetOs": "soAny"
@@ -1646,7 +1647,7 @@
       "graph-fixture": 23,
       "integration": 1614,
       "platform/destructive": 191,
-      "pure unit": 782,
+      "pure unit": 783,
       "unclassified": 354
     },
     "graphOwnedTestArtifacts": [
@@ -1861,9 +1862,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2916,
+    "nimTestBinaryCount": 2917,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2964
+    "testEntryCount": 2965
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20830,6 +20831,24 @@
       "source": "libs/repro_local_store/tests/t_store_budget_gc.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_bundle_contents_confine_a_selection",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
