@@ -495,6 +495,10 @@ const
     ##   a hard error.
     ## * ``--progress-bars`` is client-side terminal rendering; see the
     ##   module header.
+  DaemonEnv = reproFlagEnv(@["build"], "daemon")
+    ## The variables ``--daemon`` declares (``REPRO_DAEMON``): set at all,
+    ## they select the daemon mode, which the full image owns. Generated from
+    ## the same description, so the flag's variable is named once.
   ProgressFlags = reproFlagSpellings(@["build"], "progress")
     ## ``--progress`` is NOT client-handled: it is routable exactly when it
     ## selects quiet progress (the very mode that makes routing safe), which
@@ -519,8 +523,9 @@ proc shouldRouteToDaemon(args: seq[string]): bool =
   ## ``args`` is the full argv after the program name.
   if args.len == 0 or args[0] != "build":
     return false
-  if getEnv("REPRO_DAEMON", "").len > 0:
-    return false
+  for name in DaemonEnv:
+    if getEnv(name, "").len > 0:
+      return false
   if stderrIsTerminal():
     # ``supportsAnsiProgress`` is then true in the full image, which makes
     # its progress renderer emit ANSI line-clears and OSC 9;4 terminal

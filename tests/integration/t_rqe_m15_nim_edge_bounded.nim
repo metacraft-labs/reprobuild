@@ -40,6 +40,20 @@ const
   ModuleCount = 16
   BudgetMilli = 3000
 
+proc sizedCompilerArgs(wrapper: string): string =
+  ## The typed `nim.c` arguments that make Nim run `wrapper` as its C
+  ## compiler. Nim's default C compiler on macOS is clang, and a
+  ## `--gcc.exe:` wrapper is only consulted under `--cc:gcc` (`gcc` there is
+  ## the system's clang driver); without `cc` the wrapper is never called and
+  ## the compile runs `clang` by name.
+  when defined(macosx): "cc = \"gcc\", gccExe = " & escape(wrapper)
+  else: "gccExe = " & escape(wrapper)
+
+proc controlCompilerArgs(wrapper: string): string =
+  ## The same, as the elements of the control edge's inline argument list.
+  when defined(macosx): "\"--cc:gcc\", \"--gcc.exe:\" & " & escape(wrapper)
+  else: "\"--gcc.exe:\" & " & escape(wrapper)
+
 proc writeProgram(root: string) =
   createDir(root / "src")
   var imports: seq[string]
@@ -93,7 +107,7 @@ package m15_nim_edge:
       source = "src/main.nim",
       binary = "build/sized/main",
       nimcache = "build/sized/cache",
-      gccExe = """ & escape(sizedWrapper) & """,
+      """ & sizedCompilerArgs(sizedWrapper) & """,
       parallelBuild = 16,
       actionId = "m15.nim.build")
     # The control: the same compile as an inline command, with no declared
@@ -101,7 +115,7 @@ package m15_nim_edge:
     let control = buildAction("m15.nim.control",
       inlineExecCall(@[""" & escape(nim) & """, "c",
         "--nimcache:build/control/cache", "--out:build/control/main",
-        "--gcc.exe:" & """ & escape(controlWrapper) & """,
+        """ & controlCompilerArgs(controlWrapper) & """,
         "--parallelBuild:8", "src/main.nim"]),
       deps = @["m15.nim.build"],
       outputs = @["build/control/main"],

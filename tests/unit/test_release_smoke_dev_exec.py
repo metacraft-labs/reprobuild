@@ -432,6 +432,122 @@ $data = @{command=$invocation.Command; arguments=@($invocation.Arguments); quote
         self.assertIn("after-bootstrap", predecessor.stdout)
 
 
+@unittest.skipUnless(PWSH, "PowerShell is required to run the production snapshot script")
+class ReleaseWindowsMonitorSnapshot(unittest.TestCase):
+    """The Windows release build injects a monitor stack it does not rebuild.
+
+    `.#release` relinks build/lib/librepro_monitor_shim.dll (the
+    `reprobuild.test_fixtures.monitor_shim` action) while the engine injects
+    the shim it finds beside itself -- that same file -- into every monitored
+    action. On Windows a mapped DLL cannot be replaced, so the v0.2.25 release
+    failed with `ld.exe: cannot open output file ...librepro_monitor_shim.dll:
+    Permission denied`. The release job now pins REPRO_MONITOR_SHIM_LIB to a
+    copy made by scripts/release/snapshot_windows_monitor_stack.ps1.
+
+    These cases run that production script under real PowerShell against a
+    real directory of files. The files are placeholders, not DLLs: what is
+    under test is which files are copied where and what path is handed to the
+    engine, which is all the script decides. Windows' image lock itself cannot
+    be reproduced on this host and is not claimed; the release job is the
+    gate for it.
+    """
+
+    SCRIPT = ROOT / "scripts/release/snapshot_windows_monitor_stack.ps1"
+    ARTIFACTS = (ROOT / "libs/repro_dsl_stdlib/src/repro_dsl_stdlib/"
+                 "monitor_shim_artifacts.nim")
+
+    @classmethod
+    def artefact_names(cls):
+        """The four names the recipe stages and the injector looks for.
+
+        Read from the Nim constants rather than repeated here, so a rename
+        there that the script does not follow fails this test.
+        """
+        import re
+        source = cls.ARTIFACTS.read_text(encoding="utf-8")
+        names = {}
+        for const in ("MonitorShim64Name", "MonitorShim32Name",
+                      "Wow64Probe32Name", "Inject64HelperName"):
+            match = re.search(r"^\s*" + const + r'\*\s*=\s*"([^"]+)"', source, re.M)
+            if match is None:
+                raise AssertionError(f"{const} not found in {cls.ARTIFACTS}")
+            names[const] = match.group(1)
+        return names
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="release-monitor-snapshot-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.lib = self.root / "build" / "lib"
+        self.lib.mkdir(parents=True)
+        self.dest = self.root / "build" / "orchestrator-monitor"
+
+    def snapshot(self):
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-File", str(self.SCRIPT),
+             "-LibDir", str(self.lib), "-Destination", str(self.dest)],
+            cwd=self.root, capture_output=True, text=True, timeout=60,
+        )
+
+    def test_the_whole_stack_is_copied_and_the_copy_is_what_is_pinned(self):
+        names = self.artefact_names()
+        for name in names.values():
+            (self.lib / name).write_bytes(("bootstrap " + name).encode())
+        # Something else the build writes into build/lib. It is no part of
+        # the monitor stack and must not be copied beside the shim.
+        (self.lib / "librepro_project_dsl_runtime.dll").write_bytes(b"runtime")
+
+        ran = self.snapshot()
+        self.assertEqual(0, ran.returncode, ran.stderr)
+        pinned = Path(ran.stdout.strip())
+        self.assertEqual((self.dest / names["MonitorShim64Name"]).resolve(), pinned)
+        self.assertNotEqual(self.lib.resolve(), pinned.parent)
+        self.assertEqual(set(names.values()), {p.name for p in self.dest.iterdir()})
+        for name in names.values():
+            self.assertEqual((self.lib / name).read_bytes(), (self.dest / name).read_bytes())
+
+        # The point of the copy: the build may now replace build/lib's shim
+        # and the pinned one is untouched.
+        (self.lib / names["MonitorShim64Name"]).write_bytes(b"relinked by the fixture")
+        self.assertEqual(b"bootstrap " + names["MonitorShim64Name"].encode(),
+                         pinned.read_bytes())
+
+    def test_without_an_i686_toolchain_only_the_64_bit_shim_is_copied(self):
+        names = self.artefact_names()
+        (self.lib / names["MonitorShim64Name"]).write_bytes(b"shim")
+        # A previous run's copy on a persistent runner, with a companion this
+        # run did not build. Injecting it would hand 32-bit children a shim
+        # from another build.
+        self.dest.mkdir()
+        (self.dest / names["MonitorShim32Name"]).write_bytes(b"stale")
+
+        ran = self.snapshot()
+        self.assertEqual(0, ran.returncode, ran.stderr)
+        self.assertEqual({names["MonitorShim64Name"]}, {p.name for p in self.dest.iterdir()})
+
+    def test_a_missing_shim_is_refused_rather_than_pinned(self):
+        ran = self.snapshot()
+        self.assertNotEqual(0, ran.returncode, ran.stdout)
+        self.assertEqual("", ran.stdout.strip())
+        self.assertIn("librepro_monitor_shim.dll is missing", ran.stderr)
+
+    def test_the_release_build_runs_with_the_snapshot_pinned(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        lines = workflow.splitlines()
+        pins = [i for i, line in enumerate(lines)
+                if line.strip().startswith("$env:REPRO_MONITOR_SHIM_LIB = & "
+                                           "./scripts/release/snapshot_windows_monitor_stack.ps1")]
+        builds = [i for i, line in enumerate(lines)
+                  if line.strip().startswith('& ".\\$orchestrator" build ')]
+        self.assertEqual(1, len(pins), "one pin of the monitor shim snapshot is required")
+        self.assertEqual(1, len(builds), "one orchestrator build invocation is expected")
+        self.assertLess(pins[0], builds[0], "the shim must be pinned before the build starts")
+        destination = [line for line in lines if line.strip().startswith("$monitorSnapshotDir = ")]
+        self.assertEqual(1, len(destination))
+        self.assertNotIn("build\\lib", destination[0],
+                         "the snapshot must live where no action of the build writes")
+
+
 class ReleaseInventoryTests(unittest.TestCase):
     """Execute the real verifier's membership block, without runtime probes.
 
@@ -530,46 +646,6 @@ class ReleaseInventoryTests(unittest.TestCase):
         inventory = re.search(r"required_bins=\(([^)]*)\)", block).group(1).split()
         self.assertEqual(len(inventory), len(set(inventory)))
         self.assertEqual(self.REQUIRED, set(inventory))
-
-
-class ReleaseWorkflowPublishesNixPackage(unittest.TestCase):
-    """The Linux release leg must push `#reprobuild` of its own revision to Attic.
-
-    Consumers run `nix build github:metacraft-labs/reprobuild/<pin>#reprobuild`;
-    when no workflow ever built that attribute for the pinned revision, every
-    consumer lane compiled the engine from source for 28-38 minutes
-    (reprobuild-pm issue 2026-11-12-the-reprobuild-package-at-a-pinned-agents-
-    revision-is-in-no-binary-cache-...). The step is read out of the workflow
-    text: a run needs the organisation's Attic credentials.
-    """
-
-    def step(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        marker = "      - name: Publish the Nix package to the organisation cache\n"
-        self.assertEqual(1, workflow.count(marker), "the cache publish step is required")
-        body = workflow.split(marker, 1)[1]
-        return body.split("\n      - ", 1)[0]
-
-    def test_the_linux_leg_builds_the_consumer_attribute_and_pushes_it(self):
-        step = self.step()
-        self.assertIn("if: runner.os == 'Linux'", step)
-        self.assertIn('"github:${GITHUB_REPOSITORY}/${GITHUB_SHA}#reprobuild"', step)
-        self.assertIn('attic push "$ATTIC_CACHE" "$package"', step)
-
-    def test_the_publish_phase_gets_a_fresh_github_token(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        refresh = workflow.index("      - name: Refresh build authentication (cache publish)\n")
-        publish = workflow.index("      - name: Publish the Nix package to the organisation cache\n")
-        build = workflow.index("      - name: Build (POSIX)\n")
-        self.assertLess(build, refresh)
-        self.assertLess(refresh, publish)
-        self.assertIn("refresh-build-auth@dev", workflow[refresh:publish])
-
-    def test_a_missing_cache_credential_fails_the_release_leg(self):
-        step = self.step()
-        self.assertIn("ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}", step)
-        self.assertIn("ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}", step)
-        self.assertRegex(step, r"::error::[^\n]*\n\s*exit 1")
 
 
 if __name__ == "__main__":

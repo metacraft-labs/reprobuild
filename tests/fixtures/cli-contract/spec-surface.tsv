@@ -151,6 +151,7 @@ flag	repro stats	--tool-provisioning
 flag	repro stats	--top
 flag	repro stats	--watch-session
 flag	repro stats	--work-root
+env	repro stats	RUNQUOTA_SOCKET
 command	repro daemon
 flag	repro daemon	--daemon-exe
 flag	repro daemon	--dev
@@ -691,12 +692,16 @@ flag	repro run	--lock-slice
 flag	repro run	--work-root
 command	repro shell
 flag	repro shell	--activity
+flag	repro shell	--command
 flag	repro shell	--dev-env-stats
 flag	repro shell	--lock-slice
 flag	repro shell	--print-env
 flag	repro shell	--shell
 flag	repro shell	--work-root
+flag	repro shell	-c
+env	repro shell	FILE_TYPE_PIPE
 env	repro shell	STDIN_FILENO
+env	repro shell	STD_INPUT_HANDLE
 command	repro shell hook
 flag	repro shell hook	--repro-bin
 command	repro allow
@@ -1149,10 +1154,15 @@ flag	repro check	--tool-provisioning
 flag	repro check	--workspace-root
 flag	repro check	--write-report
 command	repro hooks
+env	repro hooks	INSTALL_PYTHON
+env	repro hooks	REPROBUILD_REPRO
+env	repro hooks	REPRO_CMD_SOURCE
+env	repro hooks	REPRO_INSTALLING_BUILD
 command	repro hooks ensure
 flag	repro hooks ensure	--json
 flag	repro hooks ensure	--no-write-report
 flag	repro hooks ensure	--profile
+flag	repro hooks ensure	--re-anchor
 flag	repro hooks ensure	--record-store
 flag	repro hooks ensure	--shell
 flag	repro hooks ensure	--shell-autocomplete
@@ -1163,6 +1173,7 @@ flag	repro hooks ensure	--write-report
 command	repro hooks reinstall
 flag	repro hooks reinstall	--json
 flag	repro hooks reinstall	--no-write-report
+flag	repro hooks reinstall	--re-anchor
 flag	repro hooks reinstall	--record-store
 flag	repro hooks reinstall	--shell
 flag	repro hooks reinstall	--shell-autocomplete
@@ -1173,6 +1184,7 @@ flag	repro hooks reinstall	--write-report
 command	repro hooks uninstall
 flag	repro hooks uninstall	--json
 flag	repro hooks uninstall	--no-write-report
+flag	repro hooks uninstall	--re-anchor
 flag	repro hooks uninstall	--record-store
 flag	repro hooks uninstall	--shell
 flag	repro hooks uninstall	--shell-autocomplete
@@ -1357,3 +1369,262 @@ flag	repro flake override-status	--tier
 flag	repro flake override-status	--tool-provisioning
 flag	repro flake override-status	--transitive-of
 flag	repro flake override-status	--workspace-root
+command	repro build
+flag	repro build	--action-cache-root
+flag	repro build	--action-output
+flag	repro build	--daemon
+flag	repro build	--debug
+flag	repro build	--dry-run
+flag	repro build	--evidence
+flag	repro build	--force-rebuild
+flag	repro build	--hard-rebuild
+flag	repro build	--json
+flag	repro build	--list-targets
+flag	repro build	--list-targets-json
+flag	repro build	--lock
+flag	repro build	--log
+flag	repro build	--measure
+flag	repro build	--monitor-hosting
+flag	repro build	--no-output-cleanup
+flag	repro build	--no-restore-cached-outputs
+flag	repro build	--no-runquota
+flag	repro build	--no-unicode
+flag	repro build	--no-write-report
+flag	repro build	--no-write-stats
+flag	repro build	--only
+flag	repro build	--package
+flag	repro build	--peer-cache
+flag	repro build	--prepare-only
+flag	repro build	--print-solved-graph
+flag	repro build	--progress
+flag	repro build	--progress-bars
+flag	repro build	--publish
+flag	repro build	--publish-cache-hits
+flag	repro build	--publish-materialized
+flag	repro build	--rebuild
+flag	repro build	--rebuild-host-bound
+flag	repro build	--release
+flag	repro build	--restore-cached-outputs
+flag	repro build	--runquota
+flag	repro build	--show
+flag	repro build	--skip-cmake-regeneration
+flag	repro build	--soft-rebuild
+flag	repro build	--stats-groups
+flag	repro build	--strategy
+flag	repro build	--target
+flag	repro build	--tool-provisioning
+flag	repro build	--trust-profile
+flag	repro build	--unicode
+flag	repro build	--unsafe-preserve-outputs
+flag	repro build	--variant
+flag	repro build	--verbose
+flag	repro build	--very-verbose
+flag	repro build	--work-root
+flag	repro build	--write-benchmark
+flag	repro build	--write-diagnostics
+flag	repro build	--write-report
+flag	repro build	--write-stats
+flag	repro build	-v
+flag	repro build	-vv
+env	repro build	CARGO_BUILD_TARGET
+env	repro build	CARGO_HOME
+env	repro build	CARGO_NET_OFFLINE
+env	repro build	CONFIG_SHELL
+env	repro build	DYLD_FALLBACK_LIBRARY_PATH
+env	repro build	DYLD_LIBRARY_PATH
+env	repro build	EF_ARM_ABI_FLOAT_HARD
+env	repro build	EF_ARM_ABI_FLOAT_SOFT
+env	repro build	EI_CLASS
+env	repro build	EI_DATA
+env	repro build	EI_OSABI
+env	repro build	EM_386
+env	repro build	EM_AARCH64
+env	repro build	EM_ARM
+env	repro build	EM_BPF
+env	repro build	EM_RISCV
+env	repro build	EM_X86_64
+env	repro build	FAIL_REGEX
+env	repro build	IN_AGENT_SHELL
+env	repro build	LD_LIBRARY_PATH
+env	repro build	LIBRARY_PATH
+env	repro build	MACOSX_DEPLOYMENT_TARGET
+env	repro build	NIX_BUILD_CORES
+env	repro build	NIX_CFLAGS_COMPILE
+env	repro build	NIX_CONFIG
+env	repro build	NIX_CONF_DIR
+env	repro build	NIX_DONT_SET_RPATH
+env	repro build	NIX_HARDENING_ENABLE
+env	repro build	NIX_LDFLAGS
+env	repro build	NIX_PROFILES
+env	repro build	NIX_SSL_CERT_FILE
+env	repro build	NIX_STORE
+env	repro build	NIX_USER_CONF_FILES
+env	repro build	NIX_USER_PROFILE_DIR
+env	repro build	PKG_CONFIG
+env	repro build	PKG_CONFIG_PATH
+env	repro build	PT_INTERP
+env	repro build	REPROBUILD_LOG
+env	repro build	REPROBUILD_MEASURE
+env	repro build	REPROBUILD_MONITOR_HOSTING
+env	repro build	REPROBUILD_NO_RUNQUOTA
+env	repro build	REPROBUILD_PROGRESS
+env	repro build	REPROBUILD_PROGRESS_BARS
+env	repro build	REPROBUILD_SHOW
+env	repro build	REPRO_BINARY_CACHE_CERT_PATH
+env	repro build	REPRO_BINARY_CACHE_KEY_PATH
+env	repro build	REPRO_BINARY_CACHE_URL
+env	repro build	REPRO_DAEMON
+env	repro build	REPRO_PROGRESS
+env	repro build	REPRO_RESTORE_CACHED_OUTPUTS
+env	repro build	REPRO_RUNQUOTA_GRANT_HEARTBEAT
+env	repro build	REPRO_TARGET_OBJECT_EXEMPTIONS
+env	repro build	REPRO_TOOL_PROVISIONING
+env	repro build	REPRO_UNICODE
+env	repro build	REPRO_VARIANTS
+env	repro build	RUNQUOTA_SOCKET
+env	repro build	RUSTUP_HOME
+env	repro build	RUSTUP_TOOLCHAIN
+env	repro build	SOURCE_DATE_EPOCH
+env	repro build	SSL_CERT_FILE
+env	repro build	XDG_CONFIG_DIRS
+env	repro build	XDG_CONFIG_HOME
+command	repro bench
+flag	repro bench	--action-cache-root
+flag	repro bench	--action-output
+flag	repro bench	--daemon
+flag	repro bench	--debug
+flag	repro bench	--dry-run
+flag	repro bench	--evidence
+flag	repro bench	--force-rebuild
+flag	repro bench	--hard-rebuild
+flag	repro bench	--json
+flag	repro bench	--list-targets
+flag	repro bench	--list-targets-json
+flag	repro bench	--lock
+flag	repro bench	--log
+flag	repro bench	--measure
+flag	repro bench	--monitor-hosting
+flag	repro bench	--no-output-cleanup
+flag	repro bench	--no-restore-cached-outputs
+flag	repro bench	--no-runquota
+flag	repro bench	--no-unicode
+flag	repro bench	--no-write-report
+flag	repro bench	--only
+flag	repro bench	--package
+flag	repro bench	--peer-cache
+flag	repro bench	--prepare-only
+flag	repro bench	--print-solved-graph
+flag	repro bench	--progress
+flag	repro bench	--progress-bars
+flag	repro bench	--publish
+flag	repro bench	--publish-cache-hits
+flag	repro bench	--publish-materialized
+flag	repro bench	--rebuild
+flag	repro bench	--rebuild-host-bound
+flag	repro bench	--release
+flag	repro bench	--restore-cached-outputs
+flag	repro bench	--runquota
+flag	repro bench	--show
+flag	repro bench	--skip-cmake-regeneration
+flag	repro bench	--soft-rebuild
+flag	repro bench	--stats-groups
+flag	repro bench	--strategy
+flag	repro bench	--target
+flag	repro bench	--tool-provisioning
+flag	repro bench	--trust-profile
+flag	repro bench	--unicode
+flag	repro bench	--unsafe-preserve-outputs
+flag	repro bench	--variant
+flag	repro bench	--verbose
+flag	repro bench	--very-verbose
+flag	repro bench	--work-root
+flag	repro bench	--write-benchmark
+flag	repro bench	--write-diagnostics
+flag	repro bench	--write-report
+flag	repro bench	--write-stats
+flag	repro bench	-v
+flag	repro bench	-vv
+env	repro bench	REPROBUILD_LOG
+env	repro bench	REPROBUILD_MEASURE
+env	repro bench	REPROBUILD_MONITOR_HOSTING
+env	repro bench	REPROBUILD_NO_RUNQUOTA
+env	repro bench	REPROBUILD_PROGRESS
+env	repro bench	REPROBUILD_PROGRESS_BARS
+env	repro bench	REPROBUILD_SHOW
+env	repro bench	REPRO_DAEMON
+env	repro bench	REPRO_PROGRESS
+env	repro bench	REPRO_RESTORE_CACHED_OUTPUTS
+env	repro bench	REPRO_TOOL_PROVISIONING
+env	repro bench	REPRO_UNICODE
+command	repro lint
+flag	repro lint	--action-cache-root
+flag	repro lint	--action-output
+flag	repro lint	--daemon
+flag	repro lint	--debug
+flag	repro lint	--dry-run
+flag	repro lint	--evidence
+flag	repro lint	--force-rebuild
+flag	repro lint	--hard-rebuild
+flag	repro lint	--json
+flag	repro lint	--list-targets
+flag	repro lint	--list-targets-json
+flag	repro lint	--lock
+flag	repro lint	--log
+flag	repro lint	--measure
+flag	repro lint	--monitor-hosting
+flag	repro lint	--no-output-cleanup
+flag	repro lint	--no-restore-cached-outputs
+flag	repro lint	--no-runquota
+flag	repro lint	--no-unicode
+flag	repro lint	--no-write-report
+flag	repro lint	--only
+flag	repro lint	--package
+flag	repro lint	--peer-cache
+flag	repro lint	--prepare-only
+flag	repro lint	--print-solved-graph
+flag	repro lint	--progress
+flag	repro lint	--progress-bars
+flag	repro lint	--publish
+flag	repro lint	--publish-cache-hits
+flag	repro lint	--publish-materialized
+flag	repro lint	--rebuild
+flag	repro lint	--rebuild-host-bound
+flag	repro lint	--release
+flag	repro lint	--restore-cached-outputs
+flag	repro lint	--runquota
+flag	repro lint	--show
+flag	repro lint	--skip-cmake-regeneration
+flag	repro lint	--soft-rebuild
+flag	repro lint	--stats-groups
+flag	repro lint	--strategy
+flag	repro lint	--target
+flag	repro lint	--tool-provisioning
+flag	repro lint	--trust-profile
+flag	repro lint	--unicode
+flag	repro lint	--unsafe-preserve-outputs
+flag	repro lint	--variant
+flag	repro lint	--verbose
+flag	repro lint	--very-verbose
+flag	repro lint	--work-root
+flag	repro lint	--write-benchmark
+flag	repro lint	--write-diagnostics
+flag	repro lint	--write-report
+flag	repro lint	--write-stats
+flag	repro lint	-v
+flag	repro lint	-vv
+env	repro lint	REPROBUILD_LOG
+env	repro lint	REPROBUILD_MEASURE
+env	repro lint	REPROBUILD_MONITOR_HOSTING
+env	repro lint	REPROBUILD_NO_RUNQUOTA
+env	repro lint	REPROBUILD_PROGRESS
+env	repro lint	REPROBUILD_PROGRESS_BARS
+env	repro lint	REPROBUILD_SHOW
+env	repro lint	REPRO_DAEMON
+env	repro lint	REPRO_PROGRESS
+env	repro lint	REPRO_RESTORE_CACHED_OUTPUTS
+env	repro lint	REPRO_TOOL_PROVISIONING
+env	repro lint	REPRO_UNICODE
+command	repro clean
+flag	repro clean	--dry-run
+flag	repro clean	--project-root
+flag	repro clean	--work-root

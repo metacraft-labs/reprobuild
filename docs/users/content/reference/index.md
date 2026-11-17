@@ -16,7 +16,8 @@ generated from the source reprobuild itself uses, wherever such a source exists.
 |---|---|---|
 | [Commands](commands/index.md) | Every `repro` command, its options, defaults, exit status and what it changes | The CLI's own description of itself |
 | [Project file and profile syntax](dsl.md) | The syntax of `repro.nim`, `home.nim` and `system.nim`: imports, packages, dependencies, artifacts, build actions, configuration, tasks, services, typed tool interfaces, activities, hosts, resources and resource types | The language itself: a test compiles every example on the page |
-| Files | `repro.lock`, the workspace manifests, `home.nim` and the `.repro/` directory | The schemas the parsers accept |
+| [Files](files/index.md) | The home profile export. `repro.lock`, the workspace manifests, `home.nim` and the `.repro/` directory have no page yet | The schemas the parsers accept |
+| [Nix library and Home Manager module](nix-library.md) | Every function of `reprobuild.lib` and every option of `reprobuild.homeManagerModules.intent` | The library: a flake check compares each function's name and arguments with it, and generates the module's options from the module |
 | Environment variables | Every variable `repro` reads, with its default | The CLI's description of itself |
 | Reports | The JSON reports commands write with `--json` and `--write-report` | The report schemas |
 | Errors | Each error message, what causes it and what fixes it | The messages `repro` prints |

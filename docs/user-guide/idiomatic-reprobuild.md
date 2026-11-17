@@ -269,35 +269,25 @@ the *common* form — and the only one under test, in
 `.#a` itself. Learn the rule rather than one instance of it: **one
 path/fragment selector maximum, first; bare names after it.**
 
-**Gotcha 2 — a bare name that matches something on disk is a path.**
-`classifyBuildSelector` (`repro_cli_support.nim:812`) classifies a
-selector as path-shaped if it contains `/`, `\`, `.` or `#`, **or names
-an existing path on disk**:
+**Gotcha 2 — a path is spelled as a path; a bare name never is.**
+`classifyBuildSelector` (`repro_cli_support.nim`) classifies a selector
+as path-shaped only by its spelling: it contains `/`, `\`, `.` or `#`.
+It does not look at the disk. A bare `test` is the name `test` even in a
+project with a `test/` directory, so `repro build test` and the verb
+alias `repro test` both select the `test` collection, and the directory
+is `repro build ./test`.
 
-```nim
-  if fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
-    result.kind = bskPath
-    return
-```
+Older builds also took a bare name that named an existing path as a
+path, so what a name meant depended on what the current directory held.
+That is why some recipes spell their collections `.#test` / `.#lint`
+(CodeTracer's `repro.nim` does). The fragment spelling still selects the
+same collection and stays correct; it is no longer required.
 
-CodeTracer has a `test/` directory, so from its repo root a bare `repro
-build test` resolves to that directory and never reaches the collection
-resolver. The escape hatch is the fragment form, and the recipe says so
-at the declaration (`codetracer/repro.nim:1700`):
+A bare name that names no target but does name a file or directory fails
+with `unknown_target`, and the diagnostic names the `./<name>` spelling.
 
-> SELECT THEM AS `repro build .#test` / `repro build .#lint`. The
-> fragment form is REQUIRED for `test`, not decoration: this repo has a
-> `test/` directory […] `lint` has no such directory today, but is
-> spelled the same way so the two lines cannot drift apart the day one is
-> added.
-
-Spelling both the same way when only one needs it is the idiom worth
-copying. But `.#` is a **workaround for a repo layout**, not a general
-rule: in a repo with no colliding directory, `repro build test` and the
-verb alias `repro test` are both fine.
-
-> Note the character scan runs *before* the disk probe, so a selector
-> containing a `.` is path-shaped even when no such file exists.
+> Note the character scan applies even when no such file exists: a
+> selector containing a `.` is path-shaped.
 
 ---
 

@@ -1253,6 +1253,16 @@
 ##                                            the identity's directory is gone,
 ##                                            whether or not the ledger copy is
 ##                                            (decision 178)
+## ``first-use-without-ledger-copy``         with no identity and no ledger
+##                                            copy, the records' directory is
+##                                            recorded at first use, a
+##                                            swapped one included (decision
+##                                            178, A11 round 22)
+## ``verify-absent-dir-without-identity-noted`` verify notes, not reports,
+##                                            an absent records' directory
+##                                            whose identity's directory is
+##                                            gone beside a ledger copy
+##                                            (decision 178)
 ## ``token-cleared-before-identity``          bootstrap clears a stale token,
 ##                                            and keeps a directory it made,
 ##                                            before it knows the directory
@@ -1928,6 +1938,25 @@ const
                           # Conflicts=/PropagatesStopTo= naming the boot-hold
                           # unit pass (L4).
                           "boot-hold-stop-deps-unchecked",
+                          # A9 review round 19: the re-point's stored text is
+                          # the target's when an apply names one (B1).
+                          "repoint-stored-from-target",
+                          # an Accept=yes instance is told by TriggeredBy=
+                          # alone, empty once it is collected (finding 2).
+                          "accept-instances-by-triggered-by",
+                          # the parse half skips the units the profile's
+                          # drop-ins change (finding 3).
+                          "boot-hold-dropins-unchecked",
+                          # the effective half skips them (finding 3).
+                          "boot-hold-dropins-effective-unchecked",
+                          # the effective half skips every unit but the
+                          # floored units and their activators (LOW).
+                          "boot-hold-cycle-every-unit-skipped",
+                          # Conflicts=/PropagatesStopTo= naming sysinit.target
+                          # pass (L4).
+                          "sysinit-stop-deps-unchecked",
+                          # bootstrap accepts the dynamic engine (L7).
+                          "bootstrap-accepts-dynamic",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",
@@ -2285,6 +2314,8 @@ const
                           "identity-removed-before-ledger-copy",
                           "state-gone-from-addon-dir-alone",
                           "token-cleared-before-identity",
+                          "first-use-without-ledger-copy",
+                          "verify-absent-dir-without-identity-noted",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",
                           "uninstall-records-dir-unbound",

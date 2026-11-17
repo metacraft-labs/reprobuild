@@ -163,6 +163,11 @@ e2e_addon_to_reproos_conversion_keeps_state:
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
 
+# A declared mode, group or copy form makes an fs.systemFile a private copy
+# on an add-on host, never a link into the world-readable static tree.
+e2e_addon_declared_mode_file_is_a_private_copy:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_declared_mode_file_is_a_private_copy
+
 # Milestone A5: crash consistency, boot re-assertion, confirm-or-revert. The
 # reset gate runs the seam build (run_addon_gate.sh selects it).
 e2e_addon_hard_reset_at_every_step:

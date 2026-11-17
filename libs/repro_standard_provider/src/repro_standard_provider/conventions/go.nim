@@ -1,13 +1,12 @@
 ## Go language convention (Tier 2b) — Mode A "fine-grained" plugin.
 ##
-## Recognises a single-module Go project whose ``reprobuild.nim`` declares
+## Recognises a Go module or workspace whose ``reprobuild.nim`` declares
 ## ``uses:`` containing ``go`` AND ships a conventional Go layout
-## (``go.mod`` at the project root plus at least one of: a root
-## ``main.go``, one or more ``cmd/<name>/main.go`` files, or a non-main
-## library package somewhere in the module) AND has *no* CGO triggers
+## (``go.mod`` or ``go.work`` at the project root plus at least one of: a
+## root ``main.go``, one or more ``cmd/<name>/main.go`` files, or a non-main
+## library package somewhere under the root) AND has *no* CGO triggers
 ## (no ``import "C"`` lines anywhere and no ``_cgo_*.go`` files in the
-## source tree) AND no ``go.work`` (workspaces are deferred). The
-## convention spec
+## source tree). The convention spec
 ## (``reprobuild-specs/Language-Conventions/Go.md`` §"Mode A — Fine-grained
 ## build graph") prescribes:
 ##
@@ -17,6 +16,7 @@
 ##         -lang=goX.Y
 ##         -complete
 ##         -importcfg <P>/importcfg
+##         [-embedcfg <P>/embedcfg]   # iff P has //go:embed patterns
 ##         -pack
 ##         -o <P>.a
 ##         <P>'s .go source files``
@@ -32,17 +32,24 @@
 ## directives — one for every package imported by P (direct imports only;
 ## the link-time ``importcfg.link`` carries the full transitive set).
 ##
-## **Design decision (M5 Option 1 — eager + M18 fingerprint cache).** Like
+## **Design decision (M5 Option 1 — eager, keyed on observed reads).** Like
 ## the M3 Nim and M4 Rust conventions, this plugin invokes the upstream
-## tooling eagerly at emit time, then layers an emit-time fingerprint
-## sidecar (see ``conventions/emit_cache.nim``) on top so the upstream
-## call doesn't fire on every ``repro build``:
+## tooling eagerly at emit time. Every field of the graph comes from the
+## ``go list`` records (``Imports``/``ImportMap`` for the importcfg,
+## ``EmbedPatterns``/``EmbedFiles`` for the embedcfg, ``Module.GoVersion``
+## for ``-lang``), never from reading ``go.mod`` by hand. Its KEY is what the
+## listing read (Go.md §"Implicit-dependency capture", item 3):
 ##
-##   * ``runGoListExport`` hashes every ``go.mod``/``go.sum``/``.go`` file
-##     under the project root + the ``go`` driver path, compares against
-##     ``<projectRoot>/.repro/build/.emit-cache/go-list-export.repro-emit-fingerprint``,
-##     and on a hit re-parses the persisted raw output instead of
-##     re-spawning ``go list``.
+##   * ``runGoListing`` runs ``go list`` under io-mon's in-process host and
+##     records every file read or probed and every directory enumerated —
+##     ``go.mod``/``go.sum``/``go.work`` wherever they are, a ``replace``d
+##     module's sources outside the project, the embed directories, the
+##     standard-library export archives;
+##   * those become the fragment's graph-evaluation inputs, so the engine
+##     re-invokes the convention when any of them changes;
+##   * the emit-time cache (``conventions/emit_cache.nim``) reuses the stored
+##     output only while every recorded input is unchanged, instead of
+##     hashing a hand-picked list of ``.go`` files.
 ##
 ## The eager-at-emit-time shape is preserved (the convention still
 ## produces a static graph from the parsed package list); only the
@@ -54,8 +61,9 @@
 ##
 ## **Original-M5 eager rationale (preserved):**
 ##
-##   * ``go list -export -json -deps ./...`` runs once per
-##     ``emitFragment`` call. The ``-export`` flag is the key — it triggers
+##   * ``go list -export -json -deps <patterns>`` runs once per
+##     ``emitFragment`` call, over the whole module or workspace (one DAG,
+##     one version selection — Go.md §"Workspace and module mode"). The ``-export`` flag is the key — it triggers
 ##     ``go`` to populate the standard library into ``GOCACHE`` *and*
 ##     reports the resulting archive path back via the ``Export`` field on
 ##     every package record. Without ``-export`` we'd be on the hook for
@@ -97,7 +105,6 @@
 ##
 ## **Out of scope for M14 (handled by ``recognize`` returning ``false``)**:
 ##
-##   * ``go.work`` workspaces (per-member DAGs).
 ##   * CGO (``import "C"`` or ``_cgo_*.go``) — needs a C cross-toolchain
 ##     the standard provider doesn't provision; falls through to M6.
 ##   * Tests (``_test.go`` files) — the convention spec asks for a
@@ -108,22 +115,31 @@
 ##     missing, ``recognize`` returns ``false`` so dispatch falls through
 ##     to the "no convention matched" diagnostic with the regular project
 ##     hint.
-##   * ``go.mod``'s ``go`` directive is consulted only for the ``-lang=``
-##     flag value passed to ``go tool compile``; the convention does not
+##   * Each package's ``-lang=`` is its module's ``go`` version as ``go
+##     list`` reports it (``Module.GoVersion``); the convention does not
 ##     enforce a minimum Go toolchain version on its own (the ``uses:``
 ##     constraint in ``reprobuild.nim`` is the authoritative pin).
+##   * The listing needs the io monitor (``librepro_monitor_shim`` beside the
+##     binaries); without it the convention refuses rather than emit a graph
+##     it cannot key. A capture the monitor grades incomplete — on Linux
+##     every run of a statically linked ``go``, which the preload monitor
+##     cannot enter — keys nothing: the listing is re-run and the fragment
+##     re-derived on every refresh.
 ##   * The compile/link uses ``go tool compile`` / ``go tool link`` via
 ##     the ``go`` driver itself. That guarantees the tool path matches the
 ##     active toolchain without us hard-coding ``$(go env GOTOOLDIR)``
 ##     into the action argv.
 
-import std/[algorithm, json, os, osproc, strutils]
+import std/[algorithm, json, os, strutils]
 
+import io_mon
 import repro_core
+import repro_core/monitor_spawn_stdio
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/emit_cache
+import repro_standard_provider/conventions/go_embed
 
 const
   ScratchDirName* = ".repro/build"
@@ -159,24 +175,60 @@ type
       ## Reported by ``go list``'s ``XTestGoFiles`` field. Listed by name
       ## only relative to ``dir``.
     imports: seq[string]
-      ## Direct ``import "..."`` strings. Used to derive the per-package
-      ## ``importcfg``.
+      ## ``go list``'s ``Imports``: the package's direct imports as RESOLVED
+      ## import paths (after ``ImportMap``). Each names another record of the
+      ## same listing; one ``packagefile`` line per entry.
+    importMap: seq[(string, string)]
+      ## ``go list``'s ``ImportMap``, source path -> resolved path, sorted by
+      ## source path. One ``importmap`` line per entry (Go.md §"The importcfg
+      ## file").
+    embedPatterns: seq[string]
+      ## ``go list``'s ``EmbedPatterns``: the patterns of the package's
+      ## ``//go:embed`` directives, ``all:`` prefix included.
+    embedFiles: seq[string]
+      ## ``go list``'s ``EmbedFiles``: the union of the files those patterns
+      ## resolve to, slash paths relative to ``dir``.
+    modulePath: string
+      ## ``Module.Path`` of the module that contains the package.
+    moduleDir: string
+      ## ``Module.Dir``.
+    moduleMain: bool
+      ## ``Module.Main``: the module is the main module or a workspace member.
+    moduleGoVersion: string
+      ## ``Module.GoVersion``; empty when the module declares no ``go``
+      ## directive.
+    hasModule: bool
+      ## The record carried a ``Module`` object (every non-standard package
+      ## does in module and workspace mode).
     exportArchive: string
       ## Absolute path to the package archive ``go`` knows about. For
       ## stdlib packages this is a GOCACHE entry; for project packages we
       ## ignore this field and emit our own compile action with our own
       ## output path.
 
-  GoModuleInfo = object
-    ## ``go.mod`` essentials for the ``-lang=`` flag.
-    goVersion: string
-      ## ``go.mod``'s ``go`` directive value (``1.22``). Defaults to
-      ## ``1.22`` when absent — Go's own behaviour.
-    modulePath: string
-      ## ``go.mod``'s ``module`` directive value
-      ## (``example.com/foo``). Empty when the directive is missing —
-      ## ``go list`` would have already failed in that case so the empty
-      ## fallback is defensive only.
+  GoObservedInputs = object
+    ## What the io monitor observed the project's ``go list`` runs read:
+    ## the graph's key (Go.md §"Implicit-dependency capture", item 3).
+    files: seq[string]
+      ## Absolute paths read, opened or probed (a probe of an absent path is
+      ## recorded too: its appearance changes the listing).
+    directories: seq[string]
+      ## Absolute paths of the directories enumerated.
+    envNames: seq[string]
+      ## Environment variables the runs read.
+    incomplete: seq[string]
+      ## Empty when every run was observed completely. Otherwise the
+      ## monitor's diagnosis of each run it graded incomplete — on Linux,
+      ## every run of a statically linked ``go`` (the preload monitor cannot
+      ## enter it; reprobuild-pm issue
+      ## 2026-10-08-frozen-wasm-static-go-monitor-incomplete). The recorded
+      ## sets are then not a key: nothing derived from the listing is reused.
+
+  GoListing = object
+    ## The project's one ``go list`` (plus, in workspace mode, the
+    ## ``go list -m`` that names its members), with what it read.
+    packages: seq[GoPackage]
+    observed: GoObservedInputs
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -328,8 +380,10 @@ proc hasAnyNonTestGoFile(projectRoot: string): bool =
 
 proc goRecognize(projectRoot: string;
                  request: ProviderGraphRequest): bool {.gcsafe.} =
-  ## Recognition contract (M14):
-  ##   * ``<projectRoot>/go.mod`` exists
+  ## Recognition contract (M14, workspaces since the 2026-11-16 Go.md
+  ## amendment):
+  ##   * ``<projectRoot>/go.mod`` or ``<projectRoot>/go.work`` exists
+  ##     (Go.md §"Recognition" 1; a ``go.work`` selects workspace mode)
   ##   * ``<projectRoot>/reprobuild.nim`` mentions ``go`` in ``uses:``
   ##   * at least ONE of:
   ##       - ``<projectRoot>/main.go`` exists (root-binary layout), OR
@@ -339,16 +393,14 @@ proc goRecognize(projectRoot: string;
   ##         ``<projectRoot>`` (library-only module — non-main packages).
   ##   * no ``import "C"`` line and no ``_cgo_*.go`` file anywhere under
   ##     ``projectRoot`` (cgo forces Mode B — M6)
-  ##   * ``<projectRoot>/go.work`` does NOT exist (workspaces deferred)
   ##   * ``go`` is on PATH (so emit can run ``go list``)
-  if not fileExists(extendedPath(projectRoot / "go.mod")):
+  if not fileExists(extendedPath(projectRoot / "go.mod")) and
+      not fileExists(extendedPath(projectRoot / "go.work")):
     return false
   let source = readReprobuildSource(projectRoot)
   if source.len == 0:
     return false
   if not usesIncludesGo(source):
-    return false
-  if fileExists(extendedPath(projectRoot / "go.work")):
     return false
   if (not hasRootMainGo(projectRoot)) and
      (not hasCmdMainGo(projectRoot)) and
@@ -360,44 +412,24 @@ proc goRecognize(projectRoot: string;
     return false
   true
 
-proc parseGoMod(projectRoot: string): GoModuleInfo =
-  ## Best-effort line-scan for ``go.mod``'s ``go`` directive and
-  ## ``module`` directive. ``go list`` is the authoritative source for
-  ## the module path (it carries each package's full import path) but
-  ## we read ``module`` here too so library-only modules — where no
-  ## main package's import path can stand in for the module name — can
-  ## still derive a scratch-dir entry name.
-  result.goVersion = "1.22"
-  let modPath = projectRoot / "go.mod"
-  if not fileExists(extendedPath(modPath)):
-    return
-  var content: string
-  try:
-    content = readFile(extendedPath(modPath))
-  except CatchableError:
-    return
-  for rawLine in content.splitLines():
-    let stripped = rawLine.strip()
-    if stripped.startsWith("go "):
-      let payload = stripped[3 .. ^1].strip()
-      if payload.len > 0:
-        result.goVersion = payload
-    elif stripped.startsWith("module "):
-      let payload = stripped[7 .. ^1].strip().strip(chars = {'"', '\'',
-        ' ', '\t'})
-      if payload.len > 0:
-        result.modulePath = payload
-
-proc splitJsonObjects(blob: string): seq[JsonNode] =
-  ## ``go list -json`` emits one JSON object per package, concatenated
-  ## without any wrapping array — they're newline-separated by convention
-  ## but ``parseJson`` only consumes the first one. Loop the JSON
-  ## fragments by tracking nested brace depth, skipping over strings.
+proc splitJsonObjects(blob, context: string): seq[JsonNode] =
+  ## ``go list -json`` emits one JSON object per package (or module),
+  ## concatenated without a wrapping array; ``parseJson`` only consumes the
+  ## first one. Loop the fragments by tracking nested brace depth, skipping
+  ## over strings.
+  ##
+  ## A fragment that does not parse, or text outside the objects other than
+  ## whitespace, is REFUSED rather than skipped: a listing with a package
+  ## missing would emit a graph that silently lacks it. (On Windows the
+  ## monitored run's stdout and stderr share one capture file, so a stray
+  ## diagnostic line lands here and is reported instead of being mistaken for
+  ## part of the listing.)
   var depth = 0
   var startIdx = -1
   var i = 0
   var inString = false
   var escape = false
+  var stray = ""
   while i < blob.len:
     let ch = blob[i]
     if inString:
@@ -421,70 +453,31 @@ proc splitJsonObjects(blob: string): seq[JsonNode] =
           let fragment = blob[startIdx .. i]
           try:
             result.add(parseJson(fragment))
-          except CatchableError:
-            discard
+          except CatchableError as e:
+            raise newException(ValueError,
+              "go convention: " & context & " printed an object that is not " &
+                "JSON (" & e.msg & "):\n" & fragment)
           startIdx = -1
       else:
-        discard
+        if depth == 0 and ch notin Whitespace:
+          stray.add(ch)
     inc i
+  if depth != 0 or stray.len > 0:
+    raise newException(ValueError,
+      "go convention: " & context & " printed text that is not part of its " &
+        "JSON listing; refusing a listing that may be incomplete:\n" & blob)
 
-const
-  GoEmitCacheBaseName = "go-list-export"
-    ## Sidecar file basename for the M18 emit-time fingerprint cache.
-  GoEmitCacheOutputName = "go-list-export.cached.json"
-    ## Cached raw ``go list -export -json -deps ./...`` output. Lives
-    ## next to the fingerprint sidecar.
+proc stringList(node: JsonNode; key: string): seq[string] =
+  if key in node and node[key].kind == JArray:
+    for item in node[key]:
+      result.add(item.getStr())
 
-proc goEmitCacheScratchDir(projectRoot: string): string =
-  ## Per-project emit-cache scratch — same shape as the Rust convention.
-  projectRoot / ScratchDirName / ".emit-cache"
-
-proc collectGoInputs(projectRoot: string): seq[string] =
-  ## Every input file ``go list`` could possibly inspect on this
-  ## project: ``go.mod``, ``go.sum``, every ``.go`` file (recursively),
-  ## skipping ``.repro/`` scratch + any ``vendor/`` tree (vendor is
-  ## immutable cargo-cult input, but folding it in is correct — a
-  ## ``vendor/`` edit IS a real input change, just rare in practice).
-  ## We DO skip the obvious "build scratch" dirs the convention itself
-  ## owns so we don't get fingerprint feedback loops.
-  if not dirExists(extendedPath(projectRoot)):
-    return @[]
-  for entry in walkDirRec(projectRoot, yieldFilter = {pcFile}):
-    let rel = entry.relativePath(projectRoot)
-    let lowered = rel.replace('\\', '/').toLowerAscii
-    if lowered.startsWith(".repro/"):
-      continue
-    let basename = extractFilename(entry).toLowerAscii
-    let ext = splitFile(entry).ext.toLowerAscii
-    if basename == "go.mod" or basename == "go.sum" or ext == ".go":
-      result.add(entry)
-  result.sort(system.cmp[string])
-
-proc goEmitCacheFingerprint(projectRoot, goExe: string;
-                            sources: openArray[string]): string =
-  ## Fingerprint key for the go-list-export cache. See the analogous
-  ## comment in ``nim.nim``/``rust.nim`` for the rationale.
-  ##
-  ## **M29 Part A**: ``go version`` output is folded in via
-  ## ``toolVersionInput`` (note: ``go version`` without a leading dash —
-  ## the Go toolchain doesn't speak ``--version``). An in-place Go
-  ## upgrade therefore misses the cache and re-runs ``go list``.
-  var inputs: seq[EmitCacheInput] = @[
-    textInput("go-exe:" & goExe),
-    toolVersionInput(goExe, ["version"]),
-    textInput("project-root:" & projectRoot),
-    textInput("cmd:go list -export -json -deps ./..."),
-  ]
-  for source in sources:
-    inputs.add(fileInput(source))
-  computeEmitCacheFingerprint(inputs)
-
-proc parseGoListExportOutput(output: string): seq[GoPackage] =
-  ## Decode the raw ``go list -export -json -deps ./...`` text into the
-  ## convention's reduced-shape ``GoPackage`` records. Pulled out of
-  ## ``runGoListExport`` so the M18 cache-hit path can re-parse the
-  ## persisted output without copy-pasting the JSON shape.
-  for node in splitJsonObjects(output):
+proc parseGoListOutput(output: string): seq[GoPackage] =
+  ## Decode the raw ``go list -export -json -deps`` text into the
+  ## convention's reduced ``GoPackage`` records. Every field the graph uses
+  ## comes from here and from nothing else (Go.md §"The importcfg file",
+  ## §"The embedcfg file", §"Per-package compile argv").
+  for node in splitJsonObjects(output, "'go list -export -json -deps'"):
     if node.kind != JObject:
       continue
     var pkg = GoPackage()
@@ -500,83 +493,325 @@ proc parseGoListExportOutput(output: string): seq[GoPackage] =
       pkg.standard = node["Standard"].getBool()
     if "Export" in node:
       pkg.exportArchive = node["Export"].getStr()
-    if "GoFiles" in node and node["GoFiles"].kind == JArray:
-      for item in node["GoFiles"]:
-        pkg.goFiles.add(item.getStr())
-    if "TestGoFiles" in node and node["TestGoFiles"].kind == JArray:
-      for item in node["TestGoFiles"]:
-        pkg.testGoFiles.add(item.getStr())
-    if "XTestGoFiles" in node and node["XTestGoFiles"].kind == JArray:
-      for item in node["XTestGoFiles"]:
-        pkg.xTestGoFiles.add(item.getStr())
-    if "Imports" in node and node["Imports"].kind == JArray:
-      for item in node["Imports"]:
-        pkg.imports.add(item.getStr())
+    pkg.goFiles = stringList(node, "GoFiles")
+    pkg.testGoFiles = stringList(node, "TestGoFiles")
+    pkg.xTestGoFiles = stringList(node, "XTestGoFiles")
+    pkg.imports = stringList(node, "Imports")
+    pkg.embedPatterns = stringList(node, "EmbedPatterns")
+    pkg.embedFiles = stringList(node, "EmbedFiles")
+    if "ImportMap" in node and node["ImportMap"].kind == JObject:
+      for source, resolved in node["ImportMap"].pairs:
+        pkg.importMap.add((source, resolved.getStr()))
+      pkg.importMap.sort(proc(a, b: (string, string)): int = cmp(a[0], b[0]))
+    if "Module" in node and node["Module"].kind == JObject:
+      let module = node["Module"]
+      pkg.hasModule = true
+      if "Path" in module: pkg.modulePath = module["Path"].getStr()
+      if "Dir" in module: pkg.moduleDir = module["Dir"].getStr()
+      if "Main" in module: pkg.moduleMain = module["Main"].getBool()
+      if "GoVersion" in module:
+        pkg.moduleGoVersion = module["GoVersion"].getStr()
     result.add(pkg)
 
-proc runGoListExport(projectRoot, goExe: string): seq[GoPackage] =
-  ## Execute ``go list -export -json -deps ./...`` and parse the
-  ## resulting concatenated-JSON output. ``-export`` triggers the Go
-  ## toolchain to populate ``GOCACHE`` with stdlib archives and report
-  ## the cache paths via the ``Export`` field.
-  ##
-  ## The output is large (~100 KB for a "hello world" — every transitive
-  ## stdlib package gets a JSON record). On Windows the default pipe
-  ## buffer is ~64 KB so the naïve ``readAll`` pattern that works for
-  ## ``cargo metadata`` (a few KB) deadlocks here: Go fills the pipe
-  ## faster than we drain it. ``execCmdEx`` reads stdout line-by-line
-  ## while polling the exit code, which is exactly the drain pattern we
-  ## need. ``poStdErrToStdOut`` merges any progress chatter Go writes
-  ## (e.g. ``# downloading``) into the captured output, which becomes
-  ## the diagnostic on exit-code != 0.
-  ##
-  ## **M18 emit-cache fast path**: hash every ``go.mod``/``go.sum``/``.go``
-  ## file under the project root and, when the fingerprint matches a
-  ## sidecar AND a cached output is on disk, re-parse the cached output
-  ## instead of re-spawning ``go list``. The headline win isn't ``go
-  ## list``'s wall-time (~200-400 ms) — it's that the convention's emit
-  ## becomes purely on-disk I/O when nothing has changed.
-  let scratchDir = goEmitCacheScratchDir(projectRoot)
-  let sources = collectGoInputs(projectRoot)
-  let fingerprint = goEmitCacheFingerprint(projectRoot, goExe, sources)
-  let cachedOutputPath = scratchDir / GoEmitCacheOutputName
-  if emitCacheIsUsable(scratchDir, GoEmitCacheBaseName, fingerprint,
-      [cachedOutputPath]):
-    try:
-      let cached = readFile(extendedPath(cachedOutputPath))
-      let parsed = parseGoListExportOutput(cached)
-      if parsed.len > 0:
-        return parsed
-    except CatchableError:
-      # Stale cache — fall through to the subprocess.
+const
+  GoEmitCacheBaseName = "go-list-export"
+    ## Sidecar file basename for the emit-time fingerprint cache.
+  GoEmitCacheOutputName = "go-list-export.cached.json"
+    ## Cached raw ``go list -export -json -deps`` output (go's own JSON,
+    ## re-parsed on a hit).
+  GoEmitCacheObservedName = "go-list-export.observed"
+    ## What the monitored runs read, one ``<kind> <path-or-name>`` line per
+    ## input (``f`` file, ``d`` directory, ``e`` environment variable): the
+    ## inputs the cache key is recomputed over on the next emit.
+  DefaultModuleGoVersion = "1.16"
+    ## cmd/go's ``gover.DefaultGoModVersion``: the language version of a
+    ## module whose ``go.mod`` has no ``go`` directive.
+
+proc goEmitCacheScratchDir(projectRoot: string): string =
+  ## Per-project emit-cache scratch — same shape as the Rust convention.
+  projectRoot / ScratchDirName / ".emit-cache"
+
+proc keepObservedPath(path: string): bool =
+  ## The kernel's pseudo file systems are not inputs a file digest can key:
+  ## ``/proc`` and ``/sys`` describe the running system, ``/dev`` holds
+  ## devices (Go.md §"Implicit-dependency capture", item 3).
+  if path.len == 0:
+    return false
+  when defined(posix):
+    for prefix in ["/proc", "/sys", "/dev"]:
+      if path == prefix or path.startsWith(prefix & "/"):
+        return false
+  true
+
+proc addUnique(list: var seq[string]; value: string) =
+  if value notin list:
+    list.add(value)
+
+proc foldMonitorEvidence(observed: var GoObservedInputs;
+                         records: openArray[MonitorRecord]; cwd: string;
+                         ownPaths: openArray[string]) =
+  ## Turn one monitored run's records into graph-evaluation inputs: every
+  ## file read, opened, probed or executed, and every directory enumerated,
+  ## that the run did not itself write. ``ownPaths`` are the capture files
+  ## this process opened for the run; the child never opens them, but they
+  ## are excluded explicitly so a backend that reported an inherited
+  ## descriptor's path cannot make the key depend on its own output.
+  proc material(path: string): string =
+    if path.len == 0:
+      return ""
+    let absolute = if path.isAbsolute: path else: cwd / path
+    os.normalizedPath(absolute)
+  var written: seq[string] = @[]
+  for r in records:
+    if r.observationKind in {moFileWrite, moPathMutation}:
+      written.addUnique(material(r.path))
+  for r in records:
+    let path = material(r.path)
+    case r.observationKind
+    of moFileOpen, moFileRead, moPathProbe, moExecute:
+      if keepObservedPath(path) and path notin written and path notin ownPaths:
+        observed.files.addUnique(path)
+    of moDirectoryEnumerate:
+      if keepObservedPath(path) and path notin ownPaths:
+        observed.directories.addUnique(path)
+    of moEnvRead:
+      if r.path.len > 0:
+        observed.envNames.addUnique(r.path)
+    else:
       discard
-  let argv = @[
-    goExe,
-    "list",
-    "-export",
-    "-json",
-    "-deps",
-    "./...",
-  ]
-  let cmd = quoteShellCommand(argv)
-  let (output, exitCode) = execCmdEx(cmd,
-    options = {poStdErrToStdOut, poUsePath},
-    workingDir = projectRoot)
-  if exitCode != 0:
-    raise newException(ValueError,
-      "go convention: 'go list -export -json -deps ./...' exited " &
-        $exitCode & " for " & projectRoot & ":\n" & output)
-  result = parseGoListExportOutput(output)
-  # Persist the cache. As with the Rust path, write the output BEFORE
-  # the fingerprint so a partial-write crash leaves the sidecar
-  # mismatched (which is correct — a miss) rather than matched-but-
-  # stale.
+
+proc monitorDiagnosis(capture: MonitorResult): string =
+  ## Why a capture was graded incomplete, in the monitor's own words.
+  var reasons: seq[string] = @[]
+  for r in capture.records:
+    if r.observationKind == moEventLoss:
+      reasons.add(if r.detail.len > 0: r.detail else: r.path)
+  for gap in capture.depFile.capabilityGaps:
+    if gap.required:
+      reasons.add("required capability missing: " & $gap.capability)
+  if reasons.len == 0:
+    reasons.add("the monitor graded the capture incomplete without naming " &
+      "a loss")
+  reasons.join("; ")
+
+type GoRun = object
+  stdout: string
+  stderr: string
+
+proc runGoMonitored(goExe: string; args: seq[string];
+                    projectRoot, scratchDir, stem: string;
+                    observed: var GoObservedInputs): GoRun =
+  ## Run ``go <args>`` from ``projectRoot`` under io-mon's in-process host
+  ## and fold what it read into ``observed`` (Go.md §"Implicit-dependency
+  ## capture", item 3), following Failure-Semantics.md §"Monitoring
+  ## Failures":
+  ##   * a monitor that cannot be started (no shim, unsupported host) is
+  ##     required monitoring that is unavailable, and the run is REFUSED;
+  ##   * a capture graded incomplete is a loss of unknown scope: the output is
+  ##     used, and the diagnosis is recorded in ``observed.incomplete`` so
+  ##     that nothing derived from it is reused.
+  ##
+  ## io-mon spawns with ``poParentStreams``. On POSIX the provider's own
+  ## descriptors 1 and 2 are pointed at two capture files across the spawn
+  ## (``repro_core/monitor_spawn_stdio``, the engine's implementation), so the
+  ## listing is read from its own file and the child opens nothing to write
+  ## it. On Windows io-mon captures the child's stdout and stderr into one
+  ## file; ``splitJsonObjects`` refuses any text in it that is not JSON.
+  let commandText = "go " & args.join(" ")
+  createDir(extendedPath(scratchDir))
+  let outPath = scratchDir / (stem & ".stdout")
+  let errPath = scratchDir / (stem & ".stderr")
+  let depPath = scratchDir / (stem & ".iomon")
+  var request = FsSnoopRequest(
+    command: @[goExe] & args,
+    depFilePath: depPath,
+    cwd: projectRoot,
+    streamMode: fsoNone,
+    passthroughChildStdout: true,
+    passthroughChildStderr: true)
+  var monitored: MonitorResult
   try:
-    createDir(extendedPath(scratchDir))
-    writeFile(extendedPath(cachedOutputPath), output)
-    writeEmitCacheFingerprint(scratchDir, GoEmitCacheBaseName, fingerprint)
+    when defined(windows):
+      request.captureChildStdio = true
+      request.captureStdioPath = outPath
+      monitored = runMonitored(request)
+    else:
+      var ctx = beginMonitorSpawnContext(outPath, errPath)
+      var handle: MonitorHandle
+      try:
+        handle = startMonitor(request)
+      finally:
+        endMonitorSpawnContext(ctx)
+      monitored = finishMonitor(move handle)
+  except CatchableError as e:
+    raise newException(ValueError,
+      "go convention: cannot run '" & commandText & "' under the io " &
+        "monitor, and an unobserved listing has no sound key " &
+        "(Go.md §\"Implicit-dependency capture\"): " & e.msg)
+  try:
+    result.stdout = readFile(extendedPath(outPath))
+  except CatchableError:
+    result.stdout = ""
+  try:
+    if fileExists(extendedPath(errPath)):
+      result.stderr = readFile(extendedPath(errPath))
+  except CatchableError:
+    result.stderr = ""
+  for path in [outPath, errPath, depPath]:
+    try:
+      if fileExists(extendedPath(path)):
+        removeFile(extendedPath(path))
+    except CatchableError:
+      discard
+  if monitored.exitCode != 0:
+    raise newException(ValueError,
+      "go convention: '" & commandText & "' exited " & $monitored.exitCode &
+        " for " & projectRoot & ":\n" & result.stderr & result.stdout)
+  if monitored.completeness != mcComplete:
+    observed.incomplete.add("'" & commandText & "': " &
+      monitorDiagnosis(monitored))
+  foldMonitorEvidence(observed, monitored.records, projectRoot,
+    [outPath, errPath, depPath])
+
+proc listArgs(patterns: seq[string]): seq[string] =
+  @["list", "-export", "-json", "-deps"] & patterns
+
+proc workspacePatterns(projectRoot, goExe, scratchDir: string;
+                       observed: var GoObservedInputs): seq[string] =
+  ## Workspace mode (Go.md §"Workspace and module mode"): ``go list -m
+  ## -json`` names the workspace's main modules, and the listing covers
+  ## ``<Dir>/...`` of each. ``./...`` cannot stand in for it: a workspace
+  ## root that is not itself a module matches no package, and a member may
+  ## live outside the root.
+  let run = runGoMonitored(goExe, @["list", "-m", "-json"], projectRoot,
+    scratchDir, "go-list-m", observed)
+  for node in splitJsonObjects(run.stdout, "'go list -m -json'"):
+    if node.kind != JObject:
+      continue
+    if "Main" in node and node["Main"].getBool() and "Dir" in node:
+      result.add(node["Dir"].getStr() / "...")
+  if result.len == 0:
+    raise newException(ValueError,
+      "go convention: 'go list -m -json' named no workspace module for " &
+        projectRoot & ":\n" & run.stdout)
+  result.sort(system.cmp[string])
+
+proc observedFingerprint(projectRoot, goExe: string;
+                         observed: GoObservedInputs): string =
+  ## The emit-cache key: the toolchain, the command, and the CURRENT content
+  ## of every recorded input — file digests, directory memberships and the
+  ## values of the environment variables the runs read.
+  var inputs: seq[EmitCacheInput] = @[
+    textInput("go-exe:" & goExe),
+    toolVersionInput(goExe, ["version"]),
+    textInput("project-root:" & projectRoot),
+    textInput("cmd:go list -export -json -deps (module or workspace patterns)"),
+  ]
+  var dirs = observed.directories
+  dirs.sort(system.cmp[string])
+  for dir in dirs:
+    inputs.add(textInput("dir:" & dir & "=" &
+      directoryMemberNames(dir).join("\x1f")))
+  var names = observed.envNames
+  names.sort(system.cmp[string])
+  for name in names:
+    inputs.add(textInput("env:" & name & "=" &
+      (if existsEnv(name): "set:" & getEnv(name) else: "unset")))
+  for file in observed.files:
+    inputs.add(fileInput(file))
+  computeEmitCacheFingerprint(inputs)
+
+proc renderObserved(observed: GoObservedInputs): string =
+  for f in observed.files: result.add("f " & f & "\n")
+  for d in observed.directories: result.add("d " & d & "\n")
+  for e in observed.envNames: result.add("e " & e & "\n")
+
+proc parseObserved(text: string): GoObservedInputs =
+  for line in text.splitLines():
+    if line.len < 3 or line[1] != ' ':
+      continue
+    let value = line[2 .. ^1]
+    case line[0]
+    of 'f': result.files.add(value)
+    of 'd': result.directories.add(value)
+    of 'e': result.envNames.add(value)
+    else: discard
+
+proc runGoListing(projectRoot, goExe: string): GoListing =
+  ## The project's one listing (Go.md §"Recognition" 2): ``go list -export
+  ## -json -deps <patterns>`` run once for the whole project, under the
+  ## monitor, with ``<patterns>`` ``./...`` in module mode and each workspace
+  ## module's ``<Dir>/...`` in workspace mode.
+  ##
+  ## ``-export`` makes ``go`` populate ``GOCACHE`` with the standard-library
+  ## archives and report each one's path in ``Export``; those reads are part
+  ## of the observed key, so a trimmed cache entry re-derives the graph.
+  ##
+  ## **Emit cache**: the raw output is kept with the list of what the runs
+  ## read. A later emit reuses it only while every recorded file has the
+  ## same content, every recorded directory the same members and every
+  ## recorded environment variable the same value (``observedFingerprint``).
+  ## On a hit the same recorded inputs are what the fragment reports. A
+  ## listing whose capture was incomplete is never stored, so it is never
+  ## reused.
+  let scratchDir = goEmitCacheScratchDir(projectRoot)
+  let cachedOutputPath = scratchDir / GoEmitCacheOutputName
+  let observedPath = scratchDir / GoEmitCacheObservedName
+  if fileExists(extendedPath(observedPath)) and
+      fileExists(extendedPath(cachedOutputPath)):
+    try:
+      let observed = parseObserved(readFile(extendedPath(observedPath)))
+      if observed.files.len > 0 and emitCacheIsUsable(scratchDir,
+          GoEmitCacheBaseName, observedFingerprint(projectRoot, goExe,
+          observed), [cachedOutputPath, observedPath]):
+        let packages = parseGoListOutput(
+          readFile(extendedPath(cachedOutputPath)))
+        if packages.len > 0:
+          return GoListing(packages: packages, observed: observed)
+    except CatchableError:
+      # An unreadable or unparsable cache is a miss.
+      discard
+  var observed = GoObservedInputs()
+  let patterns =
+    if fileExists(extendedPath(projectRoot / "go.work")):
+      workspacePatterns(projectRoot, goExe, scratchDir, observed)
+    else:
+      @["./..."]
+  let run = runGoMonitored(goExe, listArgs(patterns), projectRoot,
+    scratchDir, "go-list-export", observed)
+  result = GoListing(packages: parseGoListOutput(run.stdout),
+    observed: observed)
+  if observed.incomplete.len > 0:
+    return
+  # Persist the output and the observed inputs BEFORE the fingerprint, so a
+  # crash part-way leaves a mismatched sidecar (a miss), never a matched but
+  # stale one.
+  try:
+    writeFile(extendedPath(cachedOutputPath), run.stdout)
+    writeFile(extendedPath(observedPath), renderObserved(observed))
+    writeEmitCacheFingerprint(scratchDir, GoEmitCacheBaseName,
+      observedFingerprint(projectRoot, goExe, observed))
   except CatchableError:
     discard
+
+proc registerObservedInputs(observed: GoObservedInputs; goExe: string) =
+  ## Report the observed reads as the fragment's evaluation inputs
+  ## (Project-Provider-Graph-Protocol.md §"Evaluation Inputs"): a changed
+  ## file re-invokes this convention, a changed directory membership re-runs
+  ## the root. Must run inside ``buildPackageFragment``'s build proc, which
+  ## resets the registry before calling it. A path that is a directory when
+  ## registered is covered by its enumeration if it was enumerated; a file
+  ## digest of it would read as ``missing`` either way.
+  for file in observed.files:
+    if not dirExists(extendedPath(file)):
+      providerFileInput(file)
+  for dir in observed.directories:
+    providerDirectoryInput(dir)
+  if observed.incomplete.len > 0:
+    # Unknown-scope loss: the recorded sets above are a lower bound, not a
+    # key. Mark the fragment as derived from unobserved reads, so every
+    # refresh produces it again (and re-runs the listing).
+    providerUnobservedInput(goExe)
 
 proc sanitizeImportPath(importPath: string): string =
   ## Map a Go import path (``example.com/foo/bar``) to a filesystem-safe
@@ -670,36 +905,42 @@ proc collectGoSources(pkg: GoPackage): seq[string] =
     result.add(pkg.dir / relative)
   result.sort(system.cmp[string])
 
-proc renderImportcfg(packages: openArray[GoPackage];
-                     imports: openArray[string];
+proc renderImportcfg(packages: openArray[GoPackage]; pkg: GoPackage;
                      projectRoot, projectEntry: string): string =
-  ## Build a ``packagefile <importPath>=<archive>`` listing for a single
-  ## package's ``importcfg``. Each direct import maps to either:
-  ##   * a stdlib package's ``Export`` archive (GOCACHE entry), or
-  ##   * a project package's archive path under our scratch tree.
-  ## The first line is a literal ``# import config`` comment (Go's own
-  ## driver emits this header and the spec section 4 §"importcfg" lists
-  ## it as the conventional preamble — purely informational, ``go tool``
-  ## accepts files without it).
+  ## The package's ``importcfg`` (Go.md §"The importcfg file"), taken from
+  ## its own ``go list`` record and from nothing else:
+  ##   * one ``importmap <source>=<resolved>`` line per ``ImportMap`` entry;
+  ##   * one ``packagefile <path>=<archive>`` line per ``Imports`` entry,
+  ##     whose archive is the standard-library ``Export`` file or our own
+  ##     compile output for a non-standard package.
+  ## ``go.mod``'s ``replace`` directives play no part: a replacement changes
+  ## a package's ``Dir``, never its import path. The first line is the
+  ## ``# import config`` comment cmd/go writes (informational only).
   result.add("# import config\n")
-  for importPath in imports:
+  for (source, resolved) in pkg.importMap:
+    result.add("importmap " & source & "=" & resolved & "\n")
+  for importPath in pkg.imports:
     var found = false
-    for pkg in packages:
-      if pkg.importPath != importPath:
+    for dep in packages:
+      if dep.importPath != importPath:
         continue
       found = true
-      if pkg.standard:
-        if pkg.exportArchive.len == 0:
-          # Stdlib packages with no Export (e.g. ``unsafe``) carry no
-          # archive at all — they're handled at compile-tool level via
-          # ``-complete`` and the Go compiler intrinsically.
+      if dep.standard:
+        if dep.exportArchive.len == 0:
+          # ``unsafe`` (and only such intrinsic packages) carries no archive:
+          # the compiler provides it.
           break
-        result.add("packagefile " & importPath & "=" & pkg.exportArchive &
+        result.add("packagefile " & importPath & "=" & dep.exportArchive &
           "\n")
       else:
         result.add("packagefile " & importPath & "=" &
           archivePathFor(projectRoot, projectEntry, importPath) & "\n")
       break
+    if not found:
+      raise newException(ValueError,
+        "go convention: " & pkg.importPath & " imports " & importPath &
+          ", which 'go list -deps' did not report; refusing an importcfg " &
+          "that would omit it")
 
 proc renderLinkImportcfg(packages: seq[GoPackage]; mainImportPath,
                         projectRoot, projectEntry: string): string =
@@ -733,34 +974,97 @@ proc renderLinkImportcfg(packages: seq[GoPackage]; mainImportPath,
       result.add("packagefile " & mainImportPath & "=" &
         archivePathFor(projectRoot, projectEntry, mainImportPath) & "\n")
 
-proc collectAllProjectGoSources(projectRoot: string): seq[string] =
-  ## Every ``.go`` file under ``projectRoot`` (excluding ``_test.go``).
-  ## Used to roll the "is anything stale?" decision for the umbrella
-  ## ``go list`` action — its declared inputs trigger a re-listing
-  ## whenever the source layout changes.
-  for entry in walkDirRec(projectRoot):
-    let lower = entry.toLowerAscii
-    if not lower.endsWith(".go"):
-      continue
-    if extractFilename(entry).toLowerAscii.endsWith("_test.go"):
-      continue
-    result.add(entry)
-  result.sort(system.cmp[string])
-
 type
   GoCompileAction = object
     action: BuildActionDef
     importPath: string
     archivePath: string
 
+proc goLanguageVersion*(version: string): string =
+  ## Port of cmd/go's ``gover.Lang``
+  ## (https://github.com/golang/go/blob/master/src/cmd/go/internal/gover/gover.go):
+  ## the language version of a Go version — its ``major.minor`` prefix, or
+  ## the bare major for ``1`` and ``1.0``. ``1.22.3`` and ``1.21rc1`` give
+  ## ``1.22`` and ``1.21``. A ``go`` directive may carry a patch release or a
+  ## pre-release suffix (``go mod init`` writes ``go 1.N.0`` since Go 1.21),
+  ## and the compiler's ``-lang`` accepts only ``goMAJOR.MINOR``, so cmd/go
+  ## passes ``-lang=go`` & ``Lang(v)``, never ``v`` itself. Raises
+  ## ``ValueError`` on a string that does not start with ``major[.minor]``
+  ## (``go list`` validates the directive, so that means a corrupt record).
+  proc digitsAt(s: string; start: int): int =
+    result = start
+    while result < s.len and s[result] in Digits:
+      inc result
+  let majorEnd = digitsAt(version, 0)
+  if majorEnd == 0:
+    raise newException(ValueError,
+      "go convention: not a Go version: " & version.escape())
+  let major = version[0 ..< majorEnd]
+  if majorEnd == version.len:
+    return major
+  if version[majorEnd] != '.':
+    raise newException(ValueError,
+      "go convention: not a Go version: " & version.escape())
+  let minorEnd = digitsAt(version, majorEnd + 1)
+  if minorEnd == majorEnd + 1:
+    raise newException(ValueError,
+      "go convention: not a Go version: " & version.escape())
+  let minor = version[majorEnd + 1 ..< minorEnd]
+  if major == "1" and minor == "0":
+    return major
+  major & "." & minor
+
+proc languageVersionOf(pkg: GoPackage): string =
+  ## ``-lang`` for one package (Go.md §"Per-package compile argv"): the
+  ## language version (``goLanguageVersion``) of the ``GoVersion`` of the
+  ## module containing it, as ``go list`` reports it in the package's
+  ## ``Module`` record, or of cmd/go's default when that module declares no
+  ## ``go`` directive. Never the root ``go.mod``'s version: a dependency or a
+  ## workspace member compiles at its own.
+  if not pkg.hasModule:
+    raise newException(ValueError,
+      "go convention: 'go list' reported no module for non-standard " &
+        "package " & pkg.importPath & "; only module and workspace mode " &
+        "are supported (Go.md)")
+  goLanguageVersion(
+    if pkg.moduleGoVersion.len > 0: pkg.moduleGoVersion
+    else: DefaultModuleGoVersion)
+
+proc collectEmbedSources(pkg: GoPackage): seq[string] =
+  ## Absolute paths of the package's ``EmbedFiles``.
+  for relative in pkg.embedFiles:
+    result.add(pkg.dir / relative.replace('/', DirSep))
+  result.sort(system.cmp[string])
+
+proc embedcfgPathFor(projectRoot, projectEntry, importPath: string): string =
+  scratchPathFor(projectRoot, projectEntry) / "pkg" /
+    (sanitizeImportPath(importPath) & ".embedcfg")
+
+proc emitEmbedcfgAction(projectRoot, projectEntry: string;
+                        pkg: GoPackage): tuple[action: BuildActionDef;
+                                               path: string] =
+  ## The package's ``-embedcfg`` document (Go.md §"The embedcfg file") as an
+  ## ``fs.writeText`` action, like the importcfg.
+  let path = embedcfgPathFor(projectRoot, projectEntry, pkg.importPath)
+  createDir(extendedPath(parentDir(path)))
+  let action = fs.writeText(
+    output = path,
+    text = renderEmbedcfg(pkg.dir, pkg.embedPatterns, pkg.embedFiles),
+    actionId = actionIdFor("go-embedcfg", projectEntry, pkg.importPath),
+    commandStatsId = "go.embedcfg")
+  (action, path)
+
 proc emitCompileAction(projectRoot, projectEntry, goExe: string;
-                      module: GoModuleInfo;
                       pkg: GoPackage;
+                      packages: seq[GoPackage];
                       importcfgPath: string;
-                      importcfgActionId: string): GoCompileAction =
+                      importcfgActionId: string;
+                      embedcfgPath = "";
+                      embedcfgActionId = ""): GoCompileAction =
   ## Emit a single per-package ``go tool compile`` action. Inputs are the
-  ## package's ``.go`` files plus the importcfg the previous action just
-  ## wrote. Outputs are the package archive.
+  ## package's ``.go`` files, its embedded files, and the importcfg (and,
+  ## for a package with ``//go:embed``, the embedcfg) the writer actions
+  ## produce. Outputs are the package archive.
   let archive = archivePathFor(projectRoot, projectEntry, pkg.importPath)
   let archiveDir = parentDir(archive)
   createDir(extendedPath(archiveDir))
@@ -783,7 +1087,7 @@ proc emitCompileAction(projectRoot, projectEntry, goExe: string;
     "tool",
     "compile",
     "-p", pFlag,
-    "-lang=go" & module.goVersion,
+    "-lang=go" & languageVersionOf(pkg),
   ]
   # ``-complete`` tells the compiler not to look for missing function
   # bodies in assembly. Safe for any package that has no ``.s`` files;
@@ -794,6 +1098,9 @@ proc emitCompileAction(projectRoot, projectEntry, goExe: string;
   argv.add("-complete")
   argv.add("-importcfg")
   argv.add(importcfgPath)
+  if embedcfgPath.len > 0:
+    argv.add("-embedcfg")
+    argv.add(embedcfgPath)
   argv.add("-pack")
   argv.add("-o")
   argv.add(archive)
@@ -803,11 +1110,27 @@ proc emitCompileAction(projectRoot, projectEntry, goExe: string;
   var inputs: seq[string] = @[importcfgPath]
   for src in sourceFiles:
     inputs.add(src)
+  var deps = @[importcfgActionId]
+  # Go.md §"Cross-package ordering edges": the compile of a package consumes
+  # the archive of every non-standard package it imports, so it must run
+  # after their compiles. Without the edge the scheduler is free to start it
+  # first, and the compile fails reading an archive that does not exist yet.
+  for importPath in pkg.imports:
+    for dep in packages:
+      if dep.importPath == importPath and not dep.standard:
+        inputs.add(archivePathFor(projectRoot, projectEntry, importPath))
+        deps.add(actionIdFor("go-compile", projectEntry, importPath))
+        break
+  if embedcfgPath.len > 0:
+    inputs.add(embedcfgPath)
+    deps.add(embedcfgActionId)
+    for embedded in collectEmbedSources(pkg):
+      inputs.add(embedded)
 
   let action = buildAction(
     id = actionIdFor("go-compile", projectEntry, pkg.importPath),
     call = inlineExecCall(argv, projectRoot),
-    deps = @[importcfgActionId],
+    deps = deps,
     inputs = inputs,
     outputs = @[archive],
     pool = "compile",
@@ -829,8 +1152,7 @@ proc emitImportcfgAction(projectRoot, projectEntry: string;
   let importcfgPath =
     importcfgPathFor(projectRoot, projectEntry, pkg.importPath)
   createDir(extendedPath(parentDir(importcfgPath)))
-  let text = renderImportcfg(packages, pkg.imports, projectRoot,
-    projectEntry)
+  let text = renderImportcfg(packages, pkg, projectRoot, projectEntry)
   let action = fs.writeText(
     output = importcfgPath,
     text = text,
@@ -946,23 +1268,34 @@ proc binaryNameForMain(mainPkg: GoPackage): string =
   let tail = mainPkg.importPath.split('/')[^1]
   sanitizeBinaryName(tail)
 
-proc deriveProjectEntryFromModule(module: GoModuleInfo;
-                                  projectRoot: string): string =
-  ## Pick a stable filename-safe ``entry`` name for the module as a
-  ## whole. Used as the scratch-dir prefix
-  ## (``<scratch>/<projectEntry>/pkg/``) and as the synthetic
-  ## ``PackageDef.packageName``. Library-only modules use this directly;
-  ## binary-bearing modules also share one entry across all their main
-  ## packages so they don't fragment the scratch tree.
+proc sameDirectory(a, b: string): bool =
+  if a.len == 0 or b.len == 0:
+    return false
+  if os.normalizedPath(a) == os.normalizedPath(b):
+    return true
+  try:
+    sameFile(a, b)
+  except CatchableError:
+    false
+
+proc deriveProjectEntry(packages: seq[GoPackage];
+                        projectRoot: string): string =
+  ## Pick a stable filename-safe ``entry`` name for the project as a whole.
+  ## Used as the scratch-dir prefix (``<scratch>/<projectEntry>/pkg/``) and
+  ## as the synthetic ``PackageDef.packageName``; every binary of the
+  ## project shares it.
   ##
   ## Priority:
-  ##   1. ``go.mod``'s ``module`` directive last segment, snake-cased.
-  ##   2. ``projectRoot`` basename, snake-cased (defensive fallback —
-  ##      ``parseGoMod`` should always populate ``modulePath`` for any
-  ##      project that passes recognise).
-  if module.modulePath.len > 0:
-    let tail = module.modulePath.split('/')[^1]
-    return sanitizeBinaryName(tail)
+  ##   1. The last segment of the path of the main module whose ``Dir`` is
+  ##      the project root, as ``go list`` reports it (module mode, or a
+  ##      workspace whose root is itself a module), snake-cased.
+  ##   2. ``projectRoot`` basename, snake-cased (a workspace whose root is
+  ##      not a module).
+  for pkg in packages:
+    if pkg.standard or not pkg.moduleMain or pkg.modulePath.len == 0:
+      continue
+    if sameDirectory(pkg.moduleDir, projectRoot):
+      return sanitizeBinaryName(pkg.modulePath.split('/')[^1])
   let rootBase = projectRoot.extractFilename
   if rootBase.len > 0:
     return sanitizeBinaryName(rootBase)
@@ -1095,15 +1428,19 @@ proc goEmitFragment(projectRoot: string;
     if goExe.len == 0:
       raise newException(ValueError,
         "go convention: 'go' executable not on PATH; cannot run 'go list'")
-    let module = parseGoMod(projectRoot)
-    let packages = runGoListExport(projectRoot, goExe)
+    let listing = runGoListing(projectRoot, goExe)
+    let packages = listing.packages
     if packages.len == 0:
       raise newException(ValueError,
         "go convention: 'go list' returned no packages for " & projectRoot)
     let mainPackages = collectMainPackages(packages)
-    let projectEntry = deriveProjectEntryFromModule(module, projectRoot)
+    let projectEntry = deriveProjectEntry(packages, projectRoot)
     let pkg = syntheticPackage(projectRoot, projectEntry)
     let registerAll = proc() =
+      # The graph below is derived from the listing, so what the listing read
+      # is what the fragment reports as its evaluation inputs (Go.md
+      # §"Implicit-dependency capture", item 3).
+      registerObservedInputs(listing.observed, goExe)
       discard buildPool("compile", 8'u32)
       var compileActions: seq[GoCompileAction] = @[]
       var allActions: seq[BuildActionDef] = @[]
@@ -1116,9 +1453,16 @@ proc goEmitFragment(projectRoot: string;
         let importcfgPair = emitImportcfgAction(projectRoot, projectEntry,
           srcPkg, packages)
         allActions.add(importcfgPair.action)
+        var embedcfgPath, embedcfgActionId: string
+        if srcPkg.embedPatterns.len > 0:
+          let embedcfgPair = emitEmbedcfgAction(projectRoot, projectEntry,
+            srcPkg)
+          allActions.add(embedcfgPair.action)
+          embedcfgPath = embedcfgPair.path
+          embedcfgActionId = embedcfgPair.action.id
         let compileAction = emitCompileAction(projectRoot, projectEntry,
-          goExe, module, srcPkg, importcfgPair.importcfgPath,
-          importcfgPair.action.id)
+          goExe, srcPkg, packages, importcfgPair.importcfgPath,
+          importcfgPair.action.id, embedcfgPath, embedcfgActionId)
         compileActions.add(compileAction)
         allActions.add(compileAction.action)
       # Pass 2: per-main-package link + importcfg.link actions.

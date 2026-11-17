@@ -141,6 +141,9 @@ profile "referenceServices":
       linuxTmpfilesRule(name = "repro-vaultwarden.conf",
         content = "d /var/lib/vaultwarden 0700 vaultwarden vaultwarden -\n",
         address = "vaultwardenState", dependsOn = @["linux.sysusersEntry:vaultwarden"])
+      # An `EnvironmentFile=` of a floored unit: a link into the static tree,
+      # never a copy (ReproOS Add-On Mode §13 decision 50). It holds no
+      # secret; the admin token is a `secretFile` below.
       fsSystemFile(path = "/etc/vaultwarden/config.env",
         content = VaultwardenConfig,
         address = "vaultwardenConfig")
@@ -221,9 +224,9 @@ profile "referenceServices":
         address = "ethState",
         dependsOn = @["linux.sysusersEntry:eth-execution", "linux.sysusersEntry:eth-beacon", "linux.sysusersEntry:eth-validator"])
       fsSystemFile(path = "/etc/ethereum/beacon.yaml", content = BeaconConfig,
-        mode = "0644", address = "beaconConfig")
+        address = "beaconConfig")
       fsSystemFile(path = "/etc/ethereum/validator.yaml",
-        content = ValidatorConfig & ValidatorExtraConfig, mode = "0644",
+        content = ValidatorConfig & ValidatorExtraConfig,
         address = "validatorConfig")
       # The engine API's shared secret, once per service that loads it.
       secretFile(service = "eth-execution", name = "jwt", address = "gethJwt")

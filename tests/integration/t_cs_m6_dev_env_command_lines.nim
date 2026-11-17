@@ -307,6 +307,19 @@ suite "CS-M6: the development-environment command lines":
     check parsedCommand.shell.command == ReproCommandLineShellCommand.call
     check parsedCommand.shell.call.selector == "./hook"
     check parsedCommand.shell.call.printEnv == some("json")
+    # `shell -c` takes one word, the command the shell runs; `shell --`
+    # takes every word after it, like `exec`. Which of the two may be
+    # combined with what is the command's decision, not the parser's.
+    check parsed(["shell", "proj", "-c", "echo --help; exit 3"]) == 0
+    check parsedCommand.shell.call.selector == "proj"
+    check parsedCommand.shell.call.command == some("echo --help; exit 3")
+    check parsedCommand.shell.call.argv.len == 0
+    check parsed(["shell", "--command=true"]) == 0
+    check parsedCommand.shell.call.command == some("true")
+    check parsed(["shell", "proj", "--", "sh", "-c", "exit 7", "--"]) == 0
+    check parsedCommand.shell.call.selector == "proj"
+    check parsedCommand.shell.call.command.isNone
+    check parsedCommand.shell.call.argv == @["sh", "-c", "exit 7", "--"]
 
   test "the values the description accepts reach the command":
     let s = newScratch()

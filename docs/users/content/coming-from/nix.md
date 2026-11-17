@@ -126,12 +126,29 @@ working for the people who still use it until you remove it.
 [Move a project from a Nix flake to reprobuild](../tutorials/move-a-project-from-a-nix-flake.md)
 takes one project through all of them.
 
-1. **The environment.** `repro.nim` activates the flake's existing development shell with `useFlakeDevShell()`, unchanged: [Keep an existing Nix flake as the environment](../guides/environments/keep-a-nix-flake-environment.md).
-2. **direnv.** reprobuild's shell hook activates the environment when you enter the directory, as `use flake` did: [Activate environments when you change directory](../guides/environments/activate-on-directory-change.md). `.envrc` can stay for the people who still use direnv.
-3. **Inputs you work on.** A flake input whose repository you have checked out in a workspace builds from your checkout: [Build a flake against a local checkout of an input](../guides/workspaces/develop-a-flake-input.md).
-4. **Tasks.** Scripts that a development shell's `shellHook` defines, and `nix run` apps that wrap a project command, become named tasks in `repro.nim`: [Coming from just and Make](just-and-make-tasks.md).
-5. **Tools.** `uses:` names each tool with a version range, and `defaultToolProvisioning "nix"` takes it from Nix through reprobuild's catalog, so the flake no longer has to list it: [Choose where a project's tools come from](../guides/building/choose-where-tools-come-from.md).
-6. **Caches.** Nix keeps substituting store paths from the caches it is configured with. reprobuild shares build results through its own [binary cache](../reference/glossary.md#binary-cache), which is not a Nix substituter.
+### The environment
+
+`repro.nim` activates the flake's existing development shell with `useFlakeDevShell()`, unchanged: [Keep an existing Nix flake as the environment](../guides/environments/keep-a-nix-flake-environment.md).
+
+### direnv
+
+reprobuild's shell hook activates the environment when you enter the directory, as `use flake` did: [Activate environments when you change directory](../guides/environments/activate-on-directory-change.md). `.envrc` can stay for the people who still use direnv.
+
+### Inputs you work on
+
+A flake input whose repository you have checked out in a workspace builds from your checkout: [Build a flake against a local checkout of an input](../guides/workspaces/develop-a-flake-input.md).
+
+### Tasks
+
+Scripts that a development shell's `shellHook` defines, and `nix run` apps that wrap a project command, become named tasks in `repro.nim`: [Coming from just and Make](just-and-make-tasks.md).
+
+### Tools
+
+`uses:` names each tool with a version range, and `defaultToolProvisioning "nix"` takes it from Nix through reprobuild's catalog, so the flake no longer has to list it: [Choose where a project's tools come from](../guides/building/choose-where-tools-come-from.md).
+
+### Caches
+
+Nix keeps substituting store paths from the caches it is configured with. reprobuild shares build results through its own [binary cache](../reference/glossary.md#binary-cache), which is not a Nix substituter: [Binary caches and Nix substituters](../concepts/dependencies-and-the-store.md#binary-caches-and-nix-substituters).
 
 ## What reprobuild does not do
 

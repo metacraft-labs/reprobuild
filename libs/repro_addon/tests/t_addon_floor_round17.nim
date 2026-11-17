@@ -363,11 +363,18 @@ suite "A9 review round 17, finding 7: a template's instances come back":
     # A9 review round 18, L1: an instance another unit's Wants= pulled in
     # (not enabled) comes back too; one a socket with Accept=yes started is
     # left to its socket.
-    let gen = toHashSet(["a@.service", "b.service"])
-    let up = revertStoppedToStart(["a@x.service", "a@y.service", "b.service",
+    # A9 review round 19, finding 2: a stopped instance is collected, so
+    # systemd reports no TriggeredBy= for it; the socket that starts it is
+    # read from the generation (``acceptSocketTemplates``). Here a@y is an
+    # instance of the template an Accept=yes socket starts, a@x of a
+    # template none does.
+    let gen = toHashSet(["a@.service", "s@.service", "b.service"])
+    let accept = toHashSet(["s@.service"])
+    let up = revertStoppedToStart(["a@x.service", "s@y.service", "b.service",
                                    "c@z.service"],
       gen, [], proc (u: string): bool = false,
-      proc (u: string): bool = u == "a@y.service")
+      proc (u: string): bool =
+        instanceSocketActivated(u, accept, proc (w: string): seq[string] = @[]))
     check up == @["a@x.service", "b.service"]
 
 suite "A9 review round 17, finding 8: every systemd time unit":

@@ -52,11 +52,12 @@ const
     # client's `dev-env export` reader takes its flags from the
     # description); the sixth `workspace_restore.nim` (`repro workspace
     # restore` takes its values from the description), and the sixth's
-    # `develop` and `flake` took this file from 502 to 343. What `infra.nim` and
-    # `infra_image.nim` still hold is no
-    # argv parsing (a `git describe` suffix, a table of the flags a
-    # bootstrap names), but it has the shape the scan counts.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 343),
+    # `develop` and `flake` took this file from 502 to 343, and the seventh
+    # group's `build` (with `bench` and `lint`) and `clean` from 343 to
+    # 221. What `infra.nim` and `infra_image.nim` still hold is no argv
+    # parsing (a `git describe` suffix, a table of the flags a bootstrap
+    # names), but it has the shape the scan counts.
+    ("libs/repro_cli_support/src/repro_cli_support.nim", 221),
     ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
     ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
@@ -141,7 +142,15 @@ const
     "flakeDevelopSelectionOf", "flakeShellBindingsOf",
     "hookSubstitutedDevelopSet", "executeFlakeLockRefresh",
     "runFlakeOverrideArgsCommand", "runFlakeRefreshLockCommand",
-    "runFlakeOverrideStatusCommand", "runReproFlakeCommand"]
+    "runFlakeOverrideStatusCommand", "runReproFlakeCommand",
+    # The seventh group (the build family) so far: `build`, with `bench` and
+    # `lint`, which take its command line (`runBuildVerbCommand`); every
+    # route into a build, the daemon worker's included, reads its arguments
+    # through `loadBuildCommandLine`, and the daemon parent's request
+    # readers through `buildRequestOf`; and `clean`.
+    "runBuildCommand", "runBuildVerbCommand", "loadBuildCommandLine",
+    "buildRequestOf", "givenOnCommandLine", "daemonRequestProjectRoot",
+    "daemonPrewarmTargetOutputDir", "runCleanCommand"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.
@@ -237,23 +246,22 @@ proc scannedFiles(): seq[string] =
 
 proc procBody(source, name: string): string =
   ## The text of top-level proc `name`: from its `proc` line to the next
-  ## top-level declaration.
+  ## top-level declaration. Every top-level `proc` of that name counts, so a
+  ## forward declaration does not hide the body that follows it.
   let lines = source.splitLines()
-  var start = -1
-  for i, line in lines:
-    if line.startsWith("proc " & name & "(") or
-        line.startsWith("proc " & name & "*("):
-      start = i
-      break
-  if start < 0:
-    return ""
-  var stop = lines.len
-  for i in start + 1 ..< lines.len:
-    let line = lines[i]
-    if line.len > 0 and line[0] notin {' ', '#'}:
-      stop = i
-      break
-  lines[start ..< stop].join("\n")
+  var bodies: seq[string] = @[]
+  for start, line in lines:
+    if not (line.startsWith("proc " & name & "(") or
+        line.startsWith("proc " & name & "*(")):
+      continue
+    var stop = lines.len
+    for i in start + 1 ..< lines.len:
+      let next = lines[i]
+      if next.len > 0 and next[0] notin {' ', '#'}:
+        stop = i
+        break
+    bodies.add(lines[start ..< stop].join("\n"))
+  bodies.join("\n")
 
 const Fixture = """
 if arg == "--json": discard            # 1: comparison

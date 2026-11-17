@@ -24,7 +24,7 @@ What it extracts, and from where:
 * `command <path>`: each command in `COVERED_COMMANDS`, whose flags and
   environment variables the test compares (a command is covered once its
   parsing has moved onto the description).
-* `flag <path> <spelling>`: the flags (`--name`, `-x`) the command's page
+* `flag <path> <spelling>`: the flags (`--name`, `-x`, `-xx`) the command's page
   or section writes where it states syntax: in a code block, or in the code
   a list item starts with (`` - `--format json|text` — the output format``).
   Code in running prose (``like `--version`, ...``) does not count, because
@@ -247,6 +247,10 @@ COVERED_COMMANDS = [
     "flake override-args",
     "flake refresh-lock",
     "flake override-status",
+    "build",
+    "bench",
+    "lint",
+    "clean",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
@@ -255,7 +259,9 @@ FENCE = re.compile(r"^\s*```")
 HEADING = re.compile(r"^(#+)\s+(.*)$")
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 LONG_FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
-SHORT_FLAG = re.compile(r"(?<![\w-])-[A-Za-z](?![\w-])")
+# A short spelling: one letter, or one letter doubled (`-vv`, which `repro
+# build` declares beside `-v`).
+SHORT_FLAG = re.compile(r"(?<![\w-])-([A-Za-z])\1?(?![\w-])")
 ENV_VAR = re.compile(r"(?<![\w$])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![\w])")
 COMMAND_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
 HEADED_COMMAND = re.compile(r"`repro ([a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*)`")
@@ -366,8 +372,8 @@ def surface(pages: Path) -> list[str]:
             if target not in flags:
                 continue
             if syntax:
-                for spelling in LONG_FLAG.findall(piece) + SHORT_FLAG.findall(
-                        piece):
+                for spelling in LONG_FLAG.findall(piece) + [
+                        m.group(0) for m in SHORT_FLAG.finditer(piece)]:
                     if spelling not in BUILT_IN_FLAGS:
                         flags[target].add(spelling)
             for name in ENV_VAR.findall(piece):

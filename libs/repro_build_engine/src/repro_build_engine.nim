@@ -16,18 +16,11 @@ when defined(windows):
     MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
     waitForMultipleObjects
 elif defined(posix):
-  # ``Mode`` / ``umask`` / ``dup2`` / ``close`` / ``fcntl`` and
-  # ``F_DUPFD_CLOEXEC`` are the In-Process-Monitor-Hosting HM-4 spawn context
-  # and nothing else (marking the other descriptors close-on-exec across the
-  # spawn lives in ``repro_core/descriptor_inheritance``, shared with the
-  # CLI). io-mon spawns with ``poParentStreams``, so a monitored child
-  # inherits THIS process's descriptors — 0, 1 and 2, and any
-  # other one not marked close-on-exec — and the canonical 0022 file-creation
-  # mask used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper
-  # the monitor CLI ran under. All of it is re-established across the spawn
-  # instead — see ``beginMonitorSpawnContext``. None of them starts a child.
-  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
-    dup2, close, fcntl, F_DUPFD_CLOEXEC
+  # The In-Process-Monitor-Hosting HM-4 spawn context (stdio, stdin, the
+  # canonical 0022 mask and close-on-exec above 2 across io-mon's
+  # ``poParentStreams`` spawn) is ``repro_core/monitor_spawn_stdio``'s
+  # ``beginMonitorSpawnContext``, imported below. None of these starts a child.
+  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
   # Endpoint ownership for Dev-Env-Warm-Entry.md §3 (`endpointRootOwned`).
   # Metadata reads only; nothing here starts a child.
   from std/posix import Stat, lstat, S_ISDIR, S_ISLNK, S_ISSOCK
@@ -128,12 +121,6 @@ from repro_core/process_streams import drainStream
 # child it starts — converters, RunQuota helpers — is released through
 # ``closeProcessOnce``. See ``repro_core/process_close``.
 from repro_core/process_close import closeProcessOnce
-# Every descriptor above 2 close-on-exec across io-mon's in-process spawn
-# (``beginMonitorSpawnContext``). Shared with ``repro_cli_support``, which
-# applies the same rule around the ``runquotad`` an invocation owns.
-when defined(posix):
-  from repro_core/descriptor_inheritance import
-    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors
 import repro_depfile
 import repro_hash
 import repro_local_store
@@ -16599,150 +16586,12 @@ proc monitorHostRequest(action: BuildAction;
       continue
     result.env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
 
-when defined(posix):
-  type MonitorSpawnContext = object
-    savedIn: cint
-    savedOut: cint
-    savedErr: cint
-    nullFile: File
-    outFile: File
-    errFile: File
-    savedMask: Mode
-    madeCloseOnExec: seq[cint]
-    active: bool
-
-  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
-    ## Re-establish, across io-mon's spawn, the three things the retired
-    ## ``/bin/sh -c 'umask 022 && <repro> internal io monitor …'`` wrapper and
-    ## RunQuota's process backend used to provide for free.
-    ##
-    ## STDIO. io-mon spawns with ``poParentStreams``, so the monitored child
-    ## inherits THIS process's descriptors 0, 1 and 2 — for the engine, the
-    ## user's terminal, not a per-action capture. Pointing 1 and 2 at two
-    ## per-action files across the spawn gives the engine back separate
-    ## ``stdout`` and ``stderr``, and does it WITHOUT the monitored tree
-    ## opening anything: the child inherits descriptors that are already open,
-    ## so no ``open`` of a log path enters its dependency evidence. (A shell
-    ## redirect inside the monitored command would have put both log paths
-    ## into ``monitorWrites`` — which is why this is done here and not there.)
-    ##
-    ## STDIN, and it is descriptor 0 that makes this a correctness fix rather
-    ## than a capture convenience. EVERY other launch path gives the child
-    ## ``/dev/null`` on descriptor 0 — RunQuota's POSIX backend opens it
-    ## explicitly before ``execvp`` (``runquota_process.nim``), so an action
-    ## that reads stdin sees immediate EOF. ``poParentStreams`` hands the child
-    ## the ENGINE's stdin instead, which in a normal ``repro build`` is the
-    ## user's terminal: a monitored action that reads stdin would block the
-    ## build waiting for a keystroke, or worse, eat one. Redirecting it here
-    ## makes the hosted path answer EOF like every other path.
-    ##
-    ## UMASK. ``umaskWrappedArgv`` (M9.R.36.3) pins every spawned tool to the
-    ## canonical 0022 mask by wrapping the argv in a shell. A hosted action has
-    ## no wrapper shell to carry it, and monitoring one would add the shell's
-    ## own reads to the action's evidence, so the mask is set here and restored
-    ## immediately; a child inherits it across ``fork``.
-    ##
-    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED, AND BECAUSE THE ONLY
-    ## OTHER THREADS OPEN NOTHING. The engine runs N concurrent child
-    ## PROCESSES from one poll loop, not N threads, so no other SCHEDULER code
-    ## can observe the window between this call and
-    ## ``endMonitorSpawnContext``.
-    ##
-    ## The qualification is Engine-Threadpool TP-1's, and the previous version
-    ## of this comment — "``createThread`` has zero occurrences in this
-    ## library" — was already wrong when it was written: HM-5's flush worker
-    ## was in ``repro_build_engine/monitor_flush.nim``, inside this library.
-    ## The claim that MATTERS was never the thread count anyway, it is what
-    ## those threads do, and it is checked rather than assumed in
-    ## ``worker_pool.nim``'s header: a pool worker opens no file and creates
-    ## no file, so neither the ``dup2`` on 0/1/2 nor the ``umask`` can be
-    ## observed by one. A future pool tenant that opens or creates a file
-    ## re-opens both questions, and it breaks by interleaving one action's
-    ## output into another's.
-    ##
-    ## EVERY DESCRIPTOR ABOVE 2, which is the same parity question as stdin
-    ## one number further up. RunQuota's POSIX backend closes every inherited
-    ## descriptor above 2 between ``fork`` and ``execvp``
-    ## (``closeInheritedChildFds`` in ``runquota_process.nim``), so a wrapped
-    ## action — and the ``repro internal io monitor`` reference it is compared
-    ## against — starts with 0, 1 and 2 and nothing else. io-mon's spawn closes
-    ## nothing, so a hosted action used to start with whatever this process
-    ## held open without ``FD_CLOEXEC``: the three stdio copies saved just
-    ## below (``dup`` does not set the flag), plus anything the engine's own
-    ## parent leaked into it. The test runner hands every test process its own
-    ## pipe ends that way, and under a parallel run the other tests' too.
-    ## Those descriptors are real kernel objects inside the monitored tree —
-    ## an action that ``fstat``s or reads one sees a pipe it did not create,
-    ## and every descriptor it opens itself lands at a different number than
-    ## it would under the wrapper, which is how TP-2's evidence comparison
-    ## caught it (a ``chan=localfd role=create`` record carrying fd 22 hosted
-    ## and fd 4 wrapped). Marking them close-on-exec for the spawn window
-    ## gives the hosted child the same table the other launch paths give; the
-    ## flags are restored in ``endMonitorSpawnContext``.
-    flushFile(stdout)
-    flushFile(stderr)
-    result.savedIn = fcntl(cint(0), F_DUPFD_CLOEXEC, cint(3))
-    result.savedOut = fcntl(cint(1), F_DUPFD_CLOEXEC, cint(3))
-    result.savedErr = fcntl(cint(2), F_DUPFD_CLOEXEC, cint(3))
-    if result.savedIn < 0 or result.savedOut < 0 or result.savedErr < 0:
-      if result.savedIn >= 0: discard close(result.savedIn)
-      if result.savedOut >= 0: discard close(result.savedOut)
-      if result.savedErr >= 0: discard close(result.savedErr)
-      raiseEngine("in-process monitor host: cannot duplicate stdio")
-
-    proc closeSaved(ctx: MonitorSpawnContext) =
-      discard close(ctx.savedIn)
-      discard close(ctx.savedOut)
-      discard close(ctx.savedErr)
-
-    if not open(result.nullFile, "/dev/null", fmRead):
-      closeSaved(result)
-      raiseEngine("in-process monitor host: cannot open /dev/null")
-    if not open(result.outFile, outPath, fmWrite):
-      close(result.nullFile)
-      closeSaved(result)
-      raiseEngine("in-process monitor host: cannot open stdout capture " &
-        outPath)
-    if not open(result.errFile, errPath, fmWrite):
-      close(result.nullFile)
-      close(result.outFile)
-      closeSaved(result)
-      raiseEngine("in-process monitor host: cannot open stderr capture " &
-        errPath)
-    discard dup2(cint(getFileHandle(result.nullFile)), cint(0))
-    discard dup2(cint(getFileHandle(result.outFile)), cint(1))
-    discard dup2(cint(getFileHandle(result.errFile)), cint(2))
-    result.savedMask = umask(Mode(0o022))
-    result.madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
-    result.active = true
-
-  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
-    if not ctx.active:
-      return
-    ctx.active = false
-    restoreInheritableDescriptors(ctx.madeCloseOnExec)
-    discard umask(ctx.savedMask)
-    flushFile(stdout)
-    flushFile(stderr)
-    discard dup2(ctx.savedIn, cint(0))
-    discard dup2(ctx.savedOut, cint(1))
-    discard dup2(ctx.savedErr, cint(2))
-    discard close(ctx.savedIn)
-    discard close(ctx.savedOut)
-    discard close(ctx.savedErr)
-    close(ctx.nullFile)
-    close(ctx.outFile)
-    close(ctx.errFile)
-else:
-  type MonitorSpawnContext = object
-    active: bool
-
-  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
-    discard outPath
-    discard errPath
-
-  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
-    discard ctx
+# The spawn context (stdio capture, ``/dev/null`` stdin, the 0022 mask and
+# close-on-exec above 2 across io-mon's in-process spawn) lives in
+# ``repro_core/monitor_spawn_stdio``, shared with the Go standard convention's
+# monitored ``go list``.
+from repro_core/monitor_spawn_stdio import MonitorSpawnContext,
+  beginMonitorSpawnContext, endMonitorSpawnContext
 
 proc monitorHostStdioStem(actionId: string): string =
   sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId)

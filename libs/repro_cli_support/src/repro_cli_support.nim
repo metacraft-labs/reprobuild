@@ -33,6 +33,8 @@ import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
+import repro_cli_support/shell_invocation
+import repro_cli_support/stdin_terminal
 # The content identity of a producer's channel directories, folded into the
 # keys of consumer actions whose reads nothing observes (§4.3 rule 2).
 import repro_cli_support/producer_channel_content
@@ -487,30 +489,10 @@ proc runVersionCommand*(programName: string; asJson: bool): int =
 # declarations, like every migrated command's. The list of commands itself,
 # and the primary help, are generated already.
 const LegacyVerbSynopses = [
-  # DA-1i. THE HAZARD, NOT ONLY THE BEHAVIOUR. An operator choosing
-  # `--evidence=reads-only` is accepting a specific, nameable risk, and a risk
-  # described only in a specification is not one they were given the chance
-  # to accept. The table is narrower than "probes are unsafe" and that is its
-  # value, so every copy (here, docs/dependency-collection.md and the build
-  # command's specification) carries the same four rows AND the sentence
-  # that row 1 does not cover row 4.
-  ("build",
-    "repro build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--target=TRIPLE] [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--unsafe-preserve-outputs=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n" &
-      "\n" &
-      "build progress: default=bar-line; aliases: quiet=silent|none|off, line=ninja|single-line, bar-line=bar|ninja-bar|auto|plain, lines=tup|per-line, lines-bar=tup-bar|per-line-bar, dots=dot\n" &
-      "build progress bars: default=overlay; use --progress-bars=split or REPROBUILD_PROGRESS_BARS=split for separate check/exec bars\n" &
-      "build color: auto by default; set NO_COLOR or REPROBUILD_COLOR=never to disable, REPROBUILD_COLOR=always to force\n" &
-      "build evidence: default=full, which records every observation including lookups that found nothing. --evidence=reads-only records only lookups that SUCCEEDED (about a third of the records on a real nim c) and is NOT merely faster: it weakens \"is this build up to date?\" in one direction. Still detected: a recorded file is modified; a recorded file is deleted. NOT detected: a file is ADDED that shadows one earlier in a search path; a file that exists but could not be opened (a permission bit, a directory where a file was wanted) becomes openable. Those two are one rule — only successful lookups are recorded, so any later change that makes an unsuccessful lookup succeed is invisible — and \"a recorded file is modified\" does NOT cover the second, because the file is not recorded at all. This is ninja's own stale-build failure, which is why the mode exists: like-for-like comparison with depfile-driven tools, not speed. Artifacts built this way are correct and publishable; what degrades is the staleness check. Recover with --evidence=full or a clean build. A capture made under reads-only is refused by a build that requires full evidence, which recomputes locally instead; the scope is not part of the cache key, so a full-evidence result stays usable by everyone. NAME THE BLAST RADIUS: that refusal is SESSION-WIDE, not per-action. It is graded as an unknown-scope evidence loss, because a reads-only record cannot say which lookups it dropped, so there is no narrower set to invalidate -- and the first refused capture therefore turns every later cache lookup in that session into a miss. The build stays correct; it stops being incremental. You only reach it by reading a capture SOMEONE ELSE narrowed, never your own. Recover by opting into the reduced scope with --evidence=reads-only, or by re-capturing under --evidence=full.\n"),
   ("test",
     "repro test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n"),
   ("certificates",
     "repro certificates list|plan [SELECTOR...] [--no-certify] [--json]\n"),
-  ("bench",
-    "repro bench [build options]\n"),
-  ("lint",
-    "repro lint [build options]\n"),
-  ("clean",
-    "repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]\n"),
   ("watch",
     "repro watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr] [--hcr-mode=direct|shlib] [--hcr-debug=embedded|external|none] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n"),
   ("attest",
@@ -877,6 +859,30 @@ proc renderAmbiguousTargetDiagnostic*(err: BuildTargetAmbiguousError): string =
   result.add("repro build: hint: re-run with the qualified " &
     "<package>:<name> form\n")
 
+proc pathSpellingHint*(selectorName: string): string =
+  ## The ``./<name>`` spelling of a bare selector that names no target but
+  ## does name a file or directory in the current directory, or ``""``.
+  ##
+  ## A bare name is always a name ([CLI/build.md §"Target Selection"]): the
+  ## disk is never consulted to classify it, so a directory the user meant
+  ## has to be spelled as a path. The ``unknown_target`` diagnostic offers
+  ## that spelling instead of leaving the user to guess why a directory
+  ## they can see was not selected. Only a selector the classifier took as
+  ## a bare name qualifies; anything carrying a path character already was
+  ## a path. Every caller of ``renderUnknownTargetDiagnostic`` runs in the
+  ## request's working directory (the daemon build and watch executors
+  ## enter it first), so the probe is relative to the directory the user
+  ## typed the command in.
+  if selectorName.len == 0:
+    return ""
+  for ch in selectorName:
+    if ch in {'/', '\\', '.', '#', ':'}:
+      return ""
+  if fileExists(extendedPath(selectorName)) or
+      dirExists(extendedPath(selectorName)):
+    return "./" & selectorName
+  ""
+
 proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
   ## Named-Targets M2 ``unknown_target`` stderr diagnostic. Shared by
   ## the top-level CLI dispatch arm and the daemon-side
@@ -892,24 +898,39 @@ proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
       result.add("  ")
       result.add(cand)
       result.add('\n')
+  let pathSpelling = pathSpellingHint(err.selectorName)
+  if pathSpelling.len > 0:
+    result.add("repro build: hint: a bare name selects only a named " &
+      "target; to build the path '" & err.selectorName & "', spell it '" &
+      pathSpelling & "'\n")
 
 const TestCollectionSelector* = ".#test"
   ## The selector ``repro test`` (and ``repro certificates plan``) uses when
   ## the user names none: the current project's ``test`` collection
-  ## ([CLI/test.md §"Alias Semantics"]). It is spelled as a fragment
-  ## selector, not the bare name ``test``, because ``classifyBuildSelector``
-  ## takes a bare name that also names an existing path as a path, and most
-  ## projects keep their tests in a ``test/`` directory. ``.#test`` is what
-  ## ``parseAndResolveSelectors`` makes of a bare ``test`` when no such path
-  ## exists, so the resolution is otherwise unchanged.
+  ## ([CLI/test.md §"Alias Semantics"]). The alias selects the collection
+  ## directly, as the fragment ``.#test``, which is exactly what
+  ## ``parseAndResolveSelectors`` makes of a bare ``test``; naming the
+  ## collection rather than a selector that is resolved again keeps the
+  ## alias independent of the selector rule.
 
 proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
   ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
   ## A selector is a *path / fragment* selector when ANY of these holds:
   ## - it contains ``/`` or ``\\`` (path separator),
   ## - it contains ``.`` (file extension or relative-path marker),
-  ## - it contains ``#`` (fragment selector),
-  ## - it names an existing path on disk (file or directory).
+  ## - it contains ``#`` (fragment selector).
+  ##
+  ## The classification is by spelling alone and never consults the disk:
+  ## a bare ``test`` is the name ``test`` whether or not the current
+  ## directory holds a ``test/`` directory, and that directory is selected
+  ## as ``./test``. Classifying by whether a path exists made what a name
+  ## meant depend on the contents of the current directory, so a project
+  ## with a ``test/``, ``bench/`` or ``docs/`` directory silently built the
+  ## directory instead of the collection (reprobuild-pm issue
+  ## 2026-11-12-classifying-a-selector-by-whether-a-path-exists-makes-repro-test-build-the-test-directory).
+  ## The ``unknown_target`` diagnostic names the ``./<name>`` spelling when
+  ## a bare name matches no target but does match a path
+  ## (``pathSpellingHint``).
   ##
   ## Otherwise it is a *name* selector. Names containing a single ``:``
   ## (and no other special chars) are treated as the qualified
@@ -923,9 +944,6 @@ proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
     if ch == '/' or ch == '\\' or ch == '.' or ch == '#':
       result.kind = bskPath
       return
-  if fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
-    result.kind = bskPath
-    return
   let colon = raw.find(':')
   if colon > 0 and colon < raw.high:
     # ``<package>:<name>`` qualified form. Only accept when neither half
@@ -16913,6 +16931,45 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
                                  bypassRunQuotaExplicit = false):
                                    BuildGraphInspection
 
+type
+  BuildCommandLineError* = object of ValueError
+    ## A `repro build` command line the generated parser accepts and the
+    ## build refuses (`--json` without `--list-targets`, two rebuild verbs,
+    ## a malformed `--variant`, ...): a usage error, exit 2 from the
+    ## command's own dispatch.
+
+proc givenOnCommandLine(origin: CliOrigin): bool =
+  ## Whether the value came from the command line (not from an environment
+  ## variable the flag declares, nor its default).
+  origin.winner.kind == cokCli
+
+proc loadBuildCommandLine*(args: openArray[string]):
+    tuple[conf: ReproCommandLineBuild, origin: ReproCommandLineBuildOrigins] =
+  ## `repro build`'s arguments (the words after `build`), parsed by the
+  ## parser generated from repro's description, with where each value came
+  ## from. Every route into a build goes through this: the command line, the
+  ## internal callers that compose a build's arguments (`repro test`,
+  ## `repro run`, ...) and the daemon worker, which builds from the client's
+  ## `rawArgs` in the client's environment. Raises `CliUsageError` for a
+  ## command line the parser rejects.
+  let argv = @["build"] & @args
+  let (conf, origin) = ReproCommandLine.loadWithOrigins(argv,
+    CliSources(env: reproDeclaredEnvFor(argv)))
+  (conf.build, origin.build)
+
+proc buildRequestOf*(args: openArray[string]): Option[ReproCommandLineBuild] =
+  ## `repro build`'s arguments parsed WITHOUT the environment, for the daemon
+  ## parent's request readers (`daemonRequestProjectRoot`,
+  ## `daemonPrewarmTargetOutputDir`): they run in the daemon, whose own
+  ## environment belongs to no request, and need only what the arguments
+  ## say (the targets, `--work-root`, the rebuild flags). None when the
+  ## arguments are not a command line `repro build` accepts.
+  try:
+    some(ReproCommandLine.load(@["build"] & @args,
+      CliSources(env: initTable[string, string]())).build)
+  except CatchableError:
+    none(ReproCommandLineBuild)
+
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
                      daemonHosted = false;
@@ -17746,6 +17803,39 @@ proc runReproTasksCommand(conf: ReproCommandLineTasks;
   emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
   0
 
+proc runCommandInDevEnv(selection: DevEnvCliSelection; command: seq[string];
+                        publicCliPath, statsVerb: string): int =
+  ## Resolve (building on a miss) the development environment ``selection``
+  ## names and run ``command`` in it, replacing this process on POSIX so the
+  ## command's exit status is the caller's. Shared by ``repro exec -- ...``
+  ## and ``repro shell -c ...`` / ``repro shell -- ...``, so the two verbs
+  ## activate the environment the same way. ``statsVerb`` labels the
+  ## ``--dev-env-stats`` report.
+  # The bootstrap toolchain the edge below publishes is for compiling the
+  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
+  let edge = computePublicDevEnv(selection, publicCliPath,
+    announce = true)
+  writeDevEnvStats(selection.statsPath, edge, statsVerb)
+  let artifact = edge.artifact
+  if emitDevEnvDiagnostics(artifact):
+    return 1
+  # Two channels, deliberately different. Provisioned packages go in `preOps`
+  # so the recipe's own `prependPath` can sit in front of them; cross-repo
+  # producer pins go in `extraOps` so they outrank both.
+  let toolOps = devEnvToolShellOps(edge, selection)
+  let producerOps = devEnvProducerActivation(artifact,
+    selection.projectRoot)
+  restoreBootstrapToolchainEnv(userToolchainEnv)
+  # Likewise the source roots this engine seeded for its own compiles
+  # (`REPROBUILD_SOURCE_ROOT`, the built `*_SRC`): withdrawn here, after the
+  # last compile, per Distribution-And-Packaging §5. Otherwise an engine
+  # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
+  # resolves its libraries from B. Caller values are not seeds and stay.
+  clearSeededSourcePackageEnvironment()
+  return execActivatedCommand(artifact, edge.artifactPath, command,
+    selection.projectRoot, producerOps, toolOps)
+
 proc runReproExecCommand(conf: ReproCommandLineExec;
                          publicCliPath: string): int =
   ## ``repro exec [<selector>] -- <command>...``. Its command line is parsed
@@ -17755,32 +17845,9 @@ proc runReproExecCommand(conf: ReproCommandLineExec;
     stderr.writeLine("repro exec: no command after `--`; run `repro help " &
       "exec`")
     return 2
-  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
-    conf.workRoot, conf.lockSlice, conf.devEnvStats), command: conf.command)
-  # The bootstrap toolchain the edge below publishes is for compiling the
-  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
-  let userToolchainEnv = snapshotBootstrapToolchainEnv()
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
-    announce = true)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "exec")
-  let artifact = edge.artifact
-  if emitDevEnvDiagnostics(artifact):
-    return 1
-  # Two channels, deliberately different. Provisioned packages go in `preOps`
-  # so the recipe's own `prependPath` can sit in front of them; cross-repo
-  # producer pins go in `extraOps` so they outrank both.
-  let toolOps = devEnvToolShellOps(edge, parsed.selection)
-  let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
-  restoreBootstrapToolchainEnv(userToolchainEnv)
-  # Likewise the source roots this engine seeded for its own compiles
-  # (`REPROBUILD_SOURCE_ROOT`, the built `*_SRC`): withdrawn here, after the
-  # last compile, per Distribution-And-Packaging §5. Otherwise an engine
-  # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
-  # resolves its libraries from B. Caller values are not seeds and stay.
-  clearSeededSourcePackageEnvironment()
-  return execActivatedCommand(artifact, edge.artifactPath, parsed.command,
-    parsed.selection.projectRoot, producerOps, toolOps)
+  let selection = devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats)
+  runCommandInDevEnv(selection, conf.command, publicCliPath, "exec")
 
 proc defaultInteractiveShell(): string =
   when defined(windows):
@@ -17797,41 +17864,65 @@ proc defaultInteractiveShell(): string =
 proc runReproShellCommand(conf: ReproCommandLineShellCall;
                           publicCliPath: string): int =
   ## ``repro shell [<selector>]``: start a shell in the development
-  ## environment, or print it (``--print-env``). Its command line is parsed
-  ## from repro's description (``repro_cli_support/cli_description``).
+  ## environment, print it (``--print-env``), or run one command in it
+  ## (``-c <command>`` through the shell, ``-- <command>`` directly). Its
+  ## command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``); which mode the flags name, and
+  ## whether spawn mode may start here, is ``shell_invocation``'s decision.
+  # `directCommand` is "a command after `--`": the parser keeps no trace of
+  # a `--` with nothing after it, so a bare `repro shell --` reads as
+  # `repro shell` (spawn mode), exactly as a bare `repro exec --` reads as
+  # `repro exec` with no command.
+  let invocation = shellInvocationOf(printEnv = conf.printEnv.isSome,
+    inlineCommand = conf.command.isSome, directCommand = conf.argv.len > 0,
+    shellGiven = conf.shell.len > 0)
+  if invocation.usageError.len > 0:
+    stderr.writeLine("repro shell: error: " & invocation.usageError)
+    return ShellUsageExitCode
+  # Spawn mode without a terminal on standard input is refused before
+  # anything is resolved, so the refusal costs no provider build.
+  let refusal = shellSpawnRefusal(invocation.mode, stdinIsTerminal())
+  if refusal.len > 0:
+    for line in refusal:
+      stderr.writeLine(line)
+    return ShellUsageExitCode
   # The format is checked first, before anything is resolved.
   let printFormat =
     if conf.printEnv.isSome: parseDevEnvPrintFormat(conf.printEnv.get)
     else: depPosix
-  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
-    conf.workRoot, conf.lockSlice, conf.devEnvStats),
-    printEnv: conf.printEnv.isSome, printFormat: printFormat,
-    shellPath: conf.shell)
+  let selection = devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats)
+  let shellPath =
+    if conf.shell.len > 0: conf.shell
+    else: defaultInteractiveShell()
+  case invocation.mode
+  of simDirectCommand:
+    return runCommandInDevEnv(selection, conf.argv, publicCliPath, "shell")
+  of simInlineCommand:
+    return runCommandInDevEnv(selection,
+      inlineCommandArgv(shellPath, conf.command.get), publicCliPath, "shell")
+  of simPrintEnv, simSpawn:
+    discard
   let userToolchainEnv = snapshotBootstrapToolchainEnv()
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+  let edge = computePublicDevEnv(selection, publicCliPath,
     announce = true)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "shell")
+  writeDevEnvStats(selection.statsPath, edge, "shell")
   let artifact = edge.artifact
   if emitDevEnvDiagnostics(artifact):
     return 1
-  let toolOps = devEnvToolShellOps(edge, parsed.selection)
+  let toolOps = devEnvToolShellOps(edge, selection)
   let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
-  if parsed.printEnv:
+    selection.projectRoot)
+  if invocation.mode == simPrintEnv:
     stdout.write(renderDevEnvArtifact(artifact, edge.artifactPath,
-      parsed.printFormat, producerOps, toolOps))
+      printFormat, producerOps, toolOps))
     return 0
-  let shellPath =
-    if parsed.shellPath.len > 0:
-      parsed.shellPath
-    else:
-      defaultInteractiveShell()
   restoreBootstrapToolchainEnv(userToolchainEnv)
   # The engine's self-seeded source roots stay out of the shell, as for
   # `repro exec` (Distribution-And-Packaging §5).
   clearSeededSourcePackageEnvironment()
   return spawnActivatedShell(artifact, edge.artifactPath, shellPath,
-    parsed.selection.projectRoot, producerOps, toolOps)
+    selection.projectRoot, producerOps, toolOps)
 
 # M74 — ``repro dev-env export <shell>``.
 #
@@ -30683,15 +30774,14 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var mode = tpmUnspecified
   var workRoot = ""
   var daemonMode = bdmAuto
-  var daemonModeExplicit = false
-  var progressMode = configuredBuildProgressMode()
-  var progressBarStyle = configuredBuildProgressBarStyle()
-  var showSet = configuredShowSet()
-  var measureSet = configuredMeasureSet()
+  var progressMode = bpmBarLine
+  var progressBarStyle = bpbsOverlay
+  var showSet: MeasureSet = {}
+  var measureSet = DefaultMeasureSet
   var measureExplicit = false
   var showExplicit = false
   var reportPersistence = BuildReportPersistence()
-  var logMode = configuredBuildLogMode()
+  var logMode = blmQuiet
   var actionOutput = baoFailed
   var diagnosticsPath = ""
   var benchmarkPath = ""
@@ -30715,9 +30805,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # not: the flag reaches a daemon-hosted build fine (the daemon re-parses
   # ``request.rawArgs`` through this very proc), the env variable is the one
   # that does not cross into a daemon started before it was set.
-  var restoreCachedOutputs = restoreCachedOutputsEnvDefault()
+  var restoreCachedOutputs = false
   var forwardedActionArgs: seq[string] = @[]
-  var afterArgumentSeparator = false
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
   # alternate committed lock (default = ``<projectDir>/repro.lock``);
   # ``--print-solved-graph`` resolves + prints the solved graph the build
@@ -30734,8 +30823,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var printSolvedGraph = false
   var logModeExplicit = false
   # Default: use runquota when reachable; --no-runquota forces full bypass.
-  var bypassRunQuota = getEnv("REPROBUILD_NO_RUNQUOTA").normalize in
-    ["1", "true", "yes", "on"]
+  var bypassRunQuota = false
   # Whether `--runquota` was passed, as opposed to the default simply leaving
   # RunQuota on. Only the explicit request outranks the bypass a `--dry-run`
   # implies; see the derivation after the flag loop.
@@ -30755,7 +30843,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # normal (RunQuota) build ``where-supported`` silently keeps the wrapper
   # and ``required`` FAILS the action with ``monitorHostingRefusal``'s
   # sentence rather than running it unmonitored.
-  var monitorHosting = configuredMonitorHostingMode()
+  var monitorHosting = mhmNever
   # DA-1i — `repro build --evidence=full|reads-only`. `full` is the default and
   # the only scope that records failed lookups; `reads-only` records only the
   # lookups that SUCCEEDED, which reproduces the evidence model of a
@@ -30795,300 +30883,239 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var peerCacheSpec = ""
   var trustProfileFlag = ""
   var trustProfileSeen = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if afterArgumentSeparator:
-      forwardedActionArgs.add(arg)
-    elif arg == "--":
-      afterArgumentSeparator = true
-    elif arg == "--daemon" or arg.startsWith("--daemon="):
-      daemonMode = parseBuildDaemonMode(valueFromFlag(args, i, "--daemon"),
-        "--daemon")
-      daemonModeExplicit = true
-    elif arg == "--list-targets":
-      listTargets = true
-    elif arg == "--list-targets-json":
-      listTargets = true
-      listTargetsJson = true
-    elif arg == "--json" and listTargets:
-      # ``repro build --list-targets --json`` is the spec-mandated
-      # shape; accept ``--json`` as a follower of ``--list-targets``
-      # without consuming the flag for any other build subcommand
-      # surface. The ordering check above keeps the bare ``--json``
-      # token unrecognised for non-list-targets invocations so the
-      # legacy "unsupported build flag" error still fires.
-      listTargetsJson = true
-    elif arg == "--package" or arg.startsWith("--package="):
-      listTargetsPackage = valueFromFlag(args, i, "--package")
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(valueFromFlag(args, i,
-        "--tool-provisioning"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--action-cache-root" or arg.startsWith("--action-cache-root="):
-      # Phase 1 cache-scope split: user-level action cache + CAS root.
-      # See Provider-Compile-Tiering.md §"Cache Scope". When omitted, we
-      # resolve from ${REPROBUILD_STORE_ROOT}/action-cache or the platform
-      # default user cache dir at engine config build time.
-      setActionCacheRootOverride(valueFromFlag(args, i,
-        "--action-cache-root"))
-    elif arg == "--progress" or arg.startsWith("--progress="):
-      progressMode = parseBuildProgressMode(valueFromFlag(args, i,
-        "--progress"))
-    elif arg == "--progress-bars" or arg.startsWith("--progress-bars="):
-      progressBarStyle = parseBuildProgressBarStyle(valueFromFlag(args, i,
-        "--progress-bars"))
-    elif arg == "--write-diagnostics" or
-        arg.startsWith("--write-diagnostics="):
-      diagnosticsPath = valueFromFlag(args, i, "--write-diagnostics")
-    elif arg == "--write-benchmark" or arg.startsWith("--write-benchmark="):
-      benchmarkPath = valueFromFlag(args, i, "--write-benchmark")
-    elif arg == "--write-stats" or arg.startsWith("--write-stats="):
-      # PERSIST axis, third sink: the accumulating analytics store. Bare
-      # enables it at the conventional store path; ``=PATH`` names the store.
-      statsCapture.enabled = true
-      if statsCapture.groups.card == 0:
-        statsCapture.groups = AllStatsCaptureGroups
-        statsCapture.raw = "all"
-      if arg.startsWith("--write-stats="):
-        statsCapture.storePath = arg.split("=", maxsplit = 1)[1]
-    elif arg.startsWith("--stats-groups="):
-      # Section filter over the store. Naming any group enables the sink.
-      statsCapture = parseStatsCaptureGroups(arg.split("=", maxsplit = 1)[1],
-        statsCapture.storePath)
-    elif arg == "--stats-groups":
-      raise newException(ValueError,
-        "--stats-groups requires an inline value, for example " &
-          "--stats-groups=timing,cache")
-    elif arg == "--measure" or arg.startsWith("--measure="):
-      # COLLECT axis. Additive across occurrences; an explicit flag replaces
-      # the environment default rather than adding to it.
-      if not measureExplicit:
-        measureSet = {}
-        measureExplicit = true
-      measureSet = parseMeasureCategories(measureSet,
-        valueFromFlag(args, i, "--measure"), "--measure")
-    elif arg == "--show" or arg.startsWith("--show="):
-      # PRESENT axis. Same vocabulary; showing implies measuring.
-      if not showExplicit:
-        showSet = {}
-        showExplicit = true
-      showSet = parseMeasureCategories(showSet,
-        valueFromFlag(args, i, "--show"), "--show")
-    elif arg == "--write-report" or arg.startsWith("--write-report="):
-      reportPersistence.requested = true
-      if arg.startsWith("--write-report="):
-        reportPersistence.path = arg["--write-report=".len .. ^1]
-    elif arg == "--no-write-report":
-      reportPersistence.suppressed = true
-    elif arg == "--log" or arg.startsWith("--log="):
-      logMode = parseBuildLogMode(valueFromFlag(args, i, "--log"))
-      logModeExplicit = true
-    elif arg == "--action-output" or arg.startsWith("--action-output="):
-      actionOutput = parseBuildActionOutputMode(
-        valueFromFlag(args, i, "--action-output"))
-    elif arg == "-v" or arg == "--verbose":
-      logMode = blmSummary
-      logModeExplicit = true
-    elif arg == "-vv" or arg == "--very-verbose":
-      logMode = blmActions
-      logModeExplicit = true
-    elif arg == "--prepare-only":
-      prepareOnly = true
-    elif arg == "--dry-run":
-      dryRun = true
-    elif arg in ["--force-rebuild", "--rebuild"]:
-      forceRebuild = true
-    elif arg in ["--soft-rebuild", "--rebuild-host-bound", "--hard-rebuild"]:
-      # §4.1-§4.3. The three are mutually exclusive rather than cumulative:
-      # they are not additive filters, they are three points on one lattice,
-      # and `--soft-rebuild --hard-rebuild` has no meaning that is not either
-      # of the two alone. Saying so is better than silently keeping the last
-      # one, because the two orders would then do different things.
-      var parsed: RebuildClass
-      discard parseRebuildClass(arg, parsed)
-      if rebuildClass != rbNone and rebuildClass != parsed:
-        raise newException(ValueError,
-          "repro build: " & rebuildClassFlag & " and " & arg &
-          " are mutually exclusive rebuild verbs; pass one")
-      rebuildClass = parsed
-      rebuildClassFlag = arg
-    elif arg == "--only" or arg.startsWith("--only="):
-      # §4.5. Repeatable; each occurrence adds a pattern, and an edge is
-      # selected when ANY pattern matches. Plain text is a substring match,
-      # a pattern containing `*` or `?` is an anchored glob -- see
-      # `matchesOnlySelector`.
-      let raw = valueFromFlag(args, i, "--only")
-      if raw.len == 0:
-        raise newException(ValueError, "--only requires a pattern")
-      rebuildOnly.add(raw)
-    elif arg == "--unsafe-preserve-outputs" or
-        arg.startsWith("--unsafe-preserve-outputs="):
-      # Owner decision 2026-11-03: the steps (by action id or target name,
-      # `--only`'s pattern rules; `*` for every step) that run in UNSAFE
-      # preserve-outputs mode. Repeatable. See `setUnsafePreserveOutputs`.
-      let raw = valueFromFlag(args, i, "--unsafe-preserve-outputs")
-      if raw.len == 0:
-        raise newException(ValueError,
-          "--unsafe-preserve-outputs requires a pattern (`*` for every step)")
-      unsafePreserveOutputs.add(raw)
-    elif arg == "--no-output-cleanup":
-      noOutputCleanup = true
-    elif arg == "--publish-cache-hits":
-      publishCacheHits = true
-    elif arg == "--publish-materialized":
-      publishMaterialized = true
-    elif arg == "--skip-cmake-regeneration":
-      skipCmakeRegeneration = true
-    elif arg == "--restore-cached-outputs":
-      restoreCachedOutputs = true
-    elif arg == "--no-restore-cached-outputs":
-      restoreCachedOutputs = false
-    elif arg == "--no-runquota":
-      bypassRunQuota = true
-      runQuotaRequestedExplicitly = false
-    elif arg == "--runquota":
-      bypassRunQuota = false
-      # Recorded as a REQUEST, not only as its effect on `bypassRunQuota`,
-      # because a dry run's implied bypass is applied after this loop and
-      # has to be able to tell "the default left it on" from "the operator
-      # asked for the handshake". See the derivation below the loop.
-      runQuotaRequestedExplicitly = true
-    elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
-      monitorHosting = parseMonitorHostingMode(
-        valueFromFlag(args, i, "--monitor-hosting"), "--monitor-hosting")
-    elif arg == "--evidence" or arg.startsWith("--evidence="):
-      # DA-1i. `parseEvidenceScope` lives beside the enum in
-      # `repro_build_engine` and decodes through io-mon's own token codec, so
-      # the value an operator types here and the `evidence=` stamp a later
-      # reader compares against come from ONE table. An unknown or empty value
-      # raises and the flag loop's handler turns it into a usage error rather
-      # than quietly selecting the default.
-      evidenceScope = parseEvidenceScope(
-        valueFromFlag(args, i, "--evidence"), "--evidence")
-    elif arg == "--unicode":
-      setUnicodeOverride(true)
-    elif arg == "--no-unicode":
-      setUnicodeOverride(false)
-    elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
-      peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
-    elif arg == "--trust-profile" or arg.startsWith("--trust-profile="):
-      try:
-        trustProfileFlag = acceptTrustProfileFlag(trustProfileSeen,
-          valueFromFlag(args, i, "--trust-profile"))
-      except ValueError as err:
-        stderr.writeLine("repro build: " & err.msg)
-        return 2
-    elif arg == "--lock" or arg.startsWith("--lock="):
-      # MO-1 alternate committed lock, generalised by Named-Lock-Files §5.1.
-      # ``--lock-slice`` is a distinct flag handled elsewhere; the exact
-      # ``--lock`` / ``--lock=`` match here never swallows it.
-      #
-      # §5.1: "**One flag, not two.** `--lock` is the existing whole-build
-      # flag (§2.3) generalised: with an `=` it binds a named lock file,
-      # without one it binds `default`." And §5.2: "`--lock <path>` … is
-      # exactly `--lock default=<path>`. It is retained as the spelling for
-      # the overwhelmingly common single-lock-file case and is **not**
-      # deprecated. The two forms are distinguished by the presence of `=`."
-      let raw = valueFromFlag(args, i, "--lock")
+  # The command line, parsed by the parser generated from repro's
+  # description (`buildFlags` in `repro_cli_support/cli_description`), with
+  # where each value came from: the command line, the environment variable
+  # the flag declares, or neither.
+  let (c, origin) = loadBuildCommandLine(originalArgs)
+  if c.daemon.len > 0:
+    daemonMode = parseBuildDaemonMode(c.daemon, "--daemon")
+  listTargets = c.listTargets or c.listTargetsJson
+  listTargetsJson = c.listTargetsJson or (c.json and listTargets)
+  if c.json and not listTargets:
+    # ``repro build --list-targets --json`` is the spec-mandated shape;
+    # `--json` means nothing to a build.
+    raise newException(BuildCommandLineError,
+      "--json applies to --list-targets only")
+  listTargetsPackage = c.package
+  if c.toolProvisioning.len > 0:
+    mode = parseToolProvisioning(c.toolProvisioning)
+  workRoot = c.workRoot
+  if givenOnCommandLine(origin.actionCacheRoot):
+    # Phase 1 cache-scope split: user-level action cache + CAS root.
+    # See Provider-Compile-Tiering.md §"Cache Scope". When omitted, we
+    # resolve from ${REPROBUILD_STORE_ROOT}/action-cache or the platform
+    # default user cache dir at engine config build time.
+    setActionCacheRootOverride(c.actionCacheRoot)
+  # `--progress` over `$REPROBUILD_PROGRESS`, then `$REPRO_PROGRESS` (the
+  # flag declares both); with none of them, quiet in an agent's shell.
+  progressMode =
+    if c.progress.len > 0: parseBuildProgressMode(c.progress)
+    elif getEnv("IN_AGENT_SHELL", "").len > 0: bpmQuiet
+    else: bpmBarLine
+  # `--progress-bars` over `$REPROBUILD_PROGRESS_BARS`.
+  if c.progressBars.len > 0:
+    progressBarStyle = parseBuildProgressBarStyle(c.progressBars)
+  if givenOnCommandLine(origin.writeDiagnostics):
+    diagnosticsPath = c.writeDiagnostics
+  if givenOnCommandLine(origin.writeBenchmark):
+    benchmarkPath = c.writeBenchmark
+  # Section filter over the analytics store. Naming any group enables the
+  # sink; bare `--write-stats` enables it at the conventional store path
+  # with every group, `=PATH` names the store.
+  let statsStorePath = c.writeStats.get("")
+  if c.statsGroups.isSome:
+    statsCapture = parseStatsCaptureGroups(c.statsGroups.get, statsStorePath)
+  if c.writeStats.isSome:
+    statsCapture.enabled = true
+    if statsCapture.groups.card == 0:
+      statsCapture.groups = AllStatsCaptureGroups
+      statsCapture.raw = "all"
+    statsCapture.storePath = statsStorePath
+  # COLLECT axis. Additive across a source's occurrences. The flag starts
+  # from the empty set and replaces the environment default, which adds to
+  # the default set (`--measure=none,timing` is the idiom for an exact set).
+  case origin.measure.winner.kind
+  of cokCli:
+    measureExplicit = true
+    measureSet = {}
+    for value in c.measure:
+      measureSet = parseMeasureCategories(measureSet, value, "--measure")
+  of cokEnv:
+    for value in c.measure:
+      measureSet = parseMeasureCategories(measureSet, value,
+        "REPROBUILD_MEASURE")
+  else:
+    discard
+  # PRESENT axis. Same vocabulary; showing implies measuring.
+  showExplicit = givenOnCommandLine(origin.show)
+  for value in c.show:
+    showSet = parseMeasureCategories(showSet, value,
+      if showExplicit: "--show" else: "REPROBUILD_SHOW")
+  reportPersistence.requested = c.writeReport.isSome
+  reportPersistence.path = c.writeReport.get("")
+  reportPersistence.suppressed = c.noWriteReport
+  # `--log` over `$REPROBUILD_LOG`; `-v` and `-vv` are `--log=summary` and
+  # `--log=actions`, the last of them on the command line winning.
+  if c.log.len > 0:
+    logMode = parseBuildLogMode(c.log)
+  logModeExplicit = givenOnCommandLine(origin.log)
+  if givenOnCommandLine(origin.actionOutput):
+    actionOutput = parseBuildActionOutputMode(c.actionOutput)
+  prepareOnly = c.prepareOnly
+  dryRun = c.dryRun
+  forceRebuild = c.forceRebuild
+  # §4.1-§4.3. The three rebuild verbs are mutually exclusive rather than
+  # cumulative: they are not additive filters, they are three points on one
+  # lattice, and `--soft-rebuild --hard-rebuild` has no meaning that is not
+  # either of the two alone. Saying so is better than silently keeping one.
+  var rebuildVerbs: seq[string] = @[]
+  if c.softRebuild: rebuildVerbs.add("--soft-rebuild")
+  if c.rebuildHostBound: rebuildVerbs.add("--rebuild-host-bound")
+  if c.hardRebuild: rebuildVerbs.add("--hard-rebuild")
+  for spelling in rebuildVerbs:
+    var parsed: RebuildClass
+    discard parseRebuildClass(spelling, parsed)
+    if rebuildClass != rbNone and rebuildClass != parsed:
+      raise newException(BuildCommandLineError,
+        rebuildClassFlag & " and " & spelling &
+        " are mutually exclusive rebuild verbs; pass one")
+    rebuildClass = parsed
+    rebuildClassFlag = spelling
+  # §4.5. Repeatable; each occurrence adds a pattern, and an edge is
+  # selected when ANY pattern matches. Plain text is a substring match, a
+  # pattern containing `*` or `?` is an anchored glob -- see
+  # `matchesOnlySelector`.
+  for raw in c.only:
+    if raw.len == 0:
+      raise newException(BuildCommandLineError, "--only requires a pattern")
+    rebuildOnly.add(raw)
+  # Owner decision 2026-11-03: the steps (by action id or target name,
+  # `--only`'s pattern rules; `*` for every step) that run in UNSAFE
+  # preserve-outputs mode. Repeatable. See `setUnsafePreserveOutputs`.
+  for raw in c.unsafePreserveOutputs:
+    if raw.len == 0:
+      raise newException(BuildCommandLineError,
+        "--unsafe-preserve-outputs requires a pattern (`*` for every step)")
+    unsafePreserveOutputs.add(raw)
+  noOutputCleanup = c.noOutputCleanup
+  publishCacheHits = c.publishCacheHits
+  publishMaterialized = c.publishMaterialized
+  skipCmakeRegeneration = c.skipCmakeRegeneration
+  # S7 — `--restore-cached-outputs` / `--no-restore-cached-outputs`, over
+  # the `REPRO_RESTORE_CACHED_OUTPUTS` default, which the flag declares. See
+  # `restoreCachedOutputsEnvDefault` for what the env spelling is and is
+  # not.
+  restoreCachedOutputs = c.restoreCachedOutputs
+  # `--runquota` / `--no-runquota` (the last one wins), over
+  # `$REPROBUILD_NO_RUNQUOTA`, the documented full-bypass switch, which the
+  # flag declares. `--runquota` is recorded as a REQUEST,
+  # not only as its effect on `bypassRunQuota`, because a dry run's implied
+  # bypass is applied below and has to be able to tell "the default left it
+  # on" from "the operator asked for the handshake".
+  bypassRunQuota = c.noRunquota
+  runQuotaRequestedExplicitly = givenOnCommandLine(origin.noRunquota) and
+    not c.noRunquota
+  # In-Process-Monitor-Hosting P1(b): the flag over
+  # `REPROBUILD_MONITOR_HOSTING` (which it declares), decoded by the parser
+  # beside the enum in `repro_build_engine`.
+  case origin.monitorHosting.winner.kind
+  of cokCli:
+    monitorHosting = parseMonitorHostingMode(c.monitorHosting,
+      "--monitor-hosting")
+  of cokEnv:
+    monitorHosting = parseMonitorHostingMode(c.monitorHosting,
+      MonitorHostingEnvVar)
+  else:
+    discard
+  if givenOnCommandLine(origin.evidence):
+    # DA-1i. `parseEvidenceScope` lives beside the enum in
+    # `repro_build_engine` and decodes through io-mon's own token codec, so
+    # the value an operator types here and the `evidence=` stamp a later
+    # reader compares against come from ONE table. An unknown or empty value
+    # raises rather than quietly selecting the default.
+    evidenceScope = parseEvidenceScope(c.evidence, "--evidence")
+  # `--unicode` / `--no-unicode` over `$REPRO_UNICODE`.
+  if origin.unicode.winner.kind in {cokCli, cokEnv}:
+    setUnicodeOverride(c.unicode)
+  peerCacheSpec = c.peerCache
+  for value in c.trustProfile:
+    try:
+      trustProfileFlag = acceptTrustProfileFlag(trustProfileSeen, value)
+    except ValueError as err:
+      stderr.writeLine("repro build: " & err.msg)
+      return 2
+  if c.lock.len > 0:
+    # MO-1 alternate committed lock, generalised by Named-Lock-Files §5.1:
+    # with an `=` it binds a named lock file, without one it binds
+    # `default`. Every occurrence lands in `lockBindings`, so two bindings
+    # for one name in one invocation are an error rather than a precedence
+    # puzzle.
+    for raw in c.lock:
       try:
         lockBindings.applyLockFlag(raw)
       except LockFileError as err:
         stderr.writeLine("repro build: " & err.msg)
         return 2
-      # The un-named form keeps its existing meaning verbatim, so every
-      # pre-NLF-M7 invocation is byte-unchanged.
-      if lockBindings.byName.hasKey(DefaultLockFileName):
-        lockOverride = lockBindings.byName[DefaultLockFileName]
-      # NLF-M8, folded from NLF-M7 — and this is the line that makes
-      # `--lock <name>=<path>` mean something for a name other than
-      # `default`. `lockOverride` above is the VERSION-pinning half and only
-      # `default` has one; `setActiveLockBindings` is the IDENTITY half, and
-      # `governingLockIdentityFor` resolves every name through it. Without
-      # this the flag parses, validates, errors correctly on a typo — and
-      # then governs one graph.
-      setActiveLockBindings(lockBindings)
-    elif arg == "--strategy" or arg.startsWith("--strategy="):
-      # Named-Lock-Files §5.5: `repro build --strategy lowest` is
-      # `--lock default=strategy:lowest` — "generate a lock file under the
-      # given strategy into a hidden, uncommitted location, then use it.
-      # Nothing else."
-      let raw = valueFromFlag(args, i, "--strategy")
-      if not parseLockStrategy(raw, buildStrategy):
-        stderr.writeLine(unknownStrategyDiagnostic("repro build", raw))
+    # The un-named form keeps its existing meaning verbatim.
+    if lockBindings.byName.hasKey(DefaultLockFileName):
+      lockOverride = lockBindings.byName[DefaultLockFileName]
+    # NLF-M8: `lockOverride` above is the VERSION-pinning half and only
+    # `default` has one; `setActiveLockBindings` is the IDENTITY half, and
+    # `governingLockIdentityFor` resolves every name through it.
+    setActiveLockBindings(lockBindings)
+  if givenOnCommandLine(origin.strategy):
+    # Named-Lock-Files §5.5: `repro build --strategy lowest` is
+    # `--lock default=strategy:lowest`.
+    if not parseLockStrategy(c.strategy, buildStrategy):
+      stderr.writeLine(unknownStrategyDiagnostic("repro build", c.strategy))
+      return 2
+    strategyGiven = true
+  printSolvedGraph = c.printSolvedGraph
+  if c.publish.isSome:
+    # CLI/build.md §"Publishing for an appliance": publish this build's
+    # target install mirror under a profile's substitute-only edge key.
+    publishEdgeSpec = c.publish.get
+    publishGiven = true
+  # Spec-Implementation M1 — `--variant name=value` (and `--release` /
+  # `--debug`, its standard-configuration shorthands, in command-line
+  # order) registers a `prSet` contribution against the named
+  # solver-participating Configurable. The accumulated set is exported as
+  # `REPRO_VARIANTS` so it survives the CLI -> provider process hop; both
+  # halves of the contract live in `repro_dsl_stdlib/configurables/
+  # variants.nim`.
+  for spec in c.variant:
+    if spec.find('=') <= 0:
+      raise newException(BuildCommandLineError,
+        "--variant expects name=value (got: " & spec & ")")
+    var existing = getEnv("REPRO_VARIANTS")
+    if existing.len > 0:
+      existing.add(',')
+    existing.add(spec)
+    putEnv("REPRO_VARIANTS", existing)
+  if givenOnCommandLine(origin.target):
+    # ReproOS-Add-On-Mode A15: `--target=<triple>` is `--variant
+    # targetTriple=<triple>` with the spelling canonicalised
+    # (`cross_target_flag`: a short `armv7-linux` names the catalog's
+    # appliance triple; `native` assigns nothing). It lands in the same
+    # `REPRO_VARIANTS` assignment, after the `--variant` ones.
+    let triple =
+      try: canonicalTargetTriple(c.target)
+      except ValueError as e:
+        stderr.writeLine("repro build: " & e.msg)
         return 2
-      strategyGiven = true
-    elif arg == "--print-solved-graph":
-      printSolvedGraph = true
-    elif arg.startsWith("--publish="):
-      # CLI/build.md §"Publishing for an appliance": publish this build's
-      # target install mirror under a profile's substitute-only edge key.
-      publishEdgeSpec = arg["--publish=".len .. ^1]
-      publishGiven = true
-    elif arg == "--target" or arg.startsWith("--target="):
-      # ReproOS-Add-On-Mode A15: ``--target=<triple>`` is ``--variant
-      # targetTriple=<triple>`` with the spelling canonicalised
-      # (``cross_target_flag``: a short ``armv7-linux`` names the catalog's
-      # appliance triple; ``native`` assigns nothing). It lands in the same
-      # ``REPRO_VARIANTS`` assignment the ``--variant`` arm below writes, so
-      # the provider hop, the lowered-graph cache key
-      # (``canonicalVariantAssignments``) and the stdlib's one variant read
-      # site all see one value.
-      let spelling = valueFromFlag(args, i, "--target")
-      let triple =
-        try: canonicalTargetTriple(spelling)
-        except ValueError as e:
-          stderr.writeLine("repro build: " & e.msg)
-          return 2
-      buildTargetTriple = triple
-      if triple.len > 0:
-        var existing = getEnv("REPRO_VARIANTS")
-        if existing.len > 0:
-          existing.add(',')
-        existing.add(TargetTripleVariantName & "=" & triple)
-        putEnv("REPRO_VARIANTS", existing)
-    elif arg == "--variant" or arg.startsWith("--variant="):
-      # Spec-Implementation M1 — ``--variant name=value`` registers a
-      # ``prSet`` contribution against the named solver-participating
-      # Configurable before evaluation begins. The accumulated set is
-      # exported as the ``REPRO_VARIANTS`` env var so it survives the
-      # CLI -> provider process hop; both halves of the contract live
-      # in ``repro_dsl_stdlib/configurables/variants.nim``.
-      #
-      # M1 explicitly defers solver integration to M2; here the flag
-      # only feeds the priority lattice (``prDefault < prSet <
-      # prOverride < prForce``) the existing ``Configurable`` system
-      # already implements.
-      let spec = valueFromFlag(args, i, "--variant")
-      if spec.find('=') <= 0:
-        raise newException(ValueError,
-          "--variant expects name=value (got: " & spec & ")")
+    buildTargetTriple = triple
+    if triple.len > 0:
       var existing = getEnv("REPRO_VARIANTS")
       if existing.len > 0:
         existing.add(',')
-      existing.add(spec)
+      existing.add(TargetTripleVariantName & "=" & triple)
       putEnv("REPRO_VARIANTS", existing)
-    elif arg == "--release" or arg == "--debug":
-      # Standard-configuration shorthand (Standard-Configurations.md):
-      # ``--release`` / ``--debug`` are sugar for ``--variant
-      # buildType=release|debug``. Recognized standard configs map a
-      # leading-dash flag to the conventional ``buildType`` axis value;
-      # other configs still use the explicit ``--variant buildType=…``.
-      let cfg = arg[2 .. ^1]
-      var existing = getEnv("REPRO_VARIANTS")
-      if existing.len > 0:
-        existing.add(',')
-      existing.add("buildType=" & cfg)
-      putEnv("REPRO_VARIANTS", existing)
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported build flag: " & arg)
-    else:
-      # Named-Targets M2: collect every positional. Classification into
-      # path vs. name selectors happens below so the build dispatch can
-      # fold name-shaped selectors into one engine pass.
-      positionalSelectors.add(arg)
-    inc i
+  # Named-Targets M2: every positional; classification into path vs. name
+  # selectors happens below so the build dispatch can fold name-shaped
+  # selectors into one engine pass. The words after `--` go to the action.
+  positionalSelectors = c.selectors
+  forwardedActionArgs = c.actionArgs
 
   # CLI/build.md §"Publishing for an appliance": `--publish` publishes what
   # the build produced, so a build that produces nothing cannot carry it,
@@ -31301,10 +31328,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
              renderLockPins(graph.solution.packages, graph.solution.variants))
       putEnv(LockPathEnvVar, graph.lockPath)
 
-  # Apply the REPRO_TOOL_PROVISIONING env override before any dispatch so
-  # both ``--list-targets`` and the engine build observe the same mode. A
-  # value here only takes effect when ``--tool-provisioning`` was not passed.
-  mode = resolveToolProvisioningWithEnv(mode)
+  # ``--tool-provisioning`` carries ``REPRO_TOOL_PROVISIONING`` (the flag
+  # declares it and wins over it), so both ``--list-targets`` and the engine
+  # build observe the same mode.
   prependExplicitWorkRootToolPath(workRoot)
 
   # Named-Targets M5: ``--list-targets`` short-circuits the engine pass.
@@ -31316,9 +31342,6 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   if listTargets:
     return runListTargetsCommand(target, mode, publicCliPath, workRoot,
       listTargetsJson, listTargetsPackage, bypassRunQuota)
-
-  if not daemonModeExplicit:
-    daemonMode = configuredBuildDaemonMode()
 
   if progressMode == bpmQuiet:
     # Both are terminal output, so a quiet terminal clears the presentation
@@ -34001,9 +34024,6 @@ proc defaultMetricForScope(scope: string): string =
   else:
     raise newException(ValueError, "unsupported stats scope: " & scope)
 
-const CleanUsage =
-  "usage: repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]"
-
 proc projectCleanBuildRoots(projectRoot, workRoot: string): seq[string] =
   ## The directories that hold this project's per-target build state: the
   ## project's own ``.repro/build`` and, when a work root is configured (the
@@ -34099,7 +34119,7 @@ proc classifyContainerClaims(snapshot: var ProviderGraphSnapshot) =
           (claim.payload, os.normalizedPath(claim.identity)) in containers:
         claim.kind = oekDirectory
 
-proc runCleanCommand(args: openArray[string]): int =
+proc runCleanCommand(projectRoot, workRoot: string; dryRun: bool): int =
   ## ``repro clean``: remove the materialised outputs the project's build
   ## state records as its own.
   ##
@@ -34112,28 +34132,15 @@ proc runCleanCommand(args: openArray[string]): int =
   ## still reuses the cache. A container directory output is removed only once
   ## it is empty (``classifyContainerClaims``).
   ##
+  ## The command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``): ``projectRoot`` is
+  ## ``--project-root`` (the current directory by default), ``workRoot``
+  ## ``--work-root`` and ``dryRun`` ``--dry-run``.
+  ##
   ## Exit 0 when every deletable output is gone (or, with ``--dry-run``, was
-  ## listed), 1 when a deletion failed, 2 on a usage error.
-  var projectRoot = getCurrentDir()
-  var workRoot = ""
-  var dryRun = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--project-root" or arg.startsWith("--project-root="):
-      projectRoot = valueFromFlag(args, i, "--project-root")
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--dry-run":
-      dryRun = true
-    elif arg == "--help" or arg == "-h":
-      echo CleanUsage
-      return 0
-    else:
-      stderr.writeLine("repro clean: error: unsupported argument: " & arg)
-      stderr.writeLine(CleanUsage)
-      return 2
-    inc i
+  ## listed), 1 when a deletion failed, 2 when the project root does not
+  ## exist.
+  var projectRoot = projectRoot
   projectRoot = os.normalizedPath(absolutePath(projectRoot))
   if not dirExists(extendedPath(projectRoot)):
     stderr.writeLine("repro clean: error: project root does not exist: " &
@@ -35015,7 +35022,8 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
     raise newException(ValueError,
       "repro why: the second positional must be a path or fragment " &
         "selector; got the name-shaped value '" & target &
-        "' (re-run as `repro why " & target & "` with one positional)")
+        "' (spell a path as `./" & target & "`, or re-run as `repro why " &
+        target & "` with one positional)")
   if target.len == 0:
     target = "."
 
@@ -39767,6 +39775,42 @@ proc runDevelopDropCommand(c: ReproCommandLineDevelop;
     stderr.writeLine("repro develop --drop: error — " & f)
   exitCode
 
+proc developTargetIsPathShaped(target: string): bool =
+  ## Whether ``target`` was written as a path (it contains `/` or `\`, or
+  ## starts with `.`) rather than as a bare name.
+  target.contains('/') or target.contains('\\') or target.startsWith(".")
+
+proc developUnresolvedTargetDiagnostic(target, modulePath: string;
+                                       insideWorkspace: bool): seq[string] =
+  ## The `error:` + `tip:` lines for `repro develop <name>` when `<name>` is
+  ## not a local project (no project file at ``modulePath``). A target
+  ## written as a path was meant as a local project, so the answer is only
+  ## that none is there; `--only=` and `--source` take names, and naming
+  ## them for a path would mislead. For a bare name, inside a workspace or
+  ## project the tips are the two forms that develop a dependency there;
+  ## outside one, creating a workspace from a catalog package name is not
+  ## available, so the tips say where each form works.
+  if developTargetIsPathShaped(target):
+    return @["error: `repro develop " & target & "`: no project file " &
+      "found at " & modulePath]
+  result = @["error: `repro develop " & target & "`: `" & target &
+    "` is not a local project (no project file at " & modulePath & ")"]
+  if insideWorkspace:
+    result.add("tip: to check out `" & target & "` as a dependency of this " &
+      "workspace's lock set and develop it, run `repro develop --only=" &
+      target & "`")
+    result.add("tip: to develop an existing local checkout of `" & target &
+      "`, run `repro develop " & target & " --source=<path>`")
+  else:
+    result.add("tip: creating a workspace from a catalog package name " &
+      "(`repro develop <package>` in an empty directory) is not enabled " &
+      "in this build, and this directory is not inside a workspace or " &
+      "project")
+    result.add("tip: from inside a workspace, run `repro develop " &
+      "--only=<dep>` to check out a dependency of its lock set")
+    result.add("tip: to develop an existing local checkout of `" & target &
+      "`, run `repro develop " & target & " --source=<path>`")
+
 proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
   ## `repro develop …`, from its configuration. Exported for the same reason
   ## `runReproLockCommand` is: a test that asserts on what the verb WRITES
@@ -39856,7 +39900,21 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
 
   let modulePath = absolutePath(moduleForTarget(target))
   if not fileExists(extendedPath(modulePath)):
-    raise newException(IOError, "develop target module not found: " & modulePath)
+    if command.len > 0:
+      # `<target> -- <command>` names a local project to run in; a missing
+      # one is reported as such.
+      raise newException(IOError,
+        "develop target module not found: " & modulePath)
+    # A bare `repro develop <name>`: most often a dependency or a catalog
+    # package name rather than a local project directory. Teach the forms
+    # that do what was probably meant instead of naming a file path.
+    let cwd = getCurrentDir()
+    let insideWorkspace = findWorkspaceRoot(cwd).len > 0 or
+      findDevEnvProjectRoot(cwd).len > 0
+    for line in developUnresolvedTargetDiagnostic(target, modulePath,
+        insideWorkspace):
+      stderr.writeLine(line)
+    return 1
 
   let scopedRoot = scopedWorktreeRoot(modulePath, workRoot)
   let outDir =
@@ -40963,19 +41021,6 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
-const DaemonRequestValueFlags = ["--tool-provisioning",
-    "--action-cache-root", "--daemon", "--progress", "--progress-bars",
-    "--write-diagnostics", "--show", "--measure", "--log", "--write-benchmark",
-    "--monitor-hosting", "--evidence"]
-  ## The ``repro build`` flags whose BARE spelling consumes the next argument,
-  ## as ``runBuildCommand``'s parser reads them — the daemon parent's two
-  ## request readers (``daemonRequestProjectRoot``,
-  ## ``daemonPrewarmTargetOutputDir``) must skip exactly these to find the
-  ## same target the worker builds. ``--write-report`` and ``--write-stats``
-  ## are NOT here: bare, both are switches (only ``=PATH`` names a path), and
-  ## listing them made a trailing ``--write-report`` raise "requires a value"
-  ## while a leading one swallowed the target.
-
 proc daemonRequestProjectRoot*(rawArgs: openArray[string];
                                workingDir: string): string =
   ## The project a daemon-hosted ``repro build`` request is for, derived from
@@ -40984,16 +41029,14 @@ proc daemonRequestProjectRoot*(rawArgs: openArray[string];
   ## request's ``workingDir``, never the daemon's own. "" when the target does
   ## not resolve to a project file; the session record then keeps its
   ## working-directory fallback. Read-only, so it is safe in the daemon parent
-  ## (see ``UserDaemonProjectRootResolver``).
-  var target = ""
-  var i = 0
-  while i < rawArgs.len:
-    let arg = rawArgs[i]
-    if arg == "--work-root" or arg in DaemonRequestValueFlags:
-      discard valueFromFlag(rawArgs, i, arg)
-    elif not arg.startsWith("-") and target.len == 0:
-      target = arg
-    inc i
+  ## (see ``UserDaemonProjectRootResolver``). The arguments are read by the
+  ## parser generated from repro's description (``buildRequestOf``), the one
+  ## the worker reads them with.
+  let request = buildRequestOf(rawArgs)
+  if request.isNone:
+    return ""
+  var target =
+    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
   if target.len == 0:
     target = "."
   var base = splitTarget(target).base
@@ -41031,32 +41074,20 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
   ## a build decide differently — every warm-table key embeds the full path, so
   ## entries under the wrong directory are never looked up — but it would make
   ## the pass useless, so it is derived rather than guessed.
-  var target = ""
-  var workRoot = ""
-  var forceRefresh = false
-  var i = 0
-  while i < rawArgs.len:
-    let arg = rawArgs[i]
-    if arg == "--work-root" or arg.startsWith("--work-root="):
-      workRoot = valueFromFlag(rawArgs, i, "--work-root")
-    elif arg == "--force-rebuild" or arg == "--rebuild" or arg == "--dry-run":
-      forceRefresh = true
-    elif arg in DaemonRequestValueFlags:
-      discard valueFromFlag(rawArgs, i, arg)
-    elif not arg.startsWith("-") and target.len == 0:
-      # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
-      # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every
-      # route into it strips the verb first — the dispatcher passes
-      # ``args[1 .. ^1]``, and the three internal callers compose their own
-      # argument vectors without one. Skipping a literal "build" here would
-      # therefore skip a real target: ``repro build build``, in a directory
-      # holding a ``build/`` project, would warm the caches of ``.``
-      # instead. Harmless (a wrongly-named directory warms entries no build
-      # looks up, because every warm-table key embeds the full path) but
-      # wrong, and it would have made the unit case feed an argument vector
-      # the daemon never produces.
-      target = arg
-    inc i
+  # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
+  # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every route
+  # into it strips the verb first -- the dispatcher passes the words after
+  # it, and the internal callers compose their own argument vectors without
+  # one. Skipping a literal "build" here would therefore skip a real target:
+  # ``repro build build``, in a directory holding a ``build/`` project, would
+  # warm the caches of ``.`` instead.
+  let request = buildRequestOf(rawArgs)
+  if request.isNone:
+    return ""
+  var target =
+    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  var workRoot = request.get.workRoot
+  let forceRefresh = request.get.forceRebuild or request.get.dryRun
   if forceRefresh:
     # A forced rebuild ignores all three caches, so warming them would be
     # work with no consumer.
@@ -41300,6 +41331,26 @@ proc installUserDaemonBuildExecutor() =
           "{\"stream\":\"stderr\",\"diagnostic\":\"unknown_target\"}")
         emit(bekFinished, "", true, 2, "error",
           "{\"diagnostic\":\"unknown_target\"}")
+        result = 2
+      except CliUsageError as err:
+        # The thin client routes `repro build` without parsing it, so a
+        # command line the generated parser rejects is refused here, in the
+        # worker's parse (`loadBuildCommandLine`). It gets the text and the
+        # usage exit code (2) the direct dispatch gives it
+        # (`reportReproUsageError`), not the generic "daemon-hosted build
+        # failed" line and exit 1.
+        emit(bekDiagnostic, renderReproUsageError(err), false, 0, "error",
+          "{\"stream\":\"stderr\",\"diagnostic\":\"usage\"}")
+        emit(bekFinished, "", true, err.exitCode, "error",
+          "{\"diagnostic\":\"usage\"}")
+        result = err.exitCode
+      except BuildCommandLineError as err:
+        # A command line the parser accepts and the build refuses (`--json`
+        # without `--list-targets`, ...): the usage error the direct
+        # dispatch (`runBuildVerbCommand`) reports, with its text.
+        emit(bekDiagnostic, "repro build: " & err.msg & "\n", false, 0,
+          "error", "{\"stream\":\"stderr\",\"diagnostic\":\"usage\"}")
+        emit(bekFinished, "", true, 2, "error", "{\"diagnostic\":\"usage\"}")
         result = 2
     finally:
       try:
@@ -90328,9 +90379,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
         names.add(name)
     # An extra name the build would classify as a path again (one that
     # carries ``#``, ``.`` or ``/``, such as the member shorthand
-    # ``test#unit`` taken from a second ``.#test#unit`` selector, or one
-    # that names an existing path) is handed over anchored on the same
-    # project, so the build selects exactly what the plan resolved.
+    # ``test#unit`` taken from a second ``.#test#unit`` selector) is
+    # handed over anchored on the same project, so the build selects
+    # exactly what the plan resolved.
     let anchorBase = splitTarget(resolved.target).base
     buildSelectors = @[resolved.target]
     for extra in resolved.extraNameSelectors:
@@ -104866,33 +104917,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "build":
-    try:
-      let buildArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runBuildCommand(buildArgs, publicCliPath)
-    except BuildTargetAmbiguousError as err:
-      # Named-Targets M2 ``target_ambiguous`` diagnostic. Exit 2 per the
-      # CLI-build §"Target Selection" contract; the message names the
-      # qualified candidates so the user can re-run with the
-      # ``<package>:<name>`` form. The diagnostic text is rendered by a
-      # shared helper so the daemon-side translation in
-      # ``installUserDaemonBuildExecutor`` produces identical bytes.
-      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
-      return 2
-    except BuildTargetUnknownError as err:
-      # Named-Targets M2 ``unknown_target`` diagnostic. Exit 2 with
-      # Levenshtein top-3 suggestions when the project's target-export
-      # table has near-matches. Text rendered by the shared helper that
-      # the daemon-side hook also calls.
-      stderr.write(renderUnknownTargetDiagnostic(err[]))
-      return 2
-    except CatchableError as err:
-      stderr.writeLine(reproBuildErrorText(err.msg))
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "test":
     # CI-Sharding M2 — ``repro test --shard k/N [...]``.  Implementation
     # in ``runReproTestCommand`` above; see the block comment there for
@@ -104961,59 +104985,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
       return runCiCommand(ciArgs)
     except CatchableError as err:
       stderr.writeLine("repro ci: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "bench":
-    # Spec-Implementation M0: ``repro bench`` is a CLI verb alias for
-    # ``repro build bench`` per Build-Graph-Collections.md §"Verb Aliases
-    # for Conventional Collections" and CLI/bench.md. The alias is a
-    # one-arg rewrite that delegates to ``runBuildCommand``; the bench
-    # build graph collection itself is the project's responsibility to
-    # declare (via ``collect("bench", ...)`` or the M1-era
-    # ``aggregate("bench", ...)`` interim form). When no collection
-    # named ``bench`` exists the standard ``unknown_target`` diagnostic
-    # from Named-Targets M2 surfaces — no special "no benchmarks" case.
-    try:
-      let benchArgs =
-        if args.len > 1:
-          @["bench"] & args[1 .. ^1]
-        else:
-          @["bench"]
-      return runBuildCommand(benchArgs, publicCliPath)
-    except BuildTargetAmbiguousError as err:
-      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
-      return 2
-    except BuildTargetUnknownError as err:
-      stderr.write(renderUnknownTargetDiagnostic(err[]))
-      return 2
-    except CatchableError as err:
-      stderr.writeLine("repro bench: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "lint":
-    # Spec-Implementation M0: ``repro lint`` is a CLI verb alias for
-    # ``repro build lint`` per Build-Graph-Collections.md §"Verb Aliases
-    # for Conventional Collections" and CLI/lint.md. Mirror shape of the
-    # ``bench`` alias above.
-    try:
-      let lintArgs =
-        if args.len > 1:
-          @["lint"] & args[1 .. ^1]
-        else:
-          @["lint"]
-      return runBuildCommand(lintArgs, publicCliPath)
-    except BuildTargetAmbiguousError as err:
-      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
-      return 2
-    except BuildTargetUnknownError as err:
-      stderr.write(renderUnknownTargetDiagnostic(err[]))
-      return 2
-    except CatchableError as err:
-      stderr.writeLine("repro lint: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "clean":
-    try:
-      return runCleanCommand(if args.len > 1: args[1 .. ^1] else: @[])
-    except CatchableError as err:
-      stderr.writeLine("repro clean: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
@@ -105230,25 +105201,57 @@ proc runReapCommand(conf: ReproCommandLineReap): int =
     stderr.writeLine("repro reap: error: " & err.msg)
     return 1
 
-const LegacyVerbsAnsweringHelp = [
-  # The unmigrated commands whose own parser answers `--help` with their
-  # usage (exit 0), so `repro help <command> [<word>...]` can ask it. Any
-  # other unmigrated parser does not know `--help`: it rejects it, or worse,
-  # takes it as an operand (`repro allow --help` trusted a directory named
-  # `--help` until `allow` moved onto the description), so `repro help` must
-  # never hand it one. An entry goes when its command moves onto the
-  # description.
-  "clean"]
+proc runBuildVerbCommand(verb: string; args: seq[string];
+                         publicCliPath: string): int =
+  ## ``repro build [<args>]``, and ``repro bench`` and ``repro lint``, the
+  ## verb aliases of ``repro build bench`` and ``repro build lint``
+  ## (Build-Graph-Collections.md §"Verb Aliases for Conventional
+  ## Collections"): the collection named after the verb is the first target
+  ## and the rest of the command line is a build's. When the project has no
+  ## collection of that name, the standard ``unknown_target`` diagnostic
+  ## surfaces; there is no special "no benchmarks" case.
+  ##
+  ## ``args`` are the words after the verb, as written: they go to the
+  ## daemon unchanged (``rawArgs``), and ``runBuildCommand`` reads them with
+  ## the parser generated from repro's description, which has already
+  ## accepted them here.
+  let buildArgs = if verb == "build": args else: @[verb] & args
+  try:
+    return runBuildCommand(buildArgs, publicCliPath)
+  except BuildTargetAmbiguousError as err:
+    # Named-Targets M2 ``target_ambiguous`` diagnostic. Exit 2 per the
+    # CLI-build §"Target Selection" contract; the message names the
+    # qualified candidates so the user can re-run with the
+    # ``<package>:<name>`` form. The diagnostic text is rendered by a
+    # shared helper so the daemon-side translation in
+    # ``installUserDaemonBuildExecutor`` produces identical bytes.
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetUnknownError as err:
+    # Named-Targets M2 ``unknown_target`` diagnostic. Exit 2 with
+    # Levenshtein top-3 suggestions when the project's target-export
+    # table has near-matches. Text rendered by the shared helper that
+    # the daemon-side hook also calls.
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
+  except BuildCommandLineError as err:
+    # A command line the parser accepted and the build refuses: a usage
+    # error.
+    stderr.writeLine("repro " & verb & ": " & err.msg)
+    return 2
+  except CatchableError as err:
+    if verb == "build":
+      stderr.writeLine(reproBuildErrorText(err.msg))
+    else:
+      stderr.writeLine("repro " & verb & ": error: " & err.msg)
+    return 1
 
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string): int =
   ## ``repro help [<command>...]``: the help of repro or of one command, on
   ## stdout. A migrated command's help is generated from its declarations.
-  ## An unmigrated one prints its usage synopsis; a deeper word
-  ## (``repro help workspace sync``), or a command with no synopsis, is
-  ## answered by the command's own ``--help`` when its parser answers one
-  ## (``LegacyVerbsAnsweringHelp``), and otherwise by the help its
-  ## declaration gives.
+  ## An unmigrated one prints its usage synopsis (whatever words follow);
+  ## one with no synopsis, the help its declaration gives.
   var command = 0
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
@@ -105261,12 +105264,6 @@ proc runReproHelp(programName: string; topic: seq[string];
     if reproCommandIsPassThrough(command):
       let path = reproCommandPath(command)
       let synopsis = legacyVerbSynopsis(path[0])
-      if i == topic.high and synopsis.len > 0:
-        stdout.write(synopsis)
-        return 0
-      if path[0] in LegacyVerbsAnsweringHelp and reproCommandIsShown(command):
-        return runLegacyCommand(programName,
-          path & topic[i + 1 .. ^1] & @["--help"], publicCliPath)
       if synopsis.len > 0:
         stdout.write(synopsis)
         return 0
@@ -105804,6 +105801,24 @@ proc runReproCommandLine(programName: string; args: seq[string];
       except CatchableError as err:
         stderr.writeLine("repro debug artifact: error: " & err.msg)
         return 1
+  of ReproCommandLineCommand.build:
+    return runBuildVerbCommand("build", reproWordsAfterCommand(args),
+      publicCliPath)
+  of ReproCommandLineCommand.bench:
+    return runBuildVerbCommand("bench", reproWordsAfterCommand(args),
+      publicCliPath)
+  of ReproCommandLineCommand.lint:
+    return runBuildVerbCommand("lint", reproWordsAfterCommand(args),
+      publicCliPath)
+  of ReproCommandLineCommand.clean:
+    let c = conf.clean
+    try:
+      return runCleanCommand(
+        if c.projectRoot.len > 0: c.projectRoot else: getCurrentDir(),
+        c.workRoot, c.dryRun)
+    except CatchableError as err:
+      stderr.writeLine("repro clean: error: " & err.msg)
+      return 1
   else:
     let passed = reproPassThrough(conf)
     if not passed.found:

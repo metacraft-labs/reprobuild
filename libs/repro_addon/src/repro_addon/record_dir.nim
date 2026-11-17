@@ -34,6 +34,7 @@ proc mkdiratC(dirfd: cint; path: cstring; mode: Mode): cint
   {.importc: "mkdirat", header: "<sys/stat.h>".}
 proc unlinkatC(dirfd: cint; path: cstring; flags: cint): cint
   {.importc: "unlinkat", header: "<unistd.h>".}
+var AtRemoveDir {.importc: "AT_REMOVEDIR", header: "<fcntl.h>".}: cint
 proc renameatC(olddirfd: cint; oldpath: cstring; newdirfd: cint;
                newpath: cstring): cint
   {.importc: "renameat", header: "<stdio.h>".}
@@ -279,6 +280,16 @@ proc openCheckedDir*(dir: string; create: bool): cint =
             "birth time (statx STATX_BTIME), so the add-on cannot tell it " &
             "from another directory put in its place; keep /var/log on a " &
             "file system that records birth times"
+        elif b.expected.len == 0 and b.ledgerCopy.len > 0 and
+            not (fileExists(b.ledgerCopy) or symlinkExists(b.ledgerCopy)) and
+            not mutated("first-use-without-ledger-copy"):
+          # No ledger copy: an uninstall removed it, then the identity,
+          # whether or not the identity's directory went too (A11 round
+          # 22: an rmdir that failed or a crash before it leaves that
+          # directory). Never a first use: nothing is recorded, and the
+          # caller reports the unbound use.
+          b.stateGone = true
+          bindings[dir] = b
         elif b.expected.len == 0 and not dirExists(parentDir(b.identityFile)) and
             (mutated("state-gone-from-addon-dir-alone") or
              b.ledgerCopy.len == 0 or
@@ -300,7 +311,8 @@ proc openCheckedDir*(dir: string; create: bool): cint =
         elif b.expected.len == 0:
           if now.len > 0:
             # First use on a host bootstrapped before the identity was
-            # recorded: recorded now, atomically, 0600, durably, through
+            # recorded -- only with the ledger copy present, or where no
+            # ledger copy was named (a test's binding): recorded now, atomically, 0600, durably, through
             # the checked state directory. A record that cannot be written
             # is a refusal: the directory is never used unbound.
             writeInCheckedDir(b.identityFile, now & "\n", 0o600,
@@ -409,6 +421,19 @@ proc listInCheckedDir*(dir: string): seq[tuple[name: string; regular: bool]] =
     let regular = fstatatC(dfd, name.cstring, st, AtSymlinkNoFollow) == 0 and
                   S_ISREG(st.st_mode)
     result.add((name, regular))
+
+proc removeEmptyDirChecked*(dir: string) =
+  ## Remove the empty directory ``dir`` through its parent's descriptor
+  ## (``unlinkat`` with ``AT_REMOVEDIR``), then fsync the parent: what
+  ## bootstrap uses to take back a directory it has just made (A11 round
+  ## 22). Raises ``OSError``.
+  let parent = parentDir(dir)
+  let pfd = posix.open(parent.cstring, O_RDONLY or O_CLOEXEC or ODirectory)
+  if pfd < 0: raiseOSError(osLastError(), "open " & parent)
+  defer: discard posix.close(pfd)
+  if unlinkatC(pfd, extractFilename(dir).cstring, AtRemoveDir) != 0:
+    raiseOSError(osLastError(), "remove " & dir)
+  if fsync(pfd) != 0: raiseOSError(osLastError(), "fsync " & parent)
 
 proc unlinkAt(dfd: cint; name, dir: string) =
   ## Unlink ``name`` in the open directory, if there, and fsync it.
