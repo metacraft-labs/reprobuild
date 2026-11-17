@@ -674,9 +674,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                      binary, description = "A9 round 18 wanted instance") &
         # A9 review round 19, finding 2: an instance an Accept=yes socket
         # started. Once the revert stops it, systemd collects it and reports
-        # no TriggeredBy=; started again without a connection it fails, so
-        # the passing switch must leave it to its socket.
-        unitResource("a9r-ai@.service", "User=a9e\nStateDirectory=a9r-ai\n",
+        # no TriggeredBy=; started again without a connection it fails
+        # (its standard input is the connection), so the passing switch
+        # must leave it to its socket.
+        unitResource("a9r-ai@.service", "User=a9e\nStateDirectory=a9r-ai\nStandardInput=socket\n",
                      binary, description = "A9 round 19 accepted instance") &
         socketResource("a9r-ai.socket", "ListenStream=127.0.0.1:7319\nAccept=yes\n")
     let connect = "bash -c 'exec 3<>/dev/tcp/127.0.0.1/7319; sleep 1'; sleep 2; " &
@@ -721,7 +722,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.exitCode == 0 and
          g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active" and
          g.exec("systemctl is-active a9r-wi@x.service").stdout.strip() == "active" and
-         "failed" notin aiAfter and aiAfter.strip().splitLines()[^1].strip() == "active" and
+         # No instance at all: one started again with no connection fails
+         # (StandardInput=socket), and one that ran would be listed.
+         "a9r-ai@" notin aiAfter and aiAfter.strip().splitLines()[^1].strip() == "active" and
          "a9r-wt.service" notin g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
            "/var/lib/repro/system/revert-stopped 2>/dev/null; true").stdout,
          r.stdout & r.stderr & "\naccepted: " & aiStopped & aiAfter &
