@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2838,
+    "nimTestBinaries": 2839,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 772,
     "staticallyDetectedRuntimeCompilerFlowTests": 143,
-    "testEntries": 2885
+    "testEntries": 2886
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1638,7 +1638,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1565,
+      "integration": 1566,
       "platform/destructive": 182,
       "pure unit": 772,
       "unclassified": 343
@@ -1855,9 +1855,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2838,
+    "nimTestBinaryCount": 2839,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2885
+    "testEntryCount": 2886
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -16255,8 +16255,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 10,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37996,6 +37996,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_narrowed_required_name_is_not_trusted_by_the_ratchet_or_ci_skip",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_narrowed_required_name_is_not_trusted_by_the_ratchet_or_ci_skip.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_pinned_nim_is_provisioned_from_a_cold_store",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47635,6 +47653,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_lock",
         "repro_test_support"
       ],
       "owner": "tests/integration",
