@@ -304,7 +304,8 @@ export post_commit_trace
 from repro_cli_support/partition as repro_partition import
   ShardBuildAction, ShardTestEdge, ShardPlanRequest, ShardPlan,
   PartitionPlanReadError,
-  planTestShards, writePartitionPlanJson, readPartitionPlanJson
+  planTestShards, writePartitionPlanJson, readPartitionPlanJson,
+  testHistoryKeyForBinary
 from runquota_partition/types import
   NodeId, value, nodeId, SharedInputPolicy, sipIndependent, sipShared,
   PartitionAssignment, PartitionPlan, DefaultRefinementPasses, `==`, hash
@@ -89076,7 +89077,9 @@ proc discoverTestEdgesFromWorkspace(projectRoot: string;
     result.edges.add(ShardTestEdge(
       id: edgeId,
       selector: action.id,
-      historyKey: extractFilename(binaryPath),
+      # Without the `.exe` the typed output names on Windows, so one test's
+      # history keys the same on every host (`testHistoryKeyForBinary`).
+      historyKey: testHistoryKeyForBinary(binaryPath),
       buildDeps: @[buildActionId]))
     result.edgeBinaryPath[edgeId] = binaryPath
 

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2935,
+    "nimTestBinaries": 2937,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 783,
+    "pureUnitTests": 784,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2983
+    "testEntries": 2985
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1644,8 +1644,8 @@
     "classificationCounts": {
       "graph-fixture": 24,
       "integration": 1629,
-      "platform/destructive": 191,
-      "pure unit": 783,
+      "platform/destructive": 192,
+      "pure unit": 784,
       "unclassified": 356
     },
     "graphOwnedTestArtifacts": [
@@ -1860,9 +1860,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2935,
+    "nimTestBinaryCount": 2937,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2983
+    "testEntryCount": 2985
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8772,6 +8772,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_nim_unittest_execute_edge_launches_declared_output",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "ct_test_nim_unittest",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/ct_test_nim_unittest",
+      "requiresReproBinary": false,
+      "source": "libs/ct_test_nim_unittest/tests/t_nim_unittest_execute_edge_launches_declared_output.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_smoke_ct_test_nim_unittest",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -14799,6 +14817,24 @@
       "source": "libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_partition_history_key_ignores_windows_exe_suffix",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_partition_history_key_ignores_windows_exe_suffix.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

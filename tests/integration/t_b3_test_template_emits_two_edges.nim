@@ -152,6 +152,7 @@ suite "Bootstrap-And-Self-Build B3: test template emits two edges":
     if fileExists(reproBin):
       var missingBuild = initHashSet[string]()
       var missingExecute = initHashSet[string]()
+      var missingLaunch = initHashSet[string]()
 
       for stem in SampleStems:
         let selector = ".#reprobuild.test_execute." & stem
@@ -167,8 +168,15 @@ suite "Bootstrap-And-Self-Build B3: test template emits two edges":
         # instead of reporting the graph error checkpointed above.
         check not graph.isNil
 
+        # The compile writes ``<stem>.exe`` on Windows and declares exactly
+        # that; the execute edge must name the same file, or nothing orders
+        # the compile before it and the edge launches a path no edge
+        # produces (reprobuild-pm issue 2026-11-17-windows-test-execute-
+        # edge-launches-the-test-binary-without-its-exe-suffix).
+        let binaryPath = "build/test-bin/" & addFileExt(stem, ExeExt)
         var sawBuild = false
         var sawExecute = false
+        var launchesBuilt = false
         if graph != nil:
           let actions = graph{"actions"}
           check not actions.isNil
@@ -177,9 +185,18 @@ suite "Bootstrap-And-Self-Build B3: test template emits two edges":
               let id = action{"id"}.getStr()
               if id == "reprobuild.test_execute." & stem:
                 sawExecute = true
+                # The program the edge starts is argv[0], spelled absolute
+                # (and with `\` on Windows) by the lowering.
+                let argv = action{"argv"}
+                if not argv.isNil and argv.kind == JArray and argv.len > 0:
+                  let program = argv[0].getStr().replace('\\', '/')
+                  checkpoint(stem & " execute argv[0]: " & program)
+                  launchesBuilt = program.endsWith("/" & binaryPath)
               for outputPath in actionOutputs(action):
-                if outputPath.getStr() == "build/test-bin/" & stem:
+                if outputPath.getStr() == binaryPath:
                   sawBuild = true
+        if not launchesBuilt:
+          missingLaunch.incl(stem)
 
         if not sawBuild:
           missingBuild.incl(stem)
@@ -188,5 +205,8 @@ suite "Bootstrap-And-Self-Build B3: test template emits two edges":
 
       checkpoint("missing build stems: " & $toSeq(missingBuild))
       checkpoint("missing execute stems: " & $toSeq(missingExecute))
+      checkpoint("execute edges launching another path: " &
+        $toSeq(missingLaunch))
       check missingBuild.len == 0
       check missingExecute.len == 0
+      check missingLaunch.len == 0
