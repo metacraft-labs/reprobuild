@@ -273,6 +273,9 @@ nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 # clispec, the `cli:` language and typed CLI model repro_project_dsl builds
 # on. Cloned at repro.lock's revision, like nim-shm-queue.
 nim-cli-spec
+# nim-entrypoints, the `entrypoints` package (declarative entry-point
+# descriptions); cloned at repro.lock's revision, like nim-cli-spec.
+nim-entrypoints
 # confutils (the metacraft-labs fork): repro's own command line is
 # instantiated through its clispec bridge (CONFUTILS_SRC). repro.lock does not
 # pin it -- the fork has no repro.nim declaring a library, so it cannot be a

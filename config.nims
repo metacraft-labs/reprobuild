@@ -1000,6 +1000,11 @@ addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
 # the ``../nim-cli-spec`` checkout, else the ``$CLI_SPEC_SRC`` pin.
 addSiblingFirstPackagePath(".." / "nim-cli-spec" / "src", "CLI_SPEC_SRC",
   "clispec.nim")
+# entrypoints: the declarative description of a program's entry points. A leaf
+# library (standard library only), rooted at its ``src/``. Same sibling-first
+# policy: the ``../nim-entrypoints`` checkout, else the ``$ENTRYPOINTS_SRC`` pin.
+addSiblingFirstPackagePath(".." / "nim-entrypoints" / "src", "ENTRYPOINTS_SRC",
+  "entrypoints.nim")
 # confutils (the metacraft-labs fork): ``confutils/clispec_config`` is how
 # repro's own command line is instantiated from its clispec description
 # (``repro_cli_support/cli_program``). The package is rooted at the checkout

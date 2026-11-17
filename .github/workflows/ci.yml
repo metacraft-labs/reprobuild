@@ -96,6 +96,7 @@ jobs:
             nim-chronicles
             nim-cli-spec
             nim-confutils
+            nim-entrypoints
             nim-everywhere
             nim-json-serialization
             nim-pty
@@ -474,6 +475,7 @@ jobs:
             nim-chronicles
             nim-cli-spec
             nim-confutils
+            nim-entrypoints
             nim-everywhere
             nim-json-serialization
             nim-pty
@@ -1359,6 +1361,7 @@ jobs:
             nim-chronicles
             nim-cli-spec
             nim-confutils
+            nim-entrypoints
             nim-everywhere
             nim-json-serialization
             nim-pty

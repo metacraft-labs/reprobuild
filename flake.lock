@@ -1380,6 +1380,23 @@
         "type": "github"
       }
     },
+    "nim-entrypoints-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794942542,
+        "narHash": "sha256-2zjGCBISzkUw3tim4kUzm6sPPxyeLeX+PCrKYzbPjGk=",
+        "owner": "metacraft-labs",
+        "repo": "nim-entrypoints",
+        "rev": "8f2aa9253a5ce481ae92c4c6efb04e539df9ead4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "nim-entrypoints",
+        "rev": "8f2aa9253a5ce481ae92c4c6efb04e539df9ead4",
+        "type": "github"
+      }
+    },
     "nim-fork-src": {
       "flake": false,
       "locked": {
@@ -2589,6 +2606,7 @@
         "nim-cli-spec-src": "nim-cli-spec-src",
         "nim-confutils-src": "nim-confutils-src",
         "nim-csources-src": "nim-csources-src",
+        "nim-entrypoints-src": "nim-entrypoints-src",
         "nim-fork-src": "nim-fork-src",
         "nim-nimony-src": "nim-nimony-src",
         "nim-results-src": "nim-results-src",
