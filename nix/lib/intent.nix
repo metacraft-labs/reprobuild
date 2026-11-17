@@ -469,10 +469,48 @@ let
       "${xdgStateHome}/${location.path}"
     else
       throw "reprobuild.lib.profileBinPath: the profile bin directory of ${evaluation.host} on ${evaluation.target} is under `${location.base}`, which a Nix consumer does not manage";
+  # Every package name some host of the document selects on some target
+  # system: the union of the evaluation over the registry's hosts and every
+  # target the document can describe. What a realization source may be given
+  # for (realization-sources.nix): a mapping for a name outside it and outside
+  # the catalogs is not a canonical package, and one for a canonical name
+  # outside it is stale. Packages only (no concern classification is read).
+  selectedPackageNames =
+    doc:
+    let
+      hosts = doc.intent.hosts or { };
+      # A profile without a `hosts:` registry is host-agnostic: every host
+      # gets `default` (hosts.nix), so evaluate once for an anonymous host.
+      hostNames = if hosts == { } then [ "" ] else builtins.attrNames hosts;
+      perHost =
+        host:
+        concatMap (
+          system:
+          if refusalReason doc system != null then
+            [ ]
+          else
+            let
+              facts = platforms.factsFor system host;
+              enabled = hostSelection.enabledActivities hosts host;
+            in
+            concatMap (
+              a: if elem a.name enabled then map (p: p.name) (bodyPackages facts a.name a.body) else [ ]
+            ) doc.intent.activities
+        ) platforms.systems;
+    in
+    builtins.attrNames (
+      builtins.listToAttrs (
+        map (n: {
+          name = n;
+          value = true;
+        }) (concatMap perHost hostNames)
+      )
+    );
 in
 {
   inherit
     profileBinPath
+    selectedPackageNames
     evaluate
     refusalReason
     hostRefusalReason

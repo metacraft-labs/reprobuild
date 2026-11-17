@@ -2,6 +2,8 @@ import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
 import repro_test_support
+when defined(posix):
+  import repro_test_support/terminal_fixtures
 
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -418,32 +420,39 @@ suite "e2e_repro_exec_shell_artifact_consumers":
       check res.output.contains("arg1=<space arg>")
       check res.output.contains("arg2=<" & special & ">")
 
-    test "e2e_repro_shell_spawn_uses_cached_dev_env_artifact":
-      let c = prepareCase("repro-m4-shell-spawn")
-      defer: removeDir(c.tempRoot)
+    # POSIX only: the stand-in shell is a `#!/bin/sh` script, and the
+    # terminal it needs on standard input is a POSIX pseudo-terminal.
+    when defined(posix):
+      test "e2e_repro_shell_spawn_uses_cached_dev_env_artifact":
+        let c = prepareCase("repro-m4-shell-spawn")
+        defer: removeDir(c.tempRoot)
 
-      let markerPath = c.projectRoot / "shell-spawn.txt"
-      let shellPath = c.tempRoot / "spawn-shell"
-      writeFile(shellPath,
-        "#!/bin/sh\n" &
-        "printf 'spawn:%s:%s:%s:%s\\n' \"$PWD\" \"$AUX_VALUE\" " &
-          "\"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_ARTIFACT\" > " &
-          q(markerPath) & "\n")
-      setFilePermissions(shellPath, {fpUserRead, fpUserWrite, fpUserExec,
-        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+        let markerPath = c.projectRoot / "shell-spawn.txt"
+        let shellPath = c.tempRoot / "spawn-shell"
+        writeFile(shellPath,
+          "#!/bin/sh\n" &
+          "printf 'spawn:%s:%s:%s:%s\\n' \"$PWD\" \"$AUX_VALUE\" " &
+            "\"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_ARTIFACT\" > " &
+            q(markerPath) & "\n")
+        setFilePermissions(shellPath, {fpUserRead, fpUserWrite, fpUserExec,
+          fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
-      let statsPath = c.tempRoot / "spawn-stats.json"
-      let res = runRepro(c, @[
-        "shell", c.projectRoot, "--shell=" & shellPath,
-        "--dev-env-stats=" & statsPath
-      ])
-      check res.exitCode == 0
-      let stats = parseJson(readFile(statsPath))
-      let artifactPath = stats["artifactPath"].getStr()
-      check artifactPath.len > 0
-      check stats["command"].getStr() == "shell"
-      check stats["stats"]["providerIntrospectionLaunched"].getBool()
-      check stats["stats"]["artifactWriteLaunched"].getBool()
-      check stats.evidenceMentionsInput("dev-env-value.txt")
-      check readFile(markerPath).strip() ==
-        "spawn:" & c.projectRoot & ":alpha:dev:" & artifactPath
+        # Spawn mode starts an interactive shell, so it refuses a standard
+        # input that is not a terminal; give it a real one.
+        let statsPath = c.tempRoot / "spawn-stats.json"
+        let res = runWithTerminalStdin(c.reproBin, @[
+          "shell", c.projectRoot, "--shell=" & shellPath,
+          "--dev-env-stats=" & statsPath
+        ], c.repoRoot, c.tempRoot, c.envFor())
+        if res.code != 0:
+          checkpoint(res.stdout & res.stderr)
+        check res.code == 0
+        let stats = parseJson(readFile(statsPath))
+        let artifactPath = stats["artifactPath"].getStr()
+        check artifactPath.len > 0
+        check stats["command"].getStr() == "shell"
+        check stats["stats"]["providerIntrospectionLaunched"].getBool()
+        check stats["stats"]["artifactWriteLaunched"].getBool()
+        check stats.evidenceMentionsInput("dev-env-value.txt")
+        check readFile(markerPath).strip() ==
+          "spawn:" & c.projectRoot & ":alpha:dev:" & artifactPath

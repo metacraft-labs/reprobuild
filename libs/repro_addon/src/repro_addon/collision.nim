@@ -620,7 +620,9 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
   result.observedSha256 = o.sha256
   refuseLink(o, inp.address)
   refuseForeignDiversion(o, inp.address, inp.ledgerOwnsDiversion)
-  if o.exists and not o.isRegular:
+  let ownDangling = o.exists and not o.isRegular and o.ownLink and
+    inp.ledgerOwns
+  if o.exists and not o.isRegular and not ownDangling:
     raise newAddonCollisionError("refusing " & inp.address &
       ": " & o.path & " exists and is not a regular file")
   # Row 2: the ledger owns it -- unless a package came to own the path
@@ -640,6 +642,18 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
         "add-on should still own its content")
       raise e
   let attrs = if o.exists and o.isRegular: attributeMismatch(o, inp) else: ""
+  if ownDangling:
+    # The add-on's own link (exactly `/etc/X -> /etc/repro/static/X`) of a
+    # path the ledger owns, dangling: the static tree was flipped to one
+    # without the file -- what a failed link-to-copy switch leaves for its
+    # revert, and what the revert of a copy-to-link switch finds. It is the add-on's own
+    # object; it is materialised again (a link the reverted tree resolves,
+    # or a copy renamed over exactly this link), never refused as a
+    # foreign non-file.
+    result.verdict = cvUpdate
+    result.reason = "the add-on's own link, dangling after the static " &
+      "tree was flipped; materialised again"
+    return
   if inp.ledgerOwns:
     if o.exists and o.sha256 == inp.ledgerSha256:
       if o.sha256 == inp.desiredSha256 and attrs.len > 0:
@@ -924,6 +938,15 @@ type
     replay*: bool
       ## The plan is an interrupted switch's, replayed (spec §7.7): the
       ## switch may already have written this target before it stopped.
+    replacesOwnLink*: bool
+      ## The previous generation materialised this resource as the
+      ## add-on's own link (``/etc/X -> /etc/repro/static/X``, recorded in
+      ## the ledger as a link for this resource) and this one writes a
+      ## copy (an ``fs.systemFile`` that came to declare ``form = "copy"``,
+      ## ``mode`` or ``group``; ReproOS-Add-On-Mode §7.2 step 5). Step 3's
+      ## flip leaves that link dangling (the new tree does not carry the
+      ## file), so the guard judges it by the plan's observation of it, not
+      ## by what the new tree resolves it to (``preWriteRefusal``).
 
 proc plannedTarget*(address: string; inp: DecisionInputs; path: string;
                     dec: CollisionDecision; o: TargetObservation):
@@ -985,6 +1008,15 @@ proc preWriteRefusal*(d: CollisionDriver; t: PlannedTarget): string =
   if o.ownLink and o.sha256 == t.desiredSha256:
     # The static tree was flipped after the plan: the add-on's own link
     # now shows the planned bytes. That is the switch, not a change.
+    return ""
+  if o.ownLink and t.replacesOwnLink:
+    # Exactly the add-on's own link, which the plan observed (with the
+    # previous tree's bytes behind it) and decided to replace with a copy.
+    # The flip has since pointed `/etc/repro/static` at a tree without the
+    # file, so it may dangle: what it resolves to now is the switch's own
+    # doing, not a change under the plan. The copy is renamed over exactly
+    # this link (`AddOnMaterialisation.replacingLinkTo`); any other link
+    # was refused above (``linkComponent``, threat model G29).
     return ""
   if o.sha256 != expectedSha:
     return "refusing " & t.address & " at write time: " & t.path &

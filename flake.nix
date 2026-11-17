@@ -2547,7 +2547,9 @@
                 problems =
                   result.failures
                   ++ pkgs.lib.optional (result.controlFailures == [ ])
-                    "the control (the page without option ${result.controlOption}) passed, so the check proves nothing";
+                    "the control (the page without option ${result.controlOption}) passed, so the check proves nothing"
+                  ++ pkgs.lib.optional (reprobuildLib ? resolveRealizationSource && result.sourceControlFailures == [ ])
+                    "the realization-source control (the packages bullet without attribute) passed, so that comparison proves nothing";
               in
               pkgs.runCommand "reprobuild-lib-reference"
                 {

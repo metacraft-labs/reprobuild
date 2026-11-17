@@ -69,6 +69,7 @@ libs/repro_addon/tests/t_addon_floor_round15.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round16.nim	nim	12
 libs/repro_addon/tests/t_addon_floor_round17.nim	nim	28
 libs/repro_addon/tests/t_addon_floor_round18.nim	nim	8
+libs/repro_addon/tests/t_addon_floor_round19.nim	nim	20
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
@@ -109,7 +110,7 @@ libs/repro_addon/tests/t_addon_store_custody.nim	nim	7
 libs/repro_addon/tests/t_addon_store_verify.nim	nim	9
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
-libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.nim	nim	5
+libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.nim	nim	8
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	73
@@ -275,6 +276,7 @@ libs/repro_cas_store/tests/t_cas_store_occupancy_cost.nim	nim	10
 libs/repro_cas_store/tests/t_link_capability_facts.nim	nim	40
 libs/repro_cas_store/tests/t_link_capability_probe.nim	nim	20
 libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
+libs/repro_cli_support/tests/t_a_bare_selector_is_a_name_beside_a_same_named_path.nim	nim	6
 libs/repro_cli_support/tests/t_a_failing_producer_fetch_reports_why.nim	nim	1
 libs/repro_cli_support/tests/t_a_lock_rewrite_that_does_not_parse_is_refused.nim	nim	6
 libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim	nim	4
@@ -1299,6 +1301,7 @@ tests/e2e/addon/t_e2e_addon_compromised_fetch_cannot_write_etc.nim	nim	1
 tests/e2e/addon/t_e2e_addon_confirm_or_revert.nim	nim	1
 tests/e2e/addon/t_e2e_addon_custody_crash_points.nim	nim	1
 tests/e2e/addon/t_e2e_addon_debian_12_to_13_release_upgrade.nim	nim	1
+tests/e2e/addon/t_e2e_addon_declared_mode_file_is_a_private_copy.nim	nim	1
 tests/e2e/addon/t_e2e_addon_detectors_positive_controls.nim	nim	1
 tests/e2e/addon/t_e2e_addon_divert_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_drill_fetch_compromise.nim	nim	1
@@ -1857,6 +1860,7 @@ tests/integration/t_develop_all_ignores_an_unpublished_advisory_lock_ref.nim	nim
 tests/integration/t_develop_all_refuses_to_report_an_absent_checkout.nim	nim	1
 tests/integration/t_develop_all_reset_reconciles_drifted_sibling.nim	nim	1
 tests/integration/t_develop_at_rev_walks_to_nearest_locked_ancestor.nim	nim	1
+tests/integration/t_develop_bare_name_self_teaching_diagnostic.nim	nim	5
 tests/integration/t_develop_commit_keyed_backend_reads_only_the_key_record.nim	nim	4
 tests/integration/t_develop_composes_lock_set_without_a_committed_lock.nim	nim	1
 tests/integration/t_develop_dependency_modes_walk_a_real_depends_graph.nim	nim	1
@@ -2416,6 +2420,7 @@ tests/integration/t_shared_clone_cache_repacks_and_bounds_growth.nim	nim	2
 tests/integration/t_shared_clone_uses_full_repo_url_for_base_remote.nim	nim	1
 tests/integration/t_shared_clones_sweep_repairs_every_bare_in_the_cache.nim	nim	4
 tests/integration/t_shell_entry_reports_drift_over_the_applied_overrides.nim	nim	1
+tests/integration/t_shell_non_tty_refusal_and_inline_command.nim	nim	10
 tests/integration/t_shorthand_equals_to.nim	nim	1
 tests/integration/t_sibling_exact_pin_guidance.nim	nim	4
 tests/integration/t_signer_roster_rotation_and_revocation.nim	nim	22
@@ -2880,6 +2885,7 @@ tests/unit/t_same_project_fragment_selectors.nim	nim	12
 tests/unit/t_script_launcher.nim	nim	3
 tests/unit/t_several_recipe_modules_init_without_a_solve_each.nim	nim	3
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
+tests/unit/t_shell_stdin_terminal_detection.nim	nim	2
 tests/unit/t_sibling_prefix_clone.nim	nim	4
 tests/unit/t_sibling_source_paths_are_spelled_relative.nim	nim	5
 tests/unit/t_source_fetch_tool_metadata.nim	nim	8
@@ -2947,7 +2953,7 @@ tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_git.py	python	6
 tests/unit/test_release_native_packages.py	python	8
-tests/unit/test_release_smoke_dev_exec.py	python	20
+tests/unit/test_release_smoke_dev_exec.py	python	24
 tests/unit/test_release_tag_names_build.py	python	11
 tests/unit/test_reprobuild_suite_inventory.py	python	110
 tests/unit/test_sibling_lock_pins.py	python	10

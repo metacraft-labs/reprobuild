@@ -66,7 +66,7 @@ suite "A9 review round 18, B1: a fetch unit an older renderer wrote":
     check fetchOld != fetchNow
     check unitContentOf(migrated, AgentFetchUnit) != fetchOld
   test "the upgrade accepts it and re-points the migrated unit":
-    let r = repointEngine(migrated, E2, [E1], disk, rec, stored = stored)
+    let r = repointEngine(migrated, E2, [E1], disk, rec, stored = [stored])
     check r.exe == E2
     check unitContentOf(r.own, AgentFetchUnit) ==
       unitContentOf(migrated, AgentFetchUnit).replace(E1, E2)
@@ -77,7 +77,7 @@ suite "A9 review round 18, B1: a fetch unit an older renderer wrote":
           if p == unitPath(AgentFetchUnit): (true, sha256Hex("operator's")) else: disk(p),
         proc (p: string): string =
           if p == unitPath(AgentFetchUnit): sha256Hex("operator's") else: rec(p),
-        stored = stored)
+        stored = [stored])
 
 suite "A9 review round 18, M1: verify reports a dangling requires link":
   test "a link to nothing, or a unit systemd cannot load, is drift":
