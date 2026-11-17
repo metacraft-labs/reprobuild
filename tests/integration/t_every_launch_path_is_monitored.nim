@@ -858,7 +858,10 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # command already runs in and terminates it when anything is
                # still alive; on POSIX it answers false. It ends processes
                # and never starts one.
-               "endJobLeftovers"]),
+               "endJobLeftovers",
+               # Sizing data: copies a completion's memory profile and IO
+               # bytes into the finish. Pure, starts nothing.
+               "finishSizing"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
     # on the capability list with no surface at all. `startDirect` (L1),
     # `offerWithRunQuotaBatch` (L3) and `startGrantedWithRunQuota` (L3b)
@@ -901,6 +904,10 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "extNull", "extText", "extInt", "extReal",
                "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
                "denialDeadlockTimeoutMs",
+               # Sizing data: the switch read and the engine's `after` list
+               # stored on a running action for its finish. Neither starts
+               # anything.
+               "sizingDataEnabled", "declareAfter",
                # Build-wait pressure: the switch read, a one-way report on
                # the session's existing connection, and `repro pressure`,
                # which connects to the daemon and asks (`QueryPressure`).

@@ -15,10 +15,12 @@
 ## 1. for each referenced name that is not a bundled stdlib selector (for
 ##    those ``usesImportCode`` imports the stdlib module and never consults
 ##    the catalog), look the name up with ``reprobuildPackagesSearch``
-##    anchored at the PROFILE's own source file, so the catalog beside the
-##    profile (or above it), ``$REPROBUILD_PACKAGES_ROOT`` and the catalog
-##    beside the reprobuild sources are found in the order a recipe at that
-##    path would find them;
+##    anchored at the PROFILE's own source file, so ``$REPROBUILD_PACKAGES_ROOT``,
+##    the catalogs inside the profile's repository and the ONE external
+##    catalog selected for it (the one its ``repro.lock`` pins, or a
+##    develop-mode checkout of it; with no pin, the checkout beside the
+##    profile or above it, else the one beside the reprobuild sources) are
+##    found exactly as a recipe at that path would find them;
 ## 2. for the names a catalog defines, write a synthetic recipe whose
 ##    ``uses:`` lists them, and extract its interface with the real extractor
 ##    (``extractInterfaceFromModule``) with ``$REPROBUILD_PACKAGES_ROOT`` set

@@ -730,6 +730,11 @@ proc hooksActionFlags(): NimNode {.compileTime.} =
         "repo at PATH)"
     boolFlag recordStore is bool,
       help = "Register PATH as a git-checkout record store; implies --vcs"
+    boolFlag reAnchor is bool,
+      help = "With `ensure --vcs`: also replace managed hooks that demand a " &
+        "contract this build does not generate (plain `ensure` leaves " &
+        "them untouched and exits non-zero). Reconcile what supplies " &
+        "repro first"
     boolFlag shellDirenv is bool,
       help = "The direnv `.envrc` activation block"
     boolFlag shellAutocomplete is bool,

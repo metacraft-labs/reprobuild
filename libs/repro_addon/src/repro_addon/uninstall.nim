@@ -1558,9 +1558,10 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
   ## the ledger copy, so a re-run resumes and finishes the metadata, or the
   ## inputs already right.
   ##
-  ## The records directory's identity (``identityFile``, by default
+  ## The identity of the uninstall records' directory, recorded by
+  ## bootstrap (``identityFile``, by default
   ## ``record_dir.recordsDirIdentityPath`` of the ledger copy's state; §13
-  ## decision 178, amended in A11 round 21) is kept with the ledger copy
+  ## decision 178, amended in A11 round 21), is kept with the ledger copy
   ## and removed right after it, its directory joining the chain: while
   ## the ledger copy is there, a re-run still compares the records
   ## directory with it, so a swap refused once is refused again.

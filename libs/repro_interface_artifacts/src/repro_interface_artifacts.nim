@@ -4887,11 +4887,17 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
     try: hostCCompilerPath()
     except CatchableError: ""
   var dirs: seq[string] = @[]
-  # A lock-pinned catalog is verified by the compile helper. Resolve Git
-  # here, before isolation, and declare only that tool directory rather than
-  # inheriting the shell PATH. Other compiles retain their original PATH.
+  # A lock-pinned catalog the compile helper must materialize is fetched and
+  # verified with Git. Resolve Git here, before isolation, and declare only
+  # that tool directory rather than inheriting the shell PATH. A checkout
+  # selected in the pin's place -- at the pinned commit, or through develop
+  # mode -- is read in place and needs no Git, so those compiles, like every
+  # other, retain their original PATH. `$REPROBUILD_PACKAGES_ROOT` selects
+  # no pin at all.
   let catalogGit =
-    if catalogSelectionIdentity(modulePath).startsWith("catalog-locked:"):
+    if modulePath.len > 0 and
+        getEnv(ReprobuildPackagesRootEnv).len == 0 and
+        selectExternalCatalog(modulePath).kind == eckLockPinned:
       findExe("git")
     else: ""
   for tool in [nim, cc, catalogGit]:
