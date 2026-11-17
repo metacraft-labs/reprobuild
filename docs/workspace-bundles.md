@@ -248,6 +248,10 @@ captures differ.
   signed. What a hostile host can no longer do is write outside the bundle's
   declared paths: the Nix half is confined to the store paths it registers
   (and never touches a valid one), and the native-store half to exactly the
-  entries its contents list declares (see [Native-Store Bundles](store-bundles.md) §5). What
-  it can still do is serve different content at those paths, which is why
-  `https://` is required.
+  entries its contents list declares (see [Native-Store Bundles](store-bundles.md) §5). Nor
+  can it steer a download: the restorer checks every `latest.json` field that
+  names where a download goes (a half's `dir` must be exactly
+  `<system>/nix/<id>`, `sources/<id>` or `<system>/native-store/<id>`, and a
+  part name is one plain file name), and quotes every value it writes into
+  `curl`'s config. What it can still do is serve different content at those
+  paths, which is why `https://` is required.

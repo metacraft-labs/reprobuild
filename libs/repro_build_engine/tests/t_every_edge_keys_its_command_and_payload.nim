@@ -35,10 +35,11 @@
 
 import std/[options, os, strutils, tempfiles, unittest]
 
+import repro_test_support/reasoned_skip
+
 import repro_build_engine
 import repro_hash
 import repro_local_store
-import repro_test_support/reasoned_skip
 from repro_test_support import removeDirEventually
 
 const ReuseDecisions = {cdHit, cdHybridCutoff}
@@ -198,7 +199,7 @@ suite "one local action cache, two edges that differ only in what they do":
   test "a process edge whose flag changed re-runs":
     let sh = findExe("sh")
     if sh.len == 0:
-      skip("`sh` is not on PATH; this case runs a process edge through it")
+      skip("sh not on PATH; the edge under test runs a shell command")
     else:
       let root = createTempDir("repro-argv-key-", "")
       defer: removeDirEventually(root)

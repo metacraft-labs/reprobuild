@@ -227,36 +227,30 @@ suite "S7 every build-path engine config can reach the restore configuration":
     ## The negative spelling is asserted too — a mode with no way to turn it
     ## back off cannot be put in a shell profile.
     ##
-    ## The environment default goes through ONE helper,
-    ## ``restoreCachedOutputsEnvDefault``, and the assertion is that
-    ## ``getEnv`` for this variable appears nowhere else. Two commands read
-    ## it (``repro build`` and ``repro watch``) and two copies of a default
-    ## is how they come to disagree.
+    ## The environment default is read in ONE place: the flag's declaration
+    ## in repro's command-line description (`restoreCachedOutputsFlag`),
+    ## which the generated parser reads, and the assertion is that ``getEnv``
+    ## for this variable appears nowhere in the CLI. Two commands take the
+    ## flag (``repro build``, with ``bench`` and ``lint``, and ``repro
+    ## watch``), each splicing that one declaration, and two copies of a
+    ## default is how they come to disagree.
     ##
     ## Recorded because the milestone first got it backwards: the FLAG
     ## reaches a daemon-hosted build (the daemon re-parses the client's
-    ## ``request.rawArgs`` through ``runBuildCommand``), and it is the ENV
-    ## spelling that a daemon started earlier does not see. The env variable
-    ## is a session/CI convenience, not the only route in.
-    ##
-    ## `repro build` (and `bench` and `lint`) take their command line from
-    ## repro's command-line description, which declares the flag, its
-    ## `--no-` form and the variable it falls back to; the generated parser
-    ## reads the variable. `repro watch` still parses its own arguments and
-    ## reads the variable through the helper.
+    ## ``request.rawArgs`` through ``runBuildCommand``). The env variable is
+    ## a session/CI convenience, not the only route in.
     let source = cliSupportSource()
     let description = readFile(findRepoRoot() / "libs" /
       "repro_cli_support" / "src" / "repro_cli_support" /
       "cli_description.nim")
     check "boolFlag restoreCachedOutputs is bool, negatable = true,\n" &
       "      env = \"REPRO_RESTORE_CACHED_OUTPUTS\"," in description
-    check "restoreCachedOutputs = c.restoreCachedOutputs" in source
-    check "elif arg == \"--restore-cached-outputs\":" in source
-    check "elif arg == \"--no-restore-cached-outputs\":" in source
-    check "proc restoreCachedOutputsEnvDefault(): bool =" in source
-    check source.count("getEnv(\"REPRO_RESTORE_CACHED_OUTPUTS\")") == 1
-    # The definition and `repro watch`'s call.
-    check source.count("restoreCachedOutputsEnvDefault()") >= 2
+    check description.count("env = \"REPRO_RESTORE_CACHED_OUTPUTS\"") == 1
+    # `buildFlags` and `watchFlags` each splice the one declaration.
+    check description.count("let restore = restoreCachedOutputsFlag()") == 2
+    # `repro build`'s and `repro watch`'s reads of the parsed value.
+    check source.count("restoreCachedOutputs = c.restoreCachedOutputs") == 2
+    check source.count("getEnv(\"REPRO_RESTORE_CACHED_OUTPUTS\")") == 0
 
   test "the opt-in is not spelled out field by field at the call sites":
     ## ``enableCachedOutputRestore`` groups three fields that must move
