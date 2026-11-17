@@ -1605,7 +1605,13 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       removeFile(ledgerCopy)
       if hook != nil: hook("ledger-copy-removed", ledgerCopy)
       if keepId and (fileExists(idFile) or symlinkExists(idFile)):
-        removeFile(idFile)
+        try: removeFile(idFile)
+        except OSError as ex:
+          r.errors.add(idFile & ": " & ex.msg & "; the ledger copy is " &
+            "gone and the token " & tokenPath & " names what remains: " &
+            "uninstall, run again once the cause is cleared, finishes the " &
+            "removal")
+          return
       when mutated("inputs-removed-and-restored"):
         for (i, bytes) in saved.sortedByIt(it.i.path.len):
           if i.isDir: createDir(i.path)
@@ -1679,7 +1685,9 @@ proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       (fileExists(idFile) or symlinkExists(idFile)):
     try: removeFile(idFile)
     except OSError as ex:
-      r.errors.add(idFile & ": " & ex.msg & "; nothing was removed")
+      r.errors.add(idFile & ": " & ex.msg & "; nothing was removed, and " &
+        "the token " & tokenPath & " is kept: uninstall, run again once " &
+        "the cause is cleared, finishes the removal")
       return
   let (failed, err, gone) = removeChain(t.chain)
   if failed.len > 0:
