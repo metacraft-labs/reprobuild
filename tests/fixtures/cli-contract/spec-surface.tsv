@@ -1813,6 +1813,7 @@ flag	repro ci plan	--branch
 flag	repro ci plan	--current-repo
 flag	repro ci plan	--json
 flag	repro ci plan	--platform
+flag	repro ci plan	--registered-keys
 flag	repro ci plan	--workspace-root
 env	repro ci plan	GITHUB_BASE_REF
 env	repro ci plan	GITHUB_REF_NAME

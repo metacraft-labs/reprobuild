@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2943,
+    "nimTestBinaries": 2944,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 785,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2991
+    "testEntries": 2992
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1644,7 +1644,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1632,
+      "integration": 1633,
       "platform/destructive": 193,
       "pure unit": 785,
       "unclassified": 357
@@ -1861,9 +1861,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2943,
+    "nimTestBinaryCount": 2944,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2991
+    "testEntryCount": 2992
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -41307,6 +41307,21 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_ci_plan_reads_ci_trust_from_the_base_not_the_candidate.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_ci_plan_skips_only_on_a_key_store_the_job_owns",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_ci_plan_skips_only_on_a_key_store_the_job_owns.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
