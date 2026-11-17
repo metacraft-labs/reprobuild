@@ -489,12 +489,6 @@ proc runVersionCommand*(programName: string; asJson: bool): int =
 # declarations, like every migrated command's. The list of commands itself,
 # and the primary help, are generated already.
 const LegacyVerbSynopses = [
-  ("test",
-    "repro test [target...] [--shard K/N] [--certify|--no-certify] [build options]\n"),
-  ("certificates",
-    "repro certificates list|plan [SELECTOR...] [--no-certify] [--json]\n"),
-  ("watch",
-    "repro watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr] [--hcr-mode=direct|shlib] [--hcr-debug=embedded|external|none] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
@@ -9794,20 +9788,6 @@ proc measureSetText*(selection: MeasureSet): string =
       names.add($category)
   names.join(",")
 
-proc configuredMeasureSet(): MeasureSet =
-  let configured = getEnv("REPROBUILD_MEASURE", "")
-  if configured.len == 0:
-    return DefaultMeasureSet
-  parseMeasureCategories(DefaultMeasureSet, configured, "REPROBUILD_MEASURE")
-
-proc configuredShowSet(): MeasureSet =
-  ## Presentation defaults to nothing: a build prints progress and
-  ## diagnostics, not measurements, unless asked.
-  let configured = getEnv("REPROBUILD_SHOW", "")
-  if configured.len == 0:
-    return {}
-  parseMeasureCategories({}, configured, "REPROBUILD_SHOW")
-
 proc parseBuildLogMode(value: string): BuildLogMode =
   case value.toLowerAscii()
   of "actions", "verbose":
@@ -9848,12 +9828,6 @@ proc parseBuildDaemonMode(value, source: string): BuildDaemonMode =
     raise newException(ValueError,
       "unsupported " & source & "=" & value &
         " (expected auto, require, or off)")
-
-proc configuredBuildDaemonMode(): BuildDaemonMode =
-  let configured = getEnv("REPRO_DAEMON", "")
-  if configured.len == 0:
-    return bdmAuto
-  parseBuildDaemonMode(configured, "REPRO_DAEMON")
 
 proc supportsAnsiProgress(): bool =
   isatty(stderr) and getEnv("NO_COLOR", "").len == 0 and
@@ -12025,26 +11999,6 @@ proc cacheAttributionLines*(item: ActionResult): seq[string] =
     result.add("  cache-miss: " & item.cacheMissReason)
   if item.cachePublishSkipReason.len > 0:
     result.add("  cache-publish-skipped: " & item.cachePublishSkipReason)
-
-proc restoreCachedOutputsEnvDefault(): bool =
-  ## S7 — the ``REPRO_RESTORE_CACHED_OUTPUTS`` default behind
-  ## ``--restore-cached-outputs``, in one place because every command that
-  ## drives a build has to reach the same answer.
-  ##
-  ## The env spelling is a convenience, NOT a necessity, and the difference
-  ## matters because the milestone originally recorded the opposite. A
-  ## daemon-hosted build is not out of the flag's reach: the daemon
-  ## re-parses the client's ``request.rawArgs`` through ``runBuildCommand``,
-  ## so ``repro build --restore-cached-outputs`` reaches a daemon-hosted run
-  ## exactly like any other build flag. It is the ENV spelling that a daemon
-  ## does not carry across — ``getEnv`` inside the daemon reads the
-  ## environment the daemon was STARTED with, not the client's — so setting
-  ## the variable in a shell only takes effect for ``--daemon=off`` runs or
-  ## for a daemon started after it was set. The variable exists so the mode
-  ## can be turned on for a whole session or a whole CI job without editing
-  ## every invocation; the flag always wins over it.
-  getEnv("REPRO_RESTORE_CACHED_OUTPUTS").normalize in
-    ["1", "true", "yes", "on"]
 
 proc applyRunEdgeDevEnv(actions: var seq[BuildAction];
                         snapshot: ProviderGraphSnapshot;
@@ -16969,6 +16923,37 @@ proc buildRequestOf*(args: openArray[string]): Option[ReproCommandLineBuild] =
       CliSources(env: initTable[string, string]())).build)
   except CatchableError:
     none(ReproCommandLineBuild)
+
+proc loadTestCommandLine*(args: openArray[string]):
+    tuple[conf: ReproCommandLineTest, origin: ReproCommandLineTestOrigins] =
+  ## `repro test`'s arguments (the words after `test`), parsed by the parser
+  ## generated from repro's description, with where each value came from.
+  ## Raises `CliUsageError` for a command line the parser rejects.
+  let argv = @["test"] & @args
+  let (conf, origin) = ReproCommandLine.loadWithOrigins(argv,
+    CliSources(env: reproDeclaredEnvFor(argv)))
+  (conf.test, origin.test)
+
+proc loadCertifyCommandLine*(args: openArray[string]):
+    tuple[conf: ReproCommandLineCertify,
+          origin: ReproCommandLineCertifyOrigins] =
+  ## `repro certify`'s arguments (the words after `certify`), as
+  ## `loadTestCommandLine` parses `repro test`'s.
+  let argv = @["certify"] & @args
+  let (conf, origin) = ReproCommandLine.loadWithOrigins(argv,
+    CliSources(env: reproDeclaredEnvFor(argv)))
+  (conf.certify, origin.certify)
+
+proc loadWatchCommandLine*(args: openArray[string]):
+    tuple[conf: ReproCommandLineWatch, origin: ReproCommandLineWatchOrigins] =
+  ## `repro watch`'s arguments (the words after `watch`), as
+  ## `loadBuildCommandLine` parses `repro build`'s. Both routes into a watch
+  ## read them through this: the command line, and the daemon worker, which
+  ## watches from the client's `rawArgs` in the client's environment.
+  let argv = @["watch"] & @args
+  let (conf, origin) = ReproCommandLine.loadWithOrigins(argv,
+    CliSources(env: reproDeclaredEnvFor(argv)))
+  (conf.watch, origin.watch)
 
 proc runBuildCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
@@ -30800,11 +30785,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   var publishMaterialized = false
   var skipCmakeRegeneration = false
   # S7 — ``--restore-cached-outputs`` / ``--no-restore-cached-outputs``,
-  # over the ``REPRO_RESTORE_CACHED_OUTPUTS`` default. See
-  # ``restoreCachedOutputsEnvDefault`` for what the env spelling is and is
-  # not: the flag reaches a daemon-hosted build fine (the daemon re-parses
-  # ``request.rawArgs`` through this very proc), the env variable is the one
-  # that does not cross into a daemon started before it was set.
+  # over the ``REPRO_RESTORE_CACHED_OUTPUTS`` default (the flag declares
+  # it): the flag reaches a daemon-hosted build fine (the daemon re-parses
+  # ``request.rawArgs`` through this very proc).
   var restoreCachedOutputs = false
   var forwardedActionArgs: seq[string] = @[]
   # MO-1 — committed solved-graph lock. ``--lock <file>`` selects an
@@ -31003,9 +30986,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   publishMaterialized = c.publishMaterialized
   skipCmakeRegeneration = c.skipCmakeRegeneration
   # S7 — `--restore-cached-outputs` / `--no-restore-cached-outputs`, over
-  # the `REPRO_RESTORE_CACHED_OUTPUTS` default, which the flag declares. See
-  # `restoreCachedOutputsEnvDefault` for what the env spelling is and is
-  # not.
+  # the `REPRO_RESTORE_CACHED_OUTPUTS` default, which the flag declares
+  # (`restoreCachedOutputsFlag`; a session or CI job turns the mode on with
+  # the variable, without editing every invocation).
   restoreCachedOutputs = c.restoreCachedOutputs
   # `--runquota` / `--no-runquota` (the last one wins), over
   # `$REPROBUILD_NO_RUNQUOTA`, the documented full-bypass switch, which the
@@ -33085,11 +33068,12 @@ proc certificateNodeKindText(kind: CertificateNodeKind): string =
   of cnkAction: "action"
   of cnkTarget: "target"
 
-proc runCertificatesPolicyCommand*(args: openArray[string]): int
+proc runCertificatesPolicyCommand*(branchArg: string; branchGiven,
+                                   asJson: bool): int
   ## Test-Certificates TC-9b: `repro certificates policy`; defined beside
   ## the lock writer that records the snapshot it reads.
 
-proc runCertificatesCommand*(args: openArray[string];
+proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
                              publicCliPath: string): int =
   ## ``repro certificates list [--json]`` prints the certificate names the
   ## current project declares and the node each marks, implicit ``test``
@@ -33097,47 +33081,42 @@ proc runCertificatesCommand*(args: openArray[string];
   ## [--json]`` prints the certificate-producing nodes the plan for
   ## ``SELECTOR...`` materializes (``test`` when none is given, as for
   ## ``repro test``), with their repositories. Both read the project's stored
-  ## graph; neither builds, runs a test or issues a certificate.
-  const usage = "usage: repro certificates list [--json] " &
-    "[--tool-provisioning=MODE] [--no-runquota]\n" &
-    "       repro certificates plan [SELECTOR...] [--no-certify] [--json] " &
-    "[--tool-provisioning=MODE] [--no-runquota]\n" &
-    "       repro certificates policy [--branch BRANCH] [--json]"
-  if args.len == 0 or args[0] in ["-h", "--help", "help"]:
-    stderr.writeLine(usage)
-    return (if args.len == 0: 2 else: 0)
-  let sub = args[0]
-  if sub == "policy":
-    return runCertificatesPolicyCommand(args[1 .. ^1])
-  if sub notin ["list", "plan"]:
-    stderr.writeLine("repro certificates: unknown subcommand: " & sub)
-    stderr.writeLine(usage)
-    return 2
+  ## graph; neither builds, runs a test or issues a certificate. The command
+  ## line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``).
+  type Cmd = ReproCommandLineCertificatesCommand
+  var sub = ""
   var asJson = false
   var noCertify = false
-  # ``REPROBUILD_NO_RUNQUOTA`` is the documented full bypass, honoured as the
-  # default exactly as the build's own parser does (``runBuildCommand``).
-  var bypassRunQuota = runQuotaBypassedByEnv()
-  var mode = tpmPathOnly
+  # ``--no-runquota`` over ``REPROBUILD_NO_RUNQUOTA``, the documented full
+  # bypass, which the flag declares (as the build's does).
+  var bypassRunQuota = false
+  var toolProvisioning = ""
   var selectors: seq[string] = @[]
-  for i in 1 ..< args.len:
-    let arg = args[i]
-    if arg == "--json":
-      asJson = true
-    elif arg == "--no-certify" and sub == "plan":
-      noCertify = true
-    elif arg == "--no-runquota":
-      bypassRunQuota = true
-    elif arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(arg["--tool-provisioning=".len .. ^1])
-    elif arg.startsWith("-"):
-      stderr.writeLine("repro certificates " & sub & ": unknown flag: " & arg)
-      return 2
-    elif sub == "plan":
-      selectors.add(arg)
-    else:
-      stderr.writeLine("repro certificates list: unexpected argument: " & arg)
-      return 2
+  case conf.command
+  of Cmd.help:
+    stdout.write(ReproCommandLine.helpText(@["certificates"] &
+      conf.help.topic))
+    return 0
+  of Cmd.policy:
+    let c = conf.policy
+    return runCertificatesPolicyCommand(c.branch.get(""), c.branch.isSome,
+      c.json)
+  of Cmd.list:
+    sub = "list"
+    asJson = conf.list.json
+    bypassRunQuota = conf.list.noRunquota
+    toolProvisioning = conf.list.toolProvisioning
+  of Cmd.plan:
+    sub = "plan"
+    asJson = conf.plan.json
+    noCertify = conf.plan.noCertify
+    bypassRunQuota = conf.plan.noRunquota
+    toolProvisioning = conf.plan.toolProvisioning
+    selectors = conf.plan.selectors
+  let mode =
+    if toolProvisioning.len > 0: parseToolProvisioning(toolProvisioning)
+    else: tpmPathOnly
   var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
   try:
@@ -35162,14 +35141,6 @@ proc runDebugArtifactCommand(c: ReproCommandLineDebugArtifact): int =
     discard
   0
 
-proc parsePositiveIntFlag(flagName, value: string): int =
-  try:
-    result = parseInt(value)
-  except ValueError:
-    raise newException(ValueError, flagName & " must be an integer")
-  if result <= 0:
-    raise newException(ValueError, flagName & " must be greater than zero")
-
 type
   HcrWatchConfig = object
     targetName: string
@@ -36098,34 +36069,16 @@ proc deliverHcrWatchPatch(session: var HcrWatchSession;
 type
   WatchCtIncrementalFlags* = object
     ## Trace-Based-Incremental-Testing M2: the two ``repro watch`` flags that
-    ## control runtime-incremental skip/re-run. Parsed by
-    ## ``applyWatchCtIncrementalFlag`` from the same argument loop that parses
-    ## every other watch flag, so the test that drives this parser exercises the
-    ## real CLI surface (no duplicated grammar).
+    ## control runtime-incremental skip/re-run, from the command line's
+    ## configuration (``--ct-incremental``, ``--ct-incremental-trace-dir``).
     enabled*: bool        ## Set by ``--ct-incremental``.
     traceDir*: string     ## Set by ``--ct-incremental-trace-dir=PATH``.
 
-proc applyWatchCtIncrementalFlag*(flags: var WatchCtIncrementalFlags;
-                                  arg: string): bool =
-  ## Apply a single CLI argument to `flags` if it is one of the M2
-  ## ct-incremental flags. Returns ``true`` when `arg` was consumed (so the
-  ## caller's elif chain can stop), ``false`` when it is some other flag.
-  ##
-  ## A bare ``--ct-incremental-trace-dir`` (no inline value) raises the same
-  ## ``ValueError`` shape as the other value-taking watch flags — the value is
-  ## mandatory, never silently empty.
-  if arg == "--ct-incremental":
-    flags.enabled = true
-    true
-  elif arg.startsWith("--ct-incremental-trace-dir="):
-    flags.traceDir = arg.split("=", maxsplit = 1)[1]
-    true
-  elif arg == "--ct-incremental-trace-dir":
-    raise newException(ValueError,
-      "--ct-incremental-trace-dir requires an inline value, for example " &
-        "--ct-incremental-trace-dir=.repro/ct-trace")
-  else:
-    false
+type
+  WatchCommandLineError* = object of ValueError
+    ## A `repro watch` command line the generated parser accepts and the
+    ## watch refuses (a `--max-cycles` or `--debounce-ms` that is not
+    ## positive, a malformed `--hcr-target`): a usage error, exit 2.
 
 proc runWatchCommand(args: openArray[string]; publicCliPath: string;
                      forceDirect = false;
@@ -36142,8 +36095,8 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # Measurement axes (CLI/README.md §"Measurement: Collect, Present, Persist").
   # ``repro watch`` drives the same engine as ``repro build``, so it carries
   # the same three axes rather than a private subset.
-  var showSet = configuredShowSet()
-  var measureSet = configuredMeasureSet()
+  var showSet: MeasureSet = {}
+  var measureSet = DefaultMeasureSet
   var measureExplicit = false
   var showExplicit = false
   var reportPersistence = BuildReportPersistence()
@@ -36156,7 +36109,6 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # exercises it).
   var hcrTargetConfigs: seq[HcrWatchConfig] = @[]
   var daemonMode = bdmAuto
-  var daemonModeExplicit = false
   var detach = false
   var attachSessionId = ""
   var stopSessionId = ""
@@ -36175,207 +36127,151 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # all seven engine configs were: nobody looked at it. Wired rather than
   # recorded as a gap, because a watch loop is precisely where restoring a
   # deleted output instead of rebuilding it pays off.
-  var restoreCachedOutputs = restoreCachedOutputsEnvDefault()
+  var restoreCachedOutputs = false
 
-  for arg in args:
-    if arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--tool-provisioning":
-      raise newException(ValueError,
-        "--tool-provisioning requires an inline value, for example " &
-          "--tool-provisioning=path")
-    elif arg.startsWith("--work-root="):
-      workRoot = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--work-root":
-      raise newException(ValueError,
-        "--work-root requires an inline value, for example --work-root=.repro")
-    elif arg.startsWith("--max-cycles="):
-      maxCycles = parsePositiveIntFlag("--max-cycles",
-        arg.split("=", maxsplit = 1)[1])
-    elif arg.startsWith("--debounce-ms="):
-      debounceMs = parsePositiveIntFlag("--debounce-ms",
-        arg.split("=", maxsplit = 1)[1])
-    elif arg.startsWith("--daemon="):
-      daemonMode = parseBuildDaemonMode(arg.split("=", maxsplit = 1)[1],
-        "--daemon")
-      daemonModeExplicit = true
-    elif arg == "--daemon":
-      raise newException(ValueError,
-        "--daemon requires an inline value, for example --daemon=require")
-    elif arg == "--detach":
-      detach = true
-    elif arg == "--write-stats" or arg.startsWith("--write-stats="):
-      statsCapture.enabled = true
-      if statsCapture.groups.card == 0:
-        statsCapture.groups = AllStatsCaptureGroups
-        statsCapture.raw = "all"
-      if arg.startsWith("--write-stats="):
-        statsCapture.storePath = arg.split("=", maxsplit = 1)[1]
-    elif arg.startsWith("--stats-groups="):
-      statsCapture = parseStatsCaptureGroups(arg.split("=", maxsplit = 1)[1],
-        statsCapture.storePath)
-    elif arg == "--stats-groups":
-      raise newException(ValueError,
-        "--stats-groups requires an inline value, for example " &
-          "--stats-groups=timing,cache")
-    elif arg.startsWith("--measure="):
-      if not measureExplicit:
-        measureSet = {}
-        measureExplicit = true
-      measureSet = parseMeasureCategories(measureSet,
-        arg.split("=", maxsplit = 1)[1], "--measure")
-    elif arg == "--measure":
-      raise newException(ValueError,
-        "--measure requires an inline value, for example --measure=timing")
-    elif arg.startsWith("--show="):
-      if not showExplicit:
-        showSet = {}
-        showExplicit = true
-      showSet = parseMeasureCategories(showSet,
-        arg.split("=", maxsplit = 1)[1], "--show")
-    elif arg == "--show":
-      raise newException(ValueError,
-        "--show requires an inline value, for example --show=timing")
-    elif arg == "--write-report" or arg.startsWith("--write-report="):
-      reportPersistence.requested = true
-      if arg.startsWith("--write-report="):
-        reportPersistence.path = arg["--write-report=".len .. ^1]
-    elif arg == "--no-write-report":
-      reportPersistence.suppressed = true
-    elif arg == "--restore-cached-outputs":
-      restoreCachedOutputs = true
-    elif arg == "--no-restore-cached-outputs":
-      restoreCachedOutputs = false
-    elif arg.startsWith("--attach="):
-      attachSessionId = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--attach":
-      raise newException(ValueError,
-        "--attach requires an inline session id, for example --attach=watch-...")
-    elif arg.startsWith("--stop="):
-      stopSessionId = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--stop":
-      raise newException(ValueError,
-        "--stop requires an inline session id, for example --stop=watch-...")
-    elif arg == "--hcr":
-      hcrConfig.enabled = true
-    elif arg.startsWith("--hcr-mode="):
-      let val = arg.split("=", maxsplit = 1)[1]
-      if val != "direct" and val != "shlib":
-        raise newException(ValueError,
-          "--hcr-mode must be 'direct' or 'shlib', got '" & val & "'")
-      hcrConfig.mode = val
-    elif arg == "--hcr-mode":
-      raise newException(ValueError,
-        "--hcr-mode requires an inline value, for example --hcr-mode=direct")
-    elif arg.startsWith("--hcr-debug="):
-      let val = arg.split("=", maxsplit = 1)[1]
-      if val != "embedded" and val != "external" and val != "none":
-        raise newException(ValueError,
-          "--hcr-debug must be 'embedded', 'external', or 'none', got '" & val & "'")
-      hcrConfig.debug = val
-    elif arg == "--hcr-debug":
-      raise newException(ValueError,
-        "--hcr-debug requires an inline value, for example --hcr-debug=embedded")
-    elif arg.startsWith("--hcr-agent-socket="):
-      hcrConfig.socketPath = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--hcr-agent-socket":
-      raise newException(ValueError,
-        "--hcr-agent-socket requires an inline value, for example " &
-          "--hcr-agent-socket=/tmp/repro-hcr.sock")
-    elif arg.startsWith("--hcr-artifacts="):
-      hcrConfig.artifacts = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--hcr-artifacts":
-      raise newException(ValueError,
-        "--hcr-artifacts requires an inline value, for example " &
-          "--hcr-artifacts=.repro/hcr")
-    elif arg.startsWith("--hcr-metadata="):
-      hcrConfig.metadataPath = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--hcr-metadata":
-      raise newException(ValueError,
-        "--hcr-metadata requires an inline value, for example " &
-          "--hcr-metadata=build/hcr-metadata.json")
-    elif arg.startsWith("--hcr-target="):
-      # Named-Targets M4 + M5: repeatable per-target HCR binding.
-      # Two shapes are accepted (the parser picks based on the first
-      # token):
-      #   1. Legacy colon-delimited NAME:SOCKET:ARTIFACTS[:METADATA].
-      #      Fine when NAME is a bare implicit name with no ``:``.
-      #   2. M5 key=value form ``name=NAME,socket=SOCKET,artifacts=
-      #      ARTIFACTS[,metadata=METADATA]`` so a qualified
-      #      ``<package>:<name>`` target like ``pkgA:cli`` survives
-      #      without colliding with the SOCKET position. The key=value
-      #      shape is recognised when the raw value starts with
-      #      ``name=`` — any other input falls through to the colon
-      #      parser so existing CLI invocations stay byte-compatible.
-      let raw = arg.split("=", maxsplit = 1)[1]
-      var perTarget: HcrWatchConfig
-      if raw.startsWith("name="):
-        # M5 structured form. Split on ``,`` and unpack each
-        # ``key=value`` pair. Required keys: ``name``, ``socket``,
-        # ``artifacts``; optional: ``metadata``. Whitespace inside
-        # values is preserved, but the parser does not unescape ``,``
-        # (paths should not contain literal commas; if that ever
-        # bites we can promote to a JSON form).
-        var nameVal = ""
-        var socketVal = ""
-        var artifactsVal = ""
-        var metadataVal = ""
-        for pair in raw.split(','):
-          let eq = pair.find('=')
-          if eq <= 0:
-            raise newException(ValueError,
-              "--hcr-target: expected key=value pair, got '" & pair & "'")
-          let key = pair[0 ..< eq]
-          let value = pair[eq + 1 .. ^1]
-          case key
-          of "name": nameVal = value
-          of "socket": socketVal = value
-          of "artifacts": artifactsVal = value
-          of "metadata": metadataVal = value
-          else:
-            raise newException(ValueError,
-              "--hcr-target: unknown key '" & key &
-                "' (expected name|socket|artifacts|metadata)")
-        if nameVal.len == 0 or socketVal.len == 0 or artifactsVal.len == 0:
-          raise newException(ValueError,
-            "--hcr-target structured form requires non-empty " &
-              "name=, socket=, and artifacts= keys (got '" & raw & "')")
-        perTarget.targetName = nameVal
-        perTarget.socketPath = socketVal
-        perTarget.artifacts = artifactsVal
-        perTarget.metadataPath = metadataVal
-      else:
-        # Legacy colon-delimited NAME:SOCKET:ARTIFACTS[:METADATA].
-        let parts = raw.split(':')
-        if parts.len < 3 or parts.len > 4 or parts[0].len == 0 or
-            parts[1].len == 0 or parts[2].len == 0:
-          raise newException(ValueError,
-            "--hcr-target expects NAME:SOCKET:ARTIFACTS[:METADATA] " &
-              "or name=NAME,socket=SOCKET,artifacts=ARTIFACTS" &
-              "[,metadata=METADATA] (got '" & raw & "')")
-        perTarget.targetName = parts[0]
-        perTarget.socketPath = parts[1]
-        perTarget.artifacts = parts[2]
-        if parts.len == 4:
-          perTarget.metadataPath = parts[3]
-      hcrTargetConfigs.add(perTarget)
-    elif arg == "--hcr-target":
-      raise newException(ValueError,
-        "--hcr-target requires an inline value, for example " &
-          "--hcr-target=alpha:/tmp/a.sock:.repro/hcr-alpha " &
-          "or --hcr-target=name=pkgA:cli,socket=/tmp/a.sock," &
-          "artifacts=.repro/hcr-alpha")
-    elif applyWatchCtIncrementalFlag(ctFlags, arg):
-      # Trace-Based-Incremental-Testing M2: ``--ct-incremental`` /
-      # ``--ct-incremental-trace-dir=PATH`` consumed by the shared parser.
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported watch flag: " & arg)
+  # The command line, parsed by the parser generated from repro's
+  # description (`watchFlags` in `repro_cli_support/cli_description`), with
+  # where each value came from: the command line, the environment variable
+  # the flag declares, or neither. The daemon worker re-runs this proc on
+  # the client's `rawArgs`, in the client's environment.
+  let (c, origin) = loadWatchCommandLine(originalArgs)
+  # `--tool-provisioning` over `$REPRO_TOOL_PROVISIONING` (the flag declares
+  # it); with neither, the project's `defaultToolProvisioning`, resolved per
+  # cycle inside ``executeBuildTarget``.
+  if c.toolProvisioning.len > 0:
+    mode = parseToolProvisioning(c.toolProvisioning)
+  workRoot = c.workRoot
+  if givenOnCommandLine(origin.maxCycles):
+    if c.maxCycles <= 0:
+      raise newException(WatchCommandLineError,
+        "--max-cycles must be greater than zero")
+    maxCycles = c.maxCycles
+  if givenOnCommandLine(origin.debounceMs) and c.debounceMs <= 0:
+    raise newException(WatchCommandLineError,
+      "--debounce-ms must be greater than zero")
+  debounceMs = c.debounceMs
+  # `--daemon` over `$REPRO_DAEMON` (the flag declares it); with neither,
+  # auto.
+  if c.daemon.len > 0:
+    daemonMode = parseBuildDaemonMode(c.daemon,
+      if givenOnCommandLine(origin.daemon): "--daemon" else: "REPRO_DAEMON")
+  detach = c.detach
+  # Section filter over the analytics store, as for `repro build`: naming a
+  # group enables the sink; bare `--write-stats` enables it at the
+  # conventional store with every group, `=PATH` names the store.
+  let statsStorePath = c.writeStats.get("")
+  if c.statsGroups.isSome:
+    statsCapture = parseStatsCaptureGroups(c.statsGroups.get, statsStorePath)
+  if c.writeStats.isSome:
+    statsCapture.enabled = true
+    if statsCapture.groups.card == 0:
+      statsCapture.groups = AllStatsCaptureGroups
+      statsCapture.raw = "all"
+    statsCapture.storePath = statsStorePath
+  # COLLECT axis, as for `repro build`: the flag starts from the empty set
+  # and replaces `$REPROBUILD_MEASURE`, which adds to the default set.
+  case origin.measure.winner.kind
+  of cokCli:
+    measureExplicit = true
+    measureSet = {}
+    for value in c.measure:
+      measureSet = parseMeasureCategories(measureSet, value, "--measure")
+  of cokEnv:
+    for value in c.measure:
+      measureSet = parseMeasureCategories(measureSet, value,
+        "REPROBUILD_MEASURE")
+  else:
+    discard
+  # PRESENT axis: `--show` over `$REPROBUILD_SHOW`.
+  showExplicit = givenOnCommandLine(origin.show)
+  showSet = {}
+  for value in c.show:
+    showSet = parseMeasureCategories(showSet, value,
+      if showExplicit: "--show" else: "REPROBUILD_SHOW")
+  reportPersistence.requested = c.writeReport.isSome
+  reportPersistence.path = c.writeReport.get("")
+  reportPersistence.suppressed = c.noWriteReport
+  # S7: `--[no-]restore-cached-outputs` over `$REPRO_RESTORE_CACHED_OUTPUTS`,
+  # which the flag declares.
+  restoreCachedOutputs = c.restoreCachedOutputs
+  attachSessionId = c.attach
+  stopSessionId = c.stop
+  hcrConfig.enabled = c.hcr
+  hcrConfig.mode = c.hcrMode
+  hcrConfig.debug = c.hcrDebug
+  hcrConfig.socketPath = c.hcrAgentSocket
+  hcrConfig.artifacts = c.hcrArtifacts
+  hcrConfig.metadataPath = c.hcrMetadata
+  for raw in c.hcrTarget:
+    # Named-Targets M4 + M5: repeatable per-target HCR binding. Two
+    # shapes of the value are accepted (picked by its first token):
+    #   1. Legacy colon-delimited NAME:SOCKET:ARTIFACTS[:METADATA].
+    #      Fine when NAME is a bare implicit name with no ``:``.
+    #   2. M5 key=value form ``name=NAME,socket=SOCKET,artifacts=
+    #      ARTIFACTS[,metadata=METADATA]`` so a qualified
+    #      ``<package>:<name>`` target like ``pkgA:cli`` survives
+    #      without colliding with the SOCKET position. The key=value
+    #      shape is recognised when the value starts with ``name=``;
+    #      any other value is read in the colon form.
+    var perTarget: HcrWatchConfig
+    if raw.startsWith("name="):
+      # M5 structured form. Split on ``,`` and unpack each
+      # ``key=value`` pair. Required keys: ``name``, ``socket``,
+      # ``artifacts``; optional: ``metadata``. Whitespace inside
+      # values is preserved, but ``,`` is not unescaped (paths should
+      # not contain literal commas; if that ever bites we can promote to
+      # a JSON form).
+      var nameVal = ""
+      var socketVal = ""
+      var artifactsVal = ""
+      var metadataVal = ""
+      for pair in raw.split(','):
+        let eq = pair.find('=')
+        if eq <= 0:
+          raise newException(WatchCommandLineError,
+            "--hcr-target: expected key=value pair, got '" & pair & "'")
+        let key = pair[0 ..< eq]
+        let value = pair[eq + 1 .. ^1]
+        case key
+        of "name": nameVal = value
+        of "socket": socketVal = value
+        of "artifacts": artifactsVal = value
+        of "metadata": metadataVal = value
+        else:
+          raise newException(WatchCommandLineError,
+            "--hcr-target: unknown key '" & key &
+              "' (expected name|socket|artifacts|metadata)")
+      if nameVal.len == 0 or socketVal.len == 0 or artifactsVal.len == 0:
+        raise newException(WatchCommandLineError,
+          "--hcr-target structured form requires non-empty " &
+            "name=, socket=, and artifacts= keys (got '" & raw & "')")
+      perTarget.targetName = nameVal
+      perTarget.socketPath = socketVal
+      perTarget.artifacts = artifactsVal
+      perTarget.metadataPath = metadataVal
     else:
-      # Named-Targets M3: watch inherits the M2 multi-selector surface.
-      # Classification into path vs. name selectors happens below via
-      # the shared ``parseAndResolveSelectors`` helper.
-      positionalSelectors.add(arg)
+      # Legacy colon-delimited NAME:SOCKET:ARTIFACTS[:METADATA].
+      let parts = raw.split(':')
+      if parts.len < 3 or parts.len > 4 or parts[0].len == 0 or
+          parts[1].len == 0 or parts[2].len == 0:
+        raise newException(WatchCommandLineError,
+          "--hcr-target expects NAME:SOCKET:ARTIFACTS[:METADATA] " &
+            "or name=NAME,socket=SOCKET,artifacts=ARTIFACTS" &
+            "[,metadata=METADATA] (got '" & raw & "')")
+      perTarget.targetName = parts[0]
+      perTarget.socketPath = parts[1]
+      perTarget.artifacts = parts[2]
+      if parts.len == 4:
+        perTarget.metadataPath = parts[3]
+    hcrTargetConfigs.add(perTarget)
+  # Trace-Based-Incremental-Testing M2: ``--ct-incremental`` and
+  # ``--ct-incremental-trace-dir=PATH``.
+  ctFlags.enabled = c.ctIncremental
+  ctFlags.traceDir = c.ctIncrementalTraceDir
+  # Named-Targets M3: watch inherits the M2 multi-selector surface.
+  # Classification into path vs. name selectors happens below via the
+  # shared ``parseAndResolveSelectors`` helper.
+  positionalSelectors = c.selectors
 
   if hcrConfig.enabled and hcrTargetConfigs.len == 0:
     if hcrConfig.socketPath.len == 0:
@@ -36396,9 +36292,6 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
 
   if (hcrConfig.hcrWatchEnabled or hcrTargetConfigs.len > 0) and not reportPersistence.suppressed:
     reportPersistence.requested = true
-
-  if not daemonModeExplicit:
-    daemonMode = configuredBuildDaemonMode()
 
   measureSet = measureSet + showSet
   if statsCapture.enabled:
@@ -36468,15 +36361,11 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   let targetWasOmitted = resolved.targetWasOmitted
   if target.len == 0:
     target = "."
-  # Tool-provisioning resolution mirrors ``repro build`` (CLI/watch.md): an
-  # explicit ``--tool-provisioning`` flag wins, else the
-  # ``REPRO_TOOL_PROVISIONING`` env var, else the project's
-  # ``defaultToolProvisioning`` — the last tier resolved per build cycle inside
-  # ``executeBuildTarget``. ``repro watch`` and ``repro watch <target>`` must
-  # therefore work WITHOUT a mandatory CLI flag, just like a one-shot build;
-  # only the env tier can be applied here (the interface is loaded per cycle),
-  # so apply it and let ``executeBuildTarget`` resolve the project default.
-  mode = resolveToolProvisioningWithEnv(mode)
+  # Tool provisioning (read above) mirrors ``repro build``:
+  # ``repro watch`` and ``repro watch <target>`` work WITHOUT the flag, just
+  # like a one-shot build; ``executeBuildTarget`` resolves the project's
+  # ``defaultToolProvisioning`` per cycle when neither the flag nor
+  # ``$REPRO_TOOL_PROVISIONING`` names a mode.
   # Windows: kqueue gate dropped — Windows now reaches the live watch loop
   # via ReadDirectoryChangesW in repro_cli_support/watch. Linux still
   # surfaces the deferred-backend OSError from openFilesystemWatcher.
@@ -41419,6 +41308,24 @@ proc installUserDaemonWatchExecutor() =
           @[], "")
         emit(bekFinished, "", true, 2, "error",
           "{\"diagnostic\":\"unknown_target\"}", @[], "")
+        result = 2
+      except CliUsageError as err:
+        # The worker parses the client's `rawArgs` in the client's
+        # environment (`loadWatchCommandLine`), so a refusal here is the one
+        # the direct path gives: its text and the usage exit code (2).
+        emit(bekDiagnostic, renderReproUsageError(err), false, 0, "error",
+          "{\"stream\":\"stderr\",\"diagnostic\":\"usage\"}", @[], "")
+        emit(bekFinished, "", true, err.exitCode, "error",
+          "{\"diagnostic\":\"usage\"}", @[], "")
+        result = err.exitCode
+      except WatchCommandLineError as err:
+        # A command line the parser accepts and the watch refuses: the usage
+        # error the direct dispatch (`runWatchVerbCommand`) reports.
+        emit(bekDiagnostic, "repro watch: " & err.msg & "\n", false, 0,
+          "error", "{\"stream\":\"stderr\",\"diagnostic\":\"usage\"}",
+          @[], "")
+        emit(bekFinished, "", true, 2, "error", "{\"diagnostic\":\"usage\"}",
+          @[], "")
         result = 2
     finally:
       try:
@@ -86268,10 +86175,11 @@ type
     fixturePath: string
     binDir: string
     reportPath: string
-    buildFlags: seq[string]        # Build-only flags retained for the
-                                   # non-sharded ``repro build test`` alias.
-    daemonFlag: string             # ``--daemon=on|off|auto`` carry-through
-                                   # for the verb-alias path.
+    buildFlags: seq[string]
+      ## The build's command line: every `repro build` flag given on this
+      ## command line (``buildWordsOf``), for the build the verb-alias and
+      ## certifying paths run. Selectors and the words after ``--`` are not
+      ## in it.
     lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
                                    # the alternate committed solved-graph
                                    # lock, forwarded to ``runBuildCommand``
@@ -86310,9 +86218,67 @@ type
       ## any ``REPRO_ALLOW_PIN_REGRESSION`` names. The same rule the managed
       ## ``pre-commit`` hook applies, given on the command line because here
       ## the user does invoke the command.
+    actionArgs: seq[string]
+      ## The words after ``--``, forwarded to the action the build selects,
+      ## as for ``repro build``.
+    workRoot: string
+      ## ``--work-root``, for the certificate plan's read of the graph.
+    bypassRunQuota: bool
+      ## ``--no-runquota`` over ``REPROBUILD_NO_RUNQUOTA`` (``--runquota``
+      ## overrides both), for the certificate plan's own edges.
+    executesTests: bool
+      ## Whether the run executes the tests: false for a dry run, a listing,
+      ## a solved-graph print and a prepare-only pass, which have nothing to
+      ## attest.
+    variants: seq[string]
+      ## ``--variant`` (and ``--release`` / ``--debug``) assignments, in
+      ## command-line order, then ``--target``'s ``targetTriple``
+      ## assignment (canonicalised; none for ``native``), the order the
+      ## build appends them in. ``runReproTest`` exports them as
+      ## ``REPRO_VARIANTS`` for everything the run evaluates itself (the
+      ## certificate plan, the lock refresh, the sharded path's providers);
+      ## each build it runs gets them from its own command line
+      ## (``buildFlags``) instead, starting from ``callerVariants``.
+    callerVariants: Option[string]
+      ## ``REPRO_VARIANTS`` as the caller set it (none when unset), which
+      ## ``runTestBuildCommand`` restores around each build so the build's
+      ## own ``--variant`` words are not added twice.
 
 proc emitShardDiagnostic(msg: string) =
   stderr.writeLine("repro test: error: " & msg)
+
+proc exportTestVariants(opts: var ReproTestShardOpts) =
+  ## Records the caller's ``REPRO_VARIANTS`` in ``opts`` and appends the
+  ## run's variant assignments to it, as ``repro test`` has always done
+  ## before reading anything: the certificate plan and the lock refresh
+  ## evaluate the recipe under the variants the build will use.
+  opts.callerVariants =
+    if existsEnv("REPRO_VARIANTS"): some(getEnv("REPRO_VARIANTS"))
+    else: none(string)
+  for spec in opts.variants:
+    var existing = getEnv("REPRO_VARIANTS")
+    if existing.len > 0:
+      existing.add(',')
+    existing.add(spec)
+    putEnv("REPRO_VARIANTS", existing)
+
+template withCallerVariants(opts: ReproTestShardOpts; body: untyped): untyped =
+  ## Runs ``body`` (a ``repro build`` of the run's command line) with
+  ## ``REPRO_VARIANTS`` as the caller set it, then puts the run's value
+  ## back: the build appends the ``--variant`` words it was given itself,
+  ## and a second build in the same run (``repro certify``'s re-execution)
+  ## must not see them twice.
+  let runVariants = getEnv("REPRO_VARIANTS")
+  let runVariantsSet = existsEnv("REPRO_VARIANTS")
+  if opts.callerVariants.isSome:
+    putEnv("REPRO_VARIANTS", opts.callerVariants.get)
+  else:
+    delEnv("REPRO_VARIANTS")
+  try:
+    body
+  finally:
+    if runVariantsSet: putEnv("REPRO_VARIANTS", runVariants)
+    else: delEnv("REPRO_VARIANTS")
 
 type
   PeerCacheSpecKind* = enum
@@ -88612,183 +88578,87 @@ type
       ## flags, because ``[[certificate.command]]`` must record what was
       ## actually run and not a normalised or idealised form.
 
-proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
-  result.strategy = "joint-duration"
-  result.binDir = "build/test-bin"
-  # TC-1: issuance is on by default (a ``repro test`` run issues a certificate
-  # in a clean state). ``--no-certify`` opts out.
-  result.certify = true
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--shard" or arg.startsWith("--shard="):
-      let v = valueFromFlag(args, i, "--shard")
-      let parsed = parseShardSpec(v)
-      if not parsed.ok:
-        raise newException(ValueError,
-          "invalid --shard value: " & v & " (expected <k>/<N>, 1-indexed)")
-      result.shardIndex = parsed.k
-      result.shardCount = parsed.n
-    elif arg == "--partition-strategy" or arg.startsWith("--partition-strategy="):
-      result.strategy = valueFromFlag(args, i, "--partition-strategy")
-    elif arg == "--peer-cache" or arg.startsWith("--peer-cache="):
-      result.peerCacheSpec = valueFromFlag(args, i, "--peer-cache")
-    elif arg == "--emit-partition-plan" or
-        arg.startsWith("--emit-partition-plan="):
-      result.emitPlanPath = valueFromFlag(args, i, "--emit-partition-plan")
-    elif arg == "--plan-from" or arg.startsWith("--plan-from="):
-      result.planFromPath = valueFromFlag(args, i, "--plan-from")
-    elif arg == "--fixture-from" or arg.startsWith("--fixture-from="):
-      result.fixturePath = valueFromFlag(args, i, "--fixture-from")
-    elif arg == "--bin-dir" or arg.startsWith("--bin-dir="):
-      result.binDir = valueFromFlag(args, i, "--bin-dir")
-    elif arg == "--write-report":
-      # The build verb accepts the bare form and writes to its conventional
-      # report path. Do not consume the following selector as a path.
-      result.buildFlags.add(arg)
-    elif arg.startsWith("--write-report="):
-      result.reportPath = valueFromFlag(args, i, "--write-report")
-      result.buildFlags.add("--write-report=" & result.reportPath)
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--variant" or arg.startsWith("--variant="):
-      # Spec-Implementation M1 — relay through ``runBuildCommand``'s
-      # contract: ``--variant name=value`` is appended to the
-      # ``REPRO_VARIANTS`` env var so the provider process picks it up
-      # via ``repro_dsl_stdlib/configurables/variants.nim``. The CLI
-      # surface mirrors the ``repro build`` arm so ``repro test``
-      # inherits the same flag automatically.
-      let spec = valueFromFlag(args, i, "--variant")
-      if spec.find('=') <= 0:
-        raise newException(ValueError,
-          "--variant expects name=value (got: " & spec & ")")
-      var existing = getEnv("REPRO_VARIANTS")
-      if existing.len > 0:
-        existing.add(',')
-      existing.add(spec)
-      putEnv("REPRO_VARIANTS", existing)
-    elif arg == "--release" or arg == "--debug":
-      # Standard-configuration shorthand: sugar for ``--variant
-      # buildType=release|debug`` (Standard-Configurations.md).
-      let cfg = arg[2 .. ^1]
-      var existing = getEnv("REPRO_VARIANTS")
-      if existing.len > 0:
-        existing.add(',')
-      existing.add("buildType=" & cfg)
-      putEnv("REPRO_VARIANTS", existing)
-    elif arg == "--daemon" or arg.startsWith("--daemon="):
-      # Pass-through to ``runBuildCommand`` when ``repro test`` falls
-      # through to the verb-alias path (no shard flags supplied). The
-      # plain ``--daemon=off`` / ``--daemon=auto`` shape is widely
-      # used by the recorder CIs and by manual triage — without
-      # threading it here the alias path's diagnostic "unsupported
-      # repro test flag: --daemon=off" surprises users who learned
-      # the flag from ``repro build``.
-      let v = valueFromFlag(args, i, "--daemon")
-      result.daemonFlag = "--daemon=" & v
-    elif arg == "--lock" or arg.startsWith("--lock="):
-      # MO-1 carry-through: select an alternate committed solved-graph
-      # lock for the verb-alias path. ``runBuildCommand`` honours
-      # ``--lock <file>`` (default = the canonical ``repro.lock``).
-      result.lockFlag = "--lock=" & valueFromFlag(args, i, "--lock")
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      result.buildFlags.add("--work-root=" &
-        valueFromFlag(args, i, "--work-root"))
-    elif arg == "--action-cache-root" or
-        arg.startsWith("--action-cache-root="):
-      result.buildFlags.add("--action-cache-root=" &
-        valueFromFlag(args, i, "--action-cache-root"))
-    elif arg == "--progress" or arg.startsWith("--progress="):
-      result.buildFlags.add("--progress=" &
-        valueFromFlag(args, i, "--progress"))
-    elif arg == "--progress-bars" or arg.startsWith("--progress-bars="):
-      result.buildFlags.add("--progress-bars=" &
-        valueFromFlag(args, i, "--progress-bars"))
-    elif arg == "--measure" or arg.startsWith("--measure="):
-      result.buildFlags.add("--measure=" &
-        valueFromFlag(args, i, "--measure"))
-    elif arg == "--show" or arg.startsWith("--show="):
-      result.buildFlags.add("--show=" & valueFromFlag(args, i, "--show"))
-    elif arg == "--write-diagnostics" or
-        arg.startsWith("--write-diagnostics="):
-      result.buildFlags.add("--write-diagnostics=" &
-        valueFromFlag(args, i, "--write-diagnostics"))
-    elif arg == "--write-benchmark" or
-        arg.startsWith("--write-benchmark="):
-      result.buildFlags.add("--write-benchmark=" &
-        valueFromFlag(args, i, "--write-benchmark"))
-    elif arg == "--write-stats":
-      result.buildFlags.add(arg)
-    elif arg.startsWith("--write-stats="):
-      result.buildFlags.add(arg)
-    elif arg == "--stats-groups" or arg.startsWith("--stats-groups="):
-      result.buildFlags.add("--stats-groups=" &
-        valueFromFlag(args, i, "--stats-groups"))
-    elif arg == "--log" or arg.startsWith("--log="):
-      result.buildFlags.add("--log=" & valueFromFlag(args, i, "--log"))
-    elif arg == "--action-output" or arg.startsWith("--action-output="):
-      # Forwarded verbatim like ``--log``; ``repro build`` validates the
-      # value. ``repro test`` builds in-process when it issues certificates,
-      # and that build prints what its actions wrote exactly as
-      # ``repro build --action-output`` does.
-      result.buildFlags.add("--action-output=" &
-        valueFromFlag(args, i, "--action-output"))
-    elif arg == "--monitor-hosting" or arg.startsWith("--monitor-hosting="):
-      # In-Process-Monitor-Hosting P1(b): forwarded verbatim, like every
-      # other value-taking build flag here, so `repro test`/`bench`/`lint`
-      # can drive the same experiment as `repro build`.
-      result.buildFlags.add("--monitor-hosting=" &
-        valueFromFlag(args, i, "--monitor-hosting"))
-    elif arg == "--evidence" or arg.startsWith("--evidence="):
-      # DA-1i: forwarded verbatim, like every other value-taking build flag
-      # here, so `repro test`/`bench`/`lint` capture under the scope the
-      # operator asked for instead of silently reverting to `full`.
-      result.buildFlags.add("--evidence=" &
-        valueFromFlag(args, i, "--evidence"))
-    elif arg == "--package" or arg.startsWith("--package="):
-      result.buildFlags.add("--package=" &
-        valueFromFlag(args, i, "--package"))
-    elif arg in [
-        "--no-write-report", "-v", "--verbose", "-vv", "--very-verbose",
-        "--prepare-only", "--dry-run", "--force-rebuild", "--rebuild",
-        "--no-output-cleanup", "--publish-cache-hits",
-        "--publish-materialized", "--skip-cmake-regeneration",
-        "--no-runquota", "--runquota", "--unicode", "--no-unicode",
-        "--list-targets", "--list-targets-json", "--json",
-        "--print-solved-graph"]:
-      result.buildFlags.add(arg)
-    elif arg == "--certify":
-      result.certify = true
-      result.certifyExplicit = true
-    elif arg == "--no-certify":
-      result.certify = false
-      result.noCertify = true
-    elif arg == "--certificate-out" or arg.startsWith("--certificate-out="):
-      result.certificateOut = valueFromFlag(args, i, "--certificate-out")
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.certWorkspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
-      result.certCurrentRepo = valueFromFlag(args, i, "--current-repo")
-    elif arg == "--ct-incremental-trace-dir" or
-        arg.startsWith("--ct-incremental-trace-dir="):
-      result.certTraceDir = valueFromFlag(args, i, "--ct-incremental-trace-dir")
-    elif arg == "--allow-pin-regression" or
-        arg.startsWith("--allow-pin-regression="):
-      let named = parsePinRegressionAllowance(
-        valueFromFlag(args, i, "--allow-pin-regression"))
-      if named.rejected.len > 0 or named.names.len == 0:
-        raise newException(ValueError, "--allow-pin-regression names each " &
-          "sibling whose pin may move backward (there is no wildcard): " &
-          "--allow-pin-regression=<sibling>[,<sibling>...]")
-      for name in named.names:
-        if name notin result.allowPinRegression:
-          result.allowPinRegression.add(name)
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported repro test flag: " & arg)
+proc testOptionsOf[C, O](c: C; origin: O): ReproTestShardOpts =
+  ## The options of ``repro test`` (or ``repro certify``, which takes its
+  ## command line) from its parsed configuration ``c`` and the origin of
+  ## each value. Raises ``ValueError`` for a value the parser accepts and
+  ## the command refuses (a malformed ``--shard`` or ``--variant``, an empty
+  ## ``--allow-pin-regression``): a usage error, exit 2.
+  result.strategy = c.partitionStrategy
+  result.binDir = c.binDir
+  # TC-1: issuance is on by default (a ``repro test`` run issues a
+  # certificate in a clean state). ``--no-certify`` opts out.
+  result.certify = c.certify
+  let certifyGiven = origin.certify.winner.kind == cokCli
+  result.certifyExplicit = certifyGiven and c.certify
+  result.noCertify = certifyGiven and not c.certify
+  if origin.shard.winner.kind == cokCli:
+    let parsed = parseShardSpec(c.shard)
+    if not parsed.ok:
+      raise newException(ValueError,
+        "invalid --shard value: " & c.shard & " (expected <k>/<N>, 1-indexed)")
+    result.shardIndex = parsed.k
+    result.shardCount = parsed.n
+  result.emitPlanPath = c.emitPartitionPlan
+  result.planFromPath = c.planFrom
+  result.fixturePath = c.fixtureFrom
+  result.peerCacheSpec = c.peerCache
+  result.reportPath = c.writeReport.get("")
+  # The flag only: the sharded path and the certificate plan read tools as
+  # the flag says, else as the project declares (the build itself also
+  # reads `$REPRO_TOOL_PROVISIONING`, which the flag declares).
+  result.toolProvisioning =
+    if origin.toolProvisioning.winner.kind == cokCli:
+      parseToolProvisioning(c.toolProvisioning)
     else:
-      result.selectors.add(arg)
-    inc i
+      tpmUnspecified
+  if origin.lock.winner.kind == cokCli and c.lock.len > 0:
+    # MO-1 carry-through for the sharded path: the alternate committed
+    # solved-graph lock (the last `--lock`).
+    result.lockFlag = "--lock=" & c.lock[^1]
+  result.certificateOut = c.certificateOut
+  result.certWorkspaceRoot = c.workspaceRoot
+  result.certCurrentRepo = c.currentRepo
+  result.certTraceDir = c.ctIncrementalTraceDir
+  for value in c.allowPinRegression:
+    let named = parsePinRegressionAllowance(value)
+    if named.rejected.len > 0 or named.names.len == 0:
+      raise newException(ValueError, "--allow-pin-regression names each " &
+        "sibling whose pin may move backward (there is no wildcard): " &
+        "--allow-pin-regression=<sibling>[,<sibling>...]")
+    for name in named.names:
+      if name notin result.allowPinRegression:
+        result.allowPinRegression.add(name)
+  # Spec-Implementation M1: `--variant name=value` (and `--release` /
+  # `--debug`, its standard-configuration shorthands). Checked here, on
+  # every path, so a malformed one is this command's usage error.
+  for spec in c.variant:
+    if spec.find('=') <= 0:
+      raise newException(ValueError,
+        "--variant expects name=value (got: " & spec & ")")
+  result.variants = c.variant
+  if origin.target.winner.kind == cokCli:
+    # `--target` is the build's `--variant targetTriple=` assignment, after
+    # the `--variant` ones (`native` assigns none).
+    let triple = canonicalTargetTriple(c.target)
+    if triple.len > 0:
+      result.variants.add(TargetTripleVariantName & "=" & triple)
+  result.workRoot = c.workRoot
+  result.bypassRunQuota = c.noRunquota
+  result.executesTests = not (c.dryRun or c.prepareOnly or c.listTargets or
+    c.listTargetsJson or c.printSolvedGraph)
+  result.selectors = c.selectors
+  result.actionArgs = c.actionArgs
+  result.buildFlags = buildWordsOf(c, origin)
+
+proc testBuildArgs(opts: ReproTestShardOpts;
+                   selectors: seq[string]): seq[string] =
+  ## The command line of the build ``repro test`` runs: its build flags,
+  ## ``selectors`` and the words after ``--``.
+  result = opts.buildFlags & selectors
+  if opts.actionArgs.len > 0:
+    result.add("--")
+    result.add(opts.actionArgs)
 
 proc loadReproTestFixture(path: string): ReproTestFixture =
   if not fileExists(path):
@@ -89995,14 +89865,13 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
     ", " & $cert.commands.len & " command(s))")
   true
 
-proc plainTestBuild(buildArgs, selectors: seq[string];
+proc plainTestBuild(opts: ReproTestShardOpts; selectors: seq[string];
                     publicCliPath: string): int =
   ## ``repro build`` of ``selectors`` (``.#test`` when none) with no issuance.
-  var args = buildArgs
-  for sel in (if selectors.len == 0: @[TestCollectionSelector]
-              else: selectors):
-    args.add(sel)
-  runBuildCommand(args, publicCliPath)
+  withCallerVariants(opts):
+    result = runBuildCommand(testBuildArgs(opts,
+      if selectors.len == 0: @[TestCollectionSelector] else: selectors),
+      publicCliPath)
 
 proc selectorSpelling(name: string; spellings: openArray[string]): string =
   ## ``name`` (a selector as the certificate plan received it) in the
@@ -90258,19 +90127,16 @@ proc reportLockUpdateRefusal(state: LockUpdateNodeState; rerun: string) =
     ", so the tested content does not carry the locks a commit of it " &
     "would have to record; the tests ran, and the exit code is theirs")
 
-proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
+proc runCertifyingTestBuild(opts: ReproTestShardOpts;
                             publicCliPath: string): int =
   ## TC-8e: ``repro test`` / ``repro certify`` on the build-engine path, with
   ## issuance for the certificate-producing nodes the plan materializes (see
-  ## the block comment above). ``buildArgs`` are the ``repro build``
-  ## arguments without selectors.
+  ## the block comment above). The build is ``opts``'s build command line
+  ## (``testBuildArgs``).
   let mode =
     if opts.toolProvisioning == tpmUnspecified: tpmPathOnly
     else: opts.toolProvisioning
-  var workRoot = ""
-  for flag in opts.buildFlags:
-    if flag.startsWith("--work-root="):
-      workRoot = flag["--work-root=".len .. ^1]
+  let workRoot = opts.workRoot
   var selectors = opts.selectors
 
   # 1. The plan: the stored graph, as ``repro certificates plan`` reads it.
@@ -90295,9 +90161,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     # that the build it then runs had been told not to ask, and on a host
     # whose daemon socket the user cannot open the certificate plan was
     # reported unreadable. ``--runquota`` still overrides the variable, as
-    # it does for the build.
-    let bypassRunQuota = "--no-runquota" in opts.buildFlags or
-      ("--runquota" notin opts.buildFlags and runQuotaBypassedByEnv())
+    # it does for the build: the flag declares the variable, and
+    # ``--runquota`` sets the flag to false.
+    let bypassRunQuota = opts.bypassRunQuota
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     defer: releaseAutoRunQuotaProcess(autoRunQuota)
     if selectors.len == 0 and opts.certifyExplicit:
@@ -90386,11 +90252,11 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     part = certificatePlanPart(info.snapshot, info.projectRoot, names)
   except BuildTargetUnknownError, BuildTargetAmbiguousError:
     # The build reports the same selector error in its ordinary form.
-    return plainTestBuild(buildArgs, selectors, publicCliPath)
+    return plainTestBuild(opts, selectors, publicCliPath)
   except CatchableError as err:
     stderr.writeLine("repro test: no certificate — the plan's " &
       "certificate-producing nodes could not be read (" & err.msg & ")")
-    return plainTestBuild(buildArgs, selectors, publicCliPath)
+    return plainTestBuild(opts, selectors, publicCliPath)
   let nodes = planCertificateNodes(CertificatePlan(parts: @[part]))
   var unselected: seq[string]
   for entry in part.certificates.entries:
@@ -90400,7 +90266,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     if not planned and unselected.find(entry.name) < 0:
       unselected.add(entry.name)
   if nodes.len == 0:
-    let code = plainTestBuild(buildArgs, selectors, publicCliPath)
+    let code = plainTestBuild(opts, selectors, publicCliPath)
     reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
     reportUnselectedCertificates(unselected)
     return code
@@ -90540,15 +90406,18 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   proc certifyingBuild(extra: seq[string]):
       tuple[code: int; delivered: bool;
             records: Table[string, ExecutedActionRecord]] =
-    let args = buildArgs & extra & buildSelectors
+    var withExtra = opts
+    withExtra.buildFlags.add(extra)
+    let args = testBuildArgs(withExtra, buildSelectors)
     let collector = ActionOutcomeCollector()
     # HL-10: the lock-update node joins the graph, and every test command
     # of every node this run judges depends on it.
     registerLockUpdateExecutor(lockUpdateExecutorFor(lockUpdate))
     defer: clearLockUpdateExecutor()
-    result.code = runBuildCommand(args, publicCliPath,
-      actionOutcomeSink = collectorSink(collector),
-      graphAugmenter = lockUpdateAugmenter)
+    withCallerVariants(opts):
+      result.code = runBuildCommand(args, publicCliPath,
+        actionOutcomeSink = collectorSink(collector),
+        graphAugmenter = lockUpdateAugmenter)
     result.delivered = collector.delivered
     result.records = collector.records
 
@@ -90629,17 +90498,17 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   reportUnselectedCertificates(unselected)
   code
 
-proc runReproTestCommand*(args: openArray[string];
-                          publicCliPath: string): int =
-  ## ``repro test`` entry point with the CI-sharding flag surface from
-  ## ``CI-Sharding.md`` §"CLI Surface".  See the block comment above
-  ## for the per-flag semantics.
-  var opts: ReproTestShardOpts
-  try:
-    opts = parseReproTestFlags(args)
-  except ValueError as exc:
-    emitShardDiagnostic(exc.msg)
-    return 2
+proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
+  ## ``repro test`` (and ``repro certify``, which runs it with issuance
+  ## asked for explicitly) from its options: the CI-sharding flag surface
+  ## and the build's. See the block
+  ## comment above for the per-flag semantics.
+  var opts = opts
+  # Every path evaluates the recipe under the run's variants: the sharded
+  # path's providers, the certificate plan and the lock refresh read
+  # `REPRO_VARIANTS`; the builds get them on their command line
+  # (`withCallerVariants`).
+  exportTestVariants(opts)
 
   # ``--peer-cache=lan://CIDR[:port]`` — Peer-Cache M2 wires this
   # through to the multicast discovery plane. The CI-Sharding M3
@@ -90701,32 +90570,17 @@ proc runReproTestCommand*(args: openArray[string];
     # the CI-sharding-specific surface. The shard CLI is the
     # multi-machine CI path; the alias is the inner-loop "run my
     # tests" path.
-    var buildArgs = opts.buildFlags
-    if opts.toolProvisioning != tpmUnspecified:
-      buildArgs.add("--tool-provisioning=" & opts.toolProvisioning.modeName)
-    if opts.daemonFlag.len > 0:
-      buildArgs.add(opts.daemonFlag)
-    if opts.lockFlag.len > 0:
-      buildArgs.add(opts.lockFlag)
-    if opts.peerCacheSpec.len > 0:
-      buildArgs.add("--peer-cache=" & opts.peerCacheSpec)
+    # The build's command line is every build flag this command line gave
+    # (``buildWordsOf``); the build reads the variables those flags declare
+    # itself.
+    #
     # TC-8e: a run that executes tests issues a certificate for each
     # certificate-producing node it materializes. ``--no-certify`` opts out,
     # and a run that executes nothing (a dry run, a listing, a solved-graph
     # print, a prepare-only pass) has nothing to attest.
-    var executesTests = opts.certify
-    for flag in opts.buildFlags:
-      if flag in ["--dry-run", "--prepare-only", "--list-targets",
-          "--list-targets-json", "--print-solved-graph"]:
-        executesTests = false
-    if executesTests:
-      return runCertifyingTestBuild(opts, buildArgs, publicCliPath)
-    if opts.selectors.len == 0:
-      buildArgs.add(TestCollectionSelector)
-    else:
-      for sel in opts.selectors:
-        buildArgs.add(sel)
-    return runBuildCommand(buildArgs, publicCliPath)
+    if opts.certify and opts.executesTests:
+      return runCertifyingTestBuild(opts, publicCliPath)
+    return plainTestBuild(opts, opts.selectors, publicCliPath)
 
   # Two code paths from here:
   #   (a) ``--fixture-from=<path>`` — the M2 fixture path, kept for
@@ -90881,6 +90735,46 @@ proc runReproTestCommand*(args: openArray[string];
       "run 'repro certify' without shard flags")
   return shardCode
 
+proc runReproTestCommand*(args: openArray[string];
+                          publicCliPath: string): int =
+  ## ``repro test <args>``: ``args`` (the words after ``test``) parsed by the
+  ## parser generated from repro's description (``loadTestCommandLine``),
+  ## then run. Raises ``CliUsageError`` for a command line the parser
+  ## rejects; a value it accepts and the command refuses is reported here,
+  ## exit 2.
+  let (c, origin) = loadTestCommandLine(args)
+  var opts: ReproTestShardOpts
+  try:
+    opts = testOptionsOf(c, origin)
+  except ValueError as exc:
+    emitShardDiagnostic(exc.msg)
+    return 2
+  runReproTest(opts, publicCliPath)
+
+proc reproTestRunVariants*(args: openArray[string]):
+    tuple[duringRun, duringBuild, afterBuild: Option[string]] =
+  ## ``$REPRO_VARIANTS`` as ``repro test <args>`` arranges it: while the run
+  ## evaluates the recipe itself (the certificate plan, the lock refresh,
+  ## the sharded path), inside a build it runs (``withCallerVariants``) and
+  ## after that build. The caller's value is restored before returning.
+  ## Runs nothing; for the tests of that arrangement.
+  proc current(): Option[string] =
+    if existsEnv("REPRO_VARIANTS"): some(getEnv("REPRO_VARIANTS"))
+    else: none(string)
+  let (c, origin) = loadTestCommandLine(args)
+  var opts = testOptionsOf(c, origin)
+  exportTestVariants(opts)
+  try:
+    result.duringRun = current()
+    withCallerVariants(opts):
+      result.duringBuild = current()
+    result.afterBuild = current()
+  finally:
+    if opts.callerVariants.isSome:
+      putEnv("REPRO_VARIANTS", opts.callerVariants.get)
+    else:
+      delEnv("REPRO_VARIANTS")
+
 const checkSetTarget* = "pre-commit"
   ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
   ## check-set certificate covers, the way ``test`` and ``lint`` name
@@ -90901,7 +90795,18 @@ proc defaultCheckSetCommand*(repoPath: string): seq[string] =
         quoteShell(exe) & " run --all-files"]
   @[]
 
-proc runCertifyVerify*(args: openArray[string]): int =
+proc certifyFlagsGivenOutside(origin: ReproCommandLineCertifyOrigins;
+                               allowed: openArray[string]): seq[string] =
+  ## The spellings of every flag of ``repro certify`` given on the command
+  ## line whose field is not in ``allowed``: the flags that do not apply in
+  ## the mode the command line selected.
+  for name, o in fieldPairs(origin):
+    if name notin allowed and o.winner.kind == cokCli and
+        o.winner.spelling.len > 0:
+      result.add(o.winner.spelling)
+
+proc runCertifyVerify*(c: ReproCommandLineCertify;
+                       origin: ReproCommandLineCertifyOrigins): int =
   ## ``repro certify --verify <certificate> --content <id>
   ## [--registered-keys <path>] [--workspace <root>]`` —
   ## Distributed-Execution M7.
@@ -90913,42 +90818,26 @@ proc runCertifyVerify*(args: openArray[string]): int =
   ## caller sent. ``--content`` is required (threat model G32): an
   ## authentic certificate for some other tree is precisely the asset an
   ## attacker wants accepted. Exit 0 only when both hold.
-  var certPath = ""
-  var keysPath = ""
-  var content = ""
-  var workspace = getCurrentDir()
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    template value(): string =
-      (if i + 1 < args.len: (inc i; args[i]) else: "")
-    case a
-    of "--verify": discard
-    of "--registered-keys": keysPath = value()
-    of "--content": content = value()
-    of "--workspace": workspace = value()
-    else:
-      if a.startsWith("--registered-keys="):
-        keysPath = a["--registered-keys=".len .. ^1]
-      elif a.startsWith("--content="):
-        content = a["--content=".len .. ^1]
-      elif a.startsWith("--workspace="):
-        workspace = a["--workspace=".len .. ^1]
-      elif a.startsWith("-"):
-        stderr.writeLine("repro certify --verify: unknown option " & a)
-        return 2
-      elif certPath.len == 0:
-        certPath = a
-      else:
-        stderr.writeLine("repro certify --verify: one certificate at a time")
-        return 2
-    inc i
+  let foreign = certifyFlagsGivenOutside(origin,
+    ["verify", "content", "registeredKeys", "workspace", "selectors"])
+  if foreign.len > 0:
+    stderr.writeLine("repro certify --verify: unknown option " & foreign[0])
+    return 2
+  if c.selectors.len > 1:
+    stderr.writeLine("repro certify --verify: one certificate at a time")
+    return 2
+  let certPath = if c.selectors.len > 0: c.selectors[0] else: ""
+  var keysPath = c.registeredKeys
+  let content = c.content
+  let workspace =
+    if origin.workspace.winner.kind == cokCli: c.workspace
+    else: getCurrentDir()
   if certPath.len == 0 or content.len == 0:
-    stderr.writeLine("usage: repro certify --verify <certificate> " &
-      "--content <git-tree-sha1:...> [--registered-keys <path>] " &
-      "[--workspace <root>]" &
-      (if certPath.len > 0: "  (--content is required: a certificate is " &
-         "accepted only for the content the caller sent)" else: ""))
+    stderr.writeLine("repro certify --verify: " &
+      (if certPath.len == 0: "name the certificate to verify"
+       else: "--content is required: a certificate is accepted only for " &
+         "the content the caller sent") &
+      " (see `repro certify --help`)")
     return 2
   if keysPath.len == 0:
     keysPath = registeredKeyStorePath(workspace)
@@ -91047,7 +90936,8 @@ proc runCertSignerCommand*(conf: ReproCommandLineCertSigner): int =
     while true:
       try: poll(200) except ValueError: sleep(200)
 
-proc runCertifyCheckSet*(args: openArray[string];
+proc runCertifyCheckSet*(c: ReproCommandLineCertify;
+                         origin: ReproCommandLineCertifyOrigins;
                          publicCliPath = ""): int =
   ## ``repro certify --check-set [--current-repo=PATH] [--workspace-root=PATH]
   ## [--check-set-command=SHELL]`` — Agents-Push-Gate.md §3.2 / P6.e.
@@ -91069,22 +90959,27 @@ proc runCertifyCheckSet*(args: openArray[string];
   ## check set failed or the state is not certifiable (the reason is
   ## printed);
   ## 1 = usage or tooling error.
-  var currentRepo, workspaceRoot, commandOverride: string
-  var passThrough: seq[string]
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--check-set":
-      discard
-    elif arg.startsWith("--current-repo="):
-      currentRepo = arg["--current-repo=".len .. ^1]
-    elif arg.startsWith("--workspace-root="):
-      workspaceRoot = arg["--workspace-root=".len .. ^1]
-    elif arg.startsWith("--check-set-command="):
-      commandOverride = arg["--check-set-command=".len .. ^1]
-    else:
-      passThrough.add(arg)
-    inc i
+  # `--verify`'s flags do not apply here.
+  var refused: seq[string]
+  for name, o in fieldPairs(origin):
+    if name in ["content", "registeredKeys", "workspace"] and
+        o.winner.kind == cokCli:
+      refused.add(o.winner.spelling)
+  if refused.len > 0:
+    stderr.writeLine("repro certify --check-set: " & refused[0] &
+      " applies to --verify only")
+    return 2
+  # The rest of the command line is the test run's (`repro test`'s), which
+  # runs the check set as its one target.
+  var opts: ReproTestShardOpts
+  try:
+    opts = testOptionsOf(c, origin)
+  except ValueError as exc:
+    emitShardDiagnostic(exc.msg)
+    return 2
+  var currentRepo = c.currentRepo
+  var workspaceRoot = c.workspaceRoot
+  let commandOverride = c.checkSetCommand
   let gitBin = findExe("git")
   if gitBin.len == 0:
     stderr.writeLine("repro certify: git not found on PATH")
@@ -91132,14 +91027,21 @@ proc runCertifyCheckSet*(args: openArray[string];
   fixture["buildActions"] = newJArray()
   let fixturePath = scratch / "check-set-fixture.json"
   writeFile(fixturePath, fixture.pretty() & "\n")
-  var testArgs = @["--certify", "--fixture-from=" & fixturePath,
-    "--shard=1/1", "--workspace-root=" & workspaceRoot,
-    "--current-repo=" & currentRepo]
-  testArgs.add(passThrough)
+  # The test run: the check set as the one shard of the fixture, issuing
+  # for it, bound to this repository and workspace. A shard or fixture the
+  # command line names wins, as it did when it followed these as words.
+  opts.certifyExplicit = true
+  if origin.fixtureFrom.winner.kind != cokCli:
+    opts.fixturePath = fixturePath
+  if origin.shard.winner.kind != cokCli:
+    opts.shardIndex = 1
+    opts.shardCount = 1
+  opts.certWorkspaceRoot = workspaceRoot
+  opts.certCurrentRepo = currentRepo
   let previousDir = getCurrentDir()
   setCurrentDir(scratch)
   let code =
-    try: runReproTestCommand(testArgs, publicCliPath)
+    try: runReproTest(opts, publicCliPath)
     finally: setCurrentDir(previousDir)
   # TC-8d: the working tree is what was certified, modified or not. The
   # issued certificate is in the local store under the content id of the
@@ -91218,31 +91120,27 @@ type
       ## branch, or the pushed branch). Default: ``$GITHUB_BASE_REF``, else
       ## ``$GITHUB_REF_NAME``, else the checkout's commit-time branch.
 
-proc parseCiPlanArgs(args: openArray[string]): CiPlanArgs =
+proc ciPlanArgsOf(c: ReproCommandLineCiPlan): CiPlanArgs =
+  ## ``repro ci plan``'s arguments from its parsed configuration. Values are
+  ## whitespace-trimmed; an empty ``--platform`` is ignored. ``--branch``
+  ## comes from the flag, else ``$GITHUB_BASE_REF``, else
+  ## ``$GITHUB_REF_NAME`` (the variables the flag declares).
   result.toolProvisioning = tpmUnspecified
-  for a in args:
-    if a == "--json": result.json = true
-    elif a.startsWith("--platform="):
-      let v = a["--platform=".len .. ^1].strip()
-      if v.len > 0: result.platforms.add(v)
-    elif a.startsWith("--base="):
-      result.base = a["--base=".len .. ^1].strip()
-    elif a.startsWith("--branch="):
-      result.branch = a["--branch=".len .. ^1].strip()
-    elif a.startsWith("--workspace-root="):
-      result.workspaceRoot = a["--workspace-root=".len .. ^1]
-    elif a.startsWith("--current-repo="):
-      result.currentRepo = a["--current-repo=".len .. ^1]
-    else:
-      raise newException(ValueError, "repro ci plan: unknown argument '" &
-        a & "'")
+  result.json = c.json
+  for value in c.platform:
+    let v = value.strip()
+    if v.len > 0: result.platforms.add(v)
+  result.base = c.base.strip()
+  result.branch = c.branch.strip()
+  result.workspaceRoot = c.workspaceRoot
+  result.currentRepo = c.currentRepo
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc runCiPlanCommand(args: openArray[string]): int =
+proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
   ## ``repro ci plan`` — the per-platform CI fast-track decision (TC-4).
-  let parsed = parseCiPlanArgs(args)
+  let parsed = ciPlanArgsOf(c)
   let certRepoPath =
     if parsed.currentRepo.len > 0: parsed.currentRepo
     else: parsed.workspaceRoot
@@ -91266,9 +91164,7 @@ proc runCiPlanCommand(args: openArray[string]): int =
       return 1
   except CatchableError:
     discard
-  var branch = parsed.branch
-  if branch.len == 0: branch = getEnv("GITHUB_BASE_REF")
-  if branch.len == 0: branch = getEnv("GITHUB_REF_NAME")
+  let branch = parsed.branch
   var target: BranchRef
   if branch.len > 0:
     target = branchRefFromRef(branch)
@@ -91505,20 +91401,14 @@ proc runCiPlanCommand(args: openArray[string]): int =
       echo "  note: " & problem
   return 0
 
-proc runCiCommand(args: openArray[string]): int =
+proc runCiCommand(conf: ReproCommandLineCi): int =
   ## ``repro ci <subcommand>``. Currently ``plan`` (the TC-4 fast-track
   ## decision) is the only subcommand; the verb namespace is reserved for
-  ## further CI-facing helpers.
-  if args.len == 0:
-    stderr.writeLine("repro ci: missing subcommand (expected: plan)")
-    return 1
-  case args[0]
-  of "plan":
-    return runCiPlanCommand(if args.len > 1: args[1 .. ^1] else: @[])
-  else:
-    stderr.writeLine("repro ci: unknown subcommand '" & args[0] &
-      "' (expected: plan)")
-    return 1
+  ## further CI-facing helpers. The command line is parsed from repro's
+  ## description (``repro_cli_support/cli_description``).
+  case conf.command
+  of ReproCommandLineCiCommand.plan:
+    return runCiPlanCommand(conf.plan)
 
 # --------------------------------------------------------------------
 # Spec-Implementation M2e — `repro lock explain <variant>` subcommand
@@ -93781,7 +93671,8 @@ proc requirementText(req: PolicyRequirement): string =
     (if req.platforms == @[AnyPlatformMarker]: "any platform"
      else: "each of " & req.platforms.join(", ")) & ")"
 
-proc runCertificatesPolicyCommand*(args: openArray[string]): int =
+proc runCertificatesPolicyCommand*(branchArg: string; branchGiven,
+                                   asJson: bool): int =
   ## ``repro certificates policy [--branch <branch>] [--json]``: the
   ## certificate policy the current project's ``repro.lock`` records (the
   ## snapshot every gate reads), the package that exports it and the
@@ -93789,24 +93680,9 @@ proc runCertificatesPolicyCommand*(args: openArray[string]): int =
   ## (the current branch's upstream, else the current branch, by default).
   ## ``<branch>`` may be a full ref: ``refs/tags/...`` is not a branch and no
   ## rule applies. Reads only; it compiles and builds nothing.
-  var branchArg = ""
-  var branchGiven = false
-  var asJson = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--json":
-      asJson = true
-    elif arg == "--branch" or arg.startsWith("--branch="):
-      branchArg = valueFromFlag(args, i, "--branch")
-      branchGiven = true
-      if branchArg.len == 0:
-        stderr.writeLine("repro certificates policy: --branch needs a name")
-        return 2
-    else:
-      stderr.writeLine("repro certificates policy: unknown argument: " & arg)
-      return 2
-    inc i
+  if branchGiven and branchArg.len == 0:
+    stderr.writeLine("repro certificates policy: --branch needs a name")
+    return 2
   let projectDir = getCurrentDir()
   let lockPath = committedLockPath(projectDir)
   var policy: BranchCertificatePolicy
@@ -104908,100 +104784,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "test":
-    # CI-Sharding M2 — ``repro test --shard k/N [...]``.  Implementation
-    # in ``runReproTestCommand`` above; see the block comment there for
-    # the user-visible flag surface and the fixture / plan I/O shape.
-    #
-    # Spec-Implementation M0 alias contract: ``repro test`` is also the
-    # CLI verb alias for ``repro build test`` per Build-Graph-Collections.md
-    # §"Verb Aliases for Conventional Collections". The CI-sharding
-    # implementation already maps to ``repro build test`` internally
-    # (see ``buildArgs = @["build", "test"]`` at the head of this file),
-    # so the alias is satisfied without further dispatch routing.
-    try:
-      let testArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproTestCommand(testArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro test: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "certificates":
-    # TC-9a: list the project's named certificates, or the
-    # certificate-producing nodes a plan materializes.
-    return runCertificatesCommand(args[1 .. ^1], publicCliPath)
-  if programName == "repro" and args.len > 0 and args[0] == "certify":
-    # TC-1: ``repro certify`` is the explicit "run the full required set to
-    # obtain a certificate" form — an alias for ``repro test --certify``
-    # (Test-Certificates.md §"Issuance"). It forwards every remaining arg to
-    # ``runReproTestCommand`` with ``--certify`` prepended so the same
-    # issuance path runs; ``--no-certify`` would contradict the verb and is
-    # left to the user's responsibility (last-flag-wins in the parser).
-    if "--verify" in args:
-      try:
-        return runCertifyVerify(args[1 .. ^1])
-      except CatchableError as err:
-        stderr.writeLine("repro certify --verify: error: " & err.msg)
-        return 1
-    if "--check-set" in args:
-      try:
-        return runCertifyCheckSet(args[1 .. ^1], publicCliPath)
-      except CatchableError as err:
-        stderr.writeLine("repro certify: error: " & err.msg)
-        return 1
-    try:
-      var certifyArgs = @["--certify"]
-      if args.len > 1:
-        for a in args[1 .. ^1]:
-          certifyArgs.add(a)
-      return runReproTestCommand(certifyArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro certify: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "ci":
-    # TC-4: ``repro ci plan`` — the per-platform CI fast-track decision (skip
-    # targets a valid certificate already covers; run the rest). The decision
-    # reuses the TC-5 signature verifier + TC-1 coverage union, so a forged
-    # cert can never cause a skip; the skip-vs-advisory choice is the project's
-    # explicit ``ci_trust`` policy (Test-Certificates.md §"CI integration").
-    try:
-      let ciArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runCiCommand(ciArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro ci: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "watch":
-    try:
-      let watchArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runWatchCommand(watchArgs, publicCliPath)
-    except BuildTargetAmbiguousError as err:
-      # Named-Targets M3: watch inherits the shared M2 resolver, so the
-      # ``target_ambiguous`` diagnostic surfaces identically. The shared
-      # ``renderAmbiguousTargetDiagnostic`` helper keeps the watch and
-      # build emissions byte-identical at the resolver seam.
-      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
-      return 2
-    except BuildTargetUnknownError as err:
-      # Named-Targets M3: same translation for the ``unknown_target``
-      # diagnostic. The daemon-side translation lives in
-      # ``installUserDaemonWatchExecutor``; both paths render via
-      # ``renderUnknownTargetDiagnostic``.
-      stderr.write(renderUnknownTargetDiagnostic(err[]))
-      return 2
-    except CatchableError as err:
-      stderr.writeLine("repro watch: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
     # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
@@ -105231,6 +105013,106 @@ proc runBuildVerbCommand(verb: string; args: seq[string];
       stderr.writeLine(reproBuildErrorText(err.msg))
     else:
       stderr.writeLine("repro " & verb & ": error: " & err.msg)
+    return 1
+
+proc runTestVerbCommand(args: seq[string]; publicCliPath: string): int =
+  ## ``repro test [<args>]``. ``args`` are the words after ``test``, which
+  ## the generated parser has already accepted; ``runReproTestCommand``
+  ## reads them with the origin of each value. CI-Sharding M2 adds the
+  ## ``--shard k/N`` surface; without it ``repro test`` is the verb alias of
+  ## ``repro build test`` (the conventional ``test`` collection).
+  try:
+    return runReproTestCommand(args, publicCliPath)
+  except CliUsageError as err:
+    return reportReproUsageError(err)
+  except BuildCommandLineError as err:
+    # The build's own command line, refused by the build: a usage error.
+    stderr.writeLine("repro test: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro test: error: " & err.msg)
+    return 1
+
+proc runCertifyVerbCommand(args: seq[string]; publicCliPath: string): int =
+  ## ``repro certify [<args>]``: TC-1's explicit "run the full required set
+  ## to obtain a certificate" form, the verb alias of ``repro test
+  ## --certify``: the same issuance path
+  ## runs, with issuance asked for explicitly; ``--no-certify``, which
+  ## contradicts the verb, is the caller's responsibility. Two other modes:
+  ## ``--verify`` checks a certificate a remote worker returned, and
+  ## ``--check-set`` certifies the repository's check set. ``args`` are the
+  ## words after ``certify``, already accepted by the generated parser.
+  var c: ReproCommandLineCertify
+  var origin: ReproCommandLineCertifyOrigins
+  try:
+    (c, origin) = loadCertifyCommandLine(args)
+  except CliUsageError as err:
+    return reportReproUsageError(err)
+  if c.verify:
+    try:
+      return runCertifyVerify(c, origin)
+    except CatchableError as err:
+      stderr.writeLine("repro certify --verify: error: " & err.msg)
+      return 1
+  if c.checkSet:
+    try:
+      return runCertifyCheckSet(c, origin, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro certify: error: " & err.msg)
+      return 1
+  # `--verify`'s and `--check-set`'s flags do not apply to a test run.
+  for name, o in fieldPairs(origin):
+    if name in ["content", "registeredKeys", "workspace",
+        "checkSetCommand"] and o.winner.kind == cokCli:
+      stderr.writeLine("repro certify: " & o.winner.spelling &
+        " applies to " &
+        (if name == "checkSetCommand": "--check-set" else: "--verify") &
+        " only")
+      return 2
+  var opts: ReproTestShardOpts
+  try:
+    opts = testOptionsOf(c, origin)
+  except ValueError as exc:
+    emitShardDiagnostic(exc.msg)
+    return 2
+  opts.certifyExplicit = true
+  try:
+    return runReproTest(opts, publicCliPath)
+  except BuildCommandLineError as err:
+    stderr.writeLine("repro certify: " & err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro certify: error: " & err.msg)
+    return 1
+
+proc runWatchVerbCommand(args: seq[string]; publicCliPath: string): int =
+  ## ``repro watch [<args>]``. ``args`` are the words after ``watch``,
+  ## already accepted by the generated parser: they go to the daemon
+  ## unchanged (``rawArgs``), and ``runWatchCommand`` reads them with the
+  ## parser generated from repro's description.
+  try:
+    return runWatchCommand(args, publicCliPath)
+  except CliUsageError as err:
+    return reportReproUsageError(err)
+  except WatchCommandLineError as err:
+    stderr.writeLine("repro watch: " & err.msg)
+    return 2
+  except BuildTargetAmbiguousError as err:
+    # Named-Targets M3: watch inherits the shared M2 resolver, so the
+    # ``target_ambiguous`` diagnostic surfaces identically. The shared
+    # ``renderAmbiguousTargetDiagnostic`` helper keeps the watch and
+    # build emissions byte-identical at the resolver seam.
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetUnknownError as err:
+    # Named-Targets M3: same translation for the ``unknown_target``
+    # diagnostic. The daemon-side translation lives in
+    # ``installUserDaemonWatchExecutor``; both paths render via
+    # ``renderUnknownTargetDiagnostic``.
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro watch: error: " & err.msg)
     return 1
 
 proc runReproHelp(programName: string; topic: seq[string];
@@ -105797,6 +105679,32 @@ proc runReproCommandLine(programName: string; args: seq[string];
   of ReproCommandLineCommand.lint:
     return runBuildVerbCommand("lint", reproWordsAfterCommand(args),
       publicCliPath)
+  of ReproCommandLineCommand.test:
+    return runTestVerbCommand(reproWordsAfterCommand(args), publicCliPath)
+  of ReproCommandLineCommand.certify:
+    return runCertifyVerbCommand(reproWordsAfterCommand(args), publicCliPath)
+  of ReproCommandLineCommand.certificates:
+    # TC-9a: list the project's named certificates, or the
+    # certificate-producing nodes a plan materializes; TC-9b: the policy
+    # the lock records.
+    try:
+      return runCertificatesCommand(conf.certificates, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro certificates: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.ci:
+    # TC-4: ``repro ci plan`` — the per-platform CI fast-track decision
+    # (skip targets a valid certificate already covers; run the rest). The
+    # decision reuses the TC-5 signature verifier + TC-1 coverage union, so
+    # a forged cert can never cause a skip; the skip-vs-advisory choice is
+    # the project's explicit ``ci_trust`` policy.
+    try:
+      return runCiCommand(conf.ci)
+    except CatchableError as err:
+      stderr.writeLine("repro ci: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.watch:
+    return runWatchVerbCommand(reproWordsAfterCommand(args), publicCliPath)
   of ReproCommandLineCommand.clean:
     let c = conf.clean
     try:

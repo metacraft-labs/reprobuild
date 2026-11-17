@@ -1155,6 +1155,85 @@ proc flakeVerbFlags(): NimNode {.compileTime.} =
     `tools`
     boolFlag json is bool, help = "Print the result as JSON"
 
+proc daemonModeFlag(what: string): NimNode {.compileTime.} =
+  ## `--daemon`, over `$REPRO_DAEMON`: whether `what` (a build, or a watch)
+  ## runs in the per-user daemon. `repro build` (and every command that takes
+  ## its command line) and `repro watch` declare it.
+  let help = newLit("Whether the " & what & " runs in the per-user " &
+    "daemon: `auto` (use it, falling back to an in-process " & what &
+    "), `require` or `off`; the flag wins over `$REPRO_DAEMON` (default: " &
+    "auto)")
+  quote do:
+    flag daemon is string, values = ["auto", "require", "off"],
+      env = "REPRO_DAEMON", clientSide = true, help = `help`
+
+proc buildToolProvisioningFlag(): NimNode {.compileTime.} =
+  ## `--tool-provisioning`, over `$REPRO_TOOL_PROVISIONING`, of the commands
+  ## that build: `repro build` (and every command that takes its command
+  ## line) and `repro watch`.
+  quote do:
+    flag toolProvisioning is string, values = ["path", "nix", "tarball",
+        "scoop", "from-source", "fromSource", "source"],
+      env = "REPRO_TOOL_PROVISIONING",
+      help = "How the build's tools are provisioned (`from-source` is also " &
+        "spelt `fromSource` or `source`); the flag wins over " &
+        "`$REPRO_TOOL_PROVISIONING` (default: the project's " &
+        "`defaultToolProvisioning`)"
+
+proc buildWorkRootFlag(): NimNode {.compileTime.} =
+  ## `--work-root` of the commands that build. `$REPROBUILD_WORK_ROOT` is
+  ## read where the work root is resolved, after the flag.
+  quote do:
+    flag workRoot is string,
+      help = "The work root the project's build state lives under " &
+        "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
+
+proc measurementFlags(): NimNode {.compileTime.} =
+  ## The collect and present axes of the measurement flags, each over its
+  ## variable, of the commands that build. Where the value came from matters
+  ## to `--measure`: the flag starts from the empty set, the variable adds to
+  ## the default set.
+  quote do:
+    flag measure is seq[string], env = "REPROBUILD_MEASURE",
+      help = "What the build collects: trace, cache-evidence, timing, all " &
+        "or none, comma-separated (repeatable, additive; `none` clears). " &
+        "The flag replaces `$REPROBUILD_MEASURE`, which adds to the " &
+        "default set (default: trace,cache-evidence)"
+    flag show is seq[string], env = "REPROBUILD_SHOW",
+      help = "What the build prints of what it collected, in `--measure`'s " &
+        "vocabulary (implies measuring it); the flag wins over " &
+        "`$REPROBUILD_SHOW` (default: none)"
+
+proc buildReportFlags(): NimNode {.compileTime.} =
+  ## The persist axis: the build report of the commands that build.
+  quote do:
+    flag writeReport is Option[string], optionalValue = some(""),
+      help = "Write the build report: bare, as " &
+        "`<outDir>/build-report.json`; with `=PATH`, at exactly PATH"
+    boolFlag noWriteReport is bool,
+      help = "Write no report file, not even the one a failed build leaves"
+
+proc buildStatsFlags(): NimNode {.compileTime.} =
+  ## The analytics-store capture of the commands that build.
+  quote do:
+    flag writeStats is Option[string], optionalValue = some(""),
+      clientSide = true,
+      help = "Capture the build's statistics in the analytics store: bare, " &
+        "the conventional store; with `=PATH`, that store (daemon-hosted " &
+        "builds only)"
+    flag statsGroups is Option[string], format = equals, clientSide = true,
+      help = "Which statistics groups to capture: timing, cache, runquota, " &
+        "deps, sessions or all, comma-separated (enables `--write-stats`)"
+
+proc restoreCachedOutputsFlag(): NimNode {.compileTime.} =
+  ## `--[no-]restore-cached-outputs`, over `$REPRO_RESTORE_CACHED_OUTPUTS`,
+  ## of the commands that build.
+  quote do:
+    boolFlag restoreCachedOutputs is bool, negatable = true,
+      env = "REPRO_RESTORE_CACHED_OUTPUTS",
+      help = "Restore the outputs of cache hits into the tree; the flag " &
+        "wins over `$REPRO_RESTORE_CACHED_OUTPUTS` (default: off)"
+
 proc buildFlags(): NimNode {.compileTime.} =
   ## The command line of `repro build`, which `repro bench` and `repro lint`
   ## take unchanged (each is `repro build` of its conventional collection).
@@ -1178,19 +1257,16 @@ proc buildFlags(): NimNode {.compileTime.} =
   ## A switch that stands for another flag's value (`-v`, `--release`,
   ## `--runquota`, ...) refuses `=false`: written that way it would set
   ## nothing, so it is refused rather than silently ignored.
+  let daemon = daemonModeFlag("build")
+  let toolProvisioning = buildToolProvisioningFlag()
+  let workRoot = buildWorkRootFlag()
+  let measurement = measurementFlags()
+  let report = buildReportFlags()
+  let stats = buildStatsFlags()
+  let restore = restoreCachedOutputsFlag()
   quote do:
-    flag daemon is string, values = ["auto", "require", "off"],
-      env = "REPRO_DAEMON", clientSide = true,
-      help = "Whether the build runs in the per-user daemon: `auto` (use " &
-        "it, falling back to an in-process build), `require` or `off`; " &
-        "the flag wins over `$REPRO_DAEMON` (default: auto)"
-    flag toolProvisioning is string, values = ["path", "nix", "tarball",
-        "scoop", "from-source", "fromSource", "source"],
-      env = "REPRO_TOOL_PROVISIONING",
-      help = "How the build's tools are provisioned (`from-source` is also " &
-        "spelt `fromSource` or `source`); the flag wins over " &
-        "`$REPRO_TOOL_PROVISIONING` (default: the project's " &
-        "`defaultToolProvisioning`)"
+    `daemon`
+    `toolProvisioning`
     flag target is string,
       help = "Build for this platform triple (a short name such as " &
         "`armv7-linux` names the catalog's triple; `native` assigns none): " &
@@ -1204,9 +1280,7 @@ proc buildFlags(): NimNode {.compileTime.} =
     boolFlag debug is bool, alsoSets = [variant = "buildType=debug"],
       refuseFalse = true,
       help = "The same as `--variant buildType=debug`"
-    flag workRoot is string,
-      help = "The work root the project's build state lives under " &
-        "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
+    `workRoot`
     flag actionCacheRoot is string,
       help = "The action-cache root (default: " &
         "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
@@ -1256,33 +1330,14 @@ proc buildFlags(): NimNode {.compileTime.} =
       help = "The same as `--log=actions`"
     flag actionOutput is string,
       help = "Which actions' output is printed: failed (default) or all"
-    flag measure is seq[string], env = "REPROBUILD_MEASURE",
-      help = "What the build collects: trace, cache-evidence, timing, all " &
-        "or none, comma-separated (repeatable, additive; `none` clears). " &
-        "The flag replaces `$REPROBUILD_MEASURE`, which adds to the " &
-        "default set (default: trace,cache-evidence)"
-    flag show is seq[string], env = "REPROBUILD_SHOW",
-      help = "What the build prints of what it collected, in `--measure`'s " &
-        "vocabulary (implies measuring it); the flag wins over " &
-        "`$REPROBUILD_SHOW` (default: none)"
-    flag writeReport is Option[string], optionalValue = some(""),
-      help = "Write the build report: bare, as " &
-        "`<outDir>/build-report.json`; with `=PATH`, at exactly PATH"
-    boolFlag noWriteReport is bool,
-      help = "Write no report file, not even the one a failed build leaves"
+    `measurement`
+    `report`
     flag writeDiagnostics is string,
       help = "Write the human-readable diagnostic log to the path"
     flag writeBenchmark is string, clientSide = true,
       help = "Write a benchmark document of the build's phase timings to " &
         "the path (implies `--measure=timing`)"
-    flag writeStats is Option[string], optionalValue = some(""),
-      clientSide = true,
-      help = "Capture the build's statistics in the analytics store: bare, " &
-        "the conventional store; with `=PATH`, that store (daemon-hosted " &
-        "builds only)"
-    flag statsGroups is Option[string], format = equals, clientSide = true,
-      help = "Which statistics groups to capture: timing, cache, runquota, " &
-        "deps, sessions or all, comma-separated (enables `--write-stats`)"
+    `stats`
     boolFlag prepareOnly is bool,
       help = "Prepare the build graph and run no action"
     boolFlag dryRun is bool,
@@ -1310,10 +1365,7 @@ proc buildFlags(): NimNode {.compileTime.} =
       help = "Publish materialized outputs to the shared cache"
     boolFlag skipCmakeRegeneration is bool,
       help = "Do not regenerate CMake build files"
-    boolFlag restoreCachedOutputs is bool, negatable = true,
-      env = "REPRO_RESTORE_CACHED_OUTPUTS",
-      help = "Restore the outputs of cache hits into the tree; the flag " &
-        "wins over `$REPRO_RESTORE_CACHED_OUTPUTS` (default: off)"
+    `restore`
     boolFlag noRunquota is bool, env = "REPROBUILD_NO_RUNQUOTA",
       refuseFalse = true,
       help = "Bypass RunQuota entirely (the unsafe single-process " &
@@ -1386,6 +1438,124 @@ proc buildFlags(): NimNode {.compileTime.} =
         "target)"
     pos actionArgs is seq[string], required = false, afterSeparator = true,
       help = "Arguments forwarded to the selected action, after `--`"
+
+proc testFlags(): NimNode {.compileTime.} =
+  ## The command line of `repro test`, which `repro certify` takes too: its
+  ## own flags (the sharded CI path and certificate issuance), then the
+  ## command line of `repro build`, which it hands to the build it runs (the
+  ## build of the `test` collection, or of the named targets).
+  let build = buildFlags()
+  quote do:
+    flag shard is string, valueName = "K/N",
+      help = "Run shard K of N (1-indexed) of the joint build and test work"
+    flag partitionStrategy is string, values = ["joint-duration", "slice",
+        "hash", "duration"], default = "joint-duration",
+      help = "How the work is split into shards (`hash` and `duration` are " &
+        "not implemented)"
+    flag emitPartitionPlan is string,
+      help = "Write the partition plan to the path and run nothing"
+    flag planFrom is string,
+      help = "Run this shard of the partition plan at the path"
+    flag fixtureFrom is string,
+      help = "Shard the test edges a fixture file declares instead of the " &
+        "project's"
+    flag binDir is string, default = "build/test-bin",
+      help = "Where a sharded run places the test binaries"
+    boolFlag certify is bool, negatable = true, default = true,
+      help = "Issue a test certificate for what passed when the issuance " &
+        "preconditions hold; `--no-certify` runs the tests and issues " &
+        "nothing"
+    flag certificateOut is string,
+      help = "Also write the issued certificate to this path (an extra " &
+        "copy; the certificate always goes to the local certificate store)"
+    flag workspaceRoot is string,
+      help = "The workspace the certificate is bound to (default: the one " &
+        "enclosing the tested repository)"
+    flag currentRepo is string,
+      help = "The repository being certified (default: the tested " &
+        "project's)"
+    flag ctIncrementalTraceDir is string,
+      help = "The incremental test adapter's trace directory, which the " &
+        "re-certify no-op also consults"
+    flag allowPinRegression is seq[string],
+      help = "Siblings whose pins the lock-update step may move backward " &
+        "(comma-separated, repeatable; `$REPRO_ALLOW_PIN_REGRESSION` is " &
+        "read too)"
+    `build`
+
+proc certificatesInspectionFlags(): NimNode {.compileTime.} =
+  ## The flags `repro certificates list` and `plan` share: they read the
+  ## project's stored graph, as a build does.
+  quote do:
+    boolFlag json is bool, help = "Print the result as JSON"
+    flag toolProvisioning is string, format = equals, values = ["path",
+        "nix", "tarball", "scoop", "from-source", "fromSource", "source"],
+      help = "How the tools that read the project are provisioned " &
+        "(default: path)"
+    boolFlag noRunquota is bool, env = "REPROBUILD_NO_RUNQUOTA",
+      refuseFalse = true,
+      help = "Bypass RunQuota admission; the flag wins over " &
+        "`$REPROBUILD_NO_RUNQUOTA`, the same bypass"
+
+proc watchFlags(): NimNode {.compileTime.} =
+  ## The command line of `repro watch`: the build flags a watch cycle takes
+  ## (each the same declaration as `repro build`'s), the session's own, and
+  ## hot code reloading's. The watch's own flags take their value only in
+  ## the `=` spelling.
+  let daemon = daemonModeFlag("watch")
+  let toolProvisioning = buildToolProvisioningFlag()
+  let workRoot = buildWorkRootFlag()
+  let measurement = measurementFlags()
+  let report = buildReportFlags()
+  let stats = buildStatsFlags()
+  let restore = restoreCachedOutputsFlag()
+  quote do:
+    `daemon`
+    `toolProvisioning`
+    `workRoot`
+    flag maxCycles is int, format = equals,
+      help = "Stop after this many cycles (default: run until stopped)"
+    flag debounceMs is int, format = equals, default = 250,
+      help = "How long a change waits for more changes before a cycle " &
+        "starts, in milliseconds"
+    boolFlag detach is bool,
+      help = "Start a daemon-hosted watch that keeps running after this " &
+        "command returns"
+    flag attach is string, format = equals, valueName = "SESSION",
+      help = "Attach to a detached watch session and stream its events"
+    flag stop is string, format = equals, valueName = "SESSION",
+      help = "Stop a detached watch session"
+    `measurement`
+    `report`
+    `stats`
+    `restore`
+    boolFlag hcr is bool,
+      help = "Hot code reloading: deliver each change as a patch to the " &
+        "running process (direct mode only: `--daemon=off`)"
+    flag hcrMode is string, format = equals, values = ["direct", "shlib"],
+      help = "How patches are delivered (default: direct)"
+    flag hcrDebug is string, format = equals, values = ["embedded",
+        "external", "none"],
+      help = "How debug information is delivered (default: embedded)"
+    flag hcrAgentSocket is string, format = equals,
+      help = "The HCR agent's socket (default: `.repro/hcr/agent.sock`)"
+    flag hcrArtifacts is string, format = equals,
+      help = "Where the HCR artifacts are written (default: `.repro/hcr`)"
+    flag hcrMetadata is string, format = equals,
+      help = "The patch metadata document a build writes (default: infer " &
+        "the changed function)"
+    flag hcrTarget is seq[string], format = equals,
+      valueName = "NAME:SOCKET:ARTIFACTS[:METADATA]",
+      help = "Hot-reload one target (repeatable); also written " &
+        "`name=NAME,socket=SOCKET,artifacts=ARTIFACTS[,metadata=METADATA]`"
+    boolFlag ctIncremental is bool,
+      help = "Skip a watched test whose trace says the change cannot " &
+        "affect it"
+    flag ctIncrementalTraceDir is string, format = equals,
+      help = "The directory the watched test writes its trace to"
+    pos selectors is seq[string], required = false,
+      help = "What to watch: a project path, `path#name`, a target name or " &
+        "`package:name` (default: the current directory's default target)"
 
 proc lockSolveFlags(): NimNode {.compileTime.} =
   ## The flags `repro lock solve`, `refresh` and `validate` share.
@@ -1515,6 +1685,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let buildCommand = buildFlags()
   let benchCommand = buildFlags()
   let lintCommand = buildFlags()
+  let testCommand = testFlags()
+  let certifyCommand = testFlags()
+  let certificatesList = certificatesInspectionFlags()
+  let certificatesPlan = certificatesInspectionFlags()
+  let watchCommand = watchFlags()
   let lockRefresh = lockSolveFlags()
   let lockValidate = lockSolveFlags()
   let workspaceCommands = workspaceSubcommands(syncWs, pullWs, switchWs,
@@ -1534,22 +1709,85 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "build", help = "Build the current project or the selected targets":
       `buildCommand`
     subcmd "test", help = "Run the project's tests":
-      pos args is seq[string], required = false, passThrough = true
+      `testCommand`
     subcmd "bench", help = "Run the project's benchmarks":
       `benchCommand`
     subcmd "lint", help = "Run the project's lint checks":
       `lintCommand`
     subcmd "certify",
         help = "Run the required test set and issue a signed test certificate":
-      pos args is seq[string], required = false, passThrough = true
+      # `repro test --certify`'s command line, and two other modes: verify
+      # a certificate a remote worker returned, or certify the repository's
+      # check set. A flag of one mode is refused in another.
+      `certifyCommand`
+      boolFlag verify is bool,
+        help = "Verify a certificate (the positional) instead of running " &
+          "tests: authentic, and bound to `--content`"
+      flag content is string,
+        help = "With `--verify`: the content id the certificate must name " &
+          "(required)"
+      flag registeredKeys is string,
+        help = "With `--verify`: the registered-key store (default: the " &
+          "workspace's)"
+      flag workspace is string,
+        help = "With `--verify`: the workspace whose registered keys are " &
+          "read (default: the current directory)"
+      boolFlag checkSet is bool,
+        help = "Certify the repository's pre-commit check set, run over the " &
+          "whole tree, as the one target `pre-commit`"
+      flag checkSetCommand is string, format = equals,
+        help = "With `--check-set`: the shell command that runs the check " &
+          "set (default: the repository's `.pre-commit-config.yaml`, run " &
+          "by prek or pre-commit)"
     subcmd "certificates",
         help = "List the project's named certificates or those a plan issues":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "list",
+          help = "The certificate names the project declares and the node " &
+            "each marks":
+        `certificatesList`
+      subcmd "plan",
+          help = "The certificate-producing nodes the plan for the " &
+            "selectors materializes":
+        `certificatesPlan`
+        boolFlag noCertify is bool,
+          help = "Plan the run as `repro test --no-certify` would"
+        pos selectors is seq[string], required = false,
+          help = "What the plan builds (default: `.#test`, as for " &
+            "`repro test`)"
+      subcmd "policy",
+          help = "The certificate policy `repro.lock` records, and the rule " &
+            "that applies to a branch":
+        flag branch is Option[string],
+          help = "The branch, or a full ref (default: the current " &
+            "branch's upstream, else the current branch)"
+        boolFlag json is bool, help = "Print the result as JSON"
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
     subcmd "ci", help = "Plan which targets a CI run must execute":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "plan",
+          help = "Which required targets a valid certificate lets CI skip, " &
+            "and which it must run, per platform":
+        flag platform is seq[string], format = equals,
+          help = "Plan for this platform (repeatable; default: every " &
+            "required platform)"
+        flag base is string, format = equals,
+          help = "The commit whose certificate-policy snapshot decides " &
+            "(default: `origin/<branch>`)"
+        flag branch is string, format = equals,
+          env = ["GITHUB_BASE_REF", "GITHUB_REF_NAME"],
+          help = "The branch whose rule applies; the flag wins over " &
+            "`$GITHUB_BASE_REF`, then `$GITHUB_REF_NAME` (default: the " &
+            "checkout's branch)"
+        boolFlag json is bool,
+          help = "Print the plan as a `reprobuild.ci-plan.v2` document"
+        flag workspaceRoot is string, format = equals,
+          help = "The workspace root (default: the current directory)"
+        flag currentRepo is string, format = equals,
+          help = "The repository whose certificates are read (default: the " &
+            "workspace root)"
     subcmd "watch",
         help = "Watch for changes and rebuild or rerun continuously":
-      pos args is seq[string], required = false, passThrough = true
+      `watchCommand`
     subcmd "clean", help = "Remove the current project's build artifacts":
       flag projectRoot is string,
         help = "The project (default: the current directory)"

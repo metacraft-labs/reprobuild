@@ -94,12 +94,13 @@ suite "sync and hooks help":
     var topics: seq[seq[string]] = @[]
     for word in ShownCommands:
       topics.add(@[word])
-    # A deeper word of a command whose parser does not know `--help`, and
-    # has no usage synopsis. (`allow` and then `gateway`, the examples until
-    # they moved onto the description, now have generated help of their own,
-    # and a word after them in `repro help`'s topic is an unknown command, as
-    # for every command parsed from the description.)
-    topics.add(@["ci", "somewhere"])
+    # A deeper word of a command whose words its own parser reads, and which
+    # has no usage synopsis. (`allow`, `gateway` and then `ci`, the examples
+    # until they moved onto the description, now have generated help of
+    # their own, and a word after them in `repro help`'s topic is an unknown
+    # command, as for every command parsed from the description. `system
+    # addon` hands its words to the add-on's own command line.)
+    topics.add(@["system", "addon", "somewhere"])
     for topic in topics:
       let res = runShell(shellCommand(@[repro, "help"] & topic, env),
         cwd = empty, timeoutMs = 60_000)

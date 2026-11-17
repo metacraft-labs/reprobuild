@@ -1,13 +1,19 @@
-## `repro build`, `repro bench`, `repro lint` and `repro clean` take their
-## command lines from repro's description: each answers `--help` (and `repro
-## help <command>`) from its declarations, a command line the description
-## does not accept is a usage error (exit 2) naming the command, the build's
-## own refusals keep their exit codes, and a command line the description
-## accepts reaches the build with the values it gave, from the flag or from
-## the environment variable the flag declares, the flag winning.
+## The build family takes its command lines from repro's description:
+## `repro build`, `repro bench`, `repro lint`, `repro clean`, `repro test`,
+## `repro certify`, `repro certificates`, `repro ci` and `repro watch`. Each
+## answers `--help` (and `repro help <command>`) from its declarations, a
+## command line the description does not accept is a usage error (exit 2)
+## naming the command, the commands' own refusals keep their exit codes, and
+## a command line the description accepts reaches the command with the
+## values it gave, from the flag or from the environment variable the flag
+## declares, the flag winning.
 ##
 ## `bench` and `lint` take `build`'s command line unchanged (one shared
 ## declaration): each is `repro build` of its conventional collection.
+## `repro test` (and `repro certify`, which takes its command line) adds its
+## own flags to `build`'s and hands the build exactly the build flags it was
+## given (`buildWordsOf`). `repro watch` declares the build flags a watch
+## cycle takes with the same declarations as `build`.
 ##
 ## The arms, and what makes each one evidence:
 ##
@@ -42,6 +48,22 @@
 ##      among the `--variant`s; `bench`, `lint` and `clean` fill their own
 ##      configurations; the daemon parent's request readers find the target
 ##      and the work root the worker builds.
+##
+##   5. The rest of the group (arms 1, 2 and 4 again): `test`, `certify`,
+##      `certificates` with `list`, `plan`, `policy`, `ci plan` and `watch`
+##      print generated help; their refusals are usage errors (exit 2,
+##      `repro ci`'s and `repro certificates`' included, which were 1 and
+##      stderr-only before); `watch`'s `--daemon`/`REPRO_DAEMON`,
+##      `--tool-provisioning`/`REPRO_TOOL_PROVISIONING`, `--measure`,
+##      `--show` and `--[no-]restore-cached-outputs` over their variables,
+##      `ci plan --branch` over `GITHUB_BASE_REF` then `GITHUB_REF_NAME`, and
+##      `certificates list|plan --no-runquota` over `REPROBUILD_NO_RUNQUOTA`,
+##      each in both orders; `repro test` hands its build exactly the build
+##      flags given on its command line, which the build parses back to the
+##      same values, and the words after `--`; what the run evaluates itself
+##      sees its variant assignments in `$REPRO_VARIANTS` after the caller's,
+##      and each build it runs starts from the caller's value, so a second
+##      build in one run does not add them twice.
 ##
 ## No mocks: the real `build/bin/repro` runs as a subprocess, in an empty
 ## directory with a fresh HOME and XDG directories and a daemon endpoint
@@ -84,6 +106,8 @@ proc newScratch(): Scratch =
     ("REPROBUILD_LOG", ""), ("REPROBUILD_MEASURE", ""),
     ("REPROBUILD_SHOW", ""), ("REPRO_UNICODE", ""),
     ("REPROBUILD_NO_RUNQUOTA", ""), ("REPRO_VARIANTS", ""),
+    ("REPRO_TOOL_PROVISIONING", ""), ("REPRO_RESTORE_CACHED_OUTPUTS", ""),
+    ("GITHUB_BASE_REF", ""), ("GITHUB_REF_NAME", ""),
     ("REPRO_WORKSPACE_CONFIG", ""), ("REPRO_DEFAULT_PROJECTS", "")]
 
 proc dispose(s: Scratch) =
@@ -114,7 +138,8 @@ const
 
 const BuildEnv = ["REPRO_DAEMON", "REPROBUILD_PROGRESS", "REPRO_PROGRESS",
   "REPROBUILD_LOG", "REPROBUILD_MEASURE", "REPROBUILD_SHOW", "REPRO_UNICODE",
-  "REPROBUILD_NO_RUNQUOTA"]
+  "REPROBUILD_NO_RUNQUOTA", "REPRO_TOOL_PROVISIONING",
+  "REPRO_RESTORE_CACHED_OUTPUTS", "GITHUB_BASE_REF", "GITHUB_REF_NAME"]
 
 template withBuildEnv(assignments: openArray[(string, string)];
                       body: untyped) =
@@ -399,3 +424,284 @@ suite "the build family's command lines":
       check warmed.len > 0
       check daemonPrewarmTargetOutputDir(["--work-root=" & other / "w",
         project], other, NoArgs) != warmed
+
+  test "test, certify, certificates, ci and watch answer help from their declarations":
+    let s = newScratch()
+    defer: s.dispose()
+    for path in [@["test"], @["certify"], @["certificates"],
+        @["certificates", "list"], @["certificates", "plan"],
+        @["certificates", "policy"], @["ci"], @["ci", "plan"], @["watch"]]:
+      let usage = "Usage: repro " & path.join(" ")
+      for argv in [path & @["--help"], path & @["-h"], @["help"] & path]:
+        let res = s.runStdout(argv)
+        check res.code == 0
+        check usage in res.stdout
+    # `repro certificates help` is the namespace's help, on stdout.
+    let namespaceHelp = s.runStdout(["certificates", "help"])
+    check namespaceHelp.code == 0
+    check "Usage: repro certificates" in namespaceHelp.stdout
+    # `repro test` and `repro certify` take `repro build`'s flags with their
+    # own.
+    for verb in ["test", "certify"]:
+      let help = s.runStdout([verb, "--help"]).stdout
+      for flag in @SharedFlags & @["--shard", "--partition-strategy",
+          "--emit-partition-plan", "--plan-from", "--fixture-from",
+          "--bin-dir", "--[no-]certify", "--certificate-out",
+          "--workspace-root", "--current-repo", "--ct-incremental-trace-dir",
+          "--allow-pin-regression"]:
+        checkpoint(verb & " help lists " & flag)
+        check flag in help
+    let certifyHelp = s.runStdout(["certify", "--help"]).stdout
+    for flag in ["--verify", "--content", "--registered-keys",
+        "--workspace", "--check-set", "--check-set-command"]:
+      check flag in certifyHelp
+    let watchHelp = s.runStdout(["watch", "--help"]).stdout
+    for flag in ["--daemon", "--tool-provisioning", "--work-root",
+        "--max-cycles", "--debounce-ms", "--detach", "--attach", "--stop",
+        "--measure", "--show", "--write-report", "--no-write-report",
+        "--write-stats", "--stats-groups", "--[no-]restore-cached-outputs",
+        "--hcr", "--hcr-mode", "--hcr-debug", "--hcr-agent-socket",
+        "--hcr-artifacts", "--hcr-metadata", "--hcr-target",
+        "--ct-incremental", "--ct-incremental-trace-dir", "REPRO_DAEMON"]:
+      checkpoint("watch help lists " & flag)
+      check flag in watchHelp
+    check "GITHUB_BASE_REF" in s.runStdout(["ci", "plan", "--help"]).stdout
+    check not dirExists(s.home / "daemon")
+
+  test "their refusals are usage errors, before anything runs":
+    let s = newScratch()
+    defer: s.dispose()
+    let certificate = s.cwd / "cert.toml"
+    let cases: seq[(seq[string], seq[(string, string)], string)] = @[
+      (@["test", "--bogus"], @[], "--bogus"),
+      (@["test", "--daemon=maybe"], @[], "--daemon"),
+      (@["test", "."], @[("REPRO_DAEMON", "maybe")], "REPRO_DAEMON"),
+      (@["test", "--partition-strategy=zigzag"], @[], "--partition-strategy"),
+      (@["test", "--shard=half"], @[], "invalid --shard value"),
+      (@["test", "--variant=novalue"], @[], "--variant expects name=value"),
+      (@["test", "--allow-pin-regression=*"], @[], "--allow-pin-regression"),
+      (@["certify", "--bogus"], @[], "--bogus"),
+      (@["certify", "--content=git-tree-sha1:00"], @[],
+        "--content applies to --verify only"),
+      (@["certify", "--check-set-command=true"], @[],
+        "--check-set-command applies to --check-set only"),
+      (@["certify", "--verify", certificate, "--content=x", "--json"], @[],
+        "unknown option --json"),
+      (@["certify", "--verify", certificate, "other.toml", "--content=x"],
+        @[], "one certificate at a time"),
+      (@["certify", "--verify", certificate], @[], "--content is required"),
+      (@["certify", "--check-set", "--content=x"], @[],
+        "--content applies to --verify only"),
+      (@["certificates"], @[], "certificates"),
+      (@["certificates", "bogus"], @[], "bogus"),
+      (@["certificates", "list", "stray"], @[], "stray"),
+      (@["certificates", "list", "--tool-provisioning", "path"], @[],
+        "--tool-provisioning"),
+      (@["certificates", "plan", "--no-runquota=perhaps"], @[],
+        "--no-runquota"),
+      (@["certificates", "policy", "--branch="], @[], "--branch needs a name"),
+      (@["ci"], @[], "ci"),
+      (@["ci", "plan", "--bogus"], @[], "--bogus"),
+      (@["ci", "plan", "--platform", "x86_64-linux"], @[], "--platform"),
+      (@["watch", "--bogus"], @[], "--bogus"),
+      (@["watch", "--daemon=maybe"], @[], "--daemon"),
+      (@["watch", "."], @[("REPRO_DAEMON", "maybe")], "REPRO_DAEMON"),
+      (@["watch", "--max-cycles=0"], @[], "--max-cycles"),
+      (@["watch", "--max-cycles=many"], @[], "--max-cycles"),
+      (@["watch", "--debounce-ms=-5"], @[], "--debounce-ms"),
+      (@["watch", "--hcr-mode=fast"], @[], "--hcr-mode"),
+      (@["watch", "--hcr-target=only-a-name"], @[], "--hcr-target"),
+      (@["watch", "--attach"], @[], "--attach"),
+      (@["watch", "--ct-incremental-trace-dir", "d"], @[],
+        "--ct-incremental-trace-dir")]
+    for (argv, env, needle) in cases:
+      let res = s.run(argv, env)
+      check res.code == 2
+      check needle in res.output
+      check ("repro " & argv[0]) in res.output or "'" & argv[0] & "'" in
+        res.output
+    check not dirExists(s.home / "daemon")
+
+  test "watch's flags over their variables, in both orders":
+    withBuildEnv(NoEnv):
+      let (c, o) = loadWatchCommandLine(NoArgs)
+      check c.daemon == ""
+      check o.daemon.winner.kind notin {cokCli, cokEnv}
+      check c.debounceMs == 250
+      check c.maxCycles == 0
+      check not c.restoreCachedOutputs
+    withBuildEnv([("REPRO_DAEMON", "off"),
+        ("REPRO_TOOL_PROVISIONING", "nix"),
+        ("REPRO_RESTORE_CACHED_OUTPUTS", "1"),
+        ("REPROBUILD_MEASURE", "timing"), ("REPROBUILD_SHOW", "trace")]):
+      let (c, o) = loadWatchCommandLine(["."])
+      check c.daemon == "off"
+      check o.daemon.winner.kind == cokEnv
+      check c.toolProvisioning == "nix"
+      check o.toolProvisioning.winner.kind == cokEnv
+      check c.restoreCachedOutputs
+      check o.restoreCachedOutputs.winner.kind == cokEnv
+      check c.measure == @["timing"]
+      check o.measure.winner.kind == cokEnv
+      check c.show == @["trace"]
+      check o.show.winner.kind == cokEnv
+      let (f, fo) = loadWatchCommandLine(["--daemon=require",
+        "--tool-provisioning=path", "--no-restore-cached-outputs",
+        "--measure=none", "--show=timing", "."])
+      check f.daemon == "require"
+      check fo.daemon.winner.kind == cokCli
+      check f.toolProvisioning == "path"
+      check fo.toolProvisioning.winner.kind == cokCli
+      check not f.restoreCachedOutputs
+      check fo.restoreCachedOutputs.winner.kind == cokCli
+      check f.measure == @["none"]
+      check fo.measure.winner.kind == cokCli
+      check f.show == @["timing"]
+      check fo.show.winner.kind == cokCli
+    withBuildEnv([("REPRO_DAEMON", "require")]):
+      check loadWatchCommandLine(["--daemon", "off"]).conf.daemon == "off"
+      check loadWatchCommandLine(NoArgs).conf.daemon == "require"
+    withBuildEnv([("REPRO_DAEMON", "")]):
+      check loadWatchCommandLine(NoArgs).conf.daemon == ""
+    withBuildEnv(NoEnv):
+      let (w, _) = loadWatchCommandLine(["--max-cycles=3", "--debounce-ms=40",
+        "--hcr", "--hcr-mode=shlib", "--hcr-target=a:/s:/art",
+        "--hcr-target=name=p:q,socket=/t,artifacts=/u", "--detach",
+        "--write-stats", "one", "two"])
+      check w.maxCycles == 3
+      check w.debounceMs == 40
+      check w.hcr
+      check w.hcrMode == "shlib"
+      check w.hcrTarget == @["a:/s:/art", "name=p:q,socket=/t,artifacts=/u"]
+      check w.detach
+      check w.writeStats == some("")
+      check w.selectors == @["one", "two"]
+
+  test "ci plan --branch over GITHUB_BASE_REF, then GITHUB_REF_NAME":
+    withBuildEnv([("GITHUB_REF_NAME", "dev")]):
+      check parsed(["ci", "plan"]) == 0
+      check parsedCommand.ci.plan.branch == "dev"
+      check parsed(["ci", "plan", "--branch=main"]) == 0
+      check parsedCommand.ci.plan.branch == "main"
+    withBuildEnv([("GITHUB_BASE_REF", "stable"), ("GITHUB_REF_NAME", "dev")]):
+      check parsed(["ci", "plan"]) == 0
+      check parsedCommand.ci.plan.branch == "stable"
+      check parsed(["ci", "plan", "--branch=main", "--platform=a",
+        "--platform=b", "--json"]) == 0
+      check parsedCommand.ci.plan.branch == "main"
+      check parsedCommand.ci.plan.platform == @["a", "b"]
+      check parsedCommand.ci.plan.json
+    # A pull request's empty `GITHUB_BASE_REF` on a push event counts as
+    # unset, so `GITHUB_REF_NAME` applies.
+    withBuildEnv([("GITHUB_BASE_REF", ""), ("GITHUB_REF_NAME", "dev")]):
+      check parsed(["ci", "plan"]) == 0
+      check parsedCommand.ci.plan.branch == "dev"
+
+  test "certificates list and plan: --no-runquota over REPROBUILD_NO_RUNQUOTA":
+    withBuildEnv([("REPROBUILD_NO_RUNQUOTA", "1")]):
+      check parsed(["certificates", "list"]) == 0
+      check parsedCommand.certificates.list.noRunquota
+      check parsed(["certificates", "plan", "--json", "a", "b"]) == 0
+      check parsedCommand.certificates.plan.noRunquota
+      check parsedCommand.certificates.plan.selectors == @["a", "b"]
+    withBuildEnv(NoEnv):
+      check parsed(["certificates", "list"]) == 0
+      check not parsedCommand.certificates.list.noRunquota
+      check parsed(["certificates", "plan", "--no-runquota", "--no-certify",
+        "--tool-provisioning=nix"]) == 0
+      check parsedCommand.certificates.plan.noRunquota
+      check parsedCommand.certificates.plan.noCertify
+      check parsedCommand.certificates.plan.toolProvisioning == "nix"
+      check parsed(["certificates", "policy", "--branch", "main"]) == 0
+      check parsedCommand.certificates.policy.branch == some("main")
+
+  test "repro test hands its build exactly the build flags it was given":
+    withBuildEnv([("REPRO_DAEMON", "off"), ("REPROBUILD_LOG", "actions")]):
+      let argv = @["--shard=1/2", "--daemon", "require", "-v", "--release",
+        "--variant=a=1", "--no-certify", "--workspace-root=w",
+        "--runquota", "--write-report", "--write-stats=s.db",
+        "--no-unicode", "--lock", "L", "--only=x", "--hard-rebuild",
+        "--dry-run", "sel", "--", "-x", "a b"]
+      let (c, o) = loadTestCommandLine(argv)
+      check c.shard == "1/2"
+      check not c.certify
+      check c.selectors == @["sel"]
+      check c.actionArgs == @["-x", "a b"]
+      let words = buildWordsOf(c, o)
+      checkpoint(words.join(" "))
+      # Only what the command line gave, in canonical spellings; none of
+      # `repro test`'s own flags, the positionals or what a variable gave.
+      check words == @["--daemon=require", "--variant=buildType=release",
+        "--variant=a=1", "--lock=L", "--no-unicode", "--log=summary",
+        "--write-report", "--write-stats=s.db", "--dry-run",
+        "--hard-rebuild", "--only=x", "--runquota"]
+      # The build reads them back to the same values; the variables the
+      # flags declare it reads itself.
+      let (b, bo) = loadBuildCommandLine(words & @["sel", "--", "-x", "a b"])
+      check b.daemon == "require"
+      check bo.daemon.winner.kind == cokCli
+      check b.log == "summary"
+      check b.variant == @["buildType=release", "a=1"]
+      check b.lock == @["L"]
+      check b.writeReport == some("")
+      check b.writeStats == some("s.db")
+      check not b.unicode
+      check bo.unicode.winner.kind == cokCli
+      check b.dryRun and b.hardRebuild
+      check b.only == @["x"]
+      check not b.noRunquota
+      check bo.noRunquota.winner.kind == cokCli
+      check b.selectors == @["sel"]
+      check b.actionArgs == @["-x", "a b"]
+      # Without the flags, the build reads the variables, as before.
+      let (e, eo) = loadTestCommandLine(NoArgs)
+      check buildWordsOf(e, eo).len == 0
+      check e.daemon == "off"
+      check eo.daemon.winner.kind == cokEnv
+      check e.certify
+      check e.partitionStrategy == "joint-duration"
+      check e.binDir == "build/test-bin"
+    # `repro certify` takes the same command line.
+    withBuildEnv(NoEnv):
+      let (c, o) = loadCertifyCommandLine(["--verify", "cert.toml",
+        "--content=x", "--registered-keys", "k"])
+      check c.verify
+      check c.selectors == @["cert.toml"]
+      check c.content == "x"
+      check c.registeredKeys == "k"
+      check buildWordsOf(c, o).len == 0
+      let (t, to) = loadCertifyCommandLine(["--check-set",
+        "--check-set-command=true", "--tool-provisioning=nix"])
+      check t.checkSet
+      check t.checkSetCommand == "true"
+      check buildWordsOf(t, to) == @["--tool-provisioning=nix"]
+
+  test "repro test's variants: the run's own reads see them, its builds add them once":
+    # The certificate plan, the lock refresh and the sharded path evaluate
+    # the recipe in this process, under `$REPRO_VARIANTS`; the builds the run
+    # starts get the assignments on their command line (`buildWordsOf`) and
+    # must start from the caller's value, or a second build in one run
+    # (`repro certify`'s re-execution) would see them twice.
+    let saved = (existsEnv("REPRO_VARIANTS"), getEnv("REPRO_VARIANTS"))
+    try:
+      withBuildEnv(NoEnv):
+        putEnv("REPRO_VARIANTS", "x=0")
+        let r = reproTestRunVariants(["--release", "--variant=a=1",
+          "--target=native"])
+        check r.duringRun == some("x=0,buildType=release,a=1")
+        check r.duringBuild == some("x=0")
+        check r.afterBuild == some("x=0,buildType=release,a=1")
+        check getEnv("REPRO_VARIANTS") == "x=0"
+        delEnv("REPRO_VARIANTS")
+        let t = reproTestRunVariants(["--debug", "--target=armv7-linux"])
+        check t.duringRun.isSome
+        check t.duringRun.get.startsWith("buildType=debug,targetTriple=")
+        check "armv7" in t.duringRun.get
+        check t.duringBuild.isNone
+        check not existsEnv("REPRO_VARIANTS")
+        # Nothing given: the caller's value throughout.
+        let n = reproTestRunVariants(NoArgs)
+        check n.duringRun.isNone and n.duringBuild.isNone
+    finally:
+      if saved[0]: putEnv("REPRO_VARIANTS", saved[1])
+      else: delEnv("REPRO_VARIANTS")
