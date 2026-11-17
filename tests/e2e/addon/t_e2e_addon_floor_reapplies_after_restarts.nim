@@ -530,7 +530,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # §13 decision 144: a reboot before the recovery. Every floored unit
     # waits for the boot re-assertion, which replays the pending revert and
     # puts its start holds back first, so the refused unit stays down.
+    # A9 review round 20: what decides the boot-hold unit's run, recorded
+    # before the reboot and after it.
+    record["bootHoldBeforeReboot"] = %g.bootHoldBeforeReboot()
     g.rebootGuest()
+    record["bootHoldUnit"] = %g.bootHoldAfterBoot()
     # The boot re-assertion replays the pending revert; wait for it to end
     # (a oneshot that stays active), so the recovery below does not find it
     # running and defer.

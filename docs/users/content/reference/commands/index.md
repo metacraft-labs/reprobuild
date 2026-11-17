@@ -74,11 +74,11 @@ Commands fall into four side-effect classes:
 | Command | Subcommands | What it does |
 |---|---|---|
 | `repro develop` | — | Set up a project or a dependency for development. |
-| `repro add` | — | Add a dependency to the active context. |
+| `repro add` | — | Add a package dependency to the current project's repro.nim. |
 | `repro why` | — | Explain why a package or an action is in the active context. |
 | `repro lock` | `list`, `solve`, `refresh`, `update`, `validate`, `diff`, `explain` | Inspect and update the project's lock. |
 | `repro workspace` (`repro ws`) | — | Manage the multi-repository workspace. |
-| `repro remove` | — | Remove a dependency from the active context. |
+| `repro remove` | — | Remove a package dependency from the current project's repro.nim. |
 | `repro sync` | — | Fast-forward the workspace's repositories toward a target. |
 | `repro pull` | — | Converge the workspace onto its declared revisions. |
 | `repro branch` | — | Fork a new sibling workspace on a new branch (with no path: print the workspace's branch). |
@@ -126,7 +126,7 @@ Commands fall into four side-effect classes:
 <!-- generated:begin cli-reference index by=name -->
 | Command | Area | What it does |
 |---|---|---|
-| `repro add` | Dependencies & Workspaces | Add a dependency to the active context. |
+| `repro add` | Dependencies & Workspaces | Add a package dependency to the current project's repro.nim. |
 | `repro allow` | Environments & Services | Trust a directory's development environment, so the shell hook activates it. |
 | `repro anywhere` | Machines & Diagnostics | Bootstrap a booted distribution host into ReproOS add-on mode over SSH (Linux): without --expect-plan print the plan and exit 3, with it apply. |
 | `repro attest` | Machines & Diagnostics | Compute and check launch measurements of attested images. |
@@ -176,7 +176,7 @@ Commands fall into four side-effect classes:
 | `repro pull` | Dependencies & Workspaces | Converge the workspace onto its declared revisions. |
 | `repro push` | Dependencies & Workspaces | Publish the current work as a reproducible workspace state. |
 | `repro reap` | Machines & Diagnostics | Run one sweep of the resource-state store. |
-| `repro remove` | Dependencies & Workspaces | Remove a dependency from the active context. |
+| `repro remove` | Dependencies & Workspaces | Remove a package dependency from the current project's repro.nim. |
 | `repro run` | Environments & Services | Run a task, a build output or a target once. |
 | `repro self` | Machines & Diagnostics | Install and manage reprobuild's own versions. |
 | `repro shell` | Environments & Services | Enter or print the development shell environment. |

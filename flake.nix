@@ -444,6 +444,19 @@
       url = "github:metacraft-labs/nim-cli-spec/8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
       flake = false;
     };
+    nim-entrypoints-src = {
+      # nim-entrypoints ships the ``entrypoints`` package: the declarative
+      # description of a program's entry points (and what each one reads from
+      # its environment) that repro's command line is being moved onto. It is a
+      # leaf library needing only the standard library; the ``compat/`` shims
+      # in that repository are not part of the pin. config.nims reads
+      # ENTRYPOINTS_SRC (after a ``../nim-entrypoints`` sibling); the sandboxed
+      # package build + override-free CI jobs have no sibling, so seed it from
+      # here, exactly like nim-cli-spec-src. Keep this URL, flake.lock,
+      # repro.lock and .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-entrypoints/8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
+      flake = false;
+    };
     nim-confutils-src = {
       # nim-confutils (the metacraft-labs fork; mainline ``codetracer``) ships
       # ``confutils/clispec_config``: confutils instantiated over a clispec
@@ -1041,6 +1054,7 @@
       nim-shm-gset-src,
       nim-shm-queue-src,
       nim-cli-spec-src,
+      nim-entrypoints-src,
       nim-confutils-src,
       nim-fork-src,
       nim-csources-src,
@@ -1275,6 +1289,7 @@
               (row "SHM_GSET_SRC" "nim-shm-gset-src" "/src")
               (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
               (row "CLI_SPEC_SRC" "nim-cli-spec-src" "/src")
+              (row "ENTRYPOINTS_SRC" "nim-entrypoints-src" "/src")
               (row "CONFUTILS_SRC" "nim-confutils-src" "")
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
@@ -1520,6 +1535,7 @@
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 export CLI_SPEC_SRC=${nim-cli-spec-src}/src
+                export ENTRYPOINTS_SRC=${nim-entrypoints-src}/src
                 export CONFUTILS_SRC=${nim-confutils-src}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
@@ -1646,6 +1662,7 @@
               shmGsetSrc = nim-shm-gset-src;
               shmQueueSrc = nim-shm-queue-src;
               cliSpecSrc = nim-cli-spec-src;
+              entrypointsSrc = nim-entrypoints-src;
               confutilsSrc = nim-confutils-src;
               codetracerSrc = codetracer-src;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
@@ -1802,6 +1819,7 @@
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
                 CLI_SPEC_SRC|${nim-cli-spec-src}/src
+                ENTRYPOINTS_SRC|${nim-entrypoints-src}/src
                 CONFUTILS_SRC|${nim-confutils-src}
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
@@ -2033,6 +2051,7 @@
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
                                       ${nim-cli-spec-src} \
+                                      ${nim-entrypoints-src} \
                                       ${nim-confutils-src} \
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
@@ -2697,6 +2716,7 @@
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             CLI_SPEC_SRC = "${nim-cli-spec-src}/src";
+            ENTRYPOINTS_SRC = "${nim-entrypoints-src}/src";
             CONFUTILS_SRC = "${nim-confutils-src}";
             # Kernel UAPI syscall tables for the CONF-3 lease-floor derivation
             # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.

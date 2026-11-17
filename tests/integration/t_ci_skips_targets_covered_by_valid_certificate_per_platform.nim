@@ -248,7 +248,9 @@ proc planJson(fx: Fixture; platform: string): JsonNode =
     fx.reproBin, "ci", "plan",
     "--platform=" & platform,
     "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath, "--json"]))
+    "--current-repo=" & fx.libAPath,
+    "--registered-keys=" & jobOwnedKeyStore(fx.workspaceRoot, fx.scratch),
+    "--json"]))
   checkpoint("ci plan (" & platform & ") output:\n" & res.output)
   check res.code == 0
   # The JSON is the LAST object in the output (stderr notes may precede on

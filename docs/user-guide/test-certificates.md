@@ -476,9 +476,17 @@ staged.
 `git update-index --no-assume-unchanged -- <path>` clears the flag it reports.
 
 **`key_id '…' not registered`.** The verifier could not find the signing key in the
-registered-keys store of the workspace it used. For `repro ci plan` in a workspace,
-pass `--workspace-root=<workspace>` and `--current-repo=<path to the repository>`, or the
-repository is taken for the workspace and its own store is read.
+registered-keys store it used. The gates read the workspace's store. For a `skip`,
+`repro ci plan` reads only the store `--registered-keys=<path>` names, so register
+the key there. That file belongs to the CI job and must lie outside the checkout and
+the workspace root.
+
+**`repro ci plan` skips nothing although the base sets `ci_trust = "skip"`.** The job
+did not pass `--registered-keys`. Without it the plan reports `ci_trust` as `advisory`
+and says why in `policy.detail` and on stderr. The workspace's own store is one the
+candidate checkout can supply, so it cannot grant a skip. Name a store the job owns.
+The plan exits 1 when that path lies inside the checkout or the workspace root, or
+when the file is missing, unreadable or cannot be parsed.
 
 **A gateway refuses with "no certificate note on the pushed tree".** Nothing
 propagated a note, for one of two reasons, and the refusal ends by saying the pushed

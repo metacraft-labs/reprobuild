@@ -1132,13 +1132,14 @@ package reprobuild:
 
     # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
     #
-    # Each of the five names a workspace PROJECT whose ``repro.nim``
+    # Each of the six names a workspace PROJECT whose ``repro.nim``
     # declares a ``library`` and NO ``executable``:
     #
     #   reprobuild-test-adapters -> ``library repro_test_adapters`` (src/)
     #   nim-stackable-hooks      -> ``library stackable_hooks``     (src/)
     #   nim-shm-queue            -> ``library shm_queue``           (src/)
     #   nim-cli-spec             -> ``library clispec``             (src/)
+    #   nim-entrypoints          -> ``library entrypoints``         (src/)
     #   test-certificates-tools  -> ``library test_certificates``   (src/)
     #
     # That is Cross-Repo-Source-Consumption §4.2a (SC-11), the Nim
@@ -1197,6 +1198,11 @@ package reprobuild:
     # SC-11 channel and the same one-change rule: this line and its
     # ``repro.lock`` entry.
     "nim-cli-spec"
+    # entrypoints: the declarative description of a program's entry points
+    # (``library entrypoints``, ``src/``). A leaf library; its ``compat/``
+    # shims are not part of the exported path. Same SC-11 channel and the same
+    # one-change rule: this line and its ``repro.lock`` entry.
+    "nim-entrypoints"
     # NOT LISTED: nim-confutils, which the engine imports for its own command
     # line (``confutils/clispec_config``, through ``CONFUTILS_SRC`` in
     # ``config.nims``). The fork has no ``repro.nim`` declaring a

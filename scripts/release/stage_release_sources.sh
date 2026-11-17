@@ -171,6 +171,8 @@ SHM_QUEUE_SRC=$(sibling_first SHM_QUEUE_SRC ../nim-shm-queue/src shm_queue.nim) 
   stage SHM_QUEUE_SRC nim-shm-queue/src shm_queue.nim
 CLI_SPEC_SRC=$(sibling_first CLI_SPEC_SRC ../nim-cli-spec/src clispec.nim) \
   stage CLI_SPEC_SRC nim-cli-spec/src clispec.nim
+ENTRYPOINTS_SRC=$(sibling_first ENTRYPOINTS_SRC ../nim-entrypoints/src entrypoints.nim) \
+  stage ENTRYPOINTS_SRC nim-entrypoints/src entrypoints.nim
 CONFUTILS_SRC=$(sibling_first CONFUTILS_SRC ../nim-confutils confutils.nim) \
   stage CONFUTILS_SRC nim-confutils confutils.nim
 stage RUNQUOTA_SRC runquota libs/runquota_core/src/runquota_core.nim ../runquota

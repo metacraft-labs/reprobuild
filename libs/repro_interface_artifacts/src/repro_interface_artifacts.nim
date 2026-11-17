@@ -169,6 +169,7 @@ const BuiltSourcePackageRoots = [
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
   ("CLI_SPEC_SRC", compileTimeSourceRoot("CLI_SPEC_SRC")),
+  ("ENTRYPOINTS_SRC", compileTimeSourceRoot("ENTRYPOINTS_SRC")),
   # confutils: repro's own command line (``repro_cli_support/cli_program``)
   # is instantiated through it, so a nested compile of the engine needs it.
   ("CONFUTILS_SRC", compileTimeSourceRoot("CONFUTILS_SRC")),

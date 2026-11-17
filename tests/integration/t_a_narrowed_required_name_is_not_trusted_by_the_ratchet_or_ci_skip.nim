@@ -208,10 +208,24 @@ proc upstreamRef(origin, branch: string): string =
     "--verify", "--quiet", "refs/heads/" & branch]))
   if res.exitCode != 0: "" else: res.output.strip()
 
+proc jobOwnedKeys(fx: WorkspaceCertifyFixture): string =
+  ## A copy of the workspace's registered-key store outside the checkout and
+  ## the workspace root: the store a CI job owns and names with
+  ## ``--registered-keys``, without which ``ci plan`` never skips (the
+  ## workspace store is one a candidate could supply). Copied at call time,
+  ## as ``tc5_cert_signing_helpers.jobOwnedKeyStore`` does for the tests
+  ## that include it.
+  result = fx.cf.sib.scratch / "ci-job" / "registered-keys.toml"
+  createDir(result.parentDir)
+  let source = registeredKeyStorePath(fx.cf.sib.ws)
+  if fileExists(source): copyFile(source, result)
+  else: writeRegisteredKeyStore(RegisteredKeyStore(), result)
+
 proc ciPlan(fx: WorkspaceCertifyFixture; base, branch: string): JsonNode =
   let res = fx.reproIn(["ci", "plan", "--platform=" & currentPlatformTag(),
     "--branch=" & branch, "--base=" & base,
-    "--workspace-root=" & fx.cf.sib.ws, "--current-repo=" & fx.app, "--json"])
+    "--workspace-root=" & fx.cf.sib.ws, "--current-repo=" & fx.app,
+    "--registered-keys=" & fx.jobOwnedKeys(), "--json"])
   checkpoint("ci plan --base=" & base & ":\n" & res.output)
   doAssert res.code == 0, "repro ci plan failed:\n" & res.output
   let start = res.output.find("{\n")

@@ -94,7 +94,7 @@
 ##      the ordinary checkout beside it. This is the case that stops the
 ##      declaration exemption from leaking into the delete, which is what
 ##      `1c005c6f` was closing.
-##   6. The THIRD delete site, end to end: `repro remove`'s RA-22 reachability
+##   6. The THIRD delete site, end to end: `repro ws remove`'s RA-22 reachability
 ##      GC. It reaches the root by two routes — NAMED as the target, and swept
 ##      into the GC set through another target's `depends` closure — and they
 ##      are answered differently on purpose (refuse the request vs. skip the
@@ -825,19 +825,19 @@ suite "a declared checkout path cannot escape the workspace root":
   test "t_repro_remove_refuses_the_workspace_root_by_name_and_in_the_gc_set":
     ## W5 — the THIRD delete site on a repo-derived path, end to end.
     ##
-    ## `repro remove`'s RA-22 reachability GC ends in a bare
+    ## `repro ws remove`'s RA-22 reachability GC ends in a bare
     ## `removeDir(<workspaceRoot> / p.repo.path)`. Before the declaration
     ## exemption it was unreachable for `.` only because `readRepoFragment`
     ## refused the value — this loop never asked the own-tree question itself.
     ## So the reader guard was not redundant here, it was the ONLY thing in
-    ## the way, and lifting it made `repro remove` delete the workspace root
+    ## the way, and lifting it made `repro ws remove` delete the workspace root
     ## and report exit 0. This case is the reason the guard now stands in
     ## front of this `removeDir` too.
     ##
     ## The root reaches the command by two routes and they are asserted
     ## separately, because they are answered differently on purpose:
     ##
-    ##   * NAMED (`repro remove ws-root`) — the whole verb refuses and
+    ##   * NAMED (`repro ws remove ws-root`) — the whole verb refuses and
     ##     NOTHING is mutated, not even the target's `includes` edge. A GC
     ##     that quietly skipped the delete would still drop the declaration
     ##     and still print a removal line, telling the operator a repo was
@@ -921,10 +921,10 @@ suite "a declared checkout path cannot escape the workspace root":
       let projectBefore = readFile(projectFile)
 
       # ---- route 1: NAMED as the target -----------------------------------
-      let named = runShell(shellCommand([repro, "remove", "ws-root",
+      let named = runShell(shellCommand([repro, "ws", "remove", "ws-root",
         "--force", "--workspace-root=" & workspaceRoot]))
       if named.code == 0:
-        checkpoint("repro remove ws-root output: " & named.output)
+        checkpoint("repro ws remove ws-root output: " & named.output)
       check named.code == 1
       # RA-28: the offender is the REPO, not the string `.` — `ws-root` is
       # what the operator typed and what they have to act on — and the
@@ -962,10 +962,10 @@ suite "a declared checkout path cannot escape the workspace root":
         check readFile(workspaceRoot / "precious.txt") == "must survive\n"
 
       # ---- route 2: SWEPT INTO the GC set via `depends` --------------------
-      let swept = runShell(shellCommand([repro, "remove", "only-mine",
+      let swept = runShell(shellCommand([repro, "ws", "remove", "only-mine",
         "--force", "--workspace-root=" & workspaceRoot]))
       if swept.code != 1:
-        checkpoint("repro remove only-mine output: " & swept.output)
+        checkpoint("repro ws remove only-mine output: " & swept.output)
       check swept.code == 1
       check swept.output.contains("refusing to remove 'ws-root'")
       check swept.output.contains("not the workspace root itself")
@@ -1006,7 +1006,7 @@ suite "a declared checkout path cannot escape the workspace root":
     ## the unguarded executor, lost `PRECIOUS-UNTRACKED.txt`, `projects/`,
     ## `repos/` and the whole `lib` checkout — a second repo's working tree,
     ## deleted by a "force-sync" of a different repo — and the command exited
-    ## 0. That is the same class of harm as `repro remove`'s root delete
+    ## 0. That is the same class of harm as `repro ws remove`'s root delete
     ## arriving through a different verb, which is why the containment proof
     ## now lives in the executor rather than in any one caller.
     ##
@@ -1130,7 +1130,7 @@ suite "a declared checkout path cannot escape the workspace root":
     ## and `repro develop --all --reset` runs `removeDir` on it.
     ##
     ## Measured before it was guarded, and the shape of the harm is worse than
-    ## `repro remove`'s in two ways: it takes `.git` (unrecoverable), and the
+    ## `repro ws remove`'s in two ways: it takes `.git` (unrecoverable), and the
     ## run then printed a REFUSAL from the half-clone cleanup — which IS
     ## guarded — two lines after the unguarded delete had already taken
     ## everything, so the operator was told the command declined to touch the
@@ -2231,7 +2231,7 @@ suite "a declared checkout path cannot escape the workspace root":
   test "t_repro_remove_refuses_a_checkout_that_reparses_onto_the_root":
     ## W8-R1 for the FOURTH deleting consumer, `executeRemove`, end to end.
     ##
-    ## `repro remove`'s RA-22 reachability GC reaches a checkout by two
+    ## `repro ws remove`'s RA-22 reachability GC reaches a checkout by two
     ## routes, and W5 established that they must be answered DIFFERENTLY:
     ## NAMED as the target the whole verb refuses before anything is mutated,
     ## because there is no partial execution of "remove this" that is correct;
@@ -2317,9 +2317,9 @@ suite "a declared checkout path cannot escape the workspace root":
         let projectBefore = readFile(projectFile)
 
         # ---- route 1: NAMED as the target -------------------------------
-        let named = runShell(shellCommand([repro, "remove", "linked",
+        let named = runShell(shellCommand([repro, "ws", "remove", "linked",
           "--force", "--workspace-root=" & workspaceRoot]))
-        checkpoint("repro remove linked (" & tag & "): " & named.output)
+        checkpoint("repro ws remove linked (" & tag & "): " & named.output)
         check named.code == 1
         check named.output.contains("refusing to remove 'linked'")
         check named.output.contains("resolves to the workspace root itself")
@@ -2334,9 +2334,9 @@ suite "a declared checkout path cannot escape the workspace root":
         check fileExists(workspaceRoot / "precious.txt")
 
         # ---- route 2: SWEPT INTO the GC set via `depends` ----------------
-        let swept = runShell(shellCommand([repro, "remove", "hub",
+        let swept = runShell(shellCommand([repro, "ws", "remove", "hub",
           "--force", "--workspace-root=" & workspaceRoot]))
-        checkpoint("repro remove hub (" & tag & "): " & swept.output)
+        checkpoint("repro ws remove hub (" & tag & "): " & swept.output)
         check swept.code == 1
         check swept.output.contains("refusing to remove 'linked'")
         check swept.output.contains("resolves to the workspace root itself")

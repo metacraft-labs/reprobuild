@@ -6,8 +6,8 @@
 ## also resolves a committed-lock-only workspace (no membership manifests and no
 ## ``.repro/workspace.toml``) from the committed ``repro.lock``. MO-10 finishes
 ## the unification by routing the four remaining non-lock-handling resolvers —
-## ``repro workspace status`` / ``repro health`` / ``repro add`` /
-## ``repro remove`` — onto the SAME seam.
+## ``repro workspace status`` / ``repro health`` / ``repro ws add`` /
+## ``repro ws remove`` — onto the SAME seam.
 ##
 ## Before MO-10 each of those four had its own dispatch ladder that RAISED on a
 ## committed-lock-only workspace ("requires `.repro/workspace.toml` or a
@@ -139,10 +139,10 @@ suite "MO-10: status/health/add/remove use the unified resolver":
       check mStatus == "ok"
       check "resolved" in mDetail
 
-      # ---- (3) `repro add --binary --dry-run` resolves via the shared ladder
+      # ---- (3) `repro ws add --binary --dry-run` resolves via the shared ladder
       # and names the committed-lock-derived project (no checkout, no mutation
       # in dry-run). ----
-      let add = run(reproBinary & " add added-dep" &
+      let add = run(reproBinary & " ws add added-dep" &
         " --remote=https://example.invalid/added-dep.git --binary --dry-run" &
         " --workspace-root=" & repo)
       check add.code == 0
@@ -150,11 +150,11 @@ suite "MO-10: status/health/add/remove use the unified resolver":
       check "no project named" notin add.output
       check "requires" notin add.output
 
-      # ---- (4) `repro remove` reaches the target-matching stage (resolution
+      # ---- (4) `repro ws remove` reaches the target-matching stage (resolution
       # succeeded) rather than raising the missing-workspace resolution error.
       # A non-existent target yields the "is declared in project '<name>'"
       # diagnostic that only prints AFTER the project resolved. ----
-      let remove = run(reproBinary & " remove no-such-repo --workspace-root=" &
+      let remove = run(reproBinary & " ws remove no-such-repo --workspace-root=" &
         repo)
       check "is declared in project" in remove.output
       check "requires `.repro/workspace-state.toml`" notin remove.output

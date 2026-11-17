@@ -175,12 +175,16 @@ proc bindRecordsDir*(dir, identityFile: string; ledgerCopy = "") =
   ## add-on state). When there is no recorded identity yet -- a host
   ## bootstrapped before §13 decision 178's amendment -- the first checked
   ## open records it (trust on first use) where ``identityFile``'s
-  ## directory exists. The state counts as gone, and ``dir`` is used with
-  ## nothing to compare (``boundWithoutState``), only when that directory
-  ## AND the ledger copy ``ledgerCopy`` are both absent: uninstall removes
-  ## the identity only after the ledger copy (A11 round 21), so with the
-  ## ledger copy present and no identity directory something removed the
-  ## record, and every checked open refuses.
+  ## directory exists and the ledger copy ``ledgerCopy`` is present. With
+  ## no identity recorded and the named ledger copy absent, the state
+  ## counts as gone, whether or not the identity's directory survived (a
+  ## failed rmdir, or a crash before it; A11 round 22), and ``dir`` is used
+  ## with nothing to compare (``boundWithoutState``), which the caller
+  ## reports; it is never recorded at first use then. With the ledger copy
+  ## present and no identity directory, something removed the record, and
+  ## every checked open refuses (uninstall removes the identity only after
+  ## the ledger copy, A11 round 21). With no ledger copy named (a test's
+  ## binding) the identity's directory decides.
   ## An identity file that is present but empty or malformed (a torn
   ## write, or one somebody else wrote) is never taken as "nothing
   ## recorded": every checked open then refuses, naming it.
@@ -422,6 +426,10 @@ proc listInCheckedDir*(dir: string): seq[tuple[name: string; regular: bool]] =
                   S_ISREG(st.st_mode)
     result.add((name, regular))
 
+type RemovalNotDurableError* = object of OSError
+  ## ``removeEmptyDirChecked`` removed the directory, and the fsync of its
+  ## parent that would make the removal durable failed.
+
 proc removeEmptyDirChecked*(dir: string) =
   ## Remove the empty directory ``dir`` through its parent's descriptor
   ## (``unlinkat`` with ``AT_REMOVEDIR``), then fsync the parent: what
@@ -433,7 +441,9 @@ proc removeEmptyDirChecked*(dir: string) =
   defer: discard posix.close(pfd)
   if unlinkatC(pfd, extractFilename(dir).cstring, AtRemoveDir) != 0:
     raiseOSError(osLastError(), "remove " & dir)
-  if fsync(pfd) != 0: raiseOSError(osLastError(), "fsync " & parent)
+  if fsync(pfd) != 0:
+    raise newException(RemovalNotDurableError, "fsync " & parent & ": " &
+      osErrorMsg(osLastError()))
 
 proc unlinkAt(dfd: cint; name, dir: string) =
   ## Unlink ``name`` in the open directory, if there, and fsync it.
@@ -554,3 +564,123 @@ proc readInCheckedDir*(path: string): string =
   if fd < 0: raiseOSError(osLastError(), "open " & path)
   defer: discard posix.close(fd)
   readRegularBounded(fd, path)
+
+# ---------------------------------------------------------------------------
+# Entries a root writer hands to a less privileged reader (§13 decision 181).
+#
+# The evidence outbox belongs to the shipping unit's dynamic user: its
+# state directory and the outbox in it are that user's, so the user can
+# replace any name in them -- with a link to a root file, say. A root
+# writer therefore reaches the outbox through descriptors only: the state
+# directory by ``openat(O_DIRECTORY|O_NOFOLLOW)`` from its root-owned
+# parent, the outbox and the staging directory beside it the same way from
+# that, the temporary created exclusively without following a link, made
+# readable to the outbox's owner on its descriptor (``fchmod`` 0644: the
+# outbox is 0700 and its owner's, inside the root-only ``/var/lib/private``,
+# so no one else reaches it), and renamed into place with ``renameat``. A
+# writer never follows a name the reader could have planted and changes no
+# owner: a confined root writer (the egress check) has no ``CAP_CHOWN``.
+# ---------------------------------------------------------------------------
+
+proc openOrMakeDirAt(pfd: cint; name, where: string; mode = 0o700): cint =
+  ## ``name`` under the directory open at ``pfd``, not through a link;
+  ## made with ``mode`` when absent (systemd hands the outbox to the
+  ## shipping unit's user at its next start: it is one of its
+  ## ``StateDirectory=``).
+  result = openatC(pfd, name.cstring, O_RDONLY or ODirectory or ONoFollow or
+                   O_CLOEXEC)
+  if result < 0 and errno == ENOENT:
+    if mkdiratC(pfd, name.cstring, Mode(mode)) != 0 and errno != EEXIST:
+      raiseOSError(osLastError(), "mkdir " & where)
+    result = openatC(pfd, name.cstring, O_RDONLY or ODirectory or ONoFollow or
+                     O_CLOEXEC)
+  if result < 0: raiseOSError(osLastError(), "open " & where)
+  var st: Stat
+  if fstat(result, st) != 0 or not S_ISDIR(st.st_mode):
+    discard posix.close(result)
+    raise newException(OSError, where & " is not a directory")
+
+proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
+                          mode = 0o600) =
+  ## Write ``dir/name`` durably, readable by the owner of ``dir``'s parent
+  ## (a dynamic user's state directory) when run as root, through descriptors
+  ## that follow no link (see above). ``staging`` (a directory beside
+  ## ``dir``) holds the temporary until the rename, so ``dir`` only ever
+  ## holds complete entries; "" or a staging directory that cannot be
+  ## written (a unit whose writable path is ``dir`` alone) puts the
+  ## temporary inside ``dir``. ``dir``'s parent's parent is opened by path:
+  ## it must be root's.
+  let state = parentDir(dir)
+  if staging.len > 0 and parentDir(staging) != state:
+    raise newException(ValueError, staging & " is not beside " & dir)
+  var sfd: cint
+  if geteuid() == 0:
+    # Root: the state directory itself by O_NOFOLLOW from its root-owned
+    # parent (made 0700 when absent, as /var/lib/private must be).
+    let top = parentDir(state)
+    if not dirExists(top):
+      createDir(top)
+      discard posix.chmod(top.cstring, Mode(0o700))
+    let tfd = posix.open(top.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+    if tfd < 0: raiseOSError(osLastError(), "open " & top)
+    try:
+      sfd = openOrMakeDirAt(tfd, extractFilename(state), state)
+    finally:
+      discard posix.close(tfd)
+  else:
+    # The directory's own user (the shipping unit writing its own records,
+    # reaching its state through the link systemd made): no privilege to
+    # guard here, so the state directory is opened as named.
+    sfd = posix.open(state.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+    if sfd < 0: raiseOSError(osLastError(), "open " & state)
+  defer: discard posix.close(sfd)
+  var sst: Stat
+  discard fstat(sfd, sst)
+  let handOver = geteuid() == 0 and sst.st_uid != 0
+  # A directory root makes for the owner of the state directory must let
+  # that user reach what root puts in it (0711: through, not list).
+  let dfd = openOrMakeDirAt(sfd, extractFilename(dir), dir,
+                            if handOver: 0o711 else: 0o700)
+  defer: discard posix.close(dfd)
+  var tmpDir = dfd
+  var stfd: cint = -1
+  if staging.len > 0:
+    try:
+      stfd = openOrMakeDirAt(sfd, extractFilename(staging), staging)
+      tmpDir = stfd
+    except OSError:
+      stfd = -1
+  defer:
+    if stfd >= 0: discard posix.close(stfd)
+  let tmp = "." & name & ".tmp-" & $getCurrentProcessId()
+  discard unlinkatC(tmpDir, tmp.cstring, 0)
+  var fd = openatC(tmpDir, tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
+                   O_CLOEXEC or ONoFollow, Mode(mode))
+  if fd < 0 and tmpDir != dfd:
+    # The staging directory is not writable here: inside the outbox.
+    tmpDir = dfd
+    discard unlinkatC(tmpDir, tmp.cstring, 0)
+    fd = openatC(tmpDir, tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
+                 O_CLOEXEC or ONoFollow, Mode(mode))
+  if fd < 0: raiseOSError(osLastError(), "create " & dir / tmp)
+  var ok = false
+  try:
+    if handOver and fchmod(fd, Mode(mode or 0o044)) != 0:
+      raiseOSError(osLastError(), "chmod " & dir / tmp)
+    var off = 0
+    while off < bytes.len:
+      let n = posix.write(fd, unsafeAddr bytes[off], bytes.len - off)
+      if n < 0:
+        if errno == EINTR: continue
+        raiseOSError(osLastError(), "write " & dir / tmp)
+      off += n
+    if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & dir / tmp)
+    ok = true
+  finally:
+    discard posix.close(fd)
+    if not ok: discard unlinkatC(tmpDir, tmp.cstring, 0)
+  if renameatC(tmpDir, tmp.cstring, dfd, name.cstring) != 0:
+    let e = osLastError()
+    discard unlinkatC(tmpDir, tmp.cstring, 0)
+    raiseOSError(e, "rename into " & dir / name)
+  if fsync(dfd) != 0: raiseOSError(osLastError(), "fsync " & dir)

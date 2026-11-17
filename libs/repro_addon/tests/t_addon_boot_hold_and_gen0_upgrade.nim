@@ -74,9 +74,9 @@ suite "§13 decision 159: the boot-hold unit":
     check "Requires=" notin u
     # The base's shell, never the store binary, which may predate it.
     let exec = u.split("ExecStart=")[1].split("\n")[0]
-    check exec.startsWith("-/usr/bin/timeout -k 5 ") and
-      " /bin/sh -c '" in exec and "/repro/store" notin exec and
-      "system addon" notin exec
+    # No outer timeout (A9 review round 20): an overrun is TimeoutStartSec=.
+    check exec.startsWith("-/bin/sh -c '") and "timeout -k" notin exec and
+      "/repro/store" notin exec and "system addon" notin exec
 
 suite "§13 decision 159: generation 0's upgrade path":
   test "an own profile without the unit gets it, rendered as a bootstrap would":
@@ -152,11 +152,16 @@ suite "§13 decision 159: the start holds across a reboot":
     createDir(result.bin)
     # systemctl as the shell finds it on PATH: logs its arguments;
     # ``is-active`` answers from A9_SYSINIT (0: reached).
+    # ``daemon-reload`` answers from A9_RELOAD (0: reloaded).
     writeFile(result.bin / "systemctl", "#!/bin/sh\necho \"$@\" >> " &
-      result.log & "\ncase \"$1\" in is-active) exit ${A9_SYSINIT:-3};; esac\nexit 0\n")
-    setFilePermissions(result.bin / "systemctl",
-      {fpUserRead, fpUserWrite, fpUserExec})
-  proc runScript(s: Sandbox; sysinitReached = false): int =
+      result.log & "\ncase \"$1\" in is-active) exit ${A9_SYSINIT:-3};; " &
+      "daemon-reload) exit ${A9_RELOAD:-0};; esac\nexit 0\n")
+    # sleep: the script's fail-closed wait, logged instead of waited for.
+    writeFile(result.bin / "sleep", "#!/bin/sh\necho SLEEP \"$@\" >> " &
+      result.log & "\nexit 0\n")
+    for t in ["systemctl", "sleep"]:
+      setFilePermissions(result.bin / t, {fpUserRead, fpUserWrite, fpUserExec})
+  proc runScript(s: Sandbox; sysinitReached = false; reloadFails = false): int =
     ## The unit's own script, its paths moved under the sandbox.
     let script = bootHoldScript()
       .replace(BootHoldRecordPath, bootHoldRecordPath(s.state))
@@ -172,7 +177,8 @@ suite "§13 decision 159: the start holds across a reboot":
     writeFile(f, script)
     # The stand-in first, then the test's own tools (mkdir, cp).
     execShellCmd("env PATH=" & s.bin & ":" & getEnv("PATH") & " A9_SYSINIT=" &
-      (if sysinitReached: "0" else: "3") & " sh " & f & " > /dev/null")
+      (if sysinitReached: "0" else: "3") & " A9_RELOAD=" &
+      (if reloadFails: "1" else: "0") & " sh " & f & " >> " & s.log)
   test "the unit carries the script, each $ doubled for systemd":
     # One single-quoted argument: a quote inside it would end the quoting.
     check '\'' notin bootHoldScript()
@@ -190,8 +196,9 @@ suite "§13 decision 159: the start holds across a reboot":
       "/run/systemd/system/a.service.d/" & StartHoldName])
     check readBootHoldRecord(s.state) == @["a.service.d", "a.socket.d"]
     check readFile(bootHoldTextPath(s.state)) == StartHoldText
+    # A9 review round 20: no holds is a record of none, not no record.
     writeBootHoldRecord(s.state, [])
-    check not fileExists(bootHoldRecordPath(s.state))
+    check readFile(bootHoldRecordPath(s.state)) == ""
   test "at boot, the recorded holds are back before the one reload":
     let s = setup()
     writeBootHoldRecord(s.state, ["/run/systemd/system/a.service.d/" & StartHoldName,
@@ -200,32 +207,44 @@ suite "§13 decision 159: the start holds across a reboot":
     writeFile(bootHoldRecordPath(s.state), readFile(bootHoldRecordPath(s.state)) &
       "../escape.d\n.hidden.d\nx/y.d\nnot-a-dir\n")
     check runScript(s) == 0
-    check readFile(s.root / "a.service.d" / StartHoldName) == StartHoldText
-    check readFile(s.root / "a.socket.d" / StartHoldName) == StartHoldText
+    # The minimal hold, written straight away (A9 review round 20).
+    check readFile(s.root / "a.service.d" / StartHoldName) == MinimalHoldText
+    check readFile(s.root / "a.socket.d" / StartHoldName) == MinimalHoldText
     check not fileExists(parentDir(s.root) / "escape.d" / StartHoldName)
     check not dirExists(s.root / ".hidden.d")
     check not dirExists(s.root / "not-a-dir")
     check readFile(s.written).splitLines().len == 3   # two paths and the end
     check readFile(s.log).count("daemon-reload") == 1
-  test "nothing once sysinit.target is reached, nothing without a record":
+    check "skipped the record line ../escape.d" in readFile(s.log)
+    check "held 2 unit drop-in directories, systemd reloaded" in readFile(s.log)
+    check "SLEEP" notin readFile(s.log)
+  test "nothing once sysinit.target is reached, said so":
     let s = setup()
     writeBootHoldRecord(s.state, ["/run/systemd/system/a.service.d/" & StartHoldName])
     check runScript(s, sysinitReached = true) == 0
     check not dirExists(s.root)
-    clearBootHoldRecord(s.state)
+    check "sysinit.target is already active" in readFile(s.log)
+  test "a record of none holds nothing, said so":
+    let s = setup()
+    writeBootHoldRecord(s.state, [])
     check runScript(s) == 0
-    check not dirExists(s.root)
+    check not dirExists(s.root / "a.socket.d")
+    check "no unit is listed: nothing to hold" in readFile(s.log)
     check "daemon-reload" notin readFile(s.log)
   test "the script names every tool by absolute path":
     let sc = bootHoldScript()
     for tool in ["/usr/bin/systemctl is-active", "/usr/bin/mkdir -p",
-                 "/usr/bin/cp ", "/usr/bin/sha256sum ",
+                 "/usr/bin/cat ", "/usr/bin/sleep ",
                  "/usr/bin/timeout 30 /usr/bin/systemctl daemon-reload",
                  "/usr/bin/ls -1 "]:
       check tool in sc
+    # No copy and no digest of the hold text before the writes (A9 review
+    # round 20).
+    check "/usr/bin/cp " notin sc
+    check "sha256sum" notin sc
     check "set -f;" in sc
-  test "a hold text that is not the start hold's: a minimal hold on every recorded unit":
-    # A9 review round 16, finding 10: fail closed.
+  test "a planted hold text is never copied: the minimal hold on every recorded unit":
+    # A9 review round 16, finding 10, and round 20: the text is not read.
     let s = setup()
     writeBootHoldRecord(s.state, ["/run/systemd/system/a.socket.d/" & StartHoldName])
     writeFile(bootHoldTextPath(s.state), "[Unit]\nDescription=planted\n")
@@ -242,6 +261,10 @@ suite "§13 decision 159: the start holds across a reboot":
     check runScript(s) == 0
     check fileExists(s.root / "a.socket.d" / StartHoldName)
     check not fileExists("/tmp/" & StartHoldName)
+    # A hold not written fails closed (A9 review round 20): the script
+    # waits for TimeoutStartSec= to fail the unit.
+    check "1 of the holds could not be written" in readFile(s.log)
+    check "SLEEP" in readFile(s.log)
   test "a record that is a link: every socket, timer and path unit held, and exit 0":
     # A9 review round 17, finding 9: hold conservatively, never fail.
     let s = setup()

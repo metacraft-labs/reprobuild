@@ -112,8 +112,9 @@ type
     ##
     ## The engine resolves the dependency's realization FIRST (opening/REUSING
     ## the dependency's provider session through the shared pool, keyed by
-    ## ProviderArtifactId — this is where two consumers of the same library
-    ## version converge on ONE launched dependency provider), then hands the
+    ## ProviderArtifactId and lock slice — this is where two consumers of the
+    ## same library version, under the same slice, converge on ONE launched
+    ## dependency provider), then hands the
     ## consumer the dependency's identities plus its already-computed result.
     ## The consumer provider looks bindings up by ``logicalName``; it NEVER
     ## discovers a sibling through ambient/global state. The provider does not
@@ -477,15 +478,24 @@ proc defaultSessionPolicy*(): SessionPolicy =
     sessionLifetimePolicy: slpPerEngineRun)
 
 proc providerSessionKey*(providerArtifactId: string; protocolVersion: uint32;
-                         policy: SessionPolicy): string =
-  ## v1 §4: ``ProviderSessionKey = hash(ProviderArtifactId, protocolVersion,
-  ## platformRuntimeCompatibility, trustTenantBoundary,
-  ## sessionLifetimePolicy)``. Sessions with an identical key are reused
-  ## across consumer edges within an engine run.
+                         lockSliceId: string; policy: SessionPolicy): string =
+  ## ``ProviderSessionKey = hash(ProviderArtifactId, protocolVersion,
+  ## lockSliceId, platformRuntimeCompatibility, trustTenantBoundary,
+  ## sessionLifetimePolicy)`` (Project-Provider-Runtime-Protocol.md
+  ## §"Identity"). Sessions with an identical key are reused across consumer
+  ## edges within an engine run.
+  ##
+  ## ``lockSliceId`` is part of the key because a session is told its slice
+  ## once, in the EngineHello handshake: two builds whose lock slices for a
+  ## project differ must never share that project's session, or the second
+  ## would be served by a provider that was told the first build's slice.
+  ## The domain tag moved to ``.v2`` when the slice joined the key, so no
+  ## v1 key can collide with a v2 one.
   var payload: seq[byte] = @[]
-  payload.writeString("reprobuild.provider-session-key.v1")
+  payload.writeString("reprobuild.provider-session-key.v2")
   payload.writeString(providerArtifactId)
   payload.writeU32Le(protocolVersion)
+  payload.writeString(lockSliceId)
   payload.writeString(policy.platformRuntimeCompatibility)
   payload.writeString(policy.trustTenantBoundary)
   payload.writeU32Le(uint32(ord(policy.sessionLifetimePolicy)))
@@ -716,8 +726,11 @@ proc openProviderSession*(pool: ProviderSessionPool;
   ## ``ProviderSessionKey`` and perform the EngineHello / ProviderManifest
   ## handshake. A compatible session already in the pool is returned as-is
   ## (no relaunch); a fresh key spawns a new child.
+  # The slice comes from the hello because the hello is what this session
+  # will be told; keying on anything else could pool a session under a slice
+  # it never received.
   let key = providerSessionKey(artifact.providerArtifactId,
-    ProviderProtocolVersion, policy)
+    ProviderProtocolVersion, hello.lockSliceId, policy)
   # A failed session is never handed out again (Failure-Semantics.md
   # §"Provider Failures"); drop the ones a protocol failure closed.
   var live: seq[ProviderSession] = @[]
@@ -746,8 +759,9 @@ proc resolveDependencyBinding*(dependency: ProviderHandle;
     DependencyBinding =
   ## Build the wire ``DependencyBinding`` for a dependency the engine has
   ## already resolved. ``dependency`` is the SHARED session handle (from
-  ## ``openProviderSession`` on the dependency's ProviderArtifactId, so two
-  ## consumers converge on one launched process), and ``dependencyResult`` is
+  ## ``openProviderSession`` on the dependency's ProviderArtifactId and lock
+  ## slice, so two consumers converge on one launched process only when they
+  ## agree on both), and ``dependencyResult`` is
   ## the result the engine obtained by invoking the dependency on that shared
   ## session — carried into the consumer plus the dependency's observed
   ## ``evaluationInputs`` for consumer-edge invalidation (v1 §3).

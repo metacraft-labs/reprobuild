@@ -231,6 +231,7 @@ proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
   # "nothing was written" stays true.
   var noBirthTime = false
   var leftBehind = ""     # why the directory bootstrap made is still there
+  var notDurable = ""     # why its removal may not survive a crash
   try:
     when not mutated("unbound-when-no-birth-time"):
       noBirthTime = birthTimeProbe(logDir).len == 0
@@ -245,6 +246,8 @@ proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
           noBirthTime = result.len == 0
         if noBirthTime and madeHere and not mutated("token-cleared-before-identity"):
           try: removeEmptyDirChecked(logDir)
+          except RemovalNotDurableError as e:
+            notDurable = e.msg
           except OSError as e:
             leftBehind = e.msg
       if not noBirthTime and not mutated("token-cleared-before-identity"):
@@ -255,6 +258,16 @@ proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
       "is not one this add-on made: inspect it, remove it (or the entry " &
       "named " & StateRemovalTokenName & " in it), and run bootstrap " &
       "again; nothing was written")
+  if noBirthTime and notDurable.len > 0:
+    raise newException(AddonBootstrapError, "the file system holding " &
+      logDir & " reports no birth time (statx STATX_BTIME), so the add-on " &
+      "cannot record an identity for its uninstall records' directory. " &
+      "Bootstrap made " & logDir & " (empty) before it could tell and " &
+      "removed it again, but could not make that removal durable (" &
+      notDurable & "): after a crash the empty directory may be back. " &
+      "Nothing else was written. Put /var/log on a file system that " &
+      "records birth times and run bootstrap again; remove " & logDir &
+      " first if it is there")
   if noBirthTime and leftBehind.len > 0:
     raise newException(AddonBootstrapError, "the file system holding " &
       logDir & " reports no birth time (statx STATX_BTIME), so the add-on " &

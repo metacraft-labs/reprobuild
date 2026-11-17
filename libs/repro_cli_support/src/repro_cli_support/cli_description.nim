@@ -910,6 +910,60 @@ proc workspaceReposFlags(): NimNode {.compileTime.} =
     subcmd "help", visibility = hidden:
       pos topic is seq[string], required = false
 
+proc workspaceRepoAddFlags(): NimNode {.compileTime.} =
+  ## The workspace-repository flags of `repro workspace add` (`repro ws
+  ## add`): the develop-or-binary policy, its overrides and the clone. The
+  ## same declarations are spliced, hidden, into top-level `repro add`,
+  ## which refuses them and names the `repro ws add` command line that
+  ## carries them (`refusedFlags`), so the two flag sets cannot drift.
+  ## `--remote`, `--revision` and `--depends-of` are optional values, so a
+  ## refusal sees them even when given empty (`--remote=`).
+  let root = workspaceRootFlag()
+  let tools = workspaceToolProvisioningFlag()
+  quote do:
+    `root`
+    flag remote is Option[string],
+      help = "The repo's fetch URL (required: the develop-or-binary " &
+        "policy classifies its origin)"
+    flag revision is Option[string], help = "The revision to pin"
+    flag dependsOf is Option[string],
+      help = "Refused: a repo's dependencies are declared in its repro.nim"
+    `tools`
+    boolFlag develop is bool,
+      help = "Check it out for development, whatever the policy says"
+    boolFlag binary is bool, alias = "--no-develop",
+      help = "Use it as a binary dependency, whatever the policy says"
+    boolFlag noMembership is bool,
+      help = "Clone it without adding it to the workspace's membership"
+    boolFlag json is bool, help = "Print the report as JSON"
+
+proc workspaceRepoRemoveFlags(): NimNode {.compileTime.} =
+  ## The workspace-repository flags of `repro workspace remove` (`repro ws
+  ## remove`), spliced hidden into top-level `repro remove` the same way.
+  let root = workspaceRootFlag()
+  let tools = workspaceToolProvisioningFlag()
+  quote do:
+    `root`
+    `tools`
+    boolFlag force is bool, alias = "--yes",
+      help = "Remove it even when that loses work no remote carries"
+    boolFlag json is bool, help = "Print the report as JSON"
+
+proc refusedFlags(flags: NimNode): NimNode {.compileTime.} =
+  ## ``flags`` with every flag declared ``visibility = hidden``: accepted by
+  ## the parser, so the command can refuse it with a tip naming the command
+  ## that takes it, and listed nowhere.
+  result = flags.copyNimTree()
+  proc mark(n: NimNode) =
+    for i in 0 ..< n.len:
+      let stmt = n[i]
+      if stmt.kind == nnkStmtList:
+        mark(stmt)
+      elif stmt.kind in {nnkCommand, nnkCall} and stmt.len >= 2 and
+          (stmt[0].eqIdent("flag") or stmt[0].eqIdent("boolFlag")):
+        stmt.add(nnkExprEqExpr.newTree(ident("visibility"), ident("hidden")))
+  mark(result)
+
 proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
     {.compileTime.} =
   ## Every subcommand of `repro workspace` (`repro ws`).
@@ -923,6 +977,8 @@ proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
   let sets = membershipSetFlags()
   let projects = membershipSetFlags()
   let repos = workspaceReposFlags()
+  let wsAddFlags = workspaceRepoAddFlags()
+  let wsRemoveFlags = workspaceRepoRemoveFlags()
   let statusRoot = workspaceRootFlag()
   let statusTools = workspaceToolProvisioningFlag()
   let statusReport = workspaceReportFlags()
@@ -1040,6 +1096,16 @@ proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
       `projects`
     subcmd "repos", help = "List, declare and delete repos":
       `repos`
+    subcmd "add", help = "Bring a repository into the workspace: a " &
+        "develop-mode checkout or a binary dependency, as the policy says":
+      `wsAddFlags`
+      boolFlag dryRun is bool, help = "Print what would change"
+      pos repo is string, required = false, help = "The repo's name"
+    subcmd "remove", help = "Remove a repository from the workspace and " &
+        "collect the checkouts nothing else needs":
+      `wsRemoveFlags`
+      boolFlag dryRun is bool, help = "Print what would change"
+      pos repo is string, required = false, help = "The repo's name"
     subcmd "status", help = "Each repo's branch, cleanliness and " &
         "divergence":
       `statusRoot`
@@ -1849,10 +1915,8 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let switchWs = switchFlags()
   let branchTop = branchFlags()
   let branchWs = branchFlags()
-  let addRoot = workspaceRootFlag()
-  let addTools = workspaceToolProvisioningFlag()
-  let removeRoot = workspaceRootFlag()
-  let removeTools = workspaceToolProvisioningFlag()
+  let addRefused = refusedFlags(workspaceRepoAddFlags())
+  let removeRefused = refusedFlags(workspaceRepoRemoveFlags())
   let lockingExplainRoot = workspaceRootFlag()
   let lockingExplainTools = workspaceToolProvisioningFlag()
   let lockingAdoptRoot = workspaceRootFlag()
@@ -1969,6 +2033,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag currentRepo is string, format = equals,
           help = "The repository whose certificates are read (default: the " &
             "workspace root)"
+        flag registeredKeys is Option[string], format = equals,
+          help = "The registered-key store a skip verifies signers " &
+            "against: a file the CI job owns, outside the checkout and the " &
+            "workspace root (without it, nothing is skipped)"
     subcmd "watch",
         help = "Watch for changes and rebuild or rerun continuously":
       `watchCommand`
@@ -2246,32 +2314,32 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "The dependency, project or build target"
       pos command is seq[string], required = false, afterSeparator = true,
         help = "The command to run in the target's environment, after `--`"
-    subcmd "add", help = "Add a dependency to the active context":
-      `addRoot`
-      flag remote is string,
-        help = "The repo's fetch URL (required: the develop-or-binary " &
-          "policy classifies its origin)"
-      flag revision is string, help = "The revision to pin"
-      flag dependsOf is string,
-        help = "The repo that depends on it (default: the workspace's)"
-      `addTools`
-      boolFlag develop is bool,
-        help = "Check it out for development, whatever the policy says"
-      boolFlag binary is bool, alias = "--no-develop",
-        help = "Use it as a binary dependency, whatever the policy says"
-      boolFlag noMembership is bool,
-        help = "Clone it without adding it to the workspace's membership"
-      boolFlag dryRun is bool, help = "Print what would change"
-      boolFlag json is bool, help = "Print the report as JSON"
-      pos repo is string, required = false, help = "The repo's name"
-    subcmd "remove", help = "Remove a dependency from the active context":
-      `removeRoot`
-      `removeTools`
-      boolFlag force is bool, alias = "--yes",
-        help = "Remove it even when that loses work no remote carries"
-      boolFlag dryRun is bool, help = "Print what would change"
-      boolFlag json is bool, help = "Print the report as JSON"
-      pos repo is string, required = false, help = "The repo's name"
+    subcmd "add", help = "Add a package dependency to the current " &
+        "project's repro.nim":
+      boolFlag build is bool,
+        help = "Add it to `buildDeps:` (default: `uses:`)"
+      boolFlag nativeBuild is bool,
+        help = "Add it to `nativeBuildDeps:` (default: `uses:`)"
+      boolFlag runtime is bool,
+        help = "Add it to `runtimeDeps:` (default: `uses:`)"
+      flag package is string,
+        help = "The package of repro.nim to edit (default: its only one)"
+      boolFlag dryRun is bool,
+        help = "Print the change to repro.nim; write nothing"
+      `addRefused`
+      pos dependency is string, required = false,
+        help = "The package, with an optional version constraint as " &
+          "`uses:` writes it: `name`, `name >=1.2 <2` (one word) or " &
+          "`name@>=1.2`"
+    subcmd "remove", help = "Remove a package dependency from the current " &
+        "project's repro.nim":
+      flag package is string,
+        help = "The package of repro.nim to edit (default: its only one)"
+      boolFlag dryRun is bool,
+        help = "Print the change to repro.nim; write nothing"
+      `removeRefused`
+      pos dependency is string, required = false,
+        help = "The package to remove"
     subcmd "hcr", help = "Coordinate hot code reloading":
       subcmd "coordinate", help = "Run one coordination cycle with an HCR " &
           "agent: edit, rebuild and patch":

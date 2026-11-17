@@ -190,11 +190,16 @@ The add-on handles this in four ways:
     puts the holds of a step back that is still pending in place before
     any of them can start. It runs only while a switch is pending, so a
     normal boot skips it. `sysinit.target` requires it, so systemd never
-    drops it to break an ordering cycle, and it never fails: if a step of
-    it fails it logs that and goes on, and if it cannot read the pending
-    switch's list of holds it holds every socket, timer and path unit in
-    `/etc/systemd/system` until the switch is resolved, except the ones the
-    host needs to stay reachable, such as an `ssh.socket` override.
+    drops it to break an ordering cycle. If the pending switch's list of
+    holds is missing or cannot be read, it holds every socket, timer and
+    path unit in `/etc/systemd/system` until the switch is resolved, except
+    the ones the host needs to stay reachable, such as an `ssh.socket`
+    override. It logs what it did on every path. If it cannot put a hold in
+    place, or systemd does not take the holds in, it does not let the boot
+    go on: it runs past its 60-second limit, the unit fails, and so does
+    `sysinit.target`, so the boot stops there instead of starting a held
+    unit. Look at `journalctl -b -u repro-addon-boot-hold.service` from
+    the emergency shell, then run `repro system addon recover`.
     Because `sysinit.target` requires it, a link
     `sysinit.target.requires/repro-addon-boot-hold.service` left without
     the unit would hold up every boot: uninstall removes it, and

@@ -1274,6 +1274,23 @@
 ##                                            the identity's directory is gone,
 ##                                            whether or not the ledger copy is
 ##                                            (decision 178)
+## ``evidence-ship-runs-as-root``            the shipping unit and its
+##                                            confined runs run as root again
+##                                            (decision 181)
+## ``evidence-ship-unix-sockets``             the shipping confinement allows
+##                                            AF_UNIX: PID 1's private socket
+##                                            and the system bus reachable
+##                                            (decision 181)
+## ``ship-decoded-as-root``                   contain, release, uninstall and
+##                                            the credential check decode the
+##                                            sink's bytes in the calling root
+##                                            process (decision 181)
+## ``outbox-written-by-path``                 a root writer writes the outbox
+##                                            entry by path, through names the
+##                                            outbox's owner controls
+##                                            (decision 181)
+## ``egress-units-unix-sockets``              the egress units may make Unix
+##                                            sockets (decision 181)
 ## ``first-use-without-ledger-copy``         with no identity and no ledger
 ##                                            copy, the records' directory is
 ##                                            recorded at first use, a
@@ -1978,6 +1995,28 @@ const
                           "sysinit-stop-deps-unchecked",
                           # bootstrap accepts the dynamic engine (L7).
                           "bootstrap-accepts-dynamic",
+                          # A9 review round 20: the boot-hold script exits at
+                          # once on a pending marker with no record.
+                          "boot-hold-record-absent-skips",
+                          # a failed reload is logged and the unit succeeds.
+                          "boot-hold-reload-failure-passes",
+                          # each hold is written only after a slow step.
+                          "boot-hold-holds-after-slow-step",
+                          # the outer timeout wrapper is back, so an overrun
+                          # succeeds.
+                          "boot-hold-outer-timeout",
+                          # the marker is written without a record.
+                          "boot-hold-marker-without-record",
+                          # the systemd.systemDropIn form is not counted, in
+                          # the parse half and in the effective half (M-1).
+                          "boot-hold-systemdropin-unchecked",
+                          "boot-hold-systemdropin-effective-unchecked",
+                          # a socket changed only by a drop-in is not read
+                          # for Accept= (LOW).
+                          "accept-dropin-only-sockets-skipped",
+                          # the boot-hold unit's minimal hold is judged as a
+                          # planted drop-in by the next check.
+                          "boot-hold-minimal-hold-judged",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",
@@ -2349,6 +2388,11 @@ const
                           "state-gone-from-addon-dir-alone",
                           "token-cleared-before-identity",
                           "first-use-without-ledger-copy",
+                          "evidence-ship-runs-as-root",
+                          "evidence-ship-unix-sockets",
+                          "ship-decoded-as-root",
+                          "outbox-written-by-path",
+                          "egress-units-unix-sockets",
                           "verify-absent-dir-without-identity-noted",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",

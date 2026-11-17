@@ -295,6 +295,9 @@ suite "RA-23 — sync clones newly-declared dependencies":
       check cEntry["executionStatus"].getStr() == "clone_failed"
       # A reason is attached so the operator knows WHY it was skipped.
       check cEntry["executionDiagnostic"].getStr().len > 0
+      # The remedy names the workspace verb that drops a repository; top-level
+      # `repro remove` edits package dependencies of a repro.nim instead.
+      check "'repro ws remove lib-c'" in cEntry["executionDiagnostic"].getStr()
 
       # --- lib-d: a reachable repo with a bad DECLARED branch is not
       # misdiagnosed as an access problem and does not fall back to dev. ---
@@ -310,7 +313,7 @@ suite "RA-23 — sync clones newly-declared dependencies":
       check dDiagnostic.contains("lib-d.toml")
       check dDiagnostic.contains("did not substitute the remote HEAD")
       check not dDiagnostic.contains("auth / network")
-      check not dDiagnostic.contains("repro remove")
+      check not dDiagnostic.contains("repro ws remove")
 
   test "t_sync_clones_attaches_new_repo_to_workspace_feature_branch":
     let gitBin = findExe("git")

@@ -214,6 +214,8 @@ COVERED_COMMANDS = [
     "workspace repos list",
     "workspace repos add",
     "workspace repos remove",
+    "workspace add",
+    "workspace remove",
     "workspace status",
     "workspace lock",
     "workspace list",
