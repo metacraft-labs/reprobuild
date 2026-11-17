@@ -1877,10 +1877,12 @@ proc leafPoolUploadPackCommand*(pool: string): string =
   ## through its POSIX shell, on Windows too, and appends the pool path.
   quotePoolShell(poolUploadPackLauncherPath(pool))
 
-proc poolTransportShell(gitBin: string): string =
-  ## Use an explicit shell for file redirection. poEvalCommand does not
-  ## invoke a shell on Windows, and cmd.exe cannot safely quote arbitrary
-  ## paths containing percent signs. Git itself already requires this shell.
+proc poolTransportShell*(gitBin: string): string =
+  ## The POSIX shell ``gitBin`` runs hooks and ``!`` commands with. Used
+  ## for file redirection: poEvalCommand does not invoke a shell on
+  ## Windows, and cmd.exe cannot safely quote arbitrary paths containing
+  ## percent signs. Git itself already requires this shell. Raises
+  ## ``IOError`` on Windows when it cannot be found.
   when defined(windows):
     let declared = runGit(gitBin, ["var", "GIT_SHELL_PATH"])
     if declared.code == 0 and fileExists(declared.output.strip()):
@@ -2961,17 +2963,54 @@ proc retentionDiscoveryEnv*(gitBin: string;
   result = (if base.isNil: scrubbedGitRepositoryEnv() else: base)
   result.prependPathEntry(gitBin.parentDir)
 
+const RetentionDiscoverAlias* = "repro-retention-discover"
+  ## The name of the shell alias ``retentionDiscoveryArgs`` defines for the
+  ## one ``git`` invocation that runs the hook's ``--discover`` pass.
+
+proc retentionDiscoveryArgs*(pool: string): seq[string] =
+  ## The ``git`` arguments that run the retention hook's ``--discover`` pass
+  ## the way ``git gc`` runs the hook: as a shell command Git itself starts
+  ## (a ``!`` alias defined for this one invocation), with ``GIT_DIR`` set to
+  ## the pool, from the same ``gc.recentObjectsHook`` value.
+  ##
+  ## Git starts it through its own POSIX shell, with the search path it
+  ## gives every hook: its exec-path first and, in Git for Windows, its
+  ## ``<mingw>/bin`` and ``/usr/bin`` next, ahead of the inherited
+  ## ``C:\Windows\System32``. Started directly instead, the pass depended on
+  ## which ``sh`` came first on the engine's search path. Git for Windows'
+  ## launcher (``bin\sh.exe``) put its own Git first, and its real
+  ## ``usr\bin\sh.exe`` kept ``System32`` first, so the hook's ``sort -u``
+  ## ran Windows' ``sort.exe`` (reprobuild-pm
+  ## ``issues/2026-11-16-windows-shared-pool-retention-discovery-depends-on-which-sh-is-first-on-path.md``).
+  ## ``--git-dir`` rather than ``-C``: an explicit repository is not
+  ## subject to discovery or its ownership check, and the hook clears
+  ## ``GIT_DIR`` before reading any checkout, as it does under gc.
+  @["--git-dir=" & pool,
+    "-c", "alias." & RetentionDiscoverAlias & "=!" &
+      retentionHookConfigValue(pool) & " --discover",
+    RetentionDiscoverAlias]
+
 proc poolRetentionReady*(gitBin, pool: string): bool =
   ## The hook and readiness share one discovery implementation. A newly
   ## found borrower is registered, but this pass still keeps ``never``; only
   ## a later complete pass can enable expiry. Discovery errors fail closed.
+  ##
+  ## ``gitBin`` runs the pass (``retentionDiscoveryArgs``), so it gets the
+  ## shell and search path that Git gives the hook under gc, whatever ``sh``
+  ## comes first on this process's search path. Git propagates the alias's
+  ## exit status.
   if not gitSupportsRetentionHook(gitBin) or
       not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
     return false
-  let env = retentionDiscoveryEnv(gitBin)
-  let discovered = execCmdExCloseOnce("sh " &
-    quoteShell(retentionHookPath(pool)) & " --discover", env = env)
-  discovered.exitCode == 0
+  var command = quoteShell(gitBin)
+  for arg in retentionDiscoveryArgs(pool):
+    command.add(" " & quoteShell(arg))
+  try:
+    execCmdExCloseOnce(command,
+      env = retentionDiscoveryEnv(gitBin)).exitCode == 0
+  except CatchableError:
+    # Git that cannot be started is a discovery failure too.
+    false
 
 proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
   ## The pool-specific rows of §3.1, beyond the static
