@@ -231,6 +231,7 @@ libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	8
 libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
 libs/repro_build_engine/tests/t_shipped_macos_tools.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
+libs/repro_build_engine/tests/t_store_realization_names_of_both_widths_are_content_addressed.nim	nim	1
 libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim	nim	5
 libs/repro_build_engine/tests/t_untracked_ancestor_change_does_not_re_run_an_edge.nim	nim	8
 libs/repro_build_engine/tests/t_untracked_scope_membership_is_not_an_input.nim	nim	7
@@ -432,7 +433,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
 libs/repro_distributed_worker/tests/t_signer_closes_after_its_early_returns.nim	nim	1
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	47
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	50
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_runs_its_alternatives.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
@@ -644,9 +645,11 @@ libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.n
 libs/repro_interface_artifacts/tests/test_provisioning_selection_from_lock.nim	nim	14
 libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	13
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
+libs/repro_local_store/tests/t_a_prefix_an_older_build_named_is_found_where_it_lies.nim	nim	6
 libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	nim	12
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim	nim	5
+libs/repro_local_store/tests/t_distinct_realizations_never_share_a_prefix_directory.nim	nim	2
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	12
 libs/repro_local_store/tests/t_input_access_sidecar.nim	nim	3
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
@@ -2852,6 +2855,7 @@ tests/unit/t_nix_daemon_spawn_wait.nim	nim	3
 tests/unit/t_nix_propagated_store_paths.nim	nim	8
 tests/unit/t_nonredistributable_publish_gate.nim	nim	3
 tests/unit/t_npm_vendor_action.nim	nim	2
+tests/unit/t_path_only_readers_find_a_prefix_an_older_build_named.nim	nim	4
 tests/unit/t_prefix_env_ops.nim	nim	4
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
 tests/unit/t_provider_compile_failure_says_how_the_action_ended.nim	nim	6

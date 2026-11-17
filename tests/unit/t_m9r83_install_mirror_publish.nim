@@ -121,8 +121,9 @@ suite "M9.R.83 install-mirror store publication":
       check published.storeRelativePath ==
         installMirrorStoreRelativePath("tiny", "1.0.0",
           published.realizationHashHex)
+      # The store's directory name: the first 40 hex (160 bits) of the id.
       check published.storeRelativePath.endsWith(
-        published.realizationHashHex[0 ..< 16])
+        "-" & published.realizationHashHex[0 ..< 40])
       check not published.storeRelativePath.endsWith(
         published.realizationHashHex)
       check fileExists(published.absolutePath / "usr" / "bin" / "hello")

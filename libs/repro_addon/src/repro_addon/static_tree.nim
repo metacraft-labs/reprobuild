@@ -137,12 +137,15 @@ proc treeManifest*(files: seq[StaticFile]): string =
   lines.join("\n") & "\n"
 
 proc staticTreePath*(files: seq[StaticFile]; storeRoot = StoreRoot): string =
-  ## Where the store places the tree for ``files``: pure, so a plan can
-  ## name it without writing.
+  ## Where the store places the tree for ``files``, named without writing so
+  ## a plan can print it: the store's own answer for its id on this host
+  ## (``resolvePrefixAbsolutePath``), the 40-hex name or the 16-hex name an
+  ## older add-on realized this very tree under.
   let id = computeRealizationHash(StaticTreePackage, ReprobuildVersion,
     "addon-switch", "", "",
     provenanceChecksum = "tree:" & sha256Hex(treeManifest(files)))
-  storeRoot / prefixRelativePath(StaticTreePackage, ReprobuildVersion, id)
+  resolvePrefixAbsolutePath(storeRoot, StaticTreePackage, ReprobuildVersion,
+                            id)
 
 proc treeTorn(path: string; files: seq[StaticFile]): bool =
   ## The tree at ``path`` is what a crash leaves of these files: nothing

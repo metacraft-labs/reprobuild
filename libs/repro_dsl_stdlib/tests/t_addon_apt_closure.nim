@@ -40,6 +40,7 @@ import repro_dsl_stdlib/packages/apt_closure {.all.}
 import repro_core/file_lock
 import repro_local_store
 from repro_test_support/process_fixtures import releaseDirAtProcessExit
+import repro_test_support/legacy_store_prefixes
 
 const ShaA = "a".repeat(64)
 const ShaB = "b".repeat(64)
@@ -283,13 +284,29 @@ suite "Add-On apt closure: identity and store paths (spec §8.3 item 4)":
     let p = aptClosurePrefixPath("/repro/store", sampleLock())
     # The store's own path for the closure's realization hash (G38: the
     # store's recovery, index and collector must recognise it).
+    # Realiser 4: the store's 160-bit name (40 hex) for an id no older
+    # build ever named, so the planner's path is the only one it can have.
+    check AptClosureRealiserVersion == "4"
     check p == "/repro/store/prefixes/apt-closure-svc/1_2.0-1-" &
-      prefixIdHex(aptClosurePrefixId(sampleLock()))[0 ..< 16]
+      prefixIdHex(aptClosurePrefixId(sampleLock()))[0 ..< 40]
     check p == "/repro/store/" & prefixRelativePath("apt-closure-svc",
       "1:2.0-1", aptClosurePrefixId(sampleLock()))
     check ':' notin p
     check aptDebPrefixPath("/repro/store", sampleLock().debs[1]).startsWith(
       "/repro/store/prefixes/apt-deb-svc/1_2.0-1-")
+    # Realiser 3's paths for the same lock: other ids, at the store's old
+    # 64-bit (16 hex) name, which is where its prefixes stay.
+    check aptClosurePrefixId(sampleLock()) !=
+      storeNamedAptClosurePrefixId(sampleLock())
+    check storeNamedAptClosurePrefixPath("/repro/store", sampleLock()) ==
+      "/repro/store/prefixes/apt-closure-svc/1_2.0-1-" &
+      prefixIdHex(storeNamedAptClosurePrefixId(sampleLock()))[0 ..< 16]
+    check storeNamedAptDebPrefixPath("/repro/store", sampleLock().debs[1]) ==
+      "/repro/store/prefixes/apt-deb-svc/1_2.0-1-" &
+      prefixIdHex(storeNamedAptDebPrefixId(sampleLock().debs[1]))[0 ..< 16]
+    # A unit realiser 3 bound is recognised as relocatable.
+    check legacyAptClosurePrefixPaths("/repro/store", sampleLock())[^1] ==
+      storeNamedAptClosurePrefixPath("/repro/store", sampleLock())
 
 suite "Add-On apt closure: resolution (spec §8.3 item 3)":
   const Index = """
@@ -850,20 +867,26 @@ update-alternatives --install /usr/bin/../bin/up up /usr/bin/less 1
       "unknown zlib 1.0\n"
 
   test "the union moves; its members and the older union's path do not":
-    # The union's realization hash carries its layout, its members' do not:
-    # no member is unpacked again, and a unit bound to the union realiser 3
-    # built before alternatives (the path below, computed by reprobuild
-    # 3390209065) is relocated through ``legacyAptClosurePrefixPaths``.
+    # Within realiser 3 the union's realization hash carried its layout and
+    # its members' did not: adding alternatives unpacked no member again,
+    # and a unit bound to the union realiser 3 built before alternatives
+    # (the path below, computed by reprobuild 3390209065) is relocated
+    # through ``legacyAptClosurePrefixPaths``. The member paths below are
+    # realiser 3's, computed by the same build; realiser 4 names its own
+    # at the store's 40-hex width.
     let lock = sampleLock()
     let pre = "/repro/store/prefixes/apt-closure-svc/1_2.0-1-57044ca7c177b65d"
     check preAlternativesAptClosurePrefixPath("/repro/store", lock) == pre
     check aptClosurePrefixPath("/repro/store", lock) != pre
-    check aptDebPrefixPath("/repro/store", lock.debs[0]) ==
+    check storeNamedAptDebPrefixPath("/repro/store", lock.debs[0]) ==
       "/repro/store/prefixes/apt-deb-libc6/2.41-12-87894d07e9b3ff23"
-    check aptDebPrefixPath("/repro/store", lock.debs[1]) ==
+    check storeNamedAptDebPrefixPath("/repro/store", lock.debs[1]) ==
       "/repro/store/prefixes/apt-deb-svc/1_2.0-1-2a7139bfc16a1771"
+    check aptDebPrefixPath("/repro/store", lock.debs[0]) !=
+      storeNamedAptDebPrefixPath("/repro/store", lock.debs[0])
     let legacy = legacyAptClosurePrefixPaths("/repro/store", lock)
-    check legacy.len == 2 and legacy[^1] == pre
+    check legacy.len == 3 and legacy[1] == pre and
+      legacy[2] == storeNamedAptClosurePrefixPath("/repro/store", lock)
 
 suite "Add-On apt closure: store receipts, index rows and GC (threat model G38)":
   ## A closure prefix the store does not know is never collected and no
@@ -949,6 +972,149 @@ suite "Add-On apt closure: store receipts, index rows and GC (threat model G38)"
     defer: st.close()
     for id in aptClosurePrefixIds(lock): check st.lookupPrefix(id).found
     storeIsClean(store)
+
+suite "Add-On apt closure: realiser 3's prefixes after the bump to 4":
+  ## Realiser 4 moved every closure to the store's 160-bit names by giving
+  ## it new ids. Realiser 3's prefixes stay where they lie: indexed, under
+  ## 16-hex names their receipts record, held by the generations that bind
+  ## them. The store's recovery must keep them, its collector must take
+  ## them only once nothing holds them, and a member whose archive is no
+  ## longer served must still be published from realiser 3's prefix of it
+  ## (the C20 fallback), as it was from realiser 2's.
+
+  proc storeNamedPrefix(store: string; lock: AptClosureLock;
+                        first: string): seq[(PrefixIdBytes, string)] =
+    ## Realiser 3's member and union prefixes of ``lock`` in ``store``,
+    ## published the way realiser 3 published them: through the store, at
+    ## its id, then named with 16 hex (``renameToLegacyWidth``). Their trees
+    ## are realiser 4's from ``first`` (the same bytes: the bump changed
+    ## only the ids).
+    var st = openStore(store)
+    defer: st.close()
+    proc publish(id: PrefixIdBytes; hint: StoreReceiptHint;
+                 src: string): string =
+      discard st.realizePrefix(id, hint,
+        proc (stage: string; mech: var string) =
+          for kind, rel in walkDir(src, relative = true):
+            if rel == ReceiptFileName: continue
+            if kind == pcDir: copyDirWithPermissions(src / rel, stage / rel)
+            else: copyFileWithPermissions(src / rel, stage / rel)
+          mech = "apt-unpack")
+      store / st.renameToLegacyWidth(id)
+    for d in lock.debs:
+      let id = storeNamedAptDebPrefixId(d)
+      let path = publish(id, StoreReceiptHint(adapter: AptDebStoreAdapter,
+        packageName: "apt-deb-" & d.name, version: d.version,
+        lockIdentity: d.sha256, provenanceUrl: debUrl(lock, d),
+        provenanceChecksum: "sha256:" & d.sha256),
+        aptDebPrefixPath(first, d))
+      check path == storeNamedAptDebPrefixPath(store, d)
+      result.add((id, path))
+    let r = lock.debs.filterIt(it.name == lock.roots[0])[0]
+    let uid = storeNamedAptClosurePrefixId(lock)
+    let upath = publish(uid, StoreReceiptHint(adapter: AptClosureStoreAdapter,
+      packageName: "apt-closure-" & r.name, version: r.version,
+      lockIdentity: aptClosureIdentityFor(lock, StoreNamedAptRealiser),
+      provenanceUrl: lock.archive), aptClosurePrefixPath(first, lock))
+    check upath == storeNamedAptClosurePrefixPath(store, lock)
+    result.insert((uid, upath), 0)
+
+  test "a member whose archive is not served is published from realiser 3's prefix":
+    let root = scratch("v3-reuse")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
+    var count = new int
+    discard realiseAptClosure(lock, root / "first", root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    let d = lock.debs[0]
+    let store = root / "store"
+    let v3 = storeNamedPrefix(store, lock, root / "first")
+    let v3Member = storeNamedAptDebPrefixPath(store, d)
+    check reusableLegacyMember(store, d) == v3Member
+    let unserved = proc (url: string; dest: string; expectedSize: int64) =
+      inc count[]
+      raise newException(EAptDebUnserved, "HTTP 404 for " & url)
+    count[] = 0
+    let prefix = realiseAptClosure(lock, store, root / "c-unserved",
+      unserved, hostMachine = "armv7l")
+    check count[] == 1
+    check prefix == aptClosurePrefixPath(store, lock)
+    check readFile(prefix / "usr/bin/svc") == "svc-binary"
+    check sameFile(aptDebPrefixPath(store, d) / "usr/bin/svc",
+                   v3Member / "usr/bin/svc")
+    let rec = readReceiptFile(aptDebPrefixPath(store, d) / ReceiptFileName)
+    check rec.provenanceUrl.startsWith(ReusedStoreNamedProvenance & v3Member &
+      "#prefix-id=" & prefixIdHex(storeNamedAptDebPrefixId(d)))
+    check rec.provenanceUrl.endsWith("#contents-not-reverified-against-the-deb")
+    check rec.provenanceChecksum == ""
+    check rec.materializationMechanism == "reused-realiser-3-prefix"
+    # Realiser 3's prefixes are untouched and still indexed where they lie.
+    var st = openStore(store)
+    defer: st.close()
+    for (id, path) in v3:
+      check dirExists(path)
+      check st.lookupPrefix(id).row.realizedPath == path.relativePath(store)
+
+  test "realiser 3's prefix the index does not vouch for is not a source":
+    let root = scratch("v3-altered")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
+    var count = new int
+    discard realiseAptClosure(lock, root / "first", root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    let d = lock.debs[0]
+    let store = root / "store"
+    discard storeNamedPrefix(store, lock, root / "first")
+    let v3Member = storeNamedAptDebPrefixPath(store, d)
+    let f = v3Member / "usr/bin/svc"
+    setFilePermissions(f, getFilePermissions(f) + {fpUserWrite})
+    writeFile(f, "altered")
+    forgetVerifiedPrefixes()
+    let unserved = proc (url: string; dest: string; expectedSize: int64) =
+      raise newException(EAptDebUnserved, "HTTP 404 for " & url)
+    expect EAptDebUnserved:
+      discard realiseAptClosure(lock, store, root / "c-altered", unserved,
+        hostMachine = "armv7l")
+    check not dirExists(aptDebPrefixPath(store, d))
+
+  test "realiser 3's prefixes survive recovery and GC while a root holds them":
+    let root = scratch("v3-gc")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")]),
+      fileDeb("libdep", @[("usr/lib/libdep.so.1", "dep")])])
+    var count = new int
+    discard realiseAptClosure(lock, root / "first", root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    let store = root / "store"
+    let v3 = storeNamedPrefix(store, lock, root / "first")
+    check v3.len == 3
+    var st = openStore(store)
+    defer: st.close()
+    # The generation an older build committed holds them.
+    st.registerRoot("v3-generation", rkProfile)
+    for (id, _) in v3: st.attachPrefixToRoot("v3-generation", id)
+    # The realiser-4 closure is realised beside them (served archives).
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    check prefix != v3[0][1]
+    st.registerRoot("v4-generation", rkProfile)
+    for id in aptClosurePrefixIds(lock): st.attachPrefixToRoot("v4-generation", id)
+    let rec = st.recover()
+    check rec.quarantinedPrefixes.len == 0
+    for (_, path) in v3: check dirExists(path)
+    let kept = st.gc(graceSeconds = 0)
+    check kept.quarantined.len == 0
+    for (_, path) in v3: check dirExists(path)
+    # The older generation is retired: the collector takes realiser 3's
+    # prefixes and leaves realiser 4's.
+    st.deleteRoot("v3-generation")
+    let collected = st.gc(graceSeconds = 0)
+    check collected.quarantined.len == 3
+    for (id, path) in v3:
+      check not dirExists(path)
+      check not st.lookupPrefix(id).found
+    check aptClosureRealised(store, lock)
+    for id in aptClosurePrefixIds(lock): check st.lookupPrefix(id).found
 
 suite "Add-On apt closure: a store root other writers can reach (SEC-1 G7)":
   ## Production-Runners-And-Shared-Store PM3 mounts the store root

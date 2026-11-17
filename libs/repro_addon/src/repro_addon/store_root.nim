@@ -58,8 +58,12 @@ const
   RootIdPrefix* = "addon-generation:"
 
 # ---------------------------------------------------------------------------
-# Prefix identities. Pure: the preflight computes them without writing, so
-# the plan it prints names the exact store paths generation 0 will use.
+# Prefix identities. Computed without writing, so the plan the preflight
+# prints names the exact store paths generation 0 will use. A path is the
+# store's own answer for the id on this host (``resolvePrefixAbsolutePath``):
+# the 40-hex name, or the 16-hex name an older build realized this very id
+# under, which the store's ``realizePrefix`` then reuses rather than
+# realizing a second copy. Nothing is planned off-host here.
 # ---------------------------------------------------------------------------
 
 proc binaryPrefixId*(binarySha256: string): PrefixIdBytes =
@@ -67,8 +71,8 @@ proc binaryPrefixId*(binarySha256: string): PrefixIdBytes =
     "", "bin/repro", provenanceChecksum = "sha256:" & binarySha256)
 
 proc binaryPrefixPath*(binarySha256: string): string =
-  StoreRoot / prefixRelativePath(BinaryPackage, ReprobuildVersion,
-                                 binaryPrefixId(binarySha256))
+  resolvePrefixAbsolutePath(StoreRoot, BinaryPackage, ReprobuildVersion,
+                            binaryPrefixId(binarySha256))
 
 proc reproExeFor*(binarySha256: string): string =
   binaryPrefixPath(binarySha256) / "bin" / "repro"
@@ -89,12 +93,24 @@ proc filesPrefixId*(names: openArray[string];
 proc filesPrefixPath*(names: openArray[string];
                       version = ReprobuildVersion;
                       storeRoot = StoreRoot): string =
-  storeRoot / prefixRelativePath(FilesPackage, version,
-                                 filesPrefixId(names, version))
+  resolvePrefixAbsolutePath(storeRoot, FilesPackage, version,
+                            filesPrefixId(names, version))
+
+proc isFilesPrefixPath*(path: string; names: openArray[string];
+                        version: string; storeRoot = StoreRoot): bool =
+  ## Whether ``path`` is one of the names the files prefix of ``names`` at
+  ## ``version`` can have under ``storeRoot``: its 40-hex path, or the
+  ## 16-hex path an older add-on realized it under. A shape check that
+  ## holds whether or not the prefix is on disk now (a recovery asks it
+  ## about a prefix that was altered or moved aside).
+  let base = storeRoot & "/"
+  path.startsWith(base) and isPrefixPathOf(path[base.len .. ^1],
+    FilesPackage, version, filesPrefixId(names, version))
 
 proc prefixVersionOf*(path: string): string =
-  ## The version a prefix path ``<store>/prefixes/<pkg>/<version>-<hash16>``
-  ## was realised under (the add-on's own prefixes use plain versions).
+  ## The version a prefix path ``<store>/prefixes/<pkg>/<version>-<hash>``
+  ## was realised under (the add-on's own prefixes use plain versions). The
+  ## hash is 40 hex, or 16 in a prefix an older build named.
   let leaf = extractFilename(path)
   let dash = leaf.rfind('-')
   if dash > 0: leaf[0 ..< dash] else: ""

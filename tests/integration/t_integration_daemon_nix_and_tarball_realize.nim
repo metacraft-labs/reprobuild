@@ -21,10 +21,11 @@ import repro_tool_profiles/archive_digest
 
 const
   ## `prefixes/<pkg>/<version>-<hash>` where the hash segment is the
-  ## first 16 hex chars (lowercase) of the BLAKE3 realization id. See
-  ## `realizationDirName` in libs/repro_local_store/src/repro_local_store/
-  ## store.nim — keep this regex in lock-step with that proc.
-  PrefixDirNameRe* = r"^[^/]+-[0-9a-f]{16}$"
+  ## first 40 hex chars (lowercase, 160 bits) of the BLAKE3 realization id.
+  ## See `realizationDirName` in libs/repro_local_store/src/
+  ## repro_local_store/prefix_paths.nim — keep this regex in lock-step with
+  ## that proc. A fresh store holds no prefix an older build named.
+  PrefixDirNameRe* = r"^[^/]+-[0-9a-f]{40}$"
 
   ## `cas/blake3/<aa>/<full-hash>` where `<aa>` is the first two hex
   ## chars of `<full-hash>`, and `<full-hash>` is exactly 64 lowercase
@@ -42,7 +43,7 @@ proc assertSpecLayoutAfterRealize(storeRoot, realizedPrefixPath: string) =
   ## * Leave the store in WAL-mode SQLite (`index.db` plus the sidecar
   ##   `index.db-wal` and `index.db-shm` files).
   ## * Lay realized prefixes under
-  ##   `<root>/prefixes/<package-segment>/<version>-<16hex>/` where the
+  ##   `<root>/prefixes/<package-segment>/<version>-<40hex>/` where the
   ##   trailing dir name is exactly what `realizationDirName` in
   ##   `libs/repro_local_store/.../store.nim` emits. The intermediate
   ##   `<package-segment>` is adapter-specific (e.g. the tarball adapter
