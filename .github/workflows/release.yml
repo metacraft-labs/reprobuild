@@ -656,6 +656,36 @@ jobs:
           $orchestrator = "build\bin\repro-orchestrator.exe"
           Copy-Item -LiteralPath "build\bin\reprobuild.exe" -Destination $orchestrator -Force
 
+          # The same self-lock, for the monitor shim. The engine injects
+          # `<engine dir>\..\lib\librepro_monitor_shim.dll` -- build\lib's copy,
+          # which bootstrap just published -- into every monitored action, and
+          # every process it was injected into keeps the DLL mapped until it
+          # exits. `.#release` also RELINKS that path (the
+          # `reprobuild.test_fixtures.monitor_shim` action), so whenever that
+          # link overlaps a running monitored action it fails exactly like the
+          # engine relink above:
+          #
+          #   ld.exe: cannot open output file ...\build\lib\librepro_monitor_shim.dll: Permission denied
+          #
+          # (v0.2.25's first release run, while the repro.exe link was still
+          # going.) Earlier releases never relinked it at all: the engine took
+          # the output bootstrap had left on disk as up to date. It now runs a
+          # cacheable action that no cache record vouches for, so on this cold
+          # cache the fixture always relinks.
+          #
+          # So pin the engine to a COPY of the monitor stack, outside build\lib,
+          # through REPRO_MONITOR_SHIM_LIB -- the engine's own override, which it
+          # honours before any discovery and refuses (rather than ignores) if
+          # the file is missing. Monitoring is unchanged; only the injected file
+          # is one no action of this build writes. The script copies the 32-bit
+          # companions too, since the injector looks for them beside whichever
+          # 64-bit shim it is handed; its header has the detail. The copy and
+          # the pin are dropped in the `finally`, like the orchestrator copy.
+          $monitorSnapshotDir = "build\orchestrator-monitor"
+          $env:REPRO_MONITOR_SHIM_LIB = & ./scripts/release/snapshot_windows_monitor_stack.ps1 `
+            -LibDir "build\lib" -Destination $monitorSnapshotDir
+          Write-Host "monitor shim pinned to the snapshot $env:REPRO_MONITOR_SHIM_LIB"
+
           # Compile the recipe with the gcc env.ps1 already provisioned. Left
           # unset, the engine provisions the same pinned WinLibs release a
           # SECOND time from the builtin catalog, whose entry is the release's
@@ -676,6 +706,8 @@ jobs:
             }
           } finally {
             Remove-Item -LiteralPath $orchestrator -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:\REPRO_MONITOR_SHIM_LIB -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $monitorSnapshotDir -Recurse -Force -ErrorAction SilentlyContinue
           }
 
       # Package the artifacts preserving the bin/ and lib/ structures.
