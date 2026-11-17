@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2888,
+    "nimTestBinaries": 2891,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 778,
     "staticallyDetectedRuntimeCompilerFlowTests": 145,
-    "testEntries": 2935
+    "testEntries": 2938
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1641,7 +1641,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1595,
+      "integration": 1598,
       "platform/destructive": 189,
       "pure unit": 778,
       "unclassified": 350
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2888,
+    "nimTestBinaryCount": 2891,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2935
+    "testEntryCount": 2938
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9087,7 +9087,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 33,
-      "staticCaseCount": 162,
+      "staticCaseCount": 164,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38479,6 +38479,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_managed_hook_resolves_the_build_that_installed_it",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_managed_hook_resolves_the_build_that_installed_it.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_mixed_direction_refusal_clears_in_one_pass",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -43759,6 +43777,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_generated_envrc_block_never_runs_hooks_ensure",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_generated_envrc_block_never_runs_hooks_ensure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_genuine_tier_policy_refuses_emulated_cvm_evidence",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -44237,6 +44272,24 @@
       "source": "tests/integration/t_hooks_ensure_installs_a_managed_pre_commit_hook.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_hooks_ensure_never_replaces_a_body_whose_contract_it_does_not_generate",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_hooks_ensure_never_replaces_a_body_whose_contract_it_does_not_generate.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57185,7 +57238,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_env_tables_keep_one_path_on_windows.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

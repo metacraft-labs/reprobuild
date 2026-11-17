@@ -288,7 +288,11 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
       # ``createTempDir`` spells the same directory ``C:\...``.
       let repoTop = requireGit(q(gitBin) & " -C " & q(repoPath) &
         " rev-parse --show-toplevel").strip()
-      check (differentStub & " hooks ensure --vcs " & repoTop) in dmsg
+      # ``--re-anchor``: a plain ``ensure`` leaves a body another build wrote
+      # untouched (CLI/hooks.md §"Re-anchoring is explicit"), so the remedy
+      # that re-anchors has to ask for it by name.
+      check (differentStub & " hooks ensure --vcs --re-anchor " & repoTop) in
+        dmsg
       # (R10) ... but only AFTER refreshing whatever supplies ``repro``.
       # Status 3 says the builds differ, not which is newer, and the measured
       # field case was a cached direnv dev shell serving an OLDER build than
@@ -296,7 +300,8 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
       # current bodies with older ones. So the refresh is named, it comes
       # first, and the message says why a different build may be the older.
       let reloadAt = dmsg.find("direnv reload")
-      let reanchorAt = dmsg.find(differentStub & " hooks ensure --vcs ")
+      let reanchorAt = dmsg.find(differentStub &
+        " hooks ensure --vcs --re-anchor ")
       check reloadAt >= 0
       check reanchorAt > reloadAt
       check "cached dev shell" in dmsg
