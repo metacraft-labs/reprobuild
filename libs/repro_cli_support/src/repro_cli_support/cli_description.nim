@@ -1486,9 +1486,16 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Print the environment instead of starting a shell: " &
             "`posix` (also `sh`, `bash`, `zsh`), `fish`, `powershell` " &
             "(also `pwsh`, `ps1`) or `json`"
+        flag command is Option[string], short = 'c',
+          help = "Run this command through the shell (`<shell> -c " &
+            "<command>`) instead of starting an interactive one, and exit " &
+            "with its status"
         pos selector is string, required = false,
           help = "The project whose environment to use (default: the " &
             "current directory's)"
+        pos argv is seq[string], required = false, afterSeparator = true,
+          help = "A command and its arguments, after `--`, run directly in " &
+            "the environment as `repro exec` runs it"
       subcmd "hook", help = "Print the shell hook that activates " &
           "development environments on `cd`":
         flag reproBin is string,

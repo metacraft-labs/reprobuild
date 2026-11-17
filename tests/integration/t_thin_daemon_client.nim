@@ -316,26 +316,8 @@ when defined(posix):
   ## A real pty, for the TTY guard. ``isatty(2)`` is the only thing
   ## ``shouldRouteToDaemon`` reads on that arm, and nothing but a terminal
   ## device makes it answer true — not a pipe, not a file, not an environment
-  ## variable. These four are POSIX and live in ``<stdlib.h>``; Nim's
-  ## ``std/posix`` does not declare them. (``std/posix`` itself is imported
-  ## with the other imports at the top of the file; see the note there.)
-  proc posix_openpt(oflag: cint): cint
-    {.importc: "posix_openpt", header: "<stdlib.h>".}
-  proc grantpt(fd: cint): cint {.importc: "grantpt", header: "<stdlib.h>".}
-  proc unlockpt(fd: cint): cint {.importc: "unlockpt", header: "<stdlib.h>".}
-  proc ptsname(fd: cint): cstring {.importc: "ptsname", header: "<stdlib.h>".}
-
-  proc openPtySlavePath(): tuple[master: cint; slave: string] =
-    ## Returns the master fd — which the CALLER must keep open for the slave
-    ## to stay usable — and the filesystem path of its slave side, which a
-    ## shell redirection can open.
-    let master = posix_openpt(ptyPosix.O_RDWR or ptyPosix.O_NOCTTY)
-    doAssert master >= 0, "posix_openpt failed"
-    doAssert grantpt(master) == 0, "grantpt failed"
-    doAssert unlockpt(master) == 0, "unlockpt failed"
-    let name = ptsname(master)
-    doAssert name != nil, "ptsname failed"
-    (master, $name)
+  ## variable. ``openPtySlavePath`` is the shared test-support helper.
+  import repro_test_support/terminal_fixtures
 
 proc writeFallbackScript(path: string) =
   writeFile(path,

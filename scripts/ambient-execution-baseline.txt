@@ -81,6 +81,7 @@ libs/repro_store_daemon/src/repro_store_daemon/runtime.nim
 libs/repro_system_rollback/src/repro_system_rollback.nim
 libs/repro_test_support/src/repro_test_support.nim
 libs/repro_test_support/src/repro_test_support/per_case_runs.nim
+libs/repro_test_support/src/repro_test_support/terminal_fixtures.nim
 libs/repro_tool_profiles/src/repro_tool_profiles.nim
 libs/repro_tool_profiles/src/repro_tool_profiles/archive_steps.nim
 libs/repro_workspace_vcs/src/git_actions.nim
