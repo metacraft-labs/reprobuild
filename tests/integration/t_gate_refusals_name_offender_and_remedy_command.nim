@@ -16,7 +16,7 @@
 ##   - sync-unpublished      ``repro sync`` refusing a locally-unpublished one.
 ##   - sync-unreadable       ``repro sync`` skipping a newly-declared repo whose
 ##                           clone fails (unreadable origin).
-##   - remove-dirty          ``repro remove`` refusing a dirty repo in non-TTY.
+##   - remove-dirty          ``repro ws remove`` refusing a dirty repo in non-TTY.
 ##   - switch-dirty          ``repro switch`` of a dirty repo refused by the
 ##                           RA-9 destructive-switch gate (non-TTY, no
 ##                           ``--yes``). RA-29 stashes a dirty repo's WIP rather
@@ -24,7 +24,7 @@
 ##                           working-tree switch the gate guards; the remedy is
 ##                           ``repro switch <branch> --yes``.
 ##   - switch-missing        ``repro switch`` of an absent branch.
-##   - remove-workspace-root ``repro remove`` of a repo declared at
+##   - remove-workspace-root ``repro ws remove`` of a repo declared at
 ##                           ``path = "."``. Both routes in — NAMED as the
 ##                           target, and swept into the RA-22 GC set through
 ##                           another target's ``depends`` closure.
@@ -215,7 +215,7 @@ proc projectTomlWithWorkspaceRoot(libAUrl: string): string =
   ## an ordinary checkout. ``lib-a`` depends on ``ws-root`` — its committed
   ## ``repro.lock`` pins it (``writeLockEdges``), the only record of a
   ## dependency since 2026-11-05 — which is what sweeps the root into
-  ## ``repro remove lib-a``'s RA-22 GC candidate set without anyone naming it.
+  ## ``repro ws remove lib-a``'s RA-22 GC candidate set without anyone naming it.
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
@@ -258,7 +258,7 @@ proc nativeLayoutFixture(gitBin, slug: string): Fixture =
   ## `manifestsRoot` accepts both; `repro workspace repos remove` reads
   ## `manifestRepoRootFor`, which is the workspace root ONLY — so the
   ## authoring verb can reach this layout and not the other one. That
-  ## difference is exactly what the `repro remove` remedy has to be honest
+  ## difference is exactly what the `repro ws remove` remedy has to be honest
   ## about, so both layouts are exercised.
   ##
   ## The root is a real git checkout because `repro workspace repos remove`
@@ -354,7 +354,7 @@ proc invokeCheckout(fx: Fixture; branch: string): CmdResult =
 
 proc invokeRemove(fx: Fixture; target: string): CmdResult =
   runShell(shellCommand(@[
-    fx.reproBin, "remove", target,
+    fx.reproBin, "ws", "remove", target,
     "--workspace-root=" & fx.workspaceRoot,
   ]))
 
@@ -587,9 +587,9 @@ suite "RA-28 — refusals name the offender and a remedy command":
       # include and still print a removal line, telling the operator a repo
       # was removed while its tree stayed.
       let named = runShell(shellCommand(@[
-        fx.reproBin, "remove", "ws-root", "--force",
+        fx.reproBin, "ws", "remove", "ws-root", "--force",
         "--workspace-root=" & fx.workspaceRoot]))
-      checkpoint("repro remove ws-root: " & named.output)
+      checkpoint("repro ws remove ws-root: " & named.output)
       check named.code == 1
       # RA-28: the offender is the REPO the operator named, not the string
       # `.`; the remedy is the one that exists — the declaration can be
@@ -619,9 +619,9 @@ suite "RA-28 — refusals name the offender and a remedy command":
       # closure. Only the root's own delete is skipped; the removal the
       # operator actually asked for still happens.
       let swept = runShell(shellCommand(@[
-        fx.reproBin, "remove", "lib-a", "--force",
+        fx.reproBin, "ws", "remove", "lib-a", "--force",
         "--workspace-root=" & fx.workspaceRoot]))
-      checkpoint("repro remove lib-a: " & swept.output)
+      checkpoint("repro ws remove lib-a: " & swept.output)
       check swept.code == 1
       assertNamesOffenderAndRemedy(swept.output, "ws-root")
       check swept.output.contains("Remedy:")
@@ -634,7 +634,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
   test "remove_workspace_root_remedy_is_a_runnable_command":
     ## RA-28's second half, taken literally: the remedy has to be a COMMAND.
     ##
-    ## `repro remove <root-repo>` refuses, correctly — the delete would take
+    ## `repro ws remove <root-repo>` refuses, correctly — the delete would take
     ## the workspace. What it then tells the operator to do used to be "delete
     ## the `includes` entry for ws-root.toml in <projectFile> and run `repro
     ## sync`", which is an instruction to hand-edit a TOML array. That is not
@@ -644,7 +644,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
     ## One exists — `repro workspace repos remove <fragment>` drops the
     ## include edge from every membership that declares the fragment and
     ## states, in its own words, that "any existing checkout was left on
-    ## disk", which is precisely the half of `repro remove` that is in bounds
+    ## disk", which is precisely the half of `repro ws remove` that is in bounds
     ## here. This case does not merely assert that the string is printed: it
     ## RUNS what the refusal printed and asserts the outcome, because a
     ## remedy that is quoted but does not work is worse than none.
@@ -656,9 +656,9 @@ suite "RA-28 — refusals name the offender and a remedy command":
       defer: removeDir(fx.scratch)
 
       let refused = runShell(shellCommand(@[
-        fx.reproBin, "remove", "ws-root", "--force",
+        fx.reproBin, "ws", "remove", "ws-root", "--force",
         "--workspace-root=" & fx.workspaceRoot]))
-      checkpoint("repro remove ws-root: " & refused.output)
+      checkpoint("repro ws remove ws-root: " & refused.output)
       check refused.code == 1
       assertNamesOffenderAndRemedy(refused.output, "ws-root")
       check refused.output.contains("IS the workspace root")
@@ -683,7 +683,7 @@ suite "RA-28 — refusals name the offender and a remedy command":
       check not projectAfter.contains("repos/ws-root.toml")
       check projectAfter.contains("repos/lib-a.toml")
       # ...and the TREE is not. That is the whole reason this command is the
-      # right remedy and `repro remove` is not.
+      # right remedy and `repro ws remove` is not.
       check fileExists(fx.workspaceRoot / "PRECIOUS.txt")
       check readFile(fx.workspaceRoot / "PRECIOUS.txt") == "must survive\n"
       check dirExists(fx.workspaceRoot / ".git")

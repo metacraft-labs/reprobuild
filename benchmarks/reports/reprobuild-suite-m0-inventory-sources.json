@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2940,
+    "nimTestBinaries": 2942,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 784,
+    "pureUnitTests": 785,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2988
+    "testEntries": 2990
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1285,7 +1285,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 8,
+      "count": 9,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
@@ -1296,6 +1296,7 @@
         "tests/unit/t_capabilities.nim",
         "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
         "tests/unit/t_da1i_evidence_help_names_the_hazard.nim",
+        "tests/unit/t_recipe_dependency_edit.nim",
         "tests/unit/t_recipe_lock_consistency_check.nim",
         "tests/unit/t_recipe_pin_edit.nim",
         "tests/unit/t_shell_stdin_terminal_detection.nim",
@@ -1643,9 +1644,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1631,
+      "integration": 1632,
       "platform/destructive": 193,
-      "pure unit": 784,
+      "pure unit": 785,
       "unclassified": 356
     },
     "graphOwnedTestArtifacts": [
@@ -1860,9 +1861,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2940,
+    "nimTestBinaryCount": 2942,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2988
+    "testEntryCount": 2990
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -51101,6 +51102,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repro_add_package_vs_ws_add_repo",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_add_package_vs_ws_add_repo.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repro_build_test_aggregate_builds_every_test",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -60826,6 +60844,23 @@
       "source": "tests/unit/t_recipe_constraint_reader.nim",
       "sourceSuiteCount": 7,
       "staticCaseCount": 34,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_dependency_edit",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_recipe_dependency_edit.nim",
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
