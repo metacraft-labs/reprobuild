@@ -2279,18 +2279,34 @@ package reprobuild:
           # once.
           if artifact.actionId notin executeDeps:
             executeDeps.add(artifact.actionId)
-      when defined(linux) or defined(macosx):
-        if spec.source == "libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim" or
-            spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
-          # These cases load a shared library, not an executable fixture.
-          # The backend case also needs it for nested interface extraction
-          # before the fixture's compiler action can run.
-          requiredBinaries.add("build/lib/" & (when defined(macosx):
-            "librepro_monitor_shim.dylib" else: "librepro_monitor_shim.so"))
-          executeDeps.add("reprobuild.test_fixtures.monitor_shim")
-      when defined(windows):
-        if spec.source == "tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim":
-          requiredBinaries.add(monitorArtifactPath(MonitorShim64Name))
+      # THE MONITOR SHIM, for every test that opens the in-tree copy.
+      #
+      # The shim is a shared library, not an executable fixture, so it has
+      # no ``testFixtureArtifacts`` row; the generated
+      # ``spec.requiresMonitorShim`` flag says which tests need it. It is
+      # computed like ``requiresReproBinary``, over the test's import
+      # closure, so a test that reaches ``build/lib`` only through
+      # ``repro_test_support.monitorShimPath`` / ``prepareMonitorTools``, or
+      # through io-mon's ``findShimLibrary`` discovery, carries it too (see
+      # ``scripts/repro_binary_reachability.nim``, ``rtMonitorShim``).
+      #
+      # This used to be a two-entry list of source paths. Every other test
+      # that needed the file passed only when something else — ``just
+      # build``, or a wider selection that included the shim edge — had
+      # already put it in ``build/lib``: from a fresh checkout,
+      # ``repro build '.#test#test_tool_identity_env_plumbing'`` failed its
+      # shim-seed case (reprobuild-pm ``issues/2026-11-16-tool-identity-env-
+      # plumbing-execute-edge-does-not-declare-the-monitor-shim.md``).
+      #
+      # Both halves, as for a fixture row: the PATH as a typed input (so a
+      # rebuilt shim re-runs the test), the ACTION ID as an ordering dep (so
+      # a narrow selection builds it first).
+      if spec.requiresMonitorShim:
+        requiredBinaries.add(
+          when defined(windows): monitorArtifactPath(MonitorShim64Name)
+          elif defined(macosx): "build/lib/librepro_monitor_shim.dylib"
+          else: "build/lib/librepro_monitor_shim.so")
+        if "reprobuild.test_fixtures.monitor_shim" notin executeDeps:
           executeDeps.add("reprobuild.test_fixtures.monitor_shim")
       when defined(linux):
         if spec.source == "tests/unit/t_m9r83_install_mirror_action_shapes.nim":
