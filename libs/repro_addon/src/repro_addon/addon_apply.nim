@@ -1444,6 +1444,21 @@ proc targetFor(address: string; inp: DecisionInputs; path: string;
     verdict: dec.verdict, diversion: saved.plan.diversion, unitClass: cls,
     replay: true)
 
+proc replacesOwnLink*(previous: Ledger; address, path, form: string;
+                      observedOwnLink, replay, revert: bool): bool =
+  ## Whether the write of ``address`` replaces the add-on's own link with a
+  ## copy (``PlannedTarget.replacesOwnLink``): this generation plans a
+  ## copy, the plan observed the add-on's own link at ``path`` (a replay
+  ## did not observe anew; its write-ahead plan made the decision), and
+  ## either the ledger records a link for exactly this resource there, or
+  ## this is a revert -- of a failed switch that turned this copy into a
+  ## link, which the committed ledger never recorded.
+  if form != "copy" or not (observedOwnLink or replay): return false
+  if revert and observedOwnLink: return true
+  for e in previous.entries:
+    if e.path == path and e.resource == address and e.isLink: return true
+  false
+
 proc alreadyRestored*(e: LedgerEntry): bool =
   ## A replay finds the removals the interrupted switch already made:
   ## an object that had preserved bytes now carries exactly them (its
@@ -6457,7 +6472,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         result.ledgerDiff.add((if p.closureRelocated: "relocate-closure"
                                else: $dec.verdict) & "\t" & path & "\t" &
                               r.address)
-      targets.add(targetFor(r.address, inp, path, dec, obs, saved))
+      var target = targetFor(r.address, inp, path, dec, obs, saved)
+      target.replacesOwnLink = replacesOwnLink(previous, r.address, path,
+        p.form, obs.ownLink, saved.found, purpose == "revert")
+      targets.add(target)
       if carrier.len > 0:
         # The tool's own operation writes this file: the write-time re-check
         # of the file's decision is the tool's too.
@@ -7458,11 +7476,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     ## A copy whose path holds the previous generation's own link (an
     ## ``fs.systemFile`` that came to declare ``mode``, ``group`` or
     ## ``form = "copy"``): the copy is renamed over exactly that link.
+  var replacesOwnLinkAt = initHashSet[string]()
+  for t in targets:
+    if t.replacesOwnLink: replacesOwnLinkAt.incl(t.address & "\t" & t.path)
   for p in plans:
     if p.form == "link":
       linkTargets[p.r.address] = staticLinkTargetFor(p.targetPath)
-    elif p.r.kind == srkFsSystemFile and
-        prevForm.getOrDefault(p.targetPath) == "link":
+    elif p.r.address & "\t" & p.targetPath in replacesOwnLinkAt:
+      # A copy the plan decided replaces the add-on's own link at its path
+      # (``replacesOwnLink``): the previous generation's (a file that came
+      # to declare `form = "copy"`, `mode` or `group`), or the one a failed
+      # switch of the other direction left for its revert. The writer
+      # replaces exactly that link and still refuses any other link, and
+      # any link at all for a copy the plan did not so decide (threat
+      # model G29).
       replacedLinks[p.r.address] = staticLinkTargetFor(p.targetPath)
   let policy: AddOnDispatchPolicy = proc(op: PrivilegedOperation):
       AddOnMaterialisation {.gcsafe.} =

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2903,
+    "nimTestBinaries": 2904,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 781,
     "staticallyDetectedRuntimeCompilerFlowTests": 145,
-    "testEntries": 2950
+    "testEntries": 2951
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1643,7 +1643,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1604,
+      "integration": 1605,
       "platform/destructive": 190,
       "pure unit": 781,
       "unclassified": 352
@@ -1860,9 +1860,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2903,
+    "nimTestBinaryCount": 2904,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2950
+    "testEntryCount": 2951
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10420,8 +10420,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32272,6 +32272,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_debian_12_to_13_release_upgrade.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_declared_mode_file_is_a_private_copy",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_declared_mode_file_is_a_private_copy.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -61631,7 +61648,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_smoke_dev_exec.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 20,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
