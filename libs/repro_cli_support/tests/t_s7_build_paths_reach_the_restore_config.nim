@@ -238,12 +238,25 @@ suite "S7 every build-path engine config can reach the restore configuration":
     ## ``request.rawArgs`` through ``runBuildCommand``), and it is the ENV
     ## spelling that a daemon started earlier does not see. The env variable
     ## is a session/CI convenience, not the only route in.
+    ##
+    ## `repro build` (and `bench` and `lint`) take their command line from
+    ## repro's command-line description, which declares the flag, its
+    ## `--no-` form and the variable it falls back to; the generated parser
+    ## reads the variable. `repro watch` still parses its own arguments and
+    ## reads the variable through the helper.
     let source = cliSupportSource()
+    let description = readFile(findRepoRoot() / "libs" /
+      "repro_cli_support" / "src" / "repro_cli_support" /
+      "cli_description.nim")
+    check "boolFlag restoreCachedOutputs is bool, negatable = true,\n" &
+      "      env = \"REPRO_RESTORE_CACHED_OUTPUTS\"," in description
+    check "restoreCachedOutputs = c.restoreCachedOutputs" in source
     check "elif arg == \"--restore-cached-outputs\":" in source
     check "elif arg == \"--no-restore-cached-outputs\":" in source
     check "proc restoreCachedOutputsEnvDefault(): bool =" in source
     check source.count("getEnv(\"REPRO_RESTORE_CACHED_OUTPUTS\")") == 1
-    check source.count("restoreCachedOutputsEnvDefault()") >= 3
+    # The definition and `repro watch`'s call.
+    check source.count("restoreCachedOutputsEnvDefault()") >= 2
 
   test "the opt-in is not spelled out field by field at the call sites":
     ## ``enableCachedOutputRestore`` groups three fields that must move

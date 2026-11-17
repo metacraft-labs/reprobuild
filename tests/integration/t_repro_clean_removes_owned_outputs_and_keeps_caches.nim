@@ -203,4 +203,6 @@ suite "repro clean":
       let res = execCmdEx(q(reproAbs) & " clean --everything")
       checkpoint(res.output)
       check res.exitCode == 2
-      check "unsupported argument: --everything" in res.output
+      # Refused by the parser generated from repro's command-line
+      # description, before anything is read or removed.
+      check "unknown flag '--everything' for 'repro clean'" in res.output

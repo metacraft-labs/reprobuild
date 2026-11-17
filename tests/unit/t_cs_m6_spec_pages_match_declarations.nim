@@ -20,7 +20,8 @@
 ## `system`, `infra`, `anywhere`, `deploy-agent`, `hardware`, `disk`,
 ## `cargo`, `health`, `debug` and their subcommands; the fifth: `exec`,
 ## `run`, `shell`, `allow`, `deny`, `dev-env`, `up`, `down`, `dev`, `hcr`,
-## `prompt` and their subcommands). Each later
+## `prompt` and their subcommands; the sixth: the workspace and publication
+## commands; the seventh, so far: `build`, `bench`, `lint`, `clean`). Each later
 ## group of commands is added by listing it here and in the generator's
 ## `COVERED_COMMANDS`; the last one replaces the list with every command. The
 ## top-level command list is compared in full already. Both comparisons run
@@ -127,7 +128,9 @@ const
     "repro gateway post-receive", "repro gateway migrate", "repro add",
     "repro remove", "repro develop", "repro flake",
     "repro flake override-args", "repro flake refresh-lock",
-    "repro flake override-status"]
+    "repro flake override-status",
+    # The seventh group (the build family) so far.
+    "repro build", "repro bench", "repro lint", "repro clean"]
     ## The commands whose flags and environment variables are compared.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
@@ -166,9 +169,73 @@ const
     "flag\trepro\t--help-all", "flag\trepro capabilities\t--json",
     "flag\trepro add\t--build", "flag\trepro add\t--native-build",
     "flag\trepro add\t--runtime", "env\trepro health\tXDG_STATE_HOME",
-    "env\trepro shell\tSTDIN_FILENO"]
-    ## Flags a covered command's page specifies that repro does not
-    ## implement yet.
+    "env\trepro shell\tSTDIN_FILENO",
+    # Names the pages write as code that are not the command's own input,
+    # so its command line declares none of them. `RUNQUOTA_SOCKET` is the
+    # RunQuota endpoint, read by the RunQuota client every command that
+    # talks to `runquotad` uses (`repro stats` reports the endpoint it
+    # resolved), not by `repro stats`' command line. The four in `repro
+    # hooks` belong to the managed hook bodies, not to the command that
+    # installs them: a body reads `REPROBUILD_REPRO` (and the hooks report
+    # resolves it the way a body would, to describe the hook, not as a
+    # default of any flag), carries the installing build as
+    # `REPRO_INSTALLING_BUILD=<path>` and records which step resolved the
+    # interpreter as `REPRO_CMD_SOURCE`, the way pre-commit's generated shim
+    # carries `INSTALL_PYTHON`.
+    "env\trepro stats\tRUNQUOTA_SOCKET",
+    "env\trepro hooks\tINSTALL_PYTHON", "env\trepro hooks\tREPROBUILD_REPRO",
+    "env\trepro hooks\tREPRO_CMD_SOURCE",
+    "env\trepro hooks\tREPRO_INSTALLING_BUILD",
+    # `repro build`'s `--no-write-stats` (turn the raw observation capture
+    # off for one build): specified, not implemented yet (its issue is the
+    # derived stats store's).
+    "flag\trepro build\t--no-write-stats",
+    # Names `repro build`'s page writes as code that are not inputs of its
+    # command line. The ELF header fields the cross-target checks read:
+    "env\trepro build\tEF_ARM_ABI_FLOAT_HARD",
+    "env\trepro build\tEF_ARM_ABI_FLOAT_SOFT", "env\trepro build\tEI_CLASS",
+    "env\trepro build\tEI_DATA", "env\trepro build\tEI_OSABI",
+    "env\trepro build\tEM_386", "env\trepro build\tEM_AARCH64",
+    "env\trepro build\tEM_ARM", "env\trepro build\tEM_BPF",
+    "env\trepro build\tEM_RISCV", "env\trepro build\tEM_X86_64",
+    "env\trepro build\tPT_INTERP",
+    # The caller's environment a daemon-hosted build carries to its
+    # actions (Nix configuration, the compiler-toolchain variables, the
+    # loader paths, pkg-config and Cargo/rustup settings, and the names a
+    # `nix develop` shell exports), and CMake's `FAIL_REGEX`:
+    "env\trepro build\tCARGO_BUILD_TARGET", "env\trepro build\tCARGO_HOME",
+    "env\trepro build\tCARGO_NET_OFFLINE", "env\trepro build\tCONFIG_SHELL",
+    "env\trepro build\tDYLD_FALLBACK_LIBRARY_PATH",
+    "env\trepro build\tDYLD_LIBRARY_PATH", "env\trepro build\tFAIL_REGEX",
+    "env\trepro build\tLD_LIBRARY_PATH", "env\trepro build\tLIBRARY_PATH",
+    "env\trepro build\tMACOSX_DEPLOYMENT_TARGET",
+    "env\trepro build\tNIX_BUILD_CORES",
+    "env\trepro build\tNIX_CFLAGS_COMPILE", "env\trepro build\tNIX_CONFIG",
+    "env\trepro build\tNIX_CONF_DIR", "env\trepro build\tNIX_DONT_SET_RPATH",
+    "env\trepro build\tNIX_HARDENING_ENABLE", "env\trepro build\tNIX_LDFLAGS",
+    "env\trepro build\tNIX_PROFILES", "env\trepro build\tNIX_SSL_CERT_FILE",
+    "env\trepro build\tNIX_STORE", "env\trepro build\tNIX_USER_CONF_FILES",
+    "env\trepro build\tNIX_USER_PROFILE_DIR", "env\trepro build\tPKG_CONFIG",
+    "env\trepro build\tPKG_CONFIG_PATH", "env\trepro build\tRUSTUP_HOME",
+    "env\trepro build\tRUSTUP_TOOLCHAIN",
+    "env\trepro build\tSOURCE_DATE_EPOCH", "env\trepro build\tSSL_CERT_FILE",
+    "env\trepro build\tXDG_CONFIG_DIRS", "env\trepro build\tXDG_CONFIG_HOME",
+    # What the build reads or writes outside its command line: an agent's
+    # shell, which makes the progress default quiet (`IN_AGENT_SHELL`), the
+    # binary-cache credentials `--publish` uses (`repro cache publish`'s), the
+    # RunQuota grant heartbeat and endpoint, the per-package exemptions an
+    # action carries, and `REPRO_VARIANTS`, which `--variant` and `--target`
+    # write for the recipe's evaluation:
+    "env\trepro build\tIN_AGENT_SHELL",
+    "env\trepro build\tREPRO_BINARY_CACHE_CERT_PATH",
+    "env\trepro build\tREPRO_BINARY_CACHE_KEY_PATH",
+    "env\trepro build\tREPRO_BINARY_CACHE_URL",
+    "env\trepro build\tREPRO_RUNQUOTA_GRANT_HEARTBEAT",
+    "env\trepro build\tREPRO_TARGET_OBJECT_EXEMPTIONS",
+    "env\trepro build\tREPRO_VARIANTS", "env\trepro build\tRUNQUOTA_SOCKET"]
+    ## Flags and variables a covered command's page names that its command
+    ## line does not declare: not implemented yet, or (as each comment says)
+    ## not an input of the command line at all.
   SpecifiedNotDeclared = [
     "audit", "info", "init", "list", "lsp", "mcp", "outdated", "package",
     "search", "upgrade"]
@@ -271,6 +338,10 @@ const
   # develop-set selection it shares with the `repro flake` verbs, removed
   # from `develop` alone.
   WithoutDevelopReset = declaredSurface("develop", "reset", true)
+  # `repro build`, compared since its parsing moved: a flag of the
+  # declaration `bench` and `lint` share, with the environment variable it
+  # declares, removed from `build` alone.
+  WithoutBuildDaemon = declaredSurface("build", "daemon", true)
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -370,6 +441,14 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro flake override-status\t--lock-store" in Declared
     check "flag\trepro flake refresh-lock\t--record-downgrade" in Declared
     check "verb\tws" notin Declared
+    # The build family: a flag of the declaration `build`, `bench` and
+    # `lint` share, in each of them, with the variable it declares.
+    check "flag\trepro build\t--daemon" in Declared
+    check "env\trepro build\tREPRO_DAEMON" in Declared
+    check "flag\trepro lint\t--no-runquota" in Declared
+    check "env\trepro bench\tREPROBUILD_NO_RUNQUOTA" in Declared
+    check "flag\trepro build\t-vv" in Declared
+    check "flag\trepro clean\t--project-root" in Declared
 
   test "removing one flag's declaration fails the comparison":
     check "flag\trepro capabilities\t--format" notin
@@ -400,6 +479,13 @@ suite "CS-M6: the specification pages match the declarations":
   test "removing a flag of `repro develop` fails the comparison":
     check differences(WithoutDevelopReset, specified()) ==
       @["flag\trepro develop\t--reset: specified, not declared"]
+
+  test "removing a flag of `repro build` fails the comparison":
+    # The flag and the environment variable it declares, in `build` alone:
+    # `bench` and `lint` splice their own copy of the declaration.
+    check differences(WithoutBuildDaemon, specified()) ==
+      @["env\trepro build\tREPRO_DAEMON: specified, not declared",
+        "flag\trepro build\t--daemon: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==
