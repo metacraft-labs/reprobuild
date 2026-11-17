@@ -13,13 +13,15 @@
 ##
 ## Coverage:
 ##   * ``recognize`` returns true for:
+##     - a ``go.work`` workspace root (Go.md §"Workspace and module mode",
+##       amended 2026-11-16; this replaced a negative case that encoded the
+##       old "workspaces deferred" rule)
 ##     - the canonical root-``main.go`` fixture (M5)
 ##     - the ``cmd/<name>/main.go`` multi-binary fixture (M14)
 ##     - the library-only fixture (M14)
 ##   * ``recognize`` returns false when:
 ##     - any ``.go`` file contains ``import "C"`` (cgo trigger)
 ##     - a ``_cgo_*.go`` file exists in the project tree
-##     - ``go.work`` is present (workspaces deferred)
 ##     - ``go.mod`` is absent (not a Go module)
 ##     - ``uses:`` doesn't list ``go``
 ##   * ``emitFragment`` against the canonical M5 fixture produces:
@@ -44,7 +46,7 @@
 ## recognise assertions still run because they short-circuit to ``false``
 ## on a missing toolchain.
 
-import std/[os, strutils, unittest]
+import std/[json, os, osproc, strutils, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -53,6 +55,7 @@ import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/go as go_convention
+import repro_standard_provider/conventions/go_embed
 
 let
   ## ``parentDir`` four times from
@@ -109,6 +112,142 @@ proc writeMinimalFixture(scratch, mainGo: string;
     "module " & modulePath & "\n\ngo 1.22\n")
   writeFile(scratch / "main.go", mainGo)
 
+proc writeWorkspaceFixture(root: string) =
+  ## A ``go.work`` root that is not itself a module: ``lib`` (``go 1.23.0``,
+  ## the patch-release form ``go mod init`` writes; ranges over a function
+  ## iterator, legal only at ``-lang=go1.23``+) and ``api`` (``go 1.22``)
+  ## importing it.
+  createDir(root / "lib")
+  createDir(root / "api")
+  writeFile(root / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package fakeGoWork:\n" &
+    "  uses:\n    \"go >=1.22 <2.0\"\n\n" &
+    "  executable api:\n    discard\n")
+  writeFile(root / "go.work", "go 1.23.0\n\nuse (\n\t./api\n\t./lib\n)\n")
+  writeFile(root / "lib" / "go.mod", "module example.com/lib\n\ngo 1.23.0\n")
+  writeFile(root / "lib" / "lib.go", "package lib\n\n" &
+    "func seq(yield func(int) bool) {\n" &
+    "\tfor i := 1; i <= 3; i++ {\n\t\tif !yield(i) {\n\t\t\treturn\n\t\t}\n\t}\n}\n\n" &
+    "func Sum() int {\n\ts := 0\n\tfor v := range seq {\n\t\ts += v\n\t}\n\treturn s\n}\n")
+  writeFile(root / "api" / "go.mod", "module example.com/api\n\ngo 1.22\n\n" &
+    "require example.com/lib v0.0.0\n")
+  writeFile(root / "api" / "main.go", "package main\n\nimport (\n\t\"fmt\"\n\n" &
+    "\t\"example.com/lib\"\n)\n\nfunc main() { fmt.Println(lib.Sum()) }\n")
+
+proc staticElfWithoutInterpreter(path: string): bool =
+  ## True for an ELF64 executable with no ``PT_INTERP`` program header: an
+  ## image the dynamic loader never runs, so ``LD_PRELOAD`` cannot inject the
+  ## monitor into it.
+  var data: string
+  try:
+    data = readFile(path)   # follows symlinks
+  except CatchableError:
+    return false
+  if data.len < 64 or data[0 .. 3] != "\x7FELF" or data[4] != '\x02':
+    return false
+  proc u16(at: int): int = ord(data[at]) or (ord(data[at + 1]) shl 8)
+  proc u64(at: int): int =
+    for i in countdown(7, 0):
+      result = (result shl 8) or ord(data[at + i])
+  let phoff = u64(0x20)
+  let phentsize = u16(0x36)
+  let phnum = u16(0x38)
+  for i in 0 ..< phnum:
+    let at = phoff + i * phentsize
+    if at + 4 > data.len:
+      return false
+    if ord(data[at]) == 3 and ord(data[at + 1]) == 0 and
+        ord(data[at + 2]) == 0 and ord(data[at + 3]) == 0:
+      return false
+  true
+
+proc writeTextOf(action: BuildActionDef): string =
+  ## The text an ``fs.writeText`` action writes.
+  for arg in action.call.arguments:
+    if arg.name == "text":
+      return arg.encodedValue
+  ""
+
+proc actionsOf(fragment: GraphFragment): seq[BuildActionDef] =
+  for node in fragment.nodes:
+    if node.kind == gnkAction:
+      result.add(decodeBuildActionPayload(toBytes(node.payload)))
+
+suite "go convention: Go's own path.Match and embed resolution":
+
+  test "goPathMatch agrees with Go's path.Match test table":
+    # The vectors are Go's own ``src/path/match_test.go`` (matchTests).
+    const matches = [
+      ("abc", "abc", true), ("*", "abc", true), ("*c", "abc", true),
+      ("a*", "a", true), ("a*", "abc", true), ("a*", "ab/c", false),
+      ("a*/b", "abc/b", true), ("a*/b", "a/c/b", false),
+      ("a*b*c*d*e*/f", "axbxcxdxe/f", true),
+      ("a*b*c*d*e*/f", "axbxcxdxexxx/f", true),
+      ("a*b*c*d*e*/f", "axbxcxdxe/xxx/f", false),
+      ("a*b*c*d*e*/f", "axbxcxdxexxx/fff", false),
+      ("a*b?c*x", "abxbbxdbxebxczzx", true),
+      ("a*b?c*x", "abxbbxdbxebxczzy", false),
+      ("ab[c]", "abc", true), ("ab[b-d]", "abc", true),
+      ("ab[e-g]", "abc", false), ("ab[^c]", "abc", false),
+      ("ab[^b-d]", "abc", false), ("ab[^e-g]", "abc", true),
+      ("a\\*b", "a*b", true), ("a\\*b", "ab", false),
+      ("a?b", "a\u263Ab", true), ("a[^a]b", "a\u263Ab", true),
+      ("a???b", "a\u263Ab", false), ("a[^a][^a][^a]b", "a\u263Ab", false),
+      ("[a-\u03B6]*", "\u03B1", true), ("*[a-\u03B6]", "A", false),
+      ("a?b", "a/b", false), ("a*b", "a/b", false),
+      ("[\\]a]", "]", true), ("[\\-]", "-", true),
+      ("[x\\-]", "x", true), ("[x\\-]", "-", true), ("[x\\-]", "z", false),
+      ("[\\-x]", "x", true), ("[\\-x]", "-", true), ("[\\-x]", "a", false),
+      ("*x", "xxx", true)]
+    for (pattern, name, expected) in matches:
+      checkpoint(pattern & " ~ " & name)
+      check goPathMatch(pattern, name) == expected
+    const bad = [("[]a]", "]"), ("[-]", "-"), ("[x-]", "x"), ("[x-]", "-"),
+      ("[x-]", "z"), ("[-x]", "x"), ("[-x]", "-"), ("[-x]", "a"),
+      ("\\", "a"), ("[a-b-c]", "a"), ("[", "a"), ("[^", "a"),
+      ("[^bc", "a"), ("a[", "a"), ("a[", "ab"), ("a[", "x"), ("a/b[", "x")]
+    for (pattern, name) in bad:
+      checkpoint("bad pattern " & pattern & " ~ " & name)
+      expect GoBadPattern:
+        discard goPathMatch(pattern, name)
+
+  test "embedFilesOfPattern applies cmd/go's directory-walk exclusions":
+    let files = @["static/a.txt", "static/sub/b.txt", "static/.h.txt",
+      "static/_u.txt", "static/sub/.s.txt", "other/c.txt", "static/.git/x"]
+    # A directory pattern drops dot- and underscore-prefixed names below the
+    # matched directory, and VCS directories always.
+    check embedFilesOfPattern("static", files) ==
+      @["static/a.txt", "static/sub/b.txt"]
+    # ``all:`` keeps the hidden names, but never a VCS directory.
+    check embedFilesOfPattern("all:static", files) == @["static/.h.txt",
+      "static/_u.txt", "static/a.txt", "static/sub/.s.txt", "static/sub/b.txt"]
+    # A glob naming a hidden file directly embeds it.
+    check embedFilesOfPattern("static/.h.txt", files) == @["static/.h.txt"]
+    check embedFilesOfPattern("static/*.txt", files) ==
+      @["static/.h.txt", "static/_u.txt", "static/a.txt"]
+    # A glob matching a directory embeds its tree, element by element.
+    check embedFilesOfPattern("s*/sub", files) == @["static/sub/b.txt"]
+    check embedFilesOfPattern("nomatch", files).len == 0
+
+  test "goLanguageVersion agrees with cmd/go's gover.Lang":
+    # The vectors are ``gover.Lang``'s (src/cmd/go/internal/gover): a ``go``
+    # directive may name a patch release or a pre-release, and ``-lang``
+    # takes only the language version.
+    for (version, lang) in [("1.22", "1.22"), ("1.22.3", "1.22"),
+        ("1.23.0", "1.23"), ("1.21rc1", "1.21"), ("1.16", "1.16"),
+        ("1", "1"), ("1.0", "1"), ("1.0.0", "1"), ("2.1.4", "2.1")]:
+      checkpoint(version)
+      check go_convention.goLanguageVersion(version) == lang
+    for bad in ["", "x1.22", "1.", "1-22"]:
+      checkpoint("bad version " & bad.escape())
+      expect ValueError:
+        discard go_convention.goLanguageVersion(bad)
+
+  test "renderEmbedcfg refuses a pattern that matches none of EmbedFiles":
+    expect ValueError:
+      discard renderEmbedcfg("/pkg", ["static"], ["other/c.txt"])
+
 suite "go convention M5 + M14":
 
   test "recognize: positive — canonical fixture":
@@ -148,18 +287,27 @@ suite "go convention M5 + M14":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "recognize: negative — go.work present":
+  test "recognize: positive — go.work workspace root without a go.mod":
+    # Spec-driven change, not a weakening: this case used to assert that a
+    # ``go.work`` made recognition FAIL ("workspaces deferred"). Go.md
+    # §"Recognition" 1 and §"Workspace and module mode" (amended
+    # 2026-11-16, reprobuild-pm issue
+    # 2026-11-12-go-import-and-embed-resolution-is-hand-approximated-and-wrong)
+    # now make a ``go.work`` root a workspace-mode project, so the case
+    # asserts the opposite — and with no root ``go.mod`` at all, the shape
+    # the old rule could not have accepted.
     let scratch = getTempDir() / "test_go_convention_go_work"
-    writeMinimalFixture(scratch,
-      mainGo = "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"workspaces\") }\n")
-    # Add go.work — recognition must reject (single-module only for M5).
-    writeFile(scratch / "go.work",
-      "go 1.22\n\nuse ./\n")
+    if dirExists(scratch):
+      removeDir(scratch)
+    writeWorkspaceFixture(scratch)
     defer:
       removeDir(scratch)
     let conv = go_convention.goConvention()
     let request = dummyRequest(scratch)
-    check not conv.recognize(scratch, request)
+    if not goToolchainAvailable():
+      check not conv.recognize(scratch, request)
+    else:
+      check conv.recognize(scratch, request)
 
   test "recognize: negative — no go.mod":
     let scratch = getTempDir() / "test_go_convention_no_gomod"
@@ -482,3 +630,120 @@ suite "go convention M5 + M14":
         let action = decodeBuildActionPayload(toBytes(node.payload))
         check not action.id.startsWith("go-test-run-")
         check not action.id.startsWith("go-test-stamp-")
+
+  # --- Go.md §"The embedcfg file" / §"Workspace and module mode" -----------
+
+  test "emitFragment: embedcfg matches the document go build -n writes":
+    if not goToolchainAvailable():
+      skip("go not on PATH")
+    else:
+      let scratch = getTempDir() / "test_go_convention_embedcfg"
+      if dirExists(scratch):
+        removeDir(scratch)
+      writeMinimalFixture(scratch, mainGo = "package main\n\n" &
+        "import (\n\t\"embed\"\n\t\"fmt\"\n)\n\n" &
+        "//go:embed static\nvar dirFS embed.FS\n\n" &
+        "//go:embed static/a.txt\nvar single string\n\n" &
+        "//go:embed all:static/sub\nvar allFS embed.FS\n\n" &
+        "func main() { fmt.Println(single, dirFS, allFS) }\n",
+        modulePath = "example.com/embedcfg")
+      for (rel, text) in [("static/a.txt", "a\n"), ("static/.h.txt", "h\n"),
+          ("static/_u.txt", "u\n"), ("static/sub/b.txt", "b\n"),
+          ("static/sub/.s.txt", "s\n")]:
+        createDir((scratch / rel).parentDir)
+        writeFile(scratch / rel, text)
+      defer:
+        removeDir(scratch)
+      let conv = go_convention.goConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var embedcfgText = ""
+      var compileArgv: seq[string] = @[]
+      for action in actionsOf(fragment):
+        if action.id.startsWith("go-embedcfg-"):
+          embedcfgText = writeTextOf(action)
+        elif action.id.startsWith("go-compile-"):
+          compileArgv = inlineArgvOf(action)
+      checkpoint("embedcfg: " & embedcfgText)
+      require embedcfgText.len > 0
+      # The compile is handed the document.
+      check "-embedcfg" in compileArgv
+      # Go's own document for the same package, from ``go build -n``.
+      # ``-a``: the convention's ``go list -export`` has just put this package
+      # in GOCACHE, and without it ``-n`` would print only the link.
+      let (dryRun, code) = execCmdEx(quoteShell(findExe("go")) &
+        " build -a -n .", options = {poUsePath, poStdErrToStdOut},
+        workingDir = scratch)
+      checkpoint("go build -n: " & dryRun)
+      require code == 0
+      # The only package of the build with //go:embed is the main one, so the
+      # one embedcfg heredoc in the plan is its.
+      let marker = dryRun.find("embedcfg << 'EOF'")
+      require marker >= 0
+      let openIdx = dryRun.find('{', marker)
+      let closeIdx = dryRun.find("EOF", openIdx)
+      require openIdx >= 0 and closeIdx > openIdx
+      let goDoc = parseJson(dryRun[openIdx ..< closeIdx])
+      check parseJson(embedcfgText) == goDoc
+      # The listing's reads key the fragment (Go.md §"Implicit-dependency
+      # capture", item 3) — where the monitor can observe ``go``. A
+      # statically linked ``go`` (every go.dev/nixpkgs build on Linux) cannot
+      # be entered by the preload monitor, and then the fragment must carry
+      # the never-matching ``unobserved`` input instead, so it is re-derived
+      # on every refresh.
+      var sawGoMod = false
+      var sawStaticDir = false
+      var sawUnobserved = false
+      for input in fragment.evaluationInputs:
+        if input.kind == gevFileRead and
+            input.digest == UnobservedEvaluationDigest:
+          sawUnobserved = true
+        elif input.kind == gevFileRead and
+            sameFile(input.identity, scratch / "go.mod"):
+          sawGoMod = true
+        if input.kind == gevDirectoryEnumeration and
+            input.identity.endsWith(DirSep & "static"):
+          sawStaticDir = true
+      if staticElfWithoutInterpreter(findExe("go")):
+        checkpoint("go is a static ELF: the capture must be graded incomplete")
+        check sawUnobserved
+      else:
+        check not sawUnobserved
+        check sawGoMod
+        check sawStaticDir
+
+  test "emitFragment: a workspace compiles each package at its module's go version":
+    if not goToolchainAvailable():
+      skip("go not on PATH")
+    else:
+      let scratch = getTempDir() / "test_go_convention_work_lang"
+      if dirExists(scratch):
+        removeDir(scratch)
+      writeWorkspaceFixture(scratch)
+      defer:
+        removeDir(scratch)
+      let conv = go_convention.goConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var langOf: seq[(string, string)] = @[]
+      for action in actionsOf(fragment):
+        if not action.id.startsWith("go-compile-"):
+          continue
+        var lang = ""
+        for arg in inlineArgvOf(action):
+          if arg.startsWith("-lang="):
+            lang = arg
+        langOf.add((action.id, lang))
+      checkpoint($langOf)
+      var sawLib, sawApi = false
+      for (id, lang) in langOf:
+        if "example.com__lib" in id:
+          sawLib = true
+          check lang == "-lang=go1.23"
+        elif "example.com__api" in id:
+          sawApi = true
+          check lang == "-lang=go1.22"
+      check sawLib
+      check sawApi
