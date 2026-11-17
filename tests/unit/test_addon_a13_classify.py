@@ -239,6 +239,13 @@ def green(kind, base="debian-13"):
             rec["fullApplyFixing"] = {"staged": "failed", "exit": 0,
                                       "active": "active", "recordLeft": "",
                                       "ok": True}
+            rec["deadJudgedActive"] = {"before": "active", "staged": "inactive",
+                                       "exit": 0, "after": "active",
+                                       "enabled": "disabled", "holdLeft": "",
+                                       "ok": True}
+            rec["essentialHostTrigger"] = {"exit": 2, "refused": True,
+                                           "dropInWritten": False, "held": "",
+                                           "ok": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -479,6 +486,17 @@ def red_record(kind, base="debian-13"):
                         red("M2: a full apply whose generation resolves a "
                             "recorded trigger starts it before its commit, "
                             "and clears the record")]
+    elif kind == "mutdeadactive":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="dead-judged-was-active-lost")
+        rec["deadJudgedActive"] = {"before": "active", "staged": "inactive",
+                                   "exit": 0, "after": "inactive",
+                                   "enabled": "disabled", "holdLeft": "",
+                                   "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("M-B: a judged service a dead full apply held "
+                            "while it ran, not enabled, is started again once "
+                            "the next apply's check passes it")]
     elif kind == "mutbootblock":
         rec = base_record(ADOPT, base, mutation="boot-record-starts-block")
         rec["bootQueuedRestart"] = {"queued": False, "recordAfterBoot": "",
@@ -616,7 +634,8 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "muttrigconv", "muttrigheld", "mutrestartignored",
              "mutdependants", "mutswitchrecord", "mutunjudgedreq",
              "mutfixstart", "mutdepblock", "mutstaleorder", "mutessential",
-             "mutrevertstarts", "mutdeadhold", "mutfullfix", "mutbootblock"]
+             "mutrevertstarts", "mutdeadhold", "mutfullfix", "mutbootblock",
+             "mutdeadactive"]
 
 
 class Accepts(unittest.TestCase):
@@ -1172,6 +1191,8 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
                                   ("decisionEssential", "dropInWritten", True),
                                   ("deadApplyAdopted", "ok", False),
                                   ("decision153Unjudged", "targetHeld", True),
+                                  ("deadJudgedActive", "ok", False),
+                                  ("essentialHostTrigger", "ok", False),
                                   ("fullApplyFixing", "ok", False)):
             rec = green("conv")
             rec[key][field] = value
@@ -1192,6 +1213,13 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutdeadhold")
         rec["deadApplyAdopted"]["checkBeganAt"] = -1.0
         self.assertRejected("mutdeadhold-debian-13", rec)
+        # The timestamps decide, not the gate's boolean (round 13, L5): a
+        # service that ran after the release is not the falsifier's red
+        # even if the boolean says otherwise.
+        rec = red_record("mutdeadhold")
+        rec["deadApplyAdopted"].update({"serviceActiveAt": 170.0,
+                                        "serviceStartedBeforeRelease": True})
+        self.assertRejected("mutdeadhold-debian-13", rec)
         # And a product record with the mutation's order is not green.
         rec = green("conv")
         rec["deadApplyAdopted"].update({"serviceActiveAt": 118.4,
@@ -1203,6 +1231,12 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutfullfix")
         rec["fullApplyFixing"]["exit"] = 1
         self.assertRejected("mutfullfix-debian-13", rec)
+        rec = red_record("mutdeadactive")
+        rec["deadJudgedActive"]["exit"] = 1
+        self.assertRejected("mutdeadactive-debian-13", rec)
+        rec = red_record("mutdeadactive")
+        rec["deadJudgedActive"]["before"] = "inactive"
+        self.assertRejected("mutdeadactive-debian-13", rec)
         rec = red_record("mutbootblock")
         rec["bootQueuedRestart"]["queued"] = True
         self.assertRejected("mutbootblock-debian-13", rec)
