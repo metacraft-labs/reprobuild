@@ -1295,6 +1295,9 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
         ctx.platform = normalizeTargetPlatform(targetPlatform)
       if targetArch.len > 0:
         ctx.arch = normalizeTargetArch(targetArch)
+      # Another platform: this machine's os-release says nothing about it,
+      # so a `nixos` guard is refused rather than read from here.
+      ctx.nixosStated = false
       opts.targetContext = ctx
       opts.hasTargetContext = true
     # M83 Phase F3: same hard-error compile path as the real apply.
@@ -1419,6 +1422,11 @@ proc runHomeBuildBundle(c: ReproCommandLineHomeBuildBundle): int =
         ctx.isWsl = targetWsl
         if targetWsl and targetPlatform.len == 0:
           ctx.platform = "linux"
+      # Evaluating for another target: the local os-release does not say
+      # whether it is NixOS.
+      if targetHost.len > 0 or targetPlatform.len > 0 or targetArch.len > 0 or
+          targetWslGiven:
+        ctx.nixosStated = false
       # The profile directory is `repro home --profile-dir`, which the
       # namespace applies as an override before any subcommand runs.
       var applyOpts: ApplyOptions
@@ -1693,6 +1701,9 @@ proc remoteApplyTargetContext(parsed: EnableDisableFlags): HostContext =
     result.isWsl = parsed.remote.targetWsl
     if parsed.remote.targetWsl and parsed.remote.targetPlatform.len == 0:
       result.platform = "linux"
+  # A remote target: this machine's os-release does not say whether it is
+  # NixOS.
+  result.nixosStated = false
 
 proc validateRemoteApplyPreflight(name: string;
                                   parsed: EnableDisableFlags;
@@ -3322,6 +3333,10 @@ proc runHomeExport(c: ReproCommandLineHomeExport): int =
     stderr.writeLine("repro home export: unsupported --format '" & format &
       "' (supported: json)")
     return 2
+  if c.nixos.isSome and target.len == 0:
+    stderr.writeLine("repro home export: --nixos states a " &
+      "fact about the --target host; pass --target")
+    return 2
   if target.len > 0 and checkFile.len > 0:
     stderr.writeLine("repro home export: --target and --check do not " &
       "combine (a snapshot is checked as exported, unevaluated)")
@@ -3382,9 +3397,13 @@ proc runHomeExport(c: ReproCommandLineHomeExport): int =
 
   if target.len > 0:
     try:
-      doc["evaluation"] = evaluateHomeExport(doc, target, host)
+      doc["evaluation"] = evaluateHomeExport(doc, target, host, c.nixos)
     except HomeExportRefused as err:
       stderr.writeLine("repro home export: " & err.msg)
+      return 3
+    except EFactNotStated as err:
+      stderr.writeLine("repro home export: cannot evaluate for " & target &
+        ": " & err.msg)
       return 3
     except CatchableError as err:
       stderr.writeLine("repro home export: cannot evaluate for " & target &
@@ -3432,6 +3451,13 @@ proc runHomeFacts(c: ReproCommandLineHomeFacts): int =
   if c.output.isSome and output.len == 0:
     stderr.writeLine("repro home facts: --output needs a file")
     return 2
+  # Without --target the facts are this machine's, so os-release says
+  # whether it is NixOS (unless the flag does); for another target the flag
+  # is the only source.
+  let nixosFact =
+    if c.nixos.isSome: c.nixos
+    elif target.len == 0: some(currentHostContext().isNixos)
+    else: none(bool)
   if target.len == 0:
     target = compilingPlatformSystem()
     if findTargetPlatform(target) < 0:
@@ -3507,7 +3533,7 @@ proc runHomeFacts(c: ReproCommandLineHomeFacts): int =
       profileDir: profilePath.parentDir,
       profilePath: profilePath,
       host: host,
-      targetContext: targetHostContext(platform, host),
+      targetContext: targetHostContext(platform, host, nixosFact),
       hasTargetContext: true,
       stateDir: stateDir,
       storeRoot: storeRoot,
@@ -3516,6 +3542,10 @@ proc runHomeFacts(c: ReproCommandLineHomeFacts): int =
     doc = collectHostFacts(opts, target)
   except ENoProfile as e:
     printNoProfile(e); return 1
+  except EFactNotStated as e:
+    stderr.writeLine("repro home facts: cannot describe the profile for " &
+      target & ": " & e.msg)
+    return 3
   except CatchableError as e:
     stderr.writeLine("repro home facts: error: " & e.msg)
     return 1

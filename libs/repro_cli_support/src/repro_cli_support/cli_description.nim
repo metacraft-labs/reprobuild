@@ -2502,6 +2502,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Also evaluate the guards for this platform (x86_64-linux, " &
             "aarch64-darwin, ...) and the host, as `evaluation`; refused " &
             "(exit 3) when the export would be wrong for it"
+        flag nixos is Option[bool], optionalValue = some(true),
+          help = "Whether the --target host is NixOS (`--nixos` alone is " &
+            "true; `--nixos=false` states it is not). The system name does " &
+            "not say it, so a profile with a `nixos` guard is refused (exit " &
+            "3) without it"
       subcmd "facts", help = "Report the host facts an apply would " &
           "produce (packages, files, environment, user services; paths " &
           "relative to a private home), the Reprobuild side of `repro home " &
@@ -2511,6 +2516,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag target is string,
           help = "The platform to plan for (x86_64-linux, aarch64-darwin, " &
             "...; default: the one repro runs on)"
+        flag nixos is Option[bool], optionalValue = some(true),
+          help = "Whether the --target host is NixOS (`--nixos` alone is " &
+            "true; `--nixos=false` states it is not); without --target the " &
+            "machine's os-release says. A profile with a `nixos` guard is " &
+            "refused (exit 3) for a --target without it"
         flag output is Option[string],
           help = "Write the document here instead of to standard output"
       subcmd "compare", help = "Compare a Nix-side and a Reprobuild-side " &

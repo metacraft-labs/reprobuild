@@ -132,7 +132,7 @@ let
       if v.ok then
         ""
       else if v.class == "unknown-identifier" then
-        "`${source}` names '${v.identifier}', which is not a built-in predicate; data files accept only windows, macos, linux, bsd, wsl, x86_64, arm64, arm32 and host ==/!=/in, combined with and/or/not (a user-defined predicate has no evaluator outside the profile's Nim code)"
+        "`${source}` names '${v.identifier}', which is not a built-in predicate; data files accept only windows, macos, linux, bsd, wsl, nixos, x86_64, arm64, arm32 and host ==/!=/in, combined with and/or/not (a user-defined predicate has no evaluator outside the profile's Nim code)"
       else
         "`${source}` is not a valid predicate: ${v.message}";
 
@@ -268,9 +268,10 @@ let
       system,
       host,
       activities,
+      nixos ? null,
     }:
     let
-      facts = platforms.factsFor system host;
+      facts = platforms.factsWith nixos system host;
       applies = r: elem r.activity activities && predicate.holds facts r.when;
       activityOrder = foldl' (acc: r: if elem r.activity acc then acc else acc ++ [ r.activity ]) [ ] rows;
       plannerOrder = builtins.concatMap (a: filter (r: r.activity == a) rows) activityOrder;
@@ -306,6 +307,7 @@ let
       hosts ? { },
       activities ? null,
       name ? baseNameOf (toString path),
+      nixos ? null,
     }:
     let
       parsed = parseRows name (builtins.readFile path);
@@ -320,7 +322,7 @@ let
           hostSelection.enabledActivities hosts host;
       selected = selectRows {
         inherit (parsed) rows;
-        inherit system host;
+        inherit system host nixos;
         activities = enabled;
       };
     in
@@ -372,6 +374,7 @@ in
       hosts ? { },
       activities ? null,
       name ? null,
+      nixos ? null,
     }:
     let
       # `name` defaults inside readDataResult (the file's base name); pass it

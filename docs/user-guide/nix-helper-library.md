@@ -62,7 +62,9 @@ apps = reprobuild.lib.readData {
 
 A row is selected exactly when `repro home plan` would select it: its
 `activity` is `default` or one the host's `hosts:` entry names, and its `when`
-holds for `system` and `host` (`wsl` is false for every target). A `hosts`
+holds for `system` and `host` (`wsl` is false for every target; `nixos` is the
+`nixos` argument, and a row whose `when` reaches it is refused while it is
+null). A `hosts`
 map that does not name `host` is refused, as the planner refuses a host its
 profile's `hosts:` registry does not declare (an empty map, like a profile
 without a registry, selects `default` for every host). Instead of

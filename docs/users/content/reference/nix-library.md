@@ -37,8 +37,8 @@ function returns the reason instead.
 
 ```nix
 readIntent { host, system, snapshot ? null, profileDir ? null,
-             buildSystem ? builtins.currentSystem or null, repro ? null,
-             packagesCatalog ? null }
+             buildSystem ? builtins.currentSystem or null, nixos ? null,
+             repro ? null, packagesCatalog ? null }
 ```
 
 Reads a `repro home export` document and evaluates it for `host` on `system`.
@@ -52,17 +52,23 @@ derivation); pure evaluation exposes no `builtins.currentSystem`, so name
 that export needs for a profile whose hosts declare `applies:`. Refuses a
 document of another format or schema version, one whose intent still names
 data files, a host the profile's `hosts:` block does not declare, and a
-`system` the document cannot describe.
+`system` the document cannot describe. `nixos` states whether the target is
+NixOS, which its system name does not say (Home Manager configurations exist
+for both): a profile whose guards reach the `nixos` predicate is refused while
+it is `null`, never read as false.
 
 ### `reprobuild.lib.readData`
 
 ```nix
-readData { path, system, host, hosts ? { }, activities ? null, name ? null }
+readData { path, system, host, hosts ? { }, activities ? null, name ? null,
+          nixos ? null }
 ```
 
 Reads a profile data file (TOML) and selects its rows as the planner does: a
 row applies when its activity is enabled for the host (`default` plus
-`hosts.${host}`, or `activities`) and its `when` holds for `system`. Returns
+`hosts.${host}`, or `activities`) and its `when` holds for `system` (and for
+`nixos`, the stated fact: a row whose `when` reaches `nixos` is refused while
+it is `null`). Returns
 `{ packages, names, rows, activities, system, host }`; `packages` holds one
 `{ name, version, binaries, activity }` per selected package, sorted by name.
 `name` labels the file in diagnostics and defaults to its base name. Refuses
@@ -241,17 +247,19 @@ reported by its canonical name, never as an unknown derivation.
 ### `reprobuild.lib.reprobuildFacts`
 
 ```nix
-reprobuildFacts { pkgs, repro, profileDir, host, system }
+reprobuildFacts { pkgs, repro, profileDir, host, system, nixos ? null }
 ```
 
-A derivation that runs `repro home facts` on a profile.
+A derivation that runs `repro home facts` on a profile. `nixos` states whether
+the host is NixOS (`--nixos`), for a profile with `nixos` guards.
 
 ### `reprobuild.lib.homeEquivalenceCheck`
 
 ```nix
 homeEquivalenceCheck { configuration, host, profileDir, allowlist ? null,
                        homebrew ? { }, outOfStoreRoots ? { },
-                       name ? "home-equivalence-${host}", repro ? null }
+                       name ? "home-equivalence-${host}", repro ? null,
+                       nixos ? null }
 ```
 
 A check that builds both sides' facts and runs `repro home compare`; it fails
@@ -293,6 +301,15 @@ predicates.factsFor system host
 ```
 
 The facts guards are evaluated against for `host` on `system`.
+
+### `reprobuild.lib.predicates.factsWith`
+
+```nix
+predicates.factsWith nixos system host
+```
+
+`factsFor` with the `nixos` fact stated: `true`, `false`, or `null` for not
+stated (a guard that reaches the `nixos` predicate is then refused).
 
 ## Home Manager module options
 
@@ -368,6 +385,13 @@ Hook: `{ name, system }` -> null or `{ kind = "cask" | "formula"; token; tap; }`
 The host the profile is evaluated for (its `hosts:` entry selects the activities).
 
 - Type: string
+
+### `reprobuild.intent.nixos`
+
+Whether this host is NixOS, for the profile's `nixos` guards. Whether a Linux target is NixOS is not part of its system name (Home Manager configurations for both exist), so it is stated here; null leaves it unstated, and a profile whose guards reach `nixos` then fails the evaluation instead of reading it as false.
+
+- Type: null or boolean
+- Default: `null`
 
 ### `reprobuild.intent.packages.enable`
 
