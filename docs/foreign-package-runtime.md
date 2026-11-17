@@ -216,7 +216,7 @@ the unit gets two lines:
 
 ```ini
 [Service]
-BindReadOnlyPaths=/repro/store/prefixes/apt-closure-<root>/<version>-<hash16>/usr:/usr
+BindReadOnlyPaths=/repro/store/prefixes/apt-closure-<root>/<version>-<hash40>/usr:/usr
 InaccessiblePaths=-/etc/ld.so.preload
 ExecStart=/usr/bin/prometheus-blackbox-exporter ...
 DynamicUser=yes
@@ -285,7 +285,7 @@ unit (`apt_closure.realiseAptClosure`):
    refused with that message otherwise.
 2. Each member's `data.tar.*` is decompressed with the host `xz`, `gzip`
    or `zstd` and unpacked once, by Reprobuild's own tar reader, into
-   `/repro/store/prefixes/apt-deb-<name>/<version>-<hash16>/`. The host
+   `/repro/store/prefixes/apt-deb-<name>/<version>-<hash40>/`. The host
    `tar` is not used: what it does with a hostile entry depends on its
    version and on whether it runs as root (GNU tar as root restores setuid
    bits and owners). The reader's policy is fixed:
@@ -303,7 +303,7 @@ unit (`apt_closure.realiseAptClosure`):
    `dpkg` and `apt` are never invoked; nothing is written to `/usr`. A second pass (`verifyHardenedTree`) refuses the
    prefix if any entry violates the mode or type policy.
 3. The closure is a hard-link union of its members at
-   `/repro/store/prefixes/apt-closure-<first root>/<version>-<hash16>/`.
+   `/repro/store/prefixes/apt-closure-<first root>/<version>-<hash40>/`.
    Only `usr/` and `etc/` are kept, and pre-merged-`/usr` top-level
    `bin`/`sbin`/`lib*` directories are folded into `usr/`. Two members that
    ship different bytes at the same path are a refusal, and so is a path
@@ -345,7 +345,8 @@ unit (`apt_closure.realiseAptClosure`):
    root holds once the retention window (never the current or previous
    generation) has passed.
 
-Each `<hash16>` is the store's realization hash for the prefix: for a
+Each `<hash40>` is the first 160 bits (40 hex characters) of the store's
+realization hash for the prefix: for a
 member it depends on the realiser version, the package name, version and
 architecture and the `.deb`'s SHA-256; for the closure on the realiser
 version, the first root's name and version, the architecture and the member
@@ -357,6 +358,12 @@ realises exactly the path the unit names. The name and version in the path
 keep only `[A-Za-z0-9._-]` and write every other character `_` (so an
 epoch's `:`, which separates a `BindReadOnlyPaths=` source from its target,
 never appears, and neither do `+` or `~`).
+
+Realiser version 4 introduced the 40-hex names; version 3 used the first
+64 bits (16 hex). A host upgraded from version 3 keeps its prefixes while a
+generation still binds them, the next switch moves units to the version 4
+paths, and when a package archive is no longer served the realiser reuses
+the verified version 3 member for it.
 
 **Prefixes from an earlier realiser.** Before realiser version 3 each
 prefix was renamed into place with only its completion marker: no receipt,
