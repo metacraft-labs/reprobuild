@@ -17208,6 +17208,63 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     result.exitCode = if helperExit == 0: 1 else: helperExit
     result.stderr = "runquota helper result parse failed: " & err.msg
 
+proc runQuotaSizingProject*(): string =
+  ## The project this build's RunQuota session declares for sizing:
+  ## `RUNQUOTA_PROJECT` when set, else the name of the directory the build
+  ## runs in, the project root. The workspace manifest is not read: it does
+  ## not name a project per directory.
+  result = getEnv("RUNQUOTA_PROJECT", "")
+  if result.len == 0:
+    try:
+      result = getCurrentDir().lastPathPart
+    except OSError:
+      result = ""
+
+proc runQuotaSizingEntryPoint*(): string =
+  ## `RUNQUOTA_ENTRY_POINT` when set, else `build`.
+  result = getEnv("RUNQUOTA_ENTRY_POINT", "")
+  if result.len == 0:
+    result = "build"
+
+proc leasedFrontier(id: string; actionsById: Table[string, BuildAction];
+                    leaseOf: Table[string, uint64];
+                    memo: var Table[string, seq[uint64]]): seq[uint64] =
+  ## The leases that stand for action ``id`` in an `after` list: its own
+  ## when it ran under one in this build's session; otherwise (a cache hit,
+  ## an action run another way) the frontiers of its dependencies, so a
+  ## dependant still waits for the leased work behind it. Memoised: a
+  ## dependency's frontier is final once it has completed, which it has
+  ## before anything that depends on it finishes. Bounded just above
+  ## `MaxAfterLeases`, past which nothing is declared anyway.
+  if leaseOf.hasKey(id):
+    return @[leaseOf[id]]
+  if memo.hasKey(id):
+    return memo[id]
+  # Marked before the walk, so a (malformed) cycle ends instead of
+  # recursing forever.
+  memo[id] = @[]
+  var found: seq[uint64] = @[]
+  if actionsById.hasKey(id):
+    for dep in actionsById[id].deps:
+      for lease in leasedFrontier(dep, actionsById, leaseOf, memo):
+        if lease notin found:
+          found.add(lease)
+      if found.len > MaxAfterLeases:
+        break
+  memo[id] = found
+  found
+
+proc afterLeases*(deps: seq[string]; actionsById: Table[string, BuildAction];
+                 leaseOf: Table[string, uint64];
+                 memo: var Table[string, seq[uint64]]): seq[uint64] =
+  ## An action's `after` list: the leased frontier of every dependency.
+  for dep in deps:
+    for lease in leasedFrontier(dep, actionsById, leaseOf, memo):
+      if lease notin result:
+        result.add(lease)
+    if result.len > MaxAfterLeases:
+      return
+
 proc finishInlineRunQuotaProcess(id: string;
                                  process: var ReproRunQuotaRunningProcess):
     ActionResult =
@@ -21243,6 +21300,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # fall-through; see the note at its declaration. AC-5.
   var inlineRunQuotaSession: ReproRunQuotaSession
   var inlineRunQuotaSessionOpen = false
+  # SIZING DATA (`sizing-data`, off by default): the lease each inline action
+  # ran under, so a finishing action can name the leases of the actions it
+  # waited for (`leasedFrontier`). Kept only when the measurement is on.
+  let declareSizingAfter = sizingDataEnabled()
+  var sizingLeaseOf = initTable[string, uint64]()
+  var sizingFrontierMemo = initTable[string, seq[uint64]]()
 
   # M9.R.73.2 — session-scoped state for the spec-graded monitor-loss
   # ladder from ``reprobuild-specs/Failure-Semantics.md`` §"Monitoring
@@ -21488,7 +21551,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return true
     let sessionStart = statStart()
     try:
-      inlineRunQuotaSession = openRunQuotaSession()
+      inlineRunQuotaSession = openRunQuotaSession(
+        project = runQuotaSizingProject(),
+        entryPoint = runQuotaSizingEntryPoint())
       inlineRunQuotaSessionOpen = true
       runQuotaDaemonReachable = some(true)
       result = true
@@ -24071,6 +24136,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.id,
             "runquota inline process failed: queued action selected before grant")
         of rpkInlineRunQuota:
+          if declareSizingAfter and actionsById.hasKey(runningItem.id):
+            runningItem.runQuotaProcess.declareAfter(afterLeases(
+              actionsById[runningItem.id].deps, actionsById, sizingLeaseOf,
+              sizingFrontierMemo))
           finishInlineRunQuotaProcess(
             runningItem.id,
             runningItem.runQuotaProcess)
@@ -24096,6 +24165,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.resultPath,
             cacheRoot)
       finishStat("repro runquota finish", finishStart)
+      # The lease this action ran under, for the `after` lists of the
+      # actions that depend on it (`sizing-data`).
+      if declareSizingAfter and runningItem.processKind == rpkInlineRunQuota and
+          finished.leaseId > 0'u64:
+        sizingLeaseOf[finished.id] = finished.leaseId
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
       if runningItem.processKind == rpkHelperProcess:
