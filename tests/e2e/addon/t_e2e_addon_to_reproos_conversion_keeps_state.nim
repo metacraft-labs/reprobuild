@@ -2222,6 +2222,29 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["bootPathSetup"] = %(nw.exec("systemctl is-enabled " & RestoreUnit &
       " || true").stdout & "damaged " & validatorArchive)
     nw.rebootGuest()
+    # The restore unit is started more than once at boot (a carried unit's
+    # start queues it again after the first failure), so a single read can
+    # race a later run (A13 review round 12: conv-debian-12 at 6b8fa94fc6
+    # read it `activating`). Wait on the guest until it has left
+    # `activating` for 15 s in a row, up to 120 s -- a timeout fails the
+    # step -- and, at every poll of the wait, record any carried unit that
+    # is active, so one that starts between the restore's runs is caught.
+    let settleUnits = [DefaultValidatorUnit, Exe, ShadowUnit, R5DistUnit]
+    writeFile(work / "a13-restore-settle.sh",
+      "calm=0; i=0\nwhile [ $i -lt 240 ]; do\n" &
+      "  for u in " & settleUnits.join(" ") & "; do\n" &
+      "    systemctl is-active --quiet $u && echo \"ACTIVE $u $(cut -d' ' -f1 /proc/uptime)\"\n" &
+      "  done\n" &
+      "  s=$(systemctl show -p ActiveState --value " & RestoreUnit & ")\n" &
+      "  if [ \"$s\" = activating ]; then calm=0; else calm=$((calm+1)); fi\n" &
+      "  [ $calm -ge 30 ] && { echo \"SETTLED $s\"; exit 0; }\n" &
+      "  i=$((i+1)); sleep 0.5\ndone\necho TIMEOUT\n")
+    nw.copyTo(work / "a13-restore-settle.sh", "/run/a13-restore-settle.sh")
+    let settle = nw.exec("bash /run/a13-restore-settle.sh", timeoutSec = 200).stdout
+    let settled = "SETTLED " in settle and "TIMEOUT" notin settle
+    var activeDuring: seq[string]
+    for l in settle.splitLines():
+      if l.startsWith("ACTIVE "): activeDuring.add(l)
     let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
     var bad: seq[string]
     for u in [DefaultValidatorUnit, Exe, ShadowUnit, R5DistUnit]:
@@ -2229,9 +2252,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let n = nw.exec("journalctl -b -u " & u &
         " --no-pager | grep -c 'Started' || true").stdout.strip()
       if st == "active" or n != "0": bad.add(u & " " & st & ", starts " & n)
+    record["bootPathSettle"] = %*{"settled": settled,
+      "activeDuring": activeDuring, "final": rres}
     step("a carried unit does not start at boot while its restore fails",
-         "Result=success" notin rres and bad.len == 0,
-         rres & "\nstarted: " & bad.join("; ") & "\n" &
+         settled and activeDuring.len == 0 and "Result=success" notin rres and
+           bad.len == 0,
+         "settle: " & settle & "\n" & rres & "\nstarted: " & bad.join("; ") & "\n" &
          nw.serviceJournal([RestoreUnit, Exe, DefaultValidatorUnit]))
 
     # Ordering, observed while the restore is provably still running. The

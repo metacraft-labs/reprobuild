@@ -21,8 +21,16 @@
 ## ``verifying`` window lasts only while the check runs, so the views are
 ## built here with the fields ``readSharedStore`` fills from the daemon's
 ## answer.
+##
+## It also covers the row rule for a daemon that answered with capture on:
+## ``ready`` needs at least one row, so a thinned (``incomplete``) window
+## that still holds rows is ``ready``, and a window with zero rows is
+## ``empty`` even when it is ``incomplete`` because every observation was
+## lost. Losing every observation needs a daemon whose writer queue
+## overflows or whose writes fail, which the integration tests cannot
+## provoke on demand, so those views are constructed here too.
 
-import std/[strutils, unittest]
+import std/[json, strutils, unittest]
 
 import repro_runquota/stats_query
 import repro_runquota/store_status
@@ -83,3 +91,54 @@ suite "repro stats names why the daemon's capture is off":
       "repro stats: store_status=unprovisioned capture_enabled=false -- ")
     check line.endsWith("; remedy: " & report.remedy)
     check '\n' notin line
+
+proc captureOnView(state: SharedStoreState; reason: string;
+                   executions: seq[SharedExecution] = @[]): SharedStoreView =
+  SharedStoreView(state: state, reason: reason,
+    endpoint: "/run/user/1000/runquota/runquotad.sock",
+    captureEnabled: true,
+    storePath: "/var/lib/runquota/observations.sqlite3",
+    daemonStoreStatus: "open",
+    executions: executions)
+
+const LostEverything =
+  "runquotad counted 7 lost observations and holds no rows for this scope"
+
+suite "repro stats is ready only when the window holds a row":
+  test "an incomplete window with zero rows is empty, not ready":
+    let report = statsStoreStatus(
+      captureOnView(sssIncomplete, LostEverything), "/p")
+    check report.status == ssEmpty
+    check report.captureEnabled
+    check report.remedy.len > 0
+    check report.remedy.contains("repro build")
+    check report.reason.contains("lost observations")
+    let line = storeStatusNotice("repro stats", report)
+    check line.startsWith(
+      "repro stats: store_status=empty capture_enabled=true -- " &
+      LostEverything)
+    check line.endsWith("; remedy: " & report.remedy)
+    let node = newJObject()
+    addStoreStatus(node, report)
+    check node["store_status"].getStr == "empty"
+    check node["capture_enabled"].getBool
+    check node["remedy"].getStr == report.remedy
+
+  test "an incomplete window that still holds a row is ready":
+    let report = statsStoreStatus(
+      captureOnView(sssIncomplete,
+        "runquotad counted 3 lost observations",
+        @[SharedExecution(executionId: "e1", statsKey: "k1",
+          durationMillis: 12)]), "/p")
+    check report.status == ssReady
+    check report.captureEnabled
+    check report.remedy.len == 0
+    check storeStatusNotice("repro stats", report).len == 0
+
+  test "a window with nothing recorded yet stays empty":
+    let report = statsStoreStatus(
+      captureOnView(sssEmpty,
+        "runquotad holds no executions for this scope yet"), "/p")
+    check report.status == ssEmpty
+    check report.captureEnabled
+    check report.remedy.contains("repro build")
