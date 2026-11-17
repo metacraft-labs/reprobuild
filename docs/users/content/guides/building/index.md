@@ -17,3 +17,4 @@ These guides cover building projects. The ideas behind them are in
 |---|---|
 | [Build an existing project](build-an-existing-project.md) | The project has a `Cargo.toml`, a `go.mod`, a `CMakeLists.txt` or another ecosystem manifest |
 | [Build a repository from its layout](build-a-monorepo-from-its-layout.md) | The repository keeps programs in `apps/` and libraries in `libs/` |
+| [Choose where a project's tools come from](choose-where-tools-come-from.md) | You want the tools in `uses:` from Nix, from your `PATH` or from another source |

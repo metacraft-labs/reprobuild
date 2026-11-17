@@ -193,7 +193,12 @@ The add-on handles this in four ways:
     drops it to break an ordering cycle, and it never fails: if a step of
     it fails it logs that and goes on, and if it cannot read the pending
     switch's list of holds it holds every socket, timer and path unit in
-    `/etc/systemd/system` until the switch is resolved. A host installed
+    `/etc/systemd/system` until the switch is resolved, except the ones the
+    host needs to stay reachable, such as an `ssh.socket` override.
+    Because `sysinit.target` requires it, a link
+    `sysinit.target.requires/repro-addon-boot-hold.service` left without
+    the unit would hold up every boot: uninstall removes it, and
+    `repro system addon verify` reports one that dangles. A host installed
     by an add-on version without that unit gets it at its next apply.
     That apply also points the add-on's boot-time re-assertion, its
     boot-time confirm and the deploy agent's two units at the add-on
@@ -203,7 +208,10 @@ The add-on handles this in four ways:
     version. Only the statically linked add-on binary is installed this
     way: when the full `reprobuild` engine applies, the add-on binary of
     the same version already in the store is used, and if there is none
-    the apply says so and leaves the units as they are. If a file is
+    the apply says so and leaves the units as they are. The bootstrap
+    itself must also run the statically linked add-on binary: the
+    preflight's `addon-binary-static` check fails for the full engine,
+    and the bootstrap refuses that plan. If a file is
     already at one of those paths and it is not exactly what the add-on
     put there, the apply refuses and changes nothing until you move it
     away. A socket, path or timer unit that starts a hardened service
@@ -213,7 +221,11 @@ The add-on handles this in four ways:
     `sysinit.target` and is ordered, directly or through other units,
     before a unit that runs before it -- a local mount,
     `local-fs.target`, `systemd-remount-fs.service`, journald, udev and
-    the like: that is an ordering cycle. An empty `Before=` or `After=`
+    the like: that is an ordering cycle. A drop-in the profile puts on a
+    distribution's unit counts as part of the profile here: it may not
+    order that unit into such a cycle either, nor name
+    `repro-addon-boot-hold.service` or `sysinit.target` in `Conflicts=`
+    or `PropagatesStopTo=` -- and no unit of the profile may. An empty `Before=` or `After=`
     in a drop-in does not clear the unit file's list; systemd adds to it. If a switch whose profile has a hardened unit with a health
     check is interrupted, the next boot finishes it in a separate unit,
     `repro-addon-boot-confirm.service`, after the re-assertion, so the

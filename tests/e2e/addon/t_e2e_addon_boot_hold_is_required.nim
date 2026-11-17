@@ -27,9 +27,20 @@
 ##    that is ordered before ``-.mount`` -- a chain the parse half cannot
 ##    see -- is refused ``boot-hold-cycle`` by the switch's check.
 ##
+## 5. a plain unit ordered after the boot-hold unit and, through a base
+##    unit, before ``-.mount`` is refused by the effective half (round 18,
+##    M2); the parse half refuses a socket ``Before=-.mount`` on the host.
+##
+## 6. a drop-in of the profile on a base unit ordering it, through a base
+##    unit, before ``-.mount`` is refused by the effective half; one naming
+##    the boot-hold unit in ``Conflicts=``, or ordering the base unit
+##    before ``-.mount``, by the parse half (round 19, finding 3).
+##
 ## Falsifying builds, red here: ``boot-hold-wanted`` (step 2: the unit is
 ## only wanted, so systemd deletes its job and the held socket listens),
-## ``boot-hold-cycle-effective-unchecked`` (step 4: the socket applies).
+## ``boot-hold-cycle-effective-unchecked`` (step 4: the socket applies),
+## ``boot-hold-dropins-effective-unchecked`` (step 6, the effective case),
+## ``boot-hold-dropins-unchecked`` (step 6, the parse cases).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``; QEMU or Incus.
 ##
@@ -166,7 +177,57 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "refused by the effective half (boot-hold-cycle)",
          r.exitCode != 0 and "boot-hold-cycle" in (r.stdout & r.stderr),
          r.stdout & r.stderr)
+    # The owner's decision of 2026-11-16 on A9 review round 18, M2: a
+    # plain unit -- no floor, no activator -- ordered after the boot-hold
+    # unit and before a base unit that runs before -.mount, by a chain only
+    # systemd's report shows.
+    let plainUnit = srp("A9 round 18") & "systemd.systemUnit {\n  name = \"a9z.service\"\n" &
+      "  content = \"[Unit]\nDefaultDependencies=no\nAfter=" & Unit &
+      "\nBefore=a9x.service\n\n[Service]\nType=oneshot\nExecStart=/bin/true\n\"\n" &
+      "  floorExceptions = [\"serviceFloor: a plain fixture\"]\n  enabled = false\n}\n"
+    r = g.applyProfile(repro, "e2", plainUnit)
+    step("a plain unit after the boot-hold unit and before a base unit that runs " &
+         "before -.mount is refused by the effective half (A9 review round 18, M2)",
+         r.exitCode != 0 and "a9z.service" in (r.stdout & r.stderr) and
+         "boot-hold-cycle" in (r.stdout & r.stderr), r.stdout & r.stderr)
+    # The owner's decision of 2026-11-17 on A9 review round 19, finding 3
+    # ("Yes, check drop-ins"): a drop-in of the profile on a base unit
+    # (a9b.service, with default dependencies, which the profile does not
+    # declare) ordering it before a9x.service closes the same cycle; only
+    # systemd's report shows the chain.
+    discard g.run("printf '[Unit]\\nDescription=A9 round 19 base unit\\n" &
+      "[Service]\\nType=oneshot\\nExecStart=/bin/true\\n' > /etc/systemd/system/a9b.service; " &
+      "systemctl daemon-reload")
+    let dropOn = proc (body: string): string =
+      srp("A9 round 19") & "systemd.systemUnit {\n  name = \"a9b.service\"\n" &
+        "  collision = \"dropIn\"\n  content = \"[Unit]\n" & body & "\n\"\n}\n"
+    r = g.applyProfile(repro, "e3", dropOn("Before=a9x.service"))
+    step("a drop-in ordering a base unit before a base unit that runs before " &
+         "-.mount is refused by the effective half (A9 review round 19, finding 3)",
+         r.exitCode != 0 and "a9b.service" in (r.stdout & r.stderr) and
+         "boot-hold-cycle" in (r.stdout & r.stderr), r.stdout & r.stderr)
     discard g.run("rm -f /etc/systemd/system/a9x.service; systemctl daemon-reload")
+    block:
+      let ledger0 = g.ledgerOf()
+      r = g.applyProfile(repro, "p2", dropOn("Conflicts=" & Unit))
+      step("the parse half refuses a drop-in on a base unit naming the boot-hold " &
+           "unit in Conflicts=, writing nothing (round 19, finding 3)",
+           r.exitCode != 0 and "in Conflicts=" in (r.stdout & r.stderr) and
+           g.ledgerOf() == ledger0,
+           r.stdout & r.stderr)
+      r = g.applyProfile(repro, "p3", dropOn("Before=-.mount"))
+      step("and one ordering it before -.mount", r.exitCode != 0 and
+           "ordering cycle" in (r.stdout & r.stderr) and g.ledgerOf() == ledger0,
+           r.stdout & r.stderr)
+    # The parse half on a real host (decision 172 asks a VM case of each
+    # half): a socket ordered before -.mount is refused before anything is
+    # written.
+    let before = g.ledgerOf()
+    r = g.applyProfile(repro, "p1", srp("A9 round 18").replace(
+      "content = \"[Socket]\n", "content = \"[Unit]\nBefore=-.mount\n\n[Socket]\n"))
+    step("the parse half refuses a socket ordered before -.mount, writing nothing",
+         r.exitCode != 0 and "ordering cycle" in (r.stdout & r.stderr) and
+         g.ledgerOf() == before, r.stdout & r.stderr)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

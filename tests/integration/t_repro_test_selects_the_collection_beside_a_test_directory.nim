@@ -3,11 +3,15 @@
 ## reprobuild-pm issue 2026-11-06 "repro test resolves to a test directory
 ## instead of the test collection").
 ##
-## ``classifyBuildSelector`` takes a bare name that also names an existing path
-## as a path (CLI/build.md §"Target Selection" step 1), and most projects keep
-## their tests in ``test/``. The alias therefore selects the collection as
-## ``.#test``, and the certifying run hands its build the resolved selector,
-## not the bare name. ``app`` declares ``aggregate("test", @[unit_a])`` and
+## ``classifyBuildSelector`` used to take a bare name that also named an
+## existing path as a path, and most projects keep their tests in ``test/``.
+## The alias therefore selects the collection as ``.#test``, and the
+## certifying run hands its build the resolved selector, not the bare name.
+## Since reprobuild-pm issue 2026-11-12 "classifying a selector by whether a
+## path exists makes repro test build the test directory", a bare name is a
+## name whatever the disk holds (CLI/build.md §"Target Selection" step 1), so
+## ``repro build test`` selects the collection as well and the directory is
+## spelled ``./test``. ``app`` declares ``aggregate("test", @[unit_a])`` and
 ## carries a committed ``test/`` directory holding a file. In order:
 ##
 ##   1. a plain ``repro test`` runs ``unit_a`` and issues ``targets =
@@ -17,8 +21,14 @@
 ##   3. an explicit ``repro test .#test`` (certifying) succeeds as well; before
 ##      the fix the certifying build re-added the bare name ``test`` and hit
 ##      the directory again;
-##   4. ``repro build test`` still means the directory, as build.md says: the
-##      alias changed, the selector rule did not.
+##   4. ``repro build test`` selects the collection too. Before the 2026-11-12
+##      fix it built the directory and failed with "build target module not
+##      found: …/test/reprobuild.nim";
+##   5. ``repro build ./test`` still names the directory: a path is spelled as
+##      one;
+##   6. a bare name that names no target but does name a directory
+##      (``docs``) fails with ``unknown_target`` and names the ``./docs``
+##      spelling.
 ##
 ## NO MOCKS: real repositories and manifest, the built ``repro``, the real
 ## provider, engine and monitor. Skip rule: ``git`` or ``ssh-keygen`` missing.
@@ -78,9 +88,32 @@ suite "repro test beside a test/ directory":
       check "build target module not found" notin explicit.output
       check fx.certificatesFor(edited, "test").len == 1
 
-      # ---- 4. repro build test still names the directory -----------------
+      # ---- 4. repro build test selects the collection --------------------
+      writeFile(app / "src" / "unit_a.txt", "unit_a v3\n")
+      discard fx.cf.gitIn(app, "commit -q -am edit-again")
+      let ranBefore = fx.executedOutputs().len
       let build = fx.reproIn(["build", "--tool-provisioning=path", "test"])
       checkpoint(build.output)
-      check build.code != 0
-      check "test" & DirSep & "reprobuild.nim" in build.output or
-        "test/reprobuild.nim" in build.output
+      check build.code == 0
+      check fx.executedOutputs().len == ranBefore + 1
+      check "build target module not found" notin build.output
+      check "test" & DirSep & "reprobuild.nim" notin build.output
+      check "test/reprobuild.nim" notin build.output
+
+      # ---- 5. repro build ./test names the directory ---------------------
+      let path = fx.reproIn(["build", "--tool-provisioning=path", "./test"])
+      checkpoint(path.output)
+      check path.code != 0
+      check "test" & DirSep & "reprobuild.nim" in path.output or
+        "test/reprobuild.nim" in path.output
+
+      # ---- 6. a bare name beside a directory, naming no target -----------
+      createDir(app / "docs")
+      writeFile(app / "docs" / "index.md", "# docs\n")
+      let docs = fx.reproIn(["build", "--tool-provisioning=path", "docs"])
+      checkpoint(docs.output)
+      check docs.code == 2
+      check "unknown_target: no build target matches 'docs'" in docs.output
+      check "spell it './docs'" in docs.output
+      check "docs" & DirSep & "reprobuild.nim" notin docs.output
+      check "docs/reprobuild.nim" notin docs.output

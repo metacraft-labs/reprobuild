@@ -1,6 +1,6 @@
 ---
 title: Coming from another tool
-description: Pages that map what you know from Nix, Bazel, direnv, just, repo or Terraform onto reprobuild, including when the other tool remains the better choice.
+description: Pages that map what you know from Nix, Home Manager, Bazel, direnv, just, repo or Terraform onto reprobuild, including when the other tool remains the better choice.
 kind: explanation
 persona: evaluator
 order: 0
@@ -20,6 +20,7 @@ tool you have is still the better choice.
 | `just`, `make` as a task runner | [Coming from `just` and `make`](just-and-make-tasks.md) | Developers |
 | Google's `repo`, git submodules | [Coming from repo and git submodules](repo-and-git-submodules.md) | Workspace maintainers |
 | Terraform, OpenTofu | [Coming from Terraform and OpenTofu](terraform-and-opentofu.md) | Machine owners |
+| Home Manager, NixOS | [Coming from Home Manager and NixOS](home-manager-and-nixos.md) | Machine owners |
 
 Each page links to the guides for moving over. For a command-by-command
 lookup, see [Command equivalents](../reference/command-equivalents.md), which is

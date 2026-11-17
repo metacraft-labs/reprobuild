@@ -120,7 +120,8 @@
 ##   the manager binds a new listener, and the record follows it, so the
 ##   next apply accepts it;
 ##
-## Falsifying builds (each red here): ``revert-refuses-on-floor``,
+## Falsifying builds (each red here): ``accept-instances-by-triggered-by``
+## (round 19, finding 2), ``revert-refuses-on-floor``,
 ## ``revert-hold-runtime-only`` (the held unit starts at the reboot),
 ## ``revert-holds-any-subject`` (a hold for every service),
 ## ``cleared-hold-not-started`` (a held unit stays down after its hold goes),
@@ -158,7 +159,8 @@
 ## ``restarted-listener-not-rerecorded`` (the socket's next apply is
 ## refused ``existing-listener``), ``revert-stopped-not-restarted`` (the
 ## floored service only a Wants= starts stays down after the passing
-## switch: A9 review round 17, finding 7, a case decision 160's
+## switch), ``revert-stopped-instances-by-enablement`` (the Wants=-pulled
+## instance of a floored template stays down: A9 review round 18, L1; A9 review round 17, finding 7, a case decision 160's
 ## held-triggers record does not cover).
 ##
 ## Also red here: ``restarted-listener-not-rerecorded`` (the record keeps
@@ -661,16 +663,38 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let wtp = proc (d: string): string =
       Head & unitResource("a9r-control.service", "", binary, description = d) &
         unitResource("a9r-wp.service", "", binary,
-                     unitLines = "Wants=a9r-wt.service\nAfter=a9r-wt.service\n",
+                     unitLines = "Wants=a9r-wt.service a9r-wi@x.service\n" &
+                                 "After=a9r-wt.service a9r-wi@x.service\n",
                      description = "A9 round 17 puller") &
         unitResource("a9r-wt.service", "User=a9e\nStateDirectory=a9r-wt\n",
-                     binary, enabled = false, description = "A9 round 17 wanted")
+                     binary, enabled = false, description = "A9 round 17 wanted") &
+        # A9 review round 18, L1: an instance of a floored template the same
+        # Wants= pulls in -- not enabled, not socket-activated.
+        unitResource("a9r-wi@.service", "User=a9e\nStateDirectory=a9r-wi\n",
+                     binary, description = "A9 round 18 wanted instance") &
+        # A9 review round 19, finding 2: an instance an Accept=yes socket
+        # started. Once the revert stops it, systemd collects it and reports
+        # no TriggeredBy=; started again without a connection it fails
+        # (its standard input is the connection), so the passing switch
+        # must leave it to its socket.
+        unitResource("a9r-ai@.service", "User=a9e\nStateDirectory=a9r-ai\nStandardInput=socket\n",
+                     binary, description = "A9 round 19 accepted instance") &
+        socketResource("a9r-ai.socket", "ListenStream=127.0.0.1:7319\nAccept=yes\n")
+    let connect = "bash -c 'exec 3<>/dev/tcp/127.0.0.1/7319; sleep 1'; sleep 2; " &
+      "systemctl list-units --no-legend --plain --state=active 'a9r-ai@*.service' | wc -l"
     r = g.applyProfile(repro, "q1", wtp("q1"))
-    step("a floored service only another unit's Wants= starts applies, and runs",
+    let accepted = g.exec(connect).stdout.strip()
+    record["acceptedInstances"] = %accepted
+    step("a floored service only another unit's Wants= starts applies, and runs; " &
+         "a connection starts an instance of the Accept=yes socket's template",
          r.exitCode == 0 and
-         g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active",
-         r.stdout & r.stderr)
-    discard g.run("rm -rf /var/lib/a9r-wt; mkdir /var/lib/a9r-wt; touch /var/lib/a9r-wt/theirs")
+         g.exec("systemctl is-active a9r-wi@x.service").stdout.strip() == "active" and
+         g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active" and
+         accepted != "0" and accepted.len > 0,
+         r.stdout & r.stderr & "\naccepted instances: " & accepted)
+    discard g.run("rm -rf /var/lib/a9r-wt /var/lib/a9r-wi /var/lib/a9r-ai; " &
+                  "mkdir /var/lib/a9r-wt /var/lib/a9r-wi /var/lib/a9r-ai; " &
+                  "touch /var/lib/a9r-wt/theirs /var/lib/a9r-wi/theirs /var/lib/a9r-ai/theirs")
     r = g.applyProfile(repro, "q2", wtp("q2"))
     let outWanted = r.stdout & r.stderr
     let stoppedRec = g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
@@ -678,17 +702,33 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("its tree refused, the revert holds it, stops it and records it",
          r.exitCode != 0 and "a9r-wt.service" in outWanted and
          g.exec("systemctl is-active a9r-wt.service").stdout.strip() != "active" and
-         "a9r-wt.service" in stoppedRec,
+         "a9r-wt.service" in stoppedRec and "a9r-wi@x.service" in stoppedRec,
          outWanted & "\nrecord: " & stoppedRec)
-    discard g.run("rm -rf /var/lib/a9r-wt")
+    let aiStopped = g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
+      "/var/lib/repro/system/revert-stopped 2>/dev/null | grep -c '^a9r-ai@'; " &
+      "systemctl show -p TriggeredBy --value $(grep -h '^a9r-ai@' " &
+      "/var/lib/repro/system/addon/revert-stopped /var/lib/repro/system/revert-stopped " &
+      "2>/dev/null | head -1) 2>&1; true").stdout
+    record["acceptedStopped"] = %aiStopped
+    discard g.run("rm -rf /var/lib/a9r-wt /var/lib/a9r-wi /var/lib/a9r-ai")
     r = g.applyProfile(repro, "q3", wtp("q1"))
+    let aiAfter = g.exec("systemctl list-units --no-legend --plain --all 'a9r-ai@*.service'; " &
+      "systemctl is-active a9r-ai.socket; true").stdout
+    record["acceptedAfter"] = %aiAfter
     step("once the tree is gone, the switch whose check passes starts it again " &
-         "from the record alone, and clears the record (A9 review round 17, finding 7)",
+         "from the record alone, and clears the record (A9 review round 17, finding 7); " &
+         "the Accept=yes instance it leaves to its socket, which listens again " &
+         "(round 19, finding 2)",
          r.exitCode == 0 and
          g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active" and
+         g.exec("systemctl is-active a9r-wi@x.service").stdout.strip() == "active" and
+         # No instance at all: one started again with no connection fails
+         # (StandardInput=socket), and one that ran would be listed.
+         "a9r-ai@" notin aiAfter and aiAfter.strip().splitLines()[^1].strip() == "active" and
          "a9r-wt.service" notin g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
            "/var/lib/repro/system/revert-stopped 2>/dev/null; true").stdout,
-         r.stdout & r.stderr & g.exec("systemctl status --no-pager a9r-wt.service 2>&1 | head -5").stdout)
+         r.stdout & r.stderr & "\naccepted: " & aiStopped & aiAfter &
+           g.exec("systemctl status --no-pager a9r-wt.service 2>&1 | head -5").stdout)
     # Back to the floored unit the next case refuses, so its revert has a
     # unit to hold.
     discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st")

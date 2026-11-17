@@ -33,6 +33,8 @@ import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
+import repro_cli_support/shell_invocation
+import repro_cli_support/stdin_terminal
 # The content identity of a producer's channel directories, folded into the
 # keys of consumer actions whose reads nothing observes (§4.3 rule 2).
 import repro_cli_support/producer_channel_content
@@ -877,6 +879,30 @@ proc renderAmbiguousTargetDiagnostic*(err: BuildTargetAmbiguousError): string =
   result.add("repro build: hint: re-run with the qualified " &
     "<package>:<name> form\n")
 
+proc pathSpellingHint*(selectorName: string): string =
+  ## The ``./<name>`` spelling of a bare selector that names no target but
+  ## does name a file or directory in the current directory, or ``""``.
+  ##
+  ## A bare name is always a name ([CLI/build.md §"Target Selection"]): the
+  ## disk is never consulted to classify it, so a directory the user meant
+  ## has to be spelled as a path. The ``unknown_target`` diagnostic offers
+  ## that spelling instead of leaving the user to guess why a directory
+  ## they can see was not selected. Only a selector the classifier took as
+  ## a bare name qualifies; anything carrying a path character already was
+  ## a path. Every caller of ``renderUnknownTargetDiagnostic`` runs in the
+  ## request's working directory (the daemon build and watch executors
+  ## enter it first), so the probe is relative to the directory the user
+  ## typed the command in.
+  if selectorName.len == 0:
+    return ""
+  for ch in selectorName:
+    if ch in {'/', '\\', '.', '#', ':'}:
+      return ""
+  if fileExists(extendedPath(selectorName)) or
+      dirExists(extendedPath(selectorName)):
+    return "./" & selectorName
+  ""
+
 proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
   ## Named-Targets M2 ``unknown_target`` stderr diagnostic. Shared by
   ## the top-level CLI dispatch arm and the daemon-side
@@ -892,24 +918,39 @@ proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
       result.add("  ")
       result.add(cand)
       result.add('\n')
+  let pathSpelling = pathSpellingHint(err.selectorName)
+  if pathSpelling.len > 0:
+    result.add("repro build: hint: a bare name selects only a named " &
+      "target; to build the path '" & err.selectorName & "', spell it '" &
+      pathSpelling & "'\n")
 
 const TestCollectionSelector* = ".#test"
   ## The selector ``repro test`` (and ``repro certificates plan``) uses when
   ## the user names none: the current project's ``test`` collection
-  ## ([CLI/test.md §"Alias Semantics"]). It is spelled as a fragment
-  ## selector, not the bare name ``test``, because ``classifyBuildSelector``
-  ## takes a bare name that also names an existing path as a path, and most
-  ## projects keep their tests in a ``test/`` directory. ``.#test`` is what
-  ## ``parseAndResolveSelectors`` makes of a bare ``test`` when no such path
-  ## exists, so the resolution is otherwise unchanged.
+  ## ([CLI/test.md §"Alias Semantics"]). The alias selects the collection
+  ## directly, as the fragment ``.#test``, which is exactly what
+  ## ``parseAndResolveSelectors`` makes of a bare ``test``; naming the
+  ## collection rather than a selector that is resolved again keeps the
+  ## alias independent of the selector rule.
 
 proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
   ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
   ## A selector is a *path / fragment* selector when ANY of these holds:
   ## - it contains ``/`` or ``\\`` (path separator),
   ## - it contains ``.`` (file extension or relative-path marker),
-  ## - it contains ``#`` (fragment selector),
-  ## - it names an existing path on disk (file or directory).
+  ## - it contains ``#`` (fragment selector).
+  ##
+  ## The classification is by spelling alone and never consults the disk:
+  ## a bare ``test`` is the name ``test`` whether or not the current
+  ## directory holds a ``test/`` directory, and that directory is selected
+  ## as ``./test``. Classifying by whether a path exists made what a name
+  ## meant depend on the contents of the current directory, so a project
+  ## with a ``test/``, ``bench/`` or ``docs/`` directory silently built the
+  ## directory instead of the collection (reprobuild-pm issue
+  ## 2026-11-12-classifying-a-selector-by-whether-a-path-exists-makes-repro-test-build-the-test-directory).
+  ## The ``unknown_target`` diagnostic names the ``./<name>`` spelling when
+  ## a bare name matches no target but does match a path
+  ## (``pathSpellingHint``).
   ##
   ## Otherwise it is a *name* selector. Names containing a single ``:``
   ## (and no other special chars) are treated as the qualified
@@ -923,9 +964,6 @@ proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
     if ch == '/' or ch == '\\' or ch == '.' or ch == '#':
       result.kind = bskPath
       return
-  if fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
-    result.kind = bskPath
-    return
   let colon = raw.find(':')
   if colon > 0 and colon < raw.high:
     # ``<package>:<name>`` qualified form. Only accept when neither half
@@ -2518,6 +2556,49 @@ proc keyedOnToolDeclaredInputCheckPolicy*(weak: ContentDigest;
     text.add(toHex(b, 2))
   weakFingerprintFromText(text)
 
+proc monitorEvidenceForContentCheckedDepfileEdge*(
+    action: var BuildAction; policy: FileFingerprintPolicy): bool =
+  ## Caching-Architecture D8: an edge whose input-check policy is content
+  ## checked (``checksum`` or ``hybrid``, stated or taken from its tools'
+  ## declaration) and whose only dependency evidence is a make depfile is
+  ## gathered by the automatic monitor instead. Returns whether it changed
+  ## the action.
+  ##
+  ## Why. Such an edge has a portable identity (D1), and its record may be
+  ## served to another checkout only if the publication rule allows it
+  ## (D6). A depfile-evidenced record never does
+  ## (Edge-Derived-Identities.md §10 decision 23): a depfile omits the
+  ## compiler binary, may omit system headers, and says nothing about the
+  ## environment the compiler read, so two checkouts whose shells set
+  ## ``CPATH`` differently would share one key. The monitor observes the
+  ## compiler's own images, every header it opens and every variable it
+  ## reads, so the record is keyed on all of them and is monitored
+  ## evidence. The depfile is NOT kept as a second source: a combined
+  ## (validated-by-monitor) record stays local under the same decision.
+  ##
+  ## Nothing is waived to make the record publishable: the monitored kind
+  ## carries exactly the ignored prefixes, capture breadth and shim-seed
+  ## setting the recipe declared for the depfile kind. The compiler still
+  ## writes its ``.d`` file (it is in the argv); nothing reads it.
+  ## ``timestamp`` edges keep their depfile unchanged.
+  if action.kind != bakProcess or policy notin {ffpChecksum, ffpHybrid}:
+    return false
+  let current = action.dependencyPolicy
+  if current.kind != dgRecognizedFormat or
+      current.recognizedReports.len == 0:
+    return false
+  for report in current.recognizedReports:
+    if string(report.formatName) != MakeDepfileFormatName:
+      return false
+  var monitored = DependencyGatheringPolicy(kind: dgAutomaticMonitor,
+    completeness: decComplete)
+  monitored.ignoredInputPrefixes = current.ignoredInputPrefixes
+  monitored.captureBreadth = current.captureBreadth
+  monitored.suppressMonitorShimSeed = current.suppressMonitorShimSeed
+  action.dependencyPolicy = monitored
+  action.depfile = ""
+  true
+
 proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
     seq[string] =
   ## The sub-tools that reach the engine as
@@ -3259,6 +3340,14 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     if policyFromTools:
       result.weakFingerprint = keyedOnToolDeclaredInputCheckPolicy(
         result.weakFingerprint, actionCachePolicy)
+    if monitorEvidenceForContentCheckedDepfileEdge(result,
+        actionCachePolicy):
+      # A record the same edge left under depfile evidence must not serve
+      # it now: it states no environment reads and no compiler images.
+      var text = "reprobuild.monitorEvidenceForContentCheckedDepfileEdge.v1\n"
+      for b in result.weakFingerprint.bytes:
+        text.add(toHex(b, 2))
+      result.weakFingerprint = weakFingerprintFromText(text)
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
@@ -4758,6 +4847,19 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   for target in targets.values:
     considerDirectAlias(aliases, target)
   let aliasForAction = aliases.byAction
+  # Caching-Architecture D7: a build file's `target "name", handle` declares
+  # its action's outputs a result of the build. The engine sees actions,
+  # not the target table, so the name rides on the lowered action as a
+  # target name (beside the implicit names a typed tool call contributes);
+  # a portable hit then puts that action's outputs in place even when the
+  # action consuming them resolves too. A target names its action already
+  # (it renames the edge), so this changes no selection; neither field is
+  # part of the action's key.
+  var declaredTargetNames = initTable[string, seq[string]]()
+  for target in targets.values:
+    if target.kind == btkTarget and target.actions.len == 1 and
+        target.targets.len == 0:
+      declaredTargetNames.mgetOrPut(target.actions[0], @[]).add(target.name)
 
   proc publicPayload(action: BuildActionDef): BuildActionDef =
     result = action
@@ -4771,7 +4873,12 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       BuildAction =
     var node = item.node
     node.payload = actionPayload(publicPayload(item.payload))
-    lowerGraphAction(node, profiles, projectRoot)
+    result = lowerGraphAction(node, profiles, projectRoot)
+    var names = declaredTargetNames.getOrDefault(item.payload.id)
+    names.sort()
+    for name in names:
+      if name notin result.targetNames:
+        result.targetNames.add(name)
 
   proc shouldLower(item: tuple[node: GraphNode;
                                payload: BuildActionDef]): bool =
@@ -17677,6 +17784,39 @@ proc runReproTasksCommand(conf: ReproCommandLineTasks;
   emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
   0
 
+proc runCommandInDevEnv(selection: DevEnvCliSelection; command: seq[string];
+                        publicCliPath, statsVerb: string): int =
+  ## Resolve (building on a miss) the development environment ``selection``
+  ## names and run ``command`` in it, replacing this process on POSIX so the
+  ## command's exit status is the caller's. Shared by ``repro exec -- ...``
+  ## and ``repro shell -c ...`` / ``repro shell -- ...``, so the two verbs
+  ## activate the environment the same way. ``statsVerb`` labels the
+  ## ``--dev-env-stats`` report.
+  # The bootstrap toolchain the edge below publishes is for compiling the
+  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
+  let edge = computePublicDevEnv(selection, publicCliPath,
+    announce = true)
+  writeDevEnvStats(selection.statsPath, edge, statsVerb)
+  let artifact = edge.artifact
+  if emitDevEnvDiagnostics(artifact):
+    return 1
+  # Two channels, deliberately different. Provisioned packages go in `preOps`
+  # so the recipe's own `prependPath` can sit in front of them; cross-repo
+  # producer pins go in `extraOps` so they outrank both.
+  let toolOps = devEnvToolShellOps(edge, selection)
+  let producerOps = devEnvProducerActivation(artifact,
+    selection.projectRoot)
+  restoreBootstrapToolchainEnv(userToolchainEnv)
+  # Likewise the source roots this engine seeded for its own compiles
+  # (`REPROBUILD_SOURCE_ROOT`, the built `*_SRC`): withdrawn here, after the
+  # last compile, per Distribution-And-Packaging §5. Otherwise an engine
+  # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
+  # resolves its libraries from B. Caller values are not seeds and stay.
+  clearSeededSourcePackageEnvironment()
+  return execActivatedCommand(artifact, edge.artifactPath, command,
+    selection.projectRoot, producerOps, toolOps)
+
 proc runReproExecCommand(conf: ReproCommandLineExec;
                          publicCliPath: string): int =
   ## ``repro exec [<selector>] -- <command>...``. Its command line is parsed
@@ -17686,32 +17826,9 @@ proc runReproExecCommand(conf: ReproCommandLineExec;
     stderr.writeLine("repro exec: no command after `--`; run `repro help " &
       "exec`")
     return 2
-  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
-    conf.workRoot, conf.lockSlice, conf.devEnvStats), command: conf.command)
-  # The bootstrap toolchain the edge below publishes is for compiling the
-  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
-  let userToolchainEnv = snapshotBootstrapToolchainEnv()
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
-    announce = true)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "exec")
-  let artifact = edge.artifact
-  if emitDevEnvDiagnostics(artifact):
-    return 1
-  # Two channels, deliberately different. Provisioned packages go in `preOps`
-  # so the recipe's own `prependPath` can sit in front of them; cross-repo
-  # producer pins go in `extraOps` so they outrank both.
-  let toolOps = devEnvToolShellOps(edge, parsed.selection)
-  let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
-  restoreBootstrapToolchainEnv(userToolchainEnv)
-  # Likewise the source roots this engine seeded for its own compiles
-  # (`REPROBUILD_SOURCE_ROOT`, the built `*_SRC`): withdrawn here, after the
-  # last compile, per Distribution-And-Packaging §5. Otherwise an engine
-  # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
-  # resolves its libraries from B. Caller values are not seeds and stay.
-  clearSeededSourcePackageEnvironment()
-  return execActivatedCommand(artifact, edge.artifactPath, parsed.command,
-    parsed.selection.projectRoot, producerOps, toolOps)
+  let selection = devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats)
+  runCommandInDevEnv(selection, conf.command, publicCliPath, "exec")
 
 proc defaultInteractiveShell(): string =
   when defined(windows):
@@ -17728,41 +17845,65 @@ proc defaultInteractiveShell(): string =
 proc runReproShellCommand(conf: ReproCommandLineShellCall;
                           publicCliPath: string): int =
   ## ``repro shell [<selector>]``: start a shell in the development
-  ## environment, or print it (``--print-env``). Its command line is parsed
-  ## from repro's description (``repro_cli_support/cli_description``).
+  ## environment, print it (``--print-env``), or run one command in it
+  ## (``-c <command>`` through the shell, ``-- <command>`` directly). Its
+  ## command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``); which mode the flags name, and
+  ## whether spawn mode may start here, is ``shell_invocation``'s decision.
+  # `directCommand` is "a command after `--`": the parser keeps no trace of
+  # a `--` with nothing after it, so a bare `repro shell --` reads as
+  # `repro shell` (spawn mode), exactly as a bare `repro exec --` reads as
+  # `repro exec` with no command.
+  let invocation = shellInvocationOf(printEnv = conf.printEnv.isSome,
+    inlineCommand = conf.command.isSome, directCommand = conf.argv.len > 0,
+    shellGiven = conf.shell.len > 0)
+  if invocation.usageError.len > 0:
+    stderr.writeLine("repro shell: error: " & invocation.usageError)
+    return ShellUsageExitCode
+  # Spawn mode without a terminal on standard input is refused before
+  # anything is resolved, so the refusal costs no provider build.
+  let refusal = shellSpawnRefusal(invocation.mode, stdinIsTerminal())
+  if refusal.len > 0:
+    for line in refusal:
+      stderr.writeLine(line)
+    return ShellUsageExitCode
   # The format is checked first, before anything is resolved.
   let printFormat =
     if conf.printEnv.isSome: parseDevEnvPrintFormat(conf.printEnv.get)
     else: depPosix
-  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
-    conf.workRoot, conf.lockSlice, conf.devEnvStats),
-    printEnv: conf.printEnv.isSome, printFormat: printFormat,
-    shellPath: conf.shell)
+  let selection = devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats)
+  let shellPath =
+    if conf.shell.len > 0: conf.shell
+    else: defaultInteractiveShell()
+  case invocation.mode
+  of simDirectCommand:
+    return runCommandInDevEnv(selection, conf.argv, publicCliPath, "shell")
+  of simInlineCommand:
+    return runCommandInDevEnv(selection,
+      inlineCommandArgv(shellPath, conf.command.get), publicCliPath, "shell")
+  of simPrintEnv, simSpawn:
+    discard
   let userToolchainEnv = snapshotBootstrapToolchainEnv()
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+  let edge = computePublicDevEnv(selection, publicCliPath,
     announce = true)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "shell")
+  writeDevEnvStats(selection.statsPath, edge, "shell")
   let artifact = edge.artifact
   if emitDevEnvDiagnostics(artifact):
     return 1
-  let toolOps = devEnvToolShellOps(edge, parsed.selection)
+  let toolOps = devEnvToolShellOps(edge, selection)
   let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
-  if parsed.printEnv:
+    selection.projectRoot)
+  if invocation.mode == simPrintEnv:
     stdout.write(renderDevEnvArtifact(artifact, edge.artifactPath,
-      parsed.printFormat, producerOps, toolOps))
+      printFormat, producerOps, toolOps))
     return 0
-  let shellPath =
-    if parsed.shellPath.len > 0:
-      parsed.shellPath
-    else:
-      defaultInteractiveShell()
   restoreBootstrapToolchainEnv(userToolchainEnv)
   # The engine's self-seeded source roots stay out of the shell, as for
   # `repro exec` (Distribution-And-Packaging §5).
   clearSeededSourcePackageEnvironment()
   return spawnActivatedShell(artifact, edge.artifactPath, shellPath,
-    parsed.selection.projectRoot, producerOps, toolOps)
+    selection.projectRoot, producerOps, toolOps)
 
 # M74 — ``repro dev-env export <shell>``.
 #
@@ -34946,7 +35087,8 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
     raise newException(ValueError,
       "repro why: the second positional must be a path or fragment " &
         "selector; got the name-shaped value '" & target &
-        "' (re-run as `repro why " & target & "` with one positional)")
+        "' (spell a path as `./" & target & "`, or re-run as `repro why " &
+        target & "` with one positional)")
   if target.len == 0:
     target = "."
 
@@ -39698,6 +39840,42 @@ proc runDevelopDropCommand(c: ReproCommandLineDevelop;
     stderr.writeLine("repro develop --drop: error — " & f)
   exitCode
 
+proc developTargetIsPathShaped(target: string): bool =
+  ## Whether ``target`` was written as a path (it contains `/` or `\`, or
+  ## starts with `.`) rather than as a bare name.
+  target.contains('/') or target.contains('\\') or target.startsWith(".")
+
+proc developUnresolvedTargetDiagnostic(target, modulePath: string;
+                                       insideWorkspace: bool): seq[string] =
+  ## The `error:` + `tip:` lines for `repro develop <name>` when `<name>` is
+  ## not a local project (no project file at ``modulePath``). A target
+  ## written as a path was meant as a local project, so the answer is only
+  ## that none is there; `--only=` and `--source` take names, and naming
+  ## them for a path would mislead. For a bare name, inside a workspace or
+  ## project the tips are the two forms that develop a dependency there;
+  ## outside one, creating a workspace from a catalog package name is not
+  ## available, so the tips say where each form works.
+  if developTargetIsPathShaped(target):
+    return @["error: `repro develop " & target & "`: no project file " &
+      "found at " & modulePath]
+  result = @["error: `repro develop " & target & "`: `" & target &
+    "` is not a local project (no project file at " & modulePath & ")"]
+  if insideWorkspace:
+    result.add("tip: to check out `" & target & "` as a dependency of this " &
+      "workspace's lock set and develop it, run `repro develop --only=" &
+      target & "`")
+    result.add("tip: to develop an existing local checkout of `" & target &
+      "`, run `repro develop " & target & " --source=<path>`")
+  else:
+    result.add("tip: creating a workspace from a catalog package name " &
+      "(`repro develop <package>` in an empty directory) is not enabled " &
+      "in this build, and this directory is not inside a workspace or " &
+      "project")
+    result.add("tip: from inside a workspace, run `repro develop " &
+      "--only=<dep>` to check out a dependency of its lock set")
+    result.add("tip: to develop an existing local checkout of `" & target &
+      "`, run `repro develop " & target & " --source=<path>`")
+
 proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
   ## `repro develop …`, from its configuration. Exported for the same reason
   ## `runReproLockCommand` is: a test that asserts on what the verb WRITES
@@ -39787,7 +39965,21 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
 
   let modulePath = absolutePath(moduleForTarget(target))
   if not fileExists(extendedPath(modulePath)):
-    raise newException(IOError, "develop target module not found: " & modulePath)
+    if command.len > 0:
+      # `<target> -- <command>` names a local project to run in; a missing
+      # one is reported as such.
+      raise newException(IOError,
+        "develop target module not found: " & modulePath)
+    # A bare `repro develop <name>`: most often a dependency or a catalog
+    # package name rather than a local project directory. Teach the forms
+    # that do what was probably meant instead of naming a file path.
+    let cwd = getCurrentDir()
+    let insideWorkspace = findWorkspaceRoot(cwd).len > 0 or
+      findDevEnvProjectRoot(cwd).len > 0
+    for line in developUnresolvedTargetDiagnostic(target, modulePath,
+        insideWorkspace):
+      stderr.writeLine(line)
+    return 1
 
   let scopedRoot = scopedWorktreeRoot(modulePath, workRoot)
   let outDir =
@@ -90250,9 +90442,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
         names.add(name)
     # An extra name the build would classify as a path again (one that
     # carries ``#``, ``.`` or ``/``, such as the member shorthand
-    # ``test#unit`` taken from a second ``.#test#unit`` selector, or one
-    # that names an existing path) is handed over anchored on the same
-    # project, so the build selects exactly what the plan resolved.
+    # ``test#unit`` taken from a second ``.#test#unit`` selector) is
+    # handed over anchored on the same project, so the build selects
+    # exactly what the plan resolved.
     let anchorBase = splitTarget(resolved.target).base
     buildSelectors = @[resolved.target]
     for extra in resolved.extraNameSelectors:

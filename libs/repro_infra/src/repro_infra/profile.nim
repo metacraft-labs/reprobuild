@@ -1392,6 +1392,18 @@ proc ownUnitName(r: SystemResource): string =
   of srkSystemdSystemTimer: r.stName
   else: ""
 
+proc dropInTargetName(r: SystemResource): string =
+  ## The unit a drop-in of the profile changes: a ``systemd.systemUnit``
+  ## with ``collision = "dropIn"`` or a ``systemd.systemDropIn``; "" for
+  ## any other resource, and for a type-wide drop-in (``service.d``),
+  ## which names no unit.
+  case r.kind
+  of srkSystemdSystemUnit:
+    if r.suCollision == "dropIn": r.suName else: ""
+  of srkSystemdSystemDropIn:
+    if '.' in r.diUnit and not r.diUnit.startsWith("."): r.diUnit else: ""
+  else: ""
+
 proc ownUnitContent(r: SystemResource): string =
   ## The bytes of the unit file ``r`` installs (``ownUnitName``).
   case r.kind
@@ -1896,16 +1908,51 @@ proc checkBootHoldOrdering*(p: SystemProfile) =
   for r in p.resources:
     let n = ownUnitName(r)
     if n.len > 0 and n notin names: names.add(n)
+  # The units the profile's drop-ins change count as the profile's units
+  # (the owner's decision of 2026-11-17 on A9 review round 19, finding 3:
+  # "Yes, check drop-ins"): a drop-in on a base unit can name the
+  # boot-hold unit in Conflicts=, or close the cycle by a Before=, as much
+  # as a unit of the profile can.
+  when InfraAddonMutation != "boot-hold-dropins-unchecked":
+    for r in p.resources:
+      let n = dropInTargetName(r)
+      if n.len > 0 and n notin names: names.add(n)
   # Which units are ordered after sysinit.target, followed through the
-  # profile's own After= (a fixpoint: at most one pass per unit).
+  # profile's own After= (a fixpoint: at most one pass per unit). A base
+  # unit that itself runs before sysinit.target (``runsBeforeSysinit``) is
+  # not: its base file orders it there, and a drop-in on it ordering it
+  # before another such unit is its own business.
   var late = initHashSet[string]()
   var grew = true
   while grew:
     grew = false
     for n in names:
-      if n notin late and profileUnitLate(p, n, late):
+      if n notin late and not runsBeforeSysinit(n) and
+          profileUnitLate(p, n, late):
         late.incl(n)
         grew = true
+  # A unit that would stop the boot-hold unit stops sysinit.target and
+  # every unit that requires it (systemd.unit(5): Requires= propagates a
+  # stop): Conflicts= naming it (starting the unit stops it), or
+  # PropagatesStopTo= naming it (A9 review round 18, L4) -- or naming
+  # sysinit.target itself, which stops the same units (round 19).
+  when InfraAddonMutation != "boot-hold-stop-deps-unchecked":
+    for n in names:
+      for c in unitFilesOf(p, n):
+        for d in sectionDirectives(c, ["Unit"]):
+          if d.key notin ["Conflicts", "PropagatesStopTo"]: continue
+          for t in d.value.splitWhitespace():
+            if t == BootHoldUnitName or
+                (t == "sysinit.target" and
+                 InfraAddonMutation != "sysinit-stop-deps-unchecked"):
+              raiseSystemProfileInvalid("systemd unit '" & n & "' names " &
+                t & " in " & d.key & "=, which would stop it; " &
+                (if t == BootHoldUnitName:
+                   "sysinit.target requires it, so that stop would stop " &
+                   "sysinit.target and every unit that requires it"
+                 else: "every unit of the boot requires it, so that stop " &
+                   "would stop them, the boot-hold unit among them") &
+                ". Drop it from " & d.key & "=")
   for n in names:
     if n notin late: continue
     let route = earlyOrderingRoute(n,

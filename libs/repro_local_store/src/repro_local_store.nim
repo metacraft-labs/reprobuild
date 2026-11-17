@@ -40,6 +40,7 @@ import ./repro_local_store/sandbox_manifest
 import ./repro_local_store/optimise
 import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
+import ./repro_local_store/portable_output_store
 import ./repro_local_store/publication_rule
 import ./repro_local_store/pattern_scoped_enumeration
 export action_index
@@ -53,6 +54,7 @@ export sandbox_manifest
 export optimise
 export portable_fingerprint
 export portable_memo
+export portable_output_store
 export publication_rule
 export pattern_scoped_enumeration
 

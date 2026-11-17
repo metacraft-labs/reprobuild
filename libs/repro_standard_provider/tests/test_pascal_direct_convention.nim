@@ -266,14 +266,14 @@ suite "pascal-direct convention emit (Mode 3 fixture)":
           pascallibArchive = outPath
       check pascallibArchive.len > 0
 
-      # The archive argv invokes ``ar rcs``.
+      # The archive argv invokes ``ar`` with the deterministic modifiers.
       let archiveArgv = inlineArgvOf(pascallibArchiveAction)
       var sawArAction = false
       var sawRcsFlag = false
       for token in archiveArgv:
         if token.endsWith("ar") or token.endsWith("ar.exe"):
           sawArAction = true
-        elif token == "rcs":
+        elif token == DeterministicArModifiers:
           sawRcsFlag = true
       check sawArAction
       check sawRcsFlag

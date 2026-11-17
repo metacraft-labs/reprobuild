@@ -1605,7 +1605,13 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       removeFile(ledgerCopy)
       if hook != nil: hook("ledger-copy-removed", ledgerCopy)
       if keepId and (fileExists(idFile) or symlinkExists(idFile)):
-        removeFile(idFile)
+        try: removeFile(idFile)
+        except OSError as ex:
+          r.errors.add(idFile & ": " & ex.msg & "; the ledger copy is " &
+            "gone and the token " & tokenPath & " names what remains: " &
+            "uninstall, run again once the cause is cleared, finishes the " &
+            "removal")
+          return
       when mutated("inputs-removed-and-restored"):
         for (i, bytes) in saved.sortedByIt(it.i.path.len):
           if i.isDir: createDir(i.path)
@@ -1679,7 +1685,9 @@ proc finishEmptyStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       (fileExists(idFile) or symlinkExists(idFile)):
     try: removeFile(idFile)
     except OSError as ex:
-      r.errors.add(idFile & ": " & ex.msg & "; nothing was removed")
+      r.errors.add(idFile & ": " & ex.msg & "; nothing was removed, and " &
+        "the token " & tokenPath & " is kept: uninstall, run again once " &
+        "the cause is cleared, finishes the removal")
       return
   let (failed, err, gone) = removeChain(t.chain)
   if failed.len > 0:
@@ -1917,6 +1925,29 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     removeOwned(li, result)
   for u in byClass[lcUnit]:
     removeOwned(u, result, driver)
+  # sysinit.target requires the boot-hold unit (§13 decision 172): a link
+  # left naming it once its file is gone -- one the ledger's removal kept
+  # because it had drifted -- would make every later boot wait for a unit
+  # that cannot load. Removed whatever it points at: the name is the
+  # add-on's (A9 review round 18, M1).
+  when not mutated("uninstall-leaves-boot-hold-requires"):
+    if not fileExists(unitPath(BootHoldUnit)):
+      for dir in ["sysinit.target.requires", "sysinit.target.wants"]:
+        let link = parentDir(unitPath(BootHoldUnit)) / dir / BootHoldUnit
+        if symlinkExists(link) or fileExists(link):
+          try:
+            removeFile(link)
+            result.removed.add(link & " (it named the boot-hold unit, now gone)")
+            # The ledger's entry for it is undone, and the drift its
+            # removal above reported (a link changed since) is resolved.
+            for li in byClass[lcInstallLink]:
+              if li.path == link: result.undone.incl(entryKey(li))
+            var kept: seq[string]
+            for dl in result.drift:
+              if not dl.startsWith(link & ":"): kept.add(dl)
+            result.drift = kept
+          except OSError as ex:
+            result.errors.add(link & ": " & ex.msg)
   for di in byClass[lcDropIn]:
     removeOwned(di, result, driver)
   # A revert's persistent holds (§13 decision 133) go with the drop-ins:

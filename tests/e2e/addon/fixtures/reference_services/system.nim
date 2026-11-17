@@ -141,8 +141,12 @@ profile "referenceServices":
       linuxTmpfilesRule(name = "repro-vaultwarden.conf",
         content = "d /var/lib/vaultwarden 0700 vaultwarden vaultwarden -\n",
         address = "vaultwardenState", dependsOn = @["linux.sysusersEntry:vaultwarden"])
+      # Read only by systemd (`EnvironmentFile=`), as root: a private copy,
+      # never a link into the world-readable static tree (spec §7.2 step 5,
+      # the 2026-11-16 amendment). The parity gate checks it is 0640
+      # root:root and a regular file on both realisations.
       fsSystemFile(path = "/etc/vaultwarden/config.env",
-        content = VaultwardenConfig,
+        content = VaultwardenConfig, mode = "0640",
         address = "vaultwardenConfig")
       secretFile(service = "vaultwarden", name = "admin-token",
         address = "vaultwardenAdminToken")
@@ -221,9 +225,9 @@ profile "referenceServices":
         address = "ethState",
         dependsOn = @["linux.sysusersEntry:eth-execution", "linux.sysusersEntry:eth-beacon", "linux.sysusersEntry:eth-validator"])
       fsSystemFile(path = "/etc/ethereum/beacon.yaml", content = BeaconConfig,
-        mode = "0644", address = "beaconConfig")
+        address = "beaconConfig")
       fsSystemFile(path = "/etc/ethereum/validator.yaml",
-        content = ValidatorConfig & ValidatorExtraConfig, mode = "0644",
+        content = ValidatorConfig & ValidatorExtraConfig,
         address = "validatorConfig")
       # The engine API's shared secret, once per service that loads it.
       secretFile(service = "eth-execution", name = "jwt", address = "gethJwt")

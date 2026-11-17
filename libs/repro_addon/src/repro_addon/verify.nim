@@ -12,6 +12,8 @@ import std/[os, posix, strutils]
 import ./mutations
 
 import ./addon_apply
+import ./generation0
+from repro_infra/host_exec import runSystemctl
 import ./ledger
 import ./record_dir
 
@@ -24,6 +26,36 @@ type
       ## ``collision = replace`` (spec §4.3 asks ``verify`` to report them
       ## after each package upgrade, because the package's unit may have
       ## changed underneath the add-on's copy).
+
+proc bootHoldLinkFinding*(unitDir: string;
+                          loadState: proc (): string {.closure.}): string =
+  ## Drift a boot can hang on (§13 decision 172's residual, mitigated; A9
+  ## review round 18, M1): ``sysinit.target`` requires the boot-hold unit,
+  ## so a ``sysinit.target.requires`` link naming it that dangles -- its
+  ## target gone, or no regular file -- or a unit systemd reports it cannot
+  ## load holds up every later boot. "" when neither.
+  when mutated("verify-ignores-boot-hold-link"):
+    return ""
+  let link = unitDir / "sysinit.target.requires" / BootHoldUnit
+  if not symlinkExists(link) and not fileExists(link): return ""
+  var target = ""
+  try: target = expandSymlink(link)
+  except OSError: discard
+  let resolved = if target.len == 0: link
+                 elif target.isAbsolute: target
+                 else: parentDir(link) / target
+  var st: Stat
+  if stat(resolved.cstring, st) != 0 or not S_ISREG(st.st_mode):
+    return link & " names " & BootHoldUnit & ", but " &
+      (if target.len > 0: target else: link) & " is not a unit file: " &
+      "sysinit.target requires it, so every boot waits for a unit that " &
+      "cannot load. Remove the link (or re-apply, which installs the unit)"
+  let ls = loadState()
+  if ls.len > 0 and ls != "loaded":
+    return BootHoldUnit & " is " & ls & " (LoadState), and sysinit.target " &
+      "requires it through " & link & ": every boot would wait for it. " &
+      "Re-apply, or remove the link"
+  ""
 
 proc runAddonVerify*(stateDir = DefaultStateDir;
                      logDir = AddonLogDir): VerifyReport =
@@ -70,6 +102,18 @@ proc runAddonVerify*(stateDir = DefaultStateDir;
           "it (its identity is recorded in " & idFile & "); inspect " &
           "/var/log, then remove " & idFile & " to let the next use make " &
           "and record it again")
+      elif fileExists(ledgerCopyPath(stateDir)) and
+          not dirExists(parentDir(idFile)) and
+          not mutated("verify-absent-dir-without-identity-noted"):
+        # A11 round 22: the ledger copy is there and the identity's
+        # directory is not -- the record is gone, as the checked open
+        # refuses; absence then is drift too, never a note.
+        result.findings.add(logDir & " is absent, and the directory of " &
+          "its recorded identity (" & parentDir(idFile) & ") is gone " &
+          "while the ledger copy " & ledgerCopyPath(stateDir) & " is " &
+          "there; inspect /var/log and the add-on's state, then create " &
+          parentDir(idFile) & " (root's 0700) so the next use makes and " &
+          "records the directory again")
       else:
         result.notes.add(logDir & " is absent; the add-on makes it " &
           "root's 0700 at its first use and records its identity")
@@ -93,6 +137,13 @@ proc runAddonVerify*(stateDir = DefaultStateDir;
           "recorded now, in " & idFile & " (" &
           recordedIdentity(logDir) & "): check that " & logDir &
           " is the directory bootstrap made")
+  block:
+    let f = bootHoldLinkFinding(parentDir(unitPath(BootHoldUnit)),
+      proc (): string =
+        try: runSystemctl(@["show", "-p", "LoadState", "--value", "--",
+                            BootHoldUnit]).output.strip()
+        except CatchableError: "")
+    if f.len > 0: result.findings.add(f)
   if result.findings.len > 0:
     result.status = "drift"
 

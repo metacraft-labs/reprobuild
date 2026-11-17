@@ -1444,6 +1444,21 @@ proc targetFor(address: string; inp: DecisionInputs; path: string;
     verdict: dec.verdict, diversion: saved.plan.diversion, unitClass: cls,
     replay: true)
 
+proc replacesOwnLink*(previous: Ledger; address, path, form: string;
+                      observedOwnLink, replay, revert: bool): bool =
+  ## Whether the write of ``address`` replaces the add-on's own link with a
+  ## copy (``PlannedTarget.replacesOwnLink``): this generation plans a
+  ## copy, the plan observed the add-on's own link at ``path`` (a replay
+  ## did not observe anew; its write-ahead plan made the decision), and
+  ## either the ledger records a link for exactly this resource there, or
+  ## this is a revert -- of a failed switch that turned this copy into a
+  ## link, which the committed ledger never recorded.
+  if form != "copy" or not (observedOwnLink or replay): return false
+  if revert and observedOwnLink: return true
+  for e in previous.entries:
+    if e.path == path and e.resource == address and e.isLink: return true
+  false
+
 proc alreadyRestored*(e: LedgerEntry): bool =
   ## A replay finds the removals the interrupted switch already made:
   ## an object that had preserved bytes now carries exactly them (its
@@ -1865,23 +1880,59 @@ proc writeRevertStopped*(stateDir: string; units: openArray[string]) =
     return
   writeHoldFile(p, units.join("\n") & "\n")
 
+proc acceptSocketTemplates*(p: SystemProfile): HashSet[string] =
+  ## The service templates an ``Accept=yes`` socket of the generation
+  ## starts instances of (``triggeredUnits`` over the socket's file and the
+  ## profile's drop-ins onto it, as systemd reads them; systemd.socket(5),
+  ## ``Accept=``). Read from the generation, not from systemd: an instance
+  ## that has stopped is garbage-collected, and its ``TriggeredBy=`` is
+  ## then empty (A9 review round 19, finding 2; measured on systemd 260).
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        not r.suName.endsWith(".socket"):
+      continue
+    for t in triggeredUnits(r.suName, @[r.suContent] & profileDropInsOf(p, r.suName)):
+      if t.contains("@."): result.incl(t)
+
+proc instanceSocketActivated*(unit: string; acceptTemplates: HashSet[string];
+                              triggeredBy: proc (u: string): seq[string]): bool =
+  ## Whether the template instance ``unit`` is one a socket starts: its
+  ## template is one an ``Accept=yes`` socket of the generation starts
+  ## (``acceptSocketTemplates``), or, while systemd still knows it, a
+  ## socket is among its ``TriggeredBy=`` (a base socket naming it).
+  when not mutated("accept-instances-by-triggered-by"):
+    # FALSIFYING MUTATION when skipped: round 18's rule, TriggeredBy= alone,
+    # which is empty once the stopped instance is garbage-collected.
+    if templateOf(unit) in acceptTemplates: return true
+  if triggeredBy != nil:
+    for t in triggeredBy(unit):
+      if t.endsWith(".socket"): return true
+  false
+
 proc revertStoppedToStart*(recorded: openArray[string];
                            generationUnits: HashSet[string];
                            planned: openArray[string];
                            isActive: proc (u: string): bool;
-                           isEnabled: proc (u: string): bool = nil): seq[string] =
+                           socketActivated: proc (u: string): bool = nil): seq[string] =
   ## Of the units a revert stopped (``recorded``), those the passing switch
   ## starts again: still installed by the generation -- an instance through
-  ## its template, and only when it is enabled (an instance a socket with
-  ## ``Accept=yes`` started comes back by its socket, not by the switch; A9
-  ## review round 17, finding 7) -- not already planned, and not running.
+  ## its template -- not already planned, and not running. An instance a
+  ## socket starts (``socketActivated``: ``instanceSocketActivated``) is
+  ## left to its socket, which comes back with it; any other instance --
+  ## an enabled one, one another unit's ``Wants=`` pulled in -- is started
+  ## again (A9 review rounds 17 to 19, finding 7 / L1).
   when mutated("revert-stopped-not-restarted"):
     return
   for u in recorded:
     let tmpl = templateOf(u)
     let installed =
       if tmpl.len > 0:
-        tmpl in generationUnits and isEnabled != nil and isEnabled(u)
+        tmpl in generationUnits and
+          (socketActivated == nil or not socketActivated(u)) and
+          # FALSIFYING MUTATION: the rule before round 18 -- an instance
+          # comes back only when enabled, so a Wants=-pulled one stays down
+          # (approximated: never, since no fixture enables one).
+          not mutated("revert-stopped-instances-by-enablement")
       else: u in generationUnits
     if installed and u notin planned and not isActive(u) and u notin result:
       result.add(u)
@@ -3217,6 +3268,48 @@ proc stemWritablePlaces*(service: string; show: ShowProps;
     let c = canonicalPlace(w, resolveLinks = true)
     if c notin result: result.add(c)
 
+proc everyUnitBootHoldProblems*(resources: openArray[SystemResource];
+    judged: HashSet[string];
+    showOf: proc (n: string): tuple[ok: bool; show: ShowProps];
+    orderedBeforeOf: proc (u: string): seq[string]): seq[string] =
+  ## The boot-hold unit's ordering cycle (§13 decision 172), the effective
+  ## half, on every unit of the generation
+  ## the floor and activator checks do not judge (``judged``): each unit
+  ## it installs and -- the owner's decision of 2026-11-17 on A9 review
+  ## round 19, finding 3 -- each unit one of its drop-ins changes, a base
+  ## unit included, read as systemd reports it (``showOf``: its ``After=``
+  ## and ``Before=``; ``ok`` false when systemd knows no such unit). A
+  ## template is skipped: its instances are what systemd orders. One
+  ## refusal line per unit that closes the cycle (``bootHoldCycleOf``).
+  when mutated("boot-hold-cycle-every-unit-skipped"):
+    # FALSIFYING MUTATION: round 17's effective half, the floored units
+    # and their activators only.
+    return
+  var seen = judged
+  var names: seq[string]
+  for r in resources:
+    let n = installedUnitName(r)
+    if n.len > 0: names.add(n)
+  when not mutated("boot-hold-dropins-effective-unchecked"):
+    for r in resources:
+      let n =
+        case r.kind
+        of srkSystemdSystemUnit: (if r.suCollision == "dropIn": r.suName else: "")
+        of srkSystemdSystemDropIn: r.diUnit
+        else: ""
+      if n.len > 0 and '.' in n and not n.startsWith("."): names.add(n)
+  for n in names:
+    if n in seen or n.contains("@."): continue
+    seen.incl(n)
+    try:
+      let (ok, show) = showOf(n)
+      if not ok: continue
+      let why = bootHoldCycleOf(n, show, orderedBeforeOf)
+      if why.len > 0:
+        result.add(refusalLine(n, "boot-hold-cycle", "Before", why))
+    except CatchableError as ex:
+      result.add(refusalLine(n, "show", "-", ex.msg))
+
 proc effectiveFloorCheck*(resources: openArray[SystemResource];
                           owned: seq[string] = @[];
                           adopted = initTable[string, string]();
@@ -3486,6 +3579,20 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
       if pending != nil:
         for hp in heldPending:
           if hp.path in written: pending[].add(hp)
+  # The boot-hold unit's ordering cycle (§13 decision 172), the effective
+  # half, on every other unit of the generation (the owner's decision of 2026-11-16 on A9 review round 18,
+  # M2): the floored units and their activators are judged above; a plain
+  # unit -- waived, or with no [Service] at all -- can close the same cycle
+  # through the boot-hold unit.
+  var judged = initHashSet[string]()
+  for n in flooredUnitNames(resources): judged.incl(n)
+  for n in flooredActivatorNames(resources): judged.incl(n)
+  result.add(everyUnitBootHoldProblems(resources, judged,
+    proc (n: string): tuple[ok: bool; show: ShowProps] =
+      let rs = runSystemctl(@["show", "--no-pager", "-p", "After", "-p",
+                              "Before", "--", n])
+      (rs.exitCode == 0, parseShow(rs.output)),
+    orderedBeforeOf))
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =
@@ -5666,13 +5773,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if replaying: parseLedger(replayPlan.fromLedgerText)
     elif fileExists(ledgerCopyPath(stateDir)): readLedger(ledgerCopyPath(stateDir))
     else: Ledger()
-  let migratedOwn =
+  # The own profile as stored on the host: the text the committed
+  # generation's units were rendered from (A9 review rounds 18 and 19, B1).
+  let ownStored = fileExists(ownProfilePath(stateDir))
+  let ownOnHost = if ownStored: readFile(ownProfilePath(stateDir)) else: ""
+  # The target's own profile: the one an `agent-repin`, an
+  # `evidence-enrol`, a revert or a rollback names, the stored one
+  # otherwise.
+  let targetOwn =
     if replaying: replayPlan.targetOwnText
-    elif opts.ownProfileText.len > 0: migrateOwnProfile(opts.ownProfileText)
-    elif fileExists(ownProfilePath(stateDir)):
-      migrateOwnProfile(readFile(ownProfilePath(stateDir)))
+    elif opts.ownProfileText.len > 0: opts.ownProfileText
+    elif ownStored: ownOnHost
     else: raise newException(AddonApplyError,
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
+  let migratedOwn =
+    if replaying: targetOwn else: migrateOwnProfile(targetOwn)
   # The objects this build added to generation 0 are installed by every
   # switch that finds them missing (§13 decision 159: a host bootstrapped
   # by an earlier engine gets the boot-hold unit at its next apply). Here,
@@ -5728,7 +5843,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         proc (path: string): string =
           for e in previous.entries:
             if e.path == path: return e.sha256
-          "")
+          "", stored = repointStoredTexts(ownOnHost, targetOwn))
       if rp.exe.len > 0 and rp.exe == engineExe and newImage.len > 0 and
           engineExe notin known:
         let pre = realiseEnginePrefix(newImage, newImageSha)
@@ -6425,7 +6540,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         result.ledgerDiff.add((if p.closureRelocated: "relocate-closure"
                                else: $dec.verdict) & "\t" & path & "\t" &
                               r.address)
-      targets.add(targetFor(r.address, inp, path, dec, obs, saved))
+      var target = targetFor(r.address, inp, path, dec, obs, saved)
+      target.replacesOwnLink = replacesOwnLink(previous, r.address, path,
+        p.form, obs.ownLink, saved.found, purpose == "revert")
+      targets.add(target)
       if carrier.len > 0:
         # The tool's own operation writes this file: the write-time re-check
         # of the file's decision is the tool's too.
@@ -7426,11 +7544,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     ## A copy whose path holds the previous generation's own link (an
     ## ``fs.systemFile`` that came to declare ``mode``, ``group`` or
     ## ``form = "copy"``): the copy is renamed over exactly that link.
+  var replacesOwnLinkAt = initHashSet[string]()
+  for t in targets:
+    if t.replacesOwnLink: replacesOwnLinkAt.incl(t.address & "\t" & t.path)
   for p in plans:
     if p.form == "link":
       linkTargets[p.r.address] = staticLinkTargetFor(p.targetPath)
-    elif p.r.kind == srkFsSystemFile and
-        prevForm.getOrDefault(p.targetPath) == "link":
+    elif p.r.address & "\t" & p.targetPath in replacesOwnLinkAt:
+      # A copy the plan decided replaces the add-on's own link at its path
+      # (``replacesOwnLink``): the previous generation's (a file that came
+      # to declare `form = "copy"`, `mode` or `group`), or the one a failed
+      # switch of the other direction left for its revert. The writer
+      # replaces exactly that link and still refuses any other link, and
+      # any link at all for a copy the plan did not so decide (threat
+      # model G29).
       replacedLinks[p.r.address] = staticLinkTargetFor(p.targetPath)
   let policy: AddOnDispatchPolicy = proc(op: PrivilegedOperation):
       AddOnMaterialisation {.gcsafe.} =
@@ -8263,11 +8390,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 if n.len > 0: genUnits.incl(n)
               var plannedUnits: seq[string]
               for t in stepTransitions: plannedUnits.add(t.unit)
+              let acceptTemplates = acceptSocketTemplates(composed)
               for u in revertStoppedToStart(readRevertStopped(stateDir), genUnits,
                                             plannedUnits, unitIsActive,
                                             proc (v: string): bool =
-                                              try: runSystemctl(["is-enabled", "--", v]).output.strip() == "enabled"
-                                              except CatchableError: false):
+                                              instanceSocketActivated(v, acceptTemplates,
+                                                proc (w: string): seq[string] =
+                                                  try:
+                                                    runSystemctl(["show", "-p", "TriggeredBy",
+                                                      "--value", "--", w]).output.splitWhitespace()
+                                                  except CatchableError: @[])):
                 stepTransitions.add(Transition(unit: u, verb: tvStart,
                   reason: "a revert stopped it while it held it; its hold is cleared"))
               revertStoppedPlanned = true

@@ -9,9 +9,12 @@ verifies:
   tests:
     - tests/integration/t_own_flake_ref_survives_an_uninitialised_submodule.nim
     - tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim
+    - tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim
+    - tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim
+    - tests/integration/t_emitted_overrides_match_the_develop_set.nim
 unverified:
-  - claim: "reprobuild obtains tools from Nix with --tool-provisioning=nix and keeps a flake's dev shell with useFlakeDevShell()."
-    reason: "Both are documented features; only the dev-shell half has a cited test."
+  - claim: "reprobuild's binary cache is not a Nix substituter."
+    reason: "Read from the source of reprobuild 84b459adda (repro 0.2.24), which serves no narinfo or nix-cache-info; no test asserts it."
     owner: unassigned
   - claim: "Conventions produce one action per compiler invocation, so a one-file change re-runs the actions that read that file."
     reason: "True of the conventions this page's links describe; not every convention splits its work this way, and no test is cited per convention."
@@ -109,10 +112,43 @@ action per compiler invocation, so the same change re-runs the actions that read
 the changed file.
 
 You can keep Nix. reprobuild can take its tools from Nix
-(`--tool-provisioning=nix`), and it can use a flake's dev shell as a project's
-environment without any change to the flake:
+(`--tool-provisioning=nix`, or `defaultToolProvisioning "nix"` in the project
+file), and it can use a flake's development shell as a project's environment without
+any change to the flake:
 [Keep an existing Nix flake as the environment](../guides/environments/keep-a-nix-flake-environment.md).
 Adopting reprobuild does not require leaving Nix.
+
+## Moving over side by side
+
+A project does not switch from Nix to reprobuild in one step. Each step below
+leaves a working project, and you can stop after any of them. The flake keeps
+working for the people who still use it until you remove it.
+[Move a project from a Nix flake to reprobuild](../tutorials/move-a-project-from-a-nix-flake.md)
+takes one project through all of them.
+
+### The environment
+
+`repro.nim` activates the flake's existing development shell with `useFlakeDevShell()`, unchanged: [Keep an existing Nix flake as the environment](../guides/environments/keep-a-nix-flake-environment.md).
+
+### direnv
+
+reprobuild's shell hook activates the environment when you enter the directory, as `use flake` did: [Activate environments when you change directory](../guides/environments/activate-on-directory-change.md). `.envrc` can stay for the people who still use direnv.
+
+### Inputs you work on
+
+A flake input whose repository you have checked out in a workspace builds from your checkout: [Build a flake against a local checkout of an input](../guides/workspaces/develop-a-flake-input.md).
+
+### Tasks
+
+Scripts that a development shell's `shellHook` defines, and `nix run` apps that wrap a project command, become named tasks in `repro.nim`: [Coming from just and Make](just-and-make-tasks.md).
+
+### Tools
+
+`uses:` names each tool with a version range, and `defaultToolProvisioning "nix"` takes it from Nix through reprobuild's catalog, so the flake no longer has to list it: [Choose where a project's tools come from](../guides/building/choose-where-tools-come-from.md).
+
+### Caches
+
+Nix keeps substituting store paths from the caches it is configured with. reprobuild shares build results through its own [binary cache](../reference/glossary.md#binary-cache), which is not a Nix substituter: [Binary caches and Nix substituters](../concepts/dependencies-and-the-store.md#binary-caches-and-nix-substituters).
 
 ## What reprobuild does not do
 
@@ -128,6 +164,9 @@ Adopting reprobuild does not require leaving Nix.
 
 ## Next steps
 
+- [Move a project from a Nix flake to reprobuild](../tutorials/move-a-project-from-a-nix-flake.md)
 - [Keep an existing Nix flake as the environment](../guides/environments/keep-a-nix-flake-environment.md)
+- [Choose where a project's tools come from](../guides/building/choose-where-tools-come-from.md)
+- [Build a flake against a local checkout of an input](../guides/workspaces/develop-a-flake-input.md)
 - [Build an existing project](../guides/building/build-an-existing-project.md)
 - [Command equivalents](../reference/command-equivalents.md#nix)
