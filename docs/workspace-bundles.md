@@ -56,9 +56,12 @@ SHA-256 sums, and needs only `bash`, `curl`, `tar`, `sha256sum`, `df`,
 `flock` (util-linux), `nix-store` and `nix-hash`. It:
 
 1. checks free disk space;
-2. downloads the parts in parallel into `/dev/shm` (or `/var/tmp` when they
-   do not fit);
-3. verifies them;
+2. downloads the parts in parallel into a fresh staging directory in
+   `/dev/shm` (or `/var/tmp` when they do not fit), or, from a local bundle
+   directory, copies them there (no more of each file than its declared
+   size);
+3. verifies them there and reads only those copies, so the bytes verified are
+   the bytes unpacked even if the source directory changes meanwhile;
 4. takes Nix's own lock (`<path>.lock`, an exclusive `flock`) on each of
    the closure's store paths that Nix does not consider valid, waiting while
    a `nix-daemon` or another `nix` holds it. It then holds Nix's `gc.lock`
