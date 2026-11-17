@@ -25,6 +25,23 @@
 ## * `repro system addon import` carries a hand-configured file's mode and
 ##   group into the skeleton, so a `0640 root:<svc>` file round-trips.
 ##
+## * A link-to-copy switch survives step 3's flip: the previous
+##   generation's own link (`/etc/X -> /etc/repro/static/X`) dangles once
+##   the new tree no longer carries the file, and the write-time re-check
+##   accepts exactly that link (any other is still refused); the revert of
+##   a failed switch in either direction decides the add-on's own dangling
+##   link instead of refusing it as "not a regular file". Found by the VM
+##   gate `t_e2e_addon_declared_mode_file_is_a_private_copy` (debian-13,
+##   generation 1 linked, generation 2 `form = "copy"`); at reprobuild
+##   2d5d3ce3ef the re-check refused with "changed since the plan (sha256
+##   absent ...)" and the rollback with "exists and is not a regular file".
+##   These cases run where `/etc` can be written: a forked child that is
+##   root of its own user + mount namespace with a tmpfs over `/etc` (the
+##   static tree and the add-on's own link must be at their real paths,
+##   which the collision observer matches by text); the flip is the
+##   removal of the file from the tree the link points into. Skipped, with
+##   a reason, on a kernel without unprivileged user namespaces.
+##
 ## MOCK JUSTIFICATION. The dpkg database is a fixture tree (the build host
 ## is not a Debian base); the unit provider answers from a fixed table
 ## (or "not-found") because no real unit is involved. The planning, the
@@ -220,3 +237,177 @@ suite "import carries a hand-configured file's mode and group":
       for f in sk.flags:
         if "/etc/svc/secret.conf" in f and "does not name" in f: found = true
       check found
+
+when defined(linux):
+  var
+    CloneNewUser {.importc: "CLONE_NEWUSER", header: "<sched.h>".}: cint
+    CloneNewNs {.importc: "CLONE_NEWNS", header: "<sched.h>".}: cint
+    MsRec {.importc: "MS_REC", header: "<sys/mount.h>".}: culong
+    MsPrivate {.importc: "MS_PRIVATE", header: "<sys/mount.h>".}: culong
+  proc c_unshare(flags: cint): cint {.importc: "unshare", header: "<sched.h>".}
+  proc c_mount(source, target, fstype: cstring; flags: culong;
+               data: pointer): cint {.importc: "mount",
+                                      header: "<sys/mount.h>".}
+
+  proc inEtcNamespace(body: proc (): seq[string]): tuple[code: int;
+                                                        failures: seq[string]] =
+    ## `body` in a forked child that is root of its own user + mount
+    ## namespace, with a private tmpfs over /etc. Code 77: no unprivileged
+    ## user namespaces.
+    let report = getTempDir() / ("t-addon-flip-" & $getCurrentProcessId() &
+                                 ".report")
+    removeFile(report)
+    let uid = getuid()
+    let gid = getgid()
+    let pid = fork()
+    doAssert pid >= 0
+    if pid == 0:
+      var code = 0
+      try:
+        if c_unshare(CloneNewUser or CloneNewNs) != 0: exitnow(77)
+        writeFile("/proc/self/setgroups", "deny")
+        writeFile("/proc/self/uid_map", "0 " & $uid & " 1")
+        writeFile("/proc/self/gid_map", "0 " & $gid & " 1")
+        doAssert c_mount(nil, "/", nil, MsRec or MsPrivate, nil) == 0
+        doAssert c_mount("tmpfs", "/etc", "tmpfs", 0,
+                         cast[pointer](cstring"mode=0755")) == 0
+        let failures = body()
+        writeFile(report, failures.join("\n"))
+        if failures.len > 0: code = 1
+      except CatchableError as ex:
+        writeFile(report, "child raised: " & ex.msg)
+        code = 1
+      exitnow(cint(code))
+    var status: cint
+    doAssert waitpid(pid, status, 0) == pid
+    result.code = if WIFEXITED(status): int(WEXITSTATUS(status)) else: 128
+    if fileExists(report):
+      let text = readFile(report)
+      if text.len > 0: result.failures = text.splitLines()
+      removeFile(report)
+
+template withEtc(body: untyped) =
+  when not defined(linux):
+    skip("the mount namespace this case writes /etc in is Linux-only")
+  else:
+    let outcome = inEtcNamespace(proc (): seq[string] =
+      var failures {.inject.}: seq[string]
+      body
+      failures)
+    if outcome.code == 77:
+      skip("unprivileged user namespaces are disabled on this kernel; " &
+        "the add-on's own link cannot be made at its /etc path")
+    else:
+      for f in outcome.failures: checkpoint f
+      check outcome.code == 0
+      check outcome.failures.len == 0
+
+proc expect(failures: var seq[string]; ok: bool; what: string) =
+  if not ok: failures.add(what)
+
+const
+  Toggled = "/etc/repro-fixture/toggled.conf"
+  ToggledAddress = "systemFile:/etc/repro-fixture/toggled.conf"
+  ToggledBytes = "toggled=1\n"
+
+proc linkedGeneration(): string =
+  ## Generation 1 on the host: the file in the static tree and the
+  ## add-on's own link to it. Returns the tree file.
+  result = staticLinkTargetFor(Toggled)
+  createDir(parentDir(result))
+  writeFile(result, ToggledBytes)
+  createDir(parentDir(Toggled))
+  createSymlink(result, Toggled)
+
+proc linkLedger(): Ledger =
+  Ledger(generation: "g1", entries: @[LedgerEntry(class: lcEtcFile,
+    path: Toggled, resource: ToggledAddress, form: "link",
+    linkTarget: staticLinkTargetFor(Toggled),
+    sha256: sha256Hex(ToggledBytes))])
+
+proc ownedInputs(): DecisionInputs =
+  DecisionInputs(address: ToggledAddress, kind: tkFile,
+    desiredContent: ToggledBytes, desiredSha256: sha256Hex(ToggledBytes),
+    ledgerOwns: true, ledgerSha256: sha256Hex(ToggledBytes))
+
+suite "a link-to-copy switch survives the flip of the static tree":
+  test "the write-time re-check accepts exactly the own link, dangling":
+    let fixture = scratch("flip-recheck")
+    defer: removeDir(fixture)
+    withEtc:
+      let d = fixtureDriver(fixture / "root")
+      let tree = linkedGeneration()
+      # The plan of generation 2 (`form = "copy"`): the own link, as the
+      # ledger recorded it, with generation 1's bytes behind it.
+      let inp = ownedInputs()
+      let (dec, obs) = decide(d, inp, Toggled)
+      failures.expect(obs.ownLink, "the plan did not see the own link")
+      failures.expect(dec.verdict == cvNoOp, "planned " & $dec.verdict)
+      var t = plannedTarget(ToggledAddress, inp, Toggled, dec, obs)
+      t.replacesOwnLink = replacesOwnLink(linkLedger(), ToggledAddress,
+        Toggled, "copy", obs.ownLink, replay = false, revert = false)
+      failures.expect(t.replacesOwnLink, "the switch does not mark the " &
+        "copy as replacing its own link")
+      # Step 3: the static tree now holds generation 2's link-form files,
+      # and toggled.conf is not one of them. The own link dangles.
+      removeFile(tree)
+      let why = preWriteRefusal(d, t)
+      failures.expect(why == "", "the own dangling link is refused at " &
+        "write time: " & why)
+      # Any other link at the path is still refused.
+      removeFile(Toggled)
+      createSymlink("/etc/repro/static/elsewhere.conf", Toggled)
+      failures.expect("symbolic link" in preWriteRefusal(d, t),
+        "a foreign link was accepted at write time")
+
+  test "a revert decides the add-on's own dangling link, never refuses it":
+    let fixture = scratch("flip-revert")
+    defer: removeDir(fixture)
+    withEtc:
+      let d = fixtureDriver(fixture / "root")
+      let tree = linkedGeneration()
+      removeFile(tree)       # the failed switch's flip: the link dangles
+      var msg = ""
+      var verdict = cvAdopt
+      try:
+        verdict = decide(d, ownedInputs(), Toggled).decision.verdict
+      except AddonCollisionError as e:
+        msg = e.msg
+      failures.expect(msg == "", "the revert refuses its own link: " & msg)
+      failures.expect(verdict == cvUpdate, "the revert decided " & $verdict)
+      # A dangling link the ledger does not own is still not the add-on's
+      # to rewrite.
+      var notOwned = ownedInputs()
+      notOwned.ledgerOwns = false
+      notOwned.ledgerSha256 = ""
+      var refused = false
+      try: discard decide(d, notOwned, Toggled)
+      except AddonCollisionError: refused = true
+      failures.expect(refused, "an unowned dangling link was accepted")
+
+  test "copy to link: the revert to the copy replaces the own link":
+    let fixture = scratch("flip-copy-to-link")
+    defer: removeDir(fixture)
+    withEtc:
+      let d = fixtureDriver(fixture / "root")
+      # Generation 1 was a copy; the failed generation 2 linked it, and its
+      # tree is still current when the revert plans.
+      let tree = linkedGeneration()
+      let inp = ownedInputs()
+      let (dec, obs) = decide(d, inp, Toggled)
+      var t = plannedTarget(ToggledAddress, inp, Toggled, dec, obs)
+      # The committed ledger (generation 1's) recorded a copy.
+      var copyLedger = linkLedger()
+      copyLedger.entries[0].form = "copy"
+      copyLedger.entries[0].linkTarget = ""
+      t.replacesOwnLink = replacesOwnLink(copyLedger, ToggledAddress,
+        Toggled, "copy", obs.ownLink, replay = false, revert = true)
+      failures.expect(t.replacesOwnLink, "the revert does not mark the " &
+        "copy as replacing the failed switch's link")
+      failures.expect(not replacesOwnLink(copyLedger, ToggledAddress,
+        Toggled, "copy", obs.ownLink, replay = false, revert = false),
+        "an ordinary apply takes over a link the ledger never recorded")
+      removeFile(tree)       # the revert's flip back to generation 1's tree
+      let why = preWriteRefusal(d, t)
+      failures.expect(why == "", "the revert's copy is refused at write " &
+        "time: " & why)

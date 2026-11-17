@@ -109,7 +109,7 @@ libs/repro_addon/tests/t_addon_store_custody.nim	nim	7
 libs/repro_addon/tests/t_addon_store_verify.nim	nim	9
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
-libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.nim	nim	5
+libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.nim	nim	8
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	73
@@ -1299,6 +1299,7 @@ tests/e2e/addon/t_e2e_addon_compromised_fetch_cannot_write_etc.nim	nim	1
 tests/e2e/addon/t_e2e_addon_confirm_or_revert.nim	nim	1
 tests/e2e/addon/t_e2e_addon_custody_crash_points.nim	nim	1
 tests/e2e/addon/t_e2e_addon_debian_12_to_13_release_upgrade.nim	nim	1
+tests/e2e/addon/t_e2e_addon_declared_mode_file_is_a_private_copy.nim	nim	1
 tests/e2e/addon/t_e2e_addon_detectors_positive_controls.nim	nim	1
 tests/e2e/addon/t_e2e_addon_divert_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_drill_fetch_compromise.nim	nim	1

@@ -14215,6 +14215,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_addon_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/addon/t_e2e_addon_declared_mode_file_is_a_private_copy.nim",
+    binary: "build/test-bin/t_e2e_addon_declared_mode_file_is_a_private_copy",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_detectors_positive_controls.nim",
     binary: "build/test-bin/t_e2e_addon_detectors_positive_controls",
     defines: @[],
@@ -14377,7 +14388,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_hard_reset_at_every_step.nim",
