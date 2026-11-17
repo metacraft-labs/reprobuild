@@ -21475,6 +21475,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let hex40 = \"0123456789abcdef0123456789abcdef01234567\""),
   TestSpec(
+    source: "tests/integration/t_go_convention_embeds_and_rekeys_on_observed_reads.nim",
+    binary: "build/test-bin/t_go_convention_embeds_and_rekeys_on_observed_reads",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let reproBin = getEnv(\"REPROBUILD_REPRO\","),
+  TestSpec(
     source: "tests/integration/t_hcr_native_library_prerequisite.nim",
     binary: "build/test-bin/t_hcr_native_library_prerequisite",
     defines: @["reproProviderMode"],

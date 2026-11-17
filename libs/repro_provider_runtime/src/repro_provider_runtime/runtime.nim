@@ -560,6 +560,23 @@ proc fileReadInput*(path: string): GraphEvaluationInput =
   GraphEvaluationInput(kind: gevFileRead, identity: path,
     digest: fileContentDigest(path))
 
+const UnobservedEvaluationDigest* = "unobserved"
+  ## The digest of an evaluation input whose content the producer could NOT
+  ## observe. ``fileContentDigest`` returns a hex digest or ``missing`` and
+  ## never this value, so the input reads as changed on every refresh and the
+  ## owning fragment is produced again every time.
+
+proc unobservedEvaluationInput*(identity: string): GraphEvaluationInput =
+  ## An evaluation input for a graph derived from reads that could not be
+  ## observed completely — Failure-Semantics.md §"Monitoring Failures": when
+  ## the scope of a loss is unknown, nothing derived from it is reused. The
+  ## fragment that carries it is never served from the snapshot; every
+  ## refresh re-invokes its entry point (and early cutoff still applies when
+  ## the rerun reproduces it unchanged). ``identity`` names what was not
+  ## observed, for the reader of the snapshot.
+  GraphEvaluationInput(kind: gevFileRead, identity: identity,
+    digest: UnobservedEvaluationDigest)
+
 proc providerSourceInput*(providerArtifactId, binaryDigest: string):
     GraphEvaluationInput =
   ## The record of WHICH PROVIDER produced a fragment: its artifact id, and

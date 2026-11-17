@@ -1006,7 +1006,7 @@ libs/repro_standard_provider/tests/test_from_source_cmake_convention.nim	nim	5
 libs/repro_standard_provider/tests/test_from_source_custom_convention.nim	nim	15
 libs/repro_standard_provider/tests/test_from_source_make_convention.nim	nim	6
 libs/repro_standard_provider/tests/test_from_source_meson_convention.nim	nim	7
-libs/repro_standard_provider/tests/test_go_convention.nim	nim	14
+libs/repro_standard_provider/tests/test_go_convention.nim	nim	20
 libs/repro_standard_provider/tests/test_go_direct_convention.nim	nim	14
 libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim	nim	8
 libs/repro_standard_provider/tests/test_java_maven_convention.nim	nim	7
@@ -1959,6 +1959,7 @@ tests/integration/t_generated_envrc_block_never_runs_hooks_ensure.nim	nim	1
 tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
 tests/integration/t_git_answer_probes_read_stdout_not_warnings.nim	nim	4
 tests/integration/t_git_object_store_lookups_are_not_cache_inputs.nim	nim	10
+tests/integration/t_go_convention_embeds_and_rekeys_on_observed_reads.nim	nim	5
 tests/integration/t_hcr_native_library_prerequisite.nim	nim	6
 tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim	nim	7
 tests/integration/t_health_fix_remediates_safe_issues_only.nim	nim	2

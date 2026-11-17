@@ -1652,6 +1652,14 @@ when defined(reproProviderMode):
     ## that appears later — an optional committed lock — also invalidates.
     providerEvaluationInputRegistry.add(fileReadInput(materialProviderPath(path)))
 
+  proc providerUnobservedInput*(identity: string) {.dynOrStatic.} =
+    ## Report that the graph this evaluation emits was derived from reads
+    ## that could not be observed completely, so no stored copy of it may be
+    ## reused: the fragment is produced again on every refresh
+    ## (``unobservedEvaluationInput``; Failure-Semantics.md §"Monitoring
+    ## Failures", unknown-scope loss).
+    providerEvaluationInputRegistry.add(unobservedEvaluationInput(identity))
+
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
 

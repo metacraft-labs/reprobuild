@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2909,
+    "nimTestBinaries": 2910,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 783,
+    "pureUnitTests": 782,
     "staticallyDetectedRuntimeCompilerFlowTests": 145,
-    "testEntries": 2957
+    "testEntries": 2958
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -955,7 +955,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 22,
+      "count": 21,
       "defines": [
         "reproProviderMode"
       ],
@@ -977,7 +977,6 @@
         "libs/repro_standard_provider/tests/test_elixir_mix_convention.nim",
         "libs/repro_standard_provider/tests/test_erlang_rebar3_convention.nim",
         "libs/repro_standard_provider/tests/test_fortran_direct_convention.nim",
-        "libs/repro_standard_provider/tests/test_go_convention.nim",
         "libs/repro_standard_provider/tests/test_haskell_cabal_convention.nim",
         "libs/repro_standard_provider/tests/test_java_maven_convention.nim",
         "libs/repro_standard_provider/tests/test_jsts_direct_convention.nim",
@@ -1645,9 +1644,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1607,
+      "integration": 1609,
       "platform/destructive": 191,
-      "pure unit": 783,
+      "pure unit": 782,
       "unclassified": 353
     },
     "graphOwnedTestArtifacts": [
@@ -1862,9 +1861,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2909,
+    "nimTestBinaryCount": 2910,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2957
+    "testEntryCount": 2958
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5520,7 +5519,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1401,
+          "line": 1406,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -27098,8 +27097,8 @@
     },
     {
       "binary": "build/test-bin/test_go_convention",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "reproProviderMode"
       ],
@@ -27114,8 +27113,8 @@
       "owner": "libs/repro_standard_provider",
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_go_convention.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44091,6 +44090,24 @@
       "source": "tests/integration/t_git_object_store_lookups_are_not_cache_inputs.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_go_convention_embeds_and_rekeys_on_observed_reads",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_go_convention_embeds_and_rekeys_on_observed_reads.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
