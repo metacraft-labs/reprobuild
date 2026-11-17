@@ -34,7 +34,10 @@
 ##    ``repro system rollback`` to the previous engine's generation
 ##    succeeds; both leave the re-assert and boot-confirm units on this
 ##    engine and its prefix in the ledger (A9 review round 17, finding 1);
-## 5. ``repro system addon uninstall`` removes it and its link through the
+## 5. with the unit file away, ``repro system addon verify`` reports the
+##    ``sysinit.target.requires`` link that would hold up every boot; with
+##    the link drifted, ``repro system addon uninstall`` still removes it
+##    (A9 review round 18, M1), and removes the unit and its link through the
 ##    ledger, and the base is as it was before the bootstrap.
 ##
 ## A path in the way -- the unit's file there, not the add-on's -- is
@@ -47,7 +50,8 @@
 ## the bootstrap engine, which holds the service but not its socket, so the
 ## socket listens after the second reboot), ``repoint-backwards`` (step 4b:
 ## the revert and the rollback point the units back at the previous
-## engine). The reboot behaviour with a switch pending is
+## engine), ``verify-ignores-boot-hold-link`` and
+## ``uninstall-leaves-boot-hold-requires`` (step 5). The reboot behaviour with a switch pending is
 ## ``t_e2e_addon_floor_reapplies_after_restarts``'s (``boot-hold-after-
 ## sysinit``, ``boot-holds-unrecorded``).
 ##
@@ -320,12 +324,31 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # The drop-in directory the gate made for the tmpfs is the gate's.
     discard g.run("rmdir /etc/systemd/system/a9b-sr.service.d " &
                   "/etc/systemd/system/a9b-sr.socket.d 2>/dev/null; true")
+    # A9 review round 18, M1: sysinit.target requires the unit, so a link
+    # left naming it with no unit behind holds up every boot. verify
+    # reports the link while the unit file is away...
+    discard g.run("mv " & UnitFile & " " & UnitFile & ".aside")
+    let vf = g.exec(repro & " system addon verify; true")
+    discard g.run("mv " & UnitFile & ".aside " & UnitFile)
+    step("verify reports a sysinit.target.requires link to a missing boot-hold " &
+         "unit (A9 review round 18, M1)",
+         "is not a unit file" in vf.stdout & vf.stderr, vf.stdout & vf.stderr)
+    # ...and uninstall removes it even when it has drifted from what the
+    # ledger records (here, the same unit by a relative target), so no
+    # dangling Requires= is left behind.
+    discard g.run("ln -sfn ../" & Unit & " " & WantsLink)
     let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
-    step("uninstall removes the unit and its link through the ledger",
+    let req = g.exec("systemctl show -p Requires --value sysinit.target").stdout
+    step("uninstall removes the unit and its link, a drifted link too, and " &
+         "sysinit.target no longer requires it",
          un.exitCode == 0 and g.exec("test -e " & UnitFile).exitCode != 0 and
-         g.exec("test -L " & WantsLink).exitCode != 0,
-         un.stdout & un.stderr)
-    let id = identityReport(f0, g.takeFingerprint(repro))
+         g.exec("test -L " & WantsLink).exitCode != 0 and Unit notin req,
+         un.stdout & un.stderr & "\nRequires=" & req)
+    # Ubuntu 24.04's dmesg.service saves the kernel log once per boot, and
+    # whether it still shows active when the fingerprint is taken depends on
+    # the boot, not on the add-on (measured on ubuntu-24.04-amd64 in this
+    # gate, A9 review round 18); every other unit is still compared.
+    let id = identityReport(f0, g.takeFingerprint(repro), ["active-units:dmesg.service"])
     step("the base is as it was before the bootstrap", id.ok, id.text)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)

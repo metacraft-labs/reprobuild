@@ -2518,6 +2518,49 @@ proc keyedOnToolDeclaredInputCheckPolicy*(weak: ContentDigest;
     text.add(toHex(b, 2))
   weakFingerprintFromText(text)
 
+proc monitorEvidenceForContentCheckedDepfileEdge*(
+    action: var BuildAction; policy: FileFingerprintPolicy): bool =
+  ## Caching-Architecture D8: an edge whose input-check policy is content
+  ## checked (``checksum`` or ``hybrid``, stated or taken from its tools'
+  ## declaration) and whose only dependency evidence is a make depfile is
+  ## gathered by the automatic monitor instead. Returns whether it changed
+  ## the action.
+  ##
+  ## Why. Such an edge has a portable identity (D1), and its record may be
+  ## served to another checkout only if the publication rule allows it
+  ## (D6). A depfile-evidenced record never does
+  ## (Edge-Derived-Identities.md §10 decision 23): a depfile omits the
+  ## compiler binary, may omit system headers, and says nothing about the
+  ## environment the compiler read, so two checkouts whose shells set
+  ## ``CPATH`` differently would share one key. The monitor observes the
+  ## compiler's own images, every header it opens and every variable it
+  ## reads, so the record is keyed on all of them and is monitored
+  ## evidence. The depfile is NOT kept as a second source: a combined
+  ## (validated-by-monitor) record stays local under the same decision.
+  ##
+  ## Nothing is waived to make the record publishable: the monitored kind
+  ## carries exactly the ignored prefixes, capture breadth and shim-seed
+  ## setting the recipe declared for the depfile kind. The compiler still
+  ## writes its ``.d`` file (it is in the argv); nothing reads it.
+  ## ``timestamp`` edges keep their depfile unchanged.
+  if action.kind != bakProcess or policy notin {ffpChecksum, ffpHybrid}:
+    return false
+  let current = action.dependencyPolicy
+  if current.kind != dgRecognizedFormat or
+      current.recognizedReports.len == 0:
+    return false
+  for report in current.recognizedReports:
+    if string(report.formatName) != MakeDepfileFormatName:
+      return false
+  var monitored = DependencyGatheringPolicy(kind: dgAutomaticMonitor,
+    completeness: decComplete)
+  monitored.ignoredInputPrefixes = current.ignoredInputPrefixes
+  monitored.captureBreadth = current.captureBreadth
+  monitored.suppressMonitorShimSeed = current.suppressMonitorShimSeed
+  action.dependencyPolicy = monitored
+  action.depfile = ""
+  true
+
 proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
     seq[string] =
   ## The sub-tools that reach the engine as
@@ -3259,6 +3302,14 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     if policyFromTools:
       result.weakFingerprint = keyedOnToolDeclaredInputCheckPolicy(
         result.weakFingerprint, actionCachePolicy)
+    if monitorEvidenceForContentCheckedDepfileEdge(result,
+        actionCachePolicy):
+      # A record the same edge left under depfile evidence must not serve
+      # it now: it states no environment reads and no compiler images.
+      var text = "reprobuild.monitorEvidenceForContentCheckedDepfileEdge.v1\n"
+      for b in result.weakFingerprint.bytes:
+        text.add(toHex(b, 2))
+      result.weakFingerprint = weakFingerprintFromText(text)
   proc argValue(name: string): string =
     for arg in payload.call.arguments:
       if arg.name == name:
@@ -4758,6 +4809,19 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
   for target in targets.values:
     considerDirectAlias(aliases, target)
   let aliasForAction = aliases.byAction
+  # Caching-Architecture D7: a build file's `target "name", handle` declares
+  # its action's outputs a result of the build. The engine sees actions,
+  # not the target table, so the name rides on the lowered action as a
+  # target name (beside the implicit names a typed tool call contributes);
+  # a portable hit then puts that action's outputs in place even when the
+  # action consuming them resolves too. A target names its action already
+  # (it renames the edge), so this changes no selection; neither field is
+  # part of the action's key.
+  var declaredTargetNames = initTable[string, seq[string]]()
+  for target in targets.values:
+    if target.kind == btkTarget and target.actions.len == 1 and
+        target.targets.len == 0:
+      declaredTargetNames.mgetOrPut(target.actions[0], @[]).add(target.name)
 
   proc publicPayload(action: BuildActionDef): BuildActionDef =
     result = action
@@ -4771,7 +4835,12 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       BuildAction =
     var node = item.node
     node.payload = actionPayload(publicPayload(item.payload))
-    lowerGraphAction(node, profiles, projectRoot)
+    result = lowerGraphAction(node, profiles, projectRoot)
+    var names = declaredTargetNames.getOrDefault(item.payload.id)
+    names.sort()
+    for name in names:
+      if name notin result.targetNames:
+        result.targetNames.add(name)
 
   proc shouldLower(item: tuple[node: GraphNode;
                                payload: BuildActionDef]): bool =

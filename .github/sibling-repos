@@ -251,7 +251,7 @@ reprobuild-packages
 # flake.nix and flake.lock: a macOS monitored root that is itself a
 # SIP-protected binary (`/bin/sh -c ...`) is spawned through its drop-in
 # (30d8579). 4212d138 is an ancestor.
-io-mon=30d85793e891c1a80859d52a9eb197b42d56752c
+io-mon=735726963f48d91031463cbd9d1e9cf8f444f5ee
 # `release.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at

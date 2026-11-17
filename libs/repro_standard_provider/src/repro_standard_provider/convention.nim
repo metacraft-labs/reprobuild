@@ -31,6 +31,21 @@ import std/[options]
 
 import repro_provider_runtime
 
+const
+  DeterministicArModifiers* =
+    when defined(macosx): "rcs"
+    else: "rcsD"
+    ## The ``ar`` modifiers every convention archives a static library with.
+    ## ``D`` writes zero for each member's timestamp, owner and group, so an
+    ## archive is a function of its members' bytes and names alone: two
+    ## checkouts that compile byte-identical objects archive byte-identical
+    ## libraries, and a restored archive and a rebuilt one agree. GNU ``ar``
+    ## built without ``--enable-deterministic-archives`` (the Linux toolchain
+    ## the engine provisions into the store root is one) defaults to ``U``,
+    ## real timestamps; ``llvm-ar`` takes ``D`` as well. The Darwin ``ar``
+    ## (cctools) has no ``D`` modifier, so macOS keeps ``rcs``.
+    ## https://sourceware.org/binutils/docs/binutils/ar-cmdline.html
+
 type
   RecognizeProc* = proc(projectRoot: string;
                         request: ProviderGraphRequest): bool {.closure, gcsafe.}

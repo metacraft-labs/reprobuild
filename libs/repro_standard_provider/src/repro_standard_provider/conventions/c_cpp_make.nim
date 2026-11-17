@@ -560,7 +560,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
   ## archive argv).
   let archiveOutput = staticLibraryPathFor(projectRoot, member.name)
   createDir(extendedPath(parentDir(archiveOutput)))
-  var argv = @[arExe, "rcs", archiveOutput]
+  var argv = @[arExe, DeterministicArModifiers, archiveOutput]
   for obj in objFiles:
     argv.add(obj)
   for flag in makeFlags:

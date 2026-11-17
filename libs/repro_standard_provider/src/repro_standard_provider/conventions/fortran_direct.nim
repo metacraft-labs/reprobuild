@@ -624,7 +624,7 @@ proc emitArchiveAction(projectRoot, arExe: string;
   ## archive action.
   let archiveOutput = archivePathFor(projectRoot, member.name)
   createDir(extendedPath(parentDir(archiveOutput)))
-  var argv = @[arExe, "rcs", archiveOutput]
+  var argv = @[arExe, DeterministicArModifiers, archiveOutput]
   for obj in objFiles:
     argv.add(obj)
   buildAction(
@@ -908,7 +908,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
                                   BuildActionDef =
   let archiveOutput = ccppCrossArchivePath(projectRoot, member.libraryName)
   createDir(extendedPath(parentDir(archiveOutput)))
-  var argv = @[arExe, "rcs", archiveOutput]
+  var argv = @[arExe, DeterministicArModifiers, archiveOutput]
   for obj in objFiles:
     argv.add(obj)
   buildAction(
