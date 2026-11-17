@@ -1976,6 +1976,9 @@ const
                           # a socket changed only by a drop-in is not read
                           # for Accept= (LOW).
                           "accept-dropin-only-sockets-skipped",
+                          # the boot-hold unit's minimal hold is judged as a
+                          # planted drop-in by the next check.
+                          "boot-hold-minimal-hold-judged",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",

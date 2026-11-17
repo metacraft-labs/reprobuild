@@ -90,6 +90,10 @@ const
   StartHoldText* = "# Written by the ReproOS add-on switch: the unit may not " &
     "start until its\n# effective configuration has been checked against " &
     "its hardening floor.\n[Unit]\n" & StartHoldAssertion & "\n"
+  MinimalStartHoldText* = "[Unit]\n" & StartHoldAssertion & "\n"
+    ## The start hold the boot-hold unit writes (``generation0.
+    ## MinimalHoldText``): the same assertion with no comment, which the
+    ## unit's shell cannot carry inline (A9 review round 20).
   RevertHoldName* = "zz-repro-addon-revert-hold.conf"
     ## The persistent drop-in a revert writes, under ``/etc/systemd/system``,
     ## for each unit of the generation its own floor check refused (§13
@@ -1425,7 +1429,8 @@ proc isAddonHold*(path, content: string): bool =
   ## loaded files do not judge: the switch's start hold, or a revert's
   ## persistent hold (§13 decision 133) holding exactly ``RevertHoldText``.
   ## A file of that name with other content is judged like any drop-in,
-  ## and so is a start hold that is not exactly ``StartHoldText`` in a
+  ## and so is a start hold that is not exactly ``StartHoldText`` (or the
+  ## boot-hold unit's ``MinimalStartHoldText``) in a
   ## regular file under the runtime unit directory: the hold the switch
   ## writes on an activator (§13 decisions 151 and 155) is exempt, a file
   ## planted under its name is not.
@@ -1434,8 +1439,13 @@ proc isAddonHold*(path, content: string): bool =
       # Falsifying build: a start hold exempted by its name alone.
       return true
     else:
+      # The boot-hold unit's minimal hold is the add-on's too (A9 review
+      # round 20): the boot puts it where the switch's start hold was, and
+      # the replay's or the revert's check that follows must not judge it
+      # as a planted drop-in.
       return path.startsWith(RuntimeHoldDir & "/") and not symlinkExists(path) and
-        content == StartHoldText
+        (content == StartHoldText or
+         (content == MinimalStartHoldText and not mutated("boot-hold-minimal-hold-judged")))
   when mutated("revert-hold-any-content"):
     # Falsifying build: a revert hold exempted by its name alone.
     path.endsWith("/" & RevertHoldName)

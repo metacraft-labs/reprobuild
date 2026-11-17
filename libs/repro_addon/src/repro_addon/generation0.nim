@@ -53,7 +53,7 @@ import repro_elevation/posix_system_parse
 from repro_infra/profile import SecretsBootUnit
 from repro_infra/apply import EssentialUnits
 
-from ./effective_floor import StartHoldText
+from ./effective_floor import StartHoldText, MinimalStartHoldText, StartHoldAssertion
 import ./fingerprint
 import ./mutations
 
@@ -591,10 +591,12 @@ proc bootConfirmUnit*(reproExe: string): string =
   "WantedBy=repro-addon.target\n"
 
 const
-  MinimalHoldText* = "[Unit]\nAssertPathExists=!/\n"
-    ## The hold the boot-hold script writes when it cannot copy the start
-    ## hold's text: the same always-failing assertion and nothing else.
-    ## ``boot_holds.releaseBootHolds`` lifts it as it lifts the start hold.
+  MinimalHoldText* = MinimalStartHoldText
+    ## The hold the boot-hold script writes (A9 review round 20: always,
+    ## straight from the record): the start hold's always-failing
+    ## assertion and nothing else. ``boot_holds.releaseBootHolds`` lifts it
+    ## as it lifts the start hold, and the effective-unit check takes it
+    ## for the add-on's own (``effective_floor.isAddonHold``).
   ConservativeHoldDir* = "/etc/systemd/system"
     ## Where the units the add-on installs live: when the record cannot be
     ## read, every socket, timer and path unit here is held.
@@ -706,10 +708,10 @@ proc bootHoldScript*(): string =
       # (here a reload per hold, as the copy and digest of round 19 were
       # before the writes), so an overrun leaves holds unwritten.
       reload & "; echo " & h & " >> " & w & "; echo [Unit] > " & h &
-        " && echo AssertPathExists=!/ >> " & h
+        " && echo " & StartHoldAssertion & " >> " & h
     else:
       "echo " & h & " >> " & w & "; echo [Unit] > " & h &
-        " && echo AssertPathExists=!/ >> " & h
+        " && echo " & StartHoldAssertion & " >> " & h
   "set -f; " &
   "if /usr/bin/systemctl is-active -q sysinit.target; then " & say &
     "sysinit.target is already active: nothing to put back; exit 0; fi; " &
