@@ -158,7 +158,8 @@
 ## ``restarted-listener-not-rerecorded`` (the socket's next apply is
 ## refused ``existing-listener``), ``revert-stopped-not-restarted`` (the
 ## floored service only a Wants= starts stays down after the passing
-## switch: A9 review round 17, finding 7, a case decision 160's
+## switch), ``revert-stopped-instances-by-enablement`` (the Wants=-pulled
+## instance of a floored template stays down: A9 review round 18, L1; A9 review round 17, finding 7, a case decision 160's
 ## held-triggers record does not cover).
 ##
 ## Also red here: ``restarted-listener-not-rerecorded`` (the record keeps
@@ -661,16 +662,23 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let wtp = proc (d: string): string =
       Head & unitResource("a9r-control.service", "", binary, description = d) &
         unitResource("a9r-wp.service", "", binary,
-                     unitLines = "Wants=a9r-wt.service\nAfter=a9r-wt.service\n",
+                     unitLines = "Wants=a9r-wt.service a9r-wi@x.service\n" &
+                                 "After=a9r-wt.service a9r-wi@x.service\n",
                      description = "A9 round 17 puller") &
         unitResource("a9r-wt.service", "User=a9e\nStateDirectory=a9r-wt\n",
-                     binary, enabled = false, description = "A9 round 17 wanted")
+                     binary, enabled = false, description = "A9 round 17 wanted") &
+        # A9 review round 18, L1: an instance of a floored template the same
+        # Wants= pulls in -- not enabled, not socket-activated.
+        unitResource("a9r-wi@.service", "User=a9e\nStateDirectory=a9r-wi\n",
+                     binary, description = "A9 round 18 wanted instance")
     r = g.applyProfile(repro, "q1", wtp("q1"))
     step("a floored service only another unit's Wants= starts applies, and runs",
          r.exitCode == 0 and
+         g.exec("systemctl is-active a9r-wi@x.service").stdout.strip() == "active" and
          g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active",
          r.stdout & r.stderr)
-    discard g.run("rm -rf /var/lib/a9r-wt; mkdir /var/lib/a9r-wt; touch /var/lib/a9r-wt/theirs")
+    discard g.run("rm -rf /var/lib/a9r-wt /var/lib/a9r-wi; mkdir /var/lib/a9r-wt /var/lib/a9r-wi; " &
+                  "touch /var/lib/a9r-wt/theirs /var/lib/a9r-wi/theirs")
     r = g.applyProfile(repro, "q2", wtp("q2"))
     let outWanted = r.stdout & r.stderr
     let stoppedRec = g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
@@ -678,14 +686,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("its tree refused, the revert holds it, stops it and records it",
          r.exitCode != 0 and "a9r-wt.service" in outWanted and
          g.exec("systemctl is-active a9r-wt.service").stdout.strip() != "active" and
-         "a9r-wt.service" in stoppedRec,
+         "a9r-wt.service" in stoppedRec and "a9r-wi@x.service" in stoppedRec,
          outWanted & "\nrecord: " & stoppedRec)
-    discard g.run("rm -rf /var/lib/a9r-wt")
+    discard g.run("rm -rf /var/lib/a9r-wt /var/lib/a9r-wi")
     r = g.applyProfile(repro, "q3", wtp("q1"))
     step("once the tree is gone, the switch whose check passes starts it again " &
          "from the record alone, and clears the record (A9 review round 17, finding 7)",
          r.exitCode == 0 and
          g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active" and
+         g.exec("systemctl is-active a9r-wi@x.service").stdout.strip() == "active" and
          "a9r-wt.service" notin g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
            "/var/lib/repro/system/revert-stopped 2>/dev/null; true").stdout,
          r.stdout & r.stderr & g.exec("systemctl status --no-pager a9r-wt.service 2>&1 | head -5").stdout)

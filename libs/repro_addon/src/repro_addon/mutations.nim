@@ -1911,6 +1911,23 @@ const
                           # health-checked floored unit confirms inside the
                           # re-assertion (and times out).
                           "boot-confirm-revert-in-reassert",
+                          # A9 review round 18: the re-point compares with the
+                          # migrated own profile only (B1).
+                          "repoint-migrated-only",
+                          # a Wants=-pulled instance is restarted only when
+                          # enabled (L1).
+                          "revert-stopped-instances-by-enablement",
+                          # the conservative boot hold holds essential
+                          # activators (L2).
+                          "conservative-hold-holds-essential",
+                          # uninstall leaves a requires link naming the
+                          # boot-hold unit (M1).
+                          "uninstall-leaves-boot-hold-requires",
+                          # verify does not report such a link (M1).
+                          "verify-ignores-boot-hold-link",
+                          # Conflicts=/PropagatesStopTo= naming the boot-hold
+                          # unit pass (L4).
+                          "boot-hold-stop-deps-unchecked",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",

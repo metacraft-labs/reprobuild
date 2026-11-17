@@ -244,7 +244,8 @@ type
     onDisk*: string     ## the engine the installed units ran before
 
 proc repointEngine*(own, engineExe: string; known: openArray[string];
-                    probe: PathProbe; recorded: RecordedDigest): RepointOutcome =
+                    probe: PathProbe; recorded: RecordedDigest;
+                    stored = ""): RepointOutcome =
   ## ``own`` with each of ``RepointedUnits`` it carries rendered for the
   ## newest engine (§13 decision 164 as amended by A9 review round 17,
   ## finding 1): a host an earlier engine bootstrapped runs the boot
@@ -285,11 +286,23 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
       continue
     let rec = recorded(path)
     var disk = ""
+    # The bytes on disk are those of the own profile as stored -- written by
+    # the engine that rendered it -- or, once this build migrated it, of the
+    # migrated text: both are the add-on's renderings (A9 review round 18,
+    # B1: a fetch unit an engine with another fetch renderer wrote).
+    var renderings = @[(cur, ownExe)]
+    let storedCur = if stored.len > 0: unitContentOf(stored, u) else: ""
+    when not mutated("repoint-migrated-only"):
+      if storedCur.len > 0 and storedCur != cur:
+        let storedExe = engineExeIn(storedCur)
+        if storedExe.len > 0: renderings.add((storedCur, storedExe))
     if p.sha256.len > 0 and rec == p.sha256:
-      for x in @known & @[engineExe, ownExe]:
-        if x.len > 0 and sha256Hex(cur.replace(ownExe, x)) == p.sha256:
-          disk = x
-          break
+      block search:
+        for (text, textExe) in renderings:
+          for x in @known & @[engineExe, ownExe, textExe]:
+            if x.len > 0 and sha256Hex(text.replace(textExe, x)) == p.sha256:
+              disk = x
+              break search
     if disk.len == 0:
       raise newException(ValueError, path & " is not a " & u & " the " &
         "add-on installed (" &
