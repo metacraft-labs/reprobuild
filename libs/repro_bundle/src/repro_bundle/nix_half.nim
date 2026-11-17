@@ -3,7 +3,9 @@
 ## normalised `nix print-dev-env` per shell, so a session enters a shell with
 ## no evaluation.
 
-import std/[algorithm, json, os, sets, strutils, tables, tempfiles]
+import std/[algorithm, json, os, sequtils, sets, strutils, tables, tempfiles]
+when defined(posix):
+  import std/posix
 import nimcrypto/sha2
 import repro_core/ambient_execution
 import repro_local_store/store_bundle
@@ -368,6 +370,119 @@ proc removeStoreLeftover*(location: string) =
       setFilePermissions(sub, getFilePermissions(sub) + {fpUserWrite})
     removeDir(location)
 
+when defined(posix):
+  const LockEx {.importc: "LOCK_EX", header: "<sys/file.h>".}: cint = 2
+  const LockSh {.importc: "LOCK_SH", header: "<sys/file.h>".}: cint = 1
+  proc cFlock(fd: cint; op: cint): cint {.importc: "flock",
+    header: "<sys/file.h>".}
+
+type StoreLock = object
+  file: string   ## `<location>.lock`
+  fd: cint
+
+proc raiseOpenFileLimit(locks: int) =
+  ## Every held lock is an open descriptor, and a large half can need more
+  ## than the usual soft limit (1024 on Linux, 256 on macOS). Raise it
+  ## towards the hard limit, and refuse up front, naming the count, when
+  ## that is still too low. An unlimited hard limit reads as a negative
+  ## number on Linux and as a huge one on macOS, where `setrlimit` also
+  ## refuses more than `OPEN_MAX`, so a refused raise is retried at 10240.
+  when defined(posix):
+    let wanted = locks + 64
+    var lim: RLimit
+    if getrlimit(RLIMIT_NOFILE, lim) != 0: return
+    if lim.rlim_cur >= 0 and lim.rlim_cur < wanted:
+      let hard = lim.rlim_max
+      lim.rlim_cur = (if hard >= 0 and hard < wanted: hard else: wanted)
+      if setrlimit(RLIMIT_NOFILE, lim) != 0 and lim.rlim_cur > 10240:
+        lim.rlim_cur = 10240
+        discard setrlimit(RLIMIT_NOFILE, lim)
+      if getrlimit(RLIMIT_NOFILE, lim) == 0 and lim.rlim_cur >= 0 and
+          lim.rlim_cur < wanted:
+        bundleFail("restoring " & $locks & " store paths holds a lock " &
+          "on each, but the open-file limit is " & $lim.rlim_cur &
+          "; raise it (ulimit -n) to at least " & $wanted)
+
+proc gcLockFile(root: string): string =
+  ## Nix's `gc.lock`, in the store's state directory.
+  if root.len == 0 or root == "/":
+    let state = getEnv("NIX_STATE_DIR")
+    (if state.len > 0: state else: "/nix/var/nix") / "gc.lock"
+  else:
+    root.strip(leading = false, chars = {'/'}) & "/nix/var/nix/gc.lock"
+
+proc holdGcLock(root: string): cint =
+  ## A shared `flock` on `gc.lock`. The garbage collector holds it
+  ## exclusively for a whole collection and ignores per-path locks, so
+  ## holding it shared keeps a collection from deleting a path, or its lock
+  ## file, between the validity re-check and its registration (§7 step
+  ## 3.3); a collection already running is waited for.
+  when defined(posix):
+    let file = gcLockFile(root)
+    createDir(file.parentDir)
+    result = posix.open(file.cstring, O_RDWR or O_CREAT, 0o600)
+    if result < 0:
+      bundleFail("cannot open the Nix GC lock " & file & ": " &
+        $strerror(errno))
+    while cFlock(result, LockSh) != 0:
+      if errno != EINTR:
+        let reason = $strerror(errno)
+        discard posix.close(result)
+        bundleFail("cannot lock " & file & ": " & reason)
+  else:
+    bundleFail("restoring a Nix half needs POSIX file locks")
+
+proc lockStoreLocation(location: string): StoreLock =
+  ## Nix's per-path lock (`PathLocks::lockPaths`, src/libstore/unix/
+  ## pathlocks.cc): an exclusive `flock` on `<path>.lock`, waiting while
+  ## another writer holds it. A holder that deletes its lock file writes a
+  ## byte to it first, so a non-empty lock file is stale and is reopened.
+  when defined(posix):
+    let file = location & ".lock"
+    while true:
+      let fd = posix.open(file.cstring, O_RDWR or O_CREAT, 0o600)
+      if fd < 0:
+        bundleFail("cannot open the store lock " & file & ": " &
+          $strerror(errno))
+      while cFlock(fd, LockEx) != 0:
+        if errno != EINTR:
+          let reason = $strerror(errno)
+          discard posix.close(fd)
+          bundleFail("cannot lock " & file & ": " & reason)
+      var st: Stat
+      if fstat(fd, st) != 0:
+        let reason = $strerror(errno)
+        discard posix.close(fd)
+        bundleFail("cannot stat " & file & ": " & reason)
+      if st.st_size == 0:
+        return StoreLock(file: file, fd: fd)
+      discard posix.close(fd)
+  else:
+    bundleFail("restoring a Nix half needs POSIX file locks")
+
+proc stillLinked(l: StoreLock): bool =
+  ## Whether the lock file is still in the store. The garbage collector
+  ## deletes a `<path>.lock` whose path is invalid and no temporary root,
+  ## so a lock taken before `gc.lock` may have lost its file.
+  when defined(posix):
+    var st: Stat
+    result = fstat(l.fd, st) == 0 and st.st_nlink > 0
+  else:
+    result = false
+
+proc release(locks: var seq[StoreLock]) =
+  ## Release as Nix releases a lock file it deletes: unlink it, write a
+  ## byte so a waiter knows it is stale, close it. A lock file something
+  ## else already deleted is only closed: the name may by now be another
+  ## writer's lock file.
+  when defined(posix):
+    for l in locks:
+      if l.stillLinked:
+        discard posix.unlink(l.file.cstring)
+        discard posix.write(l.fd, "d".cstring, 1)
+      discard posix.close(l.fd)
+  locks.setLen(0)
+
 proc narHashes(locations: seq[string]): seq[string] =
   ## The base16 SHA-256 NAR hash of each location, in order ("" where it
   ## could not be computed), by `nix-hash`, 16 at a time.
@@ -385,31 +500,26 @@ proc narHashes(locations: seq[string]): seq[string] =
     if tab > 0: got[line[0 ..< tab]] = line[tab + 1 .. ^1]
   for loc in locations: result.add(got.getOrDefault(loc))
 
-proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
-  ## §7 step 3. Only the half's *invalid* paths are restored; a valid path
-  ## is Nix's, and is neither rewritten nor re-registered. Whatever an
-  ## interrupted unpack or substitution left at an invalid path is deleted
-  ## first, so `--skip-old-files` can never keep a truncated file. The
-  ## verified parts are then unpacked, each restored path's NAR hash must
-  ## match its registration, and only then are those paths registered. A
-  ## run killed at any point leaves them invalid, and the next run starts
-  ## them over.
-  let zstdExe = zstdForRestore(h)
-  let target = (if root.len > 0: root else: "/")
-  createDir(target)
-  let reg = readVerifiedPart(partsDir, h.registration)
-  let registered = parseRegistration(mustRunShell(quoteShell(zstdExe) &
-    " -q -dc", "decompressing the registration", stdinData = reg))
-  var paths: seq[string]
-  for r in registered: paths.add(r.path)
-  let invalid = invalidPaths(paths, root).toHashSet()
-  for p in paths:
-    if p in invalid: removeStoreLeftover(storeLocation(root, p))
+proc restoreLockedPaths(h: NixHalf; partsDir, root, target, zstdExe: string;
+    registered: seq[RegisteredPath]; invalid: HashSet[string]) =
+  ## §7 steps 3.4 to 3.7, for the paths in `invalid`, whose locks are held.
+  for r in registered:
+    if r.path in invalid: removeStoreLeftover(storeLocation(root, r.path))
+  # Every registered path that is valid is Nix's: tar adds nothing to it.
+  var skip = ""
+  for r in registered:
+    if r.path notin invalid: skip.add(r.path.strip(chars = {'/'},
+      trailing = false) & "\n")
+  let (excludeFile, excludes) = createTempFile("repro-bundle-exclude-", "")
+  excludeFile.write(skip)
+  excludeFile.close()
+  defer: removeFile(excludes)
   let errPath = partsDir / ".unpack.stderr"
   let command = "set -o pipefail; (" & quoteShell(zstdExe) &
     " -q -dc --long=" & $ZstdWindowLog & " - | " &
     quoteShell(requireExe("tar")) & " -C " & quoteShell(target) &
-    " --skip-old-files -xf -) >" & quoteShell(errPath) & " 2>&1"
+    " --skip-old-files --anchored --no-wildcards -X " &
+    quoteShell(excludes) & " -xf -) >" & quoteShell(errPath) & " 2>&1"
   if feedParts(partsDir, h.parts, command, stopEarly = false) != 0:
     bundleFail("unpacking the Nix half failed: " &
       (if fileExists(errPath): readFile(errPath).strip() else: ""))
@@ -435,6 +545,72 @@ proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
   if db.len > 0:
     discard mustRun(requireExe("nix-store"), storeArgs(root) & @["--load-db"],
       stdinData = db)
+
+proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
+  ## §7 step 3. Only the half's *invalid* paths are restored; a valid path
+  ## is Nix's, and is neither rewritten nor re-registered. Each invalid
+  ## path's Nix lock (`<path>.lock`) is taken, in sorted order, and held
+  ## until registration; validity is checked again under the locks, and a
+  ## path another Nix writer made valid meanwhile is left to it and
+  ## excluded from extraction (§7 step 3.3). A shared lock on Nix's
+  ## `gc.lock`, taken after the path locks, is held until registration, so
+  ## no garbage collection deletes a path being restored. Whatever an
+  ## interrupted unpack or substitution left at an invalid path is deleted
+  ## first, so `--skip-old-files` can never keep a truncated file. The
+  ## verified parts are then unpacked, each restored path's NAR hash must
+  ## match its registration, and only then are those paths registered. A
+  ## run killed at any point leaves them invalid, and the next run starts
+  ## them over.
+  let zstdExe = zstdForRestore(h)
+  let target = (if root.len > 0: root else: "/")
+  createDir(target)
+  let reg = readVerifiedPart(partsDir, h.registration)
+  let registered = parseRegistration(mustRunShell(quoteShell(zstdExe) &
+    " -q -dc", "decompressing the registration", stdinData = reg))
+  var paths: seq[string]
+  for r in registered: paths.add(r.path)
+  var gcLock: cint = -1
+  var locks: seq[StoreLock]
+  try:
+    var candidates = invalidPaths(paths, root).deduplicate()
+    candidates.sort()
+    # Path locks first, then `gc.lock`: Nix holds a path lock while it
+    # waits for a collection (`addToStore` calls `autoGC`), so waiting for
+    # a path lock while holding `gc.lock` could deadlock with it. A
+    # collection that ran while the path locks were taken may have deleted
+    # a lock file, or a path that was valid and so is not locked; then
+    # everything is let go and taken again, for every path now invalid.
+    # The lock descriptors are inherited by the tar and nix-store children,
+    # so a killed restore's locks last until its writers have exited too.
+    var invalid: HashSet[string]
+    while true:
+      if candidates.len > 0:
+        createDir(storeLocation(root, "/nix/store"))
+        raiseOpenFileLimit(candidates.len)
+      for p in candidates:
+        locks.add(lockStoreLocation(storeLocation(root, p)))
+      # Nothing invalid means nothing is written, so a no-op rerun stays
+      # read-only and needs no access to a root-owned `gc.lock`.
+      if candidates.len > 0: gcLock = holdGcLock(root)
+      var intact = true
+      for l in locks:
+        if not l.stillLinked: intact = false
+      let now = invalidPaths(paths, root)
+      invalid = now.toHashSet()
+      let locked = candidates.toHashSet()
+      if intact and invalid <= locked: break
+      release(locks)
+      when defined(posix):
+        if gcLock >= 0: discard posix.close(gcLock)
+      gcLock = -1
+      candidates = (locked + invalid).toSeq()
+      candidates.sort()
+    restoreLockedPaths(h, partsDir, root, target, zstdExe, registered,
+      invalid)
+  finally:
+    release(locks)
+    when defined(posix):
+      if gcLock >= 0: discard posix.close(gcLock)
   if not h.nixHalfPresent(root):
     bundleFail("the Nix half's registration did not make every shell root " &
       "valid")

@@ -1,6 +1,7 @@
 ## `restore.sh`: the bootstrap a machine without `repro` runs
 ## (Workspace-Bundles.md §7). It restores the Nix half with nothing but
-## bash, curl, tar, sha256sum, df, nix-store and nix-hash, then hands over to
+## bash, curl, tar, sha256sum, df, flock, nix-store and nix-hash, then hands
+## over to
 ## the `repro` that half contains, which restores the remaining halves.
 ##
 ## Everything it needs is baked in at create time (the half's id, parts,
@@ -127,10 +128,28 @@ else
   # first, so --skip-old-files never keeps a truncated file; each restored
   # path's NAR hash must match the registration before it is registered.
   # A run killed anywhere leaves those paths invalid, and the next starts
-  # them over (Workspace-Bundles.md §7 step 3).
+  # them over (Workspace-Bundles.md §7 step 3). Each invalid path's Nix lock
+  # is held from the validity re-check to the registration (step 3.3).
   command -v nix-hash >/dev/null || done_with "nix-hash is not installed; nothing restored"
+  command -v flock >/dev/null || done_with "flock (util-linux) is not installed; nothing restored"
   meta=$(mktemp -d "${TMPDIR:-/tmp}/repro-bundle-meta.XXXXXX") || done_with "cannot create a scratch directory"
-  trap 'rm -rf "$meta" "${work:-}"' EXIT
+  # Nix's lock release (PathLocks with deletion): unlink the lock file, then
+  # write a byte to it, so a waiter that gets it next sees it is stale. A
+  # lock file something else deleted is only closed: by now the name may be
+  # another writer's lock file.
+  lock_files=(); lock_fds=(); gc_fd=""
+  linked() { [ "$(stat -L -c %h "/dev/fd/$1" 2>/dev/null)" != 0 ]; }
+  release_locks() {
+    local i
+    for i in "${!lock_fds[@]}"; do
+      if linked "${lock_fds[$i]}"; then rm -f "${lock_files[$i]}"; printf d >&"${lock_fds[$i]}"; fi
+      eval "exec ${lock_fds[$i]}>&-"
+    done
+    lock_files=(); lock_fds=()
+    [ -z "$gc_fd" ] || eval "exec ${gc_fd}>&-"
+    gc_fd=""
+  }
+  trap 'release_locks; rm -rf "$meta" "${work:-}"' EXIT
   "$Z" -q -dc "$dir/registration" > "$meta/db" || done_with "cannot decompress the registration"
   # nix-store --dump-db: <path> <narHash> <narSize> <deriver> <n> <n refs>.
   awk -v out="$meta/expected" -v paths="$meta/paths" '
@@ -140,15 +159,67 @@ else
     s == 5 { if (--n == 0) s = 0 }
     END { if (s != 0) exit 1 }' "$meta/db" && [ -s "$meta/paths" ] \
     || done_with "malformed nix half registration"
-  xargs nix-store "${store[@]}" --check-validity --print-invalid < "$meta/paths" > "$meta/invalid" \
-    || done_with "nix-store --check-validity failed"
   at=""; [ "$ROOT" != / ] && at="${ROOT%/}"
+  xargs nix-store "${store[@]}" --check-validity --print-invalid < "$meta/paths" > "$meta/unlocked" \
+    || done_with "nix-store --check-validity failed"
+  mkdir -p "$at/nix/store" || done_with "cannot create $at/nix/store"
+  n=$(wc -l < "$meta/unlocked") || done_with "cannot count the invalid paths"
+  lim=$(ulimit -n)
+  if [ "$lim" != unlimited ] && (( lim < n + 64 )); then
+    ulimit -Sn $(( n + 64 )) 2>/dev/null \
+      || done_with "restoring $n store paths holds a lock on each, but the open-file limit is $lim; raise it (ulimit -n) to at least $(( n + 64 ))"
+  fi
+  if [ "$ROOT" = / ]; then state="${NIX_STATE_DIR:-/nix/var/nix}"; else state="$at/nix/var/nix"; fi
+  # A rerun with nothing invalid writes nothing: no state directory, no gc.lock.
+  [ "$n" -eq 0 ] || mkdir -p "$state" || done_with "cannot create $state"
+  # Nix's PathLocks: in sorted order, an exclusive flock on <path>.lock,
+  # waiting while a Nix writer holds it; a non-empty lock file is stale (its
+  # holder deleted it) and is opened again. Then gc.lock, shared: the
+  # collector ignores path locks and holds gc.lock exclusively while it
+  # collects, so no collection deletes what is restored before --load-db.
+  # In that order because Nix holds a path lock while it waits for a
+  # collection. A collection that ran before gc.lock was ours may have
+  # deleted a held lock file, or a path that was valid and so is unlocked:
+  # then let everything go and start over, for every path now invalid. The
+  # lock descriptors are inherited by tar and nix-store, so a killed
+  # restore's locks last until its writers have exited too.
+  LC_ALL=C sort -u -o "$meta/unlocked" "$meta/unlocked" || done_with "cannot sort the invalid paths"
+  while :; do
+    while IFS= read -r p; do
+      l="$at$p.lock"
+      while :; do
+        exec {fd}<>"$l" || done_with "cannot open the store lock $l"
+        flock "$fd" || done_with "cannot lock $l"
+        [ -s "/dev/fd/$fd" ] || break
+        eval "exec ${fd}>&-"
+      done
+      lock_files+=("$l"); lock_fds+=("$fd")
+    done < "$meta/unlocked"
+    if [ -s "$meta/unlocked" ]; then
+      exec {gc_fd}<>"$state/gc.lock" || done_with "cannot open $state/gc.lock"
+      flock -s "$gc_fd" || done_with "cannot lock $state/gc.lock"
+    fi
+    intact=1
+    for f in "${lock_fds[@]}"; do linked "$f" || intact=0; done
+    # Checked again under the locks: a path a Nix writer made valid while
+    # we waited is Nix's now, and tar adds nothing to it.
+    xargs nix-store "${store[@]}" --check-validity --print-invalid < "$meta/paths" > "$meta/invalid" \
+      || done_with "nix-store --check-validity failed"
+    LC_ALL=C sort -u -o "$meta/invalid" "$meta/invalid" || done_with "cannot sort the invalid paths"
+    missed=$(LC_ALL=C comm -13 "$meta/unlocked" "$meta/invalid") || done_with "cannot compare the invalid paths"
+    (( intact )) && [ -z "$missed" ] && break
+    release_locks
+    LC_ALL=C sort -u -o "$meta/unlocked" "$meta/unlocked" "$meta/invalid" || done_with "cannot sort the invalid paths"
+  done
+  LC_ALL=C sort -u "$meta/paths" | LC_ALL=C comm -23 - "$meta/invalid" | sed 's|^/||' > "$meta/exclude" \
+    || done_with "cannot list the valid paths to leave alone"
   while IFS= read -r p; do
     t="$at$p"
     if [ -d "$t" ] && [ ! -L "$t" ]; then chmod -R u+w "$t"; fi
     if [ -e "$t" ] || [ -L "$t" ]; then rm -rf "$t" || done_with "cannot remove the partial store path $t"; fi
   done < "$meta/invalid"
-  ( cd "$dir" && cat "${PARTS[@]}" ) | "$Z" -q -dc --long=27 | tar -C "$ROOT" --skip-old-files -xf - \
+  ( cd "$dir" && cat "${PARTS[@]}" ) | "$Z" -q -dc --long=27 \
+    | tar -C "$ROOT" --skip-old-files --anchored --no-wildcards -X "$meta/exclude" -xf - \
     || done_with "nix half unpack failed"
   # In sh -c: $0 is nix-hash, $1 the root's prefix, $2 one store path.
   tr '\n' '\0' < "$meta/invalid" \
@@ -173,6 +244,7 @@ else
     s == 4 { n = $0 + 0; e = e $0 "\n"; if (n == 0) { if (p in w) printf "%s", e; s = 0 } else s = 5; next }
     s == 5 { e = e $0 "\n"; if (--n == 0) { if (p in w) printf "%s", e; s = 0 } }' "$meta/db" \
     | nix-store "${store[@]}" --load-db || done_with "nix-store --load-db failed"
+  release_locks
   rm -rf "$meta"
   nix-store "${store[@]}" --check-validity "${ROOTS[@]}" >/dev/null || done_with "registration incomplete"
   [ "$dir" = "${work:-}" ] && rm -f "$work"/*
