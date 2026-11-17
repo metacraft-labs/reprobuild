@@ -601,6 +601,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim",
+    binary: "build/test-bin/t_addon_evidence_ship_confinement",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-ship-confinement-\" & $getC..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim",
     binary: "build/test-bin/t_addon_evidence_ships_off_host",
     defines: @[],

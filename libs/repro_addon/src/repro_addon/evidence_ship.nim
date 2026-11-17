@@ -34,7 +34,7 @@
 ## and exits 0; the sink side sees the heartbeat stop. A configuration that
 ## cannot be read exits 2.
 
-import std/[asyncdispatch, os, strutils, times]
+import std/[asyncdispatch, json, os, posix, strutils, times]
 
 import repro_core/file_lock
 import repro_peer_cache/evidence as sinkEvidence
@@ -45,6 +45,9 @@ import repro_peer_cache/types
 import ./apt_hook
 import ./evidence
 import ./generation0
+import ./host_exec
+import ./record_dir
+import ./ledger
 import ./mutations
 
 type
@@ -66,6 +69,12 @@ type
     aptHookLog*: string
     dpkgLog*: string
     bootIdPath*: string
+    harvestStateDir*: string  ## the apt hook cursor's directory ("": stateDir)
+    confined*: bool
+      ## The host's site as root sees it: a shipping run or credential
+      ## check for it runs in the shipping unit's confinement, as its
+      ## dynamic user (``runConfined``; §13 decision 181), never in the
+      ## calling root process. Test sites are run in process.
 
   ShipResult* = object
     shipped*: int             ## outbox entries the sink acknowledged
@@ -94,12 +103,29 @@ const
   HookWrapperKinds* = ["verify-missing", "verify-failed", "verify-timeout"]
 
 proc defaultShipSite*(): ShipSite =
+  ## The host's site as a root caller sees it (``confined``).
   ShipSite(confPath: EvidenceConfPath, sinkCaPath: EvidenceSinkCaPath,
     credentialCert: EvidenceCredentialCertPath,
-    credentialKey: EvidenceCredentialKeyPath, stateDir: EvidenceStateDir,
+    credentialKey: EvidenceCredentialKeyPath, stateDir: EvidenceShipStateDir,
+    harvestStateDir: EvidenceStateDir, confined: true,
     outbox: EvidenceOutboxPath, aptHookLog: AptHookLogPath,
     dpkgLog: "/var/log/dpkg.log",
     bootIdPath: "/proc/sys/kernel/random/boot_id")
+
+proc unitShipSite*(): ShipSite =
+  ## The host's site as the shipping unit and its transient runs see it:
+  ## the credential from ``$CREDENTIALS_DIRECTORY`` (``LoadCredential=``),
+  ## the dynamic user's state directory, and no apt hook log (its
+  ## privileged ``ExecStartPre=+`` step, or the root caller, harvests it).
+  let creds = getEnv("CREDENTIALS_DIRECTORY")
+  result = defaultShipSite()
+  result.confined = false
+  result.credentialCert = creds / EvidenceCredentialNames[0]
+  result.credentialKey = creds / EvidenceCredentialNames[1]
+  result.stateDir = EvidenceShipUnitStateDir
+  result.outbox = EvidenceShipUnitStateDir / "outbox"
+  result.aptHookLog = ""
+  result.harvestStateDir = ""
 
 proc parseEvidenceConf*(text: string): EvidenceConf =
   ## ``key = value`` lines (``generation0.renderEvidenceConf``).
@@ -172,7 +198,6 @@ proc lastHeartbeatMs(site: ShipSite): int64 =
 proc writeOutboxRecord*(outbox: string; r: EvidenceRecord; kind: string) =
   ## An entry the shipping unit itself writes (it holds no attestation key,
   ## so these are unattested): the hook wrapper's events.
-  createDir(outbox)
   let t = getTime()
   let ns = t.toUnix() * 1_000_000_000 + int64(t.nanosecond)
   let name = align($ns, 20, '0') & "-" & $getCurrentProcessId() & "-" &
@@ -183,7 +208,11 @@ proc harvestHookWrapperEvents*(site: ShipSite; host: string): int =
   ## The apt hook wrapper's ``verify-*`` lines since the last run, each as a
   ## DET-AO-6 record in the outbox (persisted before the cursor moves on,
   ## so a run that cannot reach the sink loses none of them).
-  for line in hookEventsSince(site.stateDir / "apt-hook.cursor",
+  if site.aptHookLog.len == 0: return
+  let cursorDir = if site.harvestStateDir.len > 0: site.harvestStateDir
+                  else: site.stateDir
+  createDir(cursorDir)
+  for line in hookEventsSince(cursorDir / "apt-hook.cursor",
                               site.aptHookLog):
     let parts = line.splitWhitespace()
     if parts.len < 2 or parts[1] notin HookWrapperKinds: continue
@@ -422,14 +451,175 @@ proc shipRunWait*(site: ShipSite; heartbeatSec: int): int =
       try: removeFile(failuresPath) except CatchableError: discard
     0
 
+# ---------------------------------------------------------------------------
+# The confined runs (§13 decision 181). Every decoder of the sink's bytes --
+# the shipping run, the credential self-test -- runs as the shipping unit's
+# dynamic user, in its sandbox. A root caller (``contain``, ``release``,
+# uninstall, an operator's ``evidence-credential-check``) starts a
+# transient unit with exactly the shipping unit's confinement
+# (``evidenceShipConfinement``), waits for it, and then takes from the
+# outbox only what names it holds: never an entry's bytes.
+# ---------------------------------------------------------------------------
+
+const SystemdRunCandidates* = ["/usr/bin/systemd-run", "/bin/systemd-run"]
+const ConfinedExeCopy* = "/var/lib/repro-addon-evidence-run/repro"
+  ## The copy of a binary outside the store that a confined run executes,
+  ## root's, 0755, made just before the run and removed just after it.
+  ## Not in /run (mounted ``noexec``) and not in the dynamic user's state
+  ## directory (systemd refuses to execute from it: measured on debian-13,
+  ## "Permission denied" at EXEC); in practice only an uninstall re-run
+  ## whose store is already gone needs it.
+
+proc sinkAddressOf*(endpoint: string): string =
+  ## The address part of ``address:port`` (IPv6 without its brackets).
+  let colon = endpoint.rfind(':')
+  result = if colon > 0: endpoint[0 ..< colon] else: endpoint
+  if result.startsWith("[") and result.endsWith("]"):
+    result = result[1 .. ^2]
+
+proc confinedReproExe*(unitFile = unitPath(EvidenceShipUnit);
+                       bootstrapRecord = "/var/lib/repro/system/addon/" &
+                         "bootstrap-evidence.json";
+                       self = getAppFilename()): string =
+  ## The add-on's own binary, which a confined run executes as the dynamic
+  ## user: this process's when it is in the store; otherwise the one the
+  ## installed shipping unit names, or, once uninstall removed the units,
+  ## the one bootstrap recorded (an operator may run ``repro`` from a path
+  ## the sandbox hides, ``/root`` say); otherwise this process's.
+  if self.startsWith(StoreRoot & "/") and fileExists(self): return self
+  try:
+    for l in readFile(unitFile).splitLines():
+      if l.startsWith("ExecStart="):
+        let exe = l["ExecStart=".len .. ^1].splitWhitespace()[0]
+        if exe.startsWith(StoreRoot & "/") and fileExists(exe): return exe
+  except CatchableError: discard
+  try:
+    let exe = parseJson(readFile(bootstrapRecord)){"reproExe"}.getStr()
+    if exe.startsWith(StoreRoot & "/") and fileExists(exe): return exe
+  except CatchableError: discard
+  self
+
+proc confinedRunArgv*(conf: EvidenceConf; command: openArray[string];
+                      reproExe = confinedReproExe(); systemdRun = ""): seq[string] =
+  ## ``systemd-run`` for one confined run of ``repro system addon
+  ## <command>``: waits for it, passes its output through, and gives it
+  ## every line of the shipping unit's confinement.
+  let tool = if systemdRun.len > 0: systemdRun
+             else: resolveHostTool(SystemdRunCandidates)
+  if tool.len == 0:
+    raise newException(EvidenceConfError, "systemd-run not found at " &
+      SystemdRunCandidates.join(" or ") & "; the sink is reached only from " &
+      "the shipping unit's confinement")
+  result = @[tool, "--wait", "--pipe", "--quiet", "--collect",
+             "--service-type=oneshot",
+             "--description=Reprobuild add-on: confined evidence run",
+             "-p", "TimeoutStartSec=" & $EvidenceShipTimeoutStartSec]
+  let inputs = EvidenceUnitsInputs(sinkAddress: sinkAddressOf(conf.sinkEndpoint))
+  for line in evidenceShipConfinement(inputs):
+    result.add("-p")
+    result.add(line)
+  # A binary outside the store may sit where the sandbox hides it (an
+  # operator's /root, the test bed's /root/addon): the run executes a copy
+  # of that one file in the dynamic user's state directory (``runConfined``
+  # makes it; systemd-run looks the command up on the host, so it must
+  # exist there too).
+  result.add("--")
+  result.add(if reproExe.startsWith(StoreRoot & "/"): reproExe
+             else: ConfinedExeCopy)
+  result.add("system")
+  result.add("addon")
+  for c in command: result.add(c)
+
+var confinedRunner*: proc (argv: seq[string]): HostToolResult {.nimcall.} = nil
+  ## A test seam, nil in production: what runs a confined run's
+  ## ``systemd-run`` argv instead of the host (a unit test has no PID 1 to
+  ## start a transient unit).
+
+proc runConfined*(conf: EvidenceConf; command: openArray[string]):
+    HostToolResult =
+  ## One confined run (``confinedRunArgv``), its output captured.
+  if confinedRunner != nil:
+    return confinedRunner(confinedRunArgv(conf, command,
+                                          systemdRun = "/usr/bin/systemd-run"))
+  let exe = confinedReproExe()
+  let copied = not exe.startsWith(StoreRoot & "/")
+  if copied:
+    createDir(parentDir(ConfinedExeCopy))
+    discard posix.chmod(parentDir(ConfinedExeCopy).cstring, Mode(0o755))
+    writeFileAtomic(ConfinedExeCopy, readFile(exe), 0o755)
+  try:
+    result = runHostTool(confinedRunArgv(conf, command, reproExe = exe),
+                         timeoutSec = EvidenceShipTimeoutStartSec + 60)
+  finally:
+    if copied:
+      try: removeDir(parentDir(ConfinedExeCopy))
+      except OSError: discard
+
+proc shipFor*(site: ShipSite; conf: EvidenceConf; host: string;
+              forceHeartbeat = false): ShipResult =
+  ## A shipping run for ``site``: in process for a test's site; for the
+  ## host's (``site.confined``) the apt hook harvest here, as root, and
+  ## the shipping itself in a confined run. ``pending`` is then the count
+  ## of entry names left in the outbox, and ``error`` says why any are.
+  if not site.confined or mutated("ship-decoded-as-root"):
+    var s = site
+    s.confined = false
+    return runEvidenceShip(s, conf, host, forceHeartbeat)
+  result.hookEvents = harvestHookWrapperEvents(site, host)
+  var cmd = @["evidence-ship", "--no-backoff"]
+  if forceHeartbeat: cmd.add("--heartbeat")
+  let r = runConfined(conf, cmd)
+  result.pending = outboxEntries(site.outbox).len
+  if r.exitCode != 0:
+    result.error = "the confined shipping run (" & confinedReproExe() &
+      ") exited " & $r.exitCode & ": " & r.output.strip()
+  elif result.pending > 0:
+    result.error = $result.pending & " record(s) still queued: " &
+      r.output.strip()
+
+proc inConfinedRun(): bool =
+  ## Whether this process is the shipping unit or one of its transient
+  ## runs (``EvidenceShipConfinedEnv``).
+  getEnv(EvidenceShipConfinedEnv) == "1"
+
+proc runEvidenceHarvestCli*(args: seq[string]): int =
+  ## ``repro system addon evidence-harvest``: the shipping unit's
+  ## privileged ``ExecStartPre=+`` step. Turns the apt hook wrapper's
+  ## events in root's log into outbox entries; reads nothing from the
+  ## network.
+  if args.len != 0:
+    stderr.write("usage: repro system addon evidence-harvest\n")
+    return 2
+  try:
+    let n = harvestHookWrapperEvents(defaultShipSite(), readHost())
+    if n > 0: stdout.write("evidence: " & $n & " apt hook event(s)\n")
+    0
+  except CatchableError as e:
+    stderr.write("repro system addon evidence-harvest: " & e.msg & "\n")
+    2
+
 proc runEvidenceShipCli*(args: seq[string]): int =
   var force = false
+  var noBackoff = false
   for a in args:
     if a == "--heartbeat": force = true
+    elif a == "--no-backoff": noBackoff = true
     else:
       stderr.write("usage: repro system addon evidence-ship [--heartbeat]\n")
       return 2
-  let site = defaultShipSite()
+  if not inConfinedRun() and not mutated("ship-decoded-as-root"):
+    # An operator's (or any root) invocation: ship in a confined run.
+    try:
+      let site = defaultShipSite()
+      let conf = loadEvidenceConf(site.confPath)
+      let r = shipFor(site, conf, readHost(), force)
+      stdout.write("evidence: queued " & $r.pending & "\n")
+      if r.error.len > 0: stderr.write("repro-addon evidence: " & r.error & "\n")
+      return 0
+    except CatchableError as e:
+      stderr.write("repro system addon evidence-ship: " & e.msg & "\n")
+      return 2
+  let site = unitShipSite()
   var heartbeat = DefaultEvidenceHeartbeatSec
   var broken = ""
   result = 0
@@ -463,13 +653,25 @@ proc runEvidenceShipCli*(args: seq[string]): int =
           kind: "evidence-ship-broken", fields: @[("message", broken)]),
           defaultSite())
       except CatchableError: discard
-  sleep(1000 * shipRunWait(site, heartbeat))
+  if not noBackoff:
+    sleep(1000 * shipRunWait(site, heartbeat))
 
 proc runCredentialCheckCli*(args: seq[string]): int =
   if args.len != 0:
     stderr.write("usage: repro system addon evidence-credential-check\n")
     return 2
-  let site = defaultShipSite()
+  if not inConfinedRun() and not mutated("ship-decoded-as-root"):
+    # The sink's answers are decoded in the shipping unit's confinement,
+    # never by the calling root process (§13 decision 181).
+    try:
+      let conf = loadEvidenceConf(defaultShipSite().confPath)
+      let r = runConfined(conf, ["evidence-credential-check"])
+      stdout.write(r.output)
+      return (if r.exitCode in [0, 1, 2]: r.exitCode else: 2)
+    except CatchableError as e:
+      stderr.write("repro system addon evidence-credential-check: " & e.msg & "\n")
+      return 2
+  let site = unitShipSite()
   try:
     let conf = loadEvidenceConf(site.confPath)
     let c = runCredentialCheck(site, conf, readHost())

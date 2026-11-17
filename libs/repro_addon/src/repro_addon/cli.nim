@@ -8,6 +8,7 @@
 ##                                [--cache-publishers F [--cache-url U]]
 ##                                [--evidence-sink A:P --evidence-sink-ca F]
 ##   repro system addon evidence-ship [--heartbeat]
+##   repro system addon evidence-harvest
 ##   repro system addon evidence-credential-check
 ##   repro system addon uninstall [--keep-store]
 ##   repro system addon verify-discard-record RECORD --key HEX
@@ -151,10 +152,14 @@ commands:
       The egress observer's check (repro-addon-egress-check.service): record
       every destination the deploy agent's fetch unit was refused, and
       heartbeat.
+  evidence-harvest
+      The shipping unit's privileged first step: turn the apt hook
+      wrapper's events into evidence records. Reads root's own log only.
   evidence-credential-check
       Test this host's sink write credential: an append must succeed and a
       list, a read, an overwrite and a delete must each be refused. Exit 0
-      only then. It announces itself first, so the sink's check reads it as
+      only then. Runs in the shipping unit's confinement, as its dynamic
+      user. It announces itself first, so the sink's check reads it as
       a self-test, not as a probe (G34).
   uninstall [--keep-store] [--discard-store-evidence]
             [--discard-unacknowledged-store-evidence]
@@ -807,6 +812,8 @@ proc runAddonCli*(args: seq[string]): int =
       return runRotateRecipientKeyCli(rest)
     of "evidence-ship":
       return runEvidenceShipCli(rest)
+    of "evidence-harvest":
+      return runEvidenceHarvestCli(rest)
     of "evidence-credential-check":
       return runCredentialCheckCli(rest)
     of "evidence-enrol":

@@ -193,10 +193,9 @@ const
     ## the sink (never the peer-cache anchors, threat model G28's rule).
   EvidenceStateDir* = "/var/lib/repro/evidence"
     ## ``0700 root``: the host's sink write credential (``host-ca.key``,
-    ## ``host-ca.crt``), the shipping cursor and the sink's last receipt.
-    ## Nothing else can read the credential; the shipping unit cannot read
-    ## the attestation key or the recipient key (they are under
-    ## ``/var/lib/repro/agent``, hidden from it).
+    ## ``host-ca.crt``) and the apt hook harvest's cursor. The shipping unit
+    ## runs as a dynamic user (§13 decision 181) and cannot open it: systemd
+    ## hands it the credential through ``LoadCredential=``.
   EvidenceCredentialCertPath* = EvidenceStateDir & "/host-ca.crt"
   EvidenceCredentialKeyPath* = EvidenceStateDir & "/host-ca.key"
   AttestationKeyPath* = "/var/lib/repro/agent/attestation.key"
@@ -207,8 +206,35 @@ const
   AttestationPubPath* = "/var/lib/repro/agent/attestation.pub"
   EvidenceDirPath* = "/var/lib/repro/system/addon/evidence"
     ## The local records (one JSON document per event, spec §10.4).
-  EvidenceOutboxPath* = EvidenceDirPath & "/outbox"
+  EvidenceShipUser* = "repro-addon-evidence"
+    ## The shipping unit's dynamic user (``DynamicUser=``, §13 decision
+    ## 181): no account in ``/etc/passwd``, so bootstrap adds none (T23).
+    ## The transient runs that ship for ``contain``, ``release``, uninstall
+    ## and ``evidence-credential-check`` name the same user, so they share
+    ## its state directory, its outbox and ``ship.lock``.
+  EvidenceShipStateDir* =
+    when mutated("evidence-ship-runs-as-root"): "/var/lib/repro-addon-evidence"
+    else: "/var/lib/private/repro-addon-evidence"
+    ## The dynamic user's ``StateDirectory=`` as root sees it (systemd links
+    ## ``/var/lib/repro-addon-evidence`` to it): the outbox, the shipping
+    ## cursor, the sink's last receipt and ``ship.lock``.
+  EvidenceShipStatePaths* = ["/var/lib/private/repro-addon-evidence",
+                             "/var/lib/repro-addon-evidence"]
+    ## What uninstall removes of that state directory.
+  EvidenceShipUnitStateDir* = "/var/lib/repro-addon-evidence"
+    ## The same directory as the shipping unit sees it.
+  EvidenceOutboxPath* = EvidenceShipStateDir & "/outbox"
     ## Each record as the sink receives it, until the sink acknowledges it.
+    ## Owned by the shipping unit's dynamic user; the root writers write
+    ## each entry through descriptors that follow no link and hand it to
+    ## that user (``record_dir.writeDelegatedEntry``). A root reader takes
+    ## only entry names from it, never their bytes (§13 decision 181).
+  EvidenceShipConfinedEnv* = "REPRO_ADDON_SHIP_CONFINED"
+    ## Set in the shipping unit and its transient runs: the shipping and
+    ## credential-check commands decode the sink's bytes only where it is
+    ## set, and hand themselves to a confined run otherwise.
+  EvidenceCredentialNames* = ["host-ca.crt", "host-ca.key"]
+    ## The credential's names under ``$CREDENTIALS_DIRECTORY``.
   StoreQuarantinePath* = "/var/lib/repro/system/addon/store-quarantine"
     ## Store paths whose bytes differed from their realisation digest (spec
     ## §13 decision 46): one per line; no switch uses one again.
@@ -1088,11 +1114,26 @@ proc egressUnit*(nft: string; tableSha256 = ""): string =
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
   "ProtectSystem=strict\n" &
+  "InaccessiblePaths=-/var/lib/repro -/run/repro\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
+  "PrivateDevices=yes\n" &
   "ProtectKernelTunables=yes\n" &
+  "ProtectKernelModules=yes\n" &
+  "ProtectKernelLogs=yes\n" &
   "ProtectControlGroups=yes\n" &
-  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "ProtectClock=yes\n" &
+  "ProtectHostname=yes\n" &
+  "RestrictNamespaces=yes\n" &
+  "RestrictRealtime=yes\n" &
+  "RestrictSUIDSGID=yes\n" &
+  "LockPersonality=yes\n" &
+  "SystemCallArchitectures=native\n" &
+  # It loads one root-written file with nft over netlink: no Unix socket
+  # (§13 decision 181), no IP socket, nothing of the add-on's state.
+  (when mutated("egress-units-unix-sockets"):
+     "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n"
+   else: "RestrictAddressFamilies=AF_NETLINK\n") &
   "IPAddressDeny=any\n" &
   "\n" &
   "[Install]\n" &
@@ -1109,19 +1150,35 @@ proc egressCheckUnit*(reproExe: string): string =
   "[Service]\n" &
   "Type=oneshot\n" &
   "ExecStart=" & reproExe & " system addon egress-check\n" &
-  "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
+  # CAP_DAC_OVERRIDE: its records go into the outbox, which belongs to the
+  # shipping unit's dynamic user (§13 decision 181); root without it cannot
+  # write into a directory another user owns.
+  "CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
   "ProtectSystem=strict\n" &
-  "ReadWritePaths=" & EvidenceDirPath & "\n" &
+  "ReadWritePaths=" & EvidenceDirPath & " -" & EvidenceShipStateDir & "\n" &
   "InaccessiblePaths=-/var/lib/repro/agent -/run/repro\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
   "PrivateDevices=yes\n" &
   "ProtectKernelTunables=yes\n" &
   "ProtectKernelModules=yes\n" &
+  "ProtectKernelLogs=yes\n" &
   "ProtectControlGroups=yes\n" &
-  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "ProtectClock=yes\n" &
+  "ProtectHostname=yes\n" &
+  "RestrictNamespaces=yes\n" &
+  "RestrictRealtime=yes\n" &
+  "RestrictSUIDSGID=yes\n" &
+  "LockPersonality=yes\n" &
+  "SystemCallArchitectures=native\n" &
+  # AF_NETLINK alone (§13 decision 181): it reads the table's counters
+  # over netlink and needs no Unix socket, so neither the system bus nor
+  # PID 1's private socket is reachable from it.
+  (when mutated("egress-units-unix-sockets"):
+     "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n"
+   else: "RestrictAddressFamilies=AF_NETLINK\n") &
   "IPAddressDeny=any\n"
 
 proc egressCheckTimer*(heartbeatSec: int): string =
@@ -1335,21 +1392,82 @@ proc renderEvidenceConf*(e: EvidenceUnitsInputs; agent: AgentUnitsInputs): strin
   "heartbeat-interval = " & $evidenceHeartbeatSec(e) & "\n" &
   "tick-interval = " & $tick & "\n"
 
+proc evidenceShipConfinement*(e: EvidenceUnitsInputs): seq[string] =
+  ## The shipping unit's identity and sandbox, one ``Key=value`` per line
+  ## (§13 decision 181): the unit file carries these lines, and the
+  ## transient runs root callers start (``systemd-run -p``) carry the same
+  ## ones, so there is one confinement for every decoder of the sink's
+  ## bytes.
+  ##
+  ## - A dynamic user, never uid 0, with no capability; its own state
+  ##   directory and outbox (``StateDirectory=``, chowned to it by systemd
+  ##   at each start).
+  ## - The sink write credential through ``LoadCredential=``: systemd
+  ##   (root) reads it from the ``0700 root`` ``EvidenceStateDir`` and the
+  ##   unit reads it from ``$CREDENTIALS_DIRECTORY``, readable by it alone.
+  ## - ``/var/lib/repro`` and ``/run/repro`` hidden: nothing there is the
+  ##   shipper's. ``/repro`` stays visible read-only (the unit's own binary
+  ##   is in the store), as everything is under ``ProtectSystem=strict``.
+  ## - ``RestrictAddressFamilies=AF_INET AF_INET6``: no ``AF_UNIX``
+  ##   socket can be made, so neither the system bus nor PID 1's private
+  ##   socket is reachable (its stdout and stderr are descriptors systemd
+  ##   passes, not sockets it opens); IP egress to the sink's address only.
+  let user = when mutated("evidence-ship-runs-as-root"): @[]
+             else: @["DynamicUser=yes", "User=" & EvidenceShipUser]
+  let families = when mutated("evidence-ship-unix-sockets"):
+                   "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX"
+                 else: "RestrictAddressFamilies=AF_INET AF_INET6"
+  let egress = when mutated("evidence-ship-unrestricted-egress"): @[]
+               else: @["IPAddressDeny=any", "IPAddressAllow=" & e.sinkAddress]
+  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro"
+               else: "-/var/lib/repro -/run/repro"
+  result = user & @[
+    "StateDirectory=repro-addon-evidence repro-addon-evidence/outbox",
+    "StateDirectoryMode=0700",
+    "LoadCredential=" & EvidenceCredentialNames[0] & ":" &
+      EvidenceCredentialCertPath,
+    "LoadCredential=" & EvidenceCredentialNames[1] & ":" &
+      EvidenceCredentialKeyPath,
+    "Environment=" & EvidenceShipConfinedEnv & "=1",
+    "CapabilityBoundingSet=",
+    "AmbientCapabilities=",
+    "NoNewPrivileges=yes",
+    "ProtectSystem=strict",
+    "InaccessiblePaths=" & hidden,
+    "ProtectHome=yes",
+    "PrivateTmp=yes",
+    "PrivateDevices=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectKernelLogs=yes",
+    "ProtectControlGroups=yes",
+    "ProtectClock=yes",
+    "ProtectHostname=yes",
+    "ProtectProc=invisible",
+    "RestrictNamespaces=yes",
+    "RestrictRealtime=yes",
+    "RestrictSUIDSGID=yes",
+    "LockPersonality=yes",
+    "MemoryDenyWriteExecute=yes",
+    "SystemCallArchitectures=native"]
+  for l in FetchSyscallFilter.splitLines():
+    if l.len > 0: result.add(l)
+  result.add("SystemCallErrorNumber=EPERM")
+  result.add(families)
+  for l in (ResolverSocketsHidden & "InaccessiblePaths=-/run/dbus -/var/run/dbus\n").splitLines():
+    if l.len > 0: result.add(l)
+  result.add(egress)
+
 proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   ## ``repro-addon-evidence.service`` (spec §10.4): ships the outbox to the
-  ## Evidence sink and heartbeats. Root -- the records and the credential
-  ## are root's files -- but with NO capability, a read-only system apart
-  ## from its own two directories, the attestation and recipient keys and
-  ## the secrets hidden, and egress to the sink's address only. It is the
-  ## only add-on unit that talks to the sink; the units that write records
-  ## (apply, re-assert, the apt hook) have no network and cannot sign as
-  ## the sink credential, and this one cannot sign attestations.
-  let egress = when mutated("evidence-ship-unrestricted-egress"): ""
-               else: "IPAddressDeny=any\nIPAddressAllow=" & e.sinkAddress & "\n"
-  # The store stays visible (read-only, as everywhere): the unit's own
-  # binary is in it.
-  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro"
-               else: "-/var/lib/repro/agent -/run/repro"
+  ## Evidence sink and heartbeats, as a dynamic user with no capability
+  ## (``evidenceShipConfinement``; §13 decision 181). It is the only add-on
+  ## unit that talks to the sink; the units that write records (apply,
+  ## re-assert, the apt hook) have no network and cannot sign as the sink
+  ## credential, and this one cannot sign attestations. The apt hook
+  ## wrapper's events are turned into records first, by a privileged
+  ## ``ExecStartPre=+`` step that reads root's own log and decodes nothing
+  ## from the network.
   "[Unit]\n" &
   "Description=Reprobuild add-on: ship evidence records to the Evidence sink\n" &
   "After=network-online.target\n" &
@@ -1362,37 +1480,11 @@ proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
+  "ExecStartPre=+" & reproExe & " system addon evidence-harvest\n" &
   "ExecStart=" & reproExe & " system addon evidence-ship\n" &
   "TimeoutStartSec=" & (when mutated("ship-backoff-reaches-timeout"): "300"
                          else: $EvidenceShipTimeoutStartSec) & "\n" &
-  "CapabilityBoundingSet=\n" &
-  "AmbientCapabilities=\n" &
-  "NoNewPrivileges=yes\n" &
-  "ProtectSystem=strict\n" &
-  "ReadWritePaths=" & EvidenceStateDir & " " & EvidenceOutboxPath & "\n" &
-  "InaccessiblePaths=" & hidden & "\n" &
-  "ProtectHome=yes\n" &
-  "PrivateTmp=yes\n" &
-  "PrivateDevices=yes\n" &
-  "ProtectKernelTunables=yes\n" &
-  "ProtectKernelModules=yes\n" &
-  "ProtectKernelLogs=yes\n" &
-  "ProtectControlGroups=yes\n" &
-  "ProtectClock=yes\n" &
-  "ProtectHostname=yes\n" &
-  "ProtectProc=invisible\n" &
-  "RestrictNamespaces=yes\n" &
-  "RestrictRealtime=yes\n" &
-  "RestrictSUIDSGID=yes\n" &
-  "LockPersonality=yes\n" &
-  "MemoryDenyWriteExecute=yes\n" &
-  "SystemCallArchitectures=native\n" &
-  FetchSyscallFilter &
-  "SystemCallErrorNumber=EPERM\n" &
-  "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
-  ResolverSocketsHidden &
-  "InaccessiblePaths=-/run/dbus -/var/run/dbus\n" &
-  egress
+  evidenceShipConfinement(e).join("\n") & "\n"
 
 proc storeVerifyUnit*(reproExe: string): string =
   ## ``repro-addon-store-verify.service`` (spec §13 decision 46): the current
@@ -1448,8 +1540,9 @@ proc evidenceShipPathUnit*(): string =
   # failed (A11 audit F2).
   (when mutated("evidence-path-rate-limited"): "" else:
      "TriggerLimitIntervalSec=0\n") &
-  "MakeDirectory=yes\n" &
-  "DirectoryMode=0700\n" &
+  # No MakeDirectory=: the outbox is the shipping unit's dynamic user's
+  # (StateDirectory=), and PID 1 would make it by path, as root, in a
+  # directory that user owns (§13 decision 181).
   "Unit=" & EvidenceShipUnit & "\n" &
   "\n" &
   "[Install]\n" &
