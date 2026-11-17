@@ -28,7 +28,11 @@
 ## difference that is no longer there fails the test until its entry is
 ## removed. The only flag differences are flags a page specifies that are not
 ## implemented yet (`SpecifiedNotImplemented`); a flag is declared when it is
-## implemented, and its entry goes then.
+## implemented, and its entry goes then. The environment differences are
+## those, plus names a page writes that are not the input of any declared flag
+## (`SpecifiedEnvNotOnTheCommandLine`): a variable read below the command
+## line, or by a file the command writes, and a C or Win32 constant a page
+## writes as code.
 ##
 ## `--help` and `-h` are compared on neither side: the parser builds them into
 ## every command.
@@ -158,17 +162,36 @@ const
     # What the pages came to specify after the sixth group moved, for the
     # command-line and DSL usability work that implements it: the root's
     # `--help-all` (all of a command's help tiers), `repro capabilities
-    # --json`, `repro add`'s dependency-kind flags, and `STDIN_FILENO`, a
-    # name `repro shell`'s page writes as code (its non-terminal refusal).
-    # And `XDG_STATE_HOME` in `repro health`: the page moved the per-user
-    # resource-state store from a cache directory to a state directory, and
-    # the store has not moved yet.
+    # --json` and `repro add`'s dependency-kind flags. And `XDG_STATE_HOME`
+    # in `repro health`: the page moved the per-user resource-state store
+    # from a cache directory to a state directory, and the store has not
+    # moved yet.
     "flag\trepro\t--help-all", "flag\trepro capabilities\t--json",
     "flag\trepro add\t--build", "flag\trepro add\t--native-build",
-    "flag\trepro add\t--runtime", "env\trepro health\tXDG_STATE_HOME",
-    "env\trepro shell\tSTDIN_FILENO"]
+    "flag\trepro add\t--runtime", "env\trepro health\tXDG_STATE_HOME"]
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
+  SpecifiedEnvNotOnTheCommandLine = [
+    # Names a page writes in environment-variable form that are not the
+    # input of any declared flag, so no parameter declares them. `repro
+    # stats` locates the RunQuota daemon at `RUNQUOTA_SOCKET`, the endpoint
+    # every RunQuota client resolves itself, below the command line. The four
+    # `repro hooks` names are not flag inputs either: some are read below the
+    # command line (`REPROBUILD_REPRO` also by `repro hooks` itself, when it
+    # resolves the `repro` a managed hook will run), and the rest by the
+    # managed hook bodies it writes (which `repro` services a hook, and how
+    # pre-commit's shim names its interpreter). The three `repro shell`
+    # names are not variables at all: the page writes the C file-descriptor
+    # constant `STDIN_FILENO` and the Win32 constants `STD_INPUT_HANDLE` and
+    # `FILE_TYPE_PIPE` as code, defining its non-terminal refusal.
+    "env\trepro stats\tRUNQUOTA_SOCKET",
+    "env\trepro hooks\tINSTALL_PYTHON", "env\trepro hooks\tREPROBUILD_REPRO",
+    "env\trepro hooks\tREPRO_CMD_SOURCE",
+    "env\trepro hooks\tREPRO_INSTALLING_BUILD",
+    "env\trepro shell\tSTDIN_FILENO", "env\trepro shell\tSTD_INPUT_HANDLE",
+    "env\trepro shell\tFILE_TYPE_PIPE"]
+    ## Environment-variable-shaped names a covered command's page writes
+    ## that no declared flag reads.
   SpecifiedNotDeclared = [
     "audit", "info", "init", "list", "lsp", "mcp", "outdated", "package",
     "search", "upgrade"]
@@ -304,7 +327,8 @@ proc differences(declared, specified: openArray[string]): seq[string] =
     let fields = row.split('\t')
     if fields[0] == "verb" and fields[1] in SpecifiedNotDeclared:
       continue
-    if row in SpecifiedNotImplemented:
+    if row in SpecifiedNotImplemented or
+        row in SpecifiedEnvNotOnTheCommandLine:
       continue
     result.add(row & ": specified, not declared")
   for row in decl - spec:
@@ -320,6 +344,10 @@ proc differences(declared, specified: openArray[string]): seq[string] =
     if row notin spec or row in decl:
       result.add(row & ": no longer a difference; remove it from " &
         "SpecifiedNotImplemented")
+  for row in SpecifiedEnvNotOnTheCommandLine:
+    if row notin spec or row in decl:
+      result.add(row & ": no longer a difference; remove it from " &
+        "SpecifiedEnvNotOnTheCommandLine")
   for verb in DeclaredNotSpecified:
     if "verb\t" & verb notin decl or "verb\t" & verb in spec:
       result.add("verb\t" & verb & ": no longer a difference; remove it " &

@@ -151,6 +151,7 @@ flag	repro stats	--tool-provisioning
 flag	repro stats	--top
 flag	repro stats	--watch-session
 flag	repro stats	--work-root
+env	repro stats	RUNQUOTA_SOCKET
 command	repro daemon
 flag	repro daemon	--daemon-exe
 flag	repro daemon	--dev
@@ -685,12 +686,16 @@ flag	repro run	--lock-slice
 flag	repro run	--work-root
 command	repro shell
 flag	repro shell	--activity
+flag	repro shell	--command
 flag	repro shell	--dev-env-stats
 flag	repro shell	--lock-slice
 flag	repro shell	--print-env
 flag	repro shell	--shell
 flag	repro shell	--work-root
+flag	repro shell	-c
+env	repro shell	FILE_TYPE_PIPE
 env	repro shell	STDIN_FILENO
+env	repro shell	STD_INPUT_HANDLE
 command	repro shell hook
 flag	repro shell hook	--repro-bin
 command	repro allow
@@ -1143,10 +1148,15 @@ flag	repro check	--tool-provisioning
 flag	repro check	--workspace-root
 flag	repro check	--write-report
 command	repro hooks
+env	repro hooks	INSTALL_PYTHON
+env	repro hooks	REPROBUILD_REPRO
+env	repro hooks	REPRO_CMD_SOURCE
+env	repro hooks	REPRO_INSTALLING_BUILD
 command	repro hooks ensure
 flag	repro hooks ensure	--json
 flag	repro hooks ensure	--no-write-report
 flag	repro hooks ensure	--profile
+flag	repro hooks ensure	--re-anchor
 flag	repro hooks ensure	--record-store
 flag	repro hooks ensure	--shell
 flag	repro hooks ensure	--shell-autocomplete
@@ -1157,6 +1167,7 @@ flag	repro hooks ensure	--write-report
 command	repro hooks reinstall
 flag	repro hooks reinstall	--json
 flag	repro hooks reinstall	--no-write-report
+flag	repro hooks reinstall	--re-anchor
 flag	repro hooks reinstall	--record-store
 flag	repro hooks reinstall	--shell
 flag	repro hooks reinstall	--shell-autocomplete
@@ -1167,6 +1178,7 @@ flag	repro hooks reinstall	--write-report
 command	repro hooks uninstall
 flag	repro hooks uninstall	--json
 flag	repro hooks uninstall	--no-write-report
+flag	repro hooks uninstall	--re-anchor
 flag	repro hooks uninstall	--record-store
 flag	repro hooks uninstall	--shell
 flag	repro hooks uninstall	--shell-autocomplete
