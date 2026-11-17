@@ -296,10 +296,18 @@ proc upstreamTip(fx: StoreFixture): string =
     "rev-parse", "refs/heads/main"]))
   if res.exitCode != 0: "" else: res.output.strip()
 
-proc ciPlan(fx: StoreFixture; platform: string): JsonNode =
-  let res = runArgv(@[fx.reproBin, "ci", "plan", "--platform=" & platform,
+proc ciPlan(fx: StoreFixture; platform: string;
+            jobOwnedKeys = true): JsonNode =
+  ## ``jobOwnedKeys``: name a job-owned copy of the workspace store with
+  ## ``--registered-keys``, as a CI job does; without it the plan never
+  ## skips, and the workspace store informs only the verdict fields.
+  var argv = @[fx.reproBin, "ci", "plan", "--platform=" & platform,
     "--workspace-root=" & fx.workspaceRoot, "--current-repo=" & fx.libAPath,
-    "--json"])
+    "--json"]
+  if jobOwnedKeys:
+    argv.add("--registered-keys=" &
+      jobOwnedKeyStore(fx.workspaceRoot, fx.scratch))
+  let res = runArgv(argv)
   checkpoint("ci plan output:\n" & res.output)
   doAssert res.code == 0, "repro ci plan failed:\n" & res.output
   let start = res.output.find("{\n")

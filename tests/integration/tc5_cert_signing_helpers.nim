@@ -46,6 +46,17 @@ proc writeRegistry*(workspaceRoot: string; entries: openArray[RegisteredKey]) =
   for e in entries: store.keys.add(e)
   writeRegisteredKeyStore(store, registeredKeyStorePath(workspaceRoot))
 
+proc jobOwnedKeyStore*(workspaceRoot, scratch: string): string =
+  ## A copy of ``workspaceRoot``'s registered-key store at
+  ## ``<scratch>/ci-job/registered-keys.toml``: the store a CI job names with
+  ## ``repro ci plan --registered-keys``, outside the checkout and the
+  ## workspace root. Copied at call time, so it reflects the registry now.
+  result = scratch / "ci-job" / "registered-keys.toml"
+  createDir(result.parentDir)
+  let source = registeredKeyStorePath(workspaceRoot)
+  if fileExists(source): copyFile(source, result)
+  else: writeRegisteredKeyStore(RegisteredKeyStore(), result)
+
 proc seedManifestLockStore*(gitBin, workspaceRoot: string;
                             reproBin = ""; upstreamBare = "") =
   ## Make ``<workspaceRoot>/.repro/manifests`` a real git checkout.

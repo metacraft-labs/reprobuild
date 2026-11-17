@@ -91197,7 +91197,8 @@ proc runCertifyCheckSet*(c: ReproCommandLineCertify;
 # from the developer's commit, so it is not covered.
 #
 # HOW A CI JOB CONSUMES THE PLAN (the external-YAML deferral, DEFER-TC4-CI-YAML):
-# a CI workflow runs `repro ci plan --platform=$RUNNER_PLATFORM --json`, runs the
+# a CI workflow runs `repro ci plan --platform=$RUNNER_PLATFORM
+# --registered-keys=<a store the job owns> --json`, runs the
 # `run` target set (e.g. `repro test --certify <run targets>`), skips the `skip`
 # set, and — on green — the issuance path (already wired into `repro test`)
 # writes + signs a certificate covering the run set for the platform into the
@@ -91224,6 +91225,16 @@ type
       ## ``--branch=<name>``: the branch whose rule applies (the PR's target
       ## branch, or the pushed branch). Default: ``$GITHUB_BASE_REF``, else
       ## ``$GITHUB_REF_NAME``, else the checkout's commit-time branch.
+    registeredKeys: string
+      ## ``--registered-keys=<path>``: the registered-key store a ``skip``
+      ## decision verifies signers against. It must be a file the job owns,
+      ## outside the candidate checkout and the workspace root. Without it a
+      ## base's ``ci_trust = "skip"`` is planned as ``advisory``: the store
+      ## under the workspace root is one the candidate can supply
+      ## (Test-Certificates.md §"Who owns the registered-key store").
+    registeredKeysGiven: bool
+      ## Whether ``--registered-keys`` was passed at all: an empty value is
+      ## refused, never read as "no flag".
 
 proc ciPlanArgsOf(c: ReproCommandLineCiPlan): CiPlanArgs =
   ## ``repro ci plan``'s arguments from its parsed configuration. Values are
@@ -91239,9 +91250,33 @@ proc ciPlanArgsOf(c: ReproCommandLineCiPlan): CiPlanArgs =
   result.branch = c.branch.strip()
   result.workspaceRoot = c.workspaceRoot
   result.currentRepo = c.currentRepo
+  if c.registeredKeys.isSome:
+    result.registeredKeysGiven = true
+    result.registeredKeys = c.registeredKeys.get()
   if result.workspaceRoot.len == 0:
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
+
+proc ciPlanPathSpellings(path: string): seq[string] =
+  ## The spellings a ``--registered-keys`` containment check compares: the
+  ## path with symbolic links resolved (when it exists) and its lexically
+  ## normalized absolute form (which still names a link by its own path).
+  let absolute = os.normalizedPath(absolutePath(path))
+  try:
+    result.add(expandFilename(path))
+  except CatchableError:
+    discard
+  if absolute notin result:
+    result.add(absolute)
+
+proc ciPlanPathIsWithin(path, root: string): bool =
+  ## Whether ``path`` is ``root`` or lies under it, in any pair of spellings.
+  for p in ciPlanPathSpellings(path):
+    for r in ciPlanPathSpellings(root):
+      if p == r: return true
+      let prefix = if r.endsWith(DirSep): r else: r & DirSep
+      if p.startsWith(prefix): return true
+  false
 
 proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
   ## ``repro ci plan`` — the per-platform CI fast-track decision (TC-4).
@@ -91249,6 +91284,35 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
   let certRepoPath =
     if parsed.currentRepo.len > 0: parsed.currentRepo
     else: parsed.workspaceRoot
+  # The store a ``skip`` decision trusts must be one the job owns. A path in
+  # the candidate checkout or the workspace root is one the candidate can
+  # supply, so naming it is a misconfigured job, and so is naming a store
+  # that is not there: the plan stops rather than quietly trusting nobody
+  # (CLI/ci.md §"Decision rules (security-critical)"). Without the flag the
+  # workspace store still informs the verdict fields, but cannot grant a
+  # skip (below).
+  if parsed.registeredKeysGiven and parsed.registeredKeys.len == 0:
+    stderr.writeLine("repro ci plan: --registered-keys= needs a path")
+    return 1
+  var keyStorePath = registeredKeyStorePath(parsed.workspaceRoot)
+  if parsed.registeredKeys.len > 0:
+    let named = parsed.registeredKeys
+    for (root, what) in [(certRepoPath, "the candidate checkout"),
+                         (parsed.workspaceRoot, "the workspace root")]:
+      if ciPlanPathIsWithin(named, root):
+        stderr.writeLine("repro ci plan: --registered-keys=" & named &
+          " lies inside " & what & " (" & root & "), which the candidate " &
+          "can supply; name a store the CI job owns, outside it")
+        return 1
+    if not fileExists(named):
+      stderr.writeLine("repro ci plan: --registered-keys=" & named &
+        " is not a readable file")
+      return 1
+    keyStorePath = ciPlanPathSpellings(named)[0]
+  let keys = readRegisteredKeyStoreChecked(keyStorePath)
+  if parsed.registeredKeys.len > 0 and keys.availability == ksaUnreadable:
+    stderr.writeLine("repro ci plan: --registered-keys: " & keys.detail)
+    return 1
   # TC-9c: the required names, their platforms and ``ci_trust`` come from the
   # ``[certificate_policy]`` snapshot of the BASE the job evaluates against,
   # under the rule for the target branch. The candidate's own snapshot is
@@ -91374,6 +91438,13 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
        else: "no certificate policy in the base or the checked-out " &
          "content — ") &
       "nothing to plan (CI runs its own targets normally)")
+  if parsed.registeredKeys.len == 0 and requirement.ciTrust == cctSkip:
+    let reason = "ci_trust is advisory because no --registered-keys names " &
+      "a store the job owns (the workspace store is one the candidate " &
+      "can supply)"
+    requirement.ciTrust = cctAdvisory
+    policyDetail.add("; " & reason)
+    stderr.writeLine("repro ci plan: " & reason)
   let policy = (ciTrust: requirement.ciTrust,
     requiredTargets: requiredNames)
   # TC-8c: the binding is the CONTENT CI checked out, not a commit. A
@@ -91469,8 +91540,6 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
         couldNotLook.add(problem)
     for f in stored.found:
       addFound(f)
-  let keys = readRegisteredKeyStoreChecked(
-    registeredKeyStorePath(parsed.workspaceRoot))
   for platform in planPlatforms:
     # A platform no requirement names owes nothing in particular, so it runs
     # every required name, as before.

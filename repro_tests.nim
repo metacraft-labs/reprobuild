@@ -21421,6 +21421,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_ci_plan_skips_only_on_a_key_store_the_job_owns.nim",
+    binary: "build/test-bin/t_ci_plan_skips_only_on_a_key_store_the_job_owns",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g03",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_ci_plan_v2_binds_the_checked_out_content.nim",
     binary: "build/test-bin/t_ci_plan_v2_binds_the_checked_out_content",
     defines: @[],
@@ -21874,7 +21886,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_cs_m6_dev_env_command_lines.nim",
@@ -22582,7 +22594,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_develop_refuses_unreadable_backend_before_membership_degrades.nim",
@@ -23446,7 +23458,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_gateway_bare_borrows_pool_objects_and_costs_no_second_copy.nim",
@@ -24202,7 +24214,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_configurable_staged_field_access.nim",
@@ -24946,7 +24958,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim",
@@ -25558,7 +25570,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_update_node_failure_withholds_only_the_certificate.nim",
