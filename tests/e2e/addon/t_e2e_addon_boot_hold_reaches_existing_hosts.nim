@@ -344,7 +344,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          un.exitCode == 0 and g.exec("test -e " & UnitFile).exitCode != 0 and
          g.exec("test -L " & WantsLink).exitCode != 0 and Unit notin req,
          un.stdout & un.stderr & "\nRequires=" & req)
-    let id = identityReport(f0, g.takeFingerprint(repro))
+    # Ubuntu 24.04's dmesg.service saves the kernel log once per boot, and
+    # whether it still shows active when the fingerprint is taken depends on
+    # the boot, not on the add-on (measured on ubuntu-24.04-amd64 in this
+    # gate, A9 review round 18); every other unit is still compared.
+    let id = identityReport(f0, g.takeFingerprint(repro), ["active-units:dmesg.service"])
     step("the base is as it was before the bootstrap", id.ok, id.text)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
