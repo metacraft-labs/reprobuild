@@ -80,6 +80,7 @@ verb	watch
 verb	why
 verb	workspace
 command	repro
+flag	repro	--help-all
 flag	repro	--version
 flag	repro	-V
 command	repro help
@@ -88,6 +89,7 @@ flag	repro version	--json
 command	repro completion
 command	repro capabilities
 flag	repro capabilities	--format
+flag	repro capabilities	--json
 command	repro show-conventions
 flag	repro show-conventions	--json
 flag	repro show-conventions	--project
@@ -665,6 +667,7 @@ flag	repro health	--offline
 flag	repro health	--verbose
 flag	repro health	--workspace-root
 flag	repro health	-v
+env	repro health	XDG_STATE_HOME
 command	repro debug
 command	repro debug artifact
 flag	repro debug artifact	--format
@@ -687,6 +690,7 @@ flag	repro shell	--lock-slice
 flag	repro shell	--print-env
 flag	repro shell	--shell
 flag	repro shell	--work-root
+env	repro shell	STDIN_FILENO
 command	repro shell hook
 flag	repro shell hook	--repro-bin
 command	repro allow
@@ -1236,14 +1240,17 @@ flag	repro gateway migrate	--dry-run
 flag	repro gateway migrate	--workspace-root
 command	repro add
 flag	repro add	--binary
+flag	repro add	--build
 flag	repro add	--depends-of
 flag	repro add	--develop
 flag	repro add	--dry-run
 flag	repro add	--json
+flag	repro add	--native-build
 flag	repro add	--no-develop
 flag	repro add	--no-membership
 flag	repro add	--remote
 flag	repro add	--revision
+flag	repro add	--runtime
 flag	repro add	--tool-provisioning
 flag	repro add	--workspace-root
 command	repro remove
@@ -1253,3 +1260,94 @@ flag	repro remove	--json
 flag	repro remove	--tool-provisioning
 flag	repro remove	--workspace-root
 flag	repro remove	--yes
+command	repro develop
+flag	repro develop	--all
+flag	repro develop	--at
+flag	repro develop	--cmake
+flag	repro develop	--cmake-binary
+flag	repro develop	--direct
+flag	repro develop	--drop
+flag	repro develop	--dry-run
+flag	repro develop	--except
+flag	repro develop	--filter
+flag	repro develop	--indirect
+flag	repro develop	--into
+flag	repro develop	--json
+flag	repro develop	--list
+flag	repro develop	--list-overrides
+flag	repro develop	--lock-store
+flag	repro develop	--no-write-report
+flag	repro develop	--only
+flag	repro develop	--project
+flag	repro develop	--project-root
+flag	repro develop	--reset
+flag	repro develop	--source
+flag	repro develop	--strict
+flag	repro develop	--tag
+flag	repro develop	--tier
+flag	repro develop	--tool-provisioning
+flag	repro develop	--transitive-of
+flag	repro develop	--work-root
+flag	repro develop	--workspace-root
+flag	repro develop	--write-report
+command	repro flake
+command	repro flake override-args
+flag	repro flake override-args	--all
+flag	repro flake override-args	--at
+flag	repro flake override-args	--direct
+flag	repro flake override-args	--except
+flag	repro flake override-args	--filter
+flag	repro flake override-args	--flake
+flag	repro flake override-args	--indirect
+flag	repro flake override-args	--json
+flag	repro flake override-args	--lock-store
+flag	repro flake override-args	--only
+flag	repro flake override-args	--project
+flag	repro flake override-args	--strict
+flag	repro flake override-args	--strip-suffix
+flag	repro flake override-args	--tag
+flag	repro flake override-args	--tier
+flag	repro flake override-args	--tool-provisioning
+flag	repro flake override-args	--transitive-of
+flag	repro flake override-args	--workspace-root
+command	repro flake refresh-lock
+flag	repro flake refresh-lock	--all
+flag	repro flake refresh-lock	--at
+flag	repro flake refresh-lock	--current-repo
+flag	repro flake refresh-lock	--direct
+flag	repro flake refresh-lock	--except
+flag	repro flake refresh-lock	--filter
+flag	repro flake refresh-lock	--flake
+flag	repro flake refresh-lock	--indirect
+flag	repro flake refresh-lock	--json
+flag	repro flake refresh-lock	--lock-store
+flag	repro flake refresh-lock	--only
+flag	repro flake refresh-lock	--project
+flag	repro flake refresh-lock	--record-downgrade
+flag	repro flake refresh-lock	--strict
+flag	repro flake refresh-lock	--strip-suffix
+flag	repro flake refresh-lock	--tag
+flag	repro flake refresh-lock	--tier
+flag	repro flake refresh-lock	--tool-provisioning
+flag	repro flake refresh-lock	--transitive-of
+flag	repro flake refresh-lock	--workspace-root
+command	repro flake override-status
+flag	repro flake override-status	--all
+flag	repro flake override-status	--applied
+flag	repro flake override-status	--at
+flag	repro flake override-status	--direct
+flag	repro flake override-status	--except
+flag	repro flake override-status	--filter
+flag	repro flake override-status	--flake
+flag	repro flake override-status	--indirect
+flag	repro flake override-status	--json
+flag	repro flake override-status	--lock-store
+flag	repro flake override-status	--only
+flag	repro flake override-status	--project
+flag	repro flake override-status	--strict
+flag	repro flake override-status	--strip-suffix
+flag	repro flake override-status	--tag
+flag	repro flake override-status	--tier
+flag	repro flake override-status	--tool-provisioning
+flag	repro flake override-status	--transitive-of
+flag	repro flake override-status	--workspace-root

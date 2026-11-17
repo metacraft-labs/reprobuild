@@ -51,11 +51,12 @@ const
     # `infra_install_root.nim`; the fifth `dev_env_fast_path.nim` (the thin
     # client's `dev-env export` reader takes its flags from the
     # description); the sixth `workspace_restore.nim` (`repro workspace
-    # restore` takes its values from the description). What `infra.nim` and
+    # restore` takes its values from the description), and the sixth's
+    # `develop` and `flake` took this file from 502 to 343. What `infra.nim` and
     # `infra_image.nim` still hold is no
     # argv parsing (a `git describe` suffix, a table of the flags a
     # bootstrap names), but it has the shape the scan counts.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 502),
+    ("libs/repro_cli_support/src/repro_cli_support.nim", 343),
     ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
     ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
@@ -127,7 +128,20 @@ const
     "runGatewayMigrateCommand", "runReproLockingCommand",
     "runReproLockingExplain", "runReproLockingAdoptManifest",
     "runReproLockCommand", "runReproLockList", "runReproLockDiff",
-    "runReproLockUpdate", "projectsWorkspaceRoot"]
+    "runReproLockUpdate", "projectsWorkspaceRoot",
+    # The sixth group's `develop` and `flake` (with `flake override-args`,
+    # `refresh-lock`, `override-status`), and the develop-set computation
+    # the flake verbs and the managed hooks share. (`developSetSelectionOf`
+    # and `developSelectorWords`, generic over the configurations that
+    # declare the selection, are not found by `procBody`; they read typed
+    # fields only.)
+    "runDevelopCommand", "developSetArgsOf", "workspaceDevelopArgsOf",
+    "runWorkspaceDevelopCommand", "runDevelopDropCommand",
+    "developFlagsGiven", "firstOutside", "developAllArgsOf",
+    "flakeDevelopSelectionOf", "flakeShellBindingsOf",
+    "hookSubstitutedDevelopSet", "executeFlakeLockRefresh",
+    "runFlakeOverrideArgsCommand", "runFlakeRefreshLockCommand",
+    "runFlakeOverrideStatusCommand", "runReproFlakeCommand"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.

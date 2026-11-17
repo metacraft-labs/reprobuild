@@ -684,12 +684,17 @@ proc switchFlags(): NimNode {.compileTime.} =
 
 proc branchFlags(): NimNode {.compileTime.} =
   ## `repro branch` and `repro workspace new`: fork a sibling workspace.
+  ##
+  ## Both spellings refuse the retired `--from-mainlines` and name what
+  ## replaced it, so the note does not depend on which name was typed.
   let root = workspaceRootFlag()
   let tools = workspaceToolProvisioningFlag()
   let report = workspaceReportFlags()
   let clone = cloneObjectsFlag()
   let shorthands = branchRoleShorthandFlags()
   quote do:
+    retired "--from-mainlines",
+      replacement = "`--from=mainline`, or its shorthand `--mainline`"
     `root`
     `tools`
     `clone`
@@ -1085,6 +1090,71 @@ proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
       pos projectName is string, required = false,
         help = "The project, as a positional"
 
+proc developSelectionFlags(): NimNode {.compileTime.} =
+  ## The develop-set selection `repro develop` and the three `repro flake`
+  ## verbs share. Which repos: a mode (`--all`, the default, `--direct`,
+  ## `--indirect` or `--transitive-of`), narrowed by `--project`, `--tag`,
+  ## `--filter`, `--only` and `--except` in that fixed order. Which lock
+  ## records: `--tier`, `--at`, `--lock-store` and `--strict`.
+  ##
+  ## A name list may be repeated and each value may be comma-separated; the
+  ## command splits it, trimming the names and dropping empty ones.
+  ## `--transitive-of`, `--filter` and `--at` take one value: they are lists
+  ## so that two different values are refused by the command rather than
+  ## resolved by their position.
+  quote do:
+    boolFlag all is bool,
+      help = "Select every dependency of the lock set (the default mode)"
+    boolFlag direct is bool,
+      help = "Select only the root repo's direct dependencies"
+    boolFlag indirect is bool,
+      help = "Select the dependencies that are not direct ones"
+    flag transitiveOf is seq[string],
+      help = "Select the transitive closure below this dependency"
+    flag project is seq[string],
+      help = "Keep only the repos these projects contribute " &
+        "(comma-separated)"
+    flag tag is seq[string],
+      help = "Keep only the repos carrying these manifest tags " &
+        "(comma-separated)"
+    flag filter is seq[string],
+      help = "Keep only the repos whose name matches the glob (one glob)"
+    flag only is seq[string],
+      help = "Keep only these repos (exact names, comma-separated)"
+    flag exceptNames is seq[string], perSource = [cli = "except"],
+      help = "Drop these repos (exact names, comma-separated)"
+    flag tier is seq[string],
+      help = "Read only these tiers' lock records: `public`, `org`, " &
+        "`team`, `personal` (comma-separated)"
+    flag at is seq[string],
+      help = "Key commit-addressed lock records on this revision instead " &
+        "of the root repo's HEAD"
+    flag lockStore is seq[string],
+      help = "An extra lock backend for this run, " &
+        "`[<tier>:]<kind>:<location>` (repeatable; a later one takes " &
+        "precedence)"
+    boolFlag strict is bool,
+      help = "Refuse when any lock backend is unreadable, the personal " &
+        "tier's included"
+
+proc flakeVerbFlags(): NimNode {.compileTime.} =
+  ## The flags every `repro flake` verb takes: the develop set whose
+  ## checkouts the flake's inputs follow, the flake, and the workspace.
+  let selection = developSelectionFlags()
+  let tools = workspaceToolProvisioningFlag()
+  quote do:
+    `selection`
+    flag flake is string,
+      help = "The directory holding `flake.nix` (default: the current " &
+        "directory)"
+    flag stripSuffix is Option[string],
+      help = "Input-name suffixes removed before an input is matched with " &
+        "a repo (comma-separated; default: the built-in list)"
+    flag workspaceRoot is string,
+      help = "The workspace (default: found from the current directory)"
+    `tools`
+    boolFlag json is bool, help = "Print the result as JSON"
+
 proc lockSolveFlags(): NimNode {.compileTime.} =
   ## The flags `repro lock solve`, `refresh` and `validate` share.
   quote do:
@@ -1201,6 +1271,12 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let lockingExplainTools = workspaceToolProvisioningFlag()
   let lockingAdoptRoot = workspaceRootFlag()
   let lockingAdoptTools = workspaceToolProvisioningFlag()
+  let developSelection = developSelectionFlags()
+  let developTools = workspaceToolProvisioningFlag()
+  let developReport = writeReportFlags()
+  let flakeOverrideArgs = flakeVerbFlags()
+  let flakeRefreshLock = flakeVerbFlags()
+  let flakeOverrideStatus = flakeVerbFlags()
   let lockSolve = lockSolveFlags()
   let lockRefresh = lockSolveFlags()
   let lockValidate = lockSolveFlags()
@@ -1483,7 +1559,44 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "The project (default: the current directory's)"
     subcmd "develop",
         help = "Set up a project or a dependency for development":
-      pos args is seq[string], required = false, passThrough = true
+      `developSelection`
+      boolFlag list is bool,
+        help = "Print the resolved lock set and exit, changing nothing"
+      boolFlag listOverrides is bool,
+        help = "Print the local develop-override map and exit"
+      flag drop is seq[string],
+        help = "Remove the develop override of these dependencies " &
+          "(comma-separated) and exit"
+      boolFlag dryRun is bool,
+        help = "Print what the selection would do and exit, changing nothing"
+      flag into is Option[string],
+        help = "Where the selected checkouts go (default: beside the " &
+          "workspace); with one dependency, its checkout"
+      boolFlag reset is bool,
+        help = "Force a checkout that drifted off its locked revision back " &
+          "to it (destructive)"
+      flag source is Option[string],
+        help = "Register this existing checkout of the dependency instead " &
+          "of cloning it"
+      flag workspaceRoot is Option[string],
+        help = "The workspace (default: found from the current directory)"
+      flag projectRoot is string,
+        help = "With --drop: the project whose overrides to drop too " &
+          "(default: the current directory's)"
+      `developTools`
+      boolFlag json is bool, help = "Print the report as JSON"
+      `developReport`
+      boolFlag cmake is bool,
+        help = "Treat the target as a CMake source directory"
+      flag cmakeBinary is Option[string],
+        help = "With --cmake: the cmake to run"
+      flag workRoot is Option[string],
+        help = "The work root of the environment build (default: the " &
+          "project's `.repro`)"
+      pos target is string, required = false,
+        help = "The dependency, project or build target"
+      pos command is seq[string], required = false, afterSeparator = true,
+        help = "The command to run in the target's environment, after `--`"
     subcmd "add", help = "Add a dependency to the active context":
       `addRoot`
       flag remote is string,
@@ -1699,7 +1812,27 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "The project, as a positional"
     subcmd "flake",
         help = "Compute the Nix flake overrides of the develop set":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "override-args", help = "Print the `--override-input` " &
+          "arguments that bind the flake's inputs to the develop set's " &
+          "checkouts":
+        `flakeOverrideArgs`
+      subcmd "refresh-lock", help = "Move each substituted input's " &
+          "`flake.lock` pin to its checkout's HEAD":
+        `flakeRefreshLock`
+        flag currentRepo is string,
+          help = "The checkout the refresh runs for (default: the flake " &
+            "directory)"
+        boolFlag recordDowngrade is bool,
+          help = "Record a pin that moves backward instead of withholding it"
+      subcmd "override-status", help = "Report whether each substituted " &
+          "checkout is at, ahead of or behind its `flake.lock` pin":
+        `flakeOverrideStatus`
+        boolFlag applied is bool,
+          help = "Report on the `--override-input` arguments after `--` " &
+            "instead of a develop set"
+        pos appliedArgs is seq[string], required = false,
+          afterSeparator = true,
+          help = "With --applied: the override arguments the shell used"
     subcmd "gateway", help = "Run a push-gateway hook entry point":
       subcmd "pre-receive", help = "Verify the pushed refs' certificates " &
           "and forward them upstream (the gateway's pre-receive hook)":

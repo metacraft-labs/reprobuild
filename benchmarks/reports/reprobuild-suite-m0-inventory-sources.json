@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2891,
+    "nimTestBinaries": 2892,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 778,
     "staticallyDetectedRuntimeCompilerFlowTests": 145,
-    "testEntries": 2938
+    "testEntries": 2939
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1641,7 +1641,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1598,
+      "integration": 1599,
       "platform/destructive": 189,
       "pure unit": 778,
       "unclassified": 350
@@ -1858,9 +1858,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2891,
+    "nimTestBinaryCount": 2892,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2938
+    "testEntryCount": 2939
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -41348,6 +41348,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cs_m6_develop_and_flake_command_lines",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cs_m6_develop_and_flake_command_lines.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cs_m6_machines_command_lines",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -56895,7 +56913,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -60380,8 +60398,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_stats_store_status_names_why_capture_is_off.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

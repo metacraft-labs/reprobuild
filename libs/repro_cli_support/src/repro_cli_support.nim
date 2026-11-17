@@ -513,16 +513,6 @@ const LegacyVerbSynopses = [
     "repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]\n"),
   ("watch",
     "repro watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr] [--hcr-mode=direct|shlib] [--hcr-debug=embedded|external|none] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n"),
-  ("develop",
-    "repro develop --list [--json] [--at=REV] [membership selectors] [--workspace-root=PATH]\n" &
-      "repro develop --list-overrides\n" &
-      "repro develop --drop=DEPENDENCY[,DEPENDENCY...] [--workspace-root=PATH] [--project-root=PATH] [--json]\n" &
-      "repro develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--tag=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n" &
-      "repro develop <dependency> --into=PATH\n" &
-      "repro develop <target[#name]> --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] -- <command> [args...]\n" &
-      "repro develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n"),
-  ("flake",
-    "repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|<develop selectors>] [--flake=DIR] [--strip-suffix=LIST] [--workspace-root=PATH] [--json]\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
@@ -37005,43 +36995,109 @@ proc workspaceShellFirstRoot(explicit: string): string =
   let found = findWorkspaceRoot(here)
   if found.len > 0: found else: here
 
-proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
+type
+  DevelopFlag = enum
+    ## The flags of `repro develop`. The command has four forms told apart
+    ## by the flags they are given (see ``runDevelopCommand``), and each
+    ## form refuses the flags that belong to another, naming them.
+    dfAll = "--all", dfDirect = "--direct", dfIndirect = "--indirect",
+    dfTransitiveOf = "--transitive-of", dfProject = "--project",
+    dfTag = "--tag", dfFilter = "--filter", dfOnly = "--only",
+    dfExcept = "--except", dfTier = "--tier", dfAt = "--at",
+    dfLockStore = "--lock-store", dfStrict = "--strict", dfList = "--list",
+    dfListOverrides = "--list-overrides", dfDrop = "--drop",
+    dfDryRun = "--dry-run", dfInto = "--into", dfReset = "--reset",
+    dfSource = "--source", dfWorkspaceRoot = "--workspace-root",
+    dfProjectRoot = "--project-root",
+    dfToolProvisioning = "--tool-provisioning", dfJson = "--json",
+    dfWriteReport = "--write-report", dfNoWriteReport = "--no-write-report",
+    dfCmake = "--cmake", dfCmakeBinary = "--cmake-binary",
+    dfWorkRoot = "--work-root"
+
+const
+  DevelopSetModeMarkers = {dfAll, dfDirect, dfIndirect, dfTransitiveOf,
+    dfOnly, dfProject, dfTag, dfList}
+    ## The flags that make a command line the set form.
+  DevelopSetFormFlags = {dfAll, dfDirect, dfIndirect, dfTransitiveOf,
+    dfProject, dfTag, dfFilter, dfOnly, dfExcept, dfTier, dfAt, dfLockStore,
+    dfStrict, dfList, dfDryRun, dfInto, dfReset, dfWorkspaceRoot,
+    dfToolProvisioning, dfJson}
+  DevelopOverlayMarkers = {dfSource, dfJson, dfWriteReport, dfWorkspaceRoot}
+    ## The flags that make a command line the workspace-overlay form
+    ## (`repro develop <pkg> --source=...`), when none of
+    ## ``DevelopOverlayExcluded`` is given.
+  DevelopOverlayExcluded = {dfList, dfListOverrides, dfInto, dfCmake,
+    dfCmakeBinary, dfWorkRoot, dfToolProvisioning}
+  DevelopOverlayFormFlags = {dfSource, dfWorkspaceRoot, dfToolProvisioning,
+    dfJson, dfWriteReport, dfNoWriteReport}
+  DevelopDropFormFlags = {dfDrop, dfWorkspaceRoot, dfProjectRoot, dfJson,
+    dfToolProvisioning}
+  DevelopTargetFormFlags = {dfCmake, dfListOverrides, dfInto,
+    dfToolProvisioning, dfCmakeBinary, dfWorkRoot}
+
+proc developFlagsGiven(c: ReproCommandLineDevelop): set[DevelopFlag] =
+  ## The flags ``c``'s command line gave.
+  if c.all: result.incl(dfAll)
+  if c.direct: result.incl(dfDirect)
+  if c.indirect: result.incl(dfIndirect)
+  if c.transitiveOf.len > 0: result.incl(dfTransitiveOf)
+  if c.project.len > 0: result.incl(dfProject)
+  if c.tag.len > 0: result.incl(dfTag)
+  if c.filter.len > 0: result.incl(dfFilter)
+  if c.only.len > 0: result.incl(dfOnly)
+  if c.exceptNames.len > 0: result.incl(dfExcept)
+  if c.tier.len > 0: result.incl(dfTier)
+  if c.at.len > 0: result.incl(dfAt)
+  if c.lockStore.len > 0: result.incl(dfLockStore)
+  if c.strict: result.incl(dfStrict)
+  if c.list: result.incl(dfList)
+  if c.listOverrides: result.incl(dfListOverrides)
+  if c.drop.len > 0: result.incl(dfDrop)
+  if c.dryRun: result.incl(dfDryRun)
+  if c.into.isSome: result.incl(dfInto)
+  if c.reset: result.incl(dfReset)
+  if c.source.isSome: result.incl(dfSource)
+  if c.workspaceRoot.isSome: result.incl(dfWorkspaceRoot)
+  if c.projectRoot.len > 0: result.incl(dfProjectRoot)
+  if c.toolProvisioning.len > 0: result.incl(dfToolProvisioning)
+  if c.json: result.incl(dfJson)
+  if c.writeReport.isSome: result.incl(dfWriteReport)
+  if c.noWriteReport: result.incl(dfNoWriteReport)
+  if c.cmake: result.incl(dfCmake)
+  if c.cmakeBinary.isSome: result.incl(dfCmakeBinary)
+  if c.workRoot.isSome: result.incl(dfWorkRoot)
+
+proc firstOutside(given, allowed: set[DevelopFlag]): string =
+  ## The first flag of ``given`` that ``allowed`` does not hold, or "".
+  for flag in DevelopFlag:
+    if flag in given and flag notin allowed:
+      return $flag
+  ""
+
+proc workspaceDevelopArgsOf(c: ReproCommandLineDevelop;
+                            given: set[DevelopFlag]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ## [--json] [--write-report[=PATH]] [--no-write-report]``, the
+  ## workspace-overlay form, from its configuration.
   ##
-  ## Mirrors the M9 ``parseWorkspaceInitArgs`` shape. The positional
-  ## ``<pkg>`` is required and must NOT be combined with ``--``,
-  ## ``--cmake``, ``--list``, or ``--into`` (those route to the existing
-  ## pre-M22 develop forms). ``--source`` and ``--workspace-root`` accept
-  ## both ``flag=value`` and ``flag value`` forms.
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--source" or arg.startsWith("--source="):
-      result.sourcePath = valueFromFlag(args, i, "--source")
-      result.explicitSource = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-      result.explicitWorkspaceRoot = true
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro develop` flag in M22 workspace-overlay form: " &
-          arg)
-    elif result.package.len == 0:
-      result.package = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro develop <pkg>`: " & arg)
-    inc i
+  ## The positional ``<pkg>`` is required; the target form's flags
+  ## (``--list``, ``--into``, ``--cmake``, ...) and a command after ``--``
+  ## never reach this form (``runDevelopCommand`` routes them to it).
+  let outside = firstOutside(given, DevelopOverlayFormFlags)
+  if outside.len > 0:
+    raise newException(ValueError,
+      "unsupported `repro develop` flag in M22 workspace-overlay form: " &
+        outside)
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.sourcePath = c.source.get("")
+  result.explicitSource = c.source.isSome
+  result.workspaceRoot = c.workspaceRoot.get("")
+  result.explicitWorkspaceRoot = c.workspaceRoot.isSome
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.package = c.target
   if result.package.len == 0:
     raise newException(ValueError,
       "`repro develop <pkg>` requires a package name")
@@ -37334,15 +37390,13 @@ proc writeWorkspaceDevelopReport(report: WorkspaceDevelopReport;
   except CatchableError:
     discard
 
-proc runWorkspaceDevelopCommand*(args: openArray[string]): int =
-  ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+proc runWorkspaceDevelopCommand(parsed: WorkspaceDevelopArgs): int =
+  ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH] [--json]``.
   ##
   ## M22 workspace-overlay dispatcher: clone the package (via M2 VCS
   ## actions) or just register the override (when ``--source`` points at
   ## a pre-existing checkout), then persist the entry in
   ## ``<workspaceRoot>/.repro/develop-overrides.toml`` via M20.
-  let parsed = parseDevelopArgs(args)
   let report = executeWorkspaceDevelop(parsed)
   writeWorkspaceDevelopReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "develop"))
@@ -39227,7 +39281,165 @@ proc parseAdhocLockStore(spec: string): DevelopAdhocLockStore =
       "--lock-store=" & raw & " names no location for the '" & result.kind &
       "' backend")
 
-proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
+type
+  DevelopSetSelection = object
+    ## The develop set a caller selects: its membership axis (which repos)
+    ## and its source axis (which lock records), with nothing about what
+    ## happens to the set.
+    ##
+    ## `repro develop`'s set form and the three `repro flake` verbs read it
+    ## from their command lines (``developSetSelectionOf``); the managed
+    ## hooks build it directly (``DevelopSetSelection(mode: dasmAll)``, the
+    ## whole lock set). ``developAllArgsOf`` turns it into the composer's
+    ## arguments, so every caller reaches the one composer
+    ## (``executeDevelopAll``) with a typed selection rather than with words
+    ## it assembled for a parser.
+    mode: DevelopAllSelectionMode
+    named: bool
+      ## Whether a mode or an exact-name selector (`--only`, `--project`,
+      ## `--tag`) named the set. A bulk mutation needs one; a query
+      ## (`--list`) does not.
+    transitiveOf: string
+    filter: string
+    only: seq[string]
+    exceptNames: seq[string]
+    projects: seq[string]
+    tags: seq[string]
+    tiers: seq[string]
+    lockStores: seq[DevelopAdhocLockStore]
+    at: string
+    strict: bool
+    refusal: string
+      ## Why the selection cannot be composed ("" when it can): two
+      ## different modes, a one-valued selector given two values, an unknown
+      ## tier, a malformed `--lock-store`, an empty `--at` or
+      ## `--transitive-of`. Carried rather than raised, so each caller
+      ## refuses at the point and in the form it always has (`repro develop`
+      ## exits 1 with it; the flake verbs report it as a refusal, exit 2).
+
+proc developSetSelectionOf[T](c: T): DevelopSetSelection =
+  ## The selection of a command line that declares the develop-set flags
+  ## (`repro develop`, `repro flake override-args|refresh-lock|
+  ## override-status`).
+  ##
+  ## Selectors compose in a FIXED ORDER, so the result never depends on the
+  ## order of the command line. The list-valued
+  ## selectors (`--only`, `--except`, `--project`, `--tag`, `--tier`)
+  ## accumulate and are order-free, but taking the last of several
+  ## one-valued ones would answer differently for two orders of one flag
+  ## set. So two different modes, or a one-valued selector (`--filter`,
+  ## `--at`) given two different values, is a refusal; the same value twice
+  ## is harmless and accepted, because a script assembling a command line
+  ## from several fragments legitimately does that.
+  result.mode = dasmAll
+  proc refuse(r: var DevelopSetSelection; why: string) =
+    if r.refusal.len == 0:
+      r.refusal = why
+  var modes: seq[string]
+  if c.all: modes.add("--all")
+  if c.direct: modes.add("--direct")
+  if c.indirect: modes.add("--indirect")
+  for pkg in c.transitiveOf:
+    let mode = "--transitive-of=" & pkg
+    if mode notin modes: modes.add(mode)
+  if modes.len > 1:
+    result.refuse("`repro develop` was given two different selection " &
+      "modes (" & modes[0] & " and " & modes[1] & "). They are " &
+      "alternatives, not a composition, and taking the last one would make " &
+      "the answer depend on argv order — which the fixed selector order " &
+      "exists to prevent. Pass exactly one of --all / --direct / --indirect " &
+      "/ --transitive-of.")
+  if c.all: result.mode = dasmAll
+  elif c.direct: result.mode = dasmDirect
+  elif c.indirect: result.mode = dasmIndirect
+  elif c.transitiveOf.len > 0:
+    result.mode = dasmTransitiveOf
+    result.transitiveOf = c.transitiveOf[0]
+  result.named = modes.len > 0 or c.only.len > 0 or c.project.len > 0 or
+    c.tag.len > 0
+  proc single(r: var DevelopSetSelection; flag: string;
+              values: openArray[string]): string =
+    for value in values:
+      if result.len > 0 and value != result:
+        r.refuse(flag & " was given twice with different values ('" &
+          result & "' and '" & value & "'). It takes a single value, and " &
+          "taking the last one would make the answer depend on argv order. " &
+          "Pass one " & flag &
+          (if flag == "--filter":
+             " (a glob: `--filter='{a,b}'` is not supported, but " &
+             "`--only=a,b` names both exactly)"
+           else: "") & ".")
+        return
+      result = value
+  result.filter = result.single("--filter", c.filter)
+  var revisions: seq[string]
+  for rev in c.at:
+    if rev.strip().len == 0:
+      result.refuse("--at requires a revision")
+    revisions.add(rev.strip())
+  result.at = result.single("--at", revisions)
+  for value in c.only: result.only.add(parseCommaList(value))
+  for value in c.exceptNames: result.exceptNames.add(parseCommaList(value))
+  for value in c.project: result.projects.add(parseCommaList(value))
+  for value in c.tag: result.tags.add(parseCommaList(value))
+  for value in c.tier:
+    for t in parseCommaList(value):
+      let tier = t.toLowerAscii()
+      if tier notin ["public", "org", "team", "personal", "private"]:
+        result.refuse("--tier=" & t & " names no locking tier (expected " &
+          "one or more of: public | org | team | personal)")
+        continue
+      # `private` is the workspace TOML's other spelling of `personal`
+      # (WorkspaceVisibility carries one canonical name); normalize so the
+      # tier compares equal to ``lockingTierLabel``'s output.
+      result.tiers.add(if tier == "private": "personal" else: tier)
+  for value in c.lockStore:
+    try:
+      result.lockStores.add(parseAdhocLockStore(value))
+    except ValueError as err:
+      result.refuse(err.msg)
+  result.strict = c.strict
+  if result.mode == dasmTransitiveOf and result.transitiveOf.len == 0:
+    result.refuse("`repro develop --transitive-of=<pkg>` requires a " &
+      "package name")
+
+proc developSelectorWords[T](c: T): seq[string] =
+  ## The develop-set selectors a command line gave, written out as
+  ## `--flag[=value]` words, for a refusal that has to name them.
+  if c.all: result.add("--all")
+  if c.direct: result.add("--direct")
+  if c.indirect: result.add("--indirect")
+  for v in c.transitiveOf: result.add("--transitive-of=" & v)
+  for v in c.project: result.add("--project=" & v)
+  for v in c.tag: result.add("--tag=" & v)
+  for v in c.filter: result.add("--filter=" & v)
+  for v in c.only: result.add("--only=" & v)
+  for v in c.exceptNames: result.add("--except=" & v)
+  for v in c.tier: result.add("--tier=" & v)
+  for v in c.at: result.add("--at=" & v)
+  for v in c.lockStore: result.add("--lock-store=" & v)
+  if c.strict: result.add("--strict")
+
+proc developAllArgsOf(selection: DevelopSetSelection; workspaceRoot: string;
+                      toolProvisioning: ToolProvisioningMode): DevelopAllArgs =
+  ## The composer's arguments for ``selection``, with no action requested
+  ## (the caller sets `list`, `dryRun`, `intoDir`, ...).
+  result.mode = selection.mode
+  result.transitiveOf = selection.transitiveOf
+  result.filter = selection.filter
+  result.only = selection.only
+  result.exceptNames = selection.exceptNames
+  result.projects = selection.projects
+  result.tags = selection.tags
+  result.tiers = selection.tiers
+  result.lockStores = selection.lockStores
+  result.at = selection.at
+  result.strict = selection.strict
+  result.workspaceRoot = workspaceRoot
+  result.toolProvisioning = toolProvisioning
+
+proc developSetArgsOf(c: ReproCommandLineDevelop;
+                      given: set[DevelopFlag]): DevelopAllArgs =
   ## ``repro develop --list|--all|--direct|--indirect|--transitive-of=<pkg>
   ## [--project=<list>] [--tag=<list>] [--filter=<glob>] [--only=<list>]
   ## [--except=<list>] [--tier=<list>] [--at=<rev>]
@@ -39262,193 +39474,39 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## ``--reset`` force-reconciles an already-present sibling checkout that has
   ## drifted off the locked revision back to the lock (destructive re-clone at
   ## the locked SHA) instead of refusing. Default off = refuse-on-drift.
-  result.mode = dasmAll
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  var sawSelector = false
-  var sawMode = false
-  # "Selectors compose in a FIXED ORDER, **so the result never depends on argv
-  # order**" (CLI/develop.md §"Membership axis"). The fixed stage order alone
-  # does not deliver that promise: the list-valued selectors (`--only`,
-  # `--except`, `--project`, `--tag`) ACCUMULATE and are order-free, but the
-  # SINGLE-VALUED ones would silently take the LAST occurrence — so
-  # `--all --direct` and `--direct --all` are the same flag set in two argv
-  # orders and would answer differently, which is exactly what the rule
-  # forbids. A repeated single-valued selector is therefore a LOUD refusal
-  # rather than a silent last-wins; repeating the SAME value is harmless and
-  # stays accepted, because a script assembling argv from several fragments
-  # legitimately does that.
-  var modeFlag = ""
-  proc chooseMode(flag: string) =
-    if modeFlag.len > 0 and modeFlag != flag:
-      raise newException(ValueError,
-        "`repro develop` was given two different selection modes (" &
-        modeFlag & " and " & flag & "). They are alternatives, not a " &
-        "composition, and taking the last one would make the answer depend " &
-        "on argv order — which the fixed selector order exists to prevent. " &
-        "Pass exactly one of --all / --direct / --indirect / --transitive-of.")
-    modeFlag = flag
-  proc single(field: var string; flag, value: string) =
-    if field.len > 0 and field != value:
-      raise newException(ValueError,
-        flag & " was given twice with different values ('" & field &
-        "' and '" & value & "'). It takes a single value, and taking the " &
-        "last one would make the answer depend on argv order. Pass one " &
-        flag & (if flag == "--filter":
-                  " (a glob: `--filter='{a,b}'` is not supported, but " &
-                  "`--only=a,b` names both exactly)"
-                else: "") & ".")
-    field = value
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--all":
-      chooseMode("--all")
-      result.mode = dasmAll; sawSelector = true; sawMode = true
-    elif arg == "--direct":
-      chooseMode("--direct")
-      result.mode = dasmDirect; sawSelector = true; sawMode = true
-    elif arg == "--indirect":
-      chooseMode("--indirect")
-      result.mode = dasmIndirect; sawSelector = true; sawMode = true
-    elif arg == "--transitive-of" or arg.startsWith("--transitive-of="):
-      let pkg = valueFromFlag(args, i, "--transitive-of")
-      chooseMode("--transitive-of=" & pkg)
-      result.mode = dasmTransitiveOf
-      single(result.transitiveOf, "--transitive-of", pkg)
-      sawSelector = true; sawMode = true
-    elif arg == "--filter" or arg.startsWith("--filter="):
-      single(result.filter, "--filter", valueFromFlag(args, i, "--filter"))
-    elif arg == "--only" or arg.startsWith("--only="):
-      result.only.add(parseCommaList(valueFromFlag(args, i, "--only")))
-      sawSelector = true
-    elif arg == "--except" or arg.startsWith("--except="):
-      result.exceptNames.add(parseCommaList(valueFromFlag(args, i, "--except")))
-    elif arg == "--project" or arg.startsWith("--project="):
-      result.projects.add(parseCommaList(valueFromFlag(args, i, "--project")))
-      sawSelector = true
-    elif arg == "--tag" or arg.startsWith("--tag="):
-      result.tags.add(parseCommaList(valueFromFlag(args, i, "--tag")))
-      sawSelector = true
-    elif arg == "--tier" or arg.startsWith("--tier="):
-      for t in parseCommaList(valueFromFlag(args, i, "--tier")):
-        let tier = t.toLowerAscii()
-        if tier notin ["public", "org", "team", "personal", "private"]:
-          raise newException(ValueError,
-            "--tier=" & t & " names no locking tier (expected one or more " &
-            "of: public | org | team | personal)")
-        # `private` is the workspace TOML's other spelling of `personal`
-        # (WorkspaceVisibility carries one canonical name); normalize so the
-        # tier compares equal to ``lockingTierLabel``'s output.
-        result.tiers.add(if tier == "private": "personal" else: tier)
-    elif arg == "--lock-store" or arg.startsWith("--lock-store="):
-      result.lockStores.add(
-        parseAdhocLockStore(valueFromFlag(args, i, "--lock-store")))
-    elif arg == "--at" or arg.startsWith("--at="):
-      let rev = valueFromFlag(args, i, "--at").strip()
-      if rev.len == 0:
-        raise newException(ValueError, "--at requires a revision")
-      # Single-valued for the same reason the mode flags are: two `--at`s
-      # would key the commit-addressed backends on whichever came last.
-      single(result.at, "--at", rev)
-    elif arg == "--list":
-      result.list = true
-    elif arg == "--strict":
-      result.strict = true
-    elif arg == "--into" or arg.startsWith("--into="):
-      result.intoDir = valueFromFlag(args, i, "--into")
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--reset":
-      result.reset = true
-    elif arg == "--dry-run":
-      result.dryRun = true
-    else:
-      raise newException(ValueError,
-        "unsupported `repro develop` set-form argument: " & arg)
-    inc i
-  if not sawSelector and result.transitiveOf.len == 0:
-    result.mode = dasmAll
-  if result.mode == dasmTransitiveOf and result.transitiveOf.len == 0:
+  let outside = firstOutside(given, DevelopSetFormFlags)
+  if outside.len > 0:
     raise newException(ValueError,
-      "`repro develop --transitive-of=<pkg>` requires a package name")
+      "unsupported `repro develop` set-form argument: " & outside)
+  if c.target.len > 0:
+    raise newException(ValueError,
+      "unsupported `repro develop` set-form argument: " & c.target)
+  let selection = developSetSelectionOf(c)
+  if selection.refusal.len > 0:
+    raise newException(ValueError, selection.refusal)
+  result = developAllArgsOf(selection, c.workspaceRoot.get(""),
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly)
+  result.list = c.list
+  result.intoDir = c.into.get("")
+  result.json = c.json
+  result.reset = c.reset
+  result.dryRun = c.dryRun
   if result.list and result.reset:
     raise newException(ValueError,
       "`repro develop --list` is a query and cannot be combined with " &
       "--reset (a destructive action)")
   # ``--list`` requires no selector; every OTHER form does, because "a bulk
   # mutation of the working tree is never implicit".
-  if not result.list and not sawMode and not sawSelector:
+  if not result.list and not selection.named:
     raise newException(ValueError,
       "`repro develop` with no target and no selector is not a bulk " &
       "operation: pass --all/--direct/--indirect/--transitive-of, a " &
       "membership selector, or --list to query the lock set")
   result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
-proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
-  ## The L1 develop-SET form is distinguished by a set-selection flag
-  ## (``--all`` / ``--direct`` / ``--indirect`` / ``--transitive-of`` /
-  ## ``--only`` / ``--project`` / ``--tag``) or by the SET-PATH ``--list``
-  ## (DS-6). ``--into`` / ``--filter`` alone stay on the pre-L1
-  ## single-dependency ``--into`` route (that route already owns ``--into``).
-  ##
-  ## DS-6 — ``--list`` used to route AWAY from here unconditionally, which is
-  ## why "today `--list` only reaches the pre-set route". The pre-set route's
-  ## `--list` printed the local develop-OVERRIDE map; that output now lives on
-  ## the explicit ``--list-overrides``, and bare ``--list`` answers the
-  ## question CLI/develop.md §"Action axis" assigns it: "what does this
-  ## workspace's lock set manage?". Nothing is lost — every override still
-  ## appears, as a row with state `develop`.
-  for arg in args:
-    if arg == "--" or arg == "--cmake" or arg == "--list-overrides":
-      return false
-  for arg in args:
-    if arg == "--all" or arg == "--direct" or arg == "--indirect" or
-        arg == "--list" or
-        arg == "--transitive-of" or arg.startsWith("--transitive-of=") or
-        arg == "--only" or arg.startsWith("--only=") or
-        arg == "--project" or arg.startsWith("--project=") or
-        arg == "--tag" or arg.startsWith("--tag="):
-      return true
-  false
-
-proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
-  ## Decide whether the argv looks like the M22 workspace-overlay form
-  ## (``repro develop <pkg> [--source=...] [--workspace-root=...]
-  ## [--json]``) as opposed to the pre-M22 surfaces (``--list``,
-  ## ``<dependency> --into=PATH``, ``<target> -- <command>``,
-  ## ``--cmake``). Returns true when at least one M22-distinctive
-  ## marker is present AND none of the pre-M22 markers are present.
-  ##
-  ## The M22-distinctive markers are: ``--source[=...]``, ``--json``,
-  ## ``--write-report[=...]``, ``--workspace-root[=...]``. The pre-M22 markers
-  ## are: ``--list``,
-  ## ``--into[=...]``, ``--cmake``, ``--cmake-binary[=...]``,
-  ## ``--work-root[=...]``, ``--tool-provisioning[=...]``, ``--``
-  ## (the command separator).
-  var hasM22Marker = false
-  for arg in args:
-    if arg == "--source" or arg.startsWith("--source=") or
-        arg == "--json" or
-        arg == "--write-report" or arg.startsWith("--write-report=") or
-        arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      hasM22Marker = true
-    if arg == "--list" or arg == "--list-overrides" or
-        arg == "--into" or arg.startsWith("--into=") or
-        arg == "--cmake" or
-        arg == "--cmake-binary" or arg.startsWith("--cmake-binary=") or
-        arg == "--work-root" or arg.startsWith("--work-root=") or
-        arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning=") or
-        arg == "--":
-      return false
-  hasM22Marker
-
-proc runDevelopDropCommand(args: openArray[string]): int =
+proc runDevelopDropCommand(c: ReproCommandLineDevelop;
+                           given: set[DevelopFlag]): int =
   ## ``repro develop --drop=<dependency>[,<dependency>…]
   ## [--workspace-root=PATH] [--project-root=PATH] [--json]``.
   ##
@@ -39479,39 +39537,24 @@ proc runDevelopDropCommand(args: openArray[string]): int =
   ## dependency with no override is reported, exits 0, and writes nothing.
   ## Exit 1 when an override document cannot be read or written; exit 2 on a
   ## usage error.
+  let outside = firstOutside(given, DevelopDropFormFlags)
+  if outside.len > 0 or c.target.len > 0 or c.command.len > 0:
+    stderr.writeLine("repro develop --drop: unsupported argument '" &
+      (if outside.len > 0: outside
+       elif c.target.len > 0: c.target
+       else: c.command[0]) &
+      "'; --drop removes recorded overrides and takes no selector")
+    return 2
+  # `--tool-provisioning` is accepted (its value checked by the parser) like
+  # every other `repro develop` form, so a caller that passes it uniformly
+  # is not refused; `--drop` runs no tool.
   var names: seq[string]
-  var explicitWorkspace = ""
-  var explicitProject = ""
-  var asJson = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--drop" or arg.startsWith("--drop="):
-      for n in parseCommaList(valueFromFlag(args, i, "--drop")):
-        if n notin names: names.add(n)
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitWorkspace = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--project-root" or arg.startsWith("--project-root="):
-      explicitProject = valueFromFlag(args, i, "--project-root")
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      # Accepted (and validated) like every other `repro develop` form, so a
-      # caller that passes it uniformly is not refused; `--drop` runs no tool.
-      try:
-        discard parseToolProvisioning(
-          valueFromFlag(args, i, "--tool-provisioning"))
-      except ValueError as err:
-        stderr.writeLine("repro develop --drop: " & err.msg)
-        return 2
-    else:
-      stderr.writeLine("repro develop --drop: unsupported argument '" & arg &
-        "' (usage: repro develop --drop=<dependency>[,<dependency>...] " &
-        "[--workspace-root=PATH] [--project-root=PATH] [--json]); --drop " &
-        "removes recorded overrides and takes no selector")
-      return 2
-    inc i
+  for value in c.drop:
+    for n in parseCommaList(value):
+      if n notin names: names.add(n)
+  let explicitWorkspace = c.workspaceRoot.get("")
+  let explicitProject = c.projectRoot
+  let asJson = c.json
   if names.len == 0:
     stderr.writeLine("repro develop --drop: name the dependency whose " &
       "develop override to remove (`repro develop --drop=<dependency>`)")
@@ -39655,81 +39698,58 @@ proc runDevelopDropCommand(args: openArray[string]): int =
     stderr.writeLine("repro develop --drop: error — " & f)
   exitCode
 
-proc runDevelopCommand*(args: openArray[string]): int =
-  ## `repro develop …`. Exported for the same reason `runReproLockCommand` is:
-  ## a test that asserts on what the verb WRITES has to reach the verb, and
-  ## reaching a private copy of its body instead would let the two drift.
-  # L1 routing: a set-selection flag (``--all`` / ``--direct`` /
-  # ``--transitive-of``) routes to the lock-driven develop-SET command that
-  # clones every selected dependency at its locked revision (CLI/develop.md
-  # §"Develop Set Selection"). Checked FIRST so ``--all --into=...`` reaches the
-  # set path rather than the single-dependency ``--into`` route.
-  #
-  # ``--drop`` is checked before everything: it removes recorded overrides,
-  # and a selector beside it is a usage error the drop parser reports, not a
-  # reason to route the argv somewhere that would add overrides instead.
-  for arg in args:
-    if arg == "--drop" or arg.startsWith("--drop="):
-      return runDevelopDropCommand(args)
-  if looksLikeDevelopAllArgs(args):
-    return runDevelopAllCommand(parseDevelopAllArgs(args))
-  # M22 routing: when the argv carries an M22-distinctive flag
-  # (``--source``, ``--workspace-root``, ``--json``) and none of the
-  # pre-M22 markers (``--list``, ``--into``, ``--cmake``,
-  # ``--tool-provisioning``, ``--work-root``, ``--``), dispatch to the
-  # workspace-overlay form documented in ``CLI/develop.md``.
-  if looksLikeWorkspaceDevelopArgs(args):
-    return runWorkspaceDevelopCommand(args)
-  var target = ""
-  var mode = tpmUnspecified
-  var command: seq[string] = @[]
-  var afterSeparator = false
-  var workRoot = ""
-  var cmakeMode = false
-  var cmakeBinary = ""
-  var listOverrides = false
-  var intoPath = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if afterSeparator:
-      command.add(arg)
-    elif arg == "--":
-      afterSeparator = true
-    elif arg == "--cmake":
-      cmakeMode = true
-    elif arg == "--list-overrides":
-      # DS-6 — this is the pre-set route's old ``--list``: the local
-      # develop-OVERRIDE map (`<node>\t<path>`), byte-identical. Bare ``--list``
-      # now answers the lock-set question CLI/develop.md assigns it, so the two
-      # meanings got one name each instead of sharing one.
-      listOverrides = true
-    elif arg == "--into" or arg.startsWith("--into="):
-      intoPath = valueFromFlag(args, i, "--into")
-    elif arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--tool-provisioning":
-      raise newException(ValueError,
-        "--tool-provisioning requires an inline value, for example " &
-        "--tool-provisioning=nix")
-    elif arg.startsWith("--cmake-binary="):
-      cmakeBinary = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--cmake-binary":
-      raise newException(ValueError,
-        "--cmake-binary requires an inline value, for example " &
-          "--cmake-binary=/path/to/cmake")
-    elif arg.startsWith("--work-root="):
-      workRoot = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--work-root":
-      raise newException(ValueError,
-        "--work-root requires an inline value, for example --work-root=.repro")
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported develop flag: " & arg)
-    elif target.len == 0:
-      target = arg
-    else:
-      raise newException(ValueError, "unexpected develop argument before --: " & arg)
-    inc i
+proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
+  ## `repro develop …`, from its configuration. Exported for the same reason
+  ## `runReproLockCommand` is: a test that asserts on what the verb WRITES
+  ## has to reach the verb, and reaching a private copy of its body instead
+  ## would let the two drift.
+  ##
+  ## The command has four forms, told apart by the flags they are given;
+  ## each refuses a flag that belongs to another one, naming it:
+  ##
+  ##   * `--drop=<list>` removes recorded overrides. Checked before
+  ##     everything: a selector beside it is a usage error the drop form
+  ##     reports, not a reason to route to a form that would add overrides.
+  ##   * The develop SET: a set-selection flag (`--all`, `--direct`,
+  ##     `--indirect`, `--transitive-of`, `--only`, `--project`, `--tag`) or
+  ##     the set's `--list`, with no `--cmake`,
+  ##     `--list-overrides` or command. Checked next, so `--all --into=...`
+  ##     reaches the set path rather than the single-dependency `--into`
+  ##     route.
+  ##   * The workspace overlay (`repro develop <pkg> --source=...`): one of
+  ##     `--source`, `--json`, `--write-report`, `--workspace-root`, and none
+  ##     of the target form's `--list`, `--list-overrides`, `--into`,
+  ##     `--cmake`, `--cmake-binary`, `--work-root`, `--tool-provisioning`
+  ##     or a command.
+  ##   * Otherwise the target form: `--list-overrides`, `<dependency>
+  ##     --into=PATH`, `<target> -- <command>`, `--cmake <source-dir>`.
+  let given = developFlagsGiven(c)
+  if dfDrop in given:
+    return runDevelopDropCommand(c, given)
+  if c.command.len == 0 and
+      (given * {dfCmake, dfListOverrides}).len == 0 and
+      (given * DevelopSetModeMarkers).len > 0:
+    return runDevelopAllCommand(developSetArgsOf(c, given))
+  if c.command.len == 0 and (given * DevelopOverlayMarkers).len > 0 and
+      (given * DevelopOverlayExcluded).len == 0:
+    return runWorkspaceDevelopCommand(workspaceDevelopArgsOf(c, given))
+  let outside = firstOutside(given, DevelopTargetFormFlags)
+  if outside.len > 0:
+    raise newException(ValueError, "unsupported develop flag: " & outside)
+  let target = c.target
+  let mode =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmUnspecified
+  let command = c.command
+  let workRoot = c.workRoot.get("")
+  let cmakeMode = c.cmake
+  let cmakeBinary = c.cmakeBinary.get("")
+  # `--list-overrides` is what this form's ``--list`` used to print: the
+  # local develop-OVERRIDE map (`<node>\t<path>`), byte-identical. Bare
+  # ``--list`` answers the lock-set question instead, so the two meanings
+  # got one name each instead of sharing one.
+  let listOverrides = c.listOverrides
+  let intoPath = c.into.get("")
 
   if listOverrides:
     if target.len > 0 or intoPath.len > 0 or command.len > 0 or cmakeMode:
@@ -96986,7 +97006,8 @@ proc runReproLockingCommand*(c: ReproCommandLineLocking): int =
 # resolves a SET — `--all` / `--only` / `--except` / `--tier` composing in a
 # fixed, argv-order-independent order over the workspace lock set — and
 # NF-1's rule is that **the develop set IS the override set**. So this verb
-# parses the develop set-form argv verbatim (``parseDevelopAllArgs``) and runs
+# declares `repro develop`'s selection flags (one shared declaration), reads
+# them into the same typed selection (``developSetSelectionOf``) and runs
 # the same composer through its QUERY path (``list = true``), which mutates
 # nothing: no clone, no checkout, no override file, no receipt. Adding a second
 # selection vocabulary here would leave two answers to one question, which is
@@ -97101,26 +97122,25 @@ type
       ## ``ok`` is false because the workspace lock set is EMPTY
       ## (``DevelopAllResult.emptyLockSet``): develop mode substitutes nothing.
 
-proc flakeDevelopSelectionOf(passthrough: openArray[string];
-    explicitRoot: string): FlakeDevelopSelection =
-  ## Resolve the develop set through ``repro develop``'s OWN composer.
+proc flakeDevelopSelectionOf(selection: DevelopSetSelection;
+    explicitRoot: string; toolProvisioning: ToolProvisioningMode):
+    FlakeDevelopSelection =
+  ## Resolve the develop set ``selection`` names through ``repro develop``'s
+  ## OWN composer.
   ##
-  ## ``--list`` is appended rather than ``--all`` so no selector is REQUIRED (a
-  ## query has no destructive edge, per CLI/develop.md §"Default behavior") and
-  ## so the composer takes its read-only path: ``executeDevelopAll`` returns
-  ## before it touches the override file, the engine cache, the receipts
-  ## directory or any checkout.
+  ## The composer is asked to LIST the set, so no selector is REQUIRED (a
+  ## query has no destructive edge)
+  ## and it takes its read-only path: ``executeDevelopAll`` returns before
+  ## it touches the override file, the engine cache, the receipts directory
+  ## or any checkout. ``toolProvisioning`` is how it obtains git.
   result.checkoutOf = initTable[string, string]()
   result.sourceOf = initTable[string, string]()
-  var developArgs: DevelopAllArgs
-  try:
-    var forDevelop: seq[string]
-    for a in passthrough: forDevelop.add(a)
-    forDevelop.add("--list")
-    developArgs = parseDevelopAllArgs(forDevelop)
-  except CatchableError as err:
-    result.refusals.add("the selection could not be parsed: " & err.msg)
+  if selection.refusal.len > 0:
+    result.refusals.add("the selection could not be parsed: " &
+      selection.refusal)
     return
+  var developArgs = developAllArgsOf(selection, explicitRoot,
+    toolProvisioning)
   developArgs.list = true
   developArgs.json = false
   # The workspace-wide recipe scan is `repro develop`'s; the flake verbs
@@ -97840,9 +97860,9 @@ type
     emitted: seq[FlakeOverrideBinding]
     report: seq[string]      ## the notices `override-args` prints on stderr
 
-proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
-    explicitRoot: string; suffixes: seq[string];
-    identity: GitToolIdentity): FlakeShellBindings =
+proc flakeShellBindingsOf(flakeRoot: string; selection: DevelopSetSelection;
+    explicitRoot: string; toolProvisioning: ToolProvisioningMode;
+    suffixes: seq[string]; identity: GitToolIdentity): FlakeShellBindings =
   ## The substitution develop mode performs for the flake at ``flakeRoot``:
   ## the develop set through `repro develop`'s own composer
   ## (``flakeDevelopSelectionOf``), the flake's declared inputs, §16.4's
@@ -97856,7 +97876,8 @@ proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
   ## built at their pin (reprobuild-pm issue
   ## `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
   result.suffixes = suffixes
-  result.selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+  result.selection = flakeDevelopSelectionOf(selection, explicitRoot,
+    toolProvisioning)
   if not result.selection.ok:
     for r in result.selection.refusals: result.refusals.add(r)
     return
@@ -97914,9 +97935,8 @@ proc hookSubstitutedDevelopSet(hs: HookDevelopSet;
   # rule removes.
   var bound = initTable[string, string]()
   let shell = flakeShellBindingsOf(flakeRoot,
-    ["--all", "--workspace-root=" & workspaceRoot,
-     "--tool-provisioning=path"], workspaceRoot,
-    defaultFlakeInputStripSuffixes, identity)
+    DevelopSetSelection(mode: dasmAll, named: true), workspaceRoot,
+    tpmPathOnly, defaultFlakeInputStripSuffixes, identity)
   if shell.ok:
     for e in shell.emitted:
       bound[e.input] = os.normalizedPath(absolutePath(e.path))
@@ -98947,7 +98967,7 @@ proc flakeRenderDriftReport(state: FlakeOverrideState;
       stderr.writeLine(label & ": " & flakeRowSentence(row))
   stderr.writeLine(label & ": " & flakeStateSummaryLine(state))
 
-proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
+proc runFlakeOverrideArgsCommand*(c: ReproCommandLineFlakeOverrideArgs): int =
   ## ``repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|
   ## …every other `repro develop` set-form selector] [--flake=DIR]
   ## [--strip-suffix=LIST] [--workspace-root=PATH] [--json]``.
@@ -98982,38 +99002,16 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   ## shell should use, and a dev shell that refuses to activate because
   ## `flake.lock` is unreadable would stop work over something the shell does
   ## not depend on.
-  var
-    flakeDir = ""
-    stripSpec = ""
-    stripGiven = false
-    asJson = false
-    explicitRoot = ""
-    passthrough: seq[string]
-    toolProvisioning = tpmPathOnly
-      ## Seeded, never left ``tpmUnspecified``: ``resolveGitTool`` REJECTS that
-      ## outright, and this is the line `.envrc` runs on every directory entry.
-      ## The same defect and the same fix are recorded for
-      ## ``repro workspace migrate-locks`` and ``repro flake refresh-lock``.
-    i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--flake" or arg.startsWith("--flake="):
-      flakeDir = valueFromFlag(args, i, "--flake")
-    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
-      stripSpec = valueFromFlag(args, i, "--strip-suffix")
-      stripGiven = true
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitRoot = valueFromFlag(args, i, "--workspace-root")
-      passthrough.add("--workspace-root=" & explicitRoot)
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-      passthrough.add(arg)
-    else:
-      passthrough.add(arg)
-    inc i
+  let flakeDir = c.flake
+  let asJson = c.json
+  let explicitRoot = c.workspaceRoot
+  let toolProvisioning =
+    # Defaulted to `path`, never left ``tpmUnspecified``: ``resolveGitTool``
+    # REJECTS that outright, and this is the line `.envrc` runs on every
+    # directory entry. The same defect and the same fix are recorded for
+    # ``repro workspace migrate-locks`` and ``repro flake refresh-lock``.
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
 
   var refusals: seq[string]
   proc refuse(): int =
@@ -99047,10 +99045,10 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
   let suffixes =
-    if stripGiven: parseCommaList(stripSpec)
+    if c.stripSuffix.isSome: parseCommaList(c.stripSuffix.get)
     else: defaultFlakeInputStripSuffixes
-  let shell = flakeShellBindingsOf(flakeRoot, passthrough, explicitRoot,
-    suffixes, identity)
+  let shell = flakeShellBindingsOf(flakeRoot, developSetSelectionOf(c),
+    explicitRoot, toolProvisioning, suffixes, identity)
   if not shell.ok:
     for r in shell.refusals: refusals.add(r)
     return refuse()
@@ -100309,7 +100307,7 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "`, then re-run the refresh to learn where this sibling really stands.")
 
 proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
-    selectorArgs: openArray[string]; suffixes: openArray[string];
+    developSet: DevelopSetSelection; suffixes: openArray[string];
     toolProvisioning: ToolProvisioningMode;
     recordDowngrade = false;
     label = flakeRefreshLockLabel;
@@ -100378,28 +100376,20 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     result.exitCode = 2
     return
 
-  # (1) The override set — NF-1's answer, computed by NF-1's own code.
-  var selector: seq[string]
-  var toolProvisioningGiven = false
-  for a in selectorArgs:
-    selector.add(a)
-    if a.startsWith("--tool-provisioning"): toolProvisioningGiven = true
-  if workspaceRoot.len > 0:
-    selector.add("--workspace-root=" & workspaceRoot)
-  if not toolProvisioningGiven and toolProvisioning == tpmPathOnly:
-    # The commit hook resolves git off ``PATH`` (post-commit must not provision
-    # a toolchain), so the develop-set query it drives has to do the same. Left
-    # off, the composer would resolve its own git by the default policy and a
-    # hook could end up materialising a toolchain on the commit path.
-    selector.add("--tool-provisioning=path")
+  # (1) The override set — `override-args`' answer, computed by its code. The
+  # develop-set query resolves git the way the refresh does
+  # (``toolProvisioning``, `path` unless the operator named another mode):
+  # the commit hook resolves git off ``PATH`` (post-commit must not provision
+  # a toolchain), and a query that resolved its own git by the default
+  # policy could materialise a toolchain on the commit path.
   #
   # ``preset`` is the managed hooks' own develop set (§16.5,
-  # ``hookFlakeSelection``); without it, the operator verb's selector is
-  # composed exactly as before.
+  # ``hookFlakeSelection``); without it, the operator verb's selection is
+  # composed.
   let selection =
     if preset.isSome: preset.get()
-    else: flakeDevelopSelectionOf(selector,
-      if workspaceRoot.len > 0: workspaceRoot else: "")
+    else: flakeDevelopSelectionOf(developSet,
+      if workspaceRoot.len > 0: workspaceRoot else: "", toolProvisioning)
   if not selection.ok:
     result.tag = "refused-unresolvable-workspace"
     result.diagnostic = selection.refusals.join("; ")
@@ -101793,7 +101783,7 @@ proc runReproLockUpdate*(c: ReproCommandLineLockUpdate): int =
   printLockUpdateOutcome(outcome, LockUpdateLabel)
   outcome.exitCode
 
-proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
+proc runFlakeRefreshLockCommand*(c: ReproCommandLineFlakeRefreshLock): int =
   ## ``repro flake refresh-lock [--all|--only=LIST|…every `repro develop`
   ## set-form selector] [--flake=DIR] [--strip-suffix=LIST]
   ## [--workspace-root=PATH] [--current-repo=PATH] [--json]``.
@@ -101835,64 +101825,37 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ## variable, with the same meaning, as on the commit path — or, for a behind
   ## input, unless ``--record-downgrade`` is given. Each regression recorded
   ## that way is announced on stderr.
-  var
-    flakeDir = ""
-    stripSpec = ""
-    stripGiven = false
-    asJson = false
-    explicitRoot = ""
-    currentRepo = ""
-    recordDowngrade = false
-    toolProvisioning = tpmPathOnly
-      ## NOT ``tpmUnspecified``, and the difference is the whole difference
-      ## between a command that runs and one that only reads as though it
-      ## would. ``resolveGitTool`` REJECTS ``tpmUnspecified`` outright ("no
-      ## provisioning mode was selected before resolving git; callers must
-      ## parse --tool-provisioning before invoking resolveGitTool"), so this
-      ## verb — the one NF-3's pre-push refusal tells the operator to run —
-      ## exited 2 with that message for every invocation that did not spell
-      ## the flag out. Every other verb's parser seeds ``tpmPathOnly`` and
-      ## lets ``--tool-provisioning`` override it (the same defect was fixed
-      ## for ``repro workspace migrate-locks``); this now does too.
-      ##
-      ## Found by NF-3's `t_push_refuses_when_the_lock_disagrees_with_the_
-      ## siblings`, which does not match the emitted remedy against a pattern
-      ## but EXECUTES it in the directory the refusal names.
-    passthrough: seq[string]
-    i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--flake" or arg.startsWith("--flake="):
-      flakeDir = valueFromFlag(args, i, "--flake")
-    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
-      stripSpec = valueFromFlag(args, i, "--strip-suffix")
-      stripGiven = true
-    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
-      currentRepo = valueFromFlag(args, i, "--current-repo")
-    elif arg == "--record-downgrade":
-      # The explicit opt-in of §3.2's "deliberately testing an older dependency
-      # is legitimate". Without it a behind-pin sibling's pin is left alone and
-      # named; with it, the downgrade is filed because somebody asked for it in
-      # so many words. NOT passed through to the develop-set selector — it is
-      # this verb's flag, and the composer would refuse an argument it does not
-      # know.
-      recordDowngrade = true
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-      passthrough.add(arg)
-    else:
-      passthrough.add(arg)
-    inc i
+  let flakeDir = c.flake
+  let asJson = c.json
+  let explicitRoot = c.workspaceRoot
+  var currentRepo = c.currentRepo
+  # The explicit opt-in to "deliberately testing an older dependency is
+  # legitimate". Without it a behind-pin sibling's pin is left alone and
+  # named; with it, the downgrade is filed because somebody asked for it in
+  # so many words. It is this verb's flag, not a develop-set selector.
+  let recordDowngrade = c.recordDowngrade
+  let toolProvisioning =
+    # NOT ``tpmUnspecified``, and the difference is the whole difference
+    # between a command that runs and one that only reads as though it
+    # would. ``resolveGitTool`` REJECTS ``tpmUnspecified`` outright ("no
+    # provisioning mode was selected before resolving git; callers must
+    # parse --tool-provisioning before invoking resolveGitTool"), so this
+    # verb — the one the pre-push refusal tells the operator to run —
+    # exited 2 with that message for every invocation that did not spell
+    # the flag out. Every other verb defaults to `path` and lets
+    # ``--tool-provisioning`` override it (the same defect was fixed for
+    # ``repro workspace migrate-locks``); this does too.
+    #
+    # Found by `t_push_refuses_when_the_lock_disagrees_with_the_
+    # siblings`, which does not match the emitted remedy against a pattern
+    # but EXECUTES it in the directory the refusal names.
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
   if currentRepo.len == 0: currentRepo = flakeRoot
   let suffixes =
-    if stripGiven: parseCommaList(stripSpec)
+    if c.stripSuffix.isSome: parseCommaList(c.stripSuffix.get)
     else: defaultFlakeInputStripSuffixes
   let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
   let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
@@ -101911,18 +101874,9 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   # land in `flake.lock`, and a modified checkout's `HEAD` is refused (see
   # ``executeLockUpdate``).
   var named: seq[string]
-  block:
-    var j = 0
-    while j < passthrough.len:
-      let a = passthrough[j]
-      if a.startsWith("--only="):
-        for n in parseCommaList(a["--only=".len .. ^1]):
-          if n notin named: named.add(n)
-      elif a == "--only" and j + 1 < passthrough.len:
-        for n in parseCommaList(passthrough[j + 1]):
-          if n notin named: named.add(n)
-        inc j
-      inc j
+  for value in c.only:
+    for n in parseCommaList(value):
+      if n notin named: named.add(n)
   if named.len > 0:
     var status = 0
     var results = newJArray()
@@ -101948,7 +101902,7 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
         "lockUpdates": results}, indent = 2))
     return status
   let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo,
-    passthrough, suffixes, toolProvisioning, recordDowngrade,
+    developSetSelectionOf(c), suffixes, toolProvisioning, recordDowngrade,
     allowRegression = allowance.names)
   if asJson:
     var rewrites = newJArray()
@@ -102297,7 +102251,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     for m in substituted.hookSet.notSubstituted:
       result.notSubstituted.add(describeNotSubstituted(m))
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
-      currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
+      currentRepo, DevelopSetSelection(mode: dasmAll, named: true),
+      defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
       label = label, allowRegression = allowRegression,
       refuseRegressions = true, planOnly = planOnly,
@@ -102695,7 +102650,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
      else:
        " Then commit both files and re-push.")
 
-proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
+proc runFlakeOverrideStatusCommand*(c: ReproCommandLineFlakeOverrideStatus): int =
   ## CONSUMER 2 — ``repro flake override-status [--all|--only=LIST|
   ## --except=LIST|--tier=LIST| …every other `repro develop` set-form selector]
   ## [--flake=DIR] [--workspace-root=PATH] [--strip-suffix=LIST] [--json]``,
@@ -102761,58 +102716,29 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   ## Every develop-set selector is REFUSED here rather than ignored: there is
   ## no selection to make, and a ``--only=`` that silently did nothing would be
   ## §5's inert knob in the one command whose subject is inert knobs.
-  var
-    flakeDir = ""
-    stripSpec = ""
-    stripGiven = false
-    asJson = false
-    explicitRoot = ""
-    applied = false
-    appliedArgs: seq[string]
-    selectors: seq[string]
-    passthrough: seq[string]
-    toolProvisioning = tpmPathOnly
-      ## Seeded, not left ``tpmUnspecified`` — see the same note on
-      ## ``runFlakeRefreshLockCommand``. ``resolveGitTool`` REJECTS
-      ## ``tpmUnspecified`` outright, so a verb that seeded it would exit 2 for
-      ## every invocation that did not spell the flag out.
-    i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--":
-      # Everything after the separator is the applied vector, verbatim —
-      # including words that look like flags of this command, because they are
-      # nix's arguments and not ours.
-      appliedArgs = @(args[i + 1 .. ^1])
-      break
-    if arg == "--flake" or arg.startsWith("--flake="):
-      flakeDir = valueFromFlag(args, i, "--flake")
-    elif arg == "--applied":
-      applied = true
-    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
-      stripSpec = valueFromFlag(args, i, "--strip-suffix")
-      stripGiven = true
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitRoot = valueFromFlag(args, i, "--workspace-root")
-      passthrough.add("--workspace-root=" & explicitRoot)
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-      passthrough.add(arg)
-    else:
-      # Every remaining flag is a `repro develop` set-form selector and reaches
-      # the composer verbatim. This is the ONE line that makes `--only=` and
-      # `--except=` mean here what they mean there.
-      passthrough.add(arg)
-      selectors.add(arg)
-    inc i
-
+  let flakeDir = c.flake
+  let asJson = c.json
+  let explicitRoot = c.workspaceRoot
+  let applied = c.applied
+  let stripGiven = c.stripSuffix.isSome
+  # Everything after the separator is the applied vector, verbatim —
+  # including words that look like flags of this command, because they are
+  # nix's arguments and not ours.
+  let appliedArgs = c.appliedArgs
+  # Every develop-set selector the command line gave. Without `--applied`
+  # they select the set; with it they are refused, by name.
+  let selectors = developSelectorWords(c)
+  let toolProvisioning =
+    # Defaulted to `path`, not left ``tpmUnspecified`` — see the same note
+    # on ``runFlakeRefreshLockCommand``. ``resolveGitTool`` REJECTS
+    # ``tpmUnspecified`` outright, so a verb that seeded it would exit 2 for
+    # every invocation that did not spell the flag out.
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
   let suffixes =
-    if stripGiven: parseCommaList(stripSpec)
+    if stripGiven: parseCommaList(c.stripSuffix.get)
     else: defaultFlakeInputStripSuffixes
   let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
 
@@ -102953,7 +102879,8 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     # binder. One derivation, the same one `repro flake override-args` emits and
     # the same one the pre-push gate verifies, so no two of them can disagree
     # about which inputs the dev shell is actually building from.
-    let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+    let selection = flakeDevelopSelectionOf(developSetSelectionOf(c),
+      explicitRoot, toolProvisioning)
     if not selection.ok:
       for r in selection.refusals: refusals.add(r)
       return refuse()
@@ -103040,25 +102967,16 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     flakeOverrideStatusLabel)
   0
 
-proc runReproFlakeCommand*(args: openArray[string]): int =
-  ## Top-level dispatcher for ``repro flake <verb> …``. NF-1 ships
-  ## ``override-args``, NF-2 ``refresh-lock``, NF-3 ``override-status``.
-  if args.len == 0:
-    stderr.writeLine("repro flake: error: missing verb " &
-      "(one of: override-args, refresh-lock, override-status)")
-    return 2
-  let rest = if args.len > 1: args[1 .. ^1] else: @[]
-  case args[0]
-  of "override-args":
-    return runFlakeOverrideArgsCommand(rest)
-  of "refresh-lock":
-    return runFlakeRefreshLockCommand(rest)
-  of "override-status":
-    return runFlakeOverrideStatusCommand(rest)
-  else:
-    stderr.writeLine("repro flake: error: unknown verb '" & args[0] &
-      "' (one of: override-args, refresh-lock, override-status)")
-    return 2
+proc runReproFlakeCommand*(c: ReproCommandLineFlake): int =
+  ## ``repro flake <verb> …``: ``override-args``, ``refresh-lock`` and
+  ## ``override-status``.
+  case c.command
+  of ReproCommandLineFlakeCommand.overrideArgs:
+    runFlakeOverrideArgsCommand(c.overrideArgs)
+  of ReproCommandLineFlakeCommand.refreshLock:
+    runFlakeRefreshLockCommand(c.refreshLock)
+  of ReproCommandLineFlakeCommand.overrideStatus:
+    runFlakeOverrideStatusCommand(c.overrideStatus)
 
 proc runWorkspacePublishEvidenceCommand*(
     c: ReproCommandLineWorkspacePublishEvidence): int =
@@ -105019,25 +104937,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "flake":
-    # NF-1 (Nix-Flake-Coexistence.md §5) — ``repro flake <verb>``. Ships
-    # ``override-args``, which emits the ``--override-input`` arguments for the
-    # current workspace so an ``.envrc`` becomes a single call instead of six
-    # ``NIX_FLAKE_OVERRIDE_*`` variables plus a content-pinned direnv plugin.
-    #
-    # Exit 2 rather than 1 on an unexpected error, deliberately: this verb's
-    # whole contract is that a failure and an empty override list are
-    # DISTINGUISHABLE, and the exit status is the thing `.envrc` branches on.
-    try:
-      let flakeArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproFlakeCommand(flakeArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro flake: error: " & err.msg)
-      return 2
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
       let watchArgs =
@@ -105062,17 +104961,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
       return 2
     except CatchableError as err:
       stderr.writeLine("repro watch: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "develop":
-    try:
-      let developArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runDevelopCommand(developArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro develop: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
@@ -105700,6 +105588,28 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.develop:
+    try:
+      return runDevelopCommand(conf.develop)
+    except CatchableError as err:
+      stderr.writeLine("repro develop: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.flake:
+    # ``repro flake <verb>``:
+    # ``override-args`` emits the ``--override-input`` arguments for the
+    # current workspace so an ``.envrc`` becomes a single call instead of six
+    # ``NIX_FLAKE_OVERRIDE_*`` variables plus a content-pinned direnv plugin;
+    # ``refresh-lock`` and ``override-status`` share its
+    # develop-set binding.
+    #
+    # Exit 2 rather than 1 on an unexpected error, deliberately: this verb's
+    # whole contract is that a failure and an empty override list are
+    # DISTINGUISHABLE, and the exit status is the thing `.envrc` branches on.
+    try:
+      return runReproFlakeCommand(conf.flake)
+    except CatchableError as err:
+      stderr.writeLine("repro flake: error: " & err.msg)
+      return 2
   of ReproCommandLineCommand.push:
     try:
       return runPushCommand(conf.push)

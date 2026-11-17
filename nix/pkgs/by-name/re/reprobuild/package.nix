@@ -151,16 +151,16 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "e6f976ca24fce6f9d794e334372d01d6b2f21790";
-    hash = "sha256-1VQKhrGdO+P0IrVm401eya21FGLAjos9L08t86/jUpQ=";
+    rev = "8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
+    hash = "sha256-2PXrPF+3a2dYMbyoFliukQRLVXc3wIBuvqDOYZWR/ko=";
   },
   # Added after the `src` commit too: confutils over a clispec description,
   # which repro's own command line is.
   confutilsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-confutils";
-    rev = "dcad14dd0f41e06dc61e8c01386923e6d5103dc3";
-    hash = "sha256-7VIYJo4s5NNnvLmzn9I3KpsojBzJBq66D1WjqHKXseI=";
+    rev = "0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74";
+    hash = "sha256-zHFUtlFQEmS3jK8oGm2ItMgMcWAsW2U1LciY3QspuS8=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
