@@ -25,6 +25,19 @@ import repro_runquota/store_status
 
 export build_pressure
 
+const
+  RunQuotaBypassFlag* = "--no-runquota"
+    ## The command-line spelling of the RunQuota full bypass, as the build
+    ## parser declares it (``noRunquota`` in ``cli_description``). Every
+    ## diagnostic that names the bypass takes it from here, so the remedy it
+    ## prints is a flag ``repro build`` accepts.
+  RunQuotaUnresponsiveRemedy* =
+    "Retry the build, restart runquotad (`runquota daemon restart`), or " &
+    "rerun with the unsafe single-process fallback `" & RunQuotaBypassFlag &
+    "` (or `REPROBUILD_NO_RUNQUOTA=1` on a command that has no such flag)."
+    ## The remedy both wedged-daemon diagnostics print: the grant wait in
+    ## ``awaitGrantLoop`` and the build engine's inline lease path.
+
 type
   ReproRunQuotaError* = object of CatchableError
   ReproRunQuotaDeadlockError* = object of ReproRunQuotaError
@@ -417,10 +430,9 @@ proc awaitGrantLoop*(
             "runquota stopped responding while a lease for '" & label &
             "' was queued: no grant-stream frame and no status reply for " &
             $unresponsiveMs & "ms (the daemon may be wedged or mid-restart). " &
-            "Retry the build, restart runquotad (`runquota daemon restart`), " &
-            "or rerun with the unsafe single-process fallback `--runquota=off`. " &
-            "Raise REPRO_RUNQUOTA_GRANT_TIMEOUT if this build legitimately " &
-            "queues longer than " & $unresponsiveMs & "ms under load.")
+            RunQuotaUnresponsiveRemedy & " Raise REPRO_RUNQUOTA_GRANT_TIMEOUT " &
+            "if this build legitimately queues longer than " &
+            $unresponsiveMs & "ms under load.")
         maybeHeartbeat(now)
         napMs(25)
 

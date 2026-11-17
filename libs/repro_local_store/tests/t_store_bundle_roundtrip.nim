@@ -8,8 +8,20 @@
 ## after import is still rejected, so the tamper check is not weakened.
 ## §5.3: a source input re-checked-out with the same bytes but a new mtime is
 ## restamped, so its timestamp-policy record hits too.
+##
+## The hostile-exporter suite at the end protects the confinement of an
+## import: the part hashes come from the same unsigned manifest as the parts,
+## so a bundle host can rewrite the stream and re-hash it at will, and only
+## the importer's own check of the archive's members stands between that
+## stream and the disk. Each case takes a real exported bundle, rewrites its
+## tar stream with GNU tar, and re-splits and re-hashes it the way a hostile
+## host would (`contents` is unchanged, so its SHA-256 still matches), then
+## checks that the import refuses before writing. See reprobuild-pm
+## issues/2026-11-12-bundle-extraction-writes-every-tar-member-under-before-
+## checking-it-against-the-declared.md.
 
-import std/[json, os, strutils, tempfiles, times, unittest]
+import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles, times,
+    unittest]
 
 import repro_core
 import repro_hash
@@ -245,3 +257,437 @@ suite "store bundle round trip":
       check "SHA-256" in message
       # Nothing was registered: no store index, no marker.
       check not fileExists(f.store / "index.db")
+
+# ---------------------------------------------------------------------------
+# A hostile exporter
+# ---------------------------------------------------------------------------
+
+proc run(cmd: string) =
+  let (output, code) = execCmdEx(cmd)
+  doAssert code == 0, cmd & "\n" & output
+
+proc rel(path: string): string =
+  ## The tar member name of an absolute path, as export writes it.
+  path[1 .. ^1]
+
+proc tamperedStream(f: Fixture; edit: proc (tarPath: string)) =
+  ## Rewrite the exported bundle's tar stream with `edit`, then compress,
+  ## split and re-hash it into the manifest, as a host serving the bundle
+  ## could. `contents` (the first member) is left as it was, so the
+  ## manifest's SHA-256 of it still matches.
+  let work = f.top / "tamper"
+  createDir(work)
+  let tarPath = work / "stream.tar"
+  let manifestPath = f.outDir / (DefaultHalfName & ".json")
+  var manifest = parseJson(readFile(manifestPath))
+  var cat = "cat"
+  for p in parsePartsJson(manifest["parts"]):
+    cat.add(" " & quoteShell(f.outDir / p.file))
+  run(cat & " | zstd -q -dc --long=27 > " & quoteShell(tarPath))
+  edit(tarPath)
+  let (parts, _) = writeCompressedParts("cat " & quoteShell(tarPath) &
+    " | zstd -q -c -1 --long=27", f.outDir, 1024)
+  manifest["parts"] = partsJson(parts)
+  writeFile(manifestPath, pretty(manifest) & "\n")
+
+proc appendFrom(tarPath, base: string; members: openArray[string]) =
+  ## Append `members` (relative to `base`) to the uncompressed `tarPath`.
+  var cmd = "tar --format=posix -rf " & quoteShell(tarPath) & " -C " &
+    quoteShell(base)
+  for m in members: cmd.add(" " & quoteShell(m))
+  run(cmd)
+
+proc deleteMembers(tarPath: string; members: openArray[string]) =
+  var cmd = "tar --delete -f " & quoteShell(tarPath)
+  for m in members: cmd.add(" " & quoteShell(m))
+  run(cmd)
+
+proc importRefusal(f: Fixture): string =
+  ## The import's refusal, or "" when it was accepted.
+  try:
+    discard importBundle(ImportOptions(bundleDir: f.outDir), f.roots)
+  except StoreBundleError as e:
+    result = e.msg
+  checkpoint "import said: " & result
+
+proc exportForTampering(f: Fixture) =
+  var opts = defaultExportOptions(f.outDir)
+  opts.partSize = 1024
+  opts.zstdLevel = 1
+  discard exportBundle(computeClosure(f.roots), opts)
+
+suite "store bundle import confines the archive to what contents declares":
+  test "a member outside every declared root is refused and not written":
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      f.wipe()
+      # Outside the store, the action cache and the workspace, but inside
+      # this test's directory, so the test is safe to run unprivileged.
+      let planted = f.top / "planted" / "evil.sh"
+      f.tamperedStream(proc (tarPath: string) =
+        createDir(planted.parentDir)
+        writeFile(planted, "echo owned\n")
+        appendFrom(tarPath, "/", [rel(planted)])
+        removeDir(planted.parentDir))
+      let message = f.importRefusal()
+      check rel(planted) in message
+      check not fileExists(planted)
+      check not dirExists(planted.parentDir)
+      # Refused before the unpack: nothing that contents declares was
+      # written either.
+      check not fileExists(f.ws / "build" / "gen.txt")
+      check not fileExists(f.store / "index.db")
+
+  test "a symlink carried where contents declares a directory is refused":
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      f.wipe()
+      # A fresh machine has no `build/` yet.
+      removeDir(f.ws / "build")
+      # `build/` is declared a directory. The stream carries a link there to
+      # the version-controlled `src/` instead, and writes a file through it.
+      let staging = f.top / "staging-link"
+      f.tamperedStream(proc (tarPath: string) =
+        deleteMembers(tarPath, [rel(f.ws / "build" / "gen.txt"),
+          rel(f.ws / "build")])
+        createDir(staging / rel(f.ws))
+        createSymlink("src", staging / rel(f.ws / "build"))
+        appendFrom(tarPath, staging, [rel(f.ws / "build")])
+        removeDir(staging)
+        createDir(staging / rel(f.ws / "build"))
+        writeFile(staging / rel(f.ws / "build" / "planted.txt"), "planted\n")
+        appendFrom(tarPath, staging, [rel(f.ws / "build" / "planted.txt")])
+        removeDir(staging))
+      let message = f.importRefusal()
+      check rel(f.ws / "build") in message
+      check not fileExists(f.ws / "src" / "planted.txt")
+      check not symlinkExists(f.ws / "build")
+      check not fileExists(f.ws / ".repro" / "output" / "install" / "lib" /
+        "out.txt")
+
+  test "a member carried twice is refused":
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      # The second copy is appended while the original is still on disk, so
+      # it is byte-for-byte the declared file: only the duplication is wrong.
+      f.tamperedStream(proc (tarPath: string) =
+        appendFrom(tarPath, "/", [rel(f.ws / "build" / "gen.txt")]))
+      f.wipe()
+      let message = f.importRefusal()
+      check rel(f.ws / "build" / "gen.txt") in message
+      check "once" in message
+      check not fileExists(f.ws / "build" / "gen.txt")
+
+  test "a declared member missing from the stream is refused before any write":
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      f.wipe()
+      f.tamperedStream(proc (tarPath: string) =
+        deleteMembers(tarPath, [rel(f.ws / "build" / "gen.txt")]))
+      let message = f.importRefusal()
+      check rel(f.ws / "build" / "gen.txt") in message
+      # A sentinel: another declared file, which an unpack would have
+      # written, is absent.
+      check not fileExists(f.ws / ".repro" / "output" / "install" / "lib" /
+        "out.txt")
+      check not fileExists(f.store / "index.db")
+
+  test "a directory that is a symlink on this machine is not written through":
+    # GNU tar follows an existing symlink in a member's leading directories.
+    # A link already on disk below a root (planted by an earlier bundle,
+    # which may declare an `l` entry, or made by anyone else) would carry
+    # an unpack out of the roots even when every member is declared, so the
+    # import refuses before it writes.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      f.wipe()
+      let outside = f.top / "outside"
+      createDir(outside)
+      createDir(f.store)
+      createSymlink(outside, f.store / BundlesDirName)
+      let message = f.importRefusal()
+      check (f.store / BundlesDirName) in message
+      check "symlink" in message
+      var written: seq[string]
+      for p in walkDirRec(outside): written.add(p)
+      check written.len == 0
+      check not fileExists(f.ws / "build" / "gen.txt")
+      check not fileExists(f.store / "index.db")
+
+proc exportHostile(f: Fixture; edit: proc (c: var BundleClosure)) =
+  ## Export a bundle whose `contents` a hostile exporter edited: the archive
+  ## and `contents` agree, so only the importer's rules on what `contents`
+  ## may declare stand in the way.
+  var c = computeClosure(f.roots)
+  edit(c)
+  c.entries.sort(proc (a, b: BundleEntry): int = cmp(a.path, b.path))
+  var opts = defaultExportOptions(f.outDir)
+  opts.partSize = 1024
+  opts.zstdLevel = 1
+  discard exportBundle(c, opts)
+
+proc linkEntry(path: string): BundleEntry =
+  BundleEntry(kind: bekLink, mode: 0o777, digest: expandSymlink(path),
+    mtimeNs: 0, path: path)
+
+proc entriesBelow(dir: string): seq[string] =
+  for p in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+      pcLinkToDir}):
+    result.add(p)
+
+suite "store bundle import keeps its own writes inside the roots":
+  test "a symlink declared over the store's own files is refused":
+    # The unpack writes only the link, inside the root; it is the importer
+    # opening `index.db` afterwards (and every later `repro`) that would
+    # create the database, its -wal and -shm wherever the link points.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let outside = f.top / "outside"
+      createDir(outside)
+      let db = f.store / "index.db"
+      moveFile(db, f.top / "index.db.real")
+      createSymlink(outside / "pwned.db", db)
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.entries.add(linkEntry(db)))
+      f.wipe()
+      let message = f.importRefusal()
+      check db in message
+      check "outside everything a bundle carries" in message
+      check entriesBelow(outside).len == 0
+      check not fileExists(f.ws / "build" / "gen.txt")
+
+  test "a regular file carried over the store's own index is refused":
+    # Not a link, so nothing is written outside at once; but a crafted
+    # index.db could name prefix paths outside the store for a later GC to
+    # delete. A bundle never carries the store's own state (§2).
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let db = f.store / "index.db"
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.entries.add(BundleEntry(kind: bekFile, mode: 0o644,
+          size: getFileSize(db), digest: fileBlake3Hex(db), path: db)))
+      f.wipe()
+      let message = f.importRefusal()
+      check db in message
+      check not fileExists(db)
+      check not fileExists(f.ws / "build" / "gen.txt")
+
+  test "a symlink outside a prefix is refused even where a bundle carries files":
+    # Compiler-probe markers are carried, but nothing there is a link, and
+    # one would be followed by the probe code that writes markers later.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let outside = f.top / "outside"
+      createDir(outside)
+      let probes = f.store / "compiler-probes"
+      createDir(probes)
+      let lnk = probes / "planted"
+      createSymlink(outside, lnk)
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.entries.add(linkEntry(lnk)))
+      f.wipe()
+      let message = f.importRefusal()
+      check lnk in message
+      check "outside every carried prefix" in message
+      check entriesBelow(outside).len == 0
+
+  test "a workspace root declared inside the action cache exempts nothing":
+    # With no local workspace root the bundle's own are accepted, so a
+    # bundle could name `<cache>/action-cache` as one; the cache's own
+    # files must stay out of reach all the same.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let planted = f.ac / "action-cache" / "planted-index"
+      writeFile(planted, "crafted\n")
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.roots.workspaceRoots.add(f.ac / "action-cache")
+        c.entries.add(BundleEntry(kind: bekFile, mode: 0o644,
+          size: getFileSize(planted), digest: fileBlake3Hex(planted),
+          path: planted)))
+      f.wipe()
+      var message = ""
+      try:
+        discard importBundle(ImportOptions(bundleDir: f.outDir),
+          BundleRoots(storeRoot: f.store, actionCacheRoot: f.ac))
+      except StoreBundleError as e:
+        message = e.msg
+      checkpoint "import said: " & message
+      check planted in message
+      check "outside everything a bundle carries" in message
+      check not fileExists(planted)
+
+  test "a symlink declared at a root is refused":
+    # Everything the importer writes below that root afterwards would
+    # follow it (a root nested in a workspace root makes this reachable
+    # from an ordinary-looking workspace link).
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportHostile(proc (c: var BundleClosure) =
+        for e in c.entries.mitems:
+          if e.path == f.ws:
+            e = BundleEntry(kind: bekLink, mode: 0o777, digest: "/etc",
+              path: f.ws))
+      f.wipe()
+      let message = f.importRefusal()
+      check "at or above the root" in message
+      check not fileExists(f.ws / "build" / "gen.txt")
+
+  test "a link inside a carried prefix is still accepted":
+    # Packages carry links of their own (`libfoo.so -> libfoo.so.1`), and
+    # nothing writes into a registered prefix, so the rule above spares them.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      # Realized with the link in it (editing a realized prefix would only
+      # get it quarantined for no longer matching its hash), and named by
+      # the install mirror in place of the fixture's own prefix.
+      let staging = f.top / "staging-linked"
+      createDir(staging / "lib")
+      writeFile(staging / "lib" / "liblinked.so", "linked prefix bytes\n")
+      createSymlink("liblinked.so", staging / "lib" / "liblinked.so.1")
+      var store = openStore(f.store)
+      let realized = store.realizeDirectoryAsPrefix(staging, StoreReceiptHint(
+        adapter: "path", packageName: "linked", version: "1.0",
+        lockIdentity: "test"))
+      store.close()
+      writeFile(f.ws / ".repro" / "output" / ".realization-info",
+        "platform=test\nstore-relative-path=" & realized.row.realizedPath &
+        "\n")
+      let closure = computeClosure(f.roots)
+      var link = ""
+      for e in closure.entries:
+        if e.kind == bekLink: link = e.path
+      check link.endsWith("/lib/liblinked.so.1")
+      check closure.prefixes.anyIt(link.startsWith(it & "/"))
+      f.exportForTampering()
+      f.wipe()
+      let report = importBundle(ImportOptions(bundleDir: f.outDir), f.roots)
+      check not report.skippedExtraction
+      check report.quarantinedPrefixes.len == 0
+      check expandSymlink(link) == "liblinked.so"
+
+  test "a prefix line that is not a store prefix directory is refused":
+    # The symlink rule trusts what lies inside a carried prefix, so a bundle
+    # must not be able to name the whole store as one.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.prefixes.add(f.store))
+      f.wipe()
+      let message = f.importRefusal()
+      check "not a store prefix directory" in message
+      check not fileExists(f.ws / "build" / "gen.txt")
+
+  test "a restamp below a declared symlink is refused":
+    # Step 5.3 sets the mtime through every directory in the path, so a
+    # bundle that declares `<ws>/lnk -> /elsewhere` and a restamp of
+    # `<ws>/lnk/known.txt` with that file's digest would stamp a file
+    # outside the roots.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let outside = f.top / "outside"
+      createDir(outside)
+      let known = outside / "known.txt"
+      writeFile(known, "known bytes\n")
+      setLastModificationTime(known, fromUnix(1_000_000_000))
+      let lnk = f.ws / "lnk"
+      createSymlink(outside, lnk)
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.entries.add(linkEntry(lnk))
+        c.restamps.add(RestampEntry(size: getFileSize(known),
+          mtimeNs: 1_234_000_000 * 1_000_000_000'i64,
+          digest: fileBlake3Hex(known), path: lnk / "known.txt")))
+      f.wipe()
+      let message = f.importRefusal()
+      check "below the symlink entry" in message
+      check getLastModificationTime(known) == fromUnix(1_000_000_000)
+
+  test "a restamp below a directory that is a symlink on this machine is skipped":
+    # A link already on disk (one an earlier bundle declared, say) would
+    # carry the mtime write out of the roots just the same. Sources are not
+    # members, so the import itself goes ahead; the restamp is left undone.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      f.wipe()
+      let src = f.ws / "src"
+      let moved = f.top / "outside-src"
+      moveDir(src, moved)
+      createSymlink(moved, src)
+      let before = getLastModificationTime(moved / "in.txt")
+      let report = importBundle(ImportOptions(bundleDir: f.outDir), f.roots)
+      check report.restamped == 0
+      check report.restampMismatches == 1
+      check getLastModificationTime(moved / "in.txt") == before
+
+  test "the archive can be listed with a zstd that is not on PATH":
+    # The Nix half falls back to its own zstd on a host without one, and
+    # its member check must use that same decompressor.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      let zstd = findExe("zstd")
+      let bin = f.top / "bin-without-zstd"
+      createDir(bin)
+      # Everything the listing runs but zstd: bash runs its pipeline.
+      for tool in ["tar", "bash"]:
+        createSymlink(findExe(tool), bin / tool)
+      let manifest = parseJson(readFile(f.outDir / (DefaultHalfName & ".json")))
+      let parts = parsePartsJson(manifest["parts"])
+      let listing = f.top / "members"
+      let savedPath = getEnv("PATH")
+      putEnv("PATH", bin)
+      defer: putEnv("PATH", savedPath)
+      expect StoreBundleError:
+        listBundleMembers(f.outDir, parts, listing)
+      listBundleMembers(f.outDir, parts, listing, zstd)
+      check "contents" in readFile(listing)

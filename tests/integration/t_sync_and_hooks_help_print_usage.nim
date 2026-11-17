@@ -6,7 +6,7 @@
 ## request prints to stdout and exits 0, so a script or an operator can ask
 ## any verb how to call it.
 ##
-## ``repro help <command>`` answers every command ``repro --help`` lists,
+## ``repro help <command>`` answers every command ``repro --help-all`` lists,
 ## with help on stdout and exit 0, including the commands whose own parser
 ## does not know ``--help``. ``repro help`` must not hand such a parser a
 ## ``--help`` it would reject or, worse, take as an operand: ``repro allow
@@ -27,7 +27,8 @@ import repro_test_support
 import repro_cli_support/cli_description
 
 macro shownCommands(): untyped =
-  ## The top-level commands ``repro --help`` lists, from the description.
+  ## The top-level commands ``repro --help-all`` lists, from the
+  ## description.
   var words: seq[string] = @[]
   for cmd in reproCommandLineModel().commands:
     if not cmd.anonymous and cmd.path.len == 1 and

@@ -1451,10 +1451,143 @@ proc lockSolveFlags(): NimNode {.compileTime.} =
     pos projectDir is string, required = false,
       help = "The project (default: the current directory)"
 
+type
+  ReproCommandGroup* = object
+    ## One heading of ``repro --help``: its title, the commands the short
+    ## page (``-h``, ``--help``, ``repro help``) lists under it, and the
+    ## commands only ``repro --help-all`` (and ``repro help --all``) adds.
+    title*: string
+    primary*: seq[string]
+    secondary*: seq[string]
+
+const
+  ReproCommandGroups* = @[
+    ReproCommandGroup(title: "Build & Test",
+      primary: @["build", "test", "watch", "clean"],
+      secondary: @["bench", "lint", "certify", "certificates", "ci", "graph",
+        "deps", "stats", "configs", "show-conventions", "cargo"]),
+    ReproCommandGroup(title: "Environments & Services",
+      primary: @["shell", "exec", "up", "down", "run", "tasks"],
+      secondary: @["dev", "hcr", "allow", "deny", "dev-env", "prompt",
+        "launch-plan"]),
+    ReproCommandGroup(title: "Dependencies & Workspaces",
+      primary: @["develop", "add", "why", "lock", "workspace"],
+      secondary: @["remove", "sync", "pull", "branch", "switch", "push",
+        "check", "hooks", "locking", "flake", "gateway", "bundle"]),
+    ReproCommandGroup(title: "Machines & Diagnostics",
+      primary: @["home", "system", "infra", "health"],
+      secondary: @["anywhere", "deploy-agent", "hardware", "disk", "attest",
+        "cert-signer", "daemon", "store", "cas", "cache", "reap", "self",
+        "pressure", "capabilities", "debug", "version", "help",
+        "completion"])]
+    ## How ``repro --help`` organizes the top-level commands, in the order
+    ## it lists them: each group's ``primary`` commands are the daily ones
+    ## the short page shows, its ``secondary`` ones the rest, which
+    ## ``--help-all`` lists after them under the same heading. Every shown
+    ## top-level command is in exactly one group, and only shown ones are:
+    ## ``arrangeCommandGroups`` refuses to compile otherwise, so a new
+    ## command has to be given a place here. The user documentation's
+    ## commands index reads this table as text
+    ## (``scripts/render_user_docs_generated.py``), so keep its shape: one
+    ## ``ReproCommandGroup(...)`` per group, string literals only.
+
+proc commandHeadWord(stmt: NimNode): string {.compileTime.} =
+  ## The word a top-level ``subcmd "<word>"`` statement declares, or "".
+  if stmt.kind in {nnkCommand, nnkCall} and stmt.len >= 2 and
+      stmt[0].eqIdent("subcmd") and stmt[1].kind == nnkStrLit:
+    return stmt[1].strVal
+  ""
+
+proc commandHeadArgs(stmt: NimNode): int {.compileTime.} =
+  ## The index one past a ``subcmd`` statement's last head argument: its
+  ## body (a statement list) when it has one, else its end. A command
+  ## written without a body (``subcmd "x", visibility = hidden``) has head
+  ## arguments up to its last child.
+  if stmt[^1].kind == nnkStmtList: stmt.len - 1 else: stmt.len
+
+proc commandIsShown(stmt: NimNode): bool {.compileTime.} =
+  ## Whether a ``subcmd`` statement leaves its visibility at ``shown``:
+  ## neither ``hidden`` (listed nowhere) nor ``internal`` (listed only by
+  ## its own help), so the root's help has a row for it.
+  for arg in stmt[2 ..< commandHeadArgs(stmt)]:
+    if arg.kind == nnkExprEqExpr and arg[0].eqIdent("visibility"):
+      return arg[1].eqIdent("shown")
+  true
+
+proc arrangeCommandGroups(body: NimNode): NimNode {.compileTime.} =
+  ## ``body`` (the ``cli:`` body) with its shown top-level commands moved
+  ## into the ``group`` sections ``ReproCommandGroups`` names, in its order,
+  ## and every ``secondary`` one marked ``tier = secondary``. The sections
+  ## stand where the first shown command stood; every other statement keeps
+  ## its place. A group is applied here, rather than written around the
+  ## declarations, so the table is the one place that says where a command
+  ## is listed and the declarations keep their shape.
+  ##
+  ## A compile error when the table names a command that is not a shown
+  ## top-level command, names one twice, or leaves a shown one out.
+  var shown: seq[(string, NimNode)] = @[]
+  var notShown: seq[string] = @[]
+  for stmt in body:
+    let word = commandHeadWord(stmt)
+    if word.len == 0:
+      continue
+    if commandIsShown(stmt):
+      shown.add((word, stmt))
+    else:
+      notShown.add(word)
+  proc declaration(word: string): NimNode =
+    for (name, stmt) in shown:
+      if name == word:
+        return stmt
+    if word in notShown:
+      error("repro command line: ReproCommandGroups lists `" & word &
+        "`, which is not a shown command (a hidden or internal command " &
+        "has no row in `repro --help`)")
+    error("repro command line: ReproCommandGroups lists `" & word &
+      "`, which is not a top-level command")
+  var placed: seq[string] = @[]
+  var sections: seq[NimNode] = @[]
+  for group in ReproCommandGroups:
+    var commands = newStmtList()
+    for (words, secondary) in [(group.primary, false),
+                               (group.secondary, true)]:
+      for word in words:
+        if word in placed:
+          error("repro command line: ReproCommandGroups lists `" & word &
+            "` twice")
+        placed.add(word)
+        var command = declaration(word).copyNimTree()
+        if secondary:
+          command.insert(commandHeadArgs(command), nnkExprEqExpr.newTree(
+            ident("tier"), ident("secondary")))
+        commands.add(command)
+    sections.add(nnkCommand.newTree(ident("group"), newLit(group.title),
+      commands))
+  for (word, stmt) in shown:
+    if word notin placed:
+      error("repro command line: the top-level command `" & word & "` is " &
+        "in no group of ReproCommandGroups; add it to the `primary` list " &
+        "of a group if `repro --help` should list it, to the `secondary` " &
+        "list otherwise", stmt)
+  result = body.kind.newNimNode(body)
+  var sectionsAdded = false
+  for stmt in body:
+    let word = commandHeadWord(stmt)
+    if word.len > 0 and commandIsShown(stmt):
+      if not sectionsAdded:
+        for section in sections:
+          result.add(section)
+        sectionsAdded = true
+      continue
+    result.add(stmt)
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
-  ## Command order is the order ``repro --help`` lists them in.
+  ## ``repro --help`` lists the shown top-level commands by
+  ## ``ReproCommandGroups``, not in the order they are declared here
+  ## (``arrangeCommandGroups``). The ``# ---- ... ----`` comments below
+  ## only organise the declarations; they are not the help's sections.
   let graphInspection = graphInspectionFlags()
   let devEnvSelection = devEnvSelectionFlags()
   # Group 5 (development environments), one splice per command.
@@ -2983,6 +3116,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         boolFlag json is bool, help = "Shortcut for `--format=json`"
         pos path is string, help = "The artifact"
     subcmd "help", help = "Show the help of repro or of one command":
+      boolFlag all is bool,
+        help = "List every command, not only the daily ones (the page " &
+          "`--help-all` prints)"
       pos topic is seq[string], required = false,
         help = "The command whose help to show, for example `workspace sync`"
     subcmd "version",
@@ -3064,6 +3200,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     # The older spelling of `repro home __remote-activate`.
     subcmd "__remote-activate", visibility = hidden:
       `remoteActivate`
+  result = arrangeCommandGroups(result)
 
 proc reproCommandLineModel*(): CliModel[NoCliExtension,
     ReproCommandLineParamExt] {.compileTime.} =

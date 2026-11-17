@@ -7,6 +7,17 @@
 ## (they need flakes and an S3 endpoint). Restoring a Nix half is tested here
 ## against the real `nix-store`, `nix-hash`, tar and zstd, into a store under
 ## another root, with store paths this test adds to the host's store.
+##
+## The hostile-half suite at the end protects the confinement of a Nix half
+## restore: the part hashes come from the same unsigned manifest as the
+## parts, so a bundle host can serve any stream it likes, and only the
+## restorer's own check of the archive's members keeps that stream inside
+## the half's registered store paths. Each case builds a half's stream with
+## GNU tar the way a hostile host would and restores it by both entry points
+## (`restoreNixHalf` and restore.sh). The https-only cases check that a plain
+## `http://` source, which anyone on the path could rewrite, is refused. See
+## reprobuild-pm issues/2026-11-12-bundle-extraction-writes-every-tar-member-
+## under-before-checking-it-against-the-declared.md.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_bundle
@@ -138,13 +149,13 @@ suite "restore.sh":
       unpackedBytes: 1 shl 30, compressedBytes: 1 shl 28,
       parts: @[BundlePart(file: "part-0000", bytes: 5, sha256: "aa"),
                BundlePart(file: "part-0001", bytes: 5, sha256: "bb")],
-      registration: BundlePart(file: "registration", bytes: 3, sha256: "cc"),
+      registration: BundlePart(file: "registration", bytes: 3, sha256: "ab"),
       shells: @[BundleShell(name: "lib:default", input: "/nix/store/in",
         env: "/nix/store/env")])
     let latest = %*{"system": "x86_64-linux", "name": "demo"}
     let script = renderRestoreScript(latest, true, h)
     check "aa  part-0000" in script
-    check "cc  registration" in script
+    check "ab  registration" in script
     check "'/nix/store/rrr-repro'" in script
     check "bundle restore \"$SRC\" --after-bootstrap" in script
     let path = getTempDir() / ("repro-bundle-restore-" &
@@ -269,7 +280,7 @@ suite "sources into an existing root, activation, GitHub round trip":
       check viaGh.restored == @["sources"]
       check readFile(fresh / "lib" / "src" / "lib.nim") == "echo 1\n"
 
-const RestoreScriptTools = ["bash", "sh", "nix-store", "nix-hash", "tar",
+const RestoreScriptTools = ["bash", "sh", "curl", "nix-store", "nix-hash", "tar",
   "flock", "comm", "wc", "stat",
   "zstd", "sha256sum", "df", "awk", "xargs", "mktemp", "sort", "join", "cmp",
   "diff", "cut", "sed", "tr", "cat", "chmod", "rm", "mkdir", "touch", "tee",
@@ -381,6 +392,38 @@ proc corruptRegistration(partsDir: string; h: var NixHalf; storePath: string) =
   h.registration = BundlePart(file: "registration", bytes: bytes.len,
     sha256: sha256Hex(bytes))
 
+proc addPayloadPaths(top: string): tuple[a, b, c, big: string] =
+  ## Three store paths of our own, added to the host's store: a tree with a
+  ## 1 MiB file, a file, and a symlink.
+  let tree = top / "payload"
+  createDir(tree / "lib")
+  var big = newString(1 shl 20)
+  # xorshift: incompressible, so the stream spans several parts, and the
+  # same on every run, so the store path is too.
+  var x = 0x9E3779B97F4A7C15'u64
+  for i in 0 ..< big.len:
+    x = x xor (x shl 13)
+    x = x xor (x shr 7)
+    x = x xor (x shl 17)
+    big[i] = chr(int(x and 0xff))
+  writeFile(tree / "lib" / "big.so", big)
+  writeFile(tree / "env.sh", "export T_REPRO_BUNDLE=1\n")
+  result.a = sh("nix-store --add " & quoteShell(tree)).strip()
+  result.b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
+  createSymlink("env.sh", top / "link")
+  result.c = sh("nix-store --add " & quoteShell(top / "link")).strip()
+  result.big = big
+
+proc packedHalf(paths: seq[string]; partsDir, id, input, env: string): NixHalf =
+  ## A Nix half of `paths`, packed by the production packer into `partsDir`.
+  let packed = packNixHalf(paths, partsDir, 3, 128 * 1024)
+  NixHalf(id: id, system: "x86_64-linux",
+    zstd: storePathOf(expandFilename(findExe("zstd"))), paths: paths,
+    unpackedBytes: packed.unpackedBytes,
+    compressedBytes: packed.compressedBytes, parts: packed.parts,
+    registration: packed.registration,
+    shells: @[BundleShell(name: "t:default", input: input, env: env)])
+
 suite "nix half restore after an interrupted unpack":
   test "a truncated leftover is replaced, and content is checked before registration":
     if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
@@ -391,33 +434,10 @@ suite "nix half restore after an interrupted unpack":
       defer:
         discard execCmdEx("chmod -R u+w " & quoteShell(top))
         removeDir(top)
-      # Two store paths of our own: a tree with a 1 MiB file, and a file.
-      let tree = top / "payload"
-      createDir(tree / "lib")
-      var big = newString(1 shl 20)
-      # xorshift: incompressible, so the stream spans several parts, and
-      # the same on every run, so the store path is too.
-      var x = 0x9E3779B97F4A7C15'u64
-      for i in 0 ..< big.len:
-        x = x xor (x shl 13)
-        x = x xor (x shr 7)
-        x = x xor (x shl 17)
-        big[i] = chr(int(x and 0xff))
-      writeFile(tree / "lib" / "big.so", big)
-      writeFile(tree / "env.sh", "export T_REPRO_BUNDLE=1\n")
-      let a = sh("nix-store --add " & quoteShell(tree)).strip()
-      let b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
-      createSymlink("env.sh", top / "link")
-      let c = sh("nix-store --add " & quoteShell(top / "link")).strip()
+      let (a, b, c, big) = addPayloadPaths(top)
       let partsDir = top / "bundle" / "x86_64-linux" / NixHalfDir / "h"
-      let packed = packNixHalf(@[a, b, c], partsDir, 3, 128 * 1024)
-      check packed.parts.len > 1
-      var h = NixHalf(id: "h", system: "x86_64-linux",
-        zstd: storePathOf(expandFilename(findExe("zstd"))), paths: @[a, b, c],
-        unpackedBytes: packed.unpackedBytes,
-        compressedBytes: packed.compressedBytes, parts: packed.parts,
-        registration: packed.registration,
-        shells: @[BundleShell(name: "t:default", input: a, env: b)])
+      var h = packedHalf(@[a, b, c], partsDir, "h", a, b)
+      check h.parts.len > 1
 
       # The library path: `repro bundle restore`.
       let root = top / "root"
@@ -782,3 +802,278 @@ suite "nix half restore beside a Nix writer":
         let v = storeVerifies(r)
         check v.ok
         if not v.ok: echo v.output
+
+suite "restore.sh from a local bundle directory":
+  test "the bytes unpacked are the bytes verified, though the source changes":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-swap-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let tree = top / "payload"
+      createDir(tree)
+      var big = newString(1 shl 19)
+      var x = 0x9E3779B97F4A7C15'u64
+      for i in 0 ..< big.len:
+        x = x xor (x shl 13)
+        x = x xor (x shr 7)
+        x = x xor (x shl 17)
+        big[i] = chr(int(x and 0xff))
+      writeFile(tree / "big.so", big)
+      writeFile(tree / "env.sh", "export T_REPRO_BUNDLE_SWAP=1\n")
+      let a = sh("nix-store --add " & quoteShell(tree)).strip()
+      let b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
+      let bundle = top / "bundle"
+      let partsDir = bundle / "x86_64-linux" / NixHalfDir / "h"
+      let packed = packNixHalf(@[a, b], partsDir, 3, 128 * 1024)
+      check packed.parts.len > 1
+      let h = NixHalf(id: "h", system: "x86_64-linux",
+        zstd: storePathOf(expandFilename(findExe("zstd"))), paths: @[a, b],
+        unpackedBytes: packed.unpackedBytes,
+        compressedBytes: packed.compressedBytes, parts: packed.parts,
+        registration: packed.registration,
+        shells: @[BundleShell(name: "t:default", input: a, env: b)])
+      let script = top / "restore.sh"
+      writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+        "name": "bundle"}, true, h))
+      # A zstd that, at restore.sh's first call (the registration decompress,
+      # after `sha256sum -c`), empties every part of the source directory:
+      # what a writer of that directory could do between check and read.
+      let tools = restoreScriptPath(top)
+      let realZstd = findExe("zstd")
+      removeFile(tools / "zstd")
+      let marker = top / "swapped"
+      writeFile(tools / "zstd", "#!/bin/sh\n" &
+        "if [ ! -e " & quoteShell(marker) & " ]; then\n" &
+        "  : > " & quoteShell(marker) & "\n" &
+        "  for f in " & quoteShell(partsDir) & "/*; do case \"$f\" in */registration) ;; *) : > \"$f\" ;; esac; done\n" &
+        "fi\nexec " & quoteShell(realZstd) & " \"$@\"\n")
+      setFilePermissions(tools / "zstd",
+        {fpUserRead, fpUserWrite, fpUserExec})
+      let shRoot = top / "sh-root"
+      let log = top / "restore.log"
+      let env = "env -i PATH=" & quoteShell(tools) &
+        " TMPDIR=" & quoteShell(top) &
+        " REPRO_BUNDLE_LOG=" & quoteShell(log) &
+        " REPRO_BUNDLE_NIX_ROOT=" & quoteShell(shRoot)
+      discard execCmdEx(env & " bash " & quoteShell(script) & " " &
+        quoteShell(bundle))
+      check fileExists(marker)  # the swap really happened
+      check "nix half restored" in readFile(log)
+      check pathValid(shRoot, a)
+      check intactFile(storeLocationIn(shRoot, a) / "big.so", big)
+
+# ---------------------------------------------------------------------------
+# A hostile bundle host
+# ---------------------------------------------------------------------------
+
+proc hostileHalf(honest: NixHalf; honestDir, bundleDir, id: string;
+                 extras: openArray[tuple[base, member: string]]): NixHalf =
+  ## The honest half's registration, with a stream that carries the honest
+  ## store paths followed by `extras` (each `member` taken relative to its
+  ## `base`), compressed, split and hashed the way the half's host could.
+  ## It lives at `<bundleDir>/x86_64-linux/nix/<id>`, where restore.sh looks.
+  let dir = bundleDir / "x86_64-linux" / NixHalfDir / id
+  createDir(dir)
+  let tarPath = dir.parentDir / (id & ".tar")
+  var create = "tar --format=posix -C / -cf " & quoteShell(tarPath)
+  for p in honest.paths: create.add(" " & quoteShell(p[1 .. ^1]))
+  discard sh(create)
+  for (base, member) in extras:
+    discard sh("tar --format=posix -rf " & quoteShell(tarPath) & " -C " &
+      quoteShell(base) & " " & quoteShell(member))
+  let (parts, total) = writeCompressedParts("cat " & quoteShell(tarPath) &
+    " | zstd -q -c -3 --long=27", dir, 128 * 1024)
+  removeFile(tarPath)
+  copyFile(honestDir / honest.registration.file,
+    dir / honest.registration.file)
+  result = honest
+  result.id = id
+  result.parts = parts
+  result.compressedBytes = total
+
+proc restoreShEnv(top, root, log: string): string =
+  "env -i PATH=" & quoteShell(restoreScriptPath(top)) &
+    " TMPDIR=" & quoteShell(top) & " REPRO_BUNDLE_STRICT=1" &
+    " REPRO_BUNDLE_LOG=" & quoteShell(log) &
+    " REPRO_BUNDLE_NIX_ROOT=" & quoteShell(root)
+
+proc runRestoreSh(top: string; h: NixHalf; root, source: string;
+                  extraEnv = ""): tuple[code: int; log: string] =
+  ## restore.sh for `h`, rendered by the production renderer, run strict
+  ## against `source` with the Nix half restored into `root`.
+  let script = top / ("restore-" & h.id & ".sh")
+  writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+    "name": "bundle"}, true, h))
+  let log = top / ("restore-" & h.id & "-" & extractFilename(root) & ".log")
+  removeFile(log)
+  let (output, code) = execCmdEx(restoreShEnv(top, root, log) & " " &
+    extraEnv & " bash " & quoteShell(script) & " " & quoteShell(source))
+  result = (code, (if fileExists(log): readFile(log) else: output))
+  checkpoint "restore.sh exit " & $code & ":\n" & result.log
+
+proc leftoverIntact(root, a: string): bool =
+  ## Whether the truncated file `interruptedUnpack` left in `a` is still
+  ## there: a refused half must not even clear the leftovers.
+  let big = storeLocationIn(root, a) / "lib" / "big.so"
+  fileExists(big) and getFileSize(big) == 4096
+
+suite "a Nix half is confined to its registered store paths":
+  test "members outside the registered paths are refused, by both entry points":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-hostile-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let (a, b, c, _) = addPayloadPaths(top)
+      let bundle = top / "bundle"
+      let honestDir = bundle / "x86_64-linux" / NixHalfDir / "h"
+      let h = packedHalf(@[a, b, c], honestDir, "h", a, b)
+      # Outside the store altogether, and in a store path the half does not
+      # register.
+      let staging = top / "staging"
+      createDir(staging / "etc")
+      writeFile(staging / "etc" / "evil", "owned\n")
+      let other = "nix/store/00000000000000000000000000000000-not-registered"
+      createDir(staging / other)
+      writeFile(staging / other / "evil", "owned\n")
+      for (id, member, planted) in [
+          ("etc", "etc/evil", "etc/evil"),
+          ("other", other, other & "/evil")]:
+        let evil = hostileHalf(h, honestDir, bundle, id, [(staging, member)])
+        # The library path, over the state an interrupted unpack leaves.
+        let root = top / ("lib-root-" & id)
+        interruptedUnpack(honestDir, h, root)
+        var refused = ""
+        try: restoreNixHalf(evil, bundle / "x86_64-linux" / NixHalfDir / id,
+          root)
+        except CatchableError as e: refused = e.msg
+        checkpoint "restoreNixHalf said: " & refused
+        check member in refused
+        check not fileExists(root / planted)
+        check not pathValid(root, a)
+        check not pathValid(root, b)
+        check leftoverIntact(root, a)
+        check outsideUntouched(root)
+        # The bootstrap path.
+        let shRoot = top / ("sh-root-" & id)
+        interruptedUnpack(honestDir, h, shRoot)
+        let (code, log) = runRestoreSh(top, evil, shRoot, bundle)
+        check code != 0
+        check member in log
+        check "nix half restored" notin log
+        check not fileExists(shRoot / planted)
+        check not pathValid(shRoot, a)
+        check not pathValid(shRoot, b)
+        check leftoverIntact(shRoot, a)
+        check outsideUntouched(shRoot)
+
+  test "a member added inside an already-valid path is not written":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-valid-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let (a, b, c, big) = addPayloadPaths(top)
+      let bundle = top / "bundle"
+      let honestDir = bundle / "x86_64-linux" / NixHalfDir / "h"
+      let h = packedHalf(@[a, b, c], honestDir, "h", a, b)
+      let onlyA = packedHalf(@[a], top / "only-a", "only-a", a, a)
+      # `added` lies inside `a`, which is registered: the member list
+      # accepts it. But `a` is already valid on the target, so it is Nix's,
+      # and the restore must not write into it.
+      let staging = top / "staging"
+      let added = a[1 .. ^1] & "/lib/added"
+      createDir(staging / added.parentDir)
+      writeFile(staging / added, "planted\n")
+      let evil = hostileHalf(h, honestDir, bundle, "add", [(staging, added)])
+      for entry in ["lib", "sh"]:
+        let root = top / (entry & "-root")
+        restoreNixHalf(onlyA, top / "only-a", root)
+        check pathValid(root, a)
+        check not pathValid(root, b)
+        # A store directory is read-only, which stops an unprivileged
+        # restore from writing into it but not a root one (the setup-script
+        # case). Making it writable lets this run see what root would.
+        makeWritable(storeLocationIn(root, a) / "lib")
+        if entry == "lib":
+          restoreNixHalf(evil, bundle / "x86_64-linux" / NixHalfDir / "add",
+            root)
+        else:
+          let (code, log) = runRestoreSh(top, evil, root, bundle)
+          check "nix half restored" in log
+          discard code # no `repro` to hand over to, so strict mode fails after
+        check not fileExists(root / added)
+        check pathValid(root, b)
+        check pathValid(root, c)
+        check intactFile(storeLocationIn(root, a) / "lib" / "big.so", big)
+
+proc unfetchableHalf(): NixHalf =
+  ## A Nix half whose store paths exist nowhere, for the cases refused before
+  ## anything is fetched.
+  NixHalf(id: "0123456789abcdef0123456789abcdef",
+    zstd: "/nix/store/zzz-zstd-bin", repro: "",
+    unpackedBytes: 1, compressedBytes: 1,
+    parts: @[BundlePart(file: "part-0000", bytes: 5, sha256: "aa")],
+    registration: BundlePart(file: "registration", bytes: 3, sha256: "ab"),
+    shells: @[BundleShell(name: "lib:default",
+      input: "/nix/store/00000000000000000000000000000000-in",
+      env: "/nix/store/00000000000000000000000000000000-env")])
+
+suite "bundles are fetched over https only":
+  test "a plain http:// source is refused by both entry points":
+    let top = createTempDir("repro-bundle-http-", "")
+    defer: removeDir(top)
+    # Port 9 (discard) on loopback: nothing is served there, so a fetch
+    # that was not refused fails on its own, but with another message.
+    for source in ["http://127.0.0.1:9/demo", "HTTP://127.0.0.1:9/demo"]:
+      var refused = ""
+      try: discard restoreBundle(RestoreOptions(source: source,
+        workspaceDir: top / "ws"))
+      except CatchableError as e: refused = e.msg
+      checkpoint "restoreBundle said: " & refused
+      check "refusing" in refused
+      check "https://" in refused
+    let h = unfetchableHalf()
+    let (code, log) = runRestoreSh(top, h, top / "root",
+      "http://127.0.0.1:9/demo")
+    check code != 0
+    check "refusing" in log
+    check "https://" in log
+
+  test "an http:// GitHub transport override is refused by both entry points":
+    let top = createTempDir("repro-bundle-http-gh-", "")
+    defer: removeDir(top)
+    let h = unfetchableHalf()
+    for (variable, other) in [("REPRO_BUNDLE_GITHUB_RAW",
+                               "REPRO_BUNDLE_GITHUB_API"),
+                              ("REPRO_BUNDLE_GITHUB_API",
+                               "REPRO_BUNDLE_GITHUB_RAW")]:
+      putEnv(variable, "http://127.0.0.1:9")
+      # The other base exists nowhere, so nothing reaches the network.
+      putEnv(other, "file://" & top / "nowhere")
+      defer:
+        delEnv(variable)
+        delEnv(other)
+      var refused = ""
+      try: discard restoreBundle(RestoreOptions(
+        source: "github:acme/bundles@0123abc/demo", workspaceDir: top / "ws"))
+      except CatchableError as e: refused = e.msg
+      checkpoint "restoreBundle said: " & refused
+      check "refusing" in refused
+      check variable in refused
+      let (code, log) = runRestoreSh(top, h, top / "root",
+        "github:acme/bundles@0123abc/demo", variable & "=http://127.0.0.1:9 " &
+        other & "=" & quoteShell("file://" & top / "nowhere"))
+      check code != 0
+      check "refusing" in log
+      check variable in log

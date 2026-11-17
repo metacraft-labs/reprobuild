@@ -84,6 +84,7 @@ flag	repro	--help-all
 flag	repro	--version
 flag	repro	-V
 command	repro help
+flag	repro help	--all
 command	repro version
 flag	repro version	--json
 command	repro completion

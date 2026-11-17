@@ -6510,7 +6510,7 @@ proc runQuotaEnforcementHeaderLine*(record: EnforcementRecord): string =
 proc runQuotaReportJson*(bypassed: bool): JsonNode =
   ## RA-13: machine-readable resource-authority status for the run report.
   ## ``bypassed`` is true when this build launched at least one action with no
-  ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA`` or
+  ## RunQuota lease (explicit ``--no-runquota`` / ``REPROBUILD_NO_RUNQUOTA`` or
   ## the unreachable-daemon fallback). In that state ``authority`` is the
   ## engine's local pool gate only — host limits and cross-session fairness do
   ## NOT apply and concurrent cross-invocation runs cannot be made safe. When
@@ -12443,7 +12443,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   proc logRunQuotaAuthority(runResult: BuildRunResult) =
     # RA-13: surface the resource-authority status in the build header. When
     # this build launched at least one action with no RunQuota lease (explicit
-    # --runquota=off / REPROBUILD_NO_RUNQUOTA, or the unreachable-daemon
+    # --no-runquota / REPROBUILD_NO_RUNQUOTA, or the unreachable-daemon
     # fallback), say so plainly: limits are locally-enforced-only and cannot
     # make concurrent cross-invocation runs safe. Emit once per build command.
     if loggedRunQuotaAuthority:
@@ -33137,7 +33137,7 @@ proc runCertificatesCommand*(args: openArray[string];
       asJson = true
     elif arg == "--no-certify" and sub == "plan":
       noCertify = true
-    elif arg == "--no-runquota":
+    elif arg == RunQuotaBypassFlag:
       bypassRunQuota = true
     elif arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg["--tool-provisioning=".len .. ^1])
@@ -88765,7 +88765,7 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         "--prepare-only", "--dry-run", "--force-rebuild", "--rebuild",
         "--no-output-cleanup", "--publish-cache-hits",
         "--publish-materialized", "--skip-cmake-regeneration",
-        "--no-runquota", "--runquota", "--unicode", "--no-unicode",
+        RunQuotaBypassFlag, "--runquota", "--unicode", "--no-unicode",
         "--list-targets", "--list-targets-json", "--json",
         "--print-solved-graph"]:
       result.buildFlags.add(arg)
@@ -90307,7 +90307,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     # whose daemon socket the user cannot open the certificate plan was
     # reported unreadable. ``--runquota`` still overrides the variable, as
     # it does for the build.
-    let bypassRunQuota = "--no-runquota" in opts.buildFlags or
+    let bypassRunQuota = RunQuotaBypassFlag in opts.buildFlags or
       ("--runquota" notin opts.buildFlags and runQuotaBypassedByEnv())
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     defer: releaseAutoRunQuotaProcess(autoRunQuota)
@@ -105245,11 +105245,13 @@ proc runBuildVerbCommand(verb: string; args: seq[string];
     return 1
 
 proc runReproHelp(programName: string; topic: seq[string];
-                  publicCliPath: string): int =
-  ## ``repro help [<command>...]``: the help of repro or of one command, on
-  ## stdout. A migrated command's help is generated from its declarations.
-  ## An unmigrated one prints its usage synopsis (whatever words follow);
-  ## one with no synopsis, the help its declaration gives.
+                  publicCliPath: string; all = false): int =
+  ## ``repro help [--all] [<command>...]``: the help of repro or of one
+  ## command, on stdout. A migrated command's help is generated from its
+  ## declarations. An unmigrated one prints its usage synopsis (whatever
+  ## words follow); one with no synopsis, the help its declaration gives.
+  ## With ``all`` it is the page ``--help-all`` prints, which also lists
+  ## the ``secondary`` commands.
   var command = 0
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
@@ -105267,7 +105269,8 @@ proc runReproHelp(programName: string; topic: seq[string];
         return 0
       break
   try:
-    stdout.write(ReproCommandLine.helpText(reproCommandPath(command)))
+    stdout.write(ReproCommandLine.helpText(reproCommandPath(command),
+      long = all, all = all))
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
@@ -105416,7 +105419,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
     stderr.write(ReproCommandLine.helpText())
     return 2
   of ReproCommandLineCommand.help:
-    return runReproHelp(programName, conf.help.topic, publicCliPath)
+    return runReproHelp(programName, conf.help.topic, publicCliPath,
+      conf.help.all)
   of ReproCommandLineCommand.version:
     return runVersionCommand(programName, conf.version.json)
   of ReproCommandLineCommand.completion:
