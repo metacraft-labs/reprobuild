@@ -195,7 +195,19 @@ proc createBundle*(opts: CreateOptions): CreateReport =
 # ---------------------------------------------------------------------------
 
 proc isUrl(s: string): bool =
-  s.startsWith("https://") or s.startsWith("http://") or s.startsWith("file://")
+  ## A source fetched with curl. Plain `http://` is not one: `refuseHttp`
+  ## turns it away first.
+  s.startsWith("https://") or s.startsWith("file://")
+
+proc refuseHttp(source: string) =
+  ## Nothing in a bundle is signed: the parts are checked against hashes
+  ## from the same place they come from. A plain `http://` source would let
+  ## anyone on the path choose them, so it is refused outright (curl itself
+  ## is told the same, `CurlProtocols`, for redirects).
+  if source.toLowerAscii().startsWith("http://"):
+    bundleFail("refusing the plain http:// source " & source &
+      ": a bundle is fetched over https:// (or from a directory, a file:// " &
+      "URL or a github: source)")
 
 proc freeBytes*(path: string): int64 =
   ## Free space on the filesystem holding `path` (or its nearest existing
@@ -209,13 +221,15 @@ proc freeBytes*(path: string): int64 =
 
 proc download(urls: seq[tuple[url, dest: string]]; parallel: int) =
   ## Parallel `curl` transfers. curl honours HTTPS_PROXY and the system CA
-  ## bundle (SSL_CERT_FILE), which the session needs.
+  ## bundle (SSL_CERT_FILE), which the session needs. Only https:// and
+  ## file:// are fetched, and a redirect only to https:// (`CurlProtocols`).
   if urls.len == 0: return
   var cfg = ""
   for (url, dest) in urls:
     cfg.add("url = \"" & url & "\"\noutput = \"" & dest & "\"\n")
-  discard mustRun(requireExe("curl"), ["-fsS", "--retry", "3", "--parallel",
-    "--parallel-max", $max(1, parallel), "-K", "-"], stdinData = cfg)
+  discard mustRun(requireExe("curl"), @["-fsS", "--retry", "3"] &
+    @CurlProtocols & @["--parallel", "--parallel-max", $max(1, parallel),
+    "-K", "-"], stdinData = cfg)
 
 type
   SourceKind = enum skDir, skUrl, skGithub
@@ -255,6 +269,7 @@ proc fetchHalf(src: Source; staging: string; node: JsonNode;
 proc readLatest(source, system: string; staging: string):
     tuple[src: Source; latest: JsonNode] =
   var text = ""
+  refuseHttp(source)
   if isGithubSource(source):
     let gh = parseGithubSource(source)
     result.src = Source(kind: skGithub, gh: gh)

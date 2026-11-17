@@ -6510,7 +6510,7 @@ proc runQuotaEnforcementHeaderLine*(record: EnforcementRecord): string =
 proc runQuotaReportJson*(bypassed: bool): JsonNode =
   ## RA-13: machine-readable resource-authority status for the run report.
   ## ``bypassed`` is true when this build launched at least one action with no
-  ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA`` or
+  ## RunQuota lease (explicit ``--no-runquota`` / ``REPROBUILD_NO_RUNQUOTA`` or
   ## the unreachable-daemon fallback). In that state ``authority`` is the
   ## engine's local pool gate only — host limits and cross-session fairness do
   ## NOT apply and concurrent cross-invocation runs cannot be made safe. When
@@ -12443,7 +12443,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   proc logRunQuotaAuthority(runResult: BuildRunResult) =
     # RA-13: surface the resource-authority status in the build header. When
     # this build launched at least one action with no RunQuota lease (explicit
-    # --runquota=off / REPROBUILD_NO_RUNQUOTA, or the unreachable-daemon
+    # --no-runquota / REPROBUILD_NO_RUNQUOTA, or the unreachable-daemon
     # fallback), say so plainly: limits are locally-enforced-only and cannot
     # make concurrent cross-invocation runs safe. Emit once per build command.
     if loggedRunQuotaAuthority:
@@ -33137,7 +33137,7 @@ proc runCertificatesCommand*(args: openArray[string];
       asJson = true
     elif arg == "--no-certify" and sub == "plan":
       noCertify = true
-    elif arg == "--no-runquota":
+    elif arg == RunQuotaBypassFlag:
       bypassRunQuota = true
     elif arg.startsWith("--tool-provisioning="):
       mode = parseToolProvisioning(arg["--tool-provisioning=".len .. ^1])
@@ -88765,7 +88765,7 @@ proc parseReproTestFlags(args: openArray[string]): ReproTestShardOpts =
         "--prepare-only", "--dry-run", "--force-rebuild", "--rebuild",
         "--no-output-cleanup", "--publish-cache-hits",
         "--publish-materialized", "--skip-cmake-regeneration",
-        "--no-runquota", "--runquota", "--unicode", "--no-unicode",
+        RunQuotaBypassFlag, "--runquota", "--unicode", "--no-unicode",
         "--list-targets", "--list-targets-json", "--json",
         "--print-solved-graph"]:
       result.buildFlags.add(arg)
@@ -90307,7 +90307,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     # whose daemon socket the user cannot open the certificate plan was
     # reported unreadable. ``--runquota`` still overrides the variable, as
     # it does for the build.
-    let bypassRunQuota = "--no-runquota" in opts.buildFlags or
+    let bypassRunQuota = RunQuotaBypassFlag in opts.buildFlags or
       ("--runquota" notin opts.buildFlags and runQuotaBypassedByEnv())
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     defer: releaseAutoRunQuotaProcess(autoRunQuota)

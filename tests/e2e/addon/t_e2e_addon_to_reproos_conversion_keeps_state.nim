@@ -656,6 +656,15 @@ const
       systemdSystemDropIn(unit = "getty@tty6.service", name = "a13-ess",
         content = "[Unit]\nRequires=eth-r10-sock.service\nAfter=eth-r10-sock.service\n",
         address = "r12Ess")"""
+  R13SshResource = """
+      # A13 review round 13, M-C: a profile drop-in that points ssh.socket,
+      # a host trigger unit, at a unit the live check judges. ssh.socket is
+      # essential, so the apply must be refused before it writes anything
+      # (decision 177(c)) -- not hold it, which on a socket-activated ssh
+      # would cut remote access.
+      systemdSystemDropIn(unit = "ssh.socket", name = "a13-repoint",
+        content = "[Socket]\nService=eth-r10-path.service\n",
+        address = "r13Ssh")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -1086,8 +1095,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       R10Resources & R11Resources & R12EssResource))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
-    for f in ["system.nim", "system_next.nim", "system_ess.nim", PinsModule,
-              "home.nim"]:
+    writeFile(work / "system_ssh.nim", src0.replace(anchor, anchor &
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources & R11Resources & R13SshResource))
+    for f in ["system.nim", "system_next.nim", "system_ess.nim", "system_ssh.nim",
+              PinsModule, "home.nim"]:
       nw.copyTo(work / f, RefDir / f)
     let env = ReidentifyPrefix
     putReferenceSecrets(nw, env & eng & " system secret put", jwt, adminToken,
@@ -2010,6 +2022,79 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "starts it before its commit, and clears the record", m2Ok,
            m2Out & "\nstaged: " & m2Staged & "\nactive: " & m2Active &
            "\nrecord: " & m2Record)
+    # A13 review round 13, M-B: a full apply that died before its release
+    # held a judged service that was running and is not enabled (the R10
+    # socket's service, started by a connection). The next full apply's
+    # check passes it and must start it again: "ran before the dead hold"
+    # is kept for a unit this apply judges too. No connection is made
+    # after the staging, so nothing else starts it. Falsifier: the engine
+    # build dead-judged-was-active-lost (the service stays down).
+    block:
+      discard nw.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+        $R10Port & "' 2>/dev/null; for i in $(seq 15); do systemctl " &
+        "is-active --quiet " & R10SocketSvc & " && break; sleep 1; done; true")
+      let mbBefore = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
+      discard nw.run("systemctl stop " & R10SocketSvc & "; mkdir -p " &
+        "/run/systemd/system/" & R10SocketSvc & ".d && printf '[Unit]\\n" &
+        "ConditionPathExists=!/\\n' > /run/systemd/system/" & R10SocketSvc &
+        ".d/zz-repro-carried-check-hold.conf && printf '" & R10SocketSvc &
+        "\\twas-active\\n' > /var/lib/repro/system/live-check-units && " &
+        "systemctl daemon-reload")
+      let mbStaged = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
+      let mbApply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      discard nw.exec("for i in $(seq 15); do systemctl is-active --quiet " &
+        R10SocketSvc & " && break; sleep 1; done; true")
+      let mbAfter = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
+      let mbEnabled = nw.exec("systemctl is-enabled " & R10SocketSvc &
+        " 2>&1").stdout.strip()
+      let mbHold = nw.exec("ls /run/systemd/system/" & R10SocketSvc &
+        ".d/zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+      let mbOk = mbBefore == "active" and mbStaged != "active" and
+        mbApply.exitCode == 0 and mbAfter == "active" and mbHold.len == 0
+      record["deadJudgedActive"] = %*{"before": mbBefore, "staged": mbStaged,
+        "exit": mbApply.exitCode, "after": mbAfter, "enabled": mbEnabled,
+        "holdLeft": mbHold, "ok": mbOk}
+      discard nw.run("rm -f /var/lib/repro/system/live-check-units /run/" &
+        "systemd/system/" & R10SocketSvc & ".d/zz-repro-carried-check-hold.conf; " &
+        "systemctl daemon-reload; systemctl start " & R10Socket & "; true")
+      step("M-B: a judged service a dead full apply held while it ran, not " &
+           "enabled, is started again once the next apply's check passes it",
+           mbOk, mbApply.stdout & mbApply.stderr & "\nbefore: " & mbBefore &
+           " staged: " & mbStaged & " after: " & mbAfter & " enabled: " &
+           mbEnabled & " hold: " & mbHold)
+    # A13 review round 13, M-C: a profile drop-in that points ssh.socket at a
+    # judged unit makes an essential trigger of it; the apply is refused
+    # before it writes anything, by that refusal and no other, and ssh.socket
+    # is neither stopped nor held. On ubuntu-24.04 ssh is socket-activated.
+    block:
+      let sshBefore = nw.exec("systemctl show -p ActiveState ssh.socket").stdout.strip()
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_ssh.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let essText = "ssh.socket would be held for the carried-state check"
+      let written = nw.exec("ls /etc/systemd/system/ssh.socket.d 2>&1").stdout
+      let heldAnywhere = nw.exec("ls /etc/systemd/system/ssh.socket.d/" &
+        "zz-repro-carried-check-hold.conf /run/systemd/system/ssh.socket.d/" &
+        "zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+      let sshAfter = nw.exec("systemctl show -p ActiveState ssh.socket").stdout.strip()
+      let refusedSsh = r.exitCode != 0 and essText in o
+      let dropInWritten = "a13-repoint" in written
+      discard nw.run("rm -f /etc/systemd/system/ssh.socket.d/50-repro-a13-repoint.conf; " &
+        "rmdir /etc/systemd/system/ssh.socket.d 2>/dev/null; systemctl daemon-reload; true")
+      let sshOk = refusedSsh and not dropInWritten and heldAnywhere.len == 0 and
+        sshAfter == sshBefore
+      record["essentialHostTrigger"] = %*{"exit": r.exitCode,
+        "refused": refusedSsh, "dropInWritten": dropInWritten,
+        "held": heldAnywhere, "before": sshBefore, "after": sshAfter,
+        "ok": sshOk}
+      step("M-C: an apply whose drop-in points ssh.socket at a judged unit " &
+           "is refused before it writes anything, and ssh.socket is neither " &
+           "stopped nor held", sshOk, o & "\nwritten: " & written &
+           "\nheld: " & heldAnywhere & "\nbefore: " & sshBefore &
+           " after: " & sshAfter)
     # Decision 177 (A13 review round 11): with carried state restored, an
     # apply of the next generation plus a drop-in that makes a console getty
     # require a judged unit would hold an essential unit, so it is refused

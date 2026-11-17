@@ -2039,13 +2039,35 @@ proc writeTriggersToRestart*(stateDir: string; triggers: openArray[string]) =
 proc hasTriggersToRestart*(stateDir: string): bool =
   readTriggerRestartEntries(stateDir).len > 0
 
-proc renderedUnitDigest*(p: SystemProfile; unit: string): string =
-  ## The sha256 of what the generation ``p`` renders for ``unit``: its own
+proc withoutRequirementDropIns*(p: SystemProfile): SystemProfile =
+  ## ``p`` without the carried-state requirement's drop-ins
+  ## (``RequirementDropInName``): the add-on adds them to every unit that
+  ## reaches carried state while it is installed, so a generation's text
+  ## carries them or not by where it was recorded -- an add-on revert's
+  ## record, a full apply's stored text that a rollback re-applies -- not
+  ## by what its author changed, so they never resolve an entry for the
+  ## fixing switch (§13 decision 175 as the owner decided it on
+  ## 2026-11-17, "yes, exclude them").
+  result = p
+  when mutated("restart-digest-counts-requirement"):
+    # FALSIFYING MUTATION: the requirement's drop-ins are rendered too.
+    return
+  result.resources = @[]
+  for r in p.resources:
+    if r.kind == srkSystemdSystemDropIn and r.diName == RequirementDropInName:
+      continue
+    result.resources.add(r)
+
+proc renderedUnitDigest*(p0: SystemProfile; unit: string): string =
+  ## The sha256 of what the generation ``p0`` renders for ``unit``: its own
   ## unit file (``renderedSystemUnitContent``; a timer resource's content),
   ## else its template's for an instance, followed by every profile drop-in
-  ## systemd reads for it; "" when the generation renders nothing for it.
-  ## Two generations "change" a unit when these differ (the owner decision
-  ## "allow the fixing apply", A13 review round 10).
+  ## systemd reads for it but the carried-state requirement's
+  ## (``withoutRequirementDropIns``); "" when the generation renders nothing
+  ## for it. Two generations "change" a unit when these differ (the owner
+  ## decision "allow the fixing apply", A13 review round 10), on the
+  ## recording and the comparing side alike.
+  let p = withoutRequirementDropIns(p0)
   var text = ""
   var found = false
   var names = @[unit]
@@ -2304,10 +2326,21 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
   let host = if host0.start == nil: addonLiveHost() else: host0
   let entries = readTriggerRestartEntries(stateDir)
   let resolved = resolvedRestartEntries(entries, p)
+  var failedTriggers: seq[string]
   for pass in 0 .. 1:
     for e in entries:
       if e.unit notin resolved: continue
       if (pass == 0) != (e.dependantOf.len == 0): continue
+      # A dependant of a trigger whose start just failed is not started:
+      # it would start the trigger with it and fail the way it did (A13
+      # review round 13, L4). Its entry stays.
+      when not mutated("fixing-starts-dependant-of-failed-trigger"):
+        # FALSIFYING MUTATION (when absent): it is started all the same.
+        if e.dependantOf in failedTriggers:
+          result.add("systemctl start " & e.unit & " not attempted: the " &
+            "trigger it was left out with, " & e.dependantOf & ", did not " &
+            "start (§13 decision 160)")
+          continue
       var props: Table[string, string]
       try: props = host.show(e.unit)
       except CatchableError as ex:
@@ -2318,8 +2351,21 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
             "triggers to restart; this generation changes it, so its " &
             "restart must be confirmed, §13 decision 160): systemd " &
             "could not be asked: " & ex.msg)
+        if pass == 0: failedTriggers.add(e.unit)
         continue
-      if props.getOrDefault("LoadState") != "loaded": continue
+      # Only a unit systemd does not find was removed by the generation; a
+      # masked one, or one with a bad setting or a load error, fails (A13
+      # review round 13, L1).
+      let load = props.getOrDefault("LoadState")
+      if load == "not-found": continue
+      if load != "loaded" and not mutated("unloadable-trigger-counted-removed"):
+        # FALSIFYING MUTATION (when absent): any unit not loaded is skipped.
+        result.add("systemctl start " & e.unit & " (on the record of " &
+          "triggers to restart, §13 decision 160): systemd reports " &
+          "LoadState=" & load & "; not started")
+        if pass == 0: failedTriggers.add(e.unit)
+        continue
+      if load != "loaded": continue
       if noBlock and not mutated("boot-fixing-starts-block"):
         # FALSIFYING MUTATION (when absent): the boot replay's starts block.
         if host.resetFailed != nil: host.resetFailed(e.unit)
@@ -2332,6 +2378,7 @@ proc startResolvedRestartEntries*(stateDir: string; p: SystemProfile;
         continue
       let s = startConfirmed(host, e.unit, mustStayActive = pass == 0)
       if not s.ok:
+        if pass == 0: failedTriggers.add(e.unit)
         result.add("systemctl start " & e.unit & " (on record as one a " &
           "revert could not start; this generation changes it, so this " &
           "switch must start it, §13 decision 160): " & s.why)

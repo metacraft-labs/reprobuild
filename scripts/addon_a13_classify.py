@@ -319,6 +319,10 @@ EXPECT.update({
     # M4: at boot the records' starts block and the record is cleared.
     "mutbootblock": ("e2e_addon_adopt_hand_configured_service", "red",
                      "add-on build boot-record-starts-block"),
+    # A13 review round 13, M-B: a judged unit a dead apply held loses its
+    # "ran before".
+    "mutdeadactive": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                      "engine build dead-judged-was-active-lost"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -338,6 +342,7 @@ TARGET.update({
     "mutdeadhold": "M3: a judged service a dead full apply held",
     "mutfullfix": "M2: a full apply whose generation resolves a recorded trigger",
     "mutbootblock": "M4: at boot the re-assertion queues the start",
+    "mutdeadactive": "M-B: a judged service a dead full apply held while it ran",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -472,6 +477,13 @@ def on_target_rec(kind, rec):
                 u.get("staged") not in (None, "active") and
                 u.get("active") not in (None, "active") and
                 u.get("recordLeft") == "")
+    if kind == "mutdeadactive":
+        # Red because the service stayed down after a passing apply, not
+        # for another reason: it ran before the staging and the apply
+        # passed.
+        u = rec.get("deadJudgedActive", {})
+        return (on_target(kind, steps) and u.get("before") == "active" and
+                u.get("exit") == 0 and u.get("after") not in (None, "active"))
     if kind == "mutbootblock":
         # Red because the boot's re-assertion started and confirmed the
         # trigger and cleared the record, instead of queueing it.
@@ -645,6 +657,8 @@ def on_target_rec(kind, rec):
                 rec.get("deadApplyAdopted", {}).get("ok") is True and
                 dead_hold_order(rec.get("deadApplyAdopted", {})) == "never" and
                 rec.get("fullApplyFixing", {}).get("ok") is True and
+                rec.get("deadJudgedActive", {}).get("ok") is True and
+                rec.get("essentialHostTrigger", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
                 rec.get("decisionEssential", {}).get("dropInWritten") is False)
@@ -705,11 +719,19 @@ def dead_hold_order(d):
     guest-side timestamps (uptime seconds). "before-release" is the
     falsifier's criterion; a product run must show "never" (its check
     refused the service) or "after-release"."""
-    if not isinstance(d, dict) or d.get("checkBeganAt", -1) < 0:
+    # Decided from the timestamps themselves, never from the gate's own
+    # boolean (A13 review round 13, L5).
+    if not isinstance(d, dict):
         return "unmeasured"
-    if d.get("serviceActiveAt", -1) < 0:
+    def num(k):
+        v = d.get(k)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else -1.0
+    check, release, service = num("checkBeganAt"), num("releasedAt"), num("serviceActiveAt")
+    if check < 0:
+        return "unmeasured"
+    if service < 0:
         return "never"
-    if d.get("serviceStartedBeforeRelease") is True:
+    if release < 0 or service < release:
         return "before-release"
     return "after-release"
 

@@ -2430,8 +2430,11 @@ ExecStart=/bin/true
     log[].setLen(0)
     let probs = startResolvedRestartEntries(dir, comment,
                                             simHost(log, skipped = @["s.socket"]))
-    check probs.len == 1
+    # The trigger's failure, and its dependant not attempted (round 13, L4).
+    check probs.len == 2
     check "s.socket" in probs[0]
+    check "dep.service not attempted" in probs[1]
+    check "start dep.service" notin log[]
     check readTriggersToRestart(dir) == @["s.socket", "dep.service"]
     # A generation that resolves nothing starts nothing.
     log[].setLen(0)
@@ -2529,7 +2532,8 @@ suite "names, templates, targets, a dead apply's holds and boot starts (A13 revi
         if u.endsWith("@.service"):
           raise newException(OSError, "Unit name " & u &
             " is neither a valid invocation ID nor unit name.")
-        if u notin shows: raise newException(OSError, "no unit " & u)
+        # As systemctl show answers for a unit it cannot find.
+        if u notin shows: return {"LoadState": "not-found"}.toTable
         shows[u],
       start: proc (u: string): tuple[ok: bool, output: string] = (true, ""),
       list: proc (pattern: string): seq[string] =
@@ -2809,8 +2813,212 @@ Requires=gen.service
     check applied != Validator
     let written = parseSystemProfile(Validator)
     let e = entry12(restartRecordProfile(written), "eth-validator.service", @[])
-    # The premise: rendered from the applied text, the unit differs.
+    # Since round 13 (M-A, the owner's "yes, exclude them") the digest
+    # leaves the requirement's drop-ins out on both sides, so the applied
+    # text renders the unit as the written one does, and neither resolves
+    # the entry.
     check renderedUnitDigest(restartRecordProfile(parseSystemProfile(applied)),
-                             "eth-validator.service") != e.rendered[0].digest
+                             "eth-validator.service") == e.rendered[0].digest
     check not restartEntryResolvedBy(e,
       fullApplyRecordProfile(recordComparisonProfile(Validator, applied)))
+    check not restartEntryResolvedBy(e,
+      fullApplyRecordProfile(parseSystemProfile(applied)))
+
+  # --- A13 review round 13 (the reviewer's probes P1-P4 as cases) -------
+  const W13 = "systemd.systemUnit {\n  name = \"eth-validator.service\"\n" &
+    "  content = \"[Service]\nExecStart=/bin/true\n\"\n}\n"
+  const Req13 = "\nsystemd.systemDropIn {\n  unit = \"eth-validator.service\"\n" &
+    "  name = \"state-restore\"\n  content = \"[Unit]\nRequires=repro-state-restore.service\n" &
+    "After=repro-state-restore.service\n\"\n}\n"
+
+  test "M-A: a rollback's stored text with the requirement does not resolve an entry recorded without it":
+    # P1: the full apply stores (and a rollback re-applies) the text the
+    # carried-state requirement extends.
+    let e = entry12(restartRecordProfile(parseSystemProfile(W13)),
+                    "eth-validator.service", @[])
+    let stored = W13 & Req13
+    check not restartEntryResolvedBy(e,
+      fullApplyRecordProfile(recordComparisonProfile(stored, stored)))
+
+  test "M-A: an add-on record with the requirement is not resolved by the written text without it":
+    # P2: the add-on recorded while carried state was installed.
+    let e = entry12(restartRecordProfile(parseSystemProfile(W13 & Req13)),
+                    "eth-validator.service", @[])
+    check not restartEntryResolvedBy(e,
+      fullApplyRecordProfile(recordComparisonProfile(W13, W13 & Req13)))
+    # A real change still resolves it.
+    check restartEntryResolvedBy(e, fullApplyRecordProfile(parseSystemProfile(
+      W13.replace("ExecStart=/bin/true", "ExecStart=/bin/false"))))
+
+  test "M-D: recover leaves an Accept=yes socket whose template service is still held":
+    # P3: systemd shows no Triggers= for an Accept=yes socket.
+    let state = scratch12("m13p3")
+    defer: removeDir(state)
+    let holds = state / "run"
+    putEnv(HostApplyLockEnvVar, state / "lock")
+    defer: delEnv(HostApplyLockEnvVar)
+    recordLiveCheckTriggers(state, ["e.socket"])
+    discard writeHolds(["e@.service", "e.socket"], CarriedCheckHoldName, "x", holds)
+    var log = new seq[string]
+    let active = new seq[string]
+    let host = LiveHost(
+      isActive: proc (u: string): bool = u in active[],
+      show: proc (u: string): Table[string, string] =
+        result = {"LoadState": "loaded", "Accept": "yes", "Triggers": ""}.toTable
+        result["ActiveState"] = (if u in active[]: "active" else: "inactive"),
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("start " & u); active[].add(u); (true, ""),
+      stop: proc (u: string): tuple[ok: bool, output: string] = (true, ""),
+      resetFailed: proc (u: string) = discard)
+    discard repairTriggerRecords(state, host, holdDir = holds)
+    check "start e.socket" notin log[]
+    check readLiveCheckTriggers(state) == @["e.socket"]
+
+  test "M-C: a profile drop-in re-pointing a host socket, and Sockets=, make triggers of the judged unit":
+    # P4: ssh.socket re-pointed at gen.service, sshd.socket named by it.
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemDropIn {
+  unit = "ssh.socket"
+  name = "a13-repoint"
+  content = "[Socket]
+Service=gen.service
+"
+}
+systemd.systemDropIn {
+  unit = "gen.service"
+  name = "a13-sockets"
+  content = "[Service]
+Sockets=sshd.socket
+"
+}
+""")
+    let pt = profileTriggersOf(p, ["gen.service"])
+    checkpoint "profileTriggersOf: " & $pt
+    check "ssh.socket" in pt
+    check "sshd.socket" in pt
+    # So the apply is refused before it writes anything (decision 177(c)).
+    let host = systemdLike(initTable[string, Table[string, string]]())
+    check essentialInHoldSet(["gen.service"], [], pt, host) ==
+      @["ssh.socket", "sshd.socket"]
+
+  test "M-C: an essential trigger systemd names only after the reload is reported, never stopped or held":
+    let host = systemdLike(initTable[string, Table[string, string]]())
+    let late = postReloadTriggers(["ssh.socket", "app.socket", "old.socket"],
+                                  ["old.socket"], host)
+    check late.essential == @["ssh.socket"]
+    check late.stop == @["app.socket"]
+
+  test "M-F: the triggers of a held requirer are held too":
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "req.service"
+  content = "[Unit]
+Requires=gen.service
+[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemUnit {
+  name = "req.timer"
+  content = "[Timer]
+OnCalendar=daily
+"
+}
+""")
+    let reqs = profileRequirersOf(p, ["gen.service"])
+    check reqs == @["req.service"]
+    check "req.timer" in profileTriggersOf(p, triggerUnitsOfHold(["gen.service"], reqs))
+
+  test "M-B: a dead apply's judged unit keeps its \"ran before\", and a template's instances are recorded":
+    let a = adoptDeadUnits([(unit: "judged.service", wasActive: true),
+                            (unit: "other.service", wasActive: false),
+                            (unit: "tpl@x.service", wasActive: true)],
+                           ["judged.service", "tpl@.service"])
+    check a.adopted == @["other.service"]
+    check "judged.service" in a.active
+    check "tpl@x.service" in a.active
+    let rec = liveCheckUnitsRecord(["tpl@.service", "plain.service"],
+                                   ["tpl@x.service", "plain.service"])
+    check (unit: "tpl@x.service", wasActive: true) in rec
+    check (unit: "plain.service", wasActive: true) in rec
+    check (unit: "tpl@.service", wasActive: false) in rec
+
+  test "M-E: a trigger systemd cannot be asked about is a problem, and stays on the record":
+    let dir = scratch12("m13me")
+    defer: removeDir(dir)
+    putEnv(HostApplyLockEnvVar, dir / "lock")
+    defer: delEnv(HostApplyLockEnvVar)
+    writeTriggersToRestart(dir, ["u.socket"])
+    var log = new seq[string]
+    var host = simHost(log)
+    host.show = proc (u: string): Table[string, string] =
+      raise newException(OSError, "Failed to connect to bus")
+    check triggerRestarts(["u.socket"], [], host).len == 1
+    let r = retryTriggerRestarts(dir, host)
+    check not r.ok
+    check readTriggersToRestart(dir) == @["u.socket"]
+
+  test "L1: a masked trigger is not counted as removed":
+    var log = new seq[string]
+    var host = simHost(log)
+    let base = host.show
+    host.show = proc (u: string): Table[string, string] =
+      result = base(u)
+      result["LoadState"] = (if u == "m.socket": "masked" else: "not-found")
+    let probs = triggerRestarts(["m.socket", "gone.socket"], [], host)
+    check probs.len == 1 and "m.socket" in probs[0]
+    check log[].filterIt(it.startsWith("start ")).len == 0
+
+  test "L1: the fixing path fails on a masked resolved trigger":
+    let dir = scratch12("m13l1")
+    defer: removeDir(dir)
+    let g = parseSystemProfile(Gen12)
+    writeTriggerRestartEntries(dir, [entry12(g, "s.socket", @["s.service"])])
+    let fixed = parseSystemProfile(Gen12.replace("ExecStart=/bin/true",
+                                                 "ExecStart=/bin/false"))
+    var log = new seq[string]
+    var host = simHost(log)
+    let base = host.show
+    host.show = proc (u: string): Table[string, string] =
+      result = base(u)
+      if u == "s.socket": result["LoadState"] = "masked"
+    let probs = startResolvedRestartEntries(dir, fixed, host)
+    check probs.len == 1 and "LoadState=masked" in probs[0]
+
+  test "L2: a requirer systemd cannot be asked about fails the requirer reading closed":
+    # gen.service is readable; the unit that requires it is not.
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] =
+        if u == "gen.service": return {"RequiredBy": "x.service"}.toTable
+        raise newException(OSError, "Failed to connect to bus"),
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    expect ECarriedStatePending:
+      discard systemdRequirersOf(["gen.service"], host)
+
+  test "L2: a name systemd cannot be asked about fails closed":
+    let host = LiveHost(
+      isActive: proc (u: string): bool = false,
+      show: proc (u: string): Table[string, string] =
+        raise newException(OSError, "Failed to connect to bus"),
+      start: proc (u: string): tuple[ok: bool, output: string] = (true, ""))
+    expect ECarriedStatePending:
+      discard unitId(host, "dbus-org.freedesktop.login1.service")
+
+  test "decision 177(a): an alias of an essential template is resolved through its instance":
+    var shows = initTable[string, Table[string, string]]()
+    shows["mygetty@repro-addon-observe.service"] =
+      {"Id": "getty@repro-addon-observe.service"}.toTable
+    let host = systemdLike(shows)
+    check unitId(host, "mygetty@.service") == "getty@.service"
+    check essentialInHoldSet(["mygetty@.service"], [], [], host) == @["getty@.service"]
