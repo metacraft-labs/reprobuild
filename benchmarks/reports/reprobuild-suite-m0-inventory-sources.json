@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2925,
+    "nimTestBinaries": 2926,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 783,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2973
+    "testEntries": 2974
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1646,7 +1646,7 @@
       "integration": 1621,
       "platform/destructive": 191,
       "pure unit": 783,
-      "unclassified": 354
+      "unclassified": 355
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1860,9 +1860,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2925,
+    "nimTestBinaryCount": 2926,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2973
+    "testEntryCount": 2974
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17987,6 +17987,28 @@
       "source": "libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_shared_library_is_written_under_its_soname",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

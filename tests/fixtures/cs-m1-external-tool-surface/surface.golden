@@ -237,9 +237,10 @@ package "clang"
       param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/clang.nim
       param name="optimization" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-O" required=false src=repro_dsl_stdlib/packages/clang.nim
       param name="standard" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-std=" required=false src=repro_dsl_stdlib/packages/clang.nim
+      param name="soname" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-Wl,-soname," required=false src=repro_dsl_stdlib/packages/clang.nim
       param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/clang.nim
       param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/clang.nim
-    argv=["/tool/clang", "-fPIC", "-g3", "-c", "-E", "-M", "-MMD", "-shared", "-static", "-MF", "depfileOut-v", "-include", "includes-a", "-include", "includes-b", "-IincludeDirs-a", "-IincludeDirs-b", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-Ddefines-a", "-Ddefines-b", "-Ooptimization-v", "-std=standard-v", "-o", "output-v", "source-v"]
+    argv=["/tool/clang", "-fPIC", "-g3", "-c", "-E", "-M", "-MMD", "-shared", "-static", "-MF", "depfileOut-v", "-include", "includes-a", "-include", "includes-b", "-IincludeDirs-a", "-IincludeDirs-b", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-Ddefines-a", "-Ddefines-b", "-Ooptimization-v", "-std=standard-v", "-Wl,-soname,soname-v", "-o", "output-v", "source-v"]
   interface executable "clang" binary="clang"
     interface command name="" entry="clang.clang.call"
       interface param name="pic" nimType="bool" kind=ipkFlag position=0 alias="-fPIC" required=false
@@ -258,6 +259,7 @@ package "clang"
       interface param name="defines" nimType="seq[string]" kind=ipkFlag position=0 alias="-D" required=false
       interface param name="optimization" nimType="string" kind=ipkFlag position=0 alias="-O" required=false
       interface param name="standard" nimType="string" kind=ipkFlag position=0 alias="-std=" required=false
+      interface param name="soname" nimType="string" kind=ipkFlag position=0 alias="-Wl,-soname," required=false
       interface param name="output" nimType="string" kind=ipkFlag position=0 alias="-o" required=true
       interface param name="source" nimType="string" kind=ipkPositional position=0 alias="" required=true
 package "cmake"
@@ -436,10 +438,11 @@ package "gcc"
       param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/gcc.nim
       param name="optimization" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-O" required=false src=repro_dsl_stdlib/packages/gcc.nim
       param name="standard" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-std=" required=false src=repro_dsl_stdlib/packages/gcc.nim
+      param name="soname" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-Wl,-soname," required=false src=repro_dsl_stdlib/packages/gcc.nim
       param name="debugCompression" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-gz=" required=false src=repro_dsl_stdlib/packages/gcc.nim
       param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/gcc.nim
       param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/gcc.nim
-    argv=["/tool/gcc", "-fPIC", "-g3", "-c", "-E", "-M", "-MMD", "-shared", "-static", "-nostdlib", "-MF", "depfileOut-v", "-include", "includes-a", "-include", "includes-b", "-IincludeDirs-a", "-IincludeDirs-b", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-Ddefines-a", "-Ddefines-b", "-Ooptimization-v", "-std=standard-v", "-gz=debugCompression-v", "-o", "output-v", "source-v"]
+    argv=["/tool/gcc", "-fPIC", "-g3", "-c", "-E", "-M", "-MMD", "-shared", "-static", "-nostdlib", "-MF", "depfileOut-v", "-include", "includes-a", "-include", "includes-b", "-IincludeDirs-a", "-IincludeDirs-b", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-Ddefines-a", "-Ddefines-b", "-Ooptimization-v", "-std=standard-v", "-Wl,-soname,soname-v", "-gz=debugCompression-v", "-o", "output-v", "source-v"]
   interface executable "gcc" binary="gcc"
     interface command name="" entry="gcc.gcc.call"
       interface param name="pic" nimType="bool" kind=ipkFlag position=0 alias="-fPIC" required=false
@@ -459,6 +462,7 @@ package "gcc"
       interface param name="defines" nimType="seq[string]" kind=ipkFlag position=0 alias="-D" required=false
       interface param name="optimization" nimType="string" kind=ipkFlag position=0 alias="-O" required=false
       interface param name="standard" nimType="string" kind=ipkFlag position=0 alias="-std=" required=false
+      interface param name="soname" nimType="string" kind=ipkFlag position=0 alias="-Wl,-soname," required=false
       interface param name="debugCompression" nimType="string" kind=ipkFlag position=0 alias="-gz=" required=false
       interface param name="output" nimType="string" kind=ipkFlag position=0 alias="-o" required=true
       interface param name="source" nimType="string" kind=ipkPositional position=0 alias="" required=true
