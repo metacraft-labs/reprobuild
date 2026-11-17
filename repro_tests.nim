@@ -12277,6 +12277,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_standard_provider_tests_o757f6dd4_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_standard_provider/tests/test_rust_convention_lib_bin_and_path_deps.nim",
+    binary: "build/test-bin/test_rust_convention_lib_bin_and_path_deps",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_standard_provider_tests_o757f6dd4_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_standard_provider/tests/test_rust_convention_target_edition.nim",
     binary: "build/test-bin/test_rust_convention_target_edition",
     defines: @["reproProviderMode"],

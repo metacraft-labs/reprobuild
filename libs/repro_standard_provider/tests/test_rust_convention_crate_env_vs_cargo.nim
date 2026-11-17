@@ -546,11 +546,12 @@ suite "rust convention: features and crate environment match cargo":
             check modeValue.isAbsolute and dirExists(modeValue)
           else:
             check modeValue == cargoValue
-      # Both passes of each library and binary, and the test's compile.
+      # Both passes of each library, each binary's link pass (a binary has
+      # no metadata pass), and the test's compile.
       check seen[("probe_kit", "lib", false)] == 2
       check seen[("bare", "lib", false)] == 2
-      check seen[("probe_bin", "bin", false)] == 2
-      check seen[("bare_bin", "bin", false)] == 2
+      check seen[("probe_bin", "bin", false)] == 1
+      check seen[("bare_bin", "bin", false)] == 1
       check seen[("it_env", "", true)] == 1
       check seen[("bare_it", "", true)] == 1
       require testCompileIds.len == 2

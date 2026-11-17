@@ -6,8 +6,8 @@
 ## (``reprobuild-specs/Language-Conventions/Rust.md`` §"Mode A — Fine-grained
 ## build graph") prescribes:
 ##
-##   Pass 1 (metadata, per crate target):
-##     ``rustc --crate-name <n> --edition <e> --crate-type <bin|lib>
+##   Pass 1 (metadata, per library-flavoured target; binaries skip it):
+##     ``rustc --crate-name <n> --edition <e> --crate-type <lib|...>
 ##       --emit=metadata,dep-info
 ##       --out-dir <scratch>/deps
 ##       -C metadata=<stable-hash> -C extra-filename=-<stable-hash>
@@ -22,7 +22,13 @@
 ##       [--extern <dep-name>=<dep-rlib>] ...
 ##       <crate-root>.rs``
 ##     produces ``<n>.exe`` (bin) or ``lib<n>-<hash>.rlib`` (lib) plus its
-##     own depfile. Depends on Pass 1's id so the metadata edge is captured.
+##     own depfile. A library's Pass 2 depends on its Pass 1 so the
+##     metadata edge is captured. A binary gets ``--extern`` for its own
+##     package's library too, as Cargo passes it.
+##
+##   Action ids name the package, the target's kind and name, and the
+##   phase (``rustActionId``), because a library and a binary of one
+##   package usually share a crate name.
 ##
 ## **M13 extensions** over M4's single-crate-binary baseline:
 ##
@@ -31,7 +37,8 @@
 ##     ``--crate-type lib --emit=link,dep-info`` producing ``lib<n>-<hash>.rlib``.
 ##   * ``[lib]`` and ``[[bin]]`` array entries in ``Cargo.toml``. The
 ##     convention iterates every ``bin``/``lib`` target reported by
-##     ``cargo metadata`` and emits one (metadata, link) pair per target.
+##     ``cargo metadata`` and emits a (metadata, link) pair per library
+##     target and a link action per binary.
 ##     Test targets (``kind: ["test"]``), example targets, and benchmarks
 ##     are intentionally skipped at the M13 surface — they're test-runner
 ##     territory (deferred to a later milestone).
@@ -39,10 +46,9 @@
 ##     enumerates every member package, emits per-target compile/link
 ##     actions for each, and wires inter-crate ``--extern <name>=<rmeta>``
 ##     edges based on each member's ``dependencies`` array (only path
-##     deps that resolve to another workspace member — crates.io / git
-##     deps fall through to whatever rustc/cargo can find on the system
-##     after the convention's offline run, which is sufficient for the
-##     M13 fixtures whose workspace deps are purely path-local).
+##     deps that resolve to another workspace member). A crates.io / git
+##     dependency, or a path dependency on a package that is no workspace
+##     member, sends the whole project to the Mode B cargo fallback.
 ##
 ## **Design decision (M4 Option 1 — eager metadata extraction + M18
 ## fingerprint cache).** Like the M3 Nim convention's Option 1, we
@@ -205,13 +211,17 @@ type
       ## ``--extern`` edges for path deps that resolve to a sibling
       ## workspace member.
     hasExternalDeps: bool
-      ## M23: true when this package's ``dependencies`` array includes
-      ## at least one entry with ``source != null`` (i.e. a crates.io
-      ## registry or git dep, as opposed to a path dep to a sibling
-      ## workspace member). Used by the M23 routing in ``rustEmitFragment``
-      ## to fall through to the Mode B crude fallback rather than
-      ## emitting an incomplete Mode A graph that would fail to resolve
-      ## the external rlibs.
+      ## True when this package depends on a package Mode A does not
+      ## compile: a normal or build dependency with ``source != null`` (a
+      ## crates.io registry or git dep), or a ``path`` dependency of any
+      ## kind whose directory is not a workspace member (outside the
+      ## workspace, listed in ``exclude``, or any path dependency of a
+      ## package with no ``[workspace]``). ``cargo metadata --no-deps``
+      ## lists members only, so Mode A has no target to compile for such
+      ## a dependency and could pass no ``--extern`` for it. Used by the
+      ## routing in ``rustEmitFragment`` to fall through to the Mode B
+      ## crude fallback rather than emit a graph whose ``rustc`` fails to
+      ## resolve the crate.
     hasFeatures: bool
       ## True when the package declares a feature (``features`` in
       ## ``cargo metadata`` is non-empty) or an optional dependency.
@@ -231,7 +241,9 @@ type
     isWorkspace: bool
     hasExternalDeps: bool
       ## M23: true when any package in the project depends on a
-      ## crates.io / git source. Routes the entire project through the
+      ## crates.io / git source, or on a path package that is not a
+      ## workspace member (``RustPackage.hasExternalDeps``). Routes the
+      ## entire project through the
       ## Mode B crude fallback. See the M23 "Crates.io / git deps"
       ## section in ``Standard-Provider-Implementation.milestones.org``
       ## for the trade-off (we could ALSO try to harvest rlib paths from
@@ -844,6 +856,15 @@ proc loadProject(projectRoot: string;
         let depKey = normalisedManifestDir(depPath / "Cargo.toml")
         if depKey in manifestDirToName:
           workspaceDeps.add(manifestDirToName[depKey])
+        else:
+          # A path dependency on a package that is not a workspace member:
+          # ``cargo metadata --no-deps`` does not list it, so Mode A has
+          # no target to compile and no rlib to pass with ``--extern``.
+          # Dropping it would leave ``rustc`` with an unresolved crate;
+          # cargo resolves it in Mode B. Unlike a registry dev-dependency
+          # this applies to every kind: a dev-dependency here would leave
+          # the package's test compile with the same unresolved crate.
+          hasExternalDeps = true
     if hasExternalDeps:
       result.hasExternalDeps = true
     let hasFeatures = packageDeclaresFeatures(pkgNode)
@@ -1052,19 +1073,52 @@ proc stableHashHex(value: string): string =
     hash = hash * 0x100000001b3'u64
   hash.toHex(16).toLowerAscii()
 
-proc actionIdFor(prefix, crateName, detail: string): string =
-  ## Build a Reprobuild-safe action id. Mirrors the Nim convention's
-  ## ``actionIdFor`` so ``--log=actions`` output is consistent across
-  ## conventions.
-  var sanitized = ""
-  for ch in detail:
-    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}:
-      sanitized.add(ch)
+proc targetKindToken(kind: RustTargetKind): string =
+  ## The target's kind as ``cargo metadata`` names it in a target's
+  ## ``kind`` array (``lib`` also stands for a ``[lib]`` reported as
+  ## ``rlib``).
+  case kind
+  of rtkBinary: "bin"
+  of rtkLibrary: "lib"
+  of rtkCdylib: "cdylib"
+  of rtkStaticlib: "staticlib"
+  of rtkDylib: "dylib"
+  of rtkIntegrationTest: "test"
+
+proc actionIdPart(value: string): string =
+  ## One component of an action id: ``value`` with every character other
+  ## than an ASCII letter, digit, ``-`` or ``_`` replaced by ``_``. Those
+  ## are the characters of an ordinary package or target name; for any
+  ## other name the replacement can make two ids equal, and the engine
+  ## then refuses the graph with a "duplicate action id" error rather
+  ## than build either action wrongly. It keeps ``.`` out of the
+  ## components, which ``rustActionId`` uses to separate them.
+  for ch in value:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}:
+      result.add(ch)
     else:
-      sanitized.add('_')
-  if sanitized.len == 0:
-    sanitized = "x"
-  prefix & "-" & crateName & "-" & sanitized
+      result.add('_')
+  if result.len == 0:
+    result = "_"
+
+proc rustActionId(phase: string; pkg: RustPackage;
+                  target: RustTarget): string =
+  ## The id of one of a target's actions:
+  ## ``rustc-<phase>-<package>.<kind>.<target>``. A crate name does not
+  ## identify a target: Cargo's default layout, ``src/lib.rs`` plus
+  ## ``src/main.rs``, gives the library and the binary the package's name
+  ## (Cargo reference, "Cargo Targets", "Target auto-discovery":
+  ## https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery),
+  ## and two workspace members may each have a target of one name. So the
+  ## id names the package, the target's kind and its name as ``cargo
+  ## metadata`` reports them, and the phase, which also says whether the
+  ## action is a test-harness build (``test-compile``, ``test-run``,
+  ## ``test-stamp``). The engine refuses a graph in which two actions share
+  ## an id. ``.`` separates the components because no component can hold
+  ## one (``actionIdPart``), and no phase followed by ``-`` begins another
+  ## phase, so two tuples of ordinary names never give one id.
+  "rustc-" & phase & "-" & actionIdPart(pkg.packageName) & "." &
+    targetKindToken(target.kind) & "." & actionIdPart(target.rawName)
 
 proc crateTypeArg(kind: RustTargetKind): string =
   ## Map a target kind to rustc's ``--crate-type`` token. M22:
@@ -1140,9 +1194,15 @@ proc rustcArgvCommon(rustcExe, crateName, edition, crateType, outDir,
 
 type
   TargetActions = object
+    crateName: string
+      ## The target's crate name: the name a consumer passes with
+      ## ``--extern <crateName>=<rlib>``.
     metadataAction: BuildActionDef
+      ## Library-flavoured targets only; a binary has none (its ``id`` is
+      ## empty).
     linkAction: BuildActionDef
     rmetaPath: string
+      ## Empty for binary targets.
     rlibPath: string
       ## Empty for binary targets.
 
@@ -1155,6 +1215,14 @@ type
     runAction: BuildActionDef
     stampAction: BuildActionDef
 
+proc isLibFlavoured(kind: RustTargetKind): bool =
+  ## M23: classify whether a target compiles into a "library-flavoured"
+  ## artefact (rlib / cdylib / staticlib / dylib). Used to decide
+  ## whether the target lands in Pass A (libs) vs Pass B (binaries).
+  case kind
+  of rtkLibrary, rtkCdylib, rtkStaticlib, rtkDylib: true
+  else: false
+
 proc emitForTarget(projectRoot, rustcExe: string;
                    target: RustTarget;
                    pkg: RustPackage;
@@ -1164,7 +1232,13 @@ proc emitForTarget(projectRoot, rustcExe: string;
                    inputRmetas: seq[string];
                    inputRlibs: seq[string];
                    crateEnv: seq[(string, string)]): TargetActions =
-  ## Materialise the two-action graph for a single bin/lib target.
+  ## Materialise the actions of a single bin/lib target: a library-
+  ## flavoured target gets a metadata-only pass and a link pass, a binary
+  ## the link pass alone. Cargo's pipelining exists so that a dependent
+  ## crate can type-check against the library's metadata before its
+  ## codegen ends; nothing depends on a binary, so a binary's metadata
+  ## pass would only repeat its type-check (Cargo emits none:
+  ## ``--emit=dep-info,link`` for a binary).
   ##
   ## ``metadataExterns`` and ``linkExterns`` carry the pre-built
   ## ``--extern name=path`` pairs the metadata pass and the link pass
@@ -1174,48 +1248,49 @@ proc emitForTarget(projectRoot, rustcExe: string;
   ## ``externDepIds`` is the action-id list those externs introduce as
   ## deps of both passes.
   let stableHash = stableHashHex(target.crateName & "@" & target.edition)
+  let hasMetadataPass = isLibFlavoured(target.kind)
   let depsDir = depsPathFor(projectRoot, target.crateName)
   let binDir = binPathFor(projectRoot, target.crateName)
-  createDir(extendedPath(depsDir))
+  if hasMetadataPass:
+    createDir(extendedPath(depsDir))
   createDir(extendedPath(binDir))
 
   let crateType = crateTypeArg(target.kind)
-  let metadataDepfile =
-    metadataDepfilePath(projectRoot, target.crateName, stableHash)
-  let rmetaOutput =
-    rmetaOutputPath(projectRoot, target.crateName, stableHash)
-  let metadataArgv = rustcArgvCommon(
-    rustcExe = rustcExe,
-    crateName = target.crateName,
-    edition = target.edition,
-    crateType = crateType,
-    outDir = depsDir,
-    stableHash = stableHash,
-    sourcePath = target.sourcePath,
-    emit = "metadata,dep-info",
-    applyExtraFilename = true,
-    externFlags = metadataExterns)
   let crateSources = collectRustSourcesUnderManifest(pkg.manifestDir)
-  let metadataInputs = block:
-    var inputs = crateSources
-    inputs.add(pkg.manifestPath)
-    for rmeta in inputRmetas:
-      inputs.add(rmeta)
-    inputs
-
-  let metadataActionId =
-    actionIdFor("rustc-metadata", target.crateName, "umbrella")
-  let metadataAction = buildAction(
-    id = metadataActionId,
-    call = inlineExecCall(metadataArgv, projectRoot),
-    deps = externDepIds,
-    inputs = metadataInputs,
-    outputs = @[rmetaOutput, metadataDepfile],
-    pool = "compile",
-    depfile = metadataDepfile,
-    dependencyPolicy = makeDepfilePolicy(metadataDepfile),
-    commandStatsId = "rust.rustc-metadata",
-    env = crateEnv)
+  var metadataAction: BuildActionDef
+  var rmetaOutput = ""
+  if hasMetadataPass:
+    let metadataDepfile =
+      metadataDepfilePath(projectRoot, target.crateName, stableHash)
+    rmetaOutput = rmetaOutputPath(projectRoot, target.crateName, stableHash)
+    let metadataArgv = rustcArgvCommon(
+      rustcExe = rustcExe,
+      crateName = target.crateName,
+      edition = target.edition,
+      crateType = crateType,
+      outDir = depsDir,
+      stableHash = stableHash,
+      sourcePath = target.sourcePath,
+      emit = "metadata,dep-info",
+      applyExtraFilename = true,
+      externFlags = metadataExterns)
+    let metadataInputs = block:
+      var inputs = crateSources
+      inputs.add(pkg.manifestPath)
+      for rmeta in inputRmetas:
+        inputs.add(rmeta)
+      inputs
+    metadataAction = buildAction(
+      id = rustActionId("metadata", pkg, target),
+      call = inlineExecCall(metadataArgv, projectRoot),
+      deps = externDepIds,
+      inputs = metadataInputs,
+      outputs = @[rmetaOutput, metadataDepfile],
+      pool = "compile",
+      depfile = metadataDepfile,
+      dependencyPolicy = makeDepfilePolicy(metadataDepfile),
+      commandStatsId = "rust.rustc-metadata",
+      env = crateEnv)
 
   let linkDepfile =
     linkDepfilePath(projectRoot, target.crateName, stableHash, target.kind)
@@ -1257,18 +1332,21 @@ proc emitForTarget(projectRoot, rustcExe: string;
     inputs.add(pkg.manifestPath)
     # Declare the rmeta from this crate's metadata pass as an input —
     # captures the pipelined edge in the action cache fingerprint.
-    inputs.add(rmetaOutput)
+    if hasMetadataPass:
+      inputs.add(rmetaOutput)
     for rlib in inputRlibs:
       inputs.add(rlib)
     inputs
 
-  var linkDeps: seq[string] = @[metadataActionId]
+  var linkDeps: seq[string] = @[]
+  if hasMetadataPass:
+    linkDeps.add(metadataAction.id)
   for depId in externDepIds:
     if depId notin linkDeps:
       linkDeps.add(depId)
 
   let linkAction = buildAction(
-    id = actionIdFor("rustc-link", target.crateName, "umbrella"),
+    id = rustActionId("link", pkg, target),
     call = inlineExecCall(linkArgv, projectRoot),
     deps = linkDeps,
     inputs = linkInputs,
@@ -1280,6 +1358,7 @@ proc emitForTarget(projectRoot, rustcExe: string;
     env = crateEnv)
 
   TargetActions(
+    crateName: target.crateName,
     metadataAction: metadataAction,
     linkAction: linkAction,
     rmetaPath: rmetaOutput,
@@ -1356,22 +1435,9 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     "--out-dir", testsDir,
     "-L", "dependency=" & depsDir,
   ]
-  # Derive the lib's extern name from its rmeta path: ``lib<n>-<hash>.rmeta``
-  # → strip ``lib`` prefix + ``-<hash>.rmeta`` suffix.
-  var libCrateName = ""
-  if libActions.rmetaPath.len > 0:
-    var baseName = libActions.rmetaPath.extractFilename
-    if baseName.startsWith("lib"):
-      baseName = baseName[3 .. ^1]
-    let dashIdx = baseName.rfind('-')
-    if dashIdx > 0:
-      baseName = baseName[0 ..< dashIdx]
-    if baseName.endsWith(".rmeta"):
-      baseName = baseName[0 ..< baseName.len - len(".rmeta")]
-    libCrateName = baseName
-  if libCrateName.len > 0 and libActions.rlibPath.len > 0:
+  if libActions.crateName.len > 0 and libActions.rlibPath.len > 0:
     argv.add("--extern")
-    argv.add(libCrateName & "=" & libActions.rlibPath)
+    argv.add(libActions.crateName & "=" & libActions.rlibPath)
   argv.add(test.sourcePath)
 
   let tmpDir = testTargetTmpDir(projectRoot, packageCrateName)
@@ -1406,7 +1472,7 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     deps
 
   let compileAction = buildAction(
-    id = actionIdFor("rustc-test-compile", test.crateName, "compile"),
+    id = rustActionId("test-compile", pkg, test),
     call = inlineExecCall(argv, projectRoot),
     deps = compileDeps,
     inputs = compileInputs,
@@ -1436,7 +1502,7 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     if actions.linkAction.id notin runDeps:
       runDeps.add(actions.linkAction.id)
   let runAction = buildAction(
-    id = actionIdFor("rustc-test-run", test.crateName, "run"),
+    id = rustActionId("test-run", pkg, test),
     call = inlineExecCall(runArgv, projectRoot),
     deps = runDeps,
     inputs = runInputs,
@@ -1454,7 +1520,7 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     output = stampPath,
     title = "rust-test:" & test.crateName,
     entries = @[test.crateName],
-    actionId = actionIdFor("rustc-test-stamp", test.crateName, "stamp"),
+    actionId = rustActionId("test-stamp", pkg, test),
     deps = @[runAction.id],
     commandStatsId = "rust.rustc-test-stamp")
 
@@ -1547,14 +1613,6 @@ proc topologicalSortLibPackages(project: RustProject): seq[int] =
     for i in 0 ..< n:
       result.add(i)
 
-proc isLibFlavoured(kind: RustTargetKind): bool =
-  ## M23: classify whether a target compiles into a "library-flavoured"
-  ## artefact (rlib / cdylib / staticlib / dylib). Used to decide
-  ## whether the target lands in Pass A (libs) vs Pass B (binaries).
-  case kind
-  of rtkLibrary, rtkCdylib, rtkStaticlib, rtkDylib: true
-  else: false
-
 proc transitiveWorkspaceDeps(project: RustProject; rootName: string):
     seq[string] =
   ## M23: compute the transitive closure of workspace deps reachable
@@ -1597,6 +1655,19 @@ proc transitiveWorkspaceDeps(project: RustProject; rootName: string):
       seen.incl nextDep
       queue.add(nextDep)
       result.add(nextDep)
+
+proc libraryTargetName(pkg: RustPackage; lib: RustTarget): string =
+  ## The named target of a package's library: its crate name, unless one
+  ## of the package's binaries has that crate name too, as Cargo's default
+  ## ``src/lib.rs`` plus ``src/main.rs`` layout gives both. The binary
+  ## then keeps the name, since it is what ``cargo run`` and ``cargo build
+  ## --bin <name>`` select by that name, and the library's target is
+  ## ``<crate>-lib``. A crate name holds no ``-``, so that name cannot be
+  ## another target's crate name.
+  for t in pkg.targets:
+    if t.kind == rtkBinary and t.crateName == lib.crateName:
+      return lib.crateName & "-lib"
+  lib.crateName
 
 proc rustCrudeFallback(projectRoot: string;
                        request: ProviderGraphRequest):
@@ -1757,8 +1828,8 @@ proc rustEmitFragment(projectRoot: string;
       #
       # Within each package, lib targets are emitted before bin targets
       # so a same-package bin can pick up its own ``[lib]`` (the
-      # ``[lib]+[[bin]]`` mixed case — rare in the M13 fixtures but the
-      # mechanism is the same as a workspace dep).
+      # ``[lib]+[[bin]]`` case, which Cargo's default ``src/lib.rs`` plus
+      # ``src/main.rs`` layout produces).
       var libActionsByPackage = initTable[string, TargetActions]()
         ## package name → its first lib-flavoured target's actions
         ## (the only one a same-package bin or a workspace consumer can
@@ -1821,19 +1892,10 @@ proc rustEmitFragment(projectRoot: string;
             inputRmetas.add(depActions.rmetaPath)
             inputRlibs.add(depActions.rlibPath)
             continue
-          let baseName = depActions.rmetaPath.extractFilename
-          var crateName = baseName
-          if crateName.startsWith("lib"):
-            crateName = crateName[3 .. ^1]
-          let dashIdx = crateName.rfind('-')
-          if dashIdx > 0:
-            crateName = crateName[0 ..< dashIdx]
-          if crateName.endsWith(".rmeta"):
-            crateName = crateName[0 ..< crateName.len - len(".rmeta")]
           metadataExterns.add("--extern")
-          metadataExterns.add(crateName & "=" & depActions.rmetaPath)
+          metadataExterns.add(depActions.crateName & "=" & depActions.rmetaPath)
           linkExterns.add("--extern")
-          linkExterns.add(crateName & "=" & depActions.rlibPath)
+          linkExterns.add(depActions.crateName & "=" & depActions.rlibPath)
           if depActions.metadataAction.id notin externDepIds:
             externDepIds.add(depActions.metadataAction.id)
           if depActions.linkAction.id notin externDepIds:
@@ -1865,7 +1927,8 @@ proc rustEmitFragment(projectRoot: string;
             crateEnv = targetCrateEnv(pkg, t, cargoExe))
           allActions.add(actions.metadataAction)
           allActions.add(actions.linkAction)
-          discard target(t.crateName, @[actions.metadataAction, actions.linkAction])
+          discard target(libraryTargetName(pkg, t),
+            @[actions.metadataAction, actions.linkAction])
           # Record only the FIRST lib-flavoured target of each package
           # — that's the one a workspace consumer's ``--extern
           # <crateName>=<path>`` flag will point at when it depends on
@@ -1906,30 +1969,33 @@ proc rustEmitFragment(projectRoot: string;
             inputRmetas.add(depActions.rmetaPath)
             inputRlibs.add(depActions.rlibPath)
             continue
-          # Cargo's extern name = the lib target's crate name. We
-          # retrieve it by stripping the ``-<hash>.rmeta`` suffix off
-          # the rmeta path's basename → ``lib<crateName>``.
-          let baseName = depActions.rmetaPath.extractFilename
-          # ``lib<crate>-<hash>.rmeta`` → strip ``lib`` prefix +
-          # ``-<hash>.rmeta`` suffix.
-          var crateName = baseName
-          if crateName.startsWith("lib"):
-            crateName = crateName[3 .. ^1]
-          let dashIdx = crateName.rfind('-')
-          if dashIdx > 0:
-            crateName = crateName[0 ..< dashIdx]
-          if crateName.endsWith(".rmeta"):
-            crateName = crateName[0 ..< crateName.len - len(".rmeta")]
+          # Cargo's extern name = the lib target's crate name.
           metadataExterns.add("--extern")
-          metadataExterns.add(crateName & "=" & depActions.rmetaPath)
+          metadataExterns.add(depActions.crateName & "=" & depActions.rmetaPath)
           linkExterns.add("--extern")
-          linkExterns.add(crateName & "=" & depActions.rlibPath)
+          linkExterns.add(depActions.crateName & "=" & depActions.rlibPath)
           if depActions.metadataAction.id notin externDepIds:
             externDepIds.add(depActions.metadataAction.id)
           if depActions.linkAction.id notin externDepIds:
             externDepIds.add(depActions.linkAction.id)
           inputRmetas.add(depActions.rmetaPath)
           inputRlibs.add(depActions.rlibPath)
+        # The package's own library. Cargo passes each binary of a package
+        # ``--extern <lib>=<the lib's rlib>`` (Cargo reference, "Cargo
+        # Targets", "Binaries": a binary "can use the public API of the
+        # package's library":
+        # https://doc.rust-lang.org/cargo/reference/cargo-targets.html#binaries).
+        # The package-level dependency graph walked above does not list
+        # this edge, so it is added here. The binary has no metadata pass,
+        # so the rlib alone is passed, and its link action is the one dep.
+        if pkg.packageName in libActionsByPackage:
+          let ownLib = libActionsByPackage[pkg.packageName]
+          if ownLib.rlibPath.len > 0:
+            linkExterns.add("--extern")
+            linkExterns.add(ownLib.crateName & "=" & ownLib.rlibPath)
+            if ownLib.linkAction.id notin externDepIds:
+              externDepIds.add(ownLib.linkAction.id)
+            inputRlibs.add(ownLib.rlibPath)
         var searchFlags: seq[string] = @[]
         for path in libSearchPaths:
           searchFlags.add("-L")
@@ -1950,9 +2016,8 @@ proc rustEmitFragment(projectRoot: string;
             inputRmetas = inputRmetas,
             inputRlibs = inputRlibs,
             crateEnv = targetCrateEnv(pkg, t, cargoExe))
-          allActions.add(actions.metadataAction)
           allActions.add(actions.linkAction)
-          discard target(t.crateName, @[actions.metadataAction, actions.linkAction])
+          discard target(t.crateName, @[actions.linkAction])
           binActionsByPackage.mgetOrPut(pkg.packageName, @[]).add((t, actions))
       if allActions.len == 0:
         raise newException(ValueError,
