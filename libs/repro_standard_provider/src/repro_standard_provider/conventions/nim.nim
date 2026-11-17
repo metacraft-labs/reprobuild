@@ -1348,7 +1348,7 @@ proc emitForLibrary(projectRoot, nimExe: string;
 
   if lib.kind in {nlkStatic, nlkBoth}:
     let staticOutput = staticLibraryPathFor(projectRoot, lib.name)
-    var arArgv: seq[string] = @[arDriver(), "rcs", staticOutput]
+    var arArgv: seq[string] = @[arDriver(), DeterministicArModifiers, staticOutput]
     for obj in objFiles:
       arArgv.add(obj)
     # Binary-cache publish: the ``ar`` archive is the reusable static
@@ -1893,7 +1893,7 @@ proc emitCCppCrossArchiveAction(projectRoot, arExe: string;
   ## ``nim-xlang-ccpp-`` discriminator.
   let archiveOutput = ccppCrossArchivePath(projectRoot, member.libraryName)
   createDir(extendedPath(parentDir(archiveOutput)))
-  var argv = @[arExe, "rcs", archiveOutput]
+  var argv = @[arExe, DeterministicArModifiers, archiveOutput]
   for obj in objFiles:
     argv.add(obj)
   buildAction(

@@ -7,8 +7,11 @@
 ## its own. The tests that import it are
 ## `t_two_checkouts_share_a_static_library_edge`,
 ## `t_two_projects_share_a_library_built_with_the_same_flags`,
-## `t_library_outputs_are_path_free_with_debug_info` and
-## `t_a_read_outside_the_logical_roots_stays_local`.
+## `t_library_outputs_are_path_free_with_debug_info`,
+## `t_a_read_outside_the_logical_roots_stays_local`,
+## `t_restored_outputs_match_the_recorded_digests`,
+## `t_a_compiler_environment_difference_is_a_miss_not_a_wrong_hit` and
+## `t_an_archive_rebuilt_in_another_checkout_is_byte_identical`.
 ##
 ## Everything here is real: the built `repro`, the C compiler and archiver
 ## (the dev shell's on `PATH`, or the toolchain the engine realizes into the
@@ -132,14 +135,19 @@ proc parseReport(path: string): OrderedTable[string, EdgeOutcome] =
         detail: entry{"detail"}.getStr()))
 
 proc build*(host: var SharedHost; project: string; portable: bool;
-            provisioning = "path"): BuildRun =
+            provisioning = "path";
+            extraEnv: openArray[(string, string)] = [];
+            dropEnv: openArray[string] = []): BuildRun =
   ## `repro build` of `project` against the host's shared action cache and
   ## store, with the engine's cache evidence and trace collected and written
   ## to a report. `portable` turns the portable (path-independent) identity
   ## on, which is what lets a record made in one checkout be found from
   ## another. `provisioning` is the `--tool-provisioning` mode: `path` takes
   ## the C toolchain from `PATH`, `tarball` has the engine realize its Linux
-  ## C toolchain into the store root.
+  ## C toolchain into the store root. `extraEnv` sets variables on top of
+  ## the invoking environment (after `portable` has applied), for a test
+  ## that gives one checkout's build an environment the other's lacks;
+  ## `dropEnv` removes variables the invoking environment may carry.
   inc host.reportCount
   result.reportPath = host.scratch / ("report-" & $host.reportCount & ".json")
   let env = newStringTable(modeCaseSensitive)
@@ -161,6 +169,11 @@ proc build*(host: var SharedHost; project: string; portable: bool;
     env["REPRO_PORTABLE_CACHE"] = "1"
   elif env.hasKey("REPRO_PORTABLE_CACHE"):
     env.del("REPRO_PORTABLE_CACHE")
+  for key in dropEnv:
+    if env.hasKey(key):
+      env.del(key)
+  for (key, value) in extraEnv:
+    env[key] = value
   let args = @["build", "--daemon=off", "--no-runquota",
     "--tool-provisioning=" & provisioning,
     "--action-cache-root=" & host.actionCacheRoot,

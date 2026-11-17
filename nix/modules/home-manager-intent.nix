@@ -83,7 +83,21 @@ let
   reprobuildApplies = concern: applies != null && lib.elem concern applies;
   complementDefault = name: applies != null && !(reprobuildApplies mapping.categoryConcerns.${name});
 
+  # Realization sources: refused, by throwing, when a mapping names
+  # a package that is no canonical package, one the profile selects on no
+  # host, or is malformed. Forced by every output of `mapped`.
+  sourceProblems = reprobuildLib.realizationSourceProblems {
+    sources = cfg.realizationSources;
+    inherit (result) document;
+  };
+  checkedSources =
+    if sourceProblems == [ ] then
+      cfg.realizationSources
+    else
+      throw "reprobuild.intent.realizationSources: ${toString (builtins.length sourceProblems)} refused mapping(s):\n  ${lib.concatStringsSep "\n  " sourceProblems}";
+
   mapped = mapping.mapIntent {
+    realizationSources = checkedSources;
     inherit (result) evaluation;
     inherit pkgs;
     inherit (cfg) system;
@@ -94,7 +108,7 @@ let
       files = cfg.files.enable;
       environment = cfg.environment.enable;
     };
-    inherit (reprobuildLib) lookupNixRealization;
+    inherit (reprobuildLib) lookupNixRealization resolveRealizationSource;
     brewRealizationOf = cfg.homebrew.realizationOf;
   };
 
@@ -179,6 +193,21 @@ in
       description = "IFD mode: the system that runs `repro home export` -- the evaluator's, not the target's. Defaults to builtins.currentSystem where the evaluation exposes it.";
     };
 
+    realizationSources = lib.mkOption {
+      type = lib.types.attrsOf lib.types.raw;
+      default = { };
+      example = lib.literalExpression ''
+        {
+          nil = { nixpkgs = inputs.nixpkgs-unstable.legacyPackages.''${pkgs.stdenv.hostPlatform.system}; };
+          grok = { packages = inputs.llm-agents.packages.''${pkgs.stdenv.hostPlatform.system}; };
+          reprobuild = { derivation = inputs.reprobuild.packages.''${pkgs.stdenv.hostPlatform.system}.default; };
+        }
+      '';
+      description = ''
+        Where the Nix realization of a canonical package comes from when it is not this configuration's nixpkgs, by canonical name. A source is `{ nixpkgs = <package set>; attribute ? null; }` (the attribute is the one the catalog names, unless given), `{ packages = <package set>; attribute ? null; }` (a flake's `packages.<system>`; the attribute is the canonical name, unless given), or `{ derivation = <derivation>; }`. A mapping is realization, never selection: it decides where a package the profile selects comes from, not whether a host gets it. A mapping for a name that is not a canonical package, and one for a canonical package the profile selects on no host, fail the evaluation. A selected package with neither a mapping nor a catalog record is still unmapped.
+      '';
+    };
+
     packages = category "packages" "home.packages from the intent's packages (nixpkgs attributes from the reprobuild-nix-packages catalog)";
     files = category "files" "home.file from fs.userFile resources";
     environment = category "environment" "home.sessionVariables / home.sessionPath from env.userVariable / env.userPath resources";
@@ -257,7 +286,10 @@ in
     reprobuild.intent = {
       inherit (result) evaluation;
       inherit profileBin;
-      inherit (mapped) unmapped uncategorized;
+      # Forcing the source check here makes a refused mapping fail the
+      # evaluation even for a host whose profile selects no package.
+      unmapped = builtins.seq checkedSources mapped.unmapped;
+      inherit (mapped) uncategorized;
       homebrew = {
         inherit (mapped) casks formulae;
       };

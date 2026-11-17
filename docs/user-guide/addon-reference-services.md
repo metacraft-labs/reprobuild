@@ -193,7 +193,12 @@ The add-on handles this in four ways:
     drops it to break an ordering cycle, and it never fails: if a step of
     it fails it logs that and goes on, and if it cannot read the pending
     switch's list of holds it holds every socket, timer and path unit in
-    `/etc/systemd/system` until the switch is resolved. A host installed
+    `/etc/systemd/system` until the switch is resolved, except the ones the
+    host needs to stay reachable, such as an `ssh.socket` override.
+    Because `sysinit.target` requires it, a link
+    `sysinit.target.requires/repro-addon-boot-hold.service` left without
+    the unit would hold up every boot: uninstall removes it, and
+    `repro system addon verify` reports one that dangles. A host installed
     by an add-on version without that unit gets it at its next apply.
     That apply also points the add-on's boot-time re-assertion, its
     boot-time confirm and the deploy agent's two units at the add-on

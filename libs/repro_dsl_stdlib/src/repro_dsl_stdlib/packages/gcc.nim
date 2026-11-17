@@ -368,7 +368,7 @@ proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
   for obj in opts.objects:
     objects.add(if obj.outputs.len > 0: obj.outputs[0] else: "")
   binutilsModule.ar(
-    modifiers = (if opts.modifiers.len > 0: opts.modifiers else: "rcs"),
+    modifiers = (if opts.modifiers.len > 0: opts.modifiers else: DefaultArModifiers),
     archive = opts.target, objects = objects, after = opts.objects)
 
 proc gccStrip*(opts: StripOptions): BuildActionDef =

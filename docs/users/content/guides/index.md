@@ -15,4 +15,5 @@ Each guide takes you to one goal. Pick the area you are working in:
 | [Building](building/index.md) | Building projects with or without a project file |
 | [Environments](environments/index.md) | Using a project's tools and variables in your shell |
 | [Workspaces](workspaces/index.md) | Working across several repositories side by side |
+| [Machines](machines/index.md) | Configuring your account with a home profile, alongside Home Manager or in its place |
 | [Troubleshooting](troubleshooting/index.md) | Finding out why something does not work |

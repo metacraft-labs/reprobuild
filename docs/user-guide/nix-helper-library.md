@@ -11,6 +11,7 @@ module, `reprobuild.homeManagerModules.intent`, so a Nix configuration can
 | read a plain list (applications, tools) that the profile also reads | [`readData`](#readdata--a-data-file-selected-like-the-profile) |
 | use what the whole profile evaluates to for a host | [`readIntent`](#readintent--the-evaluated-profile) |
 | turn a canonical package name into a nixpkgs attribute | [`nixRealizationOf`](#nixrealizationof--canonical-name-to-nixpkgs-attribute) |
+| take a package from another package set or flake (nixpkgs-unstable, a flake's `packages`) | [realization sources](#realization-sources--a-package-from-another-set-or-flake) |
 | turn a canonical package name into a Homebrew token, or a Brewfile token back into a package | [`brewRealizationOf`](#brewrealizationof--canonical-name-to-homebrew-token-and-back) |
 | let Home Manager install packages, files and environment from the profile | [`homeManagerModules.intent`](#the-home-manager-module) |
 | check that a Home Manager configuration and the profile give a host the same thing | [`homeManagerFacts`, `homeEquivalenceCheck`](host-facts.md) |
@@ -23,7 +24,9 @@ of `when` guards, which it evaluates for the system it is configuring.
 
 ```nix
 {
-  inputs.reprobuild.url = "github:metacraft-labs/reprobuild";
+  # Pin a release tag or a commit: the repository's default branch does not
+  # carry the library.
+  inputs.reprobuild.url = "github:metacraft-labs/reprobuild/<release-tag-or-commit>";
   # or, in a workspace whose reprobuild pin comes from another flake:
   # reprobuild = nixos-modules.inputs.reprobuild;
 
@@ -204,6 +207,37 @@ realize, realizes more than once, or realizes other than as a
 attribute is looked up in **your** nixpkgs; the catalog's pinned revision is
 in `record` if you want it. When a name is missing, the fix is a contribution
 to the catalog, not a mapping in your configuration.
+
+## Realization sources — a package from another set or flake
+
+`nixRealizationOf` looks every attribute up in **your** nixpkgs. A package
+that comes from somewhere else is mapped, by its canonical name, to where it
+comes from: a *realization source*, exactly one of
+
+```nix
+reprobuild.intent.realizationSources = {
+  # a named nixpkgs-like set: the attribute is the catalog's, unless `attribute` says another
+  nil.nixpkgs = inputs.nixpkgs-unstable.legacyPackages.${system};
+  # a flake's packages.<system>: the attribute is the canonical name, unless `attribute` says another
+  grok.packages = inputs.llm-agents.packages.${system};
+  runquota = { packages = inputs.runquota.packages.${system}; attribute = "default"; };
+  # a derivation given directly (a flake output that is part of no set)
+  reprobuild.derivation = inputs.reprobuild.packages.${system}.default;
+};
+```
+
+A mapping is realization, not selection: it says where a package the profile
+selects comes from, and never makes a host get one. It is not a second list
+of packages. Three things are refused (the evaluation throws, naming the
+entry): a mapping for a name that is not a canonical package, a mapping for a
+canonical package that no host of the profile selects (so stale mappings
+cannot accumulate), and a malformed source. A selected package with neither a
+mapping nor a catalog record is still `unmapped` and fails the evaluation.
+For the same mapping the library offers `resolveRealizationSource` and
+`realizationSourceProblems`, `lookupNixPackageName` takes
+`realizationSources` to name a derivation a source resolves to, and
+`homeManagerFacts` reports such a package by its canonical name (it reads
+the module's option by default).
 
 ## `brewRealizationOf` — canonical name to Homebrew token, and back
 

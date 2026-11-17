@@ -523,7 +523,52 @@ let
     )
     && !(lib.elem expected envOff.home.sessionPath);
 
+  # Realization sources, from the shared fixture
+  # tests/fixtures/realization-sources/cases.nix with real derivations: a
+  # package comes from the named set or derivation instead of `pkgs`, a
+  # selected package with no catalog record becomes mapped by its source, a
+  # mapping is realization only (it selects nothing), and each refusal makes
+  # the evaluation fail.
+  rsCases = import (root + "/tests/fixtures/realization-sources/cases.nix") {
+    mkDrv =
+      name: version:
+      pkgs.runCommand "${name}-${version}" {
+        pname = name;
+        inherit version;
+      } "mkdir $out";
+  };
+  sourcedConfig = configFor { reprobuild.intent.realizationSources = rsCases.sources; };
+  sourcedOk =
+    let
+      have = outPaths sourcedConfig.home.packages;
+    in
+    lib.all (n: lib.elem rsCases.expected.${n}.outPath have) (lib.attrNames rsCases.expected)
+    # Taken from the source, not from the consumer's own set.
+    && !(lib.elem pkgs.bash.outPath have)
+    && !(lib.elem pkgs.llvm.dev.outPath have)
+    # What the mapping does not touch is as before.
+    && lib.all (p: lib.elem p have) (outPaths (lib.optionals isLinux [ pkgs.busybox pkgs.patchelf ]))
+    # The two packages with no catalog record are mapped now; the others
+    # unmapped still are.
+    && ids sourcedConfig.reprobuild.intent.unmapped
+    == lib.filter (id: id != "package:gm5-home-pc-only" && id != "package:ripgrep") expected.unmapped;
+  sourcedRefusalsOk = lib.all (
+    n: fails (configFor { reprobuild.intent.realizationSources = rsCases.refusals.${n}.sources; }).reprobuild.intent.unmapped
+  ) (lib.attrNames rsCases.refusals);
+  sourcedUnresolvedOk =
+    let
+      cfg = configFor { reprobuild.intent.realizationSources = rsCases.unresolved.sources; };
+    in
+    lib.any (
+      e: e.id == "package:bash" && lib.all (m: lib.hasInfix m e.reason) rsCases.unresolved.mentions
+    ) cfg.reprobuild.intent.unmapped
+    # No fallback to the consumer's own set for a mapped name.
+    && !(lib.elem pkgs.bash.outPath (outPaths cfg.home.packages));
+
   results = {
+    realization-sources-map-packages = sourcedOk;
+    realization-sources-refusals-fail = sourcedRefusalsOk;
+    realization-sources-unresolved-is-unmapped = sourcedUnresolvedOk;
     concerns-profile-bin = concernsProfileBinOk;
     concerns-complement-defaults = concernsOk;
     concerns-package-split = concernsPackagesOk;

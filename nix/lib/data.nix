@@ -361,10 +361,22 @@ in
   # binaries, activity }`, one per package, sorted by name; `rows` every
   # validated row. Throws with the planner's diagnostic for a file the
   # planner refuses, and for every file with `[[resource]]` rows.
+  # The argument pattern restates readDataResult's, so that
+  # `builtins.functionArgs reprobuild.lib.readData` names the arguments (the
+  # user reference page is checked against it, nix/tests/lib-reference.nix).
   readData =
-    args:
+    args@{
+      path,
+      system,
+      host,
+      hosts ? { },
+      activities ? null,
+      name ? null,
+    }:
     let
-      r = readDataResult args;
+      # `name` defaults inside readDataResult (the file's base name); pass it
+      # only when given.
+      r = readDataResult (if name == null then builtins.removeAttrs args [ "name" ] else args);
     in
     if r ? error then throw "reprobuild.lib.readData: ${r.error}" else r;
 }

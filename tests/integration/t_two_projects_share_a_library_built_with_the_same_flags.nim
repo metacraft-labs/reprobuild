@@ -16,21 +16,25 @@
 ## which differ, do execute. When it fails, the message names the engine's
 ## own reason for each library edge.
 ##
-## EXPECTED RED until the library edge can be shared across projects. On the
-## commit that added it the engine reports, per edge, a toolchain read
-## outside every logical root, a key that differs between the two projects,
-## or a record found whose outputs were never stored for another checkout to
-## restore.
+## History. The test was added red, when the engine reported per edge a
+## toolchain read outside every logical root, a key that differed between
+## the two projects (every build-file action named a sibling directory of
+## its project), or a record found whose outputs were never stored for
+## another checkout to restore. It went green when the toolchain came from
+## the store root, that sibling directory was named only when it exists,
+## and the engine began storing the output bytes of a shareable record
+## under the action-cache root, keyed by their content digests, and
+## restoring them, verified, in another project.
 ##
-## Where the toolchain comes from. The builds take the C compiler and
-## archiver from `PATH` (`--tool-provisioning=path`), the only mode in which
-## the engine builds a C convention project today. In the dev shell that
-## toolchain lives under `/nix/store`, and a read there stays outside every
-## logical root, so it can never make an edge portable. These builds can
-## share only once the toolchain is provisioned into the reprobuild store
-## root by the engine itself; when that exists they must request it instead
-## of `path`. That is the one change this test is meant to take: its
-## assertions stay as they are.
+## Where the toolchain comes from. The builds request
+## `--tool-provisioning=tarball`: the engine realizes its pinned Linux C
+## toolchain (compiler, archiver, linker and their runtime files) into the
+## reprobuild store root, so every read the library edges make lies inside a
+## logical root. The test first took the toolchain from `PATH`
+## (`--tool-provisioning=path`); in the dev shell that toolchain lives under
+## `/nix/store`, a read there stays outside every logical root, and no edge
+## could be portable. Switching the provisioning mode is the only change the
+## test took; its assertions are as written.
 ##
 ## Vacuity guard: the second project's application compile and link are
 ## asserted to have executed, and the first project's library edges too, so
@@ -40,8 +44,9 @@
 ## instead of `-O2` executes its library edges, so a passing run cannot come
 ## from a key that ignores the flags.
 ##
-## No mocks: the built `repro`, the C compiler and `ar` on `PATH`, real Git
-## checkouts, the real monitor and action cache.
+## No mocks: the built `repro`, the C compiler and `ar` the engine realizes
+## into the store root, real Git checkouts, the real monitor and action
+## cache.
 
 import std/[os, unittest]
 
@@ -58,7 +63,8 @@ suite "two projects share a library built with the same flags":
     writeLibraryProject(projectB, "reporterPkg", ["-O2"],
       mapPrefix = false, greeting = "reporter")
 
-    let a = host.build(projectA, portable = true)
+    let a = host.build(projectA, portable = true,
+      provisioning = "tarball")
     checkpoint("first project (" & projectA & "), exit " & $a.code & ":\n" &
       a.output)
     require a.code == 0
@@ -66,7 +72,8 @@ suite "two projects share a library built with the same flags":
     check a.launched(LibraryArchiveEdge)
     check nonEmptyFile(projectA / LibraryArchive)
 
-    let b = host.build(projectB, portable = true)
+    let b = host.build(projectB, portable = true,
+      provisioning = "tarball")
     checkpoint("second project (" & projectB & "), exit " & $b.code & ":\n" &
       b.output)
     require b.code == 0
@@ -96,13 +103,15 @@ suite "two projects share a library built with the same flags":
     writeLibraryProject(projectC, "auditorPkg", ["-O1"],
       mapPrefix = false, greeting = "auditor")
 
-    let a = host.build(projectA, portable = true)
+    let a = host.build(projectA, portable = true,
+      provisioning = "tarball")
     checkpoint("first project, exit " & $a.code & ":\n" & a.output)
     require a.code == 0
     check a.launched(LibraryCompileEdge)
     check a.launched(LibraryArchiveEdge)
 
-    let c = host.build(projectC, portable = true)
+    let c = host.build(projectC, portable = true,
+      provisioning = "tarball")
     checkpoint("project with -O1, exit " & $c.code & ":\n" & c.output &
       "\nengine reasons:\n" & engineReasons(c, LibraryCompileEdge) & "\n" &
       engineReasons(c, LibraryArchiveEdge))
