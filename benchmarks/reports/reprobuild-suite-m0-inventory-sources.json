@@ -57239,7 +57239,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_env_tables_keep_one_path_on_windows.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

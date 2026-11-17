@@ -30,30 +30,40 @@
 ##
 ## The ``host_pool_retention_discovery_*`` cases drive the product path
 ## itself, ``poolRetentionReady``, on a real pool: with the environment as
-## inherited, and with a ``git`` that fails put first on the inherited search
+## inherited; with a ``git`` that fails put first on the inherited search
 ## path, where the discovery pass must still run the pool's Git
-## (Shared-Clone-Pool-Integrity §3.2). The second case skips, with the
-## measured reason, on a host whose first ``sh`` is Git for Windows'
-## launcher: it rewrites the search path itself, so the stub cannot be
-## observed through it.
-## It lives here rather than in ``t_spi_pool_retains_registered_leaf_objects``
-## because that file's fixture runs ``VAR=value git …`` command lines, which
-## do not start on Windows.
+## (Shared-Clone-Pool-Integrity §3.2); and with an ``sh`` that fails put
+## first, which the pass must not start at all. Issue
+## ``reprobuild-pm/issues/2026-11-16-windows-shared-pool-retention-discovery-depends-on-which-sh-is-first-on-path.md``
+## found that the pass depended on the first ``sh``: Git for Windows'
+## launcher (``bin\sh.exe``) ran its own Git, and the real
+## ``usr\bin\sh.exe`` kept ``C:\Windows\System32`` first, so the hook's
+## ``sort -u`` ran Windows' ``sort.exe``. On Windows the stub-``git`` case
+## therefore puts ``System32`` first and runs once with each of those
+## shells first among the shells on the search path.
+## ``host_pool_gc_runs_the_retention_hook_with_posix_tools`` covers the gc
+## side: the full hook, whose reflog walk uses ``find``, run by the product's
+## pool gc with ``System32`` first.
+## These cases live here rather than in
+## ``t_spi_pool_retains_registered_leaf_objects`` because that file's fixture
+## runs ``VAR=value git …`` command lines, which do not start on Windows.
 ##
-## One stand-in: the failing ``git`` is a two-line ``sh`` script that records
-## that it ran. It stands for "some other Git first on the inherited search
-## path", which a test host cannot be expected to have installed; the Git the
-## pool uses and the discovery hook are real. Otherwise no mocks: every table
-## is the one the production proc returns, and the child processes are real
-## (``cmd.exe /d /c set`` on Windows, ``env`` on POSIX).
+## Stand-ins: the failing ``git`` is a two-line ``sh`` script that records
+## that it ran, and the failing ``sh`` is such a script on POSIX and a copy
+## of ``where.exe`` (which rejects the hook's arguments) on Windows, where a
+## command lookup finds only ``.exe`` files. They stand for "some other Git
+## (or shell) first on the inherited search path", which a test host cannot
+## be expected to have installed; the Git the pool uses, its shell and the
+## hook are real. Otherwise no mocks: every table is the one the production
+## proc returns, and the child processes are real (``cmd.exe /d /c set`` on
+## Windows, ``env`` on POSIX).
 
-import std/[os, osproc, strtabs, strutils, tables, tempfiles, unittest]
+import std/[os, osproc, strtabs, strutils, tables, tempfiles, times, unittest]
 
 import repro_core/process_env
 import git_tool
 import shared_clones
 import repro_test_support
-import repro_test_support/reasoned_skip
 import repro_cli_support/dev_env_shell_export
 import repro_cli_support/dev_env_rollback_manifest
 
@@ -178,6 +188,17 @@ suite "env tables keep one search path under Windows name semantics":
     old["PATH"] = gitBin.parentDir & $PathSep & r"C:\inherited"
     check old.searchPathKeys.len == 2
 
+  test "retention_discovery_runs_the_gc_hook_value_through_git":
+    # The pass is one `git` invocation that runs, as a shell alias, the same
+    # command gc runs as `gc.recentObjectsHook`, plus `--discover`; Git, not
+    # the engine, picks the shell and the search path.
+    let pool = "/pools/pool.git"
+    let args = retentionDiscoveryArgs(pool)
+    check args == @["--git-dir=" & pool, "-c",
+      "alias." & RetentionDiscoverAlias & "=!" &
+        retentionHookConfigValue(pool) & " --discover",
+      RetentionDiscoverAlias]
+
   test "windows_semantics_run_shell_override_replaces_the_inherited_Path":
     let inherited = [("Path", r"C:\inherited"), ("TEMP", r"C:\t")]
     let cmd = shellCommand(["prog"], [("PATH", r"C:\spy;C:\inherited")])
@@ -268,7 +289,8 @@ suite "env tables keep one search path under Windows name semantics":
 
   test "host_pool_retention_discovery_runs_the_pools_git_first":
     # A `git` that fails, put first on this process's inherited search path,
-    # must not be the one the `--discover` pass runs (§3.2).
+    # must not be the one the `--discover` pass runs (§3.2), whichever `sh`
+    # comes first.
     let f = setUpPool("repro-env-tables-pool-stub-")
     defer: tearDownPool(f)
     let stubDir = f.root / "stub-bin"
@@ -279,24 +301,109 @@ suite "env tables keep one search path under Windows name semantics":
       "exit 1\n")
     setFilePermissions(stubDir / "git", {fpUserRead, fpUserWrite,
       fpUserExec})
-    putEnv(f.pathName, stubDir & $PathSep & f.savedPath)
-    # Positive control: the `sh` the pass is started through finds the stub
-    # as `git` on the inherited search path.
-    let sh = findExe("sh")
-    doAssert sh.len > 0, "sh is not on PATH"
-    discard runChild(sh, ["-c", "git version"])
-    if not fileExists(marker):
-      # Measured on eli-pc: the first `sh` is Git for Windows' launcher
-      # (`bin\sh.exe` or a Scoop shim of it), which puts its own
-      # `/ucrt64/bin:/usr/bin` in front of the search path it is given, so
-      # no `git` placed on that search path can be observed through it.
-      skip("the first sh on this host's PATH (" & sh & ") does not look " &
-        "commands up on the search path it is given first, so a git " &
-        "placed there cannot be observed; product defect reprobuild-pm " &
-        "issues/2026-11-16-windows-shared-pool-retention-discovery-" &
-        "depends-on-which-sh-is-first-on-path.md, Windows leg tracked " &
-        "for eli-pc in the GNM milestone (GM1w)")
+    # Git's own POSIX shell: `/bin/sh`, or Git for Windows' `usr/bin/sh.exe`.
+    let shell = poolTransportShell(f.gitBin)
+    var arrangements: seq[(string, string)]
+    when defined(windows):
+      # System32 first, as on a stock Windows search path, so a hook run
+      # with the search path as inherited gets Windows' sort.exe. Then the
+      # stub, then one of Git for Windows' two shells: the real one, which
+      # keeps that order, or the launcher (`<git>/bin/sh.exe`), which puts
+      # its own Git in front of it.
+      let system32 = getEnv("SystemRoot", r"C:\Windows") / "System32"
+      let launcherDir = shell.parentDir.parentDir.parentDir / "bin"
+      doAssert fileExists(launcherDir / "sh.exe"),
+        "no Git for Windows launcher beside " & shell
+      for (name, shellDir) in [("real shell first", shell.parentDir),
+                               ("launcher first", launcherDir)]:
+        arrangements.add((name, system32 & $PathSep & stubDir & $PathSep &
+          shellDir & $PathSep & f.savedPath))
     else:
+      arrangements.add(("as inherited", stubDir & $PathSep & f.savedPath))
+    for (name, searchPath) in arrangements:
+      checkpoint(name & ": " & searchPath)
+      putEnv(f.pathName, searchPath)
+      # Positive control: Git's shell finds the stub as `git` on the
+      # inherited search path, so a pass that let it would be observed.
+      discard runChild(shell, ["-c", "git version"])
+      doAssert fileExists(marker), "the stub git was not found through " &
+        shell & " (" & name & ")"
       removeFile(marker)
       check poolRetentionReady(f.gitBin, f.pool)
       check not fileExists(marker)
+
+  test "host_pool_retention_discovery_ignores_the_first_sh_on_the_search_path":
+    # Git starts the pass through its own shell; whatever `sh` the engine's
+    # search path finds first is never run.
+    let f = setUpPool("repro-env-tables-pool-sh-")
+    defer: tearDownPool(f)
+    let stubDir = f.root / "stub-sh"
+    let marker = f.root / "stub-sh-ran"
+    createDir(stubDir)
+    when defined(windows):
+      # where.exe rejects the hook's arguments, so a pass run through it
+      # fails.
+      copyFile(getEnv("SystemRoot", r"C:\Windows") / "System32" / "where.exe",
+        stubDir / "sh.exe")
+    else:
+      writeFile(stubDir / "sh", "#!/bin/sh\n" &
+        "echo ran >> " & quoteShellPosix(marker) & "\n" & "exit 1\n")
+      setFilePermissions(stubDir / "sh", {fpUserRead, fpUserWrite,
+        fpUserExec})
+    putEnv(f.pathName, stubDir & $PathSep & f.savedPath)
+    # Positive control: the stub is the first `sh` on the search path.
+    doAssert findExe("sh").parentDir == stubDir,
+      "stub sh not first: " & findExe("sh")
+    check poolRetentionReady(f.gitBin, f.pool)
+    check not fileExists(marker)
+
+  test "host_pool_gc_runs_the_retention_hook_with_posix_tools":
+    # The product's pool gc, with System32 first on Windows: gc runs the full
+    # hook, whose reflog walk uses `find` and whose id lists use `sort -u`.
+    # A hook that fails makes gc fail ("unable to enumerate additional
+    # recent objects"), so `ok` says the hook ran to completion, and the
+    # commit only the leaf's reflog names must still be in the pool.
+    # (Neither `find` nor `sort` failing there makes the hook fail: both
+    # feed a pipeline whose status is the last command's.)
+    let f = setUpPool("repro-env-tables-pool-gc-")
+    defer: tearDownPool(f)
+    let leaf = f.root / "ws" / "leaf"
+    when defined(windows):
+      putEnv(f.pathName, getEnv("SystemRoot", r"C:\Windows") / "System32" &
+        $PathSep & f.savedPath)
+    proc gitOut(args: openArray[string]): string =
+      let r = runProgramSplit(f.gitBin, args, timeoutMs = 60_000)
+      doAssert r.code == 0, args.join(" ") & ": " & r.stdout & r.stderr
+      r.stdout.strip()
+    writeFile(f.root / "empty", "")
+    let tree = gitOut(["--git-dir=" & f.pool, "hash-object", "-t", "tree",
+      "-w", f.root / "empty"])
+    let kept = gitOut(["--git-dir=" & f.pool, "-c", "user.name=t",
+      "-c", "user.email=t@t", "commit-tree", tree, "-m", "kept"])
+    # Older than the expiry window, so the commit survives gc only because
+    # the hook printed it: a hook whose `find` or `sort` is not the POSIX
+    # tool exits 0 with an empty list, and gc then expires it.
+    # Git writes loose objects read-only, and Windows refuses to change the
+    # time of a read-only file.
+    let keptPath = f.pool / "objects" / kept[0 .. 1] / kept[2 .. ^1]
+    setFilePermissions(keptPath, getFilePermissions(keptPath) + {fpUserWrite})
+    setLastModificationTime(keptPath, getTime() - initDuration(days = 30))
+    createDir(leaf / ".git" / "logs" / "refs" / "heads")
+    writeFile(leaf / ".git" / "logs" / "refs" / "heads" / "gone",
+      repeat('0', kept.len) & " " & kept &
+      " t <t@t> 1700000000 +0000\tbranch: deleted later\n")
+    # Expiry on: the hook written, git >= 2.42, a complete discovery pass.
+    let config = poolIntegrityConfig(f.gitBin, f.pool)
+    checkpoint($config)
+    check ("gc.pruneExpire", PoolPruneExpire) in config
+    for (key, value) in config:
+      discard gitOut(["--git-dir=" & f.pool, "config", key, value])
+    let gc = maintainSharedBare(f.gitBin, f.pool, [], force = true)
+    checkpoint(gc.diagnostic)
+    check gc.ok
+    check gc.ran
+    let present = runProgramSplit(f.gitBin, ["--git-dir=" & f.pool,
+      "cat-file", "-t", kept], timeoutMs = 60_000)
+    checkpoint(present.stderr)
+    check present.code == 0
+    check present.stdout.strip() == "commit"
