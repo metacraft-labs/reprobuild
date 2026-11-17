@@ -125,6 +125,7 @@ package cg3_opaque:
     check lines[0] == "repro-cargo-products-v1"
     # Exactly one final product: the executable. No library, no build script,
     # nothing from the dependency tree.
+    checkpoint "products file: " & productsBefore.replace("\n", " | ")
     check lines.len == 3 and lines[2] == ""
     check lines[1].endsWith("target/release/cg3_app")
     check fileExists(lines[1])

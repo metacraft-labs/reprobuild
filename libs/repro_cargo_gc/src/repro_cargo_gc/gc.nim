@@ -22,7 +22,7 @@
 ## a build, so a janitor that holds it makes a starting build wait for it
 ## rather than race it.
 
-import std/[algorithm, os, sets, strutils, tables, times]
+import std/[algorithm, os, sequtils, sets, strutils, tables, times]
 import repro_core/file_lock
 import ./[types, layout, store]
 
@@ -67,30 +67,56 @@ proc entryKind(path: string): PathComponent =
   elif dirExists(path): pcDir
   else: pcFile
 
-proc finalArtifactTwins(profileAbsDir: string; deletedFiles: seq[string]):
-    seq[string] =
-  ## Hard-linked copies, directly in the profile directory, of the `deps/`
-  ## files being deleted (`debug/libc1.rlib` next to `deps/libc1-<hash>.rlib`),
-  ## and the `<stem>.d` dep-info file cargo writes beside each such copy.
+proc finalArtifactTwins(profileAbsDir: string; deletedFiles,
+                        keptFiles: seq[string]): seq[(string, int64)] =
+  ## Copies, directly in the profile directory, of the `deps/` files being
+  ## deleted (`debug/libc1.rlib` next to `deps/libc1-<hash>.rlib`), and the
+  ## `<stem>.d` dep-info file cargo writes beside each such copy. A copy is
+  ## either a hard link of the deleted file (Linux) or, where cargo copies
+  ## (macOS), a file of the unhashed name whose bytes equal the deleted file's
+  ## and equal no surviving unit's file: a twin of a survivor is the live
+  ## unit's artifact and stays. Each result carries the bytes the path
+  ## frees beyond what its `deps/` original already counts: 0 for a hard link,
+  ## its size for a copy and for the dep-info file.
   var wanted = initHashSet[(int64, int64)]()
+  var deletedByName = initTable[string, seq[string]]()
+  var keptByName = initTable[string, seq[string]]()
   for f in deletedFiles:
     let info =
       try: getFileInfo(f, followSymlink = false)
       except OSError: continue
-    if info.linkCount > 1:
+    if info.kind != pcDir and info.linkCount > 1:
       wanted.incl (int64(info.id.device), int64(info.id.file))
-  if wanted.len == 0: return
+    let plain = unhashedName(f.extractFilename)
+    if plain.len > 0: deletedByName.mgetOrPut(plain, @[]).add f
+  for f in keptFiles:
+    let plain = unhashedName(f.extractFilename)
+    if plain.len > 0: keptByName.mgetOrPut(plain, @[]).add f
+  if wanted.len == 0 and deletedByName.len == 0: return
+  var deletedPaths = initHashSet[string]()
+  for f in deletedFiles: deletedPaths.incl normalizedPath(f)
   for kind, path in walkDir(profileAbsDir):
-    if kind != pcFile: continue
-    if fileIdOfPath(path) in wanted:
-      result.add path
+    if kind in {pcLinkToFile, pcLinkToDir}:
+      # `debug/app.dSYM -> deps/app-<hash>.dSYM`: dangling once the target
+      # goes, so it goes with it. The link itself holds no bytes.
+      if symlinkPointsTo(path, deletedPaths): result.add (path, 0'i64)
+      continue
+    if kind notin {pcFile, pcDir}: continue
+    let linked = fileIdOfPath(path) in wanted
+    var twin = linked
+    if not twin and path.extractFilename in deletedByName:
+      twin = deletedByName[path.extractFilename].anyIt(sameContent(it, path)) and
+        not keptByName.getOrDefault(path.extractFilename).anyIt(
+          sameContent(it, path))
+    if twin:
+      result.add (path, if linked: 0'i64 else: treeBytes(path))
       # cargo's uplifted dep-info: `<stem>.d`, first token is the artifact.
       let dep = path.changeFileExt("d")
       if dep != path and fileExists(dep) and not symlinkExists(dep):
         try:
           let head = readFile(dep)
           if head.startsWith(path & ":"):
-            result.add dep
+            result.add (dep, treeBytes(dep))
         except IOError: discard
 
 proc planProfile(targetDir, profileDir: string; sets: seq[LiveSet];
@@ -111,6 +137,7 @@ proc planProfile(targetDir, profileDir: string; sets: seq[LiveSet];
   var survivorUnknownCrate = false
   var deletedCrates = initHashSet[string]()
   var deletedDepsFiles: seq[string]
+  var keptDepsFiles: seq[string]
 
   for hash, entries in index:
     var reason = drOutsideLiveSets
@@ -131,20 +158,25 @@ proc planProfile(targetDir, profileDir: string; sets: seq[LiveSet];
       for path in entries.paths:
         result.deletions.add Deletion(path: path, bytes: treeBytes(path),
           reason: reason, profileDir: profileDir, unitHash: hash)
-        if path.parentDir.extractFilename == DepsDir and fileExists(path):
+        if path.parentDir.extractFilename == DepsDir and
+            (fileExists(path) or dirExists(path)):
           deletedDepsFiles.add path
     else:
       inc result.kept
+      for path in entries.paths:
+        if path.parentDir.extractFilename == DepsDir and
+            (fileExists(path) or dirExists(path)):
+          keptDepsFiles.add path
       if entries.crateName.len > 0:
         survivorCrates.inc normalizeCrateName(entries.crateName)
       elif entries.compiled:
         # Compiled, yet no `<crate>-<hash>.d` names the crate.
         survivorUnknownCrate = true
 
-  for twin in finalArtifactTwins(abs, deletedDepsFiles):
-    # Counted as 0 bytes: it is a hard link of a `deps/` file deleted above,
-    # whose bytes are already counted there.
-    result.deletions.add Deletion(path: twin, bytes: 0,
+  for (twin, bytes) in finalArtifactTwins(abs, deletedDepsFiles, keptDepsFiles):
+    # A hard link of a `deps/` file deleted above is counted as 0 bytes (they
+    # are already counted there); a copy and the dep-info file are their own.
+    result.deletions.add Deletion(path: twin, bytes: bytes,
       reason: drFinalArtifact, profileDir: profileDir)
 
   # Incremental caches are named by rustc (`<crate>-<id>`), not by the unit

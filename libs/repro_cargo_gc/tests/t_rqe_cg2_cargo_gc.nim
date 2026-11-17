@@ -58,7 +58,12 @@ proc writeWorkspace(fx: Fixture; version: int) =
     "[package]\nname = \"" & fx.lib & "\"\nversion = \"0.1." & $version &
     "\"\nedition = \"2021\"\n[features]\nextra = []\n")
   writeIfChanged(ws / fx.lib / "src" / "lib.rs",
-    "pub fn f() -> u32 { if cfg!(feature = \"extra\") { 2 } else { 1 } }\n")
+    "pub fn f() -> u32 { if cfg!(feature = \"extra\") { 2 } else { 1 } }\n" &
+    # Ballast: a per-round rlib/rmeta/object of real size. Without it the
+    # bytes a round adds are small beside what every round shares (the build
+    # script's binary, which a macOS cargo copies where Linux hard-links), and
+    # the bounded-by-live-set case cannot tell churn from fixed cost.
+    "pub static PAD: [u8; 262144] = [1; 262144];\n")
   writeIfChanged(ws / "app" / "Cargo.toml",
     "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
     "build = \"build.rs\"\n[dependencies]\n" & fx.lib & " = { path = \"../" &
@@ -389,6 +394,57 @@ suite "cargo target-dir janitor mechanics":
     check report.deletions.len == 0
     check report.skippedProfileDirs.len > 0
     check listing(fx.target) == before
+
+  # macOS only, by construction: `split-debuginfo = "packed"` makes the
+  # linker produce a `.dSYM` bundle, a DIRECTORY, in deps/ and an uplifted
+  # copy of it beside the binary. Other hosts produce no such bundle, so the
+  # case would have nothing to look at there.
+  when defined(macosx):
+    test "a removed binary's .dSYM bundles go with its unit and a live one stays":
+      ## Falsifying mutation (applied once): let `finalArtifactTwins` ignore
+      ## symlinks (drop the `symlinkPointsTo` branch): the removed binary's
+      ## dangling `app.dSYM` link survives and the case fails.
+      var fx = newFixture()
+      defer: removeDir(fx.root)
+      let saved = getEnv("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO")
+      putEnv("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO", "packed")
+      defer:
+        if saved.len == 0: delEnv("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO")
+        else: putEnv("CARGO_PROFILE_DEV_SPLIT_DEBUGINFO", saved)
+      let debug = fx.target / "debug"
+      writeWorkspace(fx, 1)
+      discard fx.build(keep = 1)
+      # The case must have something to judge.
+      check dirExists(debug / "app.dSYM")
+      check anyStartsWith(debug / "deps", "app-")
+      # Rename the binary crate (and bump the library): the old binary's
+      # units, its two bundles and its uplifted `app`/`app.d` are garbage.
+      writeWorkspace(fx, 2)
+      writeFile(fx.ws / "app" / "Cargo.toml",
+        "[package]\nname = \"app2\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
+        "build = \"build.rs\"\n[dependencies]\n" & fx.lib & " = { path = \"../" &
+        fx.lib & "\" }\n")
+      discard fx.build(keep = 1)
+      check dirExists(debug / "app2.dSYM")
+      let report = collectGarbage(fx.target, gcConfig(keep = 1))
+      check report.errors.len == 0
+      check report.unitsDeleted > 0
+      let bundles = names(debug / "deps").filterIt(it.endsWith(".dSYM"))
+      check bundles.len == 1 and bundles[0].startsWith("app2-")
+      # (`dirExists` follows a link, so a dangling one passes it: ask the link.)
+      check not symlinkExists(debug / "app.dSYM")
+      check not dirExists(debug / "app.dSYM")
+      check not fileExists(debug / "app")
+      check not fileExists(debug / "app.d")
+      check dirExists(debug / "app2.dSYM")
+      # cargo links the bundle out of deps/ with a symlink; it must still
+      # point at the surviving unit's bundle.
+      check symlinkExists(debug / "app2.dSYM")
+      check expandFilename(debug / "app2.dSYM") ==
+        expandFilename(debug / "deps" / bundles[0])
+      # the live unit is usable: cargo finds everything fresh.
+      let again = cargoJson(fx, @["build"])
+      check freshFlags(again).allIt(it)
 
   test "the recorded set names the binary unit, resolved through its hard link":
     var fx = newFixture()

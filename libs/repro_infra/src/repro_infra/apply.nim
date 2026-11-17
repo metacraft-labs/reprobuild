@@ -1953,8 +1953,9 @@ when defined(posix):
 
 proc recordComparisonProfile*(writtenText, appliedText: string): SystemProfile =
   ## What a full apply's generation is compared with the record of triggers
-  ## to restart as, at its fixing starts and its commit (§13 decision 175
-  ## as amended in A13 review round 12): the generation as its author wrote
+  ## to restart as, to decide which entries it resolves -- as the fixing
+  ## switch does (§13 decision 175, as amended in A13 review round 12) --
+  ## at its fixing starts and its commit: the generation as its author wrote
   ## it (``writtenText``), never the text the apply runs (``appliedText``),
   ## which ``withCarriedRequirements`` extends with a drop-in on every unit
   ## that reaches carried state -- that drop-in alone would "change" the
