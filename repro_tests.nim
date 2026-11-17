@@ -2962,6 +2962,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "no other source shares its compile options"),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_a_bare_selector_is_a_name_beside_a_same_named_path.nim",
+    binary: "build/test-bin/t_a_bare_selector_is_a_name_beside_a_same_named_path",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let previousDir = getCurrentDir()"),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_a_failing_producer_fetch_reports_why.nim",
     binary: "build/test-bin/t_a_failing_producer_fetch_reports_why",
     defines: @[],

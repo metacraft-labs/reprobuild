@@ -877,6 +877,30 @@ proc renderAmbiguousTargetDiagnostic*(err: BuildTargetAmbiguousError): string =
   result.add("repro build: hint: re-run with the qualified " &
     "<package>:<name> form\n")
 
+proc pathSpellingHint*(selectorName: string): string =
+  ## The ``./<name>`` spelling of a bare selector that names no target but
+  ## does name a file or directory in the current directory, or ``""``.
+  ##
+  ## A bare name is always a name ([CLI/build.md §"Target Selection"]): the
+  ## disk is never consulted to classify it, so a directory the user meant
+  ## has to be spelled as a path. The ``unknown_target`` diagnostic offers
+  ## that spelling instead of leaving the user to guess why a directory
+  ## they can see was not selected. Only a selector the classifier took as
+  ## a bare name qualifies; anything carrying a path character already was
+  ## a path. Every caller of ``renderUnknownTargetDiagnostic`` runs in the
+  ## request's working directory (the daemon build and watch executors
+  ## enter it first), so the probe is relative to the directory the user
+  ## typed the command in.
+  if selectorName.len == 0:
+    return ""
+  for ch in selectorName:
+    if ch in {'/', '\\', '.', '#', ':'}:
+      return ""
+  if fileExists(extendedPath(selectorName)) or
+      dirExists(extendedPath(selectorName)):
+    return "./" & selectorName
+  ""
+
 proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
   ## Named-Targets M2 ``unknown_target`` stderr diagnostic. Shared by
   ## the top-level CLI dispatch arm and the daemon-side
@@ -892,24 +916,39 @@ proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
       result.add("  ")
       result.add(cand)
       result.add('\n')
+  let pathSpelling = pathSpellingHint(err.selectorName)
+  if pathSpelling.len > 0:
+    result.add("repro build: hint: a bare name selects only a named " &
+      "target; to build the path '" & err.selectorName & "', spell it '" &
+      pathSpelling & "'\n")
 
 const TestCollectionSelector* = ".#test"
   ## The selector ``repro test`` (and ``repro certificates plan``) uses when
   ## the user names none: the current project's ``test`` collection
-  ## ([CLI/test.md §"Alias Semantics"]). It is spelled as a fragment
-  ## selector, not the bare name ``test``, because ``classifyBuildSelector``
-  ## takes a bare name that also names an existing path as a path, and most
-  ## projects keep their tests in a ``test/`` directory. ``.#test`` is what
-  ## ``parseAndResolveSelectors`` makes of a bare ``test`` when no such path
-  ## exists, so the resolution is otherwise unchanged.
+  ## ([CLI/test.md §"Alias Semantics"]). The alias selects the collection
+  ## directly, as the fragment ``.#test``, which is exactly what
+  ## ``parseAndResolveSelectors`` makes of a bare ``test``; naming the
+  ## collection rather than a selector that is resolved again keeps the
+  ## alias independent of the selector rule.
 
 proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
   ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
   ## A selector is a *path / fragment* selector when ANY of these holds:
   ## - it contains ``/`` or ``\\`` (path separator),
   ## - it contains ``.`` (file extension or relative-path marker),
-  ## - it contains ``#`` (fragment selector),
-  ## - it names an existing path on disk (file or directory).
+  ## - it contains ``#`` (fragment selector).
+  ##
+  ## The classification is by spelling alone and never consults the disk:
+  ## a bare ``test`` is the name ``test`` whether or not the current
+  ## directory holds a ``test/`` directory, and that directory is selected
+  ## as ``./test``. Classifying by whether a path exists made what a name
+  ## meant depend on the contents of the current directory, so a project
+  ## with a ``test/``, ``bench/`` or ``docs/`` directory silently built the
+  ## directory instead of the collection (reprobuild-pm issue
+  ## 2026-11-12-classifying-a-selector-by-whether-a-path-exists-makes-repro-test-build-the-test-directory).
+  ## The ``unknown_target`` diagnostic names the ``./<name>`` spelling when
+  ## a bare name matches no target but does match a path
+  ## (``pathSpellingHint``).
   ##
   ## Otherwise it is a *name* selector. Names containing a single ``:``
   ## (and no other special chars) are treated as the qualified
@@ -923,9 +962,6 @@ proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
     if ch == '/' or ch == '\\' or ch == '.' or ch == '#':
       result.kind = bskPath
       return
-  if fileExists(extendedPath(raw)) or dirExists(extendedPath(raw)):
-    result.kind = bskPath
-    return
   let colon = raw.find(':')
   if colon > 0 and colon < raw.high:
     # ``<package>:<name>`` qualified form. Only accept when neither half
@@ -35015,7 +35051,8 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
     raise newException(ValueError,
       "repro why: the second positional must be a path or fragment " &
         "selector; got the name-shaped value '" & target &
-        "' (re-run as `repro why " & target & "` with one positional)")
+        "' (spell a path as `./" & target & "`, or re-run as `repro why " &
+        target & "` with one positional)")
   if target.len == 0:
     target = "."
 
@@ -90319,9 +90356,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
         names.add(name)
     # An extra name the build would classify as a path again (one that
     # carries ``#``, ``.`` or ``/``, such as the member shorthand
-    # ``test#unit`` taken from a second ``.#test#unit`` selector, or one
-    # that names an existing path) is handed over anchored on the same
-    # project, so the build selects exactly what the plan resolved.
+    # ``test#unit`` taken from a second ``.#test#unit`` selector) is
+    # handed over anchored on the same project, so the build selects
+    # exactly what the plan resolved.
     let anchorBase = splitTarget(resolved.target).base
     buildSelectors = @[resolved.target]
     for extra in resolved.extraNameSelectors:
