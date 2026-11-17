@@ -27,6 +27,10 @@
 ##    that is ordered before ``-.mount`` -- a chain the parse half cannot
 ##    see -- is refused ``boot-hold-cycle`` by the switch's check.
 ##
+## 5. a plain unit ordered after the boot-hold unit and, through a base
+##    unit, before ``-.mount`` is refused by the effective half (round 18,
+##    M2); the parse half refuses a socket ``Before=-.mount`` on the host.
+##
 ## Falsifying builds, red here: ``boot-hold-wanted`` (step 2: the unit is
 ## only wanted, so systemd deletes its job and the held socket listens),
 ## ``boot-hold-cycle-effective-unchecked`` (step 4: the socket applies).
@@ -166,7 +170,29 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "refused by the effective half (boot-hold-cycle)",
          r.exitCode != 0 and "boot-hold-cycle" in (r.stdout & r.stderr),
          r.stdout & r.stderr)
+    # The owner's decision of 2026-11-16 on A9 review round 18, M2: a
+    # plain unit -- no floor, no activator -- ordered after the boot-hold
+    # unit and before a base unit that runs before -.mount, by a chain only
+    # systemd's report shows.
+    let plainUnit = srp("A9 round 18") & "systemd.systemUnit {\n  name = \"a9z.service\"\n" &
+      "  content = \"[Unit]\nDefaultDependencies=no\nAfter=" & Unit &
+      "\nBefore=a9x.service\n\n[Service]\nType=oneshot\nExecStart=/bin/true\n\"\n" &
+      "  floorExceptions = [\"serviceFloor: a plain fixture\"]\n  enabled = false\n}\n"
+    r = g.applyProfile(repro, "e2", plainUnit)
+    step("a plain unit after the boot-hold unit and before a base unit that runs " &
+         "before -.mount is refused by the effective half (A9 review round 18, M2)",
+         r.exitCode != 0 and "a9z.service" in (r.stdout & r.stderr) and
+         "boot-hold-cycle" in (r.stdout & r.stderr), r.stdout & r.stderr)
     discard g.run("rm -f /etc/systemd/system/a9x.service; systemctl daemon-reload")
+    # The parse half on a real host (decision 172 asks a VM case of each
+    # half): a socket ordered before -.mount is refused before anything is
+    # written.
+    let before = g.ledgerOf()
+    r = g.applyProfile(repro, "p1", srp("A9 round 18").replace(
+      "content = \"[Socket]\n", "content = \"[Unit]\nBefore=-.mount\n\n[Socket]\n"))
+    step("the parse half refuses a socket ordered before -.mount, writing nothing",
+         r.exitCode != 0 and "ordering cycle" in (r.stdout & r.stderr) and
+         g.ledgerOf() == before, r.stdout & r.stderr)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

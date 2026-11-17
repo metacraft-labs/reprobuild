@@ -7,7 +7,16 @@
 ##
 ## - ``repro-addon.target``: the target the add-on's units hang off, wanted
 ##   by ``multi-user.target``. Nothing of the base ``Requires=`` it, so a
-##   broken add-on cannot hold up the base's boot;
+##   broken add-on target cannot hold up the base's boot. The one exception
+##   is ``repro-addon-boot-hold.service``, which ``sysinit.target``
+##   requires (§13 decision 172): it never fails (its script exits 0 under
+##   ``ExecStart=-`` and ``timeout``), so the boot waits only for it to run;
+##   what it cannot cover -- a missing or unloadable unit file while the
+##   ``sysinit.target.requires`` link remains, a hang setting up its
+##   namespace past ``TimeoutStartSec=``, a fork or resource failure -- is
+##   the decision's stated residual: uninstall removes the link with the
+##   unit, and ``repro system addon verify`` reports a link left dangling
+##   or a unit systemd cannot load;
 ## - ``repro-store.mount``: ``/repro/store`` bind-mounted read-only over
 ##   itself, so no process on the host can write the store through the
 ##   ordinary mount namespace (the apply process gets a private writable
@@ -42,6 +51,7 @@ import std/[algorithm, strutils]
 
 import repro_elevation/posix_system_parse
 from repro_infra/profile import SecretsBootUnit
+from repro_infra/apply import EssentialUnits
 
 from ./effective_floor import StartHoldText
 import ./fingerprint
@@ -589,6 +599,22 @@ const
     ## Where the units the add-on installs live: when the record cannot be
     ## read, every socket, timer and path unit here is held.
 
+proc essentialActivatorPattern*(): string =
+  ## The shell ``case`` pattern of the socket, timer and path units among
+  ## A13's essential units (``repro_infra/apply.EssentialUnits``, §13
+  ## decision 177: an essential unit is never held) -- the one list, read
+  ## here, not a copy: the conservative boot hold never holds the
+  ## management path (an administrator's ``ssh.socket`` override on a base
+  ## that socket-activates sshd) or the add-on's own timer (A9 review round
+  ## 18, L2).
+  var names: seq[string]
+  when not mutated("conservative-hold-holds-essential"):
+    for u in EssentialUnits:
+      if u.endsWith(".socket") or u.endsWith(".timer") or u.endsWith(".path"):
+        names.add(u)
+  if names.len == 0: names.add("x-repro-addon-none")
+  names.join("|")
+
 proc bootHoldScript*(): string =
   ## The boot-hold unit's shell step, as ``/bin/sh -c`` runs it (``$``
   ## not yet doubled for systemd). Nothing once ``sysinit.target`` is
@@ -635,8 +661,9 @@ proc bootHoldScript*(): string =
   "/usr/bin/rm -f $l; " &
   "if [ -f $r ] && [ ! -L $r ] && /usr/bin/cp $r $l; then :; else " &
     say & "the record is not a regular file, holding every socket, timer " &
-    "and path unit in " & ConservativeHoldDir & "; " &
+    "and path unit in " & ConservativeHoldDir & " but the essential ones; " &
     "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
+    essentialActivatorPattern() & ") continue;; " &
     "*.socket|*.timer|*.path) echo $u.d >> $l;; esac; done; fi; " &
   "ok=no; if [ -f $t ] && [ ! -L $t ]; then case $(/usr/bin/sha256sum $t) in " &
     sha & "*) ok=yes;; esac; fi; " &

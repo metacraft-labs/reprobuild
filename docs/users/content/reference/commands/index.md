@@ -84,7 +84,7 @@ Commands fall into four side-effect classes:
 | `repro hooks` | `ensure`, `reinstall`, `uninstall` | Install, repair or remove the managed hooks. |
 | `repro lock` | `list`, `solve`, `refresh`, `update`, `validate`, `diff`, `explain` | Inspect and update the project's lock. |
 | `repro locking` | `explain`, `adopt-manifest` | Explain or adopt the workspace's locking configuration. |
-| `repro flake` | — | Compute the Nix flake overrides of the develop set. |
+| `repro flake` | `override-args`, `refresh-lock`, `override-status` | Compute the Nix flake overrides of the develop set. |
 | `repro gateway` | `pre-receive`, `post-receive`, `migrate` | Run a push-gateway hook entry point. |
 | `repro prompt` | `init` | Print a workspace-state segment for the shell prompt. |
 

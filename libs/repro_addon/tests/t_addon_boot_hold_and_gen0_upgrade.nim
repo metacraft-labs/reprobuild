@@ -251,12 +251,16 @@ suite "§13 decision 159: the start holds across a reboot":
     createSymlink(rec & ".real", rec)
     let etc = parentDir(s.root) / "etc-systemd-system"
     createDir(etc)
-    for n in ["x.socket", "y.timer", "z.path", "w.service", "v.target"]:
+    for n in ["x.socket", "y.timer", "z.path", "w.service", "v.target",
+              "ssh.socket", "repro-agent-fetch.timer"]:
       writeFile(etc / n, "[Unit]\n")
     check runScript(s) == 0
     for n in ["x.socket", "y.timer", "z.path"]:
       check fileExists(s.root / (n & ".d") / StartHoldName)
-    for n in ["w.service", "v.target", "a.socket"]:
+    # A9 review round 18, L2: never an essential unit (§13 decision 177),
+    # read from A13's list.
+    for n in ["w.service", "v.target", "a.socket", "ssh.socket",
+              "repro-agent-fetch.timer"]:
       check not dirExists(s.root / (n & ".d"))
     check readFile(s.log).count("daemon-reload") == 1
   test "the re-assertion lifts the boot's holds only once the switch is resolved":

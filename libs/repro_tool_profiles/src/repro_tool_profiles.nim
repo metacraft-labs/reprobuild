@@ -5134,8 +5134,21 @@ proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
   addUniquePath(result.pkgConfigSearchList, prefix / "lib64" / "pkgconfig")
   addUniquePath(result.pkgConfigSearchList, prefix / "share" / "pkgconfig")
   addUniquePath(result.cpathList, prefix / "include")
-  addUniquePath(result.libraryPathList, prefix / "lib")
-  addUniquePath(result.libraryPathList, prefix / "lib64")
+  if not declaresElfRelocation(plan.record):
+    addUniquePath(result.libraryPathList, prefix / "lib")
+    addUniquePath(result.libraryPathList, prefix / "lib64")
+  # An archive whose ELF files realization relocated (the Linux C toolchain
+  # in the store root) contributes no library directory. Its programs find
+  # their own libraries through the `DT_RPATH` realization wrote, which the
+  # loader searches before `LD_LIBRARY_PATH`, and its compiler driver finds
+  # its link-time libraries from its own installation. Threading `lib/` onto
+  # `LIBRARY_PATH` / `LD_LIBRARY_PATH` would only leak the toolchain's
+  # private libraries (libgmp, libmpfr, libstdc++) into every program the
+  # action runs, and a runtime library directory makes the engine start the
+  # monitored payload through a shell that exports it
+  # (`deferRuntimeLibraryEnvForShell`): that host shell and its libraries
+  # then sit inside the monitored tree, outside every logical root, and the
+  # compile edge could never have a portable identity.
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)

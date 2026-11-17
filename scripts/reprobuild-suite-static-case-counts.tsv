@@ -68,6 +68,7 @@ libs/repro_addon/tests/t_addon_floor_round14.nim	nim	13
 libs/repro_addon/tests/t_addon_floor_round15.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round16.nim	nim	12
 libs/repro_addon/tests/t_addon_floor_round17.nim	nim	28
+libs/repro_addon/tests/t_addon_floor_round18.nim	nim	8
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	17
@@ -155,6 +156,7 @@ libs/repro_binary_cache_server/tests/t_a2_p2_rest_surface.nim	nim	2
 libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim	nim	1
 libs/repro_binary_cache_server/tests/t_start_binds_before_it_returns.nim	nim	2
 libs/repro_binary_cache_server/tests/t_store_manifest_replaces_atomically.nim	nim	4
+libs/repro_build_engine/tests/t_a_portable_hit_restores_stored_outputs.nim	nim	6
 libs/repro_build_engine/tests/t_action_cache_output_integrity.nim	nim	14
 libs/repro_build_engine/tests/t_an_input_kept_under_dev_shm_is_never_left_out_of_a_portable_key.nim	nim	2
 libs/repro_build_engine/tests/t_an_output_that_embeds_a_checkout_path_is_found_through_compression.nim	nim	10
@@ -186,11 +188,13 @@ libs/repro_build_engine/tests/t_engine_opaque_output_directory.nim	nim	6
 libs/repro_build_engine/tests/t_engine_target_export_table_records_ambiguity.nim	nim	1
 libs/repro_build_engine/tests/t_engine_typed_output_recorded_in_normalized_graph.nim	nim	1
 libs/repro_build_engine/tests/t_ensure_snippet_leaves_an_up_to_date_file_untouched.nim	nim	15
+libs/repro_build_engine/tests/t_evidence_is_evaluated_once_per_action.nim	nim	3
 libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
 libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_hermetic_action_env.nim	nim	3
 libs/repro_build_engine/tests/t_ignored_root_survives_a_symlinked_prefix.nim	nim	2
 libs/repro_build_engine/tests/t_inherited_environment_cache.nim	nim	6
+libs/repro_build_engine/tests/t_inline_site_tables.nim	nim	5
 libs/repro_build_engine/tests/t_isolated_action_environment.nim	nim	5
 libs/repro_build_engine/tests/t_m4_publisher_path_stores_output_blobs.nim	nim	7
 libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim	nim	4
@@ -326,6 +330,7 @@ libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	8
 libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	nim	17
 libs/repro_cli_support/tests/t_loopback_node_admits_only_its_owner.nim	nim	2
 libs/repro_cli_support/tests/t_lowered_action_key_covers_its_argv.nim	nim	6
+libs/repro_cli_support/tests/t_lowering_marks_build_file_targets_and_monitors_content_checked_compiles.nim	nim	2
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	4
 libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	19
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
@@ -652,6 +657,7 @@ libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim	nim	7
 libs/repro_local_store/tests/t_per_computation_output_dirs.nim	nim	5
 libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	19
 libs/repro_local_store/tests/t_portable_memo.nim	nim	8
+libs/repro_local_store/tests/t_portable_output_store.nim	nim	6
 libs/repro_local_store/tests/t_prefix_owning_path.nim	nim	4
 libs/repro_local_store/tests/t_published_trace_record.nim	nim	9
 libs/repro_local_store/tests/t_refresh_restored_outputs.nim	nim	2
@@ -1636,6 +1642,7 @@ tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim	
 tests/integration/t_a_changed_library_source_or_flag_is_never_a_hit.nim	nim	2
 tests/integration/t_a_clean_workspace_pushes_without_a_diagnostic.nim	nim	1
 tests/integration/t_a_commit_that_moves_no_sibling_does_not_touch_the_lock.nim	nim	1
+tests/integration/t_a_compiler_environment_difference_is_a_miss_not_a_wrong_hit.nim	nim	2
 tests/integration/t_a_contract_refusal_is_distinguishable_from_a_successful_dispatch.nim	nim	1
 tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	nim	1
 tests/integration/t_a_dirty_sibling_outside_the_closure_does_not_block.nim	nim	1
@@ -1682,6 +1689,7 @@ tests/integration/t_agent_replay_rejected.nim	nim	12
 tests/integration/t_agent_service_unit.nim	nim	8
 tests/integration/t_amend_and_rebase_are_idempotent.nim	nim	1
 tests/integration/t_an_ahead_sibling_is_still_recorded.nim	nim	1
+tests/integration/t_an_archive_rebuilt_in_another_checkout_is_byte_identical.nim	nim	1
 tests/integration/t_an_input_develop_mode_does_not_substitute_is_not_compared.nim	nim	1
 tests/integration/t_an_unfetchable_flake_revision_is_withheld.nim	nim	1
 tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	nim	1
@@ -2353,6 +2361,7 @@ tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_reproos_uki_through_the_cvm_path.nim	nim	8
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
 tests/integration/t_reseal_on_generation_switch.nim	nim	4
+tests/integration/t_restored_outputs_match_the_recorded_digests.nim	nim	2
 tests/integration/t_retired_branch_role_spellings_are_unknown.nim	nim	2
 tests/integration/t_role_validation_refused_through_repro.nim	nim	1
 tests/integration/t_roles_resolve_from_settings_committed_at_the_revision.nim	nim	1

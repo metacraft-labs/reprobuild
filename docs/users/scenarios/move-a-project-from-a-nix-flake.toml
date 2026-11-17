@@ -1,0 +1,98 @@
+# Scenario for tutorials/move-a-project-from-a-nix-flake.md.
+#
+# Format: reprobuild.docs.scenario.v1 (see first-build.toml). No runner exists
+# yet. Until one does, the page's capture regions hold the output of a run of
+# these steps by hand, made as [capture] below records; the runner replaces
+# them.
+
+schema = "reprobuild.docs.scenario.v1"
+page = "tutorials/move-a-project-from-a-nix-flake.md"
+platforms = ["linux"]
+
+# Values the page interpolates. This file is their only source.
+[values]
+"fixtures.flake_migration.rev" = "9269117eaf8ddcf591baf38dd9843d41ddc3059a"
+"fixtures.flake_migration.seconds" = "85"
+"fixtures.flake_migration.repro" = "0.2.24, built from reprobuild 84b459adda"
+
+[preflight]
+# The runner stops before step 1, and reports which requirement failed, when
+# one of these is missing. Nix must have the `nix-command` and `flakes`
+# experimental features enabled.
+commands = ["repro", "git", "nix"]
+
+# How the page's captures were made, until the runner makes them.
+[capture]
+release = "repro 0.2.24, built from reprobuild 84b459adda (v0.2.24-67-g84b459adda) by its Nix package, as installed on the host"
+host = "Arch Linux x86_64, Determinate Nix 2.34.8"
+date = "2026-11-17"
+# A capture shows what the command prints with stdout and stderr not on a
+# terminal and REPRO_PROGRESS=quiet, the setting under which the build's
+# progress display prints nothing. The temporary directory the run used is
+# replaced by `~/reprobuild-examples`.
+environment = { REPRO_PROGRESS = "quiet" }
+
+[[step]]
+id = "get-the-example"
+run = [
+  "git clone https://github.com/metacraft-labs/reprobuild-examples",
+  "git -C reprobuild-examples checkout {{ fixtures.flake_migration.rev }}",
+  "cd reprobuild-examples/nix/flake-dev-shell",
+]
+expect.exit = 0
+expect.exists = ["flake.nix", "flake.lock", ".envrc", "src/hello.nim"]
+
+[[step]]
+id = "list"
+capture = "list"
+run = ["ls -A"]
+expect.exit = 0
+
+[[step]]
+id = "flake-shell"
+capture = "flake-shell"
+run = ["nix develop --command which nim"]
+expect.exit = 0
+expect.stdout_matches = '^/nix/store/[a-z0-9]{32}-.*nim.*/bin/nim\n$'
+
+[[step]]
+id = "activate-the-flake"
+capture = "activate-the-flake"
+write = [{ file = "repro.nim", from_page_block = { title = "repro.nim", index = 1 } }]
+run = ["repro allow", "repro exec -- which nim"]
+expect.exit = 0
+# The same store path as the flake-shell step.
+expect.stdout_contains_capture = "flake-shell"
+
+[[step]]
+id = "build"
+capture = "build"
+write = [{ file = "repro.nim", from_page_block = { title = "repro.nim", index = 2 } }]
+run = ["repro build", "./build/hello"]
+expect.exit = 0
+expect.exists = ["build/hello"]
+expect.stdout = "hello from a project that used to need a flake\n"
+
+[[step]]
+id = "environment-from-the-project-file"
+capture = "environment-from-the-project-file"
+write = [{ file = "repro.nim", from_page_block = { title = "repro.nim", index = 3 } }]
+run = ["repro exec -- which nim"]
+expect.exit = 0
+expect.stdout_matches = '^/nix/store/[a-z0-9]{32}-.*nim.*/bin/nim\n$'
+
+[[step]]
+id = "remove-the-flake"
+capture = "remove-the-flake"
+run = [
+  "rm flake.nix flake.lock .envrc",
+  "rm -r build",
+  "repro build",
+  "./build/hello",
+  "repro exec -- which nim",
+]
+expect.exit = 0
+expect.not_exists = ["flake.nix", "flake.lock", ".envrc"]
+expect.stdout_contains = "hello from a project that used to need a flake"
+# repro.nim now equals the finished project in the examples repository.
+expect.file_equals = { "repro.nim" = "../flake-dev-shell-migrated/repro.nim#from=import" }

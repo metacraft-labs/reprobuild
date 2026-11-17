@@ -151,6 +151,7 @@ import repro_cas_store
 # The former `io_mon/codec` + `io_mon/writer` internal imports (the hand-rolled
 # iomon decoder reached into them) are gone.
 import io_mon
+import repro_build_engine/inline_site_tables
 import repro_platform
 import repro_runquota
 import repro_cargo_edge/wrapper_env
@@ -1186,7 +1187,10 @@ type
       ## its upstream records without their bytes. Output BYTES go only
       ## where the binary-cache scope publishes them — actions tagged
       ## `publishToBinaryCache`, or every action under
-      ## `binaryCacheIntermediateScope`.
+      ## `binaryCacheIntermediateScope`. (On THIS host the bytes of every
+      ## record that may be served across checkouts are stored whether or
+      ## not a publisher is configured: `portable_output_store`,
+      ## Caching-Architecture D6.)
     portableLookup*: bool
       ## Cache-Scope P3.4. Before scheduling, resolve the graph against the
       ## portable memo plane (the local store under the shared action-cache
@@ -2442,7 +2446,8 @@ type
                               {.gcsafe, closure.}
     ## Cache-Scope P3.4. Place a record's output bytes, verified against the
     ## record, at this host's paths (`portable_memo_cache.restoreMemoOutputs`).
-    ## Returns "" or why nothing was placed.
+    ## Returns "" or why nothing was placed. Tried after the bytes stored on
+    ## this host (`portable_output_store`, Caching-Architecture D6).
 
   BinaryCachePublisher* = proc(req: BinaryCachePublishRequest):
     BinaryCachePublishResult {.gcsafe, closure.}
@@ -4146,7 +4151,46 @@ proc removalParentOf(spelling: string): string =
       suffix = ancestor.substr(slash) & suffix
       ancestor = ancestor[0 ..< slash]
 
+var
+  containmentMemoDepth {.threadvar.}: int
+  containmentMemo {.threadvar.}: Table[string, Option[string]]
+
+proc beginContainmentMemo(): int =
+  ## Opens a scope in which `containmentLocation` answers each distinct
+  ## question once. A scope is ONE evaluation of one action's evidence (the
+  ## keyed input set, the portable accesses): every containment question it
+  ## asks about a path is a question about the filesystem at one moment, and
+  ## asking it again a few microseconds later, once per root it is compared
+  ## with, can only give the same answer or race with a change that the first
+  ## answer could have raced with just as well. Nothing is kept across scopes,
+  ## so no answer outlives the evaluation that asked it: a symlink or a tree
+  ## a later action changes is resolved afresh by the next evaluation.
+  ## Scopes nest; the memo is emptied when the outermost one ends.
+  inc containmentMemoDepth
+  containmentMemoDepth
+
+proc endContainmentMemo(depth: int) =
+  if depth != containmentMemoDepth:
+    raise newException(AssertionDefect,
+      "containment memo scopes ended out of order")
+  dec containmentMemoDepth
+  if containmentMemoDepth == 0:
+    containmentMemo.clear()
+
+proc containmentLocationUncached(path: string; parentEnd: int): Option[string]
+
 proc containmentLocation(path: string; parentEnd: int): Option[string] =
+  ## `containmentLocationUncached`, answered once per question inside a
+  ## `beginContainmentMemo` scope.
+  if containmentMemoDepth == 0:
+    return containmentLocationUncached(path, parentEnd)
+  let key = $parentEnd & "\0" & path
+  containmentMemo.withValue(key, known):
+    return known[]
+  result = containmentLocationUncached(path, parentEnd)
+  containmentMemo[key] = result
+
+proc containmentLocationUncached(path: string; parentEnd: int): Option[string] =
   ## A parent walk must be resolved by the filesystem THROUGH the last `..`.
   ## The remaining suffix may be absent (a probe, removal or new output), so
   ## it is appended without requiring the final object to exist. Failure to
@@ -9490,6 +9534,7 @@ proc preparedActionEnv(action: BuildAction;
 # only the visibility ordering moves.
 proc cacheInputPaths*(action: BuildAction;
                       evidence: PathSetEvidence): seq[string]
+proc hasCacheInputPath*(action: BuildAction; evidence: PathSetEvidence): bool
 proc evidenceInputPaths(action: BuildAction;
                         evidence: PathSetEvidence): seq[string]
 # DA-1i/DA-1j — forward-declared for the same reason: `collectEvidence` has to
@@ -9610,6 +9655,37 @@ proc executedToolImagePath(action: BuildAction;
       return os.normalizedPath(candidate)
   ""
 
+
+proc siteTableRootImage(action: BuildAction;
+                        config: ptr BuildEngineConfig): string =
+  ## The root image whose site table matters for `action`: its own program,
+  ## for a process action the monitor will gather evidence for; "" otherwise.
+  if action.kind != bakProcess or
+      action.dependencyPolicy.kind notin MonitorPolicyKinds or
+      action.monitorDepfile.len > 0:
+    return ""
+  executedToolImagePath(action, config)
+
+proc prepareSiteTablesFor(t: InlineSiteTables; action: BuildAction;
+                          config: ptr BuildEngineConfig): string =
+  ## Before a monitored action launches: make sure the build has a table for
+  ## its root image (which the monitor's evidence never records, see
+  ## `executedToolImagePath`), and return the path of the sealed memfd
+  ## holding every table the build has, "" when there is none.
+  t.noteLaunch(siteTableRootImage(action, config), action.id)
+  t.currentPath()
+
+proc learnSiteTableImages(t: InlineSiteTables; action: BuildAction;
+                          evidence: PathSetEvidence) =
+  ## After a monitored action ran: table every executable or shared object it
+  ## was observed reading or looking up. The libraries the loader opened are
+  ## reads; the programs a driver execs (`cc1`, `as`) reach the evidence as
+  ## the lookups the driver made for them, not as reads.
+  for path in evidence.monitorReads:
+    t.noteImage(materialPath(action.cwd, path))
+  for path in evidence.monitorProbes:
+    t.noteImage(materialPath(action.cwd, path))
+
 proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
   ## The zero-evidence guard, applied to the set the RECORD IS KEYED ON.
   ##
@@ -9649,8 +9725,7 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
   let observed = action.evidenceInputPaths(col.evidence).len
   if observed == 0:
     return
-  let keyed = action.cacheInputPaths(col.evidence)
-  if keyed.len > 0:
+  if action.hasCacheInputPath(col.evidence):
     return
   col.evidence.diagnostics.add(
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
@@ -11817,7 +11892,35 @@ proc isGitObjectStorePath*(path: string): bool =
   var memo = initTable[string, bool]()
   path.isGitObjectStorePath(memo)
 
+proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
+                         firstOnly: bool): seq[string]
+
+var cacheInputPathsComputationCount: Atomic[int]
+
+proc cacheInputPathsComputations*(): int =
+  ## How many complete keyed-input computations this process has made (the
+  ## early-stopping `hasCacheInputPath` is not one). For the regression test
+  ## that holds an executed action to one.
+  cacheInputPathsComputationCount.load()
+
 proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
+  ## The action-cache key's input path set; see `cacheInputPathsImpl`.
+  ##
+  ## An executed action needs it twice: for its local record and for the
+  ## portable accesses stored beside it. Both publish sites compute it ONCE
+  ## and hand the same set to both (`recordPortableFingerprint`'s `keyed`),
+  ## and the keyed-set grade asks only whether it is empty
+  ## (`hasCacheInputPath`), so a monitored compile's few hundred observations
+  ## are filtered once, not three times.
+  cacheInputPathsImpl(action, evidence, firstOnly = false)
+
+proc hasCacheInputPath*(action: BuildAction; evidence: PathSetEvidence): bool =
+  ## Whether `cacheInputPaths` is non-empty, stopping at the first path that
+  ## survives its filters.
+  cacheInputPathsImpl(action, evidence, firstOnly = true).len > 0
+
+proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
+                         firstOnly: bool): seq[string] =
   ## The action-cache key's input path set: the paths whose content or
   ## metadata a later run compares against to decide ``cdHit`` /
   ## ``cdMiss``. Exported for the regression tests that pin the two
@@ -11861,6 +11964,13 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   one. The monitor fold has already applied it to the observed channels
   ##   with the same scope; here it reaches the declared and tool-reported
   ##   ones, which the cache record used to drop on its own, by prefix.
+  # Every containment question this computation asks about one `..`-spelled
+  # path resolves the same prefix through the filesystem (once per tool
+  # root, ignored root and output); within one computation it is asked once.
+  if not firstOnly:
+    cacheInputPathsComputationCount.atomicInc()
+  let containment = beginContainmentMemo()
+  defer: endContainmentMemo(containment)
   let toolRoots = action.toolInputRoots()
   let volatile = evidence.volatileScope
   # The EXPLICIT prefix set, deliberately not the derived one. The derived
@@ -11886,6 +11996,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     declaredMaterialized.incl(path.replace('\\', '/'))
     result.addUnique(seen, path)
+    if firstOnly: return
   for input in evidence.depfileInputs:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
@@ -11902,6 +12013,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
          path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
+    if firstOnly: return
   for input in evidence.monitorReads:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
@@ -11918,6 +12030,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
          path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
+    if firstOnly: return
   for probe in evidence.monitorProbes:
     let path = materialContainmentPath(action.cwd, probe)
     if path.isVolatileMonitorPath(volatile):
@@ -11934,6 +12047,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
          path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
+    if firstOnly: return
 
 proc lookupEnv(env: openArray[string]; name: string):
     tuple[present: bool, value: string] =
@@ -13031,7 +13145,8 @@ proc monitorEvidenceRequirement(action: BuildAction;
 
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string;
-                     hostInProcess: bool): tuple[action: BuildAction;
+                     hostInProcess: bool;
+                     siteTablePath = ""): tuple[action: BuildAction;
                                                  diagnostic: string;
                                                  capturePath: string;
                                                  hostInProcess: bool] =
@@ -13162,10 +13277,17 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # the action's environment would be writing into a variable io-mon
       # overwrites before any shim could read it. The flag is a channel io-mon
       # does not own and therefore cannot overwrite.
+      # The build's inline site tables (`inline_site_tables`), named to the
+      # wrapper by the engine's `/proc/<pid>/fd/<n>`: the wrapper opens the
+      # sealed memfd itself, checks it, and names its own descriptor to the
+      # tree. Like the capture path, it is not part of the action's identity.
+      let siteTableFlag =
+        if siteTablePath.len > 0: @["--inline-site-tables", siteTablePath]
+        else: @[]
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
         @["--depfile", result.capturePath,
           "--interest", interestToTokens(monitorInterest(action))] &
-        monitorEvidenceFlag(monitorEvidenceScope(config)) &
+        monitorEvidenceFlag(monitorEvidenceScope(config)) & siteTableFlag &
         @["--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
@@ -16431,7 +16553,8 @@ proc allocMonitorHostSlot(pool: var MonitorHostPool): int =
 proc monitorHostRequest(action: BuildAction;
                         command: ReproCommandSpec;
                         depFilePath: string;
-                        evidenceScope: EvidenceScope): FsSnoopRequest =
+                        evidenceScope: EvidenceScope;
+                        siteTablePath = ""): FsSnoopRequest =
   ## Project the ONE argv+env contract every launch path shares onto io-mon's
   ## request. Both sides layer over the hosting process's own environment
   ## (``ReproCommandSpec.env`` through RunQuota's process backend,
@@ -16465,7 +16588,11 @@ proc monitorHostRequest(action: BuildAction;
     evidenceScope: evidenceScope,
     passthroughChildStdout: true,
     passthroughChildStderr: true,
-    isolateEnv: command.isolatedEnv)
+    isolateEnv: command.isolatedEnv,
+    # The build's inline site tables (`inline_site_tables`), the same memfd
+    # the wrapped path names with `--inline-site-tables`: io-mon opens and
+    # checks it itself and names its own descriptor to the tree.
+    inlineSiteTables: siteTablePath)
   for entry in command.env:
     let eq = entry.find('=')
     if eq <= 0:
@@ -16653,7 +16780,8 @@ proc releaseMonitorHostSlot(pool: var MonitorHostPool; slot: int) =
   pool.records[slot] = MonitorHostRecord()
 
 proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
-                      config: BuildEngineConfig; cacheRoot: string): int =
+                      config: BuildEngineConfig; cacheRoot: string;
+                      siteTablePath = ""): int =
   ## Bring io-mon's consumer up and launch the monitored tree, returning the
   ## pool slot that owns both. Raises like any other launch primitive; the
   ## caller turns a raise into the same ``process launch failed`` result the
@@ -16689,7 +16817,7 @@ proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
     pool.records[slot].depTempPath = depTemp
     pool.records[slot].depDestPath = depDest
     pool.handles[slot] = startMonitor(monitorHostRequest(action, command,
-      depTemp, monitorEvidenceScope(config)))
+      depTemp, monitorEvidenceScope(config), siteTablePath))
     pool.records[slot].handleLive = true
     pool.records[slot].rootPid = int(rootPid(pool.handles[slot]))
   except CatchableError:
@@ -20442,6 +20570,32 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           evidenceSource, observations)
         if refusal.len == 0:
           refusal = portableRecordRefusal(memo)
+        # Caching-Architecture D6: a record that may be served across
+        # checkouts (the publication rule allows it, the edge is not
+        # host-bound, and D4 found no embedded root above) also stores the
+        # bytes of its outputs on this host, keyed by the content digests
+        # the record states, so another checkout that resolves the record
+        # restores them instead of executing. Soft-fail, like the record.
+        if substitutable and refusal.len == 0:
+          let stored =
+            try:
+              storePortableOutputs(sharedRoot / PortableOutputsDirName,
+                config.portableRoots, memo)
+            except CatchableError as err:
+              PortableOutputStoreResult(reason: err.msg)
+          if stored.reason.len > 0:
+            runResult.trace(action.id, "portable-outputs-store-failed",
+              stored.reason)
+          elif stored.blobsWritten > 0:
+            runResult.trace(action.id, "portable-outputs-stored",
+              "blobs=" & $stored.blobsWritten & " bytes=" &
+              $stored.bytesWritten & " already-stored=" &
+              $stored.blobsPresent)
+        else:
+          runResult.trace(action.id, "portable-outputs-not-stored",
+            if refusal.len > 0: refusal
+            else: "determinism class " & $action.determinismClass &
+              " forbids substitution from another checkout or host")
         if refusal.len > 0 and config.portableMemoPublisher != nil and
             substitutable:
           runResult.trace(action.id, "portable-memo-publish-refused", refusal)
@@ -20476,7 +20630,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         fp.reason)
 
   proc portableAccessesOf(action: BuildAction;
-                          evidence: PathSetEvidence): InputAccesses =
+                          evidence: PathSetEvidence;
+                          keyed: seq[string]): InputAccesses =
     ## What the portable record is computed over: the SAME filtered input
     ## set the local record uses (`cacheInputPaths`: tool roots, ignored
     ## prefixes and the action's own writes already removed), split into
@@ -20488,6 +20643,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## beside it (`recordInputAccesses`): it is the one thing a later local
     ## hit cannot recover from the record, and the only way the record that
     ## hit derives is the record this run produced (P3.4b).
+    let containment = beginContainmentMemo()
+    defer: endContainmentMemo(containment)
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence,
         membershipTrackedRoots):
@@ -20506,7 +20663,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for path in evidence.monitorReads:
       probed.excl(materialPath(action.cwd, path))
     let transient = transientOwnWrites(evidence)
-    for path in action.cacheInputPaths(evidence):
+    for path in keyed:
       if path in enumerated or isHostTempListing(path) or
           (transient.len > 0 and transientWriteKey(path) in transient) or
           isOwnOutput(action, path):
@@ -20519,7 +20676,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc recordPortableFingerprint(idx: int; action: BuildAction;
                                  evidence: PathSetEvidence;
                                  record: ActionResultRecord;
-                                 evidenceLevel: EvidenceLevel) =
+                                 evidenceLevel: EvidenceLevel;
+                                 keyed: seq[string]) =
     ## Cache-Scope P3.1: compute the action's portable weak/strong
     ## fingerprint over logical paths from `portableAccessesOf`. Reported on
     ## the result and the trace, and recorded in the portable memo.
@@ -20530,7 +20688,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## `evidenceLevel`, the grade of this execution, because a later hit on
     ## the record is served without it and must not publish what this run
     ## could not (campaign M17).
-    var accesses = portableAccessesOf(action, evidence)
+    ## `keyed` is `action.cacheInputPaths(evidence)`, which the caller has
+    ## just computed for `record`'s own input set.
+    var accesses = portableAccessesOf(action, evidence, keyed)
     accesses.evidenceLevel = evidenceLevel
     let evidenceSource = evidenceSourceOf(
       declaredActions.getOrDefault(action.id, action))
@@ -21507,6 +21667,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # pool owns live consumers and live monitored trees, and its teardown is the
   # ``finally`` below, so its lifetime has to be exactly this build's.
   var monitorHosts = MonitorHostPool()
+  # The monitor shim's inline-syscall scan, done once per image for the whole
+  # build and handed to each monitored action as a sealed table
+  # (`inline_site_tables`).
+  let siteTables = newInlineSiteTables()
+  defer: siteTables.close()
+  var siteTableRoots = initTable[string, string]()
+  proc isRunning(actionId: string): bool =
+    for item in running:
+      if item.id == actionId:
+        return true
+    false
   # HM-5 — every depfile publication that came back FAILED, by action id.
   # Consulted before an action's cache entry is published and reported again at
   # the end of the build for the publications that had not finished by then.
@@ -22238,8 +22409,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # be able to key a hit). Nothing executes and nothing is fetched but
   # metadata.
   #
-  # Then materialize only what something still needs: the graph's sinks, and
-  # every resolved ancestor of an action that must execute. Engine deps are
+  # Then materialize only what something still needs: the graph's sinks,
+  # every resolved ancestor of an action that must execute, and every
+  # resolved action that carries a target name or a typed output, i.e.
+  # produces a result of the build (Caching-Architecture D7).
+  # The bytes come from what the record's producer stored on this host
+  # (D6), then from a remote restorer if one is configured. Engine deps are
   # ordering edges, not per-file edges, so an executing action may read any
   # ancestor's output — hence ancestors, not just direct deps. An output that
   # cannot be put in place un-resolves its action AND its descendants, whose
@@ -22292,6 +22467,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var resolved = initTable[string, PortableMemoRecord]()
     var producedOutputs = initTable[string, PortableOutput]()
     var ancestorsOf = initTable[string, HashSet[string]]()
+    var diskIdentities = initTable[string, Option[string]]()
+      ## The identity a path-set entry has on disk, computed once per
+      ## pre-pass. Every compile of a project reads the same toolchain files
+      ## and probes the same search directories, so without this each
+      ## lookup re-derived the identities of the same few hundred paths
+      ## (measured: the warm no-op of a 300-source project spent most of
+      ## its extra time there). It holds only entries no graph action
+      ## produces and no graph view answers (those are resolved above, per
+      ## action), and the lookup loop writes nothing, so an entry's identity
+      ## cannot change between two lookups in it; the materialization below
+      ## does not consult it.
     const Unresolved = "unresolved-upstream-output"
       ## An identity no real input has, so a path set that names an output
       ## of an unresolved action computes a strong fingerprint no record has.
@@ -22400,7 +22586,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if view.unresolved:
               return some(Unresolved)
             return some(graphViewIdentity(view, entry.kind))
-        none(string)
+        # On disk: what `currentIdentity` would compute without a resolver,
+        # memoized for the pre-pass (`diskIdentities`).
+        let memoKey = $entry.kind & "\x00" & entry.path
+        if memoKey notin diskIdentities:
+          diskIdentities[memoKey] = currentIdentity(roots, entry, nil)
+        diskIdentities[memoKey]
 
     for id in order:
       let action = actionsById[id]
@@ -22501,10 +22692,62 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
     if resolved.len == 0:
       return
+    proc anyOutputPresent(record: PortableMemoRecord): bool =
+      ## Whether something already stands at one of the record's output
+      ## paths in this checkout (a file, a directory or a link).
+      for output in record.outputs:
+        let physical = toPhysicalPath(roots, output.path)
+        if physical.isSome:
+          let p = extendedPath(physical.get())
+          if symlinkExists(p) or fileExists(p) or dirExists(p):
+            return true
+      false
+    proc restoreResolved(action: BuildAction;
+                         record: PortableMemoRecord): string =
+      ## Caching-Architecture D6: the bytes a record's producer stored on
+      ## this host first, then a remote restorer when one is configured.
+      ## "" when the outputs are in place; otherwise every reason, the
+      ## local one first. A record the publication rule refuses, or one
+      ## whose edge is host-bound, stored no bytes and restores none here.
+      var reasons: seq[string] = @[]
+      let ruleRefusal = portableRecordRefusal(record)
+      if not action.determinismClass.allowsCrossMachineSubstitution():
+        reasons.add("determinism class " & $action.determinismClass &
+          " forbids substitution from another checkout, so its outputs " &
+          "are not stored")
+      elif ruleRefusal.len > 0:
+        reasons.add("its outputs are not stored on this host: " &
+          ruleRefusal)
+      else:
+        let local =
+          try:
+            restorePortableOutputs(sharedRoot / PortableOutputsDirName,
+              roots, record)
+          except CatchableError as err:
+            err.msg
+        if local.len == 0:
+          return ""
+        reasons.add(local)
+      if config.portableMemoRestorer != nil:
+        let remote =
+          try: config.portableMemoRestorer(roots, record)
+          except CatchableError as err: err.msg
+        if remote.len == 0:
+          return ""
+        reasons.add("remote: " & remote)
+      reasons.join("; ")
     var materialized = initTable[string, string]()
     while true:
-      # Needed: resolved sinks, and resolved ancestors of anything that
-      # must execute.
+      # Needed (Caching-Architecture D7): resolved sinks, resolved
+      # ancestors of anything that must execute, and the declared outputs
+      # of a resolved action that produces a target the build names as
+      # its result: one that carries a target name (a typed tool call's
+      # implicit target) or a typed output (a convention member's library
+      # or executable).
+      # An intermediate none of these covers is left out, unless
+      # something already stands at one of its output paths: then it must
+      # be the record's bytes, so it is checked like a demanded output and
+      # replaced, or its producer executes.
       var demanded = initHashSet[string]()
       for i in countdown(order.high, 0):
         let id = order[i]
@@ -22516,7 +22759,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if id notin resolved or id in materialized:
           continue
         let sink = dependents.getOrDefault(id).len == 0
-        if not sink and id notin demanded:
+        let namedTarget = actionsById[id].targetNames.len > 0 or
+          actionsById[id].typedOutputs.len > 0
+        if not sink and id notin demanded and not namedTarget and
+            not anyOutputPresent(resolved[id]):
           continue
         let record = resolved[id]
         var physicalRecorded: seq[string] = @[]
@@ -22547,12 +22793,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if onDisk.len > 0 and onDisk != output.digest:
             overwrites.add(OutputOverwrite(path: p,
               onDisk: "content:" & onDisk, restored: "content:" & output.digest))
-        let why =
-          if config.portableMemoRestorer == nil:
-            "no portable restorer configured"
-          else:
-            try: config.portableMemoRestorer(roots, record)
-            except CatchableError as err: err.msg
+        let why = restoreResolved(actionsById[id], record)
         fileMetadataCache.clear()
         if why.len == 0:
           materialized[id] = "portable-restored"
@@ -22653,6 +22894,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if localPoolGateActive and used + units > cap:
           inc i
           continue
+        # The first run of a toolchain image tells the engine which images
+        # its driver execs; wait for it, so this action launches with their
+        # site tables instead of decoding them (`inline_site_tables`).
+        if siteTables.firstRunPending(isRunning):
+          if not siteTableRoots.hasKey(id):
+            siteTableRoots[id] = siteTableRootImage(action, unsafeAddr config)
+          if siteTables.holdsLaunch(siteTableRoots[id], isRunning):
+            inc i
+            continue
 
         ready.delete(i)
         if not applyDynamicDeps(id):
@@ -23382,6 +23632,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               config = addr config,
               sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
+            siteTables.learnSiteTableImages(action, evidence.evidence)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
               runResult.results[idx].status = asFailed
@@ -23406,11 +23657,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 let recordStart = statStart()
                 let storeOutputBlobs =
                   storeOutputBlobsFor(action, evidence.evidence)
+                let keyed = action.cacheInputPaths(evidence.evidence)
                 let record = cache.recordActionResult(cas.inner,
                   action.weakFingerprint,
                   action.actionCachePolicy,
-                  action.recordedInputNames(
-                    action.cacheInputPaths(evidence.evidence)),
+                  action.recordedInputNames(keyed),
                   action.recordedOutputPaths(), action.cwd,
                   storeOutputBlobs = storeOutputBlobs,
                   metadataCache = addr fileMetadataCache,
@@ -23435,7 +23686,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, action.id), record)
                 recordPortableFingerprint(idx, action, evidence.evidence, record,
-                  evidenceLevelOf(evidence.monitorStatus))
+                  evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(action), record,
                   evidenceLevelOf(evidence.monitorStatus), action.id)
                 publishBinaryCacheBundle(action, record)
@@ -23546,8 +23797,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             continue
 
         let monitorPlanStart = statStart()
+        let siteTablePath =
+          if action.kind == bakProcess and
+              action.dependencyPolicy.kind in MonitorPolicyKinds and
+              action.monitorDepfile.len == 0:
+            siteTables.prepareSiteTablesFor(action, unsafeAddr config)
+          else:
+            ""
+        siteTableRoots.del(id)
         let plan = monitoredAction(action, config, cacheRoot,
-          hostMonitorInProcess)
+          hostMonitorInProcess, siteTablePath)
         if plan.capturePath.len > 0:
           wrappedMonitorCaptures[id] = plan.capturePath
         finishStat("repro monitor plan", monitorPlanStart)
@@ -23613,6 +23872,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               config = addr config,
               sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
+            siteTables.learnSiteTableImages(plan.action, evidence.evidence)
             # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
             # cannot re-derive: what a foreign provisioner daemon reported
             # about its own evaluation. `collectEvidence` builds a fresh
@@ -23661,11 +23921,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # silently skip otherwise.
                 let storeOutputBlobs =
                   storeOutputBlobsFor(plan.action, evidence.evidence)
+                let keyed = plan.action.cacheInputPaths(evidence.evidence)
                 let record = cache.recordActionResult(cas.inner,
                   plan.action.weakFingerprint,
                   plan.action.actionCachePolicy,
-                  plan.action.recordedInputNames(
-                    plan.action.cacheInputPaths(evidence.evidence)),
+                  plan.action.recordedInputNames(keyed),
                   plan.action.recordedOutputPaths(), plan.action.cwd,
                   storeOutputBlobs = storeOutputBlobs,
                   metadataCache = addr fileMetadataCache,
@@ -23687,7 +23947,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, plan.action.id), record)
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                  record, evidenceLevelOf(evidence.monitorStatus))
+                  record, evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
                   evidenceLevelOf(evidence.monitorStatus), plan.action.id)
                 publishBinaryCacheBundle(plan.action, record)
@@ -23818,7 +24078,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # when the monitor plan said so, which it only does for a launch
             # path the engine spawns.
             monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
-              cacheRoot)
+              cacheRoot, siteTablePath)
           elif bypassRunQuota:
             directProcess = startBypassRunQuotaProcess(plan.action, config)
           else:
@@ -24268,6 +24528,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               sourceTreeSpellings = addr sourceTreeSpellings)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
+        siteTables.learnSiteTableImages(action, evidence.evidence)
         if wrappedCapture.len > 0:
           enqueueMonitorFlush(MonitorFlushJob(actionId: finished.id,
             tempPath: wrappedCapture, destPath: action.monitorDepfile))
@@ -24329,9 +24590,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # publisher (with this action opted in) needs to read the
             # blob payloads back out of the local CAS.
             let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
+            let keyed = action.cacheInputPaths(evidence.evidence)
             let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
               action.actionCachePolicy,
-              action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
+              action.recordedInputNames(keyed),
               action.recordedOutputPaths(), action.cwd,
               storeOutputBlobs = storeOutputBlobs,
               metadataCache = addr fileMetadataCache,
@@ -24346,7 +24608,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             writeActionResultRecordFile(
               dependencyEvidencePath(cacheRoot, action.id), record)
             recordPortableFingerprint(idx, action, evidence.evidence, record,
-              evidenceLevelOf(evidence.monitorStatus))
+              evidenceLevelOf(evidence.monitorStatus), keyed)
             publishPeerCacheBundle(peerCacheQueryOf(action), record,
               evidenceLevelOf(evidence.monitorStatus), action.id)
             publishBinaryCacheBundle(action, record)
