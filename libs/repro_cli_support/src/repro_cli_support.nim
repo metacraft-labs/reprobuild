@@ -3303,6 +3303,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.removeBeforeRun = payload.removeBeforeRun
     result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
+    # The content-keyed tool-owned caches the edge reads. Copied here, on
+    # every branch, because the engine derives the edge's effective
+    # determinism class from them (`host-bound` at least; Tool-Owned-
+    # Caches.md "Trust Boundary"): a branch that dropped them would let the
+    # edge's records leave this host.
+    result.contentKeyedToolCaches = payload.contentKeyedToolCaches
   # Caching-Architecture D2: an edge that states no policy takes the one its
   # resolved tools declare, else the owner-decided default, timestamp.
   var policyFromTools = false
@@ -4951,7 +4957,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 17'u16
+  LoweredGraphCacheVersion = 18'u16
+    # v18: ``BuildAction.contentKeyedToolCaches``, a string list after
+    # ``widthFlag``. A v17 record decoded without it would make a cache-
+    # reading edge `weak` again on the warm path only, and its records would
+    # be offered to other hosts (Tool-Owned-Caches.md "Trust Boundary").
     # v17: ``BuildAction.cpuMinMilli``, ``cpuPreferredMilli`` (u32 each) and
     # ``widthFlag`` (a string) after ``subToolIdentityRefs``: a negotiated
     # width range and the flag that passes the grant to the command. A v16
@@ -6096,6 +6106,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeU32Le(action.cpuMinMilli)
   outp.writeU32Le(action.cpuPreferredMilli)
   outp.writeString(action.widthFlag)
+  outp.writeStringSeq(action.contentKeyedToolCaches)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6187,6 +6198,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.cpuMinMilli = readU32Le(bytes, pos)
   result.cpuPreferredMilli = readU32Le(bytes, pos)
   result.widthFlag = readString(bytes, pos)
+  result.contentKeyedToolCaches = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)

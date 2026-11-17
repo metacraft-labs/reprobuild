@@ -234,6 +234,7 @@ libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
 libs/repro_build_engine/tests/t_shipped_macos_tools.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_store_realization_names_of_both_widths_are_content_addressed.nim	nim	1
+libs/repro_build_engine/tests/t_tool_cache_reader_never_leaves_its_host.nim	nim	3
 libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim	nim	5
 libs/repro_build_engine/tests/t_untracked_ancestor_change_does_not_re_run_an_edge.nim	nim	8
 libs/repro_build_engine/tests/t_untracked_scope_membership_is_not_an_input.nim	nim	7
@@ -1924,6 +1925,7 @@ tests/integration/t_e2e_variant_feature_flag_drops_tls.nim	nim	5
 tests/integration/t_earlier_draft_certificate_is_rejected_with_a_reissue_remedy.nim	nim	1
 tests/integration/t_edge_attestation_binding_resists_substitution.nim	nim	25
 tests/integration/t_edge_attestation_quorum_is_k_of_n.nim	nim	21
+tests/integration/t_edge_reading_a_shared_tool_cache_is_never_published_cross_host.nim	nim	4
 tests/integration/t_edited_input_under_dev_shm_is_not_served_or_certified.nim	nim	1
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
