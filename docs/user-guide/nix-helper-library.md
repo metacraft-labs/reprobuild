@@ -23,7 +23,9 @@ of `when` guards, which it evaluates for the system it is configuring.
 
 ```nix
 {
-  inputs.reprobuild.url = "github:metacraft-labs/reprobuild";
+  # Pin a release tag or a commit: the repository's default branch does not
+  # carry the library.
+  inputs.reprobuild.url = "github:metacraft-labs/reprobuild/<release-tag-or-commit>";
   # or, in a workspace whose reprobuild pin comes from another flake:
   # reprobuild = nixos-modules.inputs.reprobuild;
 
