@@ -15860,8 +15860,8 @@
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": false,
       "source": "libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 10,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

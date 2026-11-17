@@ -31648,6 +31648,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       rawArgs: originalArgs,
       environment: daemonBuildEnvironment(),
       environmentIsComplete: true,
+      # The digest ``startUserDaemon`` compared above; the daemon serves
+      # only a request whose stated engine is the one it runs.
+      engineDigest: expectedUserDaemonDigest(publicCliPath, config),
       attached: true,
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
@@ -36525,6 +36528,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       rawArgs: originalArgs,
       environment: daemonWatchEnvironment(),
       environmentIsComplete: true,
+      # The digest ``startUserDaemon`` compared above; the daemon serves
+      # only a request whose stated engine is the one it runs.
+      engineDigest: expectedUserDaemonDigest(publicCliPath, config),
       attached: not detach,
       detached: detach,
       cancelOnDisconnect: not detach,
