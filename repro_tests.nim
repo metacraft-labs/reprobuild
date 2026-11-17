@@ -21277,6 +21277,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_ci_job_publishes_its_certificate_with_repro_push.nim",
+    binary: "build/test-bin/t_ci_job_publishes_its_certificate_with_repro_push",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g03",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_ci_plan_reads_ci_trust_from_the_base_not_the_candidate.nim",
     binary: "build/test-bin/t_ci_plan_reads_ci_trust_from_the_base_not_the_candidate",
     defines: @[],
@@ -21754,7 +21766,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_cs_m6_develop_and_flake_command_lines.nim",
@@ -22462,7 +22474,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_develop_refuses_unreadable_backend_of_any_kind.nim",
