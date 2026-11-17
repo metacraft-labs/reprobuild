@@ -8,7 +8,7 @@ Reprobuild reconciles user-level environments (`home.nim`) and operating-system 
 
 | Infrastructure Concept | Reprobuild Equivalent | How Repro Solves It |
 |---|---|---|
-| **HCL Resources / NixOS & Home Manager modules** | `home.nim` and `system.nim` typed `resources:` / `resourceType` blocks | Compile-time-checked Nim declarations modeling packages, files/symlinks, services, users, mounts, and cloud/Terraform-provider resources. |
+| **HCL Resources / NixOS & Home Manager modules** | `home.nim` and `system.nim` typed `resources:` / `resourceType` blocks | Compile-time-checked Nim declarations modeling packages, files/symlinks, services, users, and mounts. Cloud resources through Terraform/OpenTofu providers are planned, not implemented. |
 | **State File (`.tfstate`) & Generations** | Home & System Generation Databases | Tracks owned live state resources per generation with drift checks and automatic cleanup when declarations are removed. |
 | **`terraform plan` (user profile)** | `repro home plan [--profile-dir=PATH] [--host=NAME]` | Previews package, file, and service changes for a `home.nim` profile without mutating the machine. |
 | **`terraform apply` (user profile)** | `repro home apply [--profile-dir=PATH] [--host=NAME]` | Materializes and activates a new user-level generation (`repro home rollback` reverts to a prior generation). |

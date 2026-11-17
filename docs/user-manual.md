@@ -2,7 +2,7 @@
 
 > **All the world's software, as reproducible development environments.**
 
-Reprobuild (`repro`) is a unified build system, package and configuration manager, development environment coordinator, and infrastructure provisioner (covering both local systems and cloud resources). By folding these layers into a single cohesive description, Reprobuild eliminates the fragmented boundary between "how code is compiled," "how dependencies are resolved," and "how environments are configured."
+Reprobuild (`repro`) is a unified build system, package and configuration manager, development environment coordinator, and host provisioner (covering the machines it runs on; managing cloud resources through Terraform and OpenTofu providers is planned, not yet implemented). By folding these layers into a single cohesive description, Reprobuild eliminates the fragmented boundary between "how code is compiled," "how dependencies are resolved," and "how environments are configured."
 
 ---
 
@@ -14,7 +14,7 @@ Imagine you want to fix a bug in Firefox. In a standard setup, this means spendi
 repro develop firefox
 ```
 
-This instantly clones Firefox and provisions the exact compiler toolchain, development packages, databases, and any required cloud resources.
+This instantly clones Firefox and provisions the exact compiler toolchain, development packages, and databases.
 
 But what if the bug isn't in Firefox itself, but in Cairo, one of its underlying libraries? Instead of fork-and-link hell, you just type:
 
@@ -136,7 +136,7 @@ Reprobuild integrates all build, runtime, task, and workspace workflows into a s
 If you are already familiar with the modern DevOps and build toolchain, Reprobuild maps directly onto concepts you know:
 
 *   **Nix & Spack**: Pins every build tool and library dependency to a precise version. It differs from them by supporting **Windows and macOS** natively.
-*   **Terraform**: Handles declarative desired-state reconciliation for local machine state and cloud resources, but differs by being seamlessly integrated with your build system and host configuration management—and **it can reuse all existing Terraform providers**.
+*   **Terraform**: Handles declarative desired-state reconciliation (`repro infra plan` / `apply`, with `depends_on`, drift reports and guarded removal) for host and project state, integrated with your build system: any repository can define typed `resourceType` providers. Reusing existing Terraform and OpenTofu providers to manage cloud resources is planned, not yet implemented; until then, Terraform or OpenTofu remains the tool for cloud resources.
 *   **Bazel & Buck2**: Models the workspace as a build graph of targets with remote caching. It differs by using standard Nim code and compiling into a fast, native binary rather than requiring a JVM daemon or Starlark, while supporting native **distributed builds** and **test suite sharding**.
 *   **BuildXL & Tup**: Enforces hermeticity through filesystem monitoring. It differs from them by using the [io-mon](https://github.com/metacraft-labs/io-mon) user-space filesystem interceptor to **automatically discover all build dependencies** rather than requiring kernel-level drivers or FUSE filters.
 *   **Ninja**: Optimized to **execute incremental builds at maximum speed**. It differs from it by adding features such as **OOM protection** that enable agents to execute concurrent builds without thrashing.
@@ -144,4 +144,4 @@ If you are already familiar with the modern DevOps and build toolchain, Reprobui
 *   **direnv**: Completely zero-bypass—since compiler tools are scoped to the project environment, **agents can't forget to run it**.
 *   **Docker Compose & Process Compose**: Orchestrates development services, but **type-checks** your service configuration.
 
-Reprobuild unifies all of these tools behind one simple concept: a build graph of arbitrary inputs and outputs where the nodes are not necessarily files, but a more abstract notion of states (the activation of a particular system setting, the launch of a daemon, the creation of a user or a database, etc.). Reprobuild can build files, system configurations, and entire cloud fleets on the basis of the same abstraction. The outputs or side-effects from executing the edges are automatically cleaned up when they are no longer relevant.
+Reprobuild unifies all of these tools behind one simple concept: a build graph of arbitrary inputs and outputs where the nodes are not necessarily files, but a more abstract notion of states (the activation of a particular system setting, the launch of a daemon, the creation of a user or a database, etc.). Reprobuild can build files, system configurations, and the configuration of whole fleets of machines on the basis of the same abstraction. The outputs or side-effects from executing the edges are automatically cleaned up when they are no longer relevant.
