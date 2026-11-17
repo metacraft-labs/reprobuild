@@ -782,3 +782,66 @@ suite "nix half restore beside a Nix writer":
         let v = storeVerifies(r)
         check v.ok
         if not v.ok: echo v.output
+
+suite "restore.sh from a local bundle directory":
+  test "the bytes unpacked are the bytes verified, though the source changes":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-swap-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let tree = top / "payload"
+      createDir(tree)
+      var big = newString(1 shl 19)
+      var x = 0x9E3779B97F4A7C15'u64
+      for i in 0 ..< big.len:
+        x = x xor (x shl 13)
+        x = x xor (x shr 7)
+        x = x xor (x shl 17)
+        big[i] = chr(int(x and 0xff))
+      writeFile(tree / "big.so", big)
+      writeFile(tree / "env.sh", "export T_REPRO_BUNDLE_SWAP=1\n")
+      let a = sh("nix-store --add " & quoteShell(tree)).strip()
+      let b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
+      let bundle = top / "bundle"
+      let partsDir = bundle / "x86_64-linux" / NixHalfDir / "h"
+      let packed = packNixHalf(@[a, b], partsDir, 3, 128 * 1024)
+      check packed.parts.len > 1
+      let h = NixHalf(id: "h", system: "x86_64-linux",
+        zstd: storePathOf(expandFilename(findExe("zstd"))), paths: @[a, b],
+        unpackedBytes: packed.unpackedBytes,
+        compressedBytes: packed.compressedBytes, parts: packed.parts,
+        registration: packed.registration,
+        shells: @[BundleShell(name: "t:default", input: a, env: b)])
+      let script = top / "restore.sh"
+      writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+        "name": "bundle"}, true, h))
+      # A zstd that, at restore.sh's first call (the registration decompress,
+      # after `sha256sum -c`), empties every part of the source directory:
+      # what a writer of that directory could do between check and read.
+      let tools = restoreScriptPath(top)
+      let realZstd = findExe("zstd")
+      removeFile(tools / "zstd")
+      let marker = top / "swapped"
+      writeFile(tools / "zstd", "#!/bin/sh\n" &
+        "if [ ! -e " & quoteShell(marker) & " ]; then\n" &
+        "  : > " & quoteShell(marker) & "\n" &
+        "  for f in " & quoteShell(partsDir) & "/*; do case \"$f\" in */registration) ;; *) : > \"$f\" ;; esac; done\n" &
+        "fi\nexec " & quoteShell(realZstd) & " \"$@\"\n")
+      setFilePermissions(tools / "zstd",
+        {fpUserRead, fpUserWrite, fpUserExec})
+      let shRoot = top / "sh-root"
+      let log = top / "restore.log"
+      let env = "env -i PATH=" & quoteShell(tools) &
+        " TMPDIR=" & quoteShell(top) &
+        " REPRO_BUNDLE_LOG=" & quoteShell(log) &
+        " REPRO_BUNDLE_NIX_ROOT=" & quoteShell(shRoot)
+      discard execCmdEx(env & " bash " & quoteShell(script) & " " &
+        quoteShell(bundle))
+      check fileExists(marker)  # the swap really happened
+      check "nix half restored" in readFile(log)
+      check pathValid(shRoot, a)
+      check intactFile(storeLocationIn(shRoot, a) / "big.so", big)

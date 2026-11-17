@@ -1567,9 +1567,14 @@ when not defined(windows):
     # rpath. `scripts/build_apps.sh` refuses the same fallbacks.
     let nixPackageBuild = getEnv("NIX_BUILD_TOP").len > 0 and
       getEnv("IN_NIX_SHELL").len == 0
-    if dir.len == 0 and nixPackageBuild and
+    # Only a `-d:ssl` link needs the OpenSSL this block finds, so only a
+    # `-d:ssl` compile refuses to guess one. Any other compile run by a process
+    # with a builder's environment -- the packaged `repro` compiling a home
+    # profile in a `runCommand` (`reprobuildFacts`, `readIntent`'s IFD mode) --
+    # is not a package build, adds no `-L`, and needs none.
+    if dir.len == 0 and nixPackageBuild and defined(ssl) and
         not (ambientOpensslOnly):
-      quit("config.nims: a Nix package build found no OpenSSL in " &
+      quit("config.nims: a Nix package build of a `-d:ssl` target found no OpenSSL in " &
         "OPENSSL_LIBDIR, OPENSSL_PREFIX or NIX_LDFLAGS; refusing the Homebrew " &
         "and /nix/store glob fallbacks (they would put a host path in the " &
         "package's rpath). Set OPENSSL_LIBDIR in the derivation's env.")

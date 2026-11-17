@@ -105245,11 +105245,13 @@ proc runBuildVerbCommand(verb: string; args: seq[string];
     return 1
 
 proc runReproHelp(programName: string; topic: seq[string];
-                  publicCliPath: string): int =
-  ## ``repro help [<command>...]``: the help of repro or of one command, on
-  ## stdout. A migrated command's help is generated from its declarations.
-  ## An unmigrated one prints its usage synopsis (whatever words follow);
-  ## one with no synopsis, the help its declaration gives.
+                  publicCliPath: string; all = false): int =
+  ## ``repro help [--all] [<command>...]``: the help of repro or of one
+  ## command, on stdout. A migrated command's help is generated from its
+  ## declarations. An unmigrated one prints its usage synopsis (whatever
+  ## words follow); one with no synopsis, the help its declaration gives.
+  ## With ``all`` it is the page ``--help-all`` prints, which also lists
+  ## the ``secondary`` commands.
   var command = 0
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
@@ -105267,7 +105269,8 @@ proc runReproHelp(programName: string; topic: seq[string];
         return 0
       break
   try:
-    stdout.write(ReproCommandLine.helpText(reproCommandPath(command)))
+    stdout.write(ReproCommandLine.helpText(reproCommandPath(command),
+      long = all, all = all))
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
@@ -105416,7 +105419,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
     stderr.write(ReproCommandLine.helpText())
     return 2
   of ReproCommandLineCommand.help:
-    return runReproHelp(programName, conf.help.topic, publicCliPath)
+    return runReproHelp(programName, conf.help.topic, publicCliPath,
+      conf.help.all)
   of ReproCommandLineCommand.version:
     return runVersionCommand(programName, conf.version.json)
   of ReproCommandLineCommand.completion:

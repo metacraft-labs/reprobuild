@@ -70,6 +70,11 @@ set +u; [ -r /etc/profile.d/nix.sh ] && . /etc/profile.d/nix.sh >/dev/null 2>&1;
     for p in h.parts:
       sums.add(p.sha256 & "  " & p.file & "\n")
     sums.add(h.registration.sha256 & "  " & h.registration.file & "\n")
+    # bytes<SPACE>file: a local source is copied no further than this.
+    var sizes = ""
+    for p in h.parts:
+      sizes.add($p.bytes & " " & p.file & "\n")
+    sizes.add($h.registration.bytes & " " & h.registration.file & "\n")
     # file<TAB>branch, for a GitHub source (§6.1: deterministic layout).
     var refs = ""
     for p in h.parts:
@@ -85,7 +90,8 @@ set +u; [ -r /etc/profile.d/nix.sh ] && . /etc/profile.d/nix.sh >/dev/null 2>&1;
     s.add("NIX_UNPACKED=" & $h.unpackedBytes & "\nNIX_COMPRESSED=" &
       $h.compressedBytes & "\n")
     s.add("ROOTS=(" & roots & " )\nPARTS=(" & partFiles & " )\n")
-    s.add("SUMS=" & q(sums) & "\nREFS=" & q(refs) & "\n")
+    s.add("SUMS=" & q(sums) & "\nSIZES=" & q(sizes) & "\nREFS=" & q(refs) &
+      "\n")
     s.add("""
 command -v nix-store >/dev/null || done_with "nix is not installed; nothing restored"
 if nix-store "${store[@]}" --check-validity "${ROOTS[@]}" >/dev/null 2>&1; then
@@ -95,12 +101,17 @@ else
   avail=$(df --output=avail -B1 "$( [ "$ROOT" = / ] && [ -d /nix ] && echo /nix || echo "$ROOT" )" | tail -1)
   need=$(( NIX_UNPACKED + (1 << 30) ))
   (( avail >= need )) || done_with "not enough disk: the nix half unpacks to $(( NIX_UNPACKED >> 20 )) MiB, $(( avail >> 20 )) MiB free (1 GiB margin)"
+  # Every source is staged in a directory only this run can write, and only
+  # the staged files are verified and read: a local source's directory may
+  # be writable by others, who could otherwise swap a part between its hash
+  # check and the unpack (Workspace-Bundles.md §7 step 2, §9).
+  shm=$(df --output=avail -B1 /dev/shm 2>/dev/null | tail -1 || echo 0)
+  if (( NIX_COMPRESSED * 2 < ${shm:-0} )); then work=$(mktemp -d /dev/shm/repro-bundle.XXXXXX)
+  else work=$(mktemp -d /var/tmp/repro-bundle.XXXXXX); fi \
+    || done_with "cannot create a staging directory"
+  trap 'rm -rf "$work"' EXIT
   case "$SRC" in
     http://*|https://*|github:*)
-      shm=$(df --output=avail -B1 /dev/shm 2>/dev/null | tail -1 || echo 0)
-      if (( NIX_COMPRESSED * 2 < ${shm:-0} )); then work=$(mktemp -d /dev/shm/repro-bundle.XXXXXX)
-      else work=$(mktemp -d /var/tmp/repro-bundle.XXXXXX); fi
-      trap 'rm -rf "$work"' EXIT
       log "nix half: $(( NIX_COMPRESSED >> 20 )) MiB to download, $(( NIX_UNPACKED >> 20 )) MiB to unpack"
       case "$SRC" in
         github:*)
@@ -114,10 +125,18 @@ else
           printf '%s' "$SUMS" | awk '{print $2}' \
             | xargs -P "$PARALLEL" -I{} curl -fsS --retry 3 -o "$work/{}" "$SRC/$NIX_DIR/{}" \
             || done_with "nix half download failed" ;;
-      esac
-      dir="$work" ;;
-    *) dir="$SRC/$NIX_DIR" ;;
+      esac ;;
+    *)
+      # At most each file's declared size is copied: a part replaced by
+      # something larger, or by a link to /dev/zero, cannot fill the staging
+      # filesystem, and its truncated copy fails the hash check.
+      from="${SRC#file://}/$NIX_DIR"
+      log "nix half: $(( NIX_COMPRESSED >> 20 )) MiB to copy from $from, $(( NIX_UNPACKED >> 20 )) MiB to unpack"
+      printf '%s' "$SIZES" | while read -r n f; do
+        head -c "$n" -- "$from/$f" > "$work/$f" || exit 1
+      done || done_with "nix half copy from $from failed" ;;
   esac
+  dir="$work"
   ( cd "$dir" && printf '%s' "$SUMS" | sha256sum --quiet -c - ) || done_with "nix half did not verify"
   if command -v zstd >/dev/null; then Z=zstd; else
     nix-store --realise "$ZSTD" >/dev/null 2>&1 || done_with "cannot realise $ZSTD"
@@ -247,7 +266,7 @@ else
   release_locks
   rm -rf "$meta"
   nix-store "${store[@]}" --check-validity "${ROOTS[@]}" >/dev/null || done_with "registration incomplete"
-  [ "$dir" = "${work:-}" ] && rm -f "$work"/*
+  rm -f "$work"/*
   log "nix half restored"
 fi
 prefix=""; [ "$ROOT" != / ] && prefix="$ROOT"
