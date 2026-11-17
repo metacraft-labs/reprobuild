@@ -2133,25 +2133,24 @@ package reprobuild:
         # this additive regression's compile edge out of that default too.
         # (Never grouped: scripts/generate_test_edges.nim keeps it single.)
         reprobuildTestExecuteActions.add(edge.action)
+      # ``edge.testBinary.path`` is the file the compile edge declares
+      # (``<binary>.exe`` on Windows, ``ct_test_nim_unittest``'s
+      # ``nimUnittestExecutablePath``), so these fixture inputs, the depfile
+      # edge below and the execute edge all name the same file as the
+      # compile's output, and the engine orders the compile first.
       if spec.source.startsWith("tests/bundles/"):
         pureUnitBundleArtifacts.add(TestGraphArtifact(
-          path:
-            when defined(windows): spec.binary & ".exe"
-            else: spec.binary,
+          path: edge.testBinary.path,
           actionId: edge.action.id))
       if spec.source in PerCaseFixtureGateSubjects:
         perCaseFixtureGateInputs.add(TestGraphArtifact(
-          path:
-            when defined(windows): spec.binary & ".exe"
-            else: spec.binary,
+          path: edge.testBinary.path,
           actionId: edge.action.id))
         perCaseFixtureGateNeedsRepro =
           perCaseFixtureGateNeedsRepro or spec.requiresReproBinary
       if spec.source in AgentHarborFixtureFailureGateSubjects:
         agentHarborGateInputs.add(TestGraphArtifact(
-          path:
-            when defined(windows): spec.binary & ".exe"
-            else: spec.binary,
+          path: edge.testBinary.path,
           actionId: edge.action.id))
       # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
       #
@@ -2445,7 +2444,7 @@ package reprobuild:
           let testDepfile = reproTestDepfilePath(spec.binary)
           let testDepfileEdge = dslfs.unmonitorableActionDepfile(
             output = testDepfile,
-            inputs = @[spec.binary] & @(requiredBinaries),
+            inputs = @[edge.testBinary.path] & @(requiredBinaries),
             reason =
               "test performs LD_PRELOAD interposition itself; the engine's " &
               "io-monitor injects a second interposer and the two livelock " &
