@@ -483,7 +483,10 @@ def on_target_rec(kind, rec):
         # passed.
         u = rec.get("deadJudgedActive", {})
         return (on_target(kind, steps) and u.get("before") == "active" and
-                u.get("exit") == 0 and u.get("after") not in (None, "active"))
+                u.get("staged") not in (None, "active") and
+                u.get("socketStaged") not in (None, "active") and
+                u.get("exit") == 0 and u.get("after") not in (None, "active") and
+                dead_hold_order(u) == "never")
     if kind == "mutbootblock":
         # Red because the boot's re-assertion started and confirmed the
         # trigger and cleared the record, instead of queueing it.
@@ -658,6 +661,7 @@ def on_target_rec(kind, rec):
                 dead_hold_order(rec.get("deadApplyAdopted", {})) == "never" and
                 rec.get("fullApplyFixing", {}).get("ok") is True and
                 rec.get("deadJudgedActive", {}).get("ok") is True and
+                dead_hold_order(rec.get("deadJudgedActive", {})) == "after-release" and
                 rec.get("essentialHostTrigger", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
