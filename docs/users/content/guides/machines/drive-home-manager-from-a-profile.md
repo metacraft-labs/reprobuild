@@ -18,6 +18,9 @@ unverified:
   - claim: "The captured output on this page."
     reason: "Run by hand on Linux with repro 0.2.24 built from reprobuild 84b459adda, against reprobuild-examples nix/home-manager-profile; no scenario re-runs it."
     owner: unassigned
+  - claim: "The realization-source captures."
+    reason: "Evaluated on Linux with the example's reprobuild input moved to eb60557254 (the first revision with realization sources) and bat added to the profile; the published example still pins 84b459adda, and its equivalence check was not built at eb60557254."
+    owner: unassigned
   - claim: "The steps work for a nix-darwin or NixOS Home Manager module as for a standalone configuration."
     reason: "Only a standalone homeManagerConfiguration was evaluated."
     owner: unassigned
@@ -169,6 +172,47 @@ run [Compare a Home Manager configuration with a profile](compare-with-home-mana
 which fails on any package the move lost or added.
 
 A complete set of dotfiles moved this way is not linked from this page yet.
+
+## Take a package from another package set
+
+A package the catalog has no Nix package for, or one you take from
+nixpkgs-unstable or another flake, gets a realization source: where its Nix
+package comes from, by canonical name. It never decides whether a host gets
+the package; the profile does.
+
+```nix
+reprobuild.intent.realizationSources = {
+  bat = { nixpkgs = pkgs; attribute = "bat"; };       # a nixpkgs-like set
+  some-tool = { packages = some-flake.packages.${pkgs.stdenv.hostPlatform.system}; };
+  other-tool = { derivation = other-flake.packages.${pkgs.stdenv.hostPlatform.system}.default; };
+};
+```
+
+`some-flake` and `other-flake` are flake inputs you pass to the configuration,
+for example through Home Manager's `extraSpecialArgs`.
+
+The catalog has no Nix package for `bat`, so without the mapping the
+evaluation refuses it. With `bat` added to `develop` and mapped as above,
+`laptop` gets it:
+
+<!-- generated:begin capture drive-home-manager-from-a-profile realization-source -->
+```text
+["bat-0.26.1","fd-10.3.0","htop-3.4.1","jq-1.8.1","man-db-2.13.1","shared-mime-info-2.4","dummy-xdg-mime-dirs1","dummy-xdg-mime-dirs2","home-configuration-reference-manpage","hm-session-vars.sh"]
+```
+<!-- generated:end -->
+
+A mapping for a package the profile selects on no host is refused, so stale
+mappings do not pile up:
+
+<!-- generated:begin capture drive-home-manager-from-a-profile stale-mapping from="error:" -->
+```text
+error: reprobuild.intent.realizationSources: 1 refused mapping(s):
+  realization source for `gh`: the profile selects `gh` on no host, so the mapping is stale; remove it
+```
+<!-- generated:end -->
+
+[Nix library and Home Manager module](../../reference/nix-library.md#realization-sources)
+lists the three kinds of source.
 
 ## Read the profile in your own Nix code
 

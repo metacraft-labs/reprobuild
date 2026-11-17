@@ -15,7 +15,7 @@ verifies:
     - nix/tests/intent-ifd.nix
 unverified:
   - claim: "The descriptions under each reprobuild.lib heading."
-    reason: "Written by hand from nix/lib at reprobuild 84b459adda (identical on agents); the lib-reference check compares each function's name and argument set with the library, not the prose."
+    reason: "Written by hand from nix/lib (84b459adda, and eb60557254 for the realization sources); the lib-reference check compares each function's name and argument set, and the kinds of realization source and which take attribute, with the library, not the prose (default attribute lookups, refusals, homeManagerFacts' default)."
     owner: unassigned
 ---
 

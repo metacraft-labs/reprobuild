@@ -686,12 +686,16 @@ flag	repro run	--lock-slice
 flag	repro run	--work-root
 command	repro shell
 flag	repro shell	--activity
+flag	repro shell	--command
 flag	repro shell	--dev-env-stats
 flag	repro shell	--lock-slice
 flag	repro shell	--print-env
 flag	repro shell	--shell
 flag	repro shell	--work-root
+flag	repro shell	-c
+env	repro shell	FILE_TYPE_PIPE
 env	repro shell	STDIN_FILENO
+env	repro shell	STD_INPUT_HANDLE
 command	repro shell hook
 flag	repro shell hook	--repro-bin
 command	repro allow

@@ -33,6 +33,8 @@ import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
+import repro_cli_support/shell_invocation
+import repro_cli_support/stdin_terminal
 # The content identity of a producer's channel directories, folded into the
 # keys of consumer actions whose reads nothing observes (§4.3 rule 2).
 import repro_cli_support/producer_channel_content
@@ -17801,6 +17803,39 @@ proc runReproTasksCommand(conf: ReproCommandLineTasks;
   emitMergedRunListing(listedTasks, runEdgeExportEntries(publicCliPath))
   0
 
+proc runCommandInDevEnv(selection: DevEnvCliSelection; command: seq[string];
+                        publicCliPath, statsVerb: string): int =
+  ## Resolve (building on a miss) the development environment ``selection``
+  ## names and run ``command`` in it, replacing this process on POSIX so the
+  ## command's exit status is the caller's. Shared by ``repro exec -- ...``
+  ## and ``repro shell -c ...`` / ``repro shell -- ...``, so the two verbs
+  ## activate the environment the same way. ``statsVerb`` labels the
+  ## ``--dev-env-stats`` report.
+  # The bootstrap toolchain the edge below publishes is for compiling the
+  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
+  let userToolchainEnv = snapshotBootstrapToolchainEnv()
+  let edge = computePublicDevEnv(selection, publicCliPath,
+    announce = true)
+  writeDevEnvStats(selection.statsPath, edge, statsVerb)
+  let artifact = edge.artifact
+  if emitDevEnvDiagnostics(artifact):
+    return 1
+  # Two channels, deliberately different. Provisioned packages go in `preOps`
+  # so the recipe's own `prependPath` can sit in front of them; cross-repo
+  # producer pins go in `extraOps` so they outrank both.
+  let toolOps = devEnvToolShellOps(edge, selection)
+  let producerOps = devEnvProducerActivation(artifact,
+    selection.projectRoot)
+  restoreBootstrapToolchainEnv(userToolchainEnv)
+  # Likewise the source roots this engine seeded for its own compiles
+  # (`REPROBUILD_SOURCE_ROOT`, the built `*_SRC`): withdrawn here, after the
+  # last compile, per Distribution-And-Packaging §5. Otherwise an engine
+  # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
+  # resolves its libraries from B. Caller values are not seeds and stay.
+  clearSeededSourcePackageEnvironment()
+  return execActivatedCommand(artifact, edge.artifactPath, command,
+    selection.projectRoot, producerOps, toolOps)
+
 proc runReproExecCommand(conf: ReproCommandLineExec;
                          publicCliPath: string): int =
   ## ``repro exec [<selector>] -- <command>...``. Its command line is parsed
@@ -17810,32 +17845,9 @@ proc runReproExecCommand(conf: ReproCommandLineExec;
     stderr.writeLine("repro exec: no command after `--`; run `repro help " &
       "exec`")
     return 2
-  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
-    conf.workRoot, conf.lockSlice, conf.devEnvStats), command: conf.command)
-  # The bootstrap toolchain the edge below publishes is for compiling the
-  # recipe, not for the user's command; see `snapshotBootstrapToolchainEnv`.
-  let userToolchainEnv = snapshotBootstrapToolchainEnv()
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
-    announce = true)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "exec")
-  let artifact = edge.artifact
-  if emitDevEnvDiagnostics(artifact):
-    return 1
-  # Two channels, deliberately different. Provisioned packages go in `preOps`
-  # so the recipe's own `prependPath` can sit in front of them; cross-repo
-  # producer pins go in `extraOps` so they outrank both.
-  let toolOps = devEnvToolShellOps(edge, parsed.selection)
-  let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
-  restoreBootstrapToolchainEnv(userToolchainEnv)
-  # Likewise the source roots this engine seeded for its own compiles
-  # (`REPROBUILD_SOURCE_ROOT`, the built `*_SRC`): withdrawn here, after the
-  # last compile, per Distribution-And-Packaging §5. Otherwise an engine
-  # started by the command (`cd A && B/build/bin/repro exec -- A/...`)
-  # resolves its libraries from B. Caller values are not seeds and stay.
-  clearSeededSourcePackageEnvironment()
-  return execActivatedCommand(artifact, edge.artifactPath, parsed.command,
-    parsed.selection.projectRoot, producerOps, toolOps)
+  let selection = devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats)
+  runCommandInDevEnv(selection, conf.command, publicCliPath, "exec")
 
 proc defaultInteractiveShell(): string =
   when defined(windows):
@@ -17852,41 +17864,65 @@ proc defaultInteractiveShell(): string =
 proc runReproShellCommand(conf: ReproCommandLineShellCall;
                           publicCliPath: string): int =
   ## ``repro shell [<selector>]``: start a shell in the development
-  ## environment, or print it (``--print-env``). Its command line is parsed
-  ## from repro's description (``repro_cli_support/cli_description``).
+  ## environment, print it (``--print-env``), or run one command in it
+  ## (``-c <command>`` through the shell, ``-- <command>`` directly). Its
+  ## command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``); which mode the flags name, and
+  ## whether spawn mode may start here, is ``shell_invocation``'s decision.
+  # `directCommand` is "a command after `--`": the parser keeps no trace of
+  # a `--` with nothing after it, so a bare `repro shell --` reads as
+  # `repro shell` (spawn mode), exactly as a bare `repro exec --` reads as
+  # `repro exec` with no command.
+  let invocation = shellInvocationOf(printEnv = conf.printEnv.isSome,
+    inlineCommand = conf.command.isSome, directCommand = conf.argv.len > 0,
+    shellGiven = conf.shell.len > 0)
+  if invocation.usageError.len > 0:
+    stderr.writeLine("repro shell: error: " & invocation.usageError)
+    return ShellUsageExitCode
+  # Spawn mode without a terminal on standard input is refused before
+  # anything is resolved, so the refusal costs no provider build.
+  let refusal = shellSpawnRefusal(invocation.mode, stdinIsTerminal())
+  if refusal.len > 0:
+    for line in refusal:
+      stderr.writeLine(line)
+    return ShellUsageExitCode
   # The format is checked first, before anything is resolved.
   let printFormat =
     if conf.printEnv.isSome: parseDevEnvPrintFormat(conf.printEnv.get)
     else: depPosix
-  let parsed = (selection: devEnvSelectionOf(conf.selector, conf.activity,
-    conf.workRoot, conf.lockSlice, conf.devEnvStats),
-    printEnv: conf.printEnv.isSome, printFormat: printFormat,
-    shellPath: conf.shell)
+  let selection = devEnvSelectionOf(conf.selector, conf.activity,
+    conf.workRoot, conf.lockSlice, conf.devEnvStats)
+  let shellPath =
+    if conf.shell.len > 0: conf.shell
+    else: defaultInteractiveShell()
+  case invocation.mode
+  of simDirectCommand:
+    return runCommandInDevEnv(selection, conf.argv, publicCliPath, "shell")
+  of simInlineCommand:
+    return runCommandInDevEnv(selection,
+      inlineCommandArgv(shellPath, conf.command.get), publicCliPath, "shell")
+  of simPrintEnv, simSpawn:
+    discard
   let userToolchainEnv = snapshotBootstrapToolchainEnv()
-  let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+  let edge = computePublicDevEnv(selection, publicCliPath,
     announce = true)
-  writeDevEnvStats(parsed.selection.statsPath, edge, "shell")
+  writeDevEnvStats(selection.statsPath, edge, "shell")
   let artifact = edge.artifact
   if emitDevEnvDiagnostics(artifact):
     return 1
-  let toolOps = devEnvToolShellOps(edge, parsed.selection)
+  let toolOps = devEnvToolShellOps(edge, selection)
   let producerOps = devEnvProducerActivation(artifact,
-    parsed.selection.projectRoot)
-  if parsed.printEnv:
+    selection.projectRoot)
+  if invocation.mode == simPrintEnv:
     stdout.write(renderDevEnvArtifact(artifact, edge.artifactPath,
-      parsed.printFormat, producerOps, toolOps))
+      printFormat, producerOps, toolOps))
     return 0
-  let shellPath =
-    if parsed.shellPath.len > 0:
-      parsed.shellPath
-    else:
-      defaultInteractiveShell()
   restoreBootstrapToolchainEnv(userToolchainEnv)
   # The engine's self-seeded source roots stay out of the shell, as for
   # `repro exec` (Distribution-And-Packaging §5).
   clearSeededSourcePackageEnvironment()
   return spawnActivatedShell(artifact, edge.artifactPath, shellPath,
-    parsed.selection.projectRoot, producerOps, toolOps)
+    selection.projectRoot, producerOps, toolOps)
 
 # M74 — ``repro dev-env export <shell>``.
 #
@@ -39739,6 +39775,42 @@ proc runDevelopDropCommand(c: ReproCommandLineDevelop;
     stderr.writeLine("repro develop --drop: error — " & f)
   exitCode
 
+proc developTargetIsPathShaped(target: string): bool =
+  ## Whether ``target`` was written as a path (it contains `/` or `\`, or
+  ## starts with `.`) rather than as a bare name.
+  target.contains('/') or target.contains('\\') or target.startsWith(".")
+
+proc developUnresolvedTargetDiagnostic(target, modulePath: string;
+                                       insideWorkspace: bool): seq[string] =
+  ## The `error:` + `tip:` lines for `repro develop <name>` when `<name>` is
+  ## not a local project (no project file at ``modulePath``). A target
+  ## written as a path was meant as a local project, so the answer is only
+  ## that none is there; `--only=` and `--source` take names, and naming
+  ## them for a path would mislead. For a bare name, inside a workspace or
+  ## project the tips are the two forms that develop a dependency there;
+  ## outside one, creating a workspace from a catalog package name is not
+  ## available, so the tips say where each form works.
+  if developTargetIsPathShaped(target):
+    return @["error: `repro develop " & target & "`: no project file " &
+      "found at " & modulePath]
+  result = @["error: `repro develop " & target & "`: `" & target &
+    "` is not a local project (no project file at " & modulePath & ")"]
+  if insideWorkspace:
+    result.add("tip: to check out `" & target & "` as a dependency of this " &
+      "workspace's lock set and develop it, run `repro develop --only=" &
+      target & "`")
+    result.add("tip: to develop an existing local checkout of `" & target &
+      "`, run `repro develop " & target & " --source=<path>`")
+  else:
+    result.add("tip: creating a workspace from a catalog package name " &
+      "(`repro develop <package>` in an empty directory) is not enabled " &
+      "in this build, and this directory is not inside a workspace or " &
+      "project")
+    result.add("tip: from inside a workspace, run `repro develop " &
+      "--only=<dep>` to check out a dependency of its lock set")
+    result.add("tip: to develop an existing local checkout of `" & target &
+      "`, run `repro develop " & target & " --source=<path>`")
+
 proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
   ## `repro develop …`, from its configuration. Exported for the same reason
   ## `runReproLockCommand` is: a test that asserts on what the verb WRITES
@@ -39828,7 +39900,21 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
 
   let modulePath = absolutePath(moduleForTarget(target))
   if not fileExists(extendedPath(modulePath)):
-    raise newException(IOError, "develop target module not found: " & modulePath)
+    if command.len > 0:
+      # `<target> -- <command>` names a local project to run in; a missing
+      # one is reported as such.
+      raise newException(IOError,
+        "develop target module not found: " & modulePath)
+    # A bare `repro develop <name>`: most often a dependency or a catalog
+    # package name rather than a local project directory. Teach the forms
+    # that do what was probably meant instead of naming a file path.
+    let cwd = getCurrentDir()
+    let insideWorkspace = findWorkspaceRoot(cwd).len > 0 or
+      findDevEnvProjectRoot(cwd).len > 0
+    for line in developUnresolvedTargetDiagnostic(target, modulePath,
+        insideWorkspace):
+      stderr.writeLine(line)
+    return 1
 
   let scopedRoot = scopedWorktreeRoot(modulePath, workRoot)
   let outDir =
