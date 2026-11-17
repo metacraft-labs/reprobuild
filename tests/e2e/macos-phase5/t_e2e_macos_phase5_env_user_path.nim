@@ -257,7 +257,7 @@ suite "env.userPath / env.userVariable: REAL apply / verify / destroy (sandbox-o
         let after1 = readFile(zprofile)
         doAssert after1.contains(pathEntry),
           "contribution entry missing from .zprofile after apply"
-        doAssert after1.contains("repro-managed:" & UserPathBlockId),
+        doAssert after1.contains("repro:home:" & UserPathBlockId),
           "managed-block sentinel missing from .zprofile"
         # The recorded payload is the joined contribution (UTF-8).
         doAssert recorded1.len == pathEntry.len
@@ -298,9 +298,9 @@ suite "env.userPath / env.userVariable: REAL apply / verify / destroy (sandbox-o
           "variable export missing from .zprofile after apply"
         # Both managed blocks (PATH + variable) must coexist in the
         # same `.zprofile` — the splice does not collide.
-        doAssert after2.contains("repro-managed:" & UserPathBlockId),
+        doAssert after2.contains("repro:home:" & UserPathBlockId),
           "PATH managed-block sentinel was clobbered by variable apply"
-        doAssert after2.contains("repro-managed:" & varBlockId),
+        doAssert after2.contains("repro:home:" & varBlockId),
           "variable managed-block sentinel missing after apply"
 
         let obs2 = observeShellIntegration(zprofile, varBlockId)
@@ -355,9 +355,9 @@ suite "env.userPath / env.userVariable: REAL apply / verify / destroy (sandbox-o
         destroyShellIntegration(zprofile, varBlockId)
         let after3 =
           if fileExists(zprofile): readFile(zprofile) else: ""
-        doAssert not after3.contains("repro-managed:" & UserPathBlockId),
+        doAssert not after3.contains("repro:home:" & UserPathBlockId),
           "PATH managed-block sentinel still present after destroy"
-        doAssert not after3.contains("repro-managed:" & varBlockId),
+        doAssert not after3.contains("repro:home:" & varBlockId),
           "variable managed-block sentinel still present after destroy"
         doAssert not after3.contains(pathEntry),
           "contribution entry still in .zprofile after destroy"

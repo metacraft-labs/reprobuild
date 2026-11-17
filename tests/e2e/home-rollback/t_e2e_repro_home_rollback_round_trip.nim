@@ -149,7 +149,7 @@ suite "M64 gate 1: e2e_repro_home_rollback_round_trip":
     # Sanity: A's state on disk.
     check readFile(homeDir / ".fooconfig") == AConfigContent
     let bashrcA = readFile(homeDir / ".bashrc")
-    check bashrcA.contains("repro-managed:repro.gate1")
+    check bashrcA.contains("repro:home:repro.gate1")
     check bashrcA.contains(ABlockContent.strip)
     check launcherPresent(stateDir, "pkg-x")
     check launcherPresent(stateDir, "pkg-y")

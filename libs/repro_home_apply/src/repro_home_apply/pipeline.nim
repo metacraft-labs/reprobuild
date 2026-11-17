@@ -3476,8 +3476,15 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               if k notin newBlockKeys and blocksApplied:
                 # Strip the sentinel-delimited region from the host file,
                 # keeping everything around it and deleting the file only
-                # if nothing else is left (the shared removal path).
-                destroyManagedBlockResource(mb.hostFilePath, mb.blockId)
+                # if nothing else is left (the shared removal path). A
+                # block the shared locator refuses (duplicated or
+                # unterminated) is left as it is and does not stop the
+                # removal of the other dropped blocks.
+                try:
+                  destroyManagedBlockResource(mb.hostFilePath, mb.blockId)
+                except ManagedBlockError as err:
+                  stderr.writeLine("repro home apply: left managed block '" &
+                    mb.blockId & "' in " & mb.hostFilePath & ": " & err.msg)
           except CatchableError:
             # The previous manifest may be unreadable in pathological
             # cases (manifest in CAS was GC'd by another tool, etc.).

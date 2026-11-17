@@ -216,7 +216,7 @@ suite "e2e_hooks_shell_direnv":
       let statsPath = c.tempRoot / "direnv-real-stats.json"
       check requireDirenvValue(c, statsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
       let envrc = readFile(c.projectRoot / ".envrc")
-      check "repro-managed:repro-dev-env-direnv" in envrc
+      check "repro:home:repro-dev-env-direnv" in envrc
       check "__repro-direnv-activate" in envrc
       # The block no longer installs VCS hooks on directory entry
       # (reprobuild-pm spec/CLI/hooks.md §"Direnv Integration", amended
@@ -283,7 +283,7 @@ suite "e2e_hooks_shell_direnv":
         c.projectRoot])
       let withBlock = readFile(envrcPath)
       check withBlock.contains(userBytes)
-      check withBlock.contains("repro-managed:repro-dev-env-direnv")
+      check withBlock.contains("repro:home:repro-dev-env-direnv")
 
       discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
         c.projectRoot])

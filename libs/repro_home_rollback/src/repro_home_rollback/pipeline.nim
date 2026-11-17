@@ -508,37 +508,12 @@ proc restoreFileFromTarget(store: var Store; rec: GeneratedFile;
 proc rewriteManagedBlock(hostFilePath, blockId: string;
                         blockBytes: openArray[byte]) =
   ## Re-insert `blockBytes` between the sentinels in the host file
-  ## (creating the file if missing). Mirrors the writer in
-  ## `repro_home_apply/materialize_managed_blocks.nim`.
-  let parent = parentDir(hostFilePath)
-  if parent.len > 0:
-    createDir(extendedPath(parent))
-  var existing = ""
-  if fileExists(extendedPath(hostFilePath)):
-    existing = readFile(extendedPath(hostFilePath))
-  let openS = OpenSentinelPrefix & blockId & OpenSentinelSuffix
-  let closeS = CloseSentinelPrefix & blockId & CloseSentinelSuffix
-  let openIdx = existing.find(openS)
-  let closeIdx = existing.find(closeS)
-  let bodyText = stringFromBytes(blockBytes)
-  var rewritten = ""
-  if openIdx >= 0 and closeIdx >= 0 and closeIdx > openIdx:
-    let lineEndAfterOpen = existing.find('\n', openIdx)
-    let bodyStart = if lineEndAfterOpen >= 0: lineEndAfterOpen + 1
-                    else: openIdx + openS.len
-    rewritten = existing[0 ..< bodyStart] & bodyText &
-      (if bodyText.len > 0 and not bodyText.endsWith("\n"): "\n" else: "") &
-      existing[closeIdx .. ^1]
-  else:
-    let sep = if existing.len == 0 or existing.endsWith("\n"): "" else: "\n"
-    rewritten = existing & sep & openS & "\n" & bodyText &
-      (if bodyText.len > 0 and not bodyText.endsWith("\n"): "\n" else: "") &
-      closeS & "\n"
-  let tmp = hostFilePath & ".repro.tmp"
-  writeFile(extendedPath(tmp), rewritten)
-  if fileExists(extendedPath(hostFilePath)):
-    try: removeFile(extendedPath(hostFilePath)) except OSError: discard
-  moveFile(extendedPath(tmp), extendedPath(hostFilePath))
+  ## (creating the file if missing), through the one managed-file writer
+  ## the apply pipeline uses (`repro_home_resources/drivers/managed_block`
+  ## -> `repro_core/managed_block`): same sentinels, same locator, same
+  ## atomic temp + fsync + rename.
+  discard writeHomeManagedBlock(hostFilePath, blockId,
+    stringFromBytes(blockBytes))
 
 # ---- Launcher restoration ----
 

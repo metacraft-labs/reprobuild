@@ -7093,6 +7093,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_home_resources_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_home_rollback/tests/t_home_managed_blocks_share_the_one_writer.nim",
+    binary: "build/test-bin/t_home_managed_blocks_share_the_one_writer",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_home_rollback_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_home_rollback/tests/t_resource_drift.nim",
     binary: "build/test-bin/t_resource_drift",
     defines: @[],

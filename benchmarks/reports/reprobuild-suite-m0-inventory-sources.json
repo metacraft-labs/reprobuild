@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2945,
+    "nimTestBinaries": 2946,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 786,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2993
+    "testEntries": 2994
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1647,7 +1647,7 @@
       "integration": 1633,
       "platform/destructive": 193,
       "pure unit": 786,
-      "unclassified": 357
+      "unclassified": 358
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1861,9 +1861,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2945,
+    "nimTestBinaryCount": 2946,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2993
+    "testEntryCount": 2994
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19612,6 +19612,28 @@
       "source": "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
       "sourceSuiteCount": 13,
       "staticCaseCount": 176,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_home_managed_blocks_share_the_one_writer",
+      "class": "unclassified",
+      "classificationReason": "creates threads",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_home_apply",
+        "repro_home_generations",
+        "repro_home_resources",
+        "repro_home_rollback"
+      ],
+      "owner": "libs/repro_home_rollback",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_rollback/tests/t_home_managed_blocks_share_the_one_writer.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

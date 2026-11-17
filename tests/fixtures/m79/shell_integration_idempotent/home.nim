@@ -24,7 +24,7 @@ profile "m79-shell-integration-idempotent":
     `m79-fixture`
 
   resources:
-    # A `shell.integration` resource: written as a repro-managed
+    # A `shell.integration` resource: written as a repro:home:
     # block into a shell startup file. The content deliberately does
     # NOT end with a newline so the writer's trailing-`\n`
     # normalization is exercised — this is the exact mismatch M79
