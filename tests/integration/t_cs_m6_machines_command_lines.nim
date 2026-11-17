@@ -145,7 +145,8 @@ suite "CS-M6: the machine command lines":
     check "--json" in s.run(["infra", "plan", "--help"]).output
     check "compile-profile" in s.run(["deploy-agent", "--help"]).output
     check "--allowed-signers" in s.run(["deploy-agent", "--help"]).output
-    let primary = s.run(["--help"]).output
+    # `deploy-agent` is listed only by the page with every command.
+    let primary = s.run(["--help-all"]).output
     check "deploy-agent" in primary
     check "__build-bundle" notin primary
     check "__remote-activate" notin primary
