@@ -20089,6 +20089,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker isMainModule"),
   TestSpec(
+    source: "tests/integration/t_action_index_stale_chain_recreation_converges.nim",
+    binary: "build/test-bin/t_action_index_stale_chain_recreation_converges",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for point in [scpJudgedStale, scpOpened]:"),
+  TestSpec(
     source: "tests/integration/t_activity_mock_tier_allowed_on_plain_layout.nim",
     binary: "build/test-bin/t_activity_mock_tier_allowed_on_plain_layout",
     defines: @[],

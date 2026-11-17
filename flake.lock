@@ -2557,11 +2557,11 @@
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794520036,
-        "narHash": "sha256-KEV/+e7aWmRWmOoPI4oEU8KolyYSFtr+gwaH1iobEqQ=",
+        "lastModified": 1794906340,
+        "narHash": "sha256-C8HFeQajZ6BxlSuxcXbJeRPJqQDJtUphDaxOLS9cW28=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "04b44dbe545e9d96a16810c62538a179655b5f13",
+        "rev": "c01d6740a9e9543b635d8cea554053ef2c59f421",
         "type": "github"
       },
       "original": {
