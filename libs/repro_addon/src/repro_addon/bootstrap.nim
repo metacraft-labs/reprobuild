@@ -230,6 +230,7 @@ proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
   # token is cleared only once the identity is known (A11 round 21), so
   # "nothing was written" stays true.
   var noBirthTime = false
+  var leftBehind = ""     # why the directory bootstrap made is still there
   try:
     when not mutated("unbound-when-no-birth-time"):
       noBirthTime = birthTimeProbe(logDir).len == 0
@@ -243,10 +244,9 @@ proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
         when not mutated("unbound-when-no-birth-time"):
           noBirthTime = result.len == 0
         if noBirthTime and madeHere and not mutated("token-cleared-before-identity"):
-          if posix.rmdir(logDir.cstring) != 0:
-            raiseOSError(osLastError(), "remove the directory bootstrap " &
-              "made, " & logDir & ", whose file system reports no birth " &
-              "time; remove it by hand")
+          try: removeEmptyDirChecked(logDir)
+          except OSError as e:
+            leftBehind = e.msg
       if not noBirthTime and not mutated("token-cleared-before-identity"):
         clearStateRemovalToken(logDir)
   except OSError as e:
@@ -255,6 +255,14 @@ proc prepareRecordsDir*(deploySignersPath, cachePublishersPath: string;
       "is not one this add-on made: inspect it, remove it (or the entry " &
       "named " & StateRemovalTokenName & " in it), and run bootstrap " &
       "again; nothing was written")
+  if noBirthTime and leftBehind.len > 0:
+    raise newException(AddonBootstrapError, "the file system holding " &
+      logDir & " reports no birth time (statx STATX_BTIME), so the add-on " &
+      "cannot record an identity for its uninstall records' directory. " &
+      "Bootstrap made " & logDir & " (empty) before it could tell, and " &
+      "could not remove it again (" & leftBehind & "); nothing else was " &
+      "written. Remove that empty directory, put /var/log on a file " &
+      "system that records birth times and run bootstrap again")
   if noBirthTime:
     raise newException(AddonBootstrapError, "the file system holding " &
       logDir & " reports no birth time (statx STATX_BTIME), so the add-on " &

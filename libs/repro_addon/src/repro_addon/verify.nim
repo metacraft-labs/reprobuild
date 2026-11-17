@@ -102,6 +102,18 @@ proc runAddonVerify*(stateDir = DefaultStateDir;
           "it (its identity is recorded in " & idFile & "); inspect " &
           "/var/log, then remove " & idFile & " to let the next use make " &
           "and record it again")
+      elif fileExists(ledgerCopyPath(stateDir)) and
+          not dirExists(parentDir(idFile)) and
+          not mutated("verify-absent-dir-without-identity-noted"):
+        # A11 round 22: the ledger copy is there and the identity's
+        # directory is not -- the record is gone, as the checked open
+        # refuses; absence then is drift too, never a note.
+        result.findings.add(logDir & " is absent, and the directory of " &
+          "its recorded identity (" & parentDir(idFile) & ") is gone " &
+          "while the ledger copy " & ledgerCopyPath(stateDir) & " is " &
+          "there; inspect /var/log and the add-on's state, then create " &
+          parentDir(idFile) & " (root's 0700) so the next use makes and " &
+          "records the directory again")
       else:
         result.notes.add(logDir & " is absent; the add-on makes it " &
           "root's 0700 at its first use and records its identity")

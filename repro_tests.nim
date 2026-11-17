@@ -26073,6 +26073,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_rqe_cg3_wrapper_is_transparent_fixture_crates.nim",
+    binary: "build/test-bin/t_rqe_cg3_wrapper_is_transparent_fixture_crates",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g12",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_rqe_m15_action_exports_its_lease.nim",
     binary: "build/test-bin/t_rqe_m15_action_exports_its_lease",
     defines: @[],
@@ -26279,7 +26290,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock.nim",
@@ -27126,7 +27137,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_mainline_reconcile.nim",

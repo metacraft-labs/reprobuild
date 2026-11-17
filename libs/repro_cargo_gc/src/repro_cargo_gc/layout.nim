@@ -14,7 +14,7 @@
 ## Layout reference:
 ## https://doc.rust-lang.org/cargo/reference/build-cache.html
 
-import std/[algorithm, json, os, sets, strutils, tables, times]
+import std/[algorithm, json, os, sequtils, sets, strutils, tables, times]
 import ./types
 
 const
@@ -104,9 +104,15 @@ proc readFingerprintRustc*(fingerprintUnitDir: string): string =
     for kind, path in walkDir(fingerprintUnitDir):
       if kind == pcFile and path.endsWith(".json"):
         let node = parseJson(readFile(path))
-        if node.kind == JObject and node.hasKey("rustc") and
-            node["rustc"].kind in {JInt}:
-          return $node["rustc"].getBiggestInt
+        if node.kind == JObject and node.hasKey("rustc"):
+          # The field is a u64 hash. One above 2^63 does not fit a JInt, and
+          # std/json then hands it back as a raw number (a JString that
+          # renders unquoted), so read it through `$` and accept digits only:
+          # on macOS the toolchain's value is such a number, and a
+          # JInt-only test silently dropped every fingerprint there.
+          let text = $node["rustc"]
+          if text.len > 0 and text.allIt(it in {'0' .. '9'}):
+            return text
   except CatchableError:
     discard
   ""
@@ -191,3 +197,70 @@ proc inodeIndexOfDeps*(profileAbsDir: string): Table[(int64, int64), string] =
       result[fileIdOf(path)] = hash
 
 proc fileIdOfPath*(path: string): tuple[device: int64, file: int64] = fileIdOf(path)
+
+proc unhashedName*(name: string): string =
+  ## The name cargo gives the uplifted copy of a `deps/` file: the unit hash
+  ## dropped (`libc1-<hash>.rlib` -> `libc1.rlib`, `app-<hash>` -> `app`).
+  ## Empty when `name` carries no unit hash.
+  let hash = embeddedUnitHash(name)
+  if hash.len == 0: return ""
+  let at = name.rfind("-" & hash)
+  name[0 ..< at] & name[at + 1 + hash.len .. ^1]
+
+proc sameContent*(a, b: string): bool =
+  ## True when both are regular files with byte-identical content, or both
+  ## are directories (a macOS `.dSYM` bundle) with the same entry names and
+  ## recursively identical content. This is how an uplifted artifact is tied
+  ## to its `deps/` original when the two are not hard links: cargo copies
+  ## instead of linking on macOS (the file ids differ), and any file system
+  ## that cannot link does the same. Sizes are compared first, so only a
+  ## candidate that already matches is read. A symlink is never "the same".
+  try:
+    if symlinkExists(a) or symlinkExists(b): return false
+    if dirExists(a) or dirExists(b):
+      if not (dirExists(a) and dirExists(b)): return false
+      var namesA, namesB: seq[string]
+      for _, p in walkDir(a): namesA.add p.extractFilename
+      for _, p in walkDir(b): namesB.add p.extractFilename
+      namesA.sort()
+      namesB.sort()
+      if namesA != namesB: return false
+      for n in namesA:
+        if not sameContent(a / n, b / n): return false
+      return true
+    if getFileSize(a) != getFileSize(b): return false
+    var fa, fb: File
+    if not open(fa, a): return false
+    defer: close(fa)
+    if not open(fb, b): return false
+    defer: close(fb)
+    var bufA, bufB: array[65536, byte]
+    while true:
+      let n = readBuffer(fa, addr bufA[0], bufA.len)
+      let m = readBuffer(fb, addr bufB[0], bufB.len)
+      if n != m: return false
+      if n == 0: return true
+      if cmpMem(addr bufA[0], addr bufB[0], n) != 0: return false
+  except OSError, IOError:
+    return false
+
+proc symlinkTargetName*(path: string): string =
+  ## The last component of what the symlink `path` points at, or "" when
+  ## `path` is not a symlink.
+  try:
+    if symlinkExists(path): expandSymlink(path).extractFilename else: ""
+  except OSError:
+    ""
+
+proc symlinkPointsTo*(path: string; candidates: HashSet[string]): bool =
+  ## True when `path` is a symlink whose destination, resolved lexically
+  ## against the link's own directory, is one of `candidates` (absolute,
+  ## normalised paths). The destination is not followed on disk: it may be
+  ## about to be deleted.
+  try:
+    if not symlinkExists(path): return false
+    let raw = expandSymlink(path)
+    let dest = if raw.isAbsolute: raw else: path.parentDir / raw
+    normalizedPath(dest) in candidates
+  except OSError:
+    false

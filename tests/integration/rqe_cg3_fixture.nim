@@ -19,11 +19,27 @@ proc writeCrate(dir, name, body: string) =
     "edition = \"2021\"\n")
   writeFile(dir / "src" / "lib.rs", body)
 
+proc scrubAmbientCargoEnv*() =
+  ## The cases are about what the delegated edge does with the project's own
+  ## `target/`, so they must not inherit a developer shell's cargo placement:
+  ## an exported `CARGO_TARGET_DIR` (some shells keep one cache per checkout
+  ## under the home directory) moves every product out of the project, and an
+  ## exported `RUSTFLAGS`, `RUSTC_WORKSPACE_WRAPPER` or default `--target`
+  ## changes what is compiled and which wrapper sees it. Found on macOS, where
+  ## the developer's shell exported all of them and `target/release/cg3_app`
+  ## was reported as `<cache>/<id>/release/cg3_app`. Process-wide on purpose:
+  ## each case file is its own process.
+  for name in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR",
+               "CARGO_BUILD_TARGET", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+               "RUSTC_WORKSPACE_WRAPPER"]:
+    delEnv(name)
+
 proc writeDelegatedCargoProject*(root: string; appSource = "") =
   ## A root package `cg3_app` with a build script (so the convention routes
   ## it to the delegated cargo edge) and three library crates it depends on:
   ## five units to compile, of which `cg3_app` is the only one nothing else
   ## depends on (a leaf).
+  scrubAmbientCargoEnv()
   createDir(root / "src")
   writeFile(root / "Cargo.toml",
     "[package]\nname = \"cg3_app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n" &
