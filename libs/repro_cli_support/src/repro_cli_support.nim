@@ -513,16 +513,6 @@ const LegacyVerbSynopses = [
     "repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]\n"),
   ("watch",
     "repro watch [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] [--max-cycles=N] [--debounce-ms=N] [--detach] [--attach=SESSION] [--stop=SESSION] [--hcr] [--hcr-mode=direct|shlib] [--hcr-debug=embedded|external|none] [--hcr-agent-socket=PATH --hcr-artifacts=PATH [--hcr-metadata=PATH]] [--hcr-target=NAME:SOCKET:ARTIFACTS[:METADATA] ...] [--restore-cached-outputs]\n"),
-  ("develop",
-    "repro develop --list [--json] [--at=REV] [membership selectors] [--workspace-root=PATH]\n" &
-      "repro develop --list-overrides\n" &
-      "repro develop --drop=DEPENDENCY[,DEPENDENCY...] [--workspace-root=PATH] [--project-root=PATH] [--json]\n" &
-      "repro develop --all|--direct|--indirect|--transitive-of=PKG [--project=LIST] [--tag=LIST] [--filter=GLOB] [--only=LIST] [--except=LIST] [--tier=LIST] [--at=REV] [--lock-store=KIND:LOCATION]... [--into=DIR] [--reset] [--strict] [--dry-run] [--json] [--workspace-root=PATH]\n" &
-      "repro develop <dependency> --into=PATH\n" &
-      "repro develop <target[#name]> --tool-provisioning=path|nix|tarball|scoop [--work-root=PATH] -- <command> [args...]\n" &
-      "repro develop --cmake <source-dir> --tool-provisioning=path|nix [--cmake-binary=PATH] [--work-root=PATH] -- <command> [args...]\n"),
-  ("flake",
-    "repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|<develop selectors>] [--flake=DIR] [--strip-suffix=LIST] [--workspace-root=PATH] [--json]\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
@@ -20529,6 +20519,11 @@ type
     workspaceRoot: string  ## M17: explicit --workspace-root override.
     json: bool             ## M17: emit JSON to stdout in addition to the report file.
     report: ReportSpec     ## Opt-in ``--write-report[=PATH]`` artifact.
+    reAnchor: bool         ## ``--re-anchor``: ``ensure --vcs`` may replace a
+                           ## managed body demanding a contract token this
+                           ## build does not generate (CLI/hooks.md
+                           ## §"Re-anchoring is explicit"). Never passed by a
+                           ## generated or shell-entry caller.
 
   NativeShellActivationRequest = object
     cwd: string
@@ -20905,7 +20900,14 @@ proc direnvManagedBlockContent(): string =
   result.add("    unset " & guard & "\n")
   result.add("    return 1\n")
   result.add("  fi\n")
-  result.add("  \"$repro_cmd\" hooks ensure --vcs \"$PWD\" >/dev/null 2>&1 || true\n")
+  # No `hooks ensure --vcs` here (CLI/hooks.md §"Direnv Integration",
+  # amended 2026-11-16). An earlier block ran it on every directory entry with
+  # its output discarded and its status swallowed, from whichever `repro` this
+  # shell resolved -- so the one command whose refusals report a hook-contract
+  # mismatch ran where nobody could read them. VCS hooks are installed and
+  # repaired by an explicit `repro hooks ensure --vcs`, by `repro health
+  # --fix`, and by the managed hooks' own self-heal. A block an older build
+  # wrote is replaced by this one on the next `hooks ensure --shell-direnv`.
   result.add("  local repro_status=0\n")
   result.add("  if [ -n \"${REPRO_DIRENV_STATS:-}\" ]; then\n")
   result.add("    eval \"$(\"$repro_cmd\" __repro-direnv-activate \"$PWD\" --dev-env-stats \"$REPRO_DIRENV_STATS\")\" || repro_status=$?\n")
@@ -22161,6 +22163,19 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
         PreCommitDisplacedArg & "=$RUNNING_AS_LEGACY) || exit $?; fi\n")
   result.add("exit 0\n")
 
+const
+  ManagedHookInstallingBuildAssignment* = "REPRO_INSTALLING_BUILD="
+    ## The column-zero assignment a generated managed-hook body bakes the
+    ## installing build's path into (CLI/hooks.md §"Per-install resolution").
+    ## ``managedHookInstallingBuild`` reads it back by prefix match on a whole
+    ## line, which finds the baked value and never the indented lines that
+    ## merely READ the variable. Bodies written before 2026-11-16 carry no such
+    ## line; they resolve ``$REPROBUILD_REPRO`` then ``PATH``, and every reader
+    ## treats a missing line as "no installing build" for exactly that reason.
+  ManagedHookInstallingBuildSource* = "installing-build"
+    ## ``REPRO_CMD_SOURCE`` (and the refusal record's ``resolvedFrom``) when the
+    ## body resolved the build that installed it.
+
 const ManagedHookRefusalRecordSchemaId* =
   "reprobuild.managed-hook.contract-refusal.v1"
   ## Schema of the record a managed hook files when it refuses to dispatch
@@ -22232,6 +22247,21 @@ type
       ## Absolute path of the ``repro`` that GENERATED the body, baked in so
       ## the refusal can hand the operator a command instead of the shape of
       ## one.
+    installingBuild: string
+      ## The interpreter the body resolves BEFORE ``PATH`` (CLI/hooks.md
+      ## §"Per-install resolution"): the installing build's path, or "" when
+      ## the image that generated the body is not the ``repro`` CLI.
+      ##
+      ## Usually the same path as ``authorBin``, and kept separate for the one
+      ## case where it must not be: an embedded caller -- a test binary that
+      ## links the engine and runs ``hooks ensure`` in process. Its image does
+      ## not implement ``hooks protocol`` / ``hooks dispatch``; a hook that
+      ## resolved it would re-execute the test binary, which ignores the verb
+      ## and runs its own suite again (the unbounded self-exec chain
+      ## ``spawnableWithInternalVerb`` exists to prevent). The escape hatch
+      ## only ECHOES ``authorBin``, so it may name such an image; resolution
+      ## EXECUTES ``installingBuild``, so it may not. See
+      ## ``thisBuildInstallingPath``.
     refusalRecordDir: string
       ## PG-15 — the directory a contract refusal may file its record in, or
       ## "" when it may file one NOWHERE.
@@ -22296,6 +22326,17 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     quoteShellPosix(site.refusalRecordDir) & "\n")
   result.add("REPRO_REFUSAL_RECORD_NAME=" &
     quoteShellPosix(managedHookRefusalRecordName(hookName)) & "\n")
+  # Per-install resolution (CLI/hooks.md §"Per-install resolution"): the
+  # build that installed this body, tried before PATH, so which build services
+  # a hook is a property of the install rather than of whichever shell runs
+  # `git`. Same pattern as pre-commit's generated shim and its baked
+  # `INSTALL_PYTHON`. Written at column zero as a plain assignment so
+  # `managedHookInstallingBuild` can read it back out of an installed body, and
+  # always written -- as '' when there is no installing build -- so the line
+  # is part of every body's shape and the contract digest (rendered with an
+  # empty site) is the same for every install of one build.
+  result.add(ManagedHookInstallingBuildAssignment &
+    quoteShellPosix(site.installingBuild) & "\n")
   result.add("REPROBUILD_CAPTURED_INTERNAL_CONTEXT=${" &
     InternalHookContextEnv & ":-}\n")
   result.add("unset " & InternalHookContextEnv & "\n")
@@ -22325,7 +22366,11 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # The hook records HOW it resolved its interpreter, not just which one. The
   # PATH fallback is the silent step that let an outdated install speak for
   # hooks a newer build generated, so every diagnostic below names both the
-  # binary and the source it came from.
+  # binary and the source it came from. The order is CLI/hooks.md
+  # §"Per-install resolution": an explicit `$REPROBUILD_REPRO` (set but not
+  # executable fails, it never falls through), then the build that installed
+  # this body while it is still executable, then PATH. Every in-process mirror
+  # (`resolveManagedHookInterpreter`) resolves the same three steps.
   result.add("REPRO_CMD=\n")
   result.add("REPRO_CMD_SOURCE=\n")
   # Declared up front, not where they are first assigned: the body runs under
@@ -22342,6 +22387,12 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("      return 0\n")
   result.add("    fi\n")
   result.add("    return 1\n")
+  result.add("  fi\n")
+  result.add("  if [ -n \"$REPRO_INSTALLING_BUILD\" ] && " &
+    "[ -x \"$REPRO_INSTALLING_BUILD\" ]; then\n")
+  result.add("    REPRO_CMD=$REPRO_INSTALLING_BUILD\n")
+  result.add("    REPRO_CMD_SOURCE=" & ManagedHookInstallingBuildSource & "\n")
+  result.add("    return 0\n")
   result.add("  fi\n")
   result.add("  if command -v repro >/dev/null 2>&1; then\n")
   result.add("    REPRO_CMD=$(command -v repro)\n")
@@ -22571,7 +22622,7 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("    echo \"repro hooks:      re-anchor this repository to it " &
     "and retry:\" >&2\n")
   result.add("    echo \"repro hooks:      $REPRO_CMD hooks ensure --vcs " &
-    "$REPO_ROOT\" >&2\n")
+    "--re-anchor $REPO_ROOT\" >&2\n")
   result.add("  else\n")
   result.add("    echo \"repro hooks: That build predates this handshake, " &
     "so it cannot service this\" >&2\n")
@@ -23061,6 +23112,24 @@ proc managedHookRefusalRecordDirAdvertised*(body: string): string =
         line[ManagedHookRefusalDirAssignment.len .. ^1])
   ""
 
+proc managedHookInstallingBuild*(body: string): string =
+  ## The installing build an installed managed hook resolves before ``PATH``
+  ## (CLI/hooks.md §"Per-install resolution"), or "" when it names none.
+  ##
+  ## "" covers every generation written before 2026-11-16 (no
+  ## ``REPRO_INSTALLING_BUILD=`` line at all: such a body resolves
+  ## ``$REPROBUILD_REPRO`` then ``PATH``) and a body whose generator was not the
+  ## ``repro`` CLI (the line is there and empty). Both resolve the same way, so
+  ## a caller mirroring the body's resolution does not need to tell them apart.
+  ## Kept distinct from ``managedHookAuthorBin``: that one reads the escape
+  ## hatch, which every generation since 2026-08-27 carries, and names the
+  ## writer for a diagnostic; this one names what the body will EXECUTE.
+  for line in body.splitLines():
+    if line.startsWith(ManagedHookInstallingBuildAssignment):
+      return unquoteShellPosixWord(
+        line[ManagedHookInstallingBuildAssignment.len .. ^1])
+  ""
+
 proc managedHookBodyContractDemand*(body: string): string =
   ## The contract token an installed managed-hook BODY demands, or ``""`` when
   ## it demands none.
@@ -23350,9 +23419,9 @@ proc probeHookContractServicing*(reproPath, contract: string):
   ## This runs a binary this process did not build — deliberately, and it is
   ## the only way the question has an answer: the installed bodies will execute
   ## that binary, not this one. A build that is the SAME FILE as this process
-  ## is answered in process instead, which keeps the ambient command the
-  ## generated ``.envrc`` runs on every directory entry from paying for a
-  ## subprocess it cannot benefit from.
+  ## is answered in process instead, which keeps an ambient ``hooks ensure``
+  ## (a dev shell's entry hook) from paying for a subprocess it cannot benefit
+  ## from.
   if reproPath.len == 0:
     return (hcsUnresolved, -1)
   var isSelf = false
@@ -23392,11 +23461,35 @@ proc executableFile(path: string): bool =
   else:
     result = true
 
-proc resolveManagedHookInterpreter*(repoRoot: string):
+proc thisBuildInstallingPath*(): string =
+  ## The installing-build path THIS build bakes into the bodies it writes
+  ## (``ManagedHookSite.installingBuild``), and therefore step 2 of the
+  ## resolution for any body it is about to write.
+  ##
+  ## ``publicCliImagePath()`` -- the path that re-enters this engine, the same
+  ## one the escape hatch names -- but only when that image IS the ``repro``
+  ## CLI. An embedded caller (a test binary linking the engine) gets "": a hook
+  ## that executed it would re-run the test binary with a verb it does not
+  ## implement (see ``ManagedHookSite.installingBuild``).
+  let path =
+    try: publicCliImagePath()
+    except CatchableError: ""
+  if path.len == 0 or not spawnableWithInternalVerb(path):
+    return ""
+  path
+
+proc resolveManagedHookInterpreter*(repoRoot, installingBuild: string):
     tuple[path, source: string] =
   ## ``find_repro_cmd`` from the generated body, evaluated in this process:
-  ## ``$REPROBUILD_REPRO`` if it is executable, else the first ``repro`` on
-  ## PATH, else nothing.
+  ## ``$REPROBUILD_REPRO`` if it is set (not executable: nothing, never a
+  ## fall-through), else ``installingBuild`` if it is executable, else the
+  ## first ``repro`` on PATH, else nothing.
+  ##
+  ## ``installingBuild`` is step 2 of CLI/hooks.md §"Per-install resolution"
+  ## and is taken from the body the caller is asking about: for an installed
+  ## body, ``managedHookInstallingBuild(body)`` ("" for every generation that
+  ## predates the step, which then resolves exactly as it always did); for a
+  ## body this build is about to write, ``thisBuildInstallingPath()``.
   ##
   ## It must stay byte-for-byte equivalent to the shell version. The silent
   ## PATH fallback is the whole mechanism by which governance became
@@ -23414,6 +23507,8 @@ proc resolveManagedHookInterpreter*(repoRoot: string):
       return (candidate, "REPROBUILD_REPRO")
     return ("", "REPROBUILD_REPRO (set to '" & configured &
       "', which is not executable)")
+  if installingBuild.len > 0 and executableFile(installingBuild):
+    return (installingBuild, ManagedHookInstallingBuildSource)
   # AMBIENT ON PURPOSE: ``command -v repro`` is what the hook does.
   let onPath = uncontrolledFindExe("repro")
   if onPath.len > 0:
@@ -23439,9 +23534,9 @@ type
     ## guard's question ("does the build that will RUN these hooks service the
     ## body I am about to write?") has at most a handful of distinct answers on
     ## one machine. Resolving the interpreter once and caching per contract
-    ## token keeps the generated ``.envrc``'s ambient
-    ## ``hooks ensure --vcs "$PWD"`` from paying for 860 subprocesses — and
-    ## keeps the guard from being the reason somebody turns it off.
+    ## token keeps an ambient ``hooks ensure --vcs`` (a dev shell's entry
+    ## hook) from paying for 860 subprocesses — and keeps the guard from being
+    ## the reason somebody turns it off.
     ##
     ## A guard is explicitly NOT long-lived: the resolution it caches is a
     ## property of the process environment, which is the thing that differs
@@ -23469,7 +23564,9 @@ proc interpreter*(guard: HookWriteGuard; repoRoot: string):
   ## The ``repro`` a hook installed into ``repoRoot`` would resolve, resolved
   ## at most once per guard.
   if not guard.resolved:
-    let r = resolveManagedHookInterpreter(repoRoot)
+    # The guard is asked about the bodies THIS build writes, so step 2 is this
+    # build (CLI/hooks.md §"Per-install resolution").
+    let r = resolveManagedHookInterpreter(repoRoot, thisBuildInstallingPath())
     guard.interpreterPath = r.path
     guard.interpreterSource = r.source
     guard.resolved = true
@@ -23517,14 +23614,17 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
                            guard: HookWriteGuard = nil): string =
   ## The canonical managed-hook body for ``repoRoot``, carrying the contract
   ## token of THIS build. Drift detection compares the on-disk file to this
-  ## exact string, so a hook installed by a build with a different body is
-  ## rewritten by the next ``repro hooks ensure --vcs``.
+  ## exact string. A hook whose body demands this same token but differs
+  ## elsewhere (its site) is refreshed by the next ``repro hooks ensure
+  ## --vcs``; one demanding a token this build does NOT generate is replaced
+  ## only under ``--re-anchor`` (CLI/hooks.md §"Re-anchoring is explicit").
   ##
-  ## This build's own path goes in beside the token so the refusal can name a
-  ## runnable escape hatch. It is part of the canonical content, so a hook
-  ## written by a binary at a different path counts as drift and is
-  ## re-anchored on the next ``ensure`` — which is what keeps the escape hatch
-  ## pointing at a binary that still exists.
+  ## This build's own path goes in beside the token, twice: as the escape
+  ## hatch the refusal can print, and as the installing build the body
+  ## resolves before ``PATH`` (§"Per-install resolution"). Both are part of
+  ## the canonical content, so a hook written by the same build at a
+  ## different path counts as drift and is refreshed on the next ``ensure``
+  ## -- which is what keeps both pointing at a binary that still exists.
   ##
   ## ``repoRoot`` is what makes the refusal-record destination (PG-15) a
   ## property of the INSTALL rather than of the generator: the same build
@@ -23534,6 +23634,7 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
   vcsManagedHookBody(hookName, managedHookContract(hookName),
     ManagedHookSite(
       authorBin: publicCliImagePath(),
+      installingBuild: thisBuildInstallingPath(),
       refusalRecordDir: guard.refusalRecordDir(repoRoot)))
 
 type
@@ -23561,6 +23662,22 @@ type
       ## fixing it". A build that cannot know it is doing this (it predates the
       ## flag) cannot report it; this build can, and that is the asymmetry
       ## PG-14 deliverable 2 names.
+    vheoRefusedForeignContract
+      ## The managed body demands a contract token this build does not
+      ## generate, and ``--re-anchor`` was not given, so the hook -- body AND
+      ## dispatcher -- was left byte-for-byte as it was (CLI/hooks.md
+      ## §"Re-anchoring is explicit").
+      ##
+      ## A body demanding a foreign token was written by a DIFFERENT build, and
+      ## a different build is not known to be an older one. Before this
+      ## outcome existed ``ensure`` rewrote such a body silently whenever the
+      ## interpreter it resolved was itself (the usual ambient case), so the
+      ## shell entry of a stale dev shell re-authored current hooks with an
+      ## older body and deleted the refusal that would have reported it --
+      ## reprobuild-pm issue
+      ## 2026-11-12-ambient-hooks-ensure-is-declared-safe-even-though-it-is-the-documented-self-concealing.md.
+      ## Not a success: the command exits non-zero once it has visited every
+      ## other hook and repository.
     vheoReclaimedShadowed
       ## The dispatcher had been overwritten at the canonical path by a
       ## foreign installer re-running over an ALREADY-chained copy of
@@ -23710,10 +23827,11 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
   ##
   ## Everything about its shape is a consequence of §1.6b: it names BOTH builds
   ## (writer and runner) by PATH and STORE PATH, says how each was resolved,
-  ## and never offers ``hooks ensure`` as the remedy — that is the command the
-  ## hook body's own text warns against, the command running ambiently from the
-  ## generated ``.envrc`` on every directory entry, and the command whose
-  ## effect is to delete the diagnostic rather than the defect.
+  ## and leads with reconciling what supplies ``repro``. The re-anchoring it
+  ## offers last is ``--re-anchor`` from one binary pointed at by both, never a
+  ## plain ``hooks ensure``: since 2026-11-16 a plain one refuses a
+  ## foreign-contract body instead (``vheoRefusedForeignContract``), so this
+  ## refusal is only reachable under ``--re-anchor``.
   # `publicCliImagePath`, not `getAppFilename()`: the identity runs
   # `<path> --version`, and under the portable Linux launcher the raw image is
   # the glibc loader, which would answer with ITS version.
@@ -23747,7 +23865,47 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
     "  To install from the build that will run them, point both at one " &
       "binary:\n" &
     "    REPROBUILD_REPRO=" & interpreterPath & " " & interpreterPath &
-      " hooks ensure --vcs " & repoRoot)
+      " hooks ensure --vcs --re-anchor " & repoRoot)
+
+proc foreignContractRefusalLines*(repoLabel, repoPath, hookName,
+    managedPath: string): seq[string] =
+  ## What ``ensure`` says about a hook it left untouched as
+  ## ``refused-foreign-contract`` (CLI/hooks.md §"Re-anchoring is explicit"):
+  ## the token the installed body demands, the token this build generates,
+  ## this build by path and store path, the build that wrote the installed
+  ## body, and the remedy -- reconcile what supplies ``repro`` first, and only
+  ## then re-anchor with this build.
+  ##
+  ## Read back from the file rather than threaded out of
+  ## ``ensureVcsHookDetailed``: the refusal promises the file was not touched,
+  ## so what is on disk now is what the refusal was about.
+  var body = ""
+  try:
+    body = readFile(extendedPath(managedPath))
+  except CatchableError:
+    discard
+  let installed = managedHookBodyContractDemand(body)
+  let mine = managedHookContract(hookName)
+  let self =
+    try: publicCliImagePath() except CatchableError: "repro"
+  let author = managedHookAuthorBin(body)
+  result.add("repro hooks: " & repoLabel & "/" & hookName &
+    ": refused-foreign-contract: left untouched (body and dispatcher). The " &
+    "installed body demands a contract this build does not generate, so a " &
+    "different build wrote it, and a different build is not known to be an " &
+    "older one.")
+  result.add("repro hooks:   installed body demands: " & installed)
+  result.add("repro hooks:   this build generates:   " & mine)
+  result.add("repro hooks:   this build:             " &
+    describeReproBuild(reproBuildIdentity(self)))
+  result.add("repro hooks:   installed body written by: " &
+    (if author.len > 0: describeReproBuild(reproBuildIdentity(author))
+     else: "<not recorded in the body>"))
+  result.add("repro hooks:   remedy: reconcile what supplies 'repro' first " &
+    "(direnv reload, or a new shell; then the reprobuild pin). Only if THIS " &
+    "build is the one this repository should run, re-anchor it:")
+  result.add("repro hooks:     " & self & " hooks ensure --vcs --re-anchor " &
+    repoPath)
 
 type
   CertificateGatePlan* = object
@@ -23775,7 +23933,8 @@ proc removeStaleManagedLocalHook(hooksDir, hookName: string): bool =
 
 proc ensureVcsHookDetailed(hooksDir, hookName: string;
                            guard: HookWriteGuard = nil;
-                           repoRoot = ""): VcsHookEnsureOutcome =
+                           repoRoot = "";
+                           reAnchor = false): VcsHookEnsureOutcome =
   ## Idempotent installer for one (hooksDir, hookName) pair. Returns a
   ## structured outcome so callers can surface per-repo per-hook status
   ## in the JSON report and the human-readable summary line.
@@ -23786,15 +23945,38 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   ## (``certificateGatePlan``).
   ##
   ## Outcome priority (the higher-impact change wins when several apply):
-  ##   reclaimed-shadowed  >  chained-user-hook  >  rewrote-contractless-body
-  ##   >  refreshed-drifted  >  installed  >  already-up-to-date
+  ##   refused-foreign-contract (nothing written)  >  reclaimed-shadowed  >
+  ##   chained-user-hook  >  rewrote-contractless-body  >  refreshed-drifted
+  ##   >  installed  >  already-up-to-date
+  ##
+  ## ``reAnchor`` is ``--re-anchor``: without it a managed body that demands a
+  ## contract token this build does not generate is never replaced
+  ## (``vheoRefusedForeignContract``); with it the replacement proceeds,
+  ## still subject to the writer-versus-runner guard (3) below.
   ##
   ## ``guard`` memoises the PG-14 contract probe across the repos of one
   ## ``ensure`` run; pass ``nil`` and one is created for this call alone.
-  createDir(extendedPath(hooksDir))
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
   let managed = managedHookPath(hooksDir, hookName)
+
+  # ---- Re-anchoring is explicit (CLI/hooks.md) ------------------------------
+  # Asked FIRST, before a single byte of this hook is touched -- the stale
+  # `.repro-local` cleanup, the chaining of a foreign dispatcher and the
+  # `.legacy` sanitising below all included -- because the outcome promises
+  # the hook was left exactly as it was. A body demanding a token this build
+  # does not generate was written by another build; whether that build is
+  # older or newer is not knowable from here, and the guard below (3) cannot
+  # see the dangerous case when the interpreter it resolves is this build.
+  # A missing body is still installed, and a body with NO contract line is
+  # still rewritten (step (4)): neither can hide a mismatch.
+  if not reAnchor and fileExists(extendedPath(managed)) and
+      isReprobuildVcsHook(managed, hookName):
+    let demanded = managedHookBodyContractDemand(
+      readFile(extendedPath(managed)))
+    if demanded.len > 0 and demanded != managedHookContract(hookName):
+      return vheoRefusedForeignContract
+  createDir(extendedPath(hooksDir))
 
   var chainedUser = false
   var reclaimedShadowed = false
@@ -23929,14 +24111,18 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
       "' and the body this build writes demands none. Writing it would " &
       "delete the only line that reports a mismatch.")
 
-  # (3) WRITER vs RUNNER. Two builds that both speak the handshake may still
-  #     generate different bodies, and ``ensure`` re-anchoring a repository to
-  #     the build the operator ran is the NORMAL upgrade — it must stay
-  #     allowed. What must not happen is the strictly destructive case: the
-  #     interpreter the hooks will actually resolve services what is installed
-  #     and does NOT service what we would write. Then the rewrite converts a
+  # (3) WRITER vs RUNNER. Reached only under ``--re-anchor`` (without it a
+  #     foreign-contract body returned ``vheoRefusedForeignContract`` above),
+  #     where replacing a body another build wrote is what the operator asked
+  #     for. What must still not happen is the strictly destructive case: the
+  #     interpreter the NEW body will resolve services what is installed and
+  #     does NOT service what we would write. Then the rewrite converts a
   #     working pairing into a broken one, and nothing afterwards reports it
-  #     (§1.6c measures `health` scoring exactly that state ``ok``).
+  #     (§1.6c measures `health` scoring exactly that state ``ok``). That
+  #     interpreter is ``$REPROBUILD_REPRO`` when set, else this build (the
+  #     installing build the new body bakes), so in practice this fires when
+  #     the operator points ``REPROBUILD_REPRO`` at a different build than the
+  #     one doing the writing.
   #
   #     Deliberately NOT a version comparison: on this host three 0.1.3 builds
   #     disagree about the flag. Deliberately NOT fired on an unresolved
@@ -24133,6 +24319,13 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
       of vheoReclaimedShadowed:
         result.add("repro hooks: repaired " & hookName & " in " & top &
           " (reclaimed-shadowed)")
+      of vheoRefusedForeignContract:
+        # The self-heal follows plain `ensure`'s rule: it repairs and
+        # installs, it never re-anchors. Said on every fire, because the
+        # mismatch it describes is live until somebody reconciles it.
+        for line in foreignContractRefusalLines(lastPathPart(top), top,
+            hookName, managedHookPath(hooksDir, hookName)):
+          result.add(line)
     except CatchableError as err:
       result.add("repro hooks: could NOT repair " & hookName & " in " & top &
         ": " & err.msg)
@@ -24142,7 +24335,8 @@ type
     ## One per (repo, hookName) pair in the M17 JSON report. ``outcome``
     ## is the ``vcsHookOutcomeTag`` of the ``vheo*`` outcome (``installed`` /
     ## ``already-up-to-date`` / ``chained-user-hook`` / ``refreshed-drifted``
-    ## / ``rewrote-contractless-body`` / ``reclaimed-shadowed``);
+    ## / ``rewrote-contractless-body`` / ``reclaimed-shadowed`` /
+    ## ``refused-foreign-contract``);
     ## ``hookPath`` and ``managedPath`` are the absolute paths the installer
     ## touched (or would touch).
     repo*: string
@@ -24151,6 +24345,13 @@ type
     outcome*: string
     hookPath*: string
     managedPath*: string
+    # Filled only for ``refused-foreign-contract`` (CLI/hooks.md
+    # §"Re-anchoring is explicit"), and emitted in the JSON only then.
+    installedContract*: string  ## the token the untouched body demands
+    buildContract*: string      ## the token this build generates
+    build*: string              ## this build, ``describeReproBuild``
+    installedAuthor*: string    ## the build the installed body names
+    remedy*: string             ## the re-anchoring command, offered last
 
   RepoHookWiring* = object
     ## What `ensureRepoVcsHooks` did to one repo. Deliberately not a
@@ -24162,6 +24363,9 @@ type
                                     ## not be made worktree-safe, which leaves
                                     ## the repo's worktrees ungated.
     skippedUnmaterialized*: bool    ## no git checkout at that path yet.
+    refusedForeignContract*: bool   ## at least one hook was left untouched
+                                    ## as ``refused-foreign-contract``; the
+                                    ## invocation must exit non-zero.
     entries*: seq[VcsHookEntry]
 
   HooksEnsureReport* = object
@@ -24183,6 +24387,11 @@ proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
   of vheoRefreshedDrifted: "refreshed-drifted"
   of vheoRewroteContractlessBody: "rewrote-contractless-body"
   of vheoReclaimedShadowed: "reclaimed-shadowed"
+  of vheoRefusedForeignContract: "refused-foreign-contract"
+
+const VcsHookRefusedForeignContractTag* = "refused-foreign-contract"
+  ## ``vcsHookOutcomeTag(vheoRefusedForeignContract)``, named for the callers
+  ## that test an entry's ``outcome`` string.
 
 proc toJsonNode*(report: HooksEnsureReport): JsonNode =
   result = newJObject()
@@ -24202,6 +24411,12 @@ proc toJsonNode*(report: HooksEnsureReport): JsonNode =
     obj["outcome"] = %e.outcome
     obj["hookPath"] = %e.hookPath
     obj["managedPath"] = %e.managedPath
+    if e.outcome == VcsHookRefusedForeignContractTag:
+      obj["installedContract"] = %e.installedContract
+      obj["buildContract"] = %e.buildContract
+      obj["build"] = %e.build
+      obj["installedAuthor"] = %e.installedAuthor
+      obj["remedy"] = %e.remedy
     entriesNode.add(obj)
   result["entries"] = entriesNode
   var summaryNode = newJObject()
@@ -24388,7 +24603,8 @@ proc enumerateParticipatingRepos(workspaceRoot: string):
       repos: newSeq[HookRepoTarget]())
 
 proc ensureRepoVcsHooks(repoName, repoPath: string;
-                        guard: HookWriteGuard): RepoHookWiring =
+                        guard: HookWriteGuard;
+                        reAnchor = false): RepoHookWiring =
   ## Install or repair the managed VCS hooks of ONE materialized repo.
   ##
   ## Extracted from `ensureWorkspaceHooks` so that the sweep and every other
@@ -24407,6 +24623,11 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
   ## Returns `ok = false` only when `core.hooksPath` could not be made
   ## worktree-safe. That is a real failure — the repo's worktrees are ungated
   ## — and must not be counted as a success by any caller.
+  ##
+  ## `reAnchor` is `--re-anchor`. Without it a hook whose body demands a
+  ## foreign contract is left untouched, reported on stderr and in its entry,
+  ## and `refusedForeignContract` is set; the remaining hooks are still
+  ## visited.
   result.ok = true
   if gitTopLevel(repoPath).len == 0:
     # Not materialized yet: skipped rather than failed, which is what lets
@@ -24439,7 +24660,8 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
       # line per rule (stderr, so `--json` keeps stdout one document).
       for line in certificateGatePlan(repoPath).lines:
         stderr.writeLine("repro hooks: " & repoName & ": " & line)
-    let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, repoPath)
+    let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, repoPath,
+      reAnchor)
     let tag = vcsHookOutcomeTag(outcome)
     if outcome == vheoRewroteContractlessBody:
       # Deliverable 2's distinct state, said out loud and not only counted.
@@ -24451,23 +24673,47 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
         "the handshake wrote it. Rewritten with a contract-bearing body; " &
         "reconcile what supplies 'repro' (direnv reload, then the pin) or " &
         "it will be stripped again.")
-    result.entries.add(VcsHookEntry(
+    var entry = VcsHookEntry(
       repo: repoName,
       repoPath: repoPath,
       hook: hookName,
       outcome: tag,
       hookPath: hookPath(hooksDir, hookName),
-      managedPath: managedHookPath(hooksDir, hookName)))
+      managedPath: managedHookPath(hooksDir, hookName))
+    if outcome == vheoRefusedForeignContract:
+      # Said out loud (stderr, so `--json` keeps stdout one document) AND
+      # carried in the entry, because the JSON report is what a script reads.
+      result.refusedForeignContract = true
+      for line in foreignContractRefusalLines(repoName, repoPath, hookName,
+          entry.managedPath):
+        stderr.writeLine(line)
+      var body = ""
+      try:
+        body = readFile(extendedPath(entry.managedPath))
+      except CatchableError:
+        discard
+      let self =
+        try: publicCliImagePath() except CatchableError: "repro"
+      entry.installedContract = managedHookBodyContractDemand(body)
+      entry.buildContract = managedHookContract(hookName)
+      entry.build = describeReproBuild(reproBuildIdentity(self))
+      entry.installedAuthor = managedHookAuthorBin(body)
+      entry.remedy = "reconcile what supplies 'repro' first (direnv " &
+        "reload, then the reprobuild pin); only then: " & self &
+        " hooks ensure --vcs --re-anchor " & repoPath
+    result.entries.add(entry)
 
-proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
+proc ensureWorkspaceHooks(workspaceRoot: string;
+                          reAnchor = false): HooksEnsureReport =
   ## M17 workspace-aware ``ensure`` driver. Walks every participating
   ## repo, installs the four canonical VCS hooks per repo, and returns
   ## a structured report. Exit code follows: 0 when every entry is
   ## ``installed`` / ``already-up-to-date`` / ``refreshed-drifted`` /
   ## ``chained-user-hook`` / ``rewrote-contractless-body`` /
-  ## ``reclaimed-shadowed`` (all "success" outcomes — no failure
-  ## classification exists for ensure on M17 since the installer either
-  ## writes the bytes or raises).
+  ## ``reclaimed-shadowed``; 1 when any entry is
+  ## ``refused-foreign-contract`` (the one classified non-success outcome:
+  ## nothing was written, and the sweep still visited every other repo) or a
+  ## repo's ``core.hooksPath`` could not be made worktree-safe.
   result.workspaceRoot = workspaceRoot
   let enumerated = enumerateParticipatingRepos(workspaceRoot)
   result.mode = enumerated.mode
@@ -24480,9 +24726,9 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   # it.
   let guard = newHookWriteGuard()
   for repo in enumerated.repos:
-    let wiring = ensureRepoVcsHooks(repo.name, repo.repoPath, guard)
+    let wiring = ensureRepoVcsHooks(repo.name, repo.repoPath, guard, reAnchor)
     if wiring.skippedUnmaterialized: continue
-    if not wiring.ok:
+    if not wiring.ok or wiring.refusedForeignContract:
       result.exitCode = 1
     for entry in wiring.entries:
       result.entries.add(entry)
@@ -24536,11 +24782,15 @@ proc resolveHooksWorkspaceRoot(parsed: ParsedHooksCommand): string =
     else: getCurrentDir()
   result = os.normalizedPath(absolutePath(raw))
 
-proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
+proc runVcsHooksCommand(action: HookActionKind;
+                        parsed: ParsedHooksCommand): int =
   ## Single-repo legacy path for ``reinstall`` / ``uninstall``. ``ensure``
   ## now runs through the workspace-aware ``ensureWorkspaceHooks``
   ## driver below; this proc handles the single-repo subset the older
   ## actions still target.
+  ##
+  ## Returns the exit status: 1 when ``ensure`` left a hook untouched as
+  ## ``refused-foreign-contract`` (after visiting every other hook), else 0.
   let targetPath =
     if parsed.targetPath.len > 0: parsed.targetPath
     else: resolveHooksWorkspaceRoot(parsed)
@@ -24569,6 +24819,7 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
     of hakUninstall: "uninstall"
   var changed = false
   var contractless: seq[string]
+  var refused: seq[string]
   if action == hakReinstall:
     for hookName in VcsHookNames:
       changed = uninstallVcsHook(hooksDir, hookName,
@@ -24583,8 +24834,18 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
         # stderr: the stdout line below is `.envrc`'s activation signal.
         for line in certificateGatePlan(resolveHooksTarget(targetPath)).lines:
           stderr.writeLine("repro hooks: " & line)
+      # `reinstall` removed every managed body above, so `--re-anchor` makes
+      # no difference to it; for `ensure` it is the operator's flag.
       let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard,
-        resolveHooksTarget(targetPath))
+        resolveHooksTarget(targetPath), parsed.reAnchor)
+      if outcome == vheoRefusedForeignContract:
+        refused.add(hookName)
+        for line in foreignContractRefusalLines(
+            lastPathPart(resolveHooksTarget(targetPath)),
+            resolveHooksTarget(targetPath), hookName,
+            managedHookPath(hooksDir, hookName)):
+          stderr.writeLine(line)
+        continue
       if outcome != vheoAlreadyUpToDate:
         changed = true
       if outcome == vheoRewroteContractlessBody:
@@ -24595,10 +24856,10 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
         preserveCanonicalUser = preserveCanonicalUser) or changed
   # PG-14 deliverable 2 — a contract-less body is NOT "already current" and is
   # not merely "updated": it says a build that predates the handshake has been
-  # writing into this hooks directory, and that it will do so again from the
-  # ambient `hooks ensure` the generated `.envrc` runs on every directory
-  # entry. So the single-repo path names it rather than folding it into the
-  # one-line status the two existing words carry.
+  # writing into this hooks directory, and that it will do so again the next
+  # time that build runs `hooks ensure` here. So the single-repo path names it
+  # rather than folding it into the one-line status the two existing words
+  # carry.
   if contractless.len > 0:
     stderr.writeLine("repro hooks: " & contractless.join(", ") &
       " had NO contract line at " & hooksDir &
@@ -24608,6 +24869,14 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   let status = if changed: "updated" else: "already current"
   echo "repro hooks: VCS hooks " & actionName & " " & status & " at " &
     hooksDir
+  if refused.len > 0:
+    # Not folded into the status word above: the other hooks were handled, and
+    # these were deliberately NOT, which is a failure of this invocation.
+    echo "repro hooks: VCS hooks " & actionName & " left " &
+      refused.join(", ") & " untouched (" & VcsHookRefusedForeignContractTag &
+      ") at " & hooksDir
+    return 1
+  0
 
 proc untouchedManifestRepos*(root: string): seq[string] =
   ## Names of the repos a workspace-shaped checkout declares but a
@@ -24657,7 +24926,7 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
     var single = parsed
     if single.targetPath.len == 0:
       single.targetPath = workspaceRoot
-    runVcsHooksCommand(hakEnsure, single)
+    let singleCode = runVcsHooksCommand(hakEnsure, single)
     # Say what was NOT done. The line above reads as success for the root repo
     # alone; for a workspace whose project set was never recorded that hides
     # that every participating repo kept its (usually absent) hooks and so
@@ -24672,8 +24941,8 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
         untouched.join(", ") & ". If this is a workspace, record its " &
         "project set ('repro ws enable <project>') and run " &
         "'repro hooks ensure --vcs' again.")
-    return 0
-  var report = ensureWorkspaceHooks(workspaceRoot)
+    return singleCode
+  var report = ensureWorkspaceHooks(workspaceRoot, parsed.reAnchor)
   writeHooksEnsureReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "hooks"))
   stageFailureReport(parsed.report, report.workspaceRoot, "hooks",
@@ -24710,6 +24979,7 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   if c.recordStore:
     result.recordStore = true
     result.vcs = true
+  result.reAnchor = c.reAnchor
   if c.shellAutocomplete:
     raise newException(ValueError,
       "repro hooks --shell-autocomplete is not implemented yet")
@@ -24729,6 +24999,12 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
       result.nativeShells.len == 0:
     result.shellDirenv = true
     result.vcs = true
+  if result.reAnchor and (result.action != hakEnsure or not result.vcs):
+    # Refused rather than ignored: a flag that silently did nothing would let
+    # an operator believe a repository had been re-anchored.
+    raise newException(ValueError,
+      "--re-anchor applies only to 'repro hooks ensure --vcs' (reinstall " &
+      "already rewrites every managed hook of one repository)")
 
 # Forward declaration: M18 wires ``pre-push`` dispatch through the
 # ``repro check --mode=pre-push`` gate; the implementation lives further
@@ -25208,14 +25484,18 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
     if parsed.vcs:
-      runVcsHooksCommand(parsed.action, parsed)
+      let code = runVcsHooksCommand(parsed.action, parsed)
+      if code != 0:
+        return code
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell, reinstall = true)
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      runVcsHooksCommand(parsed.action, parsed)
+      let code = runVcsHooksCommand(parsed.action, parsed)
+      if code != 0:
+        return code
     for shell in parsed.nativeShells:
       uninstallNativeShellHook(shell)
   0
@@ -36752,43 +37032,109 @@ proc workspaceShellFirstRoot(explicit: string): string =
   let found = findWorkspaceRoot(here)
   if found.len > 0: found else: here
 
-proc parseDevelopArgs*(args: openArray[string]): WorkspaceDevelopArgs =
+type
+  DevelopFlag = enum
+    ## The flags of `repro develop`. The command has four forms told apart
+    ## by the flags they are given (see ``runDevelopCommand``), and each
+    ## form refuses the flags that belong to another, naming them.
+    dfAll = "--all", dfDirect = "--direct", dfIndirect = "--indirect",
+    dfTransitiveOf = "--transitive-of", dfProject = "--project",
+    dfTag = "--tag", dfFilter = "--filter", dfOnly = "--only",
+    dfExcept = "--except", dfTier = "--tier", dfAt = "--at",
+    dfLockStore = "--lock-store", dfStrict = "--strict", dfList = "--list",
+    dfListOverrides = "--list-overrides", dfDrop = "--drop",
+    dfDryRun = "--dry-run", dfInto = "--into", dfReset = "--reset",
+    dfSource = "--source", dfWorkspaceRoot = "--workspace-root",
+    dfProjectRoot = "--project-root",
+    dfToolProvisioning = "--tool-provisioning", dfJson = "--json",
+    dfWriteReport = "--write-report", dfNoWriteReport = "--no-write-report",
+    dfCmake = "--cmake", dfCmakeBinary = "--cmake-binary",
+    dfWorkRoot = "--work-root"
+
+const
+  DevelopSetModeMarkers = {dfAll, dfDirect, dfIndirect, dfTransitiveOf,
+    dfOnly, dfProject, dfTag, dfList}
+    ## The flags that make a command line the set form.
+  DevelopSetFormFlags = {dfAll, dfDirect, dfIndirect, dfTransitiveOf,
+    dfProject, dfTag, dfFilter, dfOnly, dfExcept, dfTier, dfAt, dfLockStore,
+    dfStrict, dfList, dfDryRun, dfInto, dfReset, dfWorkspaceRoot,
+    dfToolProvisioning, dfJson}
+  DevelopOverlayMarkers = {dfSource, dfJson, dfWriteReport, dfWorkspaceRoot}
+    ## The flags that make a command line the workspace-overlay form
+    ## (`repro develop <pkg> --source=...`), when none of
+    ## ``DevelopOverlayExcluded`` is given.
+  DevelopOverlayExcluded = {dfList, dfListOverrides, dfInto, dfCmake,
+    dfCmakeBinary, dfWorkRoot, dfToolProvisioning}
+  DevelopOverlayFormFlags = {dfSource, dfWorkspaceRoot, dfToolProvisioning,
+    dfJson, dfWriteReport, dfNoWriteReport}
+  DevelopDropFormFlags = {dfDrop, dfWorkspaceRoot, dfProjectRoot, dfJson,
+    dfToolProvisioning}
+  DevelopTargetFormFlags = {dfCmake, dfListOverrides, dfInto,
+    dfToolProvisioning, dfCmakeBinary, dfWorkRoot}
+
+proc developFlagsGiven(c: ReproCommandLineDevelop): set[DevelopFlag] =
+  ## The flags ``c``'s command line gave.
+  if c.all: result.incl(dfAll)
+  if c.direct: result.incl(dfDirect)
+  if c.indirect: result.incl(dfIndirect)
+  if c.transitiveOf.len > 0: result.incl(dfTransitiveOf)
+  if c.project.len > 0: result.incl(dfProject)
+  if c.tag.len > 0: result.incl(dfTag)
+  if c.filter.len > 0: result.incl(dfFilter)
+  if c.only.len > 0: result.incl(dfOnly)
+  if c.exceptNames.len > 0: result.incl(dfExcept)
+  if c.tier.len > 0: result.incl(dfTier)
+  if c.at.len > 0: result.incl(dfAt)
+  if c.lockStore.len > 0: result.incl(dfLockStore)
+  if c.strict: result.incl(dfStrict)
+  if c.list: result.incl(dfList)
+  if c.listOverrides: result.incl(dfListOverrides)
+  if c.drop.len > 0: result.incl(dfDrop)
+  if c.dryRun: result.incl(dfDryRun)
+  if c.into.isSome: result.incl(dfInto)
+  if c.reset: result.incl(dfReset)
+  if c.source.isSome: result.incl(dfSource)
+  if c.workspaceRoot.isSome: result.incl(dfWorkspaceRoot)
+  if c.projectRoot.len > 0: result.incl(dfProjectRoot)
+  if c.toolProvisioning.len > 0: result.incl(dfToolProvisioning)
+  if c.json: result.incl(dfJson)
+  if c.writeReport.isSome: result.incl(dfWriteReport)
+  if c.noWriteReport: result.incl(dfNoWriteReport)
+  if c.cmake: result.incl(dfCmake)
+  if c.cmakeBinary.isSome: result.incl(dfCmakeBinary)
+  if c.workRoot.isSome: result.incl(dfWorkRoot)
+
+proc firstOutside(given, allowed: set[DevelopFlag]): string =
+  ## The first flag of ``given`` that ``allowed`` does not hold, or "".
+  for flag in DevelopFlag:
+    if flag in given and flag notin allowed:
+      return $flag
+  ""
+
+proc workspaceDevelopArgsOf(c: ReproCommandLineDevelop;
+                            given: set[DevelopFlag]): WorkspaceDevelopArgs =
   ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ## [--json] [--write-report[=PATH]] [--no-write-report]``, the
+  ## workspace-overlay form, from its configuration.
   ##
-  ## Mirrors the M9 ``parseWorkspaceInitArgs`` shape. The positional
-  ## ``<pkg>`` is required and must NOT be combined with ``--``,
-  ## ``--cmake``, ``--list``, or ``--into`` (those route to the existing
-  ## pre-M22 develop forms). ``--source`` and ``--workspace-root`` accept
-  ## both ``flag=value`` and ``flag value`` forms.
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--source" or arg.startsWith("--source="):
-      result.sourcePath = valueFromFlag(args, i, "--source")
-      result.explicitSource = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-      result.explicitWorkspaceRoot = true
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--json":
-      result.json = true
-    elif consumeReportFlag(arg, result.report):
-      discard
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported `repro develop` flag in M22 workspace-overlay form: " &
-          arg)
-    elif result.package.len == 0:
-      result.package = arg
-    else:
-      raise newException(ValueError,
-        "unexpected positional argument to `repro develop <pkg>`: " & arg)
-    inc i
+  ## The positional ``<pkg>`` is required; the target form's flags
+  ## (``--list``, ``--into``, ``--cmake``, ...) and a command after ``--``
+  ## never reach this form (``runDevelopCommand`` routes them to it).
+  let outside = firstOutside(given, DevelopOverlayFormFlags)
+  if outside.len > 0:
+    raise newException(ValueError,
+      "unsupported `repro develop` flag in M22 workspace-overlay form: " &
+        outside)
+  result.toolProvisioning =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
+  result.sourcePath = c.source.get("")
+  result.explicitSource = c.source.isSome
+  result.workspaceRoot = c.workspaceRoot.get("")
+  result.explicitWorkspaceRoot = c.workspaceRoot.isSome
+  result.json = c.json
+  result.report = reportSpecOf(c)
+  result.package = c.target
   if result.package.len == 0:
     raise newException(ValueError,
       "`repro develop <pkg>` requires a package name")
@@ -37081,15 +37427,13 @@ proc writeWorkspaceDevelopReport(report: WorkspaceDevelopReport;
   except CatchableError:
     discard
 
-proc runWorkspaceDevelopCommand*(args: openArray[string]): int =
-  ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+proc runWorkspaceDevelopCommand(parsed: WorkspaceDevelopArgs): int =
+  ## ``repro develop <pkg> [--source=PATH] [--workspace-root=PATH] [--json]``.
   ##
   ## M22 workspace-overlay dispatcher: clone the package (via M2 VCS
   ## actions) or just register the override (when ``--source`` points at
   ## a pre-existing checkout), then persist the entry in
   ## ``<workspaceRoot>/.repro/develop-overrides.toml`` via M20.
-  let parsed = parseDevelopArgs(args)
   let report = executeWorkspaceDevelop(parsed)
   writeWorkspaceDevelopReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "develop"))
@@ -38974,7 +39318,165 @@ proc parseAdhocLockStore(spec: string): DevelopAdhocLockStore =
       "--lock-store=" & raw & " names no location for the '" & result.kind &
       "' backend")
 
-proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
+type
+  DevelopSetSelection = object
+    ## The develop set a caller selects: its membership axis (which repos)
+    ## and its source axis (which lock records), with nothing about what
+    ## happens to the set.
+    ##
+    ## `repro develop`'s set form and the three `repro flake` verbs read it
+    ## from their command lines (``developSetSelectionOf``); the managed
+    ## hooks build it directly (``DevelopSetSelection(mode: dasmAll)``, the
+    ## whole lock set). ``developAllArgsOf`` turns it into the composer's
+    ## arguments, so every caller reaches the one composer
+    ## (``executeDevelopAll``) with a typed selection rather than with words
+    ## it assembled for a parser.
+    mode: DevelopAllSelectionMode
+    named: bool
+      ## Whether a mode or an exact-name selector (`--only`, `--project`,
+      ## `--tag`) named the set. A bulk mutation needs one; a query
+      ## (`--list`) does not.
+    transitiveOf: string
+    filter: string
+    only: seq[string]
+    exceptNames: seq[string]
+    projects: seq[string]
+    tags: seq[string]
+    tiers: seq[string]
+    lockStores: seq[DevelopAdhocLockStore]
+    at: string
+    strict: bool
+    refusal: string
+      ## Why the selection cannot be composed ("" when it can): two
+      ## different modes, a one-valued selector given two values, an unknown
+      ## tier, a malformed `--lock-store`, an empty `--at` or
+      ## `--transitive-of`. Carried rather than raised, so each caller
+      ## refuses at the point and in the form it always has (`repro develop`
+      ## exits 1 with it; the flake verbs report it as a refusal, exit 2).
+
+proc developSetSelectionOf[T](c: T): DevelopSetSelection =
+  ## The selection of a command line that declares the develop-set flags
+  ## (`repro develop`, `repro flake override-args|refresh-lock|
+  ## override-status`).
+  ##
+  ## Selectors compose in a FIXED ORDER, so the result never depends on the
+  ## order of the command line. The list-valued
+  ## selectors (`--only`, `--except`, `--project`, `--tag`, `--tier`)
+  ## accumulate and are order-free, but taking the last of several
+  ## one-valued ones would answer differently for two orders of one flag
+  ## set. So two different modes, or a one-valued selector (`--filter`,
+  ## `--at`) given two different values, is a refusal; the same value twice
+  ## is harmless and accepted, because a script assembling a command line
+  ## from several fragments legitimately does that.
+  result.mode = dasmAll
+  proc refuse(r: var DevelopSetSelection; why: string) =
+    if r.refusal.len == 0:
+      r.refusal = why
+  var modes: seq[string]
+  if c.all: modes.add("--all")
+  if c.direct: modes.add("--direct")
+  if c.indirect: modes.add("--indirect")
+  for pkg in c.transitiveOf:
+    let mode = "--transitive-of=" & pkg
+    if mode notin modes: modes.add(mode)
+  if modes.len > 1:
+    result.refuse("`repro develop` was given two different selection " &
+      "modes (" & modes[0] & " and " & modes[1] & "). They are " &
+      "alternatives, not a composition, and taking the last one would make " &
+      "the answer depend on argv order — which the fixed selector order " &
+      "exists to prevent. Pass exactly one of --all / --direct / --indirect " &
+      "/ --transitive-of.")
+  if c.all: result.mode = dasmAll
+  elif c.direct: result.mode = dasmDirect
+  elif c.indirect: result.mode = dasmIndirect
+  elif c.transitiveOf.len > 0:
+    result.mode = dasmTransitiveOf
+    result.transitiveOf = c.transitiveOf[0]
+  result.named = modes.len > 0 or c.only.len > 0 or c.project.len > 0 or
+    c.tag.len > 0
+  proc single(r: var DevelopSetSelection; flag: string;
+              values: openArray[string]): string =
+    for value in values:
+      if result.len > 0 and value != result:
+        r.refuse(flag & " was given twice with different values ('" &
+          result & "' and '" & value & "'). It takes a single value, and " &
+          "taking the last one would make the answer depend on argv order. " &
+          "Pass one " & flag &
+          (if flag == "--filter":
+             " (a glob: `--filter='{a,b}'` is not supported, but " &
+             "`--only=a,b` names both exactly)"
+           else: "") & ".")
+        return
+      result = value
+  result.filter = result.single("--filter", c.filter)
+  var revisions: seq[string]
+  for rev in c.at:
+    if rev.strip().len == 0:
+      result.refuse("--at requires a revision")
+    revisions.add(rev.strip())
+  result.at = result.single("--at", revisions)
+  for value in c.only: result.only.add(parseCommaList(value))
+  for value in c.exceptNames: result.exceptNames.add(parseCommaList(value))
+  for value in c.project: result.projects.add(parseCommaList(value))
+  for value in c.tag: result.tags.add(parseCommaList(value))
+  for value in c.tier:
+    for t in parseCommaList(value):
+      let tier = t.toLowerAscii()
+      if tier notin ["public", "org", "team", "personal", "private"]:
+        result.refuse("--tier=" & t & " names no locking tier (expected " &
+          "one or more of: public | org | team | personal)")
+        continue
+      # `private` is the workspace TOML's other spelling of `personal`
+      # (WorkspaceVisibility carries one canonical name); normalize so the
+      # tier compares equal to ``lockingTierLabel``'s output.
+      result.tiers.add(if tier == "private": "personal" else: tier)
+  for value in c.lockStore:
+    try:
+      result.lockStores.add(parseAdhocLockStore(value))
+    except ValueError as err:
+      result.refuse(err.msg)
+  result.strict = c.strict
+  if result.mode == dasmTransitiveOf and result.transitiveOf.len == 0:
+    result.refuse("`repro develop --transitive-of=<pkg>` requires a " &
+      "package name")
+
+proc developSelectorWords[T](c: T): seq[string] =
+  ## The develop-set selectors a command line gave, written out as
+  ## `--flag[=value]` words, for a refusal that has to name them.
+  if c.all: result.add("--all")
+  if c.direct: result.add("--direct")
+  if c.indirect: result.add("--indirect")
+  for v in c.transitiveOf: result.add("--transitive-of=" & v)
+  for v in c.project: result.add("--project=" & v)
+  for v in c.tag: result.add("--tag=" & v)
+  for v in c.filter: result.add("--filter=" & v)
+  for v in c.only: result.add("--only=" & v)
+  for v in c.exceptNames: result.add("--except=" & v)
+  for v in c.tier: result.add("--tier=" & v)
+  for v in c.at: result.add("--at=" & v)
+  for v in c.lockStore: result.add("--lock-store=" & v)
+  if c.strict: result.add("--strict")
+
+proc developAllArgsOf(selection: DevelopSetSelection; workspaceRoot: string;
+                      toolProvisioning: ToolProvisioningMode): DevelopAllArgs =
+  ## The composer's arguments for ``selection``, with no action requested
+  ## (the caller sets `list`, `dryRun`, `intoDir`, ...).
+  result.mode = selection.mode
+  result.transitiveOf = selection.transitiveOf
+  result.filter = selection.filter
+  result.only = selection.only
+  result.exceptNames = selection.exceptNames
+  result.projects = selection.projects
+  result.tags = selection.tags
+  result.tiers = selection.tiers
+  result.lockStores = selection.lockStores
+  result.at = selection.at
+  result.strict = selection.strict
+  result.workspaceRoot = workspaceRoot
+  result.toolProvisioning = toolProvisioning
+
+proc developSetArgsOf(c: ReproCommandLineDevelop;
+                      given: set[DevelopFlag]): DevelopAllArgs =
   ## ``repro develop --list|--all|--direct|--indirect|--transitive-of=<pkg>
   ## [--project=<list>] [--tag=<list>] [--filter=<glob>] [--only=<list>]
   ## [--except=<list>] [--tier=<list>] [--at=<rev>]
@@ -39009,193 +39511,39 @@ proc parseDevelopAllArgs(args: openArray[string]): DevelopAllArgs =
   ## ``--reset`` force-reconciles an already-present sibling checkout that has
   ## drifted off the locked revision back to the lock (destructive re-clone at
   ## the locked SHA) instead of refusing. Default off = refuse-on-drift.
-  result.mode = dasmAll
-  result.toolProvisioning = tpmPathOnly
-  var i = 0
-  var sawSelector = false
-  var sawMode = false
-  # "Selectors compose in a FIXED ORDER, **so the result never depends on argv
-  # order**" (CLI/develop.md §"Membership axis"). The fixed stage order alone
-  # does not deliver that promise: the list-valued selectors (`--only`,
-  # `--except`, `--project`, `--tag`) ACCUMULATE and are order-free, but the
-  # SINGLE-VALUED ones would silently take the LAST occurrence — so
-  # `--all --direct` and `--direct --all` are the same flag set in two argv
-  # orders and would answer differently, which is exactly what the rule
-  # forbids. A repeated single-valued selector is therefore a LOUD refusal
-  # rather than a silent last-wins; repeating the SAME value is harmless and
-  # stays accepted, because a script assembling argv from several fragments
-  # legitimately does that.
-  var modeFlag = ""
-  proc chooseMode(flag: string) =
-    if modeFlag.len > 0 and modeFlag != flag:
-      raise newException(ValueError,
-        "`repro develop` was given two different selection modes (" &
-        modeFlag & " and " & flag & "). They are alternatives, not a " &
-        "composition, and taking the last one would make the answer depend " &
-        "on argv order — which the fixed selector order exists to prevent. " &
-        "Pass exactly one of --all / --direct / --indirect / --transitive-of.")
-    modeFlag = flag
-  proc single(field: var string; flag, value: string) =
-    if field.len > 0 and field != value:
-      raise newException(ValueError,
-        flag & " was given twice with different values ('" & field &
-        "' and '" & value & "'). It takes a single value, and taking the " &
-        "last one would make the answer depend on argv order. Pass one " &
-        flag & (if flag == "--filter":
-                  " (a glob: `--filter='{a,b}'` is not supported, but " &
-                  "`--only=a,b` names both exactly)"
-                else: "") & ".")
-    field = value
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--all":
-      chooseMode("--all")
-      result.mode = dasmAll; sawSelector = true; sawMode = true
-    elif arg == "--direct":
-      chooseMode("--direct")
-      result.mode = dasmDirect; sawSelector = true; sawMode = true
-    elif arg == "--indirect":
-      chooseMode("--indirect")
-      result.mode = dasmIndirect; sawSelector = true; sawMode = true
-    elif arg == "--transitive-of" or arg.startsWith("--transitive-of="):
-      let pkg = valueFromFlag(args, i, "--transitive-of")
-      chooseMode("--transitive-of=" & pkg)
-      result.mode = dasmTransitiveOf
-      single(result.transitiveOf, "--transitive-of", pkg)
-      sawSelector = true; sawMode = true
-    elif arg == "--filter" or arg.startsWith("--filter="):
-      single(result.filter, "--filter", valueFromFlag(args, i, "--filter"))
-    elif arg == "--only" or arg.startsWith("--only="):
-      result.only.add(parseCommaList(valueFromFlag(args, i, "--only")))
-      sawSelector = true
-    elif arg == "--except" or arg.startsWith("--except="):
-      result.exceptNames.add(parseCommaList(valueFromFlag(args, i, "--except")))
-    elif arg == "--project" or arg.startsWith("--project="):
-      result.projects.add(parseCommaList(valueFromFlag(args, i, "--project")))
-      sawSelector = true
-    elif arg == "--tag" or arg.startsWith("--tag="):
-      result.tags.add(parseCommaList(valueFromFlag(args, i, "--tag")))
-      sawSelector = true
-    elif arg == "--tier" or arg.startsWith("--tier="):
-      for t in parseCommaList(valueFromFlag(args, i, "--tier")):
-        let tier = t.toLowerAscii()
-        if tier notin ["public", "org", "team", "personal", "private"]:
-          raise newException(ValueError,
-            "--tier=" & t & " names no locking tier (expected one or more " &
-            "of: public | org | team | personal)")
-        # `private` is the workspace TOML's other spelling of `personal`
-        # (WorkspaceVisibility carries one canonical name); normalize so the
-        # tier compares equal to ``lockingTierLabel``'s output.
-        result.tiers.add(if tier == "private": "personal" else: tier)
-    elif arg == "--lock-store" or arg.startsWith("--lock-store="):
-      result.lockStores.add(
-        parseAdhocLockStore(valueFromFlag(args, i, "--lock-store")))
-    elif arg == "--at" or arg.startsWith("--at="):
-      let rev = valueFromFlag(args, i, "--at").strip()
-      if rev.len == 0:
-        raise newException(ValueError, "--at requires a revision")
-      # Single-valued for the same reason the mode flags are: two `--at`s
-      # would key the commit-addressed backends on whichever came last.
-      single(result.at, "--at", rev)
-    elif arg == "--list":
-      result.list = true
-    elif arg == "--strict":
-      result.strict = true
-    elif arg == "--into" or arg.startsWith("--into="):
-      result.intoDir = valueFromFlag(args, i, "--into")
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      result.workspaceRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      result.toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--json":
-      result.json = true
-    elif arg == "--reset":
-      result.reset = true
-    elif arg == "--dry-run":
-      result.dryRun = true
-    else:
-      raise newException(ValueError,
-        "unsupported `repro develop` set-form argument: " & arg)
-    inc i
-  if not sawSelector and result.transitiveOf.len == 0:
-    result.mode = dasmAll
-  if result.mode == dasmTransitiveOf and result.transitiveOf.len == 0:
+  let outside = firstOutside(given, DevelopSetFormFlags)
+  if outside.len > 0:
     raise newException(ValueError,
-      "`repro develop --transitive-of=<pkg>` requires a package name")
+      "unsupported `repro develop` set-form argument: " & outside)
+  if c.target.len > 0:
+    raise newException(ValueError,
+      "unsupported `repro develop` set-form argument: " & c.target)
+  let selection = developSetSelectionOf(c)
+  if selection.refusal.len > 0:
+    raise newException(ValueError, selection.refusal)
+  result = developAllArgsOf(selection, c.workspaceRoot.get(""),
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly)
+  result.list = c.list
+  result.intoDir = c.into.get("")
+  result.json = c.json
+  result.reset = c.reset
+  result.dryRun = c.dryRun
   if result.list and result.reset:
     raise newException(ValueError,
       "`repro develop --list` is a query and cannot be combined with " &
       "--reset (a destructive action)")
   # ``--list`` requires no selector; every OTHER form does, because "a bulk
   # mutation of the working tree is never implicit".
-  if not result.list and not sawMode and not sawSelector:
+  if not result.list and not selection.named:
     raise newException(ValueError,
       "`repro develop` with no target and no selector is not a bulk " &
       "operation: pass --all/--direct/--indirect/--transitive-of, a " &
       "membership selector, or --list to query the lock set")
   result.workspaceRoot = workspaceShellFirstRoot(result.workspaceRoot)
 
-proc looksLikeDevelopAllArgs(args: openArray[string]): bool =
-  ## The L1 develop-SET form is distinguished by a set-selection flag
-  ## (``--all`` / ``--direct`` / ``--indirect`` / ``--transitive-of`` /
-  ## ``--only`` / ``--project`` / ``--tag``) or by the SET-PATH ``--list``
-  ## (DS-6). ``--into`` / ``--filter`` alone stay on the pre-L1
-  ## single-dependency ``--into`` route (that route already owns ``--into``).
-  ##
-  ## DS-6 — ``--list`` used to route AWAY from here unconditionally, which is
-  ## why "today `--list` only reaches the pre-set route". The pre-set route's
-  ## `--list` printed the local develop-OVERRIDE map; that output now lives on
-  ## the explicit ``--list-overrides``, and bare ``--list`` answers the
-  ## question CLI/develop.md §"Action axis" assigns it: "what does this
-  ## workspace's lock set manage?". Nothing is lost — every override still
-  ## appears, as a row with state `develop`.
-  for arg in args:
-    if arg == "--" or arg == "--cmake" or arg == "--list-overrides":
-      return false
-  for arg in args:
-    if arg == "--all" or arg == "--direct" or arg == "--indirect" or
-        arg == "--list" or
-        arg == "--transitive-of" or arg.startsWith("--transitive-of=") or
-        arg == "--only" or arg.startsWith("--only=") or
-        arg == "--project" or arg.startsWith("--project=") or
-        arg == "--tag" or arg.startsWith("--tag="):
-      return true
-  false
-
-proc looksLikeWorkspaceDevelopArgs(args: openArray[string]): bool =
-  ## Decide whether the argv looks like the M22 workspace-overlay form
-  ## (``repro develop <pkg> [--source=...] [--workspace-root=...]
-  ## [--json]``) as opposed to the pre-M22 surfaces (``--list``,
-  ## ``<dependency> --into=PATH``, ``<target> -- <command>``,
-  ## ``--cmake``). Returns true when at least one M22-distinctive
-  ## marker is present AND none of the pre-M22 markers are present.
-  ##
-  ## The M22-distinctive markers are: ``--source[=...]``, ``--json``,
-  ## ``--write-report[=...]``, ``--workspace-root[=...]``. The pre-M22 markers
-  ## are: ``--list``,
-  ## ``--into[=...]``, ``--cmake``, ``--cmake-binary[=...]``,
-  ## ``--work-root[=...]``, ``--tool-provisioning[=...]``, ``--``
-  ## (the command separator).
-  var hasM22Marker = false
-  for arg in args:
-    if arg == "--source" or arg.startsWith("--source=") or
-        arg == "--json" or
-        arg == "--write-report" or arg.startsWith("--write-report=") or
-        arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      hasM22Marker = true
-    if arg == "--list" or arg == "--list-overrides" or
-        arg == "--into" or arg.startsWith("--into=") or
-        arg == "--cmake" or
-        arg == "--cmake-binary" or arg.startsWith("--cmake-binary=") or
-        arg == "--work-root" or arg.startsWith("--work-root=") or
-        arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning=") or
-        arg == "--":
-      return false
-  hasM22Marker
-
-proc runDevelopDropCommand(args: openArray[string]): int =
+proc runDevelopDropCommand(c: ReproCommandLineDevelop;
+                           given: set[DevelopFlag]): int =
   ## ``repro develop --drop=<dependency>[,<dependency>…]
   ## [--workspace-root=PATH] [--project-root=PATH] [--json]``.
   ##
@@ -39226,39 +39574,24 @@ proc runDevelopDropCommand(args: openArray[string]): int =
   ## dependency with no override is reported, exits 0, and writes nothing.
   ## Exit 1 when an override document cannot be read or written; exit 2 on a
   ## usage error.
+  let outside = firstOutside(given, DevelopDropFormFlags)
+  if outside.len > 0 or c.target.len > 0 or c.command.len > 0:
+    stderr.writeLine("repro develop --drop: unsupported argument '" &
+      (if outside.len > 0: outside
+       elif c.target.len > 0: c.target
+       else: c.command[0]) &
+      "'; --drop removes recorded overrides and takes no selector")
+    return 2
+  # `--tool-provisioning` is accepted (its value checked by the parser) like
+  # every other `repro develop` form, so a caller that passes it uniformly
+  # is not refused; `--drop` runs no tool.
   var names: seq[string]
-  var explicitWorkspace = ""
-  var explicitProject = ""
-  var asJson = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--drop" or arg.startsWith("--drop="):
-      for n in parseCommaList(valueFromFlag(args, i, "--drop")):
-        if n notin names: names.add(n)
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitWorkspace = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--project-root" or arg.startsWith("--project-root="):
-      explicitProject = valueFromFlag(args, i, "--project-root")
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--tool-provisioning" or
-        arg.startsWith("--tool-provisioning="):
-      # Accepted (and validated) like every other `repro develop` form, so a
-      # caller that passes it uniformly is not refused; `--drop` runs no tool.
-      try:
-        discard parseToolProvisioning(
-          valueFromFlag(args, i, "--tool-provisioning"))
-      except ValueError as err:
-        stderr.writeLine("repro develop --drop: " & err.msg)
-        return 2
-    else:
-      stderr.writeLine("repro develop --drop: unsupported argument '" & arg &
-        "' (usage: repro develop --drop=<dependency>[,<dependency>...] " &
-        "[--workspace-root=PATH] [--project-root=PATH] [--json]); --drop " &
-        "removes recorded overrides and takes no selector")
-      return 2
-    inc i
+  for value in c.drop:
+    for n in parseCommaList(value):
+      if n notin names: names.add(n)
+  let explicitWorkspace = c.workspaceRoot.get("")
+  let explicitProject = c.projectRoot
+  let asJson = c.json
   if names.len == 0:
     stderr.writeLine("repro develop --drop: name the dependency whose " &
       "develop override to remove (`repro develop --drop=<dependency>`)")
@@ -39402,81 +39735,58 @@ proc runDevelopDropCommand(args: openArray[string]): int =
     stderr.writeLine("repro develop --drop: error — " & f)
   exitCode
 
-proc runDevelopCommand*(args: openArray[string]): int =
-  ## `repro develop …`. Exported for the same reason `runReproLockCommand` is:
-  ## a test that asserts on what the verb WRITES has to reach the verb, and
-  ## reaching a private copy of its body instead would let the two drift.
-  # L1 routing: a set-selection flag (``--all`` / ``--direct`` /
-  # ``--transitive-of``) routes to the lock-driven develop-SET command that
-  # clones every selected dependency at its locked revision (CLI/develop.md
-  # §"Develop Set Selection"). Checked FIRST so ``--all --into=...`` reaches the
-  # set path rather than the single-dependency ``--into`` route.
-  #
-  # ``--drop`` is checked before everything: it removes recorded overrides,
-  # and a selector beside it is a usage error the drop parser reports, not a
-  # reason to route the argv somewhere that would add overrides instead.
-  for arg in args:
-    if arg == "--drop" or arg.startsWith("--drop="):
-      return runDevelopDropCommand(args)
-  if looksLikeDevelopAllArgs(args):
-    return runDevelopAllCommand(parseDevelopAllArgs(args))
-  # M22 routing: when the argv carries an M22-distinctive flag
-  # (``--source``, ``--workspace-root``, ``--json``) and none of the
-  # pre-M22 markers (``--list``, ``--into``, ``--cmake``,
-  # ``--tool-provisioning``, ``--work-root``, ``--``), dispatch to the
-  # workspace-overlay form documented in ``CLI/develop.md``.
-  if looksLikeWorkspaceDevelopArgs(args):
-    return runWorkspaceDevelopCommand(args)
-  var target = ""
-  var mode = tpmUnspecified
-  var command: seq[string] = @[]
-  var afterSeparator = false
-  var workRoot = ""
-  var cmakeMode = false
-  var cmakeBinary = ""
-  var listOverrides = false
-  var intoPath = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if afterSeparator:
-      command.add(arg)
-    elif arg == "--":
-      afterSeparator = true
-    elif arg == "--cmake":
-      cmakeMode = true
-    elif arg == "--list-overrides":
-      # DS-6 — this is the pre-set route's old ``--list``: the local
-      # develop-OVERRIDE map (`<node>\t<path>`), byte-identical. Bare ``--list``
-      # now answers the lock-set question CLI/develop.md assigns it, so the two
-      # meanings got one name each instead of sharing one.
-      listOverrides = true
-    elif arg == "--into" or arg.startsWith("--into="):
-      intoPath = valueFromFlag(args, i, "--into")
-    elif arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
-    elif arg == "--tool-provisioning":
-      raise newException(ValueError,
-        "--tool-provisioning requires an inline value, for example " &
-        "--tool-provisioning=nix")
-    elif arg.startsWith("--cmake-binary="):
-      cmakeBinary = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--cmake-binary":
-      raise newException(ValueError,
-        "--cmake-binary requires an inline value, for example " &
-          "--cmake-binary=/path/to/cmake")
-    elif arg.startsWith("--work-root="):
-      workRoot = arg.split("=", maxsplit = 1)[1]
-    elif arg == "--work-root":
-      raise newException(ValueError,
-        "--work-root requires an inline value, for example --work-root=.repro")
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported develop flag: " & arg)
-    elif target.len == 0:
-      target = arg
-    else:
-      raise newException(ValueError, "unexpected develop argument before --: " & arg)
-    inc i
+proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
+  ## `repro develop …`, from its configuration. Exported for the same reason
+  ## `runReproLockCommand` is: a test that asserts on what the verb WRITES
+  ## has to reach the verb, and reaching a private copy of its body instead
+  ## would let the two drift.
+  ##
+  ## The command has four forms, told apart by the flags they are given;
+  ## each refuses a flag that belongs to another one, naming it:
+  ##
+  ##   * `--drop=<list>` removes recorded overrides. Checked before
+  ##     everything: a selector beside it is a usage error the drop form
+  ##     reports, not a reason to route to a form that would add overrides.
+  ##   * The develop SET: a set-selection flag (`--all`, `--direct`,
+  ##     `--indirect`, `--transitive-of`, `--only`, `--project`, `--tag`) or
+  ##     the set's `--list`, with no `--cmake`,
+  ##     `--list-overrides` or command. Checked next, so `--all --into=...`
+  ##     reaches the set path rather than the single-dependency `--into`
+  ##     route.
+  ##   * The workspace overlay (`repro develop <pkg> --source=...`): one of
+  ##     `--source`, `--json`, `--write-report`, `--workspace-root`, and none
+  ##     of the target form's `--list`, `--list-overrides`, `--into`,
+  ##     `--cmake`, `--cmake-binary`, `--work-root`, `--tool-provisioning`
+  ##     or a command.
+  ##   * Otherwise the target form: `--list-overrides`, `<dependency>
+  ##     --into=PATH`, `<target> -- <command>`, `--cmake <source-dir>`.
+  let given = developFlagsGiven(c)
+  if dfDrop in given:
+    return runDevelopDropCommand(c, given)
+  if c.command.len == 0 and
+      (given * {dfCmake, dfListOverrides}).len == 0 and
+      (given * DevelopSetModeMarkers).len > 0:
+    return runDevelopAllCommand(developSetArgsOf(c, given))
+  if c.command.len == 0 and (given * DevelopOverlayMarkers).len > 0 and
+      (given * DevelopOverlayExcluded).len == 0:
+    return runWorkspaceDevelopCommand(workspaceDevelopArgsOf(c, given))
+  let outside = firstOutside(given, DevelopTargetFormFlags)
+  if outside.len > 0:
+    raise newException(ValueError, "unsupported develop flag: " & outside)
+  let target = c.target
+  let mode =
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmUnspecified
+  let command = c.command
+  let workRoot = c.workRoot.get("")
+  let cmakeMode = c.cmake
+  let cmakeBinary = c.cmakeBinary.get("")
+  # `--list-overrides` is what this form's ``--list`` used to print: the
+  # local develop-OVERRIDE map (`<node>\t<path>`), byte-identical. Bare
+  # ``--list`` answers the lock-set question instead, so the two meanings
+  # got one name each instead of sharing one.
+  let listOverrides = c.listOverrides
+  let intoPath = c.into.get("")
 
   if listOverrides:
     if target.len > 0 or intoPath.len > 0 or command.len > 0 or cmakeMode:
@@ -55317,6 +55627,7 @@ proc managedHookBodyIsCurrent(hookName, body: string): bool =
   ## freshness one.
   let site = ManagedHookSite(
     authorBin: managedHookAuthorBin(body),
+    installingBuild: managedHookInstallingBuild(body),
     refusalRecordDir: managedHookRefusalRecordDirAdvertised(body))
   if site.authorBin.len == 0:
     return false
@@ -55363,7 +55674,19 @@ proc resolveHookReproCli(repoRoot: string): string =
   ## PG-14 folded the resolution itself into `resolveManagedHookInterpreter`,
   ## which additionally reports HOW it resolved — the half the skew diagnostics
   ## need. This wrapper keeps the path-only shape its callers expect.
-  resolveManagedHookInterpreter(repoRoot).path
+  ##
+  ## The installing build (step 2 of CLI/hooks.md §"Per-install resolution")
+  ## is read from the INSTALLED pre-push body, because that body is the one
+  ## the push will execute: preflight must probe the interpreter it resolves,
+  ## not the one a body this build would write resolves.
+  var installing = ""
+  try:
+    let managed = managedHookPath(gitHooksDir(repoRoot), "pre-push")
+    if fileExists(extendedPath(managed)):
+      installing = managedHookInstallingBuild(readFile(extendedPath(managed)))
+  except CatchableError:
+    installing = ""
+  resolveManagedHookInterpreter(repoRoot, installing).path
 
 proc configuredPushLocation(identity: GitToolIdentity; repoRoot,
     remote: string): tuple[ok: bool; value: string; diagnostic: string] =
@@ -68883,10 +69206,14 @@ proc assessHookWriterRunnerSkew*(repoRoot: string;
   # `hookContractWriteRefusal`.
   result.writer = reproBuildIdentity(
     try: publicCliImagePath() except CatchableError: "")
-  let resolved = resolveManagedHookInterpreter(repoRoot)
+  # The runner of the hooks THIS build writes: their step 2 is this build
+  # (CLI/hooks.md §"Per-install resolution"), so absent `$REPROBUILD_REPRO`
+  # the writer and the runner are one build by construction.
+  let resolved = resolveManagedHookInterpreter(repoRoot,
+    thisBuildInstallingPath())
   result.runnerSource =
     if resolved.source.len > 0: resolved.source
-    else: "neither REPROBUILD_REPRO nor PATH"
+    else: "neither REPROBUILD_REPRO, the installing build nor PATH"
   result.runner = reproBuildIdentity(resolved.path)
   if resolved.path.len == 0:
     # NOT "absence degrades" here, and the difference from the `health` row is
@@ -77223,10 +77550,10 @@ proc detectDirenvEnvrcState(workspaceRoot: string):
 #     for the resolution THIS process would get is marked as such, and it is
 #     one row among several rather than the answer.
 #   * The remedy must not be `hooks ensure`. That is the command the hook
-#     body's own refusal text warns against, the command the generated
-#     `.envrc` runs ambiently on every directory entry with its output
-#     discarded, and the command whose effect here is to delete the diagnostic
-#     instead of the defect. The remedy is to reconcile what SUPPLIES `repro`.
+#     body's own refusal text warns against, the command a dev shell may run
+#     ambiently on entry, and the command whose effect here (with
+#     `--re-anchor`) is to delete the diagnostic instead of the defect. The
+#     remedy is to reconcile what SUPPLIES `repro`.
 
 const ReproStoreNamePrefix = "reprobuild-"
   ## Store-path name prefix of a reprobuild build. A derivation that merely
@@ -77257,8 +77584,16 @@ proc direnvSuppliedReproBuilds(dir: string): seq[string] =
       if executableFile(candidate) and candidate notin result:
         result.add(candidate)
 
+type InstalledManagedBody = object
+  ## One installed managed body, reduced to the two facts that decide who
+  ## services it: the token it demands and the installing build it resolves
+  ## before ``PATH`` ("" for a body that predates per-install resolution).
+  token: string
+  installingBuild: string
+
 proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
-    tuple[tokens, authors: seq[string]; bodies, contractless: int] =
+    tuple[tokens, authors: seq[string]; bodies, contractless: int;
+          demands: seq[InstalledManagedBody]] =
   ## What the hooks INSTALLED in these repos actually demand.
   ##
   ## The skew question is about the bodies on disk, not about the body this
@@ -77285,8 +77620,11 @@ proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
       let token = managedHookBodyContractDemand(body)
       if token.len == 0:
         inc result.contractless
-      elif token notin result.tokens:
-        result.tokens.add(token)
+      else:
+        if token notin result.tokens:
+          result.tokens.add(token)
+        result.demands.add(InstalledManagedBody(token: token,
+          installingBuild: managedHookInstallingBuild(body)))
       # The body names the build that WROTE it. That build is the other half of
       # "both builds" the skew report has to name: one wrote these hooks, one
       # will run them, and a report that names only the runner leaves the
@@ -77295,11 +77633,23 @@ proc installedManagedHookContracts(repos: seq[HookRepoTarget]):
       if author.len > 0 and author notin result.authors:
         result.authors.add(author)
 
+type HookResolutionRow = object
+  ## One ``repro`` a managed hook of this workspace could resolve, and the
+  ## tokens of the bodies that would resolve it. Probing a build only with the
+  ## demands of the bodies that reach it is what per-install resolution
+  ## requires: a build that installed one repo's hooks is not asked to service
+  ## a body some other build installed elsewhere, because no hook would ever
+  ## ask it to.
+  path: string
+  source: string
+  tokens: seq[string]
+  thisShell: bool
+
 proc enumerateHookInterpreterResolutions(workspaceRoot: string;
-    repos: seq[HookRepoTarget]; contract: string):
-    seq[HookInterpreterResolution] =
-  ## Every ``repro`` a managed hook of this workspace could resolve, probed
-  ## with ``contract``.
+    repos: seq[HookRepoTarget]; installed: seq[InstalledManagedBody];
+    fallbackContract: string): seq[HookResolutionRow] =
+  ## Every ``repro`` a managed hook of this workspace could resolve, with the
+  ## tokens it would be asked to service.
   ##
   ## MUST NOT be reduced to "this process's PATH". That reduction is what every
   ## implementation an author writes first does, it is what shipped, and it is
@@ -77308,40 +77658,79 @@ proc enumerateHookInterpreterResolutions(workspaceRoot: string;
   ## workspace-root dev shell, and each per-repo dev shell that supplies its
   ## own ``repro`` — and condition 3 is that a DISAGREEMENT between them is
   ## reported when one exists.
-  var seen: HashSet[string]
+  ##
+  ## Each body resolves per CLI/hooks.md §"Per-install resolution":
+  ## ``$REPROBUILD_REPRO``, else the build that installed it while that is
+  ## still executable, else ``PATH``. So a shell's ``PATH`` -- this one's or a
+  ## dev shell's -- governs only the bodies whose installing build is gone or
+  ## that predate the step, and the dev shells are enumerated for exactly those
+  ## bodies. With nothing installed the question is about the bodies this
+  ## build would write (``fallbackContract``), whose installing build is this
+  ## build.
+  var index: Table[string, int]
 
-  proc add(res: var seq[HookInterpreterResolution]; path, source: string;
-           thisShell: bool) =
-    if path.len == 0:
+  proc add(res: var seq[HookResolutionRow]; path, source: string;
+           tokens: seq[string]; thisShell: bool) =
+    if path.len == 0 or tokens.len == 0:
       return
     var key = path
     try:
       key = expandFilename(path)
     except CatchableError:
       discard
-    if key in seen:
-      # The same build reached two ways is one build. Keep the FIRST label:
-      # the resolution order below puts the hook's own resolution first, and
-      # that is the one whose source matters.
+    if key in index:
+      # The same build reached two ways is one build, asked about the union of
+      # the bodies that reach it. Keep the FIRST label: the order below puts
+      # this shell's resolutions first, and that is the one whose source
+      # matters.
+      let at = index[key]
+      for token in tokens:
+        if token notin res[at].tokens:
+          res[at].tokens.add(token)
+      res[at].thisShell = res[at].thisShell or thisShell
       return
-    seen.incl(key)
-    res.add(probeHookInterpreter(path, source, contract, thisShell))
+    index[key] = res.len
+    res.add(HookResolutionRow(path: path, source: source, tokens: tokens,
+      thisShell: thisShell))
 
-  # 1. The resolution a hook firing in THIS process environment would get, and
-  #    the one `health`'s own verdict would otherwise silently be about.
-  let mine = resolveManagedHookInterpreter(workspaceRoot)
-  if mine.path.len > 0:
-    result.add(mine.path, mine.source & " (this shell)", true)
+  let bodies =
+    if installed.len > 0: installed
+    else: @[InstalledManagedBody(token: fallbackContract,
+      installingBuild: thisBuildInstallingPath())]
+  let explicitRepro = getEnv("REPROBUILD_REPRO").len > 0
 
-  # 2. The dev shells. The workspace root first, then every participating repo
-  #    that carries its own direnv profile — on this host those are two
-  #    distinct builds, and they are the half that ANSWERS the handshake while
-  #    bare PATH refuses.
-  for candidate in direnvSuppliedReproBuilds(workspaceRoot):
-    result.add(candidate, "direnv dev shell at " & workspaceRoot, false)
-  for repo in repos:
-    for candidate in direnvSuppliedReproBuilds(repo.repoPath):
-      result.add(candidate, "direnv dev shell at " & repo.repoPath, false)
+  # 1. The resolution each body gets when a hook fires in THIS process
+  #    environment -- what `health`'s own verdict would otherwise silently be
+  #    about.
+  for body in bodies:
+    let mine = resolveManagedHookInterpreter(workspaceRoot,
+      body.installingBuild)
+    result.add(mine.path, mine.source & " (this shell)", @[body.token], true)
+
+  # 2. Other shells. A body whose installing build still runs resolves that
+  #    build in every shell that does not set `$REPROBUILD_REPRO`; when this
+  #    shell sets it, those builds are what the other shells get.
+  var pathTokens: seq[string]
+  for body in bodies:
+    if body.installingBuild.len > 0 and executableFile(body.installingBuild):
+      if explicitRepro:
+        result.add(body.installingBuild, ManagedHookInstallingBuildSource,
+          @[body.token], false)
+    elif body.token notin pathTokens:
+      pathTokens.add(body.token)
+
+  # 3. The dev shells, for the bodies that fall back to PATH. The workspace
+  #    root first, then every participating repo that carries its own direnv
+  #    profile — on the host §1.6b measured those are two distinct builds, and
+  #    they are the half that ANSWERS the handshake while bare PATH refuses.
+  if pathTokens.len > 0:
+    for candidate in direnvSuppliedReproBuilds(workspaceRoot):
+      result.add(candidate, "direnv dev shell at " & workspaceRoot,
+        pathTokens, false)
+    for repo in repos:
+      for candidate in direnvSuppliedReproBuilds(repo.repoPath):
+        result.add(candidate, "direnv dev shell at " & repo.repoPath,
+          pathTokens, false)
 
 proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
   ## The ``hook-interpreter`` row of ``repro health``.
@@ -77368,25 +77757,25 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
   # a doctor into a hundred subprocesses. The cap is generous enough that it
   # has never been reached in practice and is reported when it bites.
   const MaxProbedContracts = 24
-  var probeTokens =
-    if demands.tokens.len > 0: demands.tokens
-    else: @[managedHookContract("post-commit")]
-  var tokensTruncated = false
-  if probeTokens.len > MaxProbedContracts:
-    probeTokens = probeTokens[0 ..< MaxProbedContracts]
-    tokensTruncated = true
   let resolutions = enumerateHookInterpreterResolutions(workspaceRoot,
-    enumerated.repos, probeTokens[0])
+    enumerated.repos, demands.demands, managedHookContract("post-commit"))
+  var tokensTruncated = false
 
   var servicing = 0
   var refusing = 0
   var differentBody = 0
   var rows: seq[string]
   var usedRow = ""
-  for res in resolutions:
-    # Every demanded token has to be serviced, not just the first: a host can
-    # carry bodies from two writers, and a build that services one of them is
-    # not thereby a build that services the others.
+  for resRow in resolutions:
+    var probeTokens = resRow.tokens
+    if probeTokens.len > MaxProbedContracts:
+      probeTokens = probeTokens[0 ..< MaxProbedContracts]
+      tokensTruncated = true
+    let res = probeHookInterpreter(resRow.path, resRow.source, probeTokens[0],
+      resRow.thisShell)
+    # Every token demanded of it has to be serviced, not just the first: a
+    # host can carry bodies from two writers, and a build that services one of
+    # them is not thereby a build that services the others.
     # EVERY demanded token, not just the first. Measured on this workspace:
     # 765 installed bodies demand SIX distinct tokens, so "does this build
     # service the contract?" has six answers per build, and a single-token
@@ -77422,7 +77811,9 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
       " (services " & $serviced & " of " & $probeTokens.len & " contract(s))"
     rows.add(rendered)
     if res.thisShell:
-      usedRow = rendered
+      usedRow =
+        if usedRow.len > 0: usedRow & " | " & rendered
+        else: rendered
 
   var writerRows: seq[string]
   for author in demands.authors:
@@ -77449,8 +77840,9 @@ proc hookInterpreterSkewCheck(workspaceRoot: string): HealthCheck =
     if usedRow.len > 0:
       "resolution used by a hook firing in THIS shell: " & usedRow
     else:
-      "no 'repro' resolves in THIS shell (REPROBUILD_REPRO unset and none " &
-        "on PATH), so a hook firing here would not dispatch at all"
+      "no 'repro' resolves in THIS shell (REPROBUILD_REPRO unset, no " &
+        "installing build still executable and none on PATH), so a hook " &
+        "firing here would not dispatch at all"
 
   if resolutions.len == 0:
     # Absence degrades (§8). Nothing resolves, so nothing disagrees.
@@ -78658,9 +79050,10 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       proc staleDetailFor(full: bool): string =
         $stale.len & " managed hook(s) STALE — present, carrying " &
           "every marker a generated body carries, and demanding a contract " &
-          "THIS build does not generate, so each fire refuses (pre-push, " &
-          "and pre-commit's certificate gate where one is installed) or " &
-          "fails open in silence (the observational hooks): " &
+          "THIS build does not generate, so each fire that resolves this " &
+          "build refuses (pre-push, and pre-commit's certificate gate where " &
+          "one is installed) or fails open in silence (the observational " &
+          "hooks): " &
           (if full: stale.join(", ")
            else: formatFindingList(stale, parsed.verbose)) & ". " & census &
           (if writers.len > 0:
@@ -78680,9 +79073,13 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsFail,
         detail: staleDetail,
         fullDetail: if staleDetail != fullStaleDetail: fullStaleDetail else: "",
-        # NOT ``hooks ensure``, and NOT auto-fixable. See the block comment.
+        # NOT a plain ``hooks ensure``, and NOT auto-fixable. See the block
+        # comment. A plain ``ensure`` would not help anyway: since 2026-11-16
+        # it leaves a foreign-contract body untouched
+        # (``refused-foreign-contract``), so the re-anchoring step offered
+        # last is the explicit ``--re-anchor`` (CLI/hooks.md §"Checks").
         remedy: "direnv reload   # then, only once hook-interpreter agrees: " &
-          remedy,
+          self & " hooks ensure --vcs --re-anchor " & parsed.workspaceRoot,
         fixKind: hfNone))
     elif pathUnsafe.len > 0:
       # SECOND. Its remedy is the same ``--fix``-able ``hooks ensure --vcs`` as
@@ -96646,7 +97043,8 @@ proc runReproLockingCommand*(c: ReproCommandLineLocking): int =
 # resolves a SET — `--all` / `--only` / `--except` / `--tier` composing in a
 # fixed, argv-order-independent order over the workspace lock set — and
 # NF-1's rule is that **the develop set IS the override set**. So this verb
-# parses the develop set-form argv verbatim (``parseDevelopAllArgs``) and runs
+# declares `repro develop`'s selection flags (one shared declaration), reads
+# them into the same typed selection (``developSetSelectionOf``) and runs
 # the same composer through its QUERY path (``list = true``), which mutates
 # nothing: no clone, no checkout, no override file, no receipt. Adding a second
 # selection vocabulary here would leave two answers to one question, which is
@@ -96761,26 +97159,25 @@ type
       ## ``ok`` is false because the workspace lock set is EMPTY
       ## (``DevelopAllResult.emptyLockSet``): develop mode substitutes nothing.
 
-proc flakeDevelopSelectionOf(passthrough: openArray[string];
-    explicitRoot: string): FlakeDevelopSelection =
-  ## Resolve the develop set through ``repro develop``'s OWN composer.
+proc flakeDevelopSelectionOf(selection: DevelopSetSelection;
+    explicitRoot: string; toolProvisioning: ToolProvisioningMode):
+    FlakeDevelopSelection =
+  ## Resolve the develop set ``selection`` names through ``repro develop``'s
+  ## OWN composer.
   ##
-  ## ``--list`` is appended rather than ``--all`` so no selector is REQUIRED (a
-  ## query has no destructive edge, per CLI/develop.md §"Default behavior") and
-  ## so the composer takes its read-only path: ``executeDevelopAll`` returns
-  ## before it touches the override file, the engine cache, the receipts
-  ## directory or any checkout.
+  ## The composer is asked to LIST the set, so no selector is REQUIRED (a
+  ## query has no destructive edge)
+  ## and it takes its read-only path: ``executeDevelopAll`` returns before
+  ## it touches the override file, the engine cache, the receipts directory
+  ## or any checkout. ``toolProvisioning`` is how it obtains git.
   result.checkoutOf = initTable[string, string]()
   result.sourceOf = initTable[string, string]()
-  var developArgs: DevelopAllArgs
-  try:
-    var forDevelop: seq[string]
-    for a in passthrough: forDevelop.add(a)
-    forDevelop.add("--list")
-    developArgs = parseDevelopAllArgs(forDevelop)
-  except CatchableError as err:
-    result.refusals.add("the selection could not be parsed: " & err.msg)
+  if selection.refusal.len > 0:
+    result.refusals.add("the selection could not be parsed: " &
+      selection.refusal)
     return
+  var developArgs = developAllArgsOf(selection, explicitRoot,
+    toolProvisioning)
   developArgs.list = true
   developArgs.json = false
   # The workspace-wide recipe scan is `repro develop`'s; the flake verbs
@@ -97500,9 +97897,9 @@ type
     emitted: seq[FlakeOverrideBinding]
     report: seq[string]      ## the notices `override-args` prints on stderr
 
-proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
-    explicitRoot: string; suffixes: seq[string];
-    identity: GitToolIdentity): FlakeShellBindings =
+proc flakeShellBindingsOf(flakeRoot: string; selection: DevelopSetSelection;
+    explicitRoot: string; toolProvisioning: ToolProvisioningMode;
+    suffixes: seq[string]; identity: GitToolIdentity): FlakeShellBindings =
   ## The substitution develop mode performs for the flake at ``flakeRoot``:
   ## the develop set through `repro develop`'s own composer
   ## (``flakeDevelopSelectionOf``), the flake's declared inputs, §16.4's
@@ -97516,7 +97913,8 @@ proc flakeShellBindingsOf(flakeRoot: string; passthrough: openArray[string];
   ## built at their pin (reprobuild-pm issue
   ## `2026-10-12-release-commit-pin-refused-by-commit-and-push-gates.md`).
   result.suffixes = suffixes
-  result.selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+  result.selection = flakeDevelopSelectionOf(selection, explicitRoot,
+    toolProvisioning)
   if not result.selection.ok:
     for r in result.selection.refusals: result.refusals.add(r)
     return
@@ -97574,9 +97972,8 @@ proc hookSubstitutedDevelopSet(hs: HookDevelopSet;
   # rule removes.
   var bound = initTable[string, string]()
   let shell = flakeShellBindingsOf(flakeRoot,
-    ["--all", "--workspace-root=" & workspaceRoot,
-     "--tool-provisioning=path"], workspaceRoot,
-    defaultFlakeInputStripSuffixes, identity)
+    DevelopSetSelection(mode: dasmAll, named: true), workspaceRoot,
+    tpmPathOnly, defaultFlakeInputStripSuffixes, identity)
   if shell.ok:
     for e in shell.emitted:
       bound[e.input] = os.normalizedPath(absolutePath(e.path))
@@ -98607,7 +99004,7 @@ proc flakeRenderDriftReport(state: FlakeOverrideState;
       stderr.writeLine(label & ": " & flakeRowSentence(row))
   stderr.writeLine(label & ": " & flakeStateSummaryLine(state))
 
-proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
+proc runFlakeOverrideArgsCommand*(c: ReproCommandLineFlakeOverrideArgs): int =
   ## ``repro flake override-args [--all|--only=LIST|--except=LIST|--tier=LIST|
   ## …every other `repro develop` set-form selector] [--flake=DIR]
   ## [--strip-suffix=LIST] [--workspace-root=PATH] [--json]``.
@@ -98642,38 +99039,16 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   ## shell should use, and a dev shell that refuses to activate because
   ## `flake.lock` is unreadable would stop work over something the shell does
   ## not depend on.
-  var
-    flakeDir = ""
-    stripSpec = ""
-    stripGiven = false
-    asJson = false
-    explicitRoot = ""
-    passthrough: seq[string]
-    toolProvisioning = tpmPathOnly
-      ## Seeded, never left ``tpmUnspecified``: ``resolveGitTool`` REJECTS that
-      ## outright, and this is the line `.envrc` runs on every directory entry.
-      ## The same defect and the same fix are recorded for
-      ## ``repro workspace migrate-locks`` and ``repro flake refresh-lock``.
-    i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--flake" or arg.startsWith("--flake="):
-      flakeDir = valueFromFlag(args, i, "--flake")
-    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
-      stripSpec = valueFromFlag(args, i, "--strip-suffix")
-      stripGiven = true
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitRoot = valueFromFlag(args, i, "--workspace-root")
-      passthrough.add("--workspace-root=" & explicitRoot)
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-      passthrough.add(arg)
-    else:
-      passthrough.add(arg)
-    inc i
+  let flakeDir = c.flake
+  let asJson = c.json
+  let explicitRoot = c.workspaceRoot
+  let toolProvisioning =
+    # Defaulted to `path`, never left ``tpmUnspecified``: ``resolveGitTool``
+    # REJECTS that outright, and this is the line `.envrc` runs on every
+    # directory entry. The same defect and the same fix are recorded for
+    # ``repro workspace migrate-locks`` and ``repro flake refresh-lock``.
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
 
   var refusals: seq[string]
   proc refuse(): int =
@@ -98707,10 +99082,10 @@ proc runFlakeOverrideArgsCommand*(args: openArray[string]): int =
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
   let suffixes =
-    if stripGiven: parseCommaList(stripSpec)
+    if c.stripSuffix.isSome: parseCommaList(c.stripSuffix.get)
     else: defaultFlakeInputStripSuffixes
-  let shell = flakeShellBindingsOf(flakeRoot, passthrough, explicitRoot,
-    suffixes, identity)
+  let shell = flakeShellBindingsOf(flakeRoot, developSetSelectionOf(c),
+    explicitRoot, toolProvisioning, suffixes, identity)
   if not shell.ok:
     for r in shell.refusals: refusals.add(r)
     return refuse()
@@ -99969,7 +100344,7 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "`, then re-run the refresh to learn where this sibling really stands.")
 
 proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
-    selectorArgs: openArray[string]; suffixes: openArray[string];
+    developSet: DevelopSetSelection; suffixes: openArray[string];
     toolProvisioning: ToolProvisioningMode;
     recordDowngrade = false;
     label = flakeRefreshLockLabel;
@@ -100038,28 +100413,20 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     result.exitCode = 2
     return
 
-  # (1) The override set — NF-1's answer, computed by NF-1's own code.
-  var selector: seq[string]
-  var toolProvisioningGiven = false
-  for a in selectorArgs:
-    selector.add(a)
-    if a.startsWith("--tool-provisioning"): toolProvisioningGiven = true
-  if workspaceRoot.len > 0:
-    selector.add("--workspace-root=" & workspaceRoot)
-  if not toolProvisioningGiven and toolProvisioning == tpmPathOnly:
-    # The commit hook resolves git off ``PATH`` (post-commit must not provision
-    # a toolchain), so the develop-set query it drives has to do the same. Left
-    # off, the composer would resolve its own git by the default policy and a
-    # hook could end up materialising a toolchain on the commit path.
-    selector.add("--tool-provisioning=path")
+  # (1) The override set — `override-args`' answer, computed by its code. The
+  # develop-set query resolves git the way the refresh does
+  # (``toolProvisioning``, `path` unless the operator named another mode):
+  # the commit hook resolves git off ``PATH`` (post-commit must not provision
+  # a toolchain), and a query that resolved its own git by the default
+  # policy could materialise a toolchain on the commit path.
   #
   # ``preset`` is the managed hooks' own develop set (§16.5,
-  # ``hookFlakeSelection``); without it, the operator verb's selector is
-  # composed exactly as before.
+  # ``hookFlakeSelection``); without it, the operator verb's selection is
+  # composed.
   let selection =
     if preset.isSome: preset.get()
-    else: flakeDevelopSelectionOf(selector,
-      if workspaceRoot.len > 0: workspaceRoot else: "")
+    else: flakeDevelopSelectionOf(developSet,
+      if workspaceRoot.len > 0: workspaceRoot else: "", toolProvisioning)
   if not selection.ok:
     result.tag = "refused-unresolvable-workspace"
     result.diagnostic = selection.refusals.join("; ")
@@ -101453,7 +101820,7 @@ proc runReproLockUpdate*(c: ReproCommandLineLockUpdate): int =
   printLockUpdateOutcome(outcome, LockUpdateLabel)
   outcome.exitCode
 
-proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
+proc runFlakeRefreshLockCommand*(c: ReproCommandLineFlakeRefreshLock): int =
   ## ``repro flake refresh-lock [--all|--only=LIST|…every `repro develop`
   ## set-form selector] [--flake=DIR] [--strip-suffix=LIST]
   ## [--workspace-root=PATH] [--current-repo=PATH] [--json]``.
@@ -101495,64 +101862,37 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   ## variable, with the same meaning, as on the commit path — or, for a behind
   ## input, unless ``--record-downgrade`` is given. Each regression recorded
   ## that way is announced on stderr.
-  var
-    flakeDir = ""
-    stripSpec = ""
-    stripGiven = false
-    asJson = false
-    explicitRoot = ""
-    currentRepo = ""
-    recordDowngrade = false
-    toolProvisioning = tpmPathOnly
-      ## NOT ``tpmUnspecified``, and the difference is the whole difference
-      ## between a command that runs and one that only reads as though it
-      ## would. ``resolveGitTool`` REJECTS ``tpmUnspecified`` outright ("no
-      ## provisioning mode was selected before resolving git; callers must
-      ## parse --tool-provisioning before invoking resolveGitTool"), so this
-      ## verb — the one NF-3's pre-push refusal tells the operator to run —
-      ## exited 2 with that message for every invocation that did not spell
-      ## the flag out. Every other verb's parser seeds ``tpmPathOnly`` and
-      ## lets ``--tool-provisioning`` override it (the same defect was fixed
-      ## for ``repro workspace migrate-locks``); this now does too.
-      ##
-      ## Found by NF-3's `t_push_refuses_when_the_lock_disagrees_with_the_
-      ## siblings`, which does not match the emitted remedy against a pattern
-      ## but EXECUTES it in the directory the refusal names.
-    passthrough: seq[string]
-    i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--flake" or arg.startsWith("--flake="):
-      flakeDir = valueFromFlag(args, i, "--flake")
-    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
-      stripSpec = valueFromFlag(args, i, "--strip-suffix")
-      stripGiven = true
-    elif arg == "--current-repo" or arg.startsWith("--current-repo="):
-      currentRepo = valueFromFlag(args, i, "--current-repo")
-    elif arg == "--record-downgrade":
-      # The explicit opt-in of §3.2's "deliberately testing an older dependency
-      # is legitimate". Without it a behind-pin sibling's pin is left alone and
-      # named; with it, the downgrade is filed because somebody asked for it in
-      # so many words. NOT passed through to the develop-set selector — it is
-      # this verb's flag, and the composer would refuse an argument it does not
-      # know.
-      recordDowngrade = true
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitRoot = valueFromFlag(args, i, "--workspace-root")
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-      passthrough.add(arg)
-    else:
-      passthrough.add(arg)
-    inc i
+  let flakeDir = c.flake
+  let asJson = c.json
+  let explicitRoot = c.workspaceRoot
+  var currentRepo = c.currentRepo
+  # The explicit opt-in to "deliberately testing an older dependency is
+  # legitimate". Without it a behind-pin sibling's pin is left alone and
+  # named; with it, the downgrade is filed because somebody asked for it in
+  # so many words. It is this verb's flag, not a develop-set selector.
+  let recordDowngrade = c.recordDowngrade
+  let toolProvisioning =
+    # NOT ``tpmUnspecified``, and the difference is the whole difference
+    # between a command that runs and one that only reads as though it
+    # would. ``resolveGitTool`` REJECTS ``tpmUnspecified`` outright ("no
+    # provisioning mode was selected before resolving git; callers must
+    # parse --tool-provisioning before invoking resolveGitTool"), so this
+    # verb — the one the pre-push refusal tells the operator to run —
+    # exited 2 with that message for every invocation that did not spell
+    # the flag out. Every other verb defaults to `path` and lets
+    # ``--tool-provisioning`` override it (the same defect was fixed for
+    # ``repro workspace migrate-locks``); this does too.
+    #
+    # Found by `t_push_refuses_when_the_lock_disagrees_with_the_
+    # siblings`, which does not match the emitted remedy against a pattern
+    # but EXECUTES it in the directory the refusal names.
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
   if currentRepo.len == 0: currentRepo = flakeRoot
   let suffixes =
-    if stripGiven: parseCommaList(stripSpec)
+    if c.stripSuffix.isSome: parseCommaList(c.stripSuffix.get)
     else: defaultFlakeInputStripSuffixes
   let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
   let allowance = parsePinRegressionAllowance(getEnv(PinRegressionAllowEnv))
@@ -101571,18 +101911,9 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
   # land in `flake.lock`, and a modified checkout's `HEAD` is refused (see
   # ``executeLockUpdate``).
   var named: seq[string]
-  block:
-    var j = 0
-    while j < passthrough.len:
-      let a = passthrough[j]
-      if a.startsWith("--only="):
-        for n in parseCommaList(a["--only=".len .. ^1]):
-          if n notin named: named.add(n)
-      elif a == "--only" and j + 1 < passthrough.len:
-        for n in parseCommaList(passthrough[j + 1]):
-          if n notin named: named.add(n)
-        inc j
-      inc j
+  for value in c.only:
+    for n in parseCommaList(value):
+      if n notin named: named.add(n)
   if named.len > 0:
     var status = 0
     var results = newJArray()
@@ -101608,7 +101939,7 @@ proc runFlakeRefreshLockCommand*(args: openArray[string]): int =
         "lockUpdates": results}, indent = 2))
     return status
   let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo,
-    passthrough, suffixes, toolProvisioning, recordDowngrade,
+    developSetSelectionOf(c), suffixes, toolProvisioning, recordDowngrade,
     allowRegression = allowance.names)
   if asJson:
     var rewrites = newJArray()
@@ -101957,7 +102288,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
     for m in substituted.hookSet.notSubstituted:
       result.notSubstituted.add(describeNotSubstituted(m))
     let outcome = executeFlakeLockRefresh(flakeRoot, workspaceRoot,
-      currentRepo, @["--all"], defaultFlakeInputStripSuffixes,
+      currentRepo, DevelopSetSelection(mode: dasmAll, named: true),
+      defaultFlakeInputStripSuffixes,
       toolProvisioning, recordDowngrade = false,
       label = label, allowRegression = allowRegression,
       refuseRegressions = true, planOnly = planOnly,
@@ -102355,7 +102687,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
      else:
        " Then commit both files and re-push.")
 
-proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
+proc runFlakeOverrideStatusCommand*(c: ReproCommandLineFlakeOverrideStatus): int =
   ## CONSUMER 2 — ``repro flake override-status [--all|--only=LIST|
   ## --except=LIST|--tier=LIST| …every other `repro develop` set-form selector]
   ## [--flake=DIR] [--workspace-root=PATH] [--strip-suffix=LIST] [--json]``,
@@ -102421,58 +102753,29 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   ## Every develop-set selector is REFUSED here rather than ignored: there is
   ## no selection to make, and a ``--only=`` that silently did nothing would be
   ## §5's inert knob in the one command whose subject is inert knobs.
-  var
-    flakeDir = ""
-    stripSpec = ""
-    stripGiven = false
-    asJson = false
-    explicitRoot = ""
-    applied = false
-    appliedArgs: seq[string]
-    selectors: seq[string]
-    passthrough: seq[string]
-    toolProvisioning = tpmPathOnly
-      ## Seeded, not left ``tpmUnspecified`` — see the same note on
-      ## ``runFlakeRefreshLockCommand``. ``resolveGitTool`` REJECTS
-      ## ``tpmUnspecified`` outright, so a verb that seeded it would exit 2 for
-      ## every invocation that did not spell the flag out.
-    i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--":
-      # Everything after the separator is the applied vector, verbatim —
-      # including words that look like flags of this command, because they are
-      # nix's arguments and not ours.
-      appliedArgs = @(args[i + 1 .. ^1])
-      break
-    if arg == "--flake" or arg.startsWith("--flake="):
-      flakeDir = valueFromFlag(args, i, "--flake")
-    elif arg == "--applied":
-      applied = true
-    elif arg == "--strip-suffix" or arg.startsWith("--strip-suffix="):
-      stripSpec = valueFromFlag(args, i, "--strip-suffix")
-      stripGiven = true
-    elif arg == "--json":
-      asJson = true
-    elif arg == "--workspace-root" or arg.startsWith("--workspace-root="):
-      explicitRoot = valueFromFlag(args, i, "--workspace-root")
-      passthrough.add("--workspace-root=" & explicitRoot)
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      toolProvisioning = parseToolProvisioning(
-        valueFromFlag(args, i, "--tool-provisioning"))
-      passthrough.add(arg)
-    else:
-      # Every remaining flag is a `repro develop` set-form selector and reaches
-      # the composer verbatim. This is the ONE line that makes `--only=` and
-      # `--except=` mean here what they mean there.
-      passthrough.add(arg)
-      selectors.add(arg)
-    inc i
-
+  let flakeDir = c.flake
+  let asJson = c.json
+  let explicitRoot = c.workspaceRoot
+  let applied = c.applied
+  let stripGiven = c.stripSuffix.isSome
+  # Everything after the separator is the applied vector, verbatim —
+  # including words that look like flags of this command, because they are
+  # nix's arguments and not ours.
+  let appliedArgs = c.appliedArgs
+  # Every develop-set selector the command line gave. Without `--applied`
+  # they select the set; with it they are refused, by name.
+  let selectors = developSelectorWords(c)
+  let toolProvisioning =
+    # Defaulted to `path`, not left ``tpmUnspecified`` — see the same note
+    # on ``runFlakeRefreshLockCommand``. ``resolveGitTool`` REJECTS
+    # ``tpmUnspecified`` outright, so a verb that seeded it would exit 2 for
+    # every invocation that did not spell the flag out.
+    if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
+    else: tpmPathOnly
   let flakeRoot =
     if flakeDir.len > 0: absolutePath(flakeDir) else: getCurrentDir()
   let suffixes =
-    if stripGiven: parseCommaList(stripSpec)
+    if stripGiven: parseCommaList(c.stripSuffix.get)
     else: defaultFlakeInputStripSuffixes
   let workspaceRoot = flakeOverrideWorkspaceRoot(explicitRoot)
 
@@ -102613,7 +102916,8 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     # binder. One derivation, the same one `repro flake override-args` emits and
     # the same one the pre-push gate verifies, so no two of them can disagree
     # about which inputs the dev shell is actually building from.
-    let selection = flakeDevelopSelectionOf(passthrough, explicitRoot)
+    let selection = flakeDevelopSelectionOf(developSetSelectionOf(c),
+      explicitRoot, toolProvisioning)
     if not selection.ok:
       for r in selection.refusals: refusals.add(r)
       return refuse()
@@ -102700,25 +103004,16 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     flakeOverrideStatusLabel)
   0
 
-proc runReproFlakeCommand*(args: openArray[string]): int =
-  ## Top-level dispatcher for ``repro flake <verb> …``. NF-1 ships
-  ## ``override-args``, NF-2 ``refresh-lock``, NF-3 ``override-status``.
-  if args.len == 0:
-    stderr.writeLine("repro flake: error: missing verb " &
-      "(one of: override-args, refresh-lock, override-status)")
-    return 2
-  let rest = if args.len > 1: args[1 .. ^1] else: @[]
-  case args[0]
-  of "override-args":
-    return runFlakeOverrideArgsCommand(rest)
-  of "refresh-lock":
-    return runFlakeRefreshLockCommand(rest)
-  of "override-status":
-    return runFlakeOverrideStatusCommand(rest)
-  else:
-    stderr.writeLine("repro flake: error: unknown verb '" & args[0] &
-      "' (one of: override-args, refresh-lock, override-status)")
-    return 2
+proc runReproFlakeCommand*(c: ReproCommandLineFlake): int =
+  ## ``repro flake <verb> …``: ``override-args``, ``refresh-lock`` and
+  ## ``override-status``.
+  case c.command
+  of ReproCommandLineFlakeCommand.overrideArgs:
+    runFlakeOverrideArgsCommand(c.overrideArgs)
+  of ReproCommandLineFlakeCommand.refreshLock:
+    runFlakeRefreshLockCommand(c.refreshLock)
+  of ReproCommandLineFlakeCommand.overrideStatus:
+    runFlakeOverrideStatusCommand(c.overrideStatus)
 
 proc runWorkspacePublishEvidenceCommand*(
     c: ReproCommandLineWorkspacePublishEvidence): int =
@@ -104679,25 +104974,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "flake":
-    # NF-1 (Nix-Flake-Coexistence.md §5) — ``repro flake <verb>``. Ships
-    # ``override-args``, which emits the ``--override-input`` arguments for the
-    # current workspace so an ``.envrc`` becomes a single call instead of six
-    # ``NIX_FLAKE_OVERRIDE_*`` variables plus a content-pinned direnv plugin.
-    #
-    # Exit 2 rather than 1 on an unexpected error, deliberately: this verb's
-    # whole contract is that a failure and an empty override list are
-    # DISTINGUISHABLE, and the exit status is the thing `.envrc` branches on.
-    try:
-      let flakeArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproFlakeCommand(flakeArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro flake: error: " & err.msg)
-      return 2
   if programName == "repro" and args.len > 0 and args[0] == "watch":
     try:
       let watchArgs =
@@ -104722,17 +104998,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
       return 2
     except CatchableError as err:
       stderr.writeLine("repro watch: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "develop":
-    try:
-      let developArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runDevelopCommand(developArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro develop: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
@@ -105360,6 +105625,28 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.develop:
+    try:
+      return runDevelopCommand(conf.develop)
+    except CatchableError as err:
+      stderr.writeLine("repro develop: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.flake:
+    # ``repro flake <verb>``:
+    # ``override-args`` emits the ``--override-input`` arguments for the
+    # current workspace so an ``.envrc`` becomes a single call instead of six
+    # ``NIX_FLAKE_OVERRIDE_*`` variables plus a content-pinned direnv plugin;
+    # ``refresh-lock`` and ``override-status`` share its
+    # develop-set binding.
+    #
+    # Exit 2 rather than 1 on an unexpected error, deliberately: this verb's
+    # whole contract is that a failure and an empty override list are
+    # DISTINGUISHABLE, and the exit status is the thing `.envrc` branches on.
+    try:
+      return runReproFlakeCommand(conf.flake)
+    except CatchableError as err:
+      stderr.writeLine("repro flake: error: " & err.msg)
+      return 2
   of ReproCommandLineCommand.push:
     try:
       return runPushCommand(conf.push)

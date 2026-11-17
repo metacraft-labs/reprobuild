@@ -13,6 +13,9 @@ export runquota_client.RunQuotaLease
 import runquota_codec
 import runquota_core
 import runquota_core/image_digest
+import runquota_core/measurement
+from runquota_core/cpu_profile import MaxAfterLeases
+export MaxAfterLeases
 import runquota_ipc except connectDefault
 import runquota_process
 import runquota_protocol
@@ -115,6 +118,10 @@ type
     active*: bool
     completed*: bool
     execution*: ReproRunQuotaExecution
+    afterKnown: bool
+    afterLeases: seq[uint64]
+      ## The leases of the actions this one waited for, declared by the
+      ## engine (`declareAfter`) and sent with the finish for sizing replay.
 
   ReproDirectRunningProcess* = object
     ## A directly launched command that uses RunQuota's argv-preserving,
@@ -1825,7 +1832,8 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount,
         totals = completion.totals,
-        cpuProfile = completion.cpuProfile)
+        cpuProfile = completion.cpuProfile,
+        sizing = completion.finishSizing())
       result = ReproRunQuotaExecution(
         leaseId: lease.id.value,
         exitCode: completion.exitCode,
@@ -1964,11 +1972,17 @@ proc cancelAndWait*(running: var ReproDirectRunningProcess):
     raise newException(ReproRunQuotaError, err.msg)
 
 proc openRunQuotaSession*(name = "reprobuild action";
-                          version = "0.1.0"): ReproRunQuotaSession =
+                          version = "0.1.0"; project = "";
+                          entryPoint = ""): ReproRunQuotaSession =
+  ## ``project`` / ``entryPoint`` are the sizing declarations; the client
+  ## library prefers `RUNQUOTA_PROJECT` / `RUNQUOTA_ENTRY_POINT` only when
+  ## these are empty, so a caller that wants the variables to win reads
+  ## them first (`buildSizingDeclaration`).
   result = ReproRunQuotaSession()
   try:
     result.client = connectDefault()
-    result.session = result.client.registerSession(name, version)
+    result.session = result.client.registerSession(name, version, project,
+      entryPoint)
     result.nextCandidateId = 1'u64
     result.active = true
   except CatchableError as err:
@@ -2846,6 +2860,32 @@ proc pollCompletion*(running: var ReproRunQuotaRunningProcess): bool =
     return false
   running.child.pollCompletion()
 
+proc sizingDataEnabled*(): bool =
+  ## Whether this process takes the `sizing-data` measurement
+  ## (`RUNQUOTA_MEASUREMENT`, off by default): the engine then computes each
+  ## action's `after` list, which costs a walk of its dependencies per
+  ## finish, and the launcher sends memory profiles and IO bytes.
+  measureSizingData in clientMeasurements()
+
+proc declareAfter*(running: var ReproRunQuotaRunningProcess;
+                   leases: seq[uint64]) =
+  ## The leases (of this build's session) of the actions this one waited
+  ## for. More than `MaxAfterLeases` is not declared at all: the replay then
+  ## falls back to the recorded offset, which is weaker but not wrong,
+  ## whereas a truncated list would claim the rest were not waited for.
+  if leases.len > MaxAfterLeases:
+    running.afterKnown = false
+    running.afterLeases = @[]
+    return
+  running.afterKnown = true
+  running.afterLeases = leases
+
+proc sizingOf(running: ReproRunQuotaRunningProcess;
+              completion: ProcessCompletion): FinishSizing =
+  result = completion.finishSizing()
+  result.afterKnown = running.afterKnown
+  result.afterLeases = running.afterLeases
+
 proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
     ReproRunQuotaExecution =
   if running.completed:
@@ -2867,7 +2907,8 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
         processCount = completion.processCount,
         totals = completion.totals,
         cpuProfile = completion.cpuProfile,
-        askExpectedDuration = pressureReportsEnabled())
+        askExpectedDuration = pressureReportsEnabled(),
+        sizing = running.sizingOf(completion))
       leaseFinishedSent = true
     finally:
       if running.lease.active:
@@ -2905,7 +2946,8 @@ proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount,
         totals = completion.totals,
-        cpuProfile = completion.cpuProfile)
+        cpuProfile = completion.cpuProfile,
+        sizing = running.sizingOf(completion))
       leaseFinishedSent = true
     finally:
       if running.lease.active:

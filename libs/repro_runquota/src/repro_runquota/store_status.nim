@@ -16,9 +16,20 @@
 ##   ``ready``,
 ##
 ## and a text-mode invocation prints ONE line on stderr whenever the status
-## is not ``ready`` (``storeStatusNotice``). A ready store whose view matched
-## no rows is ``ready``: the status describes the store, not the view's
-## filter, so "zero matching rows" and "no store" stay apart.
+## is not ``ready`` (``storeStatusNotice``).
+##
+## READY NEEDS A ROW; ZERO ROWS IS EMPTY. A daemon that answered with
+## capture on is ``ready`` exactly when it holds at least one row for the
+## caller's scope. A thinned window (``window.state = "incomplete"``) that
+## still holds rows is ``ready``; ``window`` labels it thinned. A window
+## that holds ZERO rows is ``empty`` even when ``window.state`` is
+## ``incomplete`` because every observation was evicted or lost: the
+## window keeps saying ``incomplete`` (lost is not the same as never
+## recorded), the store status says there is nothing to read, and the
+## reason names the lost observations. Rows that a view's own filter then
+## drops do not change the status: it describes the store's answer for
+## the scope, not the filter, so "zero matching rows" and "no store" stay
+## apart.
 ##
 ## The keys are spelled with underscores, unlike the camelCase of the stats
 ## schemas, because the same three keys sit beside the daemon's own
@@ -173,6 +184,18 @@ proc capturelessDaemonReport*(view: SharedStoreView): StoreStatusReport =
     result.remedy = "restart runquotad with --measurement capture=on: " &
       startDaemonRemedy(view.endpoint) & " (" & inspect & ")"
 
+proc emptyStoreReport(view: SharedStoreView;
+                      projectRoot: string): StoreStatusReport =
+  ## A recording daemon that answered and holds zero rows for the scope.
+  ## ``view.reason`` says why there are none: nothing recorded yet, or
+  ## every observation lost. The remedy is the same either way: build
+  ## something so the daemon has rows to keep.
+  StoreStatusReport(captureEnabled: true, status: ssEmpty,
+    reason: view.reason,
+    remedy: "repro build " & quoteShell(projectRoot) &
+      " (actions it launches are recorded by runquotad at " &
+      view.endpoint & ")")
+
 proc statsStoreStatus*(view: SharedStoreView;
                        projectRoot: string): StoreStatusReport =
   ## The status of the RunQuota observation store every ``repro stats``
@@ -184,16 +207,20 @@ proc statsStoreStatus*(view: SharedStoreView;
   ## before that answer arrived, nothing can be recording on this client's
   ## behalf, so it is false.
   case view.state
-  of sssComplete, sssIncomplete:
-    # INCOMPLETE IS READY. The figures exist and are labelled thinned by
-    # ``window.state``; the store itself is there to read.
+  of sssComplete:
     StoreStatusReport(captureEnabled: true, status: ssReady)
+  of sssIncomplete:
+    if view.executions.len == 0 and view.actionRows.len == 0:
+      # EVERYTHING WAS LOST. ``window.state`` stays ``incomplete`` and the
+      # view's reason counts the lost observations, but there is not one
+      # row to read, so the store is ``empty`` (see the module comment).
+      emptyStoreReport(view, projectRoot)
+    else:
+      # A THINNED WINDOW WITH ROWS IS READY. The figures exist and are
+      # labelled thinned by ``window.state``.
+      StoreStatusReport(captureEnabled: true, status: ssReady)
   of sssEmpty:
-    StoreStatusReport(captureEnabled: true, status: ssEmpty,
-      reason: view.reason,
-      remedy: "repro build " & quoteShell(projectRoot) &
-        " (actions it launches are recorded by runquotad at " &
-        view.endpoint & ")")
+    emptyStoreReport(view, projectRoot)
   of sssCaptureDisabled:
     capturelessDaemonReport(view)
   of sssQueryFailed:

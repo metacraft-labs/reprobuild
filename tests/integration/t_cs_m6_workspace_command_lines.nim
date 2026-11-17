@@ -23,7 +23,8 @@
 ##      <name> --checkout`, `workspace start|branch|project`, `checkout`,
 ##      `co`, `workspace projects add --default`, workspace `--report`,
 ##      `--manifest-layer-root`) are refused as unknown, and the retired
-##      `--from-mainlines` names its replacement.
+##      `--from-mainlines` names its replacement, under `branch`, `workspace
+##      new` and `ws new` alike.
 ##   3. The managed hooks' handshake. `hooks protocol --require=2` answers
 ##      `2`; the contract token of a body this build installs is serviced
 ##      (exit 0) and a foreign one is refused with exit 3 (the status the
@@ -234,11 +235,21 @@ suite "the workspace and publication command lines":
       let res = s.run(argv)
       check res.code == 2
       check command in res.output
-    # The retired `--from-mainlines` names its replacement.
-    let retired = s.run(["branch", "../x", "--from-mainlines"]).output
-    check "unknown flag '--from-mainlines'" in retired
-    check "`--from=mainline`" in retired
-    check "`--mainline`" in retired
+    # The retired `--from-mainlines` names its replacement under every
+    # spelling of the command: `workspace new` (and `ws new`) is `branch`
+    # under another name.
+    for (argv, command) in [
+        (@["branch", "../x", "--from-mainlines"], "repro branch"),
+        (@["workspace", "new", "../x", "--from-mainlines"],
+          "repro workspace new"),
+        (@["ws", "new", "../x", "--from-mainlines"],
+          "repro workspace new")]:
+      let retired = s.run(argv)
+      check retired.code == 2
+      check ("unknown flag '--from-mainlines' for '" & command & "'") in
+        retired.output
+      check "`--from=mainline`" in retired.output
+      check "`--mainline`" in retired.output
     check s.cwd.entriesUnder().len == 0
     check not dirExists(s.cwd.parentDir / "x")
 

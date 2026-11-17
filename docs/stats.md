@@ -263,8 +263,8 @@ because no daemon answered:
 
 | `store_status` | when | `remedy` |
 | --- | --- | --- |
-| `ready` | the daemon answered and holds rows (even if this view matched none) | — |
-| `empty` | the daemon records and holds nothing for your scope yet | `repro build <project>` |
+| `ready` | the daemon answered and holds at least one row for your scope, a thinned `incomplete` window included (even if this view's filter then matched none) | — |
+| `empty` | the daemon records and holds zero rows for your scope: nothing yet, or a window that is `incomplete` because every observation was lost | `repro build <project>` |
 | `unprovisioned` | the daemon records nothing (`capture-disabled`), or nothing was ever set up at the endpoint: neither the socket nor its directory exists | `runquotad --socket <endpoint> --measurement capture=on` |
 | `daemon_unreachable` | something was set up at the endpoint (a dead socket, or the socket's directory) and no daemon answered, or the query failed | start `runquotad` there, or point `RUNQUOTA_SOCKET` at a running one |
 

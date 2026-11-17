@@ -230,7 +230,12 @@ def green(kind, base="debian-13"):
                                         "dropInWritten": False}
             rec["deadApplyAdopted"] = {"exit": 1, "refusedForReason": True,
                                        "ran": False, "started": False,
-                                       "heldInEtc": True, "ok": True}
+                                       "heldInEtc": True, "checkBeganAt": 120.5,
+                                       "releasedAt": 160.2,
+                                       "serviceActiveAt": -1.0,
+                                       "serviceStartedBeforeCheck": False,
+                                       "serviceStartedBeforeRelease": False,
+                                       "ok": True}
             rec["fullApplyFixing"] = {"staged": "failed", "exit": 0,
                                       "active": "active", "recordLeft": "",
                                       "ok": True}
@@ -451,9 +456,14 @@ def red_record(kind, base="debian-13"):
     elif kind == "mutdeadhold":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="dead-apply-holds-lifted")
-        rec["deadApplyAdopted"] = {"exit": 1, "refusedForReason": True,
+        rec["deadApplyAdopted"] = {"exit": 0, "refusedForReason": False,
                                    "ran": True, "started": True,
-                                   "heldInEtc": True, "ok": False}
+                                   "heldInEtc": False, "checkBeganAt": 121.0,
+                                   "releasedAt": 161.0,
+                                   "serviceActiveAt": 118.4,
+                                   "serviceStartedBeforeCheck": True,
+                                   "serviceStartedBeforeRelease": True,
+                                   "ok": False}
         rec["steps"] = [ok("bootstrap"),
                         red("M3: a judged service a dead full apply held, "
                             "with connections arriving, stays held until the "
@@ -1167,12 +1177,26 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
             rec[key][field] = value
             self.assertRejected("conv-debian-13", rec)
         # A13 review round 12: each new falsifier red for its own reason.
+        # The order decides, not the start: a service that started after
+        # the release (what the product does with an adopted unit) is not
+        # the falsifier's red, and one never started is not either.
         rec = red_record("mutdeadhold")
-        rec["deadApplyAdopted"]["refusedForReason"] = False
+        rec["deadApplyAdopted"].update({"serviceActiveAt": 170.0,
+                                        "serviceStartedBeforeCheck": False,
+                                        "serviceStartedBeforeRelease": False})
         self.assertRejected("mutdeadhold-debian-13", rec)
         rec = red_record("mutdeadhold")
-        rec["deadApplyAdopted"]["started"] = False
+        rec["deadApplyAdopted"].update({"serviceActiveAt": -1.0,
+                                        "serviceStartedBeforeRelease": False})
         self.assertRejected("mutdeadhold-debian-13", rec)
+        rec = red_record("mutdeadhold")
+        rec["deadApplyAdopted"]["checkBeganAt"] = -1.0
+        self.assertRejected("mutdeadhold-debian-13", rec)
+        # And a product record with the mutation's order is not green.
+        rec = green("conv")
+        rec["deadApplyAdopted"].update({"serviceActiveAt": 118.4,
+                                        "serviceStartedBeforeRelease": True})
+        self.assertRejected("conv-debian-13", rec)
         rec = red_record("mutfullfix")
         rec["fullApplyFixing"]["recordLeft"] = "eth-r11-sock.socket"
         self.assertRejected("mutfullfix-debian-13", rec)
