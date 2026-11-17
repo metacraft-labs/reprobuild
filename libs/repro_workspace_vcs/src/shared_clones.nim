@@ -2631,11 +2631,12 @@ const RetentionHookScript* = """#!/bin/sh
 # `git gc` runs this as gc.recentObjectsHook. Every object id printed here is
 # kept, together with everything it reaches in this pool, as if it were
 # recent. It prints what each checkout listed in repro/borrowers still names
-# -- its refs, its HEADs and its reflog entries -- and, for any of those this
-# pool does not hold itself (a commit made in the checkout), the history
-# behind it, so the parents of a checkout's own commits are kept too. If this
-# script fails, git skips pruning: a failure keeps objects, it never deletes
-# them.
+# -- its refs, its HEADs, its reflog entries and what its indexes stage --
+# and, for any of those this pool does not hold itself (a commit made in the
+# checkout), the history behind it, so the parents of a checkout's own
+# commits are kept too. If this script fails, git skips pruning: a failure
+# keeps objects, it never deletes them. It fails for a checkout it cannot
+# vouch for, including one whose refs are not stored as files (reftable).
 
 # gc exports this pool's GIT_DIR (and friends) to the hook, and they override
 # `git -C <checkout>`. Clear them before reading any checkout.
@@ -2729,6 +2730,20 @@ scan_dir() {
     scan_dir "$child" "$(($2 - 1))" || return 1
   done
 }
+# ref_storage_files COMMON-DIR succeeds only when the checkout keeps its refs
+# in the `files` backend, the only one whose HEADs and reflogs are read below
+# as files. A reftable checkout keeps them in reftable stacks; reading it as
+# files would name neither a detached HEAD nor a reflog entry, and still
+# succeed. Git reads extensions only from the common config, without
+# includes, so this reads that file alone. Unset means `files`.
+ref_storage_files() {
+  storage=$(git config --file "$1/config" --get extensions.refStorage)
+  case $? in
+    0) [ "$storage" = files ] ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
 : > "$work/found"
 while IFS= read -r parent || [ -n "$parent" ]; do
@@ -2751,6 +2766,14 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
 done < "$work/discovered"
 if [ "${1-}" = --discover ]; then
   [ "$incomplete" = 0 ] || exit 2
+  # A borrower git cannot open, or one on another ref backend, keeps expiry
+  # off (§3.2): the gc pass below would refuse it on every run. (Index
+  # readability is checked by the gc pass alone, which refuses safely.)
+  while IFS= read -r leaf || [ -n "$leaf" ]; do
+    [ -n "$leaf" ] && [ -d "$leaf" ] && [ -e "$leaf/.git" ] || continue
+    common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+    ref_storage_files "$common" || exit 1
+  done < "$work/leaves"
   exit 0
 fi
 
@@ -2763,6 +2786,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   # rather than let its objects expire.
   [ -e "$leaf/.git" ] || continue
   common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { status=1; continue; }
+  ref_storage_files "$common" || { status=1; continue; }
   : > "$work/names"
   # Refs, read from the ref store: this format never opens the objects.
   git -C "$leaf" for-each-ref --format='%(objectname)' >> "$work/names" || { status=1; continue; }
@@ -2779,6 +2803,21 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
     [ -d "$logs" ] || continue
     find "$logs" -type f -exec cat {} + | cut -d' ' -f1,2 | tr ' ' '\n' >> "$work/names"
   done
+  # Staged entries, of the checkout and of each linked worktree: a blob staged
+  # with `git checkout <old> -- <path>` may be one only expired history in this
+  # pool reaches. Each index is read by path, so a worktree whose directory is
+  # gone is still read. ls-files reads the index file, not the objects;
+  # --sparse keeps a sparse index from being expanded through trees, and
+  # core.fsmonitor=false keeps a gc from starting the checkout's monitor. An
+  # index that exists but cannot be read may stage anything: refuse. Gitlinks
+  # (mode 160000) name commits of a submodule's own repository.
+  indexes=0
+  for index in "$common/index" "$common"/worktrees/*/index; do
+    [ -e "$index" ] || continue
+    GIT_INDEX_FILE=$index git -C "$leaf" -c core.fsmonitor=false ls-files --stage --sparse > "$work/staged" || { indexes=1; break; }
+    grep -v '^160000 ' "$work/staged" | cut -d' ' -f2 >> "$work/names"
+  done
+  [ "$indexes" = 0 ] || { status=1; continue; }
   grep -E '^[0-9a-f]{40}([0-9a-f]{24})?$' "$work/names" | grep -v -E '^0+$' | sort -u > "$work/ids"
   cat "$work/ids"
   # Ids this pool does not hold were made in the checkout. Print the history
