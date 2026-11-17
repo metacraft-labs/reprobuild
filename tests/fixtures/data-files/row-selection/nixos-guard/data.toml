@@ -1,0 +1,18 @@
+[[package]]
+name = "always"
+activity = "default"
+
+[[package]]
+name = "nixos-tool"
+activity = "default"
+when = "nixos"
+
+[[package]]
+name = "other-linux-tool"
+activity = "default"
+when = "linux and not nixos"
+
+[[package]]
+name = "darwin-tool"
+activity = "default"
+when = "not nixos and macos"

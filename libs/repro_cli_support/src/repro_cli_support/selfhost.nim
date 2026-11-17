@@ -119,7 +119,7 @@ proc runSelfProvision*(a: SelfArgs): int =
   let platform = effectivePlatform(a.platform)
   let pkg = pkgOf(a)
   let address = storeAddressFor(pkg, a.version, platform)
-  let relative = prefixRelativePathFor(pkg, a.version, address)
+  let relative = prefixRelativePathFor(root, pkg, a.version, address)
   let absolute = root / relative
   if fileExists(pinnedExecutableIn(pkg, absolute)):
     echo "repro self provision: " & pkg.name & " " & a.version &
@@ -196,7 +196,7 @@ proc runSelfWhich*(a: SelfArgs): int =
   var relative = ""
   var resident = false
   if pin.state == spsPinned:
-    relative = selfPrefixRelativePath(pin)
+    relative = selfPrefixRelativePath(root, pin)
     executable = pinnedExecutableIn(pkg, root / relative)
     resident = fileExists(executable)
   if a.emitJson:

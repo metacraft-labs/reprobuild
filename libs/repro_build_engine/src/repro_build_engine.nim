@@ -2249,7 +2249,7 @@ type
     traceEnabled: bool
     runQuotaBypassed*: bool
       ## RA-13: true when at least one action in this build launched without a
-      ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA``
+      ## RunQuota lease (explicit ``--no-runquota`` / ``REPROBUILD_NO_RUNQUOTA``
       ## bypass, or the unreachable-daemon fallback). In that state RunQuota is
       ## NOT the resource authority for this run: host limits, cross-session
       ## fairness, and named-pool capacity are enforced only by the engine's
@@ -2961,19 +2961,30 @@ proc nixStoreRoot(normalized: string): string =
   else:
     prefix & rest[0 ..< slash]
 
+proc endsWithDigestOfWidth(name: string; width: int): bool =
+  ## `<anything>-<exactly width lowercase hex>` at the end of `name`: a
+  ## separator `width + 1` characters from the end (the separator arm, which
+  ## also bounds the length) and nothing but lowercase hex after it (the
+  ## digit arm).
+  if name.len < width + 1 or name[name.len - width - 1] != '-':
+    return false
+  for i in name.len - width ..< name.len:
+    if name[i] notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
 proc isRealizationDirName(name: string): bool =
   ## Does this directory name carry a realization digest?
   ##
   ## `repro_local_store/prefix_paths.realizationDirName` composes
-  ## `<version>-<first 16 hex of the BLAKE3 realization hash>`. Recognising
-  ## the SHAPE rather than trusting the location is what bounds the damage a
-  ## bogus `REPRO_STORE_ROOT` can do — see `reproStoreRootPath`.
-  if name.len < 17 or name[name.len - 17] != '-':
-    return false
-  for i in name.len - 16 ..< name.len:
-    if name[i] notin {'0' .. '9', 'a' .. 'f'}:
-      return false
-  true
+  ## `<version>-<first 40 hex of the BLAKE3 realization hash>`, and a store
+  ## an older build wrote still holds prefixes it named with the first 16
+  ## (`legacyRealizationDirName`), which the store keeps where they lie. Both
+  ## shapes state a digest; nothing else does. Recognising the SHAPE rather
+  ## than trusting the location is what bounds the damage a bogus
+  ## `REPRO_STORE_ROOT` can do — see `reproStoreRootPath`.
+  endsWithDigestOfWidth(name, RealizationDirHexChars) or
+    endsWithDigestOfWidth(name, LegacyRealizationDirHexChars)
 
 proc reproStoreRootPath(): string =
   ## Reprobuild's OWN content-addressed store root, forward-slashed and with
@@ -2998,7 +3009,8 @@ proc reproStoreRootPath(): string =
   ## What the env var still could do is nominate a MUTABLE tree as
   ## content-addressed within one consistent setting, and that is what
   ## `isRealizationDirName` bounds: the only thing elided under this root is a
-  ## directory whose own name states a 16-hex realization digest.
+  ## directory whose own name states a realization digest (40 hex, or the 16
+  ## of a prefix an older build named).
   ##
   ## A ROOT OF `/` NAMES NOTHING AT ALL, which is stronger than the bound
   ## above and worth stating because a reader will look here for it. The
@@ -7022,7 +7034,8 @@ proc class3Contribution*(kind: DeclarableDaemonKind):
   of ddkReproStoreDaemon:
     ## BRANCH (b), for the same reason and over reprobuild's own CAS store:
     ## it realizes and serves prefixes under
-    ## `<storeRoot>/…/prefixes/<package>/<version>-<16 hex>`, the second root
+    ## `<storeRoot>/…/prefixes/<package>/<version>-<40 hex>` (16 in a prefix
+    ## an older build named), the second root
     ## `contentAddressedRoot` recognises. DA-2's text names it and DA-2
     ## declined to register it because nothing spawns it — which is a statement
     ## about DERIVATION, not about the branch, and is what a checked
@@ -21888,8 +21901,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         pending.actions.join(", ") & " waited for a lease at " &
         runQuotaEndpointText() & ": no grant-stream frame and no status " &
         "reply for " & $grantUnresponsiveMs() & "ms (the daemon may be " &
-        "wedged or mid-restart). Retry, restart runquotad, or bypass " &
-        "RunQuota for this command with REPROBUILD_NO_RUNQUOTA=1 (unsafe).")
+        "wedged or mid-restart). " & RunQuotaUnresponsiveRemedy)
     var blocked = true
     for item in running:
       if item.processKind != rpkInlineRunQuotaPending:

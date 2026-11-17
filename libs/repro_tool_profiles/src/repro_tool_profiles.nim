@@ -1593,7 +1593,10 @@ proc versionFromPackageSelector(packageSelector: string): string =
 # has already prepared (it does NOT move bytes around). Adapters are
 # expected to choose the prefix path with `unifiedPrefixPath` so a
 # subsequent `repro store gc` finds the directory through the standard
-# layout.
+# layout. That path is the store's own answer for the id
+# (`resolvePrefixAbsolutePath`): the 40-hex name, or an older build's 16-hex
+# name where its prefix of this id still lies, so an adapter reuses that
+# prefix instead of materializing a second copy beside it.
 # ---------------------------------------------------------------------------
 
 proc unifiedStoreRoot*(explicit: string): string =
@@ -1610,13 +1613,17 @@ proc unifiedPrefixPath*(storeRoot, packageName, version, adapter,
           prefixId: PrefixIdBytes] =
   ## Returns the canonical M56 prefix path the adapter must materialize
   ## into. The path is `<store-root>/prefixes/<safe-package>/<version>-
-  ## <realization-hash-prefix>/`. `relativePath` is store-rooted with
+  ## <realization-hash-prefix>/`: the store's path for the id on THIS
+  ## store (`resolvePrefixRelativePath`) -- the 40-hex name, or the 16-hex
+  ## name an older build realized this very id under, which the store
+  ## index records and units may bind. `relativePath` is store-rooted with
   ## forward slashes — the same form persisted in the `prefixes`
   ## index column.
   let prefixId = computeRealizationHash(packageName, version, adapter,
     lockIdentity, declaredExecutablePath, provenanceUrl,
     provenanceChecksum, extra)
-  let rel = prefixRelativePath(packageName, version, prefixId)
+  let rel = resolvePrefixRelativePath(storeRoot, packageName, version,
+                                      prefixId)
   (absolutePath: storeRoot / rel.replace('/', DirSep),
    relativePath: rel,
    prefixId: prefixId)
@@ -1635,10 +1642,38 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     tuple[prefixId: PrefixIdBytes; inserted: bool] =
   ## Records the materialized prefix in the unified store and seals the
   ## binary `.repro-receipt` envelope at its root.
+  ##
+  ## `absoluteRealizedPath` must be one of the id's two names under
+  ## `storeRoot` (its 40-hex or legacy 16-hex path; `unifiedPrefixPath`
+  ## gives the one to use), and the receipt and the row record THAT path.
+  ## The row is inserted with `INSERT OR IGNORE`, so a row an older build
+  ## left at the other name would silently disagree with the tree just
+  ## materialized: it is moved to this path when no prefix of this id is at
+  ## the path it records any more, and the registration is refused when
+  ## one is (two directories of one id).
   let prefixId = computeRealizationHash(packageName, version, adapter,
     lockIdentity, declaredExecutablePath, provenanceUrl,
     provenanceChecksum, extra)
-  let rel = prefixRelativePath(packageName, version, prefixId)
+  let rel = relativePath(absoluteRealizedPath, storeRoot).replace('\\', '/')
+  if not isPrefixPathOf(rel, packageName, version, prefixId):
+    raise newException(StoreError, "registerInUnifiedStore: " &
+      absoluteRealizedPath & " is not a store path of the prefix " &
+      prefixIdHex(prefixId) & " under " & storeRoot & " (expected " &
+      prefixRelativePath(packageName, version, prefixId) & ")")
+  var store = openStore(storeRoot)
+  defer: store.close()
+  # A row at this id's OTHER name: only an older build's 16-hex path can be
+  # there (``isPrefixPathOf``). Refused before anything is written while a
+  # prefix of this id still lies at it (two directories of one id); moved
+  # with the tree otherwise, below.
+  let existing = store.lookupPrefix(prefixId)
+  let repoint = existing.found and existing.row.realizedPath != rel
+  if repoint and resolvePrefixRelativePath(storeRoot, packageName, version,
+                                           prefixId) != rel:
+    raise newException(StoreError, "registerInUnifiedStore: the store " &
+      "index records the prefix " & prefixIdHex(prefixId) & " at " &
+      existing.row.realizedPath & ", which still holds it; refusing to " &
+      "register a second copy at " & rel)
   let receipt = RealizationReceipt(
     schemaVersion: 1'u16,
     adapter: adapter,
@@ -1680,9 +1715,10 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     adapter: adapter,
     receiptDigest: receiptDigest(receipt),
     createdAtUnix: receipt.createdAtUnix)
-  var store = openStore(storeRoot)
-  defer: store.close()
   let inserted = store.insertPrefixOrIgnore(row)
+  if not inserted and repoint:
+    store.repointPrefixRow(prefixId, rel, receiptDigest(receipt),
+                           receipt.createdAtUnix)
   (prefixId: prefixId, inserted: inserted)
 
 proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile)
@@ -7966,10 +8002,10 @@ proc realizeScoopTool(useDef: InterfaceToolUse; storeRoot: string;
       resolvedVersion)
 
   # Compute the canonical M56 prefix path. The realization hash is
-  # derived from (bucket, app, resolvedVersion, manifestChecksum) so
-  # the first 16 hex chars match the legacy `realizationKey[0 .. 15]`
-  # value in spirit while now living in the standard
-  # `prefixes/<package>/<version>-<hash>/` shape.
+  # derived from (bucket, app, resolvedVersion, manifestChecksum), in the
+  # spirit of the legacy `realizationKey`, while the prefix now lives in
+  # the standard `prefixes/<package>/<version>-<hash>/` shape (the first
+  # 40 hex of the hash; `unifiedPrefixPath`).
   let scoopPackageName = safeStoreSegment("scoop." & plan.bucket & "." &
     plan.app, "scoop-app")
   let unified = unifiedPrefixPath(storeRoot, scoopPackageName,

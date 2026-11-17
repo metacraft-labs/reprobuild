@@ -649,8 +649,8 @@ proc refusalReason*(doc: JsonNode; system: string): string =
     "there is unknown (" & why.splitLines()[0] & "). Export on " & system &
     " instead."
 
-proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
-    JsonNode =
+proc evaluateHomeExport*(doc: JsonNode; system: string; host = "";
+                         nixos = none(bool)): JsonNode =
   ## Evaluate an export document for target platform `system` (a
   ## `ProfileTargetPlatforms` name, e.g. `aarch64-darwin`) and host `host`
   ## (default: the document's `selection.host`), with the planner's rules:
@@ -660,6 +660,10 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
   ## `applicableConfigEntries`, the walkers the planner applies) -- an
   ## activity-scoped resource (GM9) only when the host's selection enables
   ## its activity. Resources are the home-scope ones the home planner plans.
+  ##
+  ## `nixos`: whether the target is NixOS, which its system name does not
+  ## say. Unstated, a profile whose guards reach a `nixos` predicate is
+  ## refused with `EFactNotStated` (never read as false).
   ##
   ## Returns the `evaluation` object (`docs/user-guide/home-export.md`).
   ## Raises `HomeExportRefused` when the document cannot describe `system`
@@ -688,7 +692,8 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = ""):
       "data files (" & intent.dataFiles.join(", ") & "); an export carries " &
       "them expanded — re-export")
   let profile = profileIntentToHomeProfile(intent, root)
-  let ctx = targetHostContext(ProfileTargetPlatforms[index], selectedHost)
+  let ctx = targetHostContext(ProfileTargetPlatforms[index], selectedHost,
+    nixos)
 
   let plan = buildPlan(profile, "", ctx)
   var packages = newJArray()

@@ -84,6 +84,7 @@ flag	repro	--help-all
 flag	repro	--version
 flag	repro	-V
 command	repro help
+flag	repro help	--all
 command	repro version
 flag	repro version	--json
 command	repro completion
@@ -420,9 +421,11 @@ flag	repro home disable	--target-store-root
 flag	repro home disable	--target-wsl
 command	repro home list
 flag	repro home list	--host
+flag	repro home list	--json
 command	repro home why
 flag	repro home why	--host
 command	repro home history
+flag	repro home history	--json
 command	repro home apply
 flag	repro home apply	--accept-overwrite
 flag	repro home apply	--allow-drift
@@ -436,14 +439,17 @@ flag	repro home apply	--uninstall-from-scoop
 command	repro home plan
 flag	repro home plan	--allow-drift
 flag	repro home plan	--host
+flag	repro home plan	--json
 flag	repro home plan	--reconcile-drift
 command	repro home export
 flag	repro home export	--check
 flag	repro home export	--format
 flag	repro home export	--host
+flag	repro home export	--nixos
 flag	repro home export	--target
 command	repro home facts
 flag	repro home facts	--host
+flag	repro home facts	--nixos
 flag	repro home facts	--output
 flag	repro home facts	--target
 command	repro home compare
@@ -479,11 +485,36 @@ command	repro system remove
 flag	repro system remove	--profile
 flag	repro system remove	--state-dir
 command	repro system list
+flag	repro system list	--json
 flag	repro system list	--profile
 flag	repro system list	--state-dir
 command	repro system why
 flag	repro system why	--profile
 flag	repro system why	--state-dir
+command	repro system plan
+flag	repro system plan	--accept-drift
+flag	repro system plan	--home-profile-dir
+flag	repro system plan	--host
+flag	repro system plan	--json
+flag	repro system plan	--profile
+flag	repro system plan	--reconcile-drift
+flag	repro system plan	--state-dir
+command	repro system apply
+flag	repro system apply	--accept-drift
+flag	repro system apply	--accept-feature-destroy
+flag	repro system apply	--accept-passwd-destroy
+flag	repro system apply	--elevate
+flag	repro system apply	--force-unlock
+flag	repro system apply	--home-profile-dir
+flag	repro system apply	--host
+flag	repro system apply	--keep-days
+flag	repro system apply	--keep-generations
+flag	repro system apply	--no-elevate
+flag	repro system apply	--no-preview
+flag	repro system apply	--plan
+flag	repro system apply	--profile
+flag	repro system apply	--reconcile-drift
+flag	repro system apply	--state-dir
 command	repro system sync
 flag	repro system sync	--accept-drift
 flag	repro system sync	--accept-passwd-destroy
@@ -496,6 +527,7 @@ flag	repro system sync	--profile
 flag	repro system sync	--reconcile-drift
 flag	repro system sync	--state-dir
 command	repro system history
+flag	repro system history	--json
 flag	repro system history	--state-dir
 command	repro system rollback
 flag	repro system rollback	--accept-drift
@@ -509,6 +541,7 @@ flag	repro system rollback	--profile
 flag	repro system rollback	--reconcile-drift
 flag	repro system rollback	--state-dir
 command	repro system audit
+flag	repro system audit	--json
 flag	repro system audit	--profile
 flag	repro system audit	--state-dir
 command	repro infra
@@ -1214,6 +1247,7 @@ flag	repro lock refresh	--registry
 flag	repro lock refresh	--repin
 flag	repro lock refresh	--strategy
 flag	repro lock refresh	--write
+env	repro lock refresh	REPRO_ALLOW_PIN_REGRESSION
 command	repro lock update
 flag	repro lock update	--allow-pin-regression
 flag	repro lock update	--repo-root

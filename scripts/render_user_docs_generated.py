@@ -212,18 +212,66 @@ def _root_command_block(all_lines: list[str]) -> list[str]:
     return all_lines[start:end]
 
 
+@dataclass
+class CommandGroup:
+    title: str
+    primary: list[str]
+    secondary: list[str]
+
+
+GROUP_TABLE_OPENER = re.compile(r"^  ReproCommandGroups\* = @\[\s*$", re.M)
+GROUP_ENTRY = re.compile(
+    r'ReproCommandGroup\(title: "([^"]+)",\s*'
+    r"primary: @\[([^\]]*)\],\s*"
+    r"secondary: @\[([^\]]*)\]\)"
+)
+
+
+def parse_command_groups(text: str) -> list[CommandGroup]:
+    """The ``ReproCommandGroups`` table of cli_description.nim.
+
+    It is how ``repro --help`` organizes the top-level commands: one heading
+    per group, the group's ``primary`` commands on the short page and its
+    ``secondary`` ones added by ``repro --help-all``. The table is read as
+    text, so its shape is fixed: one ``ReproCommandGroup(title: "...",
+    primary: @[...], secondary: @[...])`` per group, string literals only,
+    closed by ``)]``.
+    """
+    opener = GROUP_TABLE_OPENER.search(text)
+    if not opener:
+        raise RuntimeError(
+            f"{CLI_DESC}: found no `ReproCommandGroups* = @[` table; update "
+            "GROUP_TABLE_OPENER in scripts/render_user_docs_generated.py"
+        )
+    end = text.find(")]", opener.end())
+    if end < 0:
+        raise RuntimeError(f"{CLI_DESC}: the ReproCommandGroups table is not closed by `)]`")
+    table = text[opener.end() : end + 1]
+    groups = [
+        CommandGroup(
+            title=m.group(1),
+            primary=re.findall(r'"([^"]+)"', m.group(2)),
+            secondary=re.findall(r'"([^"]+)"', m.group(3)),
+        )
+        for m in GROUP_ENTRY.finditer(table)
+    ]
+    if len(groups) != table.count("ReproCommandGroup("):
+        raise RuntimeError(
+            f"{CLI_DESC}: a ReproCommandGroups entry does not have the shape "
+            "GROUP_ENTRY in scripts/render_user_docs_generated.py reads"
+        )
+    return groups
+
+
 def parse_cli_commands() -> list[CliCommand]:
     lines = _root_command_block(CLI_DESC.read_text(encoding="utf-8").splitlines())
+    # Every command's domain is its ReproCommandGroups group, assigned by
+    # group_commands; the `# ---- ... ----` comments in the description only
+    # organise the declarations and are not read.
     domain = "General"
     commands: list[CliCommand] = []
     i = 0
     while i < len(lines):
-        sec_m = re.match(r"^    # ---- (.+?) -+$", lines[i])
-        if sec_m:
-            domain = sec_m.group(1).strip()
-            i += 1
-            continue
-
         sub_m = re.match(r'^    subcmd "([^"]+)"', lines[i])
         if not sub_m:
             i += 1
@@ -316,7 +364,28 @@ def parse_cli_commands() -> list[CliCommand]:
     return commands
 
 
-def render_commands_by_domain(commands: list[CliCommand]) -> str:
+def group_commands(commands: list[CliCommand], groups: list[CommandGroup]) -> list[CliCommand]:
+    """``commands`` in the order ``repro --help-all`` lists them, each with
+    the title of its group as its domain.
+
+    The Nim compiler refuses a table that leaves a shown command out or names
+    one that is not shown; this repeats the check so a stale table fails here
+    too rather than dropping a command from the page.
+    """
+    by_name = {cmd.name: cmd for cmd in commands}
+    ordered: list[CliCommand] = []
+    for group in groups:
+        for name in group.primary + group.secondary:
+            if name not in by_name:
+                raise RuntimeError(f"{CLI_DESC}: ReproCommandGroups lists `{name}`, which is not a shown top-level command")
+            by_name[name].domain = group.title
+            ordered.append(by_name.pop(name))
+    if by_name:
+        raise RuntimeError(f"{CLI_DESC}: ReproCommandGroups leaves out {', '.join(sorted(by_name))}")
+    return ordered
+
+
+def render_commands_by_domain(commands: list[CliCommand], groups: list[CommandGroup]) -> str:
     domains: list[str] = []
     by_dom: dict[str, list[CliCommand]] = {}
     for cmd in commands:
@@ -324,11 +393,18 @@ def render_commands_by_domain(commands: list[CliCommand]) -> str:
             domains.append(cmd.domain)
             by_dom[cmd.domain] = []
         by_dom[cmd.domain].append(cmd)
+    primary = {group.title: group.primary for group in groups}
 
     out: list[str] = []
     for dom in domains:
         out.append(f"## {dom}")
         out.append("")
+        if primary.get(dom):
+            listed = ", ".join(f"`{name}`" for name in primary[dom])
+            out.append(
+                f"`repro --help` lists {listed} under this heading; the rest are listed by `repro --help-all`."
+            )
+            out.append("")
         out.append("| Command | Subcommands | What it does |")
         out.append("|---|---|---|")
         for cmd in by_dom[dom]:
@@ -678,11 +754,14 @@ def main(argv: list[str]) -> int:
         return 0
 
     check = "--check" in argv
-    commands = parse_cli_commands()
+    groups = parse_command_groups(CLI_DESC.read_text(encoding="utf-8"))
+    commands = group_commands(parse_cli_commands(), groups)
     stale: list[str] = []
 
     cmd_text = COMMANDS_PAGE.read_text(encoding="utf-8")
-    cmd_wanted = replace_generated_region(cmd_text, "cli-reference index by=domain", render_commands_by_domain(commands))
+    cmd_wanted = replace_generated_region(
+        cmd_text, "cli-reference index by=domain", render_commands_by_domain(commands, groups)
+    )
     cmd_wanted = replace_generated_region(cmd_wanted, "cli-reference index by=name", render_commands_by_name(commands))
     update_or_check(COMMANDS_PAGE, cmd_wanted, check, stale)
 

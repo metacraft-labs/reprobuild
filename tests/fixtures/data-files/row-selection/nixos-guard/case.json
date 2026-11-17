@@ -1,0 +1,52 @@
+{
+  "description": "nixos is a fact the evaluation states, not a function of the system: stated true or false it selects rows (on any system); left out it is refused whenever a row names it, never read as false -- including `not nixos and macos`, whose operands the planner sorts and Nix reads as written.",
+  "hosts": {},
+  "evaluations": [
+    {
+      "host": "h",
+      "system": "x86_64-linux",
+      "nixos": true,
+      "packages": [
+        "always",
+        "nixos-tool"
+      ]
+    },
+    {
+      "host": "h",
+      "system": "x86_64-linux",
+      "nixos": false,
+      "packages": [
+        "always",
+        "other-linux-tool"
+      ]
+    },
+    {
+      "host": "h",
+      "system": "aarch64-linux",
+      "nixos": true,
+      "packages": [
+        "always",
+        "nixos-tool"
+      ]
+    },
+    {
+      "host": "h",
+      "system": "aarch64-darwin",
+      "nixos": false,
+      "packages": [
+        "always",
+        "darwin-tool"
+      ]
+    },
+    {
+      "host": "h",
+      "system": "x86_64-linux",
+      "refused": true
+    },
+    {
+      "host": "h",
+      "system": "aarch64-darwin",
+      "refused": true
+    }
+  ]
+}

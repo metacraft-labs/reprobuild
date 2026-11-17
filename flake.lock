@@ -2157,11 +2157,11 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
-        "lastModified": 1794829136,
-        "narHash": "sha256-29TZ+ttH5C2qeb6zEMWICUQ55u/1PjpEhMJgAVvtcZg=",
+        "lastModified": 1794905563,
+        "narHash": "sha256-g3i+Z0S+NddqiXmV0cnd2J32f7hCz3FyRrRyQAA6JaM=",
         "owner": "metacraft-labs",
         "repo": "devops-modules",
-        "rev": "a69415adff173f1a1649f3e27360fe10c53af3c8",
+        "rev": "b0d609ce245ca29b57cba43aa51983208d0daa79",
         "type": "github"
       },
       "original": {
@@ -2540,28 +2540,28 @@
     "reprobuild-nix-packages-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792778697,
-        "narHash": "sha256-XQmgI0sb8lYC3a4cJ7Pt5bxm9HFDz6XTRjJqSEeypbI=",
+        "lastModified": 1794886406,
+        "narHash": "sha256-6SGokZ6D31/Qs8gOWb3BnVB/m7KI76+F7kaK3Q4v0sc=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "bb14c2e1b25e50be320261bea93400263f2deeb5",
+        "rev": "c6f6f509316d4b789d0e64a346d2d4bb3271e12d",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-nix-packages",
-        "rev": "bb14c2e1b25e50be320261bea93400263f2deeb5",
+        "rev": "c6f6f509316d4b789d0e64a346d2d4bb3271e12d",
         "type": "github"
       }
     },
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794520036,
-        "narHash": "sha256-KEV/+e7aWmRWmOoPI4oEU8KolyYSFtr+gwaH1iobEqQ=",
+        "lastModified": 1794906340,
+        "narHash": "sha256-C8HFeQajZ6BxlSuxcXbJeRPJqQDJtUphDaxOLS9cW28=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "04b44dbe545e9d96a16810c62538a179655b5f13",
+        "rev": "c01d6740a9e9543b635d8cea554053ef2c59f421",
         "type": "github"
       },
       "original": {

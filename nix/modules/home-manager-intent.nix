@@ -74,6 +74,7 @@ let
     // lib.optionalAttrs (cfg.snapshot != null) { inherit (cfg) snapshot; }
     // lib.optionalAttrs (cfg.profileDir != null) { inherit (cfg) profileDir; }
     // lib.optionalAttrs (cfg.buildSystem != null) { inherit (cfg) buildSystem; }
+    // lib.optionalAttrs (cfg.nixos != null) { inherit (cfg) nixos; }
     // lib.optionalAttrs (cfg.packagesCatalog != null) { inherit (cfg) packagesCatalog; }
   );
 
@@ -171,6 +172,12 @@ in
       default = pkgs.stdenv.hostPlatform.system;
       defaultText = lib.literalExpression "pkgs.stdenv.hostPlatform.system";
       description = "The target system the guards are evaluated for (a `repro home export --target` name).";
+    };
+    nixos = lib.mkOption {
+      type = lib.types.nullOr lib.types.bool;
+      default = null;
+      example = true;
+      description = "Whether this host is NixOS, for the profile's `nixos` guards. Whether a Linux target is NixOS is not part of its system name (Home Manager configurations for both exist), so it is stated here; null leaves it unstated, and a profile whose guards reach `nixos` then fails the evaluation instead of reading it as false.";
     };
     snapshot = lib.mkOption {
       type = lib.types.nullOr lib.types.path;

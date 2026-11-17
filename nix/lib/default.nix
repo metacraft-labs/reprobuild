@@ -154,6 +154,7 @@ in
   predicates = {
     inherit (predicate) validate holds evaluate;
     factsFor = platforms.factsFor;
+    factsWith = platforms.factsWith;
   };
   targetSystems = platforms.systems;
 

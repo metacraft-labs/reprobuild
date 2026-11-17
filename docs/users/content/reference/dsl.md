@@ -609,7 +609,7 @@ differently from the package. It may also hold:
 
 - `when <predicate>:` with a body of package references, applied only where the
   predicate holds. The predicates are `windows()`, `macos()`, `linux()`,
-  `bsd()`, `wsl()`, `x86_64()`, `arm64()` and `arm32()`, and `host()` compared
+  `bsd()`, `wsl()`, `nixos()`, `x86_64()`, `arm64()` and `arm32()`, and `host()` compared
   with `==`, `!=` or `in`, combined with `and`, `or` and `not`.
 - `stow:` with the names of directories under `stow/` to link into your home
   directory on hosts that select the activity.

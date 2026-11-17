@@ -45,12 +45,47 @@ proc hexOf*(bytes: openArray[byte]): string =
 
 proc prefixIdHex*(p: PrefixIdBytes): string = hexOf(p)
 
+const
+  RealizationDirHexChars* = 40
+    ## How many lowercase hex characters of the realization hash a prefix's
+    ## directory name carries: 160 bits (Local-Content-Addressed-Store.md
+    ## §"Realization Hash (normative)", "The directory name: the one
+    ## truncation"). The hash is the prefix's whole identity; the name is a
+    ## truncation of it, so two ids agreeing in these bits would name one
+    ## directory. At 160 bits a chosen-input collision costs about 2^80
+    ## hash evaluations.
+  LegacyRealizationDirHexChars* = 16
+    ## The width builds before the widening used: 64 bits, which anyone who
+    ## can choose realization inputs can collide for about 2^32 work. Only
+    ## READ: see ``legacyRealizationDirName``.
+
 proc realizationDirName*(version: string; prefixId: PrefixIdBytes): string =
-  ## Directory name `<version>-<hash-prefix>`. We use the first 16 hex
-  ## chars (64 bits) of the realization hash — enough to be collision
-  ## resistant in a personal store while remaining human readable.
+  ## Directory name ``<version>-<hash prefix>``: the first
+  ## ``RealizationDirHexChars`` (40) lowercase hex characters, 160 bits, of
+  ## the realization hash. Every new prefix is named this way.
   let cleanVersion = safePathSegment(version, "v0")
-  cleanVersion & "-" & hexOf(prefixId)[0 ..< 16]
+  cleanVersion & "-" & hexOf(prefixId)[0 ..< RealizationDirHexChars]
+
+proc legacyRealizationDirName*(version: string;
+                               prefixId: PrefixIdBytes): string =
+  ## The name a build before the widening gave the prefix of ``prefixId``:
+  ## ``<version>-<first 16 hex>`` (64 bits).
+  ##
+  ## READ-COMPATIBILITY ONLY. A store written by an older build holds
+  ## prefixes under this name, recorded in their receipts and index rows,
+  ## and units may bind them. Readers recognise such a prefix
+  ## (``prefix_location.resolvePrefixRelativePath``, the store's recovery);
+  ## nothing ever names a NEW prefix with it.
+  let cleanVersion = safePathSegment(version, "v0")
+  cleanVersion & "-" & hexOf(prefixId)[0 ..< LegacyRealizationDirHexChars]
+
+proc prefixPackageSegment(packageName, outputName: string): string =
+  ## ``<package>`` or, for a named non-``out`` output, ``<package>-<output>``.
+  if outputName.len == 0 or outputName == "out":
+    safePathSegment(packageName, "pkg")
+  else:
+    safePathSegment(packageName, "pkg") & "-" &
+      safePathSegment(outputName, "out")
 
 proc prefixRelativePath*(packageName, version: string;
                         prefixId: PrefixIdBytes;
@@ -69,13 +104,17 @@ proc prefixRelativePath*(packageName, version: string;
   ## each output's prefix is independently content-addressable and
   ## a downstream consumer can refer to one without dragging in the
   ## siblings.
-  let pkgSegment =
-    if outputName.len == 0 or outputName == "out":
-      safePathSegment(packageName, "pkg")
-    else:
-      safePathSegment(packageName, "pkg") & "-" &
-        safePathSegment(outputName, "out")
-  "prefixes/" & pkgSegment & "/" & realizationDirName(version, prefixId)
+  "prefixes/" & prefixPackageSegment(packageName, outputName) & "/" &
+    realizationDirName(version, prefixId)
+
+proc legacyPrefixRelativePath*(packageName, version: string;
+                               prefixId: PrefixIdBytes;
+                               outputName = ""): string =
+  ## Where a build before the widening put this prefix:
+  ## ``prefixRelativePath`` with ``legacyRealizationDirName``. Read-
+  ## compatibility only, like that name; never used to place a new prefix.
+  "prefixes/" & prefixPackageSegment(packageName, outputName) & "/" &
+    legacyRealizationDirName(version, prefixId)
 
 proc casBlobRelative*(digest: PrefixIdBytes): string =
   let hex = hexOf(digest)
