@@ -1880,19 +1880,48 @@ proc writeRevertStopped*(stateDir: string; units: openArray[string]) =
     return
   writeHoldFile(p, units.join("\n") & "\n")
 
-proc acceptSocketTemplates*(p: SystemProfile): HashSet[string] =
-  ## The service templates an ``Accept=yes`` socket of the generation
-  ## starts instances of (``triggeredUnits`` over the socket's file and the
-  ## profile's drop-ins onto it, as systemd reads them; systemd.socket(5),
-  ## ``Accept=``). Read from the generation, not from systemd: an instance
-  ## that has stopped is garbage-collected, and its ``TriggeredBy=`` is
-  ## then empty (A9 review round 19, finding 2; measured on systemd 260).
+proc acceptSocketTemplates*(p: SystemProfile;
+                            acceptOf: proc (socket: string): bool = nil): HashSet[string] =
+  ## The service templates an ``Accept=yes`` socket starts instances of:
+  ## each socket the generation installs or changes by a drop-in (either
+  ## form), read from the profile's files for it (``triggeredUnits`` over
+  ## its file and the profile's drop-ins onto it, as systemd reads them;
+  ## systemd.socket(5), ``Accept=``), or -- for a socket whose ``Accept=``
+  ## comes from the host's own file or drop-ins -- as systemd reports it
+  ## (``acceptOf``: ``systemctl show -p Accept``). Never from an
+  ## instance's ``TriggeredBy=``: an instance that has stopped is
+  ## garbage-collected, and its ``TriggeredBy=`` is then empty (A9 review
+  ## rounds 19, finding 2, and 20).
+  var sockets: seq[string]
   for r in p.resources:
-    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
-        not r.suName.endsWith(".socket"):
-      continue
-    for t in triggeredUnits(r.suName, @[r.suContent] & profileDropInsOf(p, r.suName)):
-      if t.contains("@."): result.incl(t)
+    let n =
+      case r.kind
+      of srkSystemdSystemUnit: r.suName
+      of srkSystemdSystemDropIn:
+        when mutated("accept-dropin-only-sockets-skipped"): "" else: r.diUnit
+      else: ""
+    if n.endsWith(".socket") and n notin sockets:
+      when mutated("accept-dropin-only-sockets-skipped"):
+        if r.kind == srkSystemdSystemUnit and r.suCollision == "dropIn": continue
+      sockets.add(n)
+  for s in sockets:
+    var own = ""
+    for r in p.resources:
+      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and r.suName == s:
+        own = r.suContent
+    let texts = (if own.len > 0: @[own] else: @[]) & profileDropInsOf(p, s)
+    var found = false
+    for t in triggeredUnits(s, texts):
+      if t.contains("@."):
+        result.incl(t)
+        found = true
+    if not found and acceptOf != nil:
+      var host = false
+      try: host = acceptOf(s)
+      except CatchableError: discard
+      if host:
+        let dot = s.rfind('.')
+        result.incl(s[0 ..< dot] & "@.service")
 
 proc instanceSocketActivated*(unit: string; acceptTemplates: HashSet[string];
                               triggeredBy: proc (u: string): seq[string]): bool =
@@ -3295,7 +3324,10 @@ proc everyUnitBootHoldProblems*(resources: openArray[SystemResource];
       let n =
         case r.kind
         of srkSystemdSystemUnit: (if r.suCollision == "dropIn": r.suName else: "")
-        of srkSystemdSystemDropIn: r.diUnit
+        of srkSystemdSystemDropIn:
+          # FALSIFYING MUTATION when skipped: the systemd.systemDropIn form
+          # is not counted (A9 review round 20, M-1).
+          (if mutated("boot-hold-systemdropin-effective-unchecked"): "" else: r.diUnit)
         else: ""
       if n.len > 0 and '.' in n and not n.startsWith("."): names.add(n)
   for n in names:
@@ -8390,7 +8422,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 if n.len > 0: genUnits.incl(n)
               var plannedUnits: seq[string]
               for t in stepTransitions: plannedUnits.add(t.unit)
-              let acceptTemplates = acceptSocketTemplates(composed)
+              let acceptTemplates = acceptSocketTemplates(composed,
+                proc (sk: string): bool =
+                  runSystemctl(["show", "-p", "Accept", "--value", "--", sk]).output.strip() == "yes")
               for u in revertStoppedToStart(readRevertStopped(stateDir), genUnits,
                                             plannedUnits, unitIsActive,
                                             proc (v: string): bool =

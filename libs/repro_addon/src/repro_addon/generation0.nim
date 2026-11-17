@@ -617,30 +617,41 @@ proc essentialActivatorPattern*(): string =
 
 proc bootHoldScript*(): string =
   ## The boot-hold unit's shell step, as ``/bin/sh -c`` runs it (``$``
-  ## not yet doubled for systemd). Nothing once ``sysinit.target`` is
-  ## reached (an apply that starts the unit). Otherwise:
+  ## not yet doubled for systemd). It fails closed (§13 decision 172 as
+  ## amended 2026-11-17 by the owner on A9 review round 20): every path
+  ## logs a line of its own, and either every unit it must hold is held
+  ## and systemd has loaded the holds, or the unit does not finish in
+  ## time and fails, so ``sysinit.target`` -- which requires it -- is
+  ## never reached with an activator free.
   ##
-  ## - the list of drop-in directories to hold is the pending switch's
-  ##   record; a record that is not a regular file (a link, a directory)
-  ##   or cannot be copied is not read, and every socket, timer and path
-  ##   unit in ``/etc/systemd/system`` is held instead: hold
-  ##   conservatively, never leave an activator free (A9 review round 17,
-  ##   finding 9). ``boot_holds.releaseBootHolds`` lifts them all once the
-  ##   switch is resolved;
-  ## - each listed line must be ``<unit>.d`` in the characters a unit
-  ##   name uses (letters, digits, ``@ . _ : -``); any other line is
-  ##   skipped, so the list never steers a write outside the runtime unit
-  ##   directory, and a drop-in directory that is a link is skipped too;
-  ## - the hold copied is the recorded text only if its SHA-256 is the
-  ##   start hold's (``StartHoldText``); otherwise -- no text, other bytes,
-  ##   a link -- each listed unit gets ``MinimalHoldText`` (``[Unit]`` and
-  ##   ``AssertPathExists=!/``);
-  ## - every hold written is listed for the re-assertion to lift, and
-  ##   systemd is reloaded once, bounded by ``timeout``;
-  ## - it never exits non-zero: the unit is ``RequiredBy=sysinit.target``
-  ##   (§13 decision 172), and a failure would fail the boot's
-  ##   ``sysinit.target``. A step that fails is logged and the script goes
-  ##   on; it fails closed by holding, never by failing the unit.
+  ## - ``sysinit.target`` already reached (an apply that starts the unit):
+  ##   nothing, said so.
+  ## - The list of drop-in directories is the pending switch's record,
+  ##   read where it lies; a record that is absent (a pending marker with
+  ##   no record), not a regular file (a link, a directory) or unreadable
+  ##   is not trusted, and every socket, timer and path unit in
+  ##   ``/etc/systemd/system`` but the essential ones is held instead
+  ##   (A9 review rounds 17, finding 9, and 20). A record with no line
+  ##   holds nothing, said so: the switch had no start hold.
+  ## - Each listed line must be ``<unit>.d`` in the characters a unit name
+  ##   uses (letters, digits, ``@ . _ : -``); any other line is skipped and
+  ##   logged, so the list never steers a write outside the runtime unit
+  ##   directory.
+  ## - Each hold is ``MinimalHoldText`` (``[Unit]`` and
+  ##   ``AssertPathExists=!/``), written straight away: no copy and no
+  ##   digest of the switch's hold text first, so the writes are the fast
+  ##   part and the reload the only slow step. Its path is listed for the
+  ##   re-assertion to lift (``releaseBootHolds``) BEFORE it is written, so
+  ##   a hold is never there unlisted. A hold that cannot be written (its
+  ##   directory cannot be made, or is a link) is logged and counted.
+  ## - systemd is reloaded once, bounded by ``timeout 30``.
+  ## - A hold not written, or a reload that failed, leaves an activator
+  ##   free: the script then logs why and waits, so the unit overruns
+  ##   ``TimeoutStartSec=`` and fails, and ``sysinit.target`` with it --
+  ##   the boot stops rather than starting an activator unheld (the
+  ##   boot-freeze residual the owner accepted in decision 172). Its exit
+  ##   status is never the signal: ``ExecStart=``'s ``-`` would turn it
+  ##   into success.
   ##
   ## Absolute paths for every tool; ``set -f`` so no expansion globs. No
   ## double quote, ``#``, brace or backslash: the canonical profile text
@@ -648,36 +659,82 @@ proc bootHoldScript*(): string =
   ## quoted and is validated to characters that need none. No single quote
   ## either: the script is one single-quoted ``ExecStart=`` argument, and
   ## systemd joins ``'a''b'`` into ``ab`` (systemd.syntax(7), "Quoting").
-  ## A9 review rounds 16 (finding 10) and 17 (findings 2 and 9).
   let rt = RuntimeUnitDirPath
-  let sha = sha256Hex(StartHoldText)
   let h = rt & "/$d/" & StartHoldFileName
   let l = "/run/repro-addon/boot-hold-list"
+  let w = BootHoldsWrittenList
   let say = "echo repro-addon boot-holds: "
-  "set -f; /usr/bin/systemctl is-active -q sysinit.target && exit 0; " &
-  "r=" & BootHoldRecordPath & "; t=" & BootHoldTextPath & "; l=" & l & "; " &
-  "[ -e $r ] || [ -L $r ] || exit 0; " &
-  "/usr/bin/mkdir -p /run/repro-addon || " & say & "cannot make /run/repro-addon; " &
-  "/usr/bin/rm -f $l; " &
-  "if [ -f $r ] && [ ! -L $r ] && /usr/bin/cp $r $l; then :; else " &
-    say & "the record is not a regular file, holding every socket, timer " &
-    "and path unit in " & ConservativeHoldDir & " but the essential ones; " &
+  # The fail-closed wait: longer than TimeoutStartSec=, so systemd ends it
+  # and fails the unit.
+  let failClosed = "exec /usr/bin/sleep " & $(BootHoldTimeoutSec * 2)
+  let conservative =
     "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
     essentialActivatorPattern() & ") continue;; " &
-    "*.socket|*.timer|*.path) echo $u.d >> $l;; esac; done; fi; " &
-  "ok=no; if [ -f $t ] && [ ! -L $t ]; then case $(/usr/bin/sha256sum $t) in " &
-    sha & "*) ok=yes;; esac; fi; " &
-  "n=0; " &
-  "while read -r d; do case x$d in x|x.*|*[!A-Za-z0-9@._:-]*) continue;; x*.d) ;; *) continue;; esac; " &
-  "if [ -L " & rt & "/$d ]; then continue; fi; " &
-  "/usr/bin/mkdir -p " & rt & "/$d || continue; /usr/bin/rm -f " & h & "; " &
-  "if [ $ok = yes ] && /usr/bin/cp $t " & h & "; then :; " &
-  "else echo [Unit] > " & h & "; echo AssertPathExists=!/ >> " & h & "; fi; " &
-  "echo " & h & " >> " & BootHoldsWrittenList & "; " &
-  "n=$((n+1)); done < $l; " &
-  "if [ $n -gt 0 ]; then /usr/bin/timeout 30 /usr/bin/systemctl daemon-reload || " &
-    say & "systemd was not reloaded; fi; " &
-  say & "held $n unit drop-in directories, text $ok; exit 0"
+    "*.socket|*.timer|*.path) echo $u.d;; esac; done"
+  let recordAbsent =
+    when mutated("boot-hold-record-absent-skips"):
+      # FALSIFYING MUTATION: round 19's script -- a pending marker with no
+      # record exits at once, holding nothing.
+      "exit 0"
+    else:
+      say & "the pending marker is there but the record is absent: holding " &
+        "every socket, timer and path unit in " & ConservativeHoldDir &
+        " but the essential ones; src=c"
+  let reload =
+    "/usr/bin/timeout 30 /usr/bin/systemctl daemon-reload"
+  let afterReload =
+    when mutated("boot-hold-reload-failure-passes"):
+      # FALSIFYING MUTATION: round 19's script -- a failed reload is logged
+      # and the unit succeeds with the holds on disk but not loaded.
+      "if [ $n -gt 0 ]; then " & reload & " || " & say &
+        "systemd was not reloaded; fi; " &
+      say & "held $n unit drop-in directories; exit 0"
+    else:
+      "if [ $f -gt 0 ]; then " & say & "$f of the holds could not be written: " &
+        "failing the unit so sysinit.target is not reached with an activator " &
+        "free; " & failClosed & "; fi; " &
+      "if [ $n -eq 0 ]; then " & say & "no unit is listed: nothing to hold; " &
+        "exit 0; fi; " &
+      "if " & reload & "; then " & say & "held $n unit drop-in directories, " &
+        "systemd reloaded; exit 0; fi; " &
+      say & "wrote $n holds but systemd was not reloaded: failing the unit so " &
+        "sysinit.target is not reached with the holds unloaded; " & failClosed
+  # One hold: listed first, then written (A9 review round 20).
+  let writeOne =
+    when mutated("boot-hold-holds-after-slow-step"):
+      # FALSIFYING MUTATION: the hold is written only after the slow step
+      # (here a reload per hold, as the copy and digest of round 19 were
+      # before the writes), so an overrun leaves holds unwritten.
+      reload & "; echo " & h & " >> " & w & "; echo [Unit] > " & h &
+        " && echo AssertPathExists=!/ >> " & h
+    else:
+      "echo " & h & " >> " & w & "; echo [Unit] > " & h &
+        " && echo AssertPathExists=!/ >> " & h
+  "set -f; " &
+  "if /usr/bin/systemctl is-active -q sysinit.target; then " & say &
+    "sysinit.target is already active: nothing to put back; exit 0; fi; " &
+  "r=" & BootHoldRecordPath & "; l=" & l & "; " &
+  "/usr/bin/mkdir -p /run/repro-addon || " & say & "cannot make /run/repro-addon; " &
+  "src=r; " &
+  "if [ -L $r ]; then " & say & "the record is a link: holding every socket, " &
+    "timer and path unit in " & ConservativeHoldDir & " but the essential ones; src=c; " &
+  "elif [ ! -e $r ]; then " & recordAbsent & "; " &
+  "elif [ ! -f $r ] || [ ! -r $r ]; then " & say & "the record is not a readable " &
+    "regular file: holding every socket, timer and path unit in " &
+    ConservativeHoldDir & " but the essential ones; src=c; fi; " &
+  "if ( if [ $src = c ]; then " & conservative & "; else /usr/bin/cat $r; fi ) > $l; " &
+    "then :; else " & say & "cannot write the list " & l & ": failing the unit " &
+    "so sysinit.target is not reached with an activator free; " & failClosed & "; fi; " &
+  "n=0; f=0; " &
+  "while read -r d; do case x$d in x|x.*|*[!A-Za-z0-9@._:-]*) " & say &
+    "skipped the record line $d; continue;; x*.d) ;; *) " & say &
+    "skipped the record line $d; continue;; esac; " &
+  "if [ -L " & rt & "/$d ] || ! /usr/bin/mkdir -p " & rt & "/$d; then " & say &
+    "cannot make " & rt & "/$d; f=$((f+1)); continue; fi; " &
+  "if " & writeOne & "; then n=$((n+1)); else " & say & "cannot write " & h &
+    "; f=$((f+1)); fi; " &
+  "done < $l; " &
+  afterReload
 
 proc bootHoldUnit*(): string =
   ## The boot-hold unit (§13 decision 159; A9 review round 15):
@@ -731,12 +788,19 @@ proc bootHoldUnit*(): string =
   "TimeoutStartSec=" & $BootHoldTimeoutSec & "\n" &
   # systemd expands $NAME in ExecStart= (systemd.service(5), "Command
   # lines"); $$ passes a single $ to the shell.
-  # ``-``: an exit status that would fail the unit is recorded and treated
-  # as success (systemd.service(5), "ExecStart="), and ``timeout`` ends
-  # the script before TimeoutStartSec= could: a unit sysinit.target
-  # requires must never fail the boot (§13 decision 172).
-  "ExecStart=-/usr/bin/timeout -k 5 " & $(BootHoldTimeoutSec - 15) &
-    " /bin/sh -c '" & bootHoldScript().replace("$", "$$") & "'\n" &
+  # ``-``: an exit status is recorded and treated as success
+  # (systemd.service(5), "ExecStart="), and nothing the script runs exits
+  # non-zero anyway. No outer ``timeout`` (A9 review round 20; §13
+  # decision 172 as amended 2026-11-17): a script that overruns, or that
+  # chooses to wait because a hold or the reload failed, is ended by
+  # TimeoutStartSec=, which fails the unit -- and sysinit.target, which
+  # requires it -- so the boot never goes on with an activator free.
+  (when mutated("boot-hold-outer-timeout"):
+     # FALSIFYING MUTATION: round 19's wrapper -- an overrun is killed by
+     # ``timeout`` and the ``-`` prefix reports success.
+     "ExecStart=-/usr/bin/timeout -k 5 " & $(BootHoldTimeoutSec - 15) & " /bin/sh -c '"
+   else: "ExecStart=-/bin/sh -c '") &
+    bootHoldScript().replace("$", "$$") & "'\n" &
   # Its own floor (CONF-1): it reads the state directory, writes under
   # /run only, and reloads systemd over its private socket, which checks
   # the peer's uid, not a capability -- so no capability at all. No

@@ -1957,6 +1957,25 @@ const
                           "sysinit-stop-deps-unchecked",
                           # bootstrap accepts the dynamic engine (L7).
                           "bootstrap-accepts-dynamic",
+                          # A9 review round 20: the boot-hold script exits at
+                          # once on a pending marker with no record.
+                          "boot-hold-record-absent-skips",
+                          # a failed reload is logged and the unit succeeds.
+                          "boot-hold-reload-failure-passes",
+                          # each hold is written only after a slow step.
+                          "boot-hold-holds-after-slow-step",
+                          # the outer timeout wrapper is back, so an overrun
+                          # succeeds.
+                          "boot-hold-outer-timeout",
+                          # the marker is written without a record.
+                          "boot-hold-marker-without-record",
+                          # the systemd.systemDropIn form is not counted, in
+                          # the parse half and in the effective half (M-1).
+                          "boot-hold-systemdropin-unchecked",
+                          "boot-hold-systemdropin-effective-unchecked",
+                          # a socket changed only by a drop-in is not read
+                          # for Accept= (LOW).
+                          "accept-dropin-only-sockets-skipped",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",

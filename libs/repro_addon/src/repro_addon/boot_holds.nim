@@ -12,13 +12,15 @@
 ##
 ## - the switch records the drop-in directories of the start holds it
 ##   writes, and the hold's text beside them (``writeBootHoldRecord``),
-##   durably, before its pending marker; the record goes when the switch
-##   lifts its holds (``static_tree.clearBootHoldRecord``) or with the
-##   marker;
+##   durably, before its pending marker; when the switch lifts its holds
+##   the record lists none (``static_tree.clearBootHoldRecord``), and it
+##   goes after the marker: the marker is never there without it (A9
+##   review round 20);
 ## - ``repro-addon-boot-hold.service`` (``generation0.bootHoldUnit``), wanted
 ##   by and ordered before ``sysinit.target``, conditioned on the marker,
-##   copies the recorded holds back into place with the base's ``/bin/sh``
-##   and reloads systemd once, before any of those units can start;
+##   writes the recorded holds back into place with the base's ``/bin/sh``
+##   and reloads systemd once, before any of those units can start, and
+##   fails closed (``generation0.bootHoldScript``);
 ## - once the re-assertion has resolved the switch (no marker left), it
 ##   lifts the holds the boot wrote (``releaseBootHolds``). A switch whose
 ##   check passes clears every start hold in any case
@@ -46,17 +48,17 @@ proc writeBootHoldRecord*(stateDir: string; holds: openArray[string]) =
   ## written, synced, read back), the text first, so a record is never
   ## there without it. No holds removes the record. Raises ``OSError`` when
   ## either cannot be written: the switch then stops before its marker, so
-  ## a pending switch never lacks the record of its holds.
+  ## a pending switch never lacks the record of its holds. No holds writes
+  ## a record of none (A9 review round 20): the boot-hold unit reads a
+  ## marker with no record as a reason to hold every activator.
   var lines: seq[string]
   for h in holds:
     let d = extractFilename(parentDir(h))
     if validHoldDirName(d) and d notin lines: lines.add(d)
-  if lines.len == 0:
-    clearBootHoldRecord(stateDir)
-    return
   createDir(parentDir(bootHoldRecordPath(stateDir)))
   writeHoldFile(bootHoldTextPath(stateDir), StartHoldText)
-  writeHoldFile(bootHoldRecordPath(stateDir), lines.join("\n") & "\n")
+  writeHoldFile(bootHoldRecordPath(stateDir),
+                if lines.len == 0: "" else: lines.join("\n") & "\n")
 
 proc readBootHoldRecord*(stateDir: string): seq[string] =
   ## The recorded drop-in directory names, invalid lines dropped.

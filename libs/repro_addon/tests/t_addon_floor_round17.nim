@@ -239,11 +239,14 @@ suite "§13 decision 172: the boot-hold unit is required by sysinit.target":
   test "RequiredBy=, and nothing it runs can fail the unit":
     check "RequiredBy=sysinit.target\n" in u
     check "WantedBy=sysinit.target" notin u
-    check "ExecStart=-/usr/bin/timeout -k 5 " in u
+    # A9 review round 20: no outer timeout; ``-`` for exit codes only.
+    check "ExecStart=-/bin/sh -c '" in u
+    check "TimeoutStartSec=60\n" in u
     let sc = bootHoldScript()
     for c in 1 .. 9:
       check ("exit " & $c) notin sc
-    check sc.endsWith("exit 0")
+    # Its last word is the fail-closed wait for TimeoutStartSec= (round 20).
+    check sc.endsWith("exec /usr/bin/sleep 120")
   test "systemd's transaction keeps its job when a cycle runs through it":
     let analyze = findExe("systemd-analyze")
     if analyze.len == 0:

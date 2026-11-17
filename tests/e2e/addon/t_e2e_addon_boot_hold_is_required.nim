@@ -36,7 +36,17 @@
 ##    the boot-hold unit in ``Conflicts=``, or ordering the base unit
 ##    before ``-.mount``, by the parse half (round 19, finding 3).
 ##
-## Falsifying builds, red here: ``boot-hold-wanted`` (step 2: the unit is
+## 7. (round 20) a pending marker with no record: the unit holds every
+##    socket, timer and path unit, says so, and the boot reaches
+##    ``multi-user.target``; and the ``systemd.systemDropIn`` form of step 6.
+##    Before each reboot the record and the ``sysinit.target.requires``
+##    link are recorded, and after it the unit's condition result, exit
+##    status, start time and whole journal.
+##
+## Falsifying builds, red here: ``boot-hold-record-absent-skips`` (step 7),
+## ``boot-hold-systemdropin-unchecked`` and
+## ``boot-hold-systemdropin-effective-unchecked`` (step 7's drop-in cases),
+## ``boot-hold-wanted`` (step 2: the unit is
 ## only wanted, so systemd deletes its job and the held socket listens),
 ## ``boot-hold-cycle-effective-unchecked`` (step 4: the socket applies),
 ## ``boot-hold-dropins-effective-unchecked`` (step 6, the effective case),
@@ -111,6 +121,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "printf '[Unit]\\nBefore=" & Unit & "\\n[Socket]\\nListenStream=/run/a9cyc\\n" &
       "[Install]\\nWantedBy=sockets.target\\n' > /etc/systemd/system/a9cyc.socket; " &
       "systemctl daemon-reload; systemctl enable a9cyc.socket")
+    record["cycleBeforeReboot"] = %g.bootHoldBeforeReboot()
     g.rebootGuest()
     discard g.waitReasserted()
     discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true", timeoutSec = 600)
@@ -119,7 +130,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let hold = g.exec("systemctl show -p Result -p ActiveState -p ExecMainStatus " & Unit).stdout
     let sock = g.exec("systemctl show -p ActiveState -p AssertResult a9h-sr.socket; " &
       "ss -xlH | grep -c ' /run/a9h-sr '; systemctl is-active multi-user.target; true").stdout
-    record["cycleBoot"] = %*{"journal": journal, "bootHold": hold, "heldSocket": sock}
+    record["cycleBoot"] = %*{"journal": journal, "bootHold": hold, "heldSocket": sock,
+                             "unit": g.bootHoldAfterBoot()}
     step("at the reboot systemd deletes the base socket's job, never the " &
          "boot-hold unit's (RequiredBy=sysinit.target, §13 decision 172)",
          "Job a9cyc.socket/start deleted" in journal and
@@ -151,22 +163,48 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if leavePending("s4"):
       discard g.run("cp " & Record & " /root/boot-holds.copy; rm -f " & Record &
         "; ln -s /root/boot-holds.copy " & Record)
+      record["linkBeforeReboot"] = %g.bootHoldBeforeReboot()
       g.rebootGuest()
       discard g.waitReasserted()
       discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true", timeoutSec = 600)
       let j2 = g.exec("journalctl -b -o cat --no-pager -u " & Unit & "; true").stdout
       let h2 = g.exec("systemctl show -p Result -p ActiveState " & Unit &
         "; systemctl is-active multi-user.target; true").stdout
-      record["linkBoot"] = %*{"journal": j2, "bootHold": h2}
+      record["linkBoot"] = %*{"journal": j2, "bootHold": h2, "unit": g.bootHoldAfterBoot()}
       step("a record that is a link: every socket, timer and path unit held, the " &
            "unit succeeds and the boot reaches multi-user.target (A9 review round 17, finding 9)",
-           "the record is not a regular file" in j2 and "Result=success" in h2 and
+           "the record is a link" in j2 and "Result=success" in h2 and
            h2.strip().endsWith("active"), j2 & "\n" & h2)
     discard g.run("umount /etc/systemd/system/a9h-sr.service.d /etc/systemd/system/a9h-sr.socket.d " &
       "2>/dev/null; rm -rf /var/lib/a9h-sr; true")
     discard g.exec(repro & " system addon recover", timeoutSec = 1200)
     r = g.applyProfile(repro, "s5", srp("A9 round 17"))
     step("and the host applies again", r.exitCode == 0, r.stdout & r.stderr)
+    # A9 review round 20 (the owner's fail-closed design): a pending marker
+    # with no record -- the state round 19's script left every activator
+    # free in -- holds every socket, timer and path unit.
+    if leavePending("s6"):
+      discard g.run("rm -f " & Record)
+      record["absentBeforeReboot"] = %g.bootHoldBeforeReboot()
+      g.rebootGuest()
+      discard g.waitReasserted()
+      discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true", timeoutSec = 600)
+      let ua = g.bootHoldAfterBoot()
+      let sa = g.exec("systemctl show -p ActiveState -p AssertResult a9h-sr.socket; " &
+        "ss -xlH | grep -c ' /run/a9h-sr '; systemctl is-active multi-user.target; true").stdout
+      record["absentBoot"] = %*{"unit": ua, "heldSocket": sa}
+      step("a pending marker with no record: every socket, timer and path unit is " &
+           "held, said so, the held socket does not listen, and the boot reaches " &
+           "multi-user.target (A9 review round 20)",
+           "the record is absent" in ua and "Result=success" in ua and
+           "ActiveState=active" notin sa and "AssertResult=no" in sa and
+           sa.splitLines().len >= 4 and sa.splitLines()[2].strip() == "0" and
+           sa.splitLines()[3].strip() == "active", ua & "\n" & sa)
+    discard g.run("umount /etc/systemd/system/a9h-sr.service.d /etc/systemd/system/a9h-sr.socket.d " &
+      "2>/dev/null; rm -rf /var/lib/a9h-sr; true")
+    discard g.exec(repro & " system addon recover", timeoutSec = 1200)
+    r = g.applyProfile(repro, "s7", srp("A9 round 17"))
+    step("and the host applies once more", r.exitCode == 0, r.stdout & r.stderr)
     # The effective half: a chain only systemd's report shows.
     discard g.run("printf '[Unit]\\nDefaultDependencies=no\\nBefore=-.mount\\n" &
       "[Service]\\nType=oneshot\\nExecStart=/bin/true\\n' > /etc/systemd/system/a9x.service; " &
@@ -201,6 +239,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let dropOn = proc (body: string): string =
       srp("A9 round 19") & "systemd.systemUnit {\n  name = \"a9b.service\"\n" &
         "  collision = \"dropIn\"\n  content = \"[Unit]\n" & body & "\n\"\n}\n"
+    # A9 review round 20, M-1: the same through the systemd.systemDropIn form.
+    let sysDropOn = proc (body: string): string =
+      srp("A9 round 20") & "systemd.systemDropIn {\n  unit = \"a9b.service\"\n" &
+        "  name = \"a9\"\n  content = \"[Unit]\n" & body & "\n\"\n}\n"
+    r = g.applyProfile(repro, "e4", sysDropOn("Before=a9x.service"))
+    step("a systemd.systemDropIn ordering a base unit before a base unit that runs " &
+         "before -.mount is refused by the effective half (A9 review round 20, M-1)",
+         r.exitCode != 0 and "a9b.service" in (r.stdout & r.stderr) and
+         "boot-hold-cycle" in (r.stdout & r.stderr), r.stdout & r.stderr)
     r = g.applyProfile(repro, "e3", dropOn("Before=a9x.service"))
     step("a drop-in ordering a base unit before a base unit that runs before " &
          "-.mount is refused by the effective half (A9 review round 19, finding 3)",
@@ -215,6 +262,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            r.exitCode != 0 and "in Conflicts=" in (r.stdout & r.stderr) and
            g.ledgerOf() == ledger0,
            r.stdout & r.stderr)
+      r = g.applyProfile(repro, "p4", sysDropOn("Conflicts=" & Unit))
+      step("the parse half refuses a systemd.systemDropIn on a base unit naming the " &
+           "boot-hold unit in Conflicts=, writing nothing (round 20, M-1)",
+           r.exitCode != 0 and "in Conflicts=" in (r.stdout & r.stderr) and
+           g.ledgerOf() == ledger0, r.stdout & r.stderr)
       r = g.applyProfile(repro, "p3", dropOn("Before=-.mount"))
       step("and one ordering it before -.mount", r.exitCode != 0 and
            "ordering cycle" in (r.stdout & r.stderr) and g.ledgerOf() == ledger0,

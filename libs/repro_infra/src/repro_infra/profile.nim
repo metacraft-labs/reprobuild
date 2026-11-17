@@ -1401,7 +1401,11 @@ proc dropInTargetName(r: SystemResource): string =
   of srkSystemdSystemUnit:
     if r.suCollision == "dropIn": r.suName else: ""
   of srkSystemdSystemDropIn:
-    if '.' in r.diUnit and not r.diUnit.startsWith("."): r.diUnit else: ""
+    when InfraAddonMutation == "boot-hold-systemdropin-unchecked":
+      # FALSIFYING MUTATION: the systemd.systemDropIn form is not counted.
+      ""
+    else:
+      if '.' in r.diUnit and not r.diUnit.startsWith("."): r.diUnit else: ""
   else: ""
 
 proc ownUnitContent(r: SystemResource): string =
