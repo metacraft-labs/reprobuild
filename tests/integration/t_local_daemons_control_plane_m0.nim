@@ -52,9 +52,11 @@ suite "Local daemons/control-plane M0 current-state gates":
       check daemon.contains("repro daemon: not-running")
       check not daemon.contains("repro store daemon")
 
+      # `--daemon`'s values are a closed set in repro's command-line
+      # description, so the parser refuses another one (a usage error).
       let invalidDaemon = requireReproFailure(["build", "--daemon=invalid"])
       check invalidDaemon.contains(
-        "repro build: error: unsupported --daemon=invalid")
+        "invalid value 'invalid' for '--daemon' of 'repro build'")
 
       let statsCapture = requireReproFailure([
         "build", "--stats-groups=invalid"])

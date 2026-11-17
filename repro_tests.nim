@@ -21709,6 +21709,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_cs_m6_build_family_command_lines.nim",
+    binary: "build/test-bin/t_cs_m6_build_family_command_lines",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g03",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_cs_m6_dev_env_command_lines.nim",
     binary: "build/test-bin/t_cs_m6_dev_env_command_lines",
     defines: @[],

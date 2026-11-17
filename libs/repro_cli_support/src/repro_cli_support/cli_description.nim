@@ -1155,6 +1155,238 @@ proc flakeVerbFlags(): NimNode {.compileTime.} =
     `tools`
     boolFlag json is bool, help = "Print the result as JSON"
 
+proc buildFlags(): NimNode {.compileTime.} =
+  ## The command line of `repro build`, which `repro bench` and `repro lint`
+  ## take unchanged (each is `repro build` of its conventional collection).
+  ##
+  ## `clientSide = true` marks the flags the full CLI processes itself, so
+  ## the thin client hands an invocation carrying one over rather than route
+  ## it to the daemon (the module header says why each one is there). The
+  ## thin client reads them from `build`'s declarations.
+  ##
+  ## Where a flag has an environment default, the variable is declared on it
+  ## and the flag wins over it (`--daemon` over `REPRO_DAEMON`, `--log` over
+  ## `REPROBUILD_LOG`, ...). Whether a value came from the flag or the
+  ## variable matters in three places, which read it from the origin of the
+  ## value: `--measure` adds to the empty set and `REPROBUILD_MEASURE` to the
+  ## default set; a quiet `--progress` quiets `--log` and `--show` only when
+  ## they were not passed on the command line; and `--runquota` is a request
+  ## a dry run's implied bypass must not override. The work root's and the
+  ## action cache's variables are read where those paths are resolved, after
+  ## the flag, as for every command that takes the flags.
+  ##
+  ## A switch that stands for another flag's value (`-v`, `--release`,
+  ## `--runquota`, ...) refuses `=false`: written that way it would set
+  ## nothing, so it is refused rather than silently ignored.
+  quote do:
+    flag daemon is string, values = ["auto", "require", "off"],
+      env = "REPRO_DAEMON", clientSide = true,
+      help = "Whether the build runs in the per-user daemon: `auto` (use " &
+        "it, falling back to an in-process build), `require` or `off`; " &
+        "the flag wins over `$REPRO_DAEMON` (default: auto)"
+    flag toolProvisioning is string, values = ["path", "nix", "tarball",
+        "scoop", "from-source", "fromSource", "source"],
+      env = "REPRO_TOOL_PROVISIONING",
+      help = "How the build's tools are provisioned (`from-source` is also " &
+        "spelt `fromSource` or `source`); the flag wins over " &
+        "`$REPRO_TOOL_PROVISIONING` (default: the project's " &
+        "`defaultToolProvisioning`)"
+    flag target is string,
+      help = "Build for this platform triple (a short name such as " &
+        "`armv7-linux` names the catalog's triple; `native` assigns none): " &
+        "the `--variant targetTriple=` assignment, canonicalised"
+    flag variant is seq[string],
+      help = "Assign a variant, `NAME=VALUE` (repeatable); added to " &
+        "`$REPRO_VARIANTS` for the recipe's evaluation"
+    boolFlag release is bool, alsoSets = [variant = "buildType=release"],
+      refuseFalse = true,
+      help = "The same as `--variant buildType=release`"
+    boolFlag debug is bool, alsoSets = [variant = "buildType=debug"],
+      refuseFalse = true,
+      help = "The same as `--variant buildType=debug`"
+    flag workRoot is string,
+      help = "The work root the project's build state lives under " &
+        "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
+    flag actionCacheRoot is string,
+      help = "The action-cache root (default: " &
+        "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
+    flag lock is seq[string],
+      help = "The committed lock: `PATH` binds `default`, `NAME=PATH` a " &
+        "named lock file (repeatable; default: the project's `repro.lock`)"
+    flag strategy is string,
+      help = "Solve a hidden lock under this version strategy (default, " &
+        "lowest, highest or lowest-direct) and build from it; the " &
+        "committed lock is neither used nor written"
+    boolFlag printSolvedGraph is bool, clientSide = true,
+      help = "Print the solved graph the build would pin, and build nothing"
+    boolFlag listTargets is bool, clientSide = true,
+      help = "List the project's targets instead of building"
+    boolFlag listTargetsJson is bool, clientSide = true,
+      help = "List the project's targets as JSON"
+    boolFlag json is bool,
+      help = "With `--list-targets`: list them as JSON"
+    flag package is string,
+      help = "With `--list-targets`: only the targets of this package"
+    flag progress is string,
+      env = ["REPROBUILD_PROGRESS", "REPRO_PROGRESS"],
+      help = "How build progress is shown: quiet (also silent, none, off), " &
+        "line (ninja, single-line), bar-line (bar, ninja-bar, auto, " &
+        "plain), lines (tup, per-line), lines-bar (tup-bar, " &
+        "per-line-bar), dots (dot), simple-dots, simple-lines or " &
+        "live-lines; the flag wins over `$REPROBUILD_PROGRESS`, then " &
+        "`$REPRO_PROGRESS` (default: bar-line, quiet when " &
+        "`$IN_AGENT_SHELL` is set)"
+    flag progressBars is string, env = "REPROBUILD_PROGRESS_BARS",
+      clientSide = true,
+      help = "How progress bars are laid out: overlay (also overlaid, " &
+        "single, combined) or split (two, two-bars, separate); the flag " &
+        "wins over `$REPROBUILD_PROGRESS_BARS` (default: overlay)"
+    boolFlag unicode is bool, negatable = true, env = "REPRO_UNICODE",
+      help = "Unicode markers and checkboxes in progress output; the flag " &
+        "wins over `$REPRO_UNICODE` (default: ASCII)"
+    flag log is string, env = "REPROBUILD_LOG",
+      help = "Which status lines the build prints: actions (also " &
+        "verbose), summary (normal) or quiet (none, off); the flag wins " &
+        "over `$REPROBUILD_LOG` (default: quiet)"
+    boolFlag verbose is bool, short = 'v', alsoSets = [log = "summary"],
+      refuseFalse = true,
+      help = "The same as `--log=summary`"
+    boolFlag veryVerbose is bool, alias = "-vv", alsoSets = [log = "actions"],
+      refuseFalse = true,
+      help = "The same as `--log=actions`"
+    flag actionOutput is string,
+      help = "Which actions' output is printed: failed (default) or all"
+    flag measure is seq[string], env = "REPROBUILD_MEASURE",
+      help = "What the build collects: trace, cache-evidence, timing, all " &
+        "or none, comma-separated (repeatable, additive; `none` clears). " &
+        "The flag replaces `$REPROBUILD_MEASURE`, which adds to the " &
+        "default set (default: trace,cache-evidence)"
+    flag show is seq[string], env = "REPROBUILD_SHOW",
+      help = "What the build prints of what it collected, in `--measure`'s " &
+        "vocabulary (implies measuring it); the flag wins over " &
+        "`$REPROBUILD_SHOW` (default: none)"
+    flag writeReport is Option[string], optionalValue = some(""),
+      help = "Write the build report: bare, as " &
+        "`<outDir>/build-report.json`; with `=PATH`, at exactly PATH"
+    boolFlag noWriteReport is bool,
+      help = "Write no report file, not even the one a failed build leaves"
+    flag writeDiagnostics is string,
+      help = "Write the human-readable diagnostic log to the path"
+    flag writeBenchmark is string, clientSide = true,
+      help = "Write a benchmark document of the build's phase timings to " &
+        "the path (implies `--measure=timing`)"
+    flag writeStats is Option[string], optionalValue = some(""),
+      clientSide = true,
+      help = "Capture the build's statistics in the analytics store: bare, " &
+        "the conventional store; with `=PATH`, that store (daemon-hosted " &
+        "builds only)"
+    flag statsGroups is Option[string], format = equals, clientSide = true,
+      help = "Which statistics groups to capture: timing, cache, runquota, " &
+        "deps, sessions or all, comma-separated (enables `--write-stats`)"
+    boolFlag prepareOnly is bool,
+      help = "Prepare the build graph and run no action"
+    boolFlag dryRun is bool,
+      help = "Plan the build and run no action (implies `--no-runquota` " &
+        "unless `--runquota` is passed)"
+    boolFlag forceRebuild is bool, alias = "--rebuild",
+      help = "Rebuild every action, ignoring the caches"
+    boolFlag softRebuild is bool,
+      help = "Re-run the actions whose results may differ between runs"
+    boolFlag rebuildHostBound is bool,
+      help = "Re-run the actions bound to this host"
+    boolFlag hardRebuild is bool,
+      help = "Re-run every action, discarding its recorded state"
+    flag only is seq[string], clientSide = true,
+      help = "Scope a rebuild verb to the actions or targets matching the " &
+        "pattern (repeatable; `*` and `?` glob, otherwise a substring)"
+    flag unsafePreserveOutputs is seq[string],
+      help = "Run the matching steps in unsafe preserve-outputs mode " &
+        "(repeatable; `--only`'s patterns, `*` for every step)"
+    boolFlag noOutputCleanup is bool,
+      help = "Leave stale outputs of vanished actions in place"
+    boolFlag publishCacheHits is bool,
+      help = "Publish cache hits to the shared cache too"
+    boolFlag publishMaterialized is bool,
+      help = "Publish materialized outputs to the shared cache"
+    boolFlag skipCmakeRegeneration is bool,
+      help = "Do not regenerate CMake build files"
+    boolFlag restoreCachedOutputs is bool, negatable = true,
+      env = "REPRO_RESTORE_CACHED_OUTPUTS",
+      help = "Restore the outputs of cache hits into the tree; the flag " &
+        "wins over `$REPRO_RESTORE_CACHED_OUTPUTS` (default: off)"
+    boolFlag noRunquota is bool, env = "REPROBUILD_NO_RUNQUOTA",
+      refuseFalse = true,
+      help = "Bypass RunQuota entirely (the unsafe single-process " &
+        "fallback); the flag wins over `$REPROBUILD_NO_RUNQUOTA`. " &
+        "`--dry-run` implies it"
+    boolFlag runquota is bool, alsoSets = [noRunquota = "false"],
+      refuseFalse = true,
+      help = "Admit the build's actions through RunQuota even where it " &
+        "would be bypassed (`--dry-run`, `$REPROBUILD_NO_RUNQUOTA`); the " &
+        "last of `--runquota` and `--no-runquota` wins"
+    flag monitorHosting is string, env = "REPROBUILD_MONITOR_HOSTING",
+      help = "Where the I/O monitor is hosted: never, where-supported or " &
+        "required; the flag wins over `$REPROBUILD_MONITOR_HOSTING` " &
+        "(default: never)"
+    # DA-1i. THE HAZARD, NOT ONLY THE BEHAVIOUR. An operator choosing
+    # `--evidence=reads-only` is accepting a specific, nameable risk, and a
+    # risk described only in a specification is not one they were given the
+    # chance to accept. The table is narrower than "probes are unsafe" and
+    # that is its value, so every copy (this long help, which `repro build
+    # --help` prints, and docs/dependency-collection.md) carries the same
+    # four rows AND the sentence that row 1 does not cover row 4
+    # (`t_da1i_evidence_help_names_the_hazard`).
+    flag evidence is string, valueName = "full|reads-only",
+      help = "Which dependency evidence the build records: full (default) " &
+        "or reads-only",
+      longHelp = "`full` records every observation, including lookups " &
+        "that found nothing. `reads-only` records only lookups that " &
+        "SUCCEEDED (about a third of the records on a real nim c) and is " &
+        "NOT merely faster: it weakens \"is this build up to date?\" in " &
+        "one direction. Still detected: a recorded file is modified; a " &
+        "recorded file is deleted. NOT detected: a file is ADDED that " &
+        "shadows one earlier in a search path; a file that exists but " &
+        "could not be opened (a permission bit, a directory where a file " &
+        "was wanted) becomes openable. Those two are one rule: only " &
+        "successful lookups are recorded, so any later change that makes " &
+        "an unsuccessful lookup succeed is invisible, and \"a recorded " &
+        "file is modified\" does NOT cover the second, because the file " &
+        "is not recorded at all. This is ninja's own stale-build failure, " &
+        "which is why the mode exists: like-for-like comparison with " &
+        "depfile-driven tools, not speed. Artifacts built this way are " &
+        "correct and publishable; what degrades is the staleness check. " &
+        "Recover with --evidence=full or a clean build.\n" &
+        "A capture made under reads-only is refused by a build that " &
+        "requires full evidence, which recomputes locally instead; the " &
+        "scope is not part of the cache key, so a full-evidence result " &
+        "stays usable by everyone. That refusal is SESSION-WIDE, not " &
+        "per-action: it is graded as an unknown-scope evidence loss, " &
+        "because a reads-only record cannot say which lookups it dropped, " &
+        "so there is no narrower set to invalidate, and the first refused " &
+        "capture therefore turns every later cache lookup in " &
+        "that session into a miss. The build stays correct; it stops " &
+        "being incremental. You only reach it by reading a capture " &
+        "someone else narrowed, never your own. Recover by opting into " &
+        "the reduced scope with --evidence=reads-only, or by re-capturing " &
+        "under --evidence=full."
+    flag peerCache is string,
+      help = "Consult a peer cache: none, lan://CIDR[:port][?seeds=" &
+        "HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=" &
+        "trusted|hardened] or remote://URL"
+    flag trustProfile is seq[string],
+      help = "The trust profile of the peer-cache node: trusted or " &
+        "hardened (given at most once)"
+    flag publish is Option[string], format = equals,
+      help = "Publish the build's install mirror under a profile's " &
+        "substitute-only edge: `--publish=<profile.nim>#<edge-id>` (the " &
+        "consuming platform is `--target`'s)"
+    pos selectors is seq[string], required = false,
+      help = "What to build: a project path, `path#name`, a target name " &
+        "or `package:name` (default: the current directory's default " &
+        "target)"
+    pos actionArgs is seq[string], required = false, afterSeparator = true,
+      help = "Arguments forwarded to the selected action, after `--`"
+
 proc lockSolveFlags(): NimNode {.compileTime.} =
   ## The flags `repro lock solve`, `refresh` and `validate` share.
   quote do:
@@ -1278,6 +1510,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let flakeRefreshLock = flakeVerbFlags()
   let flakeOverrideStatus = flakeVerbFlags()
   let lockSolve = lockSolveFlags()
+  # Group 7 (the build family): `build`, and `bench` and `lint`, which take
+  # its command line unchanged.
+  let buildCommand = buildFlags()
+  let benchCommand = buildFlags()
+  let lintCommand = buildFlags()
   let lockRefresh = lockSolveFlags()
   let lockValidate = lockSolveFlags()
   let workspaceCommands = workspaceSubcommands(syncWs, pullWs, switchWs,
@@ -1295,40 +1532,13 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
 
     # ---- Building and testing -------------------------------------------
     subcmd "build", help = "Build the current project or the selected targets":
-      # The flags the thin client hands over on (see the module header).
-      # `build` is not parsed from this description yet: until it is, these
-      # declarations feed the thin client's table and completion, and the
-      # arguments reach `runBuildCommand` unparsed through `args`.
-      flag daemon is string, values = ["auto", "require", "off"],
-        clientSide = true,
-        help = "Whether the build runs in the per-user daemon"
-      boolFlag listTargets is bool, clientSide = true,
-        help = "List the project's targets instead of building"
-      boolFlag listTargetsJson is bool, clientSide = true,
-        help = "List the project's targets as JSON"
-      boolFlag printSolvedGraph is bool, clientSide = true,
-        help = "Print the solved build graph instead of building"
-      flag only is string, clientSide = true,
-        help = "Run only the actions matching the pattern"
-      flag writeBenchmark is string, clientSide = true,
-        help = "Write a benchmark document to the path"
-      flag writeStats is string, optionalValue = "", clientSide = true,
-        help = "Write the build statistics"
-      flag statsGroups is string, clientSide = true,
-        help = "Which statistics groups to record"
-      flag progressBars is string, values = ["overlay", "split"],
-        clientSide = true, help = "How progress bars are laid out"
-      # Routable when (and only when) it selects quiet progress; the thin
-      # client reads its spellings from here.
-      flag progress is string, help = "How build progress is shown"
-      pos args is seq[string], required = false, passThrough = true,
-        help = "Targets and the rest of the build command line"
+      `buildCommand`
     subcmd "test", help = "Run the project's tests":
       pos args is seq[string], required = false, passThrough = true
     subcmd "bench", help = "Run the project's benchmarks":
-      pos args is seq[string], required = false, passThrough = true
+      `benchCommand`
     subcmd "lint", help = "Run the project's lint checks":
-      pos args is seq[string], required = false, passThrough = true
+      `lintCommand`
     subcmd "certify",
         help = "Run the required test set and issue a signed test certificate":
       pos args is seq[string], required = false, passThrough = true
@@ -1341,7 +1551,13 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "Watch for changes and rebuild or rerun continuously":
       pos args is seq[string], required = false, passThrough = true
     subcmd "clean", help = "Remove the current project's build artifacts":
-      pos args is seq[string], required = false, passThrough = true
+      flag projectRoot is string,
+        help = "The project (default: the current directory)"
+      flag workRoot is string,
+        help = "The work root the project's build state lives under " &
+          "(default: `$REPROBUILD_WORK_ROOT`)"
+      boolFlag dryRun is bool,
+        help = "List the outputs that would be removed, and remove nothing"
     subcmd "run", help = "Run a task, a build output or a target once":
       `runSelection`
       boolFlag choose is bool,
@@ -2851,3 +3067,21 @@ macro reproFlagSpellings*(path: static[seq[string]];
   if result.len == 0:
     error("repro command line: command `" & $path & "` has no flag `" &
       name & "`")
+
+macro reproFlagEnv*(path: static[seq[string]];
+                    name: static[string]): untyped =
+  ## The environment variables the flag ``name`` of the command at ``path``
+  ## declares, as an array literal; a compile error when there is no such
+  ## flag or it declares none.
+  let model = reproCommandLineModel()
+  let at = model.commandNamed(path)
+  if at < 0:
+    error("repro command line: no command `" & $path & "`")
+  result = nnkBracket.newTree()
+  for p in model.commands[at].params:
+    if p.name == name and p.kind == cpkFlag:
+      for variable in p.env:
+        result.add(newLit(variable))
+  if result.len == 0:
+    error("repro command line: flag `" & name & "` of `" & $path &
+      "` declares no environment variable")

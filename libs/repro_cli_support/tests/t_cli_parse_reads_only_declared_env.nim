@@ -37,12 +37,16 @@
 ##
 ## The second suite checks that the by-name lookup is the same input to the
 ## parse as the whole environment was, on every host: a small description
-## with parameters that declare variables (repro's own grammar declares none
-## at the time of writing, which would make the comparison vacuous) is loaded
+## with parameters that declare variables (repro's own grammar declares only
+## `repro build`'s, `bench`'s and `lint`'s, which a self-contained probe
+## exercises better) is loaded
 ## from `cliProcessEnv()` and from `declaredEnvOf` under several
 ## environments, and must yield the same values, or the same refusal. It
 ## also checks `reproDeclaredEnv()` against the whole environment filtered to
-## repro's declared names. This half has teeth on Linux too: a lookup that
+## repro's declared names (a variable set to the empty string counts as
+## unset, as reprobuild has always read these), and that the parse of one
+## command looks up only the variables that command's parameters declare
+## (`reproDeclaredEnvFor`). This half has teeth on Linux too: a lookup that
 ## leaked an undeclared variable, dropped a declared one, or changed which of
 ## a parameter's variables wins, fails it.
 ##
@@ -226,8 +230,29 @@ suite "repro command-line parse: the by-name environment is the same input":
           declared.add name
     var expected = initTable[string, string]()
     for name, value in cliProcessEnv():
-      if name in declared:
+      if name in declared and value.len > 0:
         expected[name] = value
     let actual = reproDeclaredEnv()
     check SentinelName notin actual
     check actual == expected
+
+  test "a command's parse looks up only the variables its parameters declare":
+    # `REPRO_DAEMON` is `repro build`'s (and `bench`'s and `lint`'s); a
+    # helper edge's parse must not be keyed on it.
+    let saved = (existsEnv("REPRO_DAEMON"), getEnv("REPRO_DAEMON"))
+    defer:
+      if saved[0]: putEnv("REPRO_DAEMON", saved[1])
+      else: delEnv("REPRO_DAEMON")
+    putEnv("REPRO_DAEMON", "off")
+    check reproDeclaredEnvFor(["build", "--work-root", "x", "."]).
+      getOrDefault("REPRO_DAEMON") == "off"
+    check reproDeclaredEnvFor(["lint"]).getOrDefault("REPRO_DAEMON") == "off"
+    check "REPRO_DAEMON" notin reproDeclaredEnvFor(
+      ["__repro-compile-profile", "--out", "x"])
+    check "REPRO_DAEMON" notin reproDeclaredEnvFor(["sync"])
+    # The root alone may reach any command, so it sees them all.
+    check reproDeclaredEnvFor(newSeq[string]()).
+      getOrDefault("REPRO_DAEMON") == "off"
+    # Set to the empty string, it counts as unset.
+    putEnv("REPRO_DAEMON", "")
+    check "REPRO_DAEMON" notin reproDeclaredEnvFor(["build"])
