@@ -160,9 +160,11 @@ proc fingerprintArch*(g: Guest; repro: string; omarchyAccount = ""): string =
   ## ``btrfs-subvolumes`` on a btrfs root, ``omarchy-hooks`` for an account).
   ## The add-on's own root snapshots are accounted for, not compared
   ## (``addon_testbed.accountedFingerprint``).
-  g.accountedFingerprint(repro, g.run(repro & " system addon fingerprint" &
+  let fp = g.run(repro & " system addon fingerprint" &
         (if omarchyAccount.len > 0: " --omarchy-account " & omarchyAccount
-         else: "")))
+         else: ""))
+  g.noteKernelTaint(fp)
+  g.accountedFingerprint(repro, fp)
 
 proc rootIsBtrfs*(b: BaseImage): bool =
   ## The base's root filesystem as the test bed builds it: btrfs for the

@@ -55,6 +55,7 @@ import repro_infra
 
 import ./host_exec
 import ./mutations
+import ./store_custody
 import ./seams
 import ./switch
 import ./transitions
@@ -631,6 +632,19 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
     receipt[e.path] = ReceiptEntry(digest: e.digest, root: rootOf(root),
                                    id: dirIdentity(target))
     result.add(e.path)
+  # What the receipt records is durable before the receipt says so: the
+  # extracted trees were renamed into place without a sync of their files.
+  # On ext4 the receipt's own fsyncs commit their data with the journal
+  # (data=ordered); on btrfs an fsync persists only the file it names, and
+  # a reset before the receipt's rename left a restored directory whose
+  # files had lost their bytes, which the next restore refused (measured
+  # on the Omarchy VM, e2e_addon_hard_reset_at_every_step).
+  var synced: seq[string]
+  for p in result:
+    let parent = parentDir(under(root, p))
+    if parent notin synced:
+      synced.add(parent)
+      syncFilesystemOf(parent)
   # Test seams (seam builds only): the hard-reset gate resets the host
   # inside the receipt's replacement (``receipt-before-rename``,
   # ``receipt-before-dir-fsync``) and requires a whole receipt after it.

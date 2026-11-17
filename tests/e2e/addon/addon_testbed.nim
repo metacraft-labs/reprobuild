@@ -337,6 +337,8 @@ type
     serialLog*: string
     booted*: bool
     log*: seq[string]
+    notedTaints*: seq[string]
+      ## The kernel taint values whose warnings ``noteKernelTaint`` logged.
     dataDisks*: seq[string]
       ## Extra writable disks attached after the boot disk (``/dev/vdb``,
       ## ...), each a ``DataDisk`` the gate owns: destroying the guest does
@@ -823,8 +825,24 @@ proc accountedFingerprint*(g: Guest; repro, fingerprint: string): string =
       "account: " & a.problems.join("; "))
   withoutOwnedSnapshots(fingerprint, a.owned)
 
+proc noteKernelTaint*(g: Guest; fingerprint: string) =
+  ## A fingerprint that records a tainted kernel (``kernel.tainted`` not 0)
+  ## puts the kernel's log into the guest's log, once per taint value: the
+  ## console runs quiet, so this is the only record of what warned
+  ## (measured 2026-11-17: TAINT_WARN on arch-ext4-amd64, its cause lost
+  ## with the guest).
+  for line in fingerprint.splitLines():
+    if line.startsWith("sysctl\tkernel.tainted\t"):
+      let v = line.split('\t')[^1]
+      if v != "0" and v notin g.notedTaints:
+        g.notedTaints.add(v)
+        g.note("kernel.tainted = " & v & "; the kernel's warnings:\n" &
+          g.exec("dmesg --notime 2>/dev/null | grep -A40 -E 'cut here|WARNING:|Tainted:' | head -200").stdout)
+
 proc takeFingerprint*(g: Guest; repro: string): string =
-  g.accountedFingerprint(repro, g.run(repro & " system addon fingerprint"))
+  let fp = g.run(repro & " system addon fingerprint")
+  g.noteKernelTaint(fp)
+  g.accountedFingerprint(repro, fp)
 
 proc gostiHead*(): string
 
