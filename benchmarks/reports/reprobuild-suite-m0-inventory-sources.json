@@ -13452,7 +13452,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

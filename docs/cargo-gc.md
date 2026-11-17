@@ -29,8 +29,8 @@ sets was built by (a toolchain that was upgraded away: the equivalent of
 `cargo sweep --installed`).
 
 Deleting a unit removes its entries in `deps/`, `.fingerprint/` and `build/`,
-the final artifacts that cargo hard-linked out of its `deps/` files (and their
-`.d` files), and the `incremental/` caches of crates that no longer have a unit
+the final artifacts that cargo linked or copied out of its `deps/` files (and
+their `.d` files), and the `incremental/` caches of crates that no longer have a unit
 (or that have more caches than units: the newest are kept).
 
 Everything else is left alone: `test-logs/`, `nextest/`, `flycheck*/` (a
@@ -69,8 +69,11 @@ explicitly where it matters.
 standard input (or `--from FILE`). From `compiler-artifact` messages (fresh
 ones included) it takes each unit's hash and toolchain fingerprint, from
 `build-script-executed` messages the build script's output directory. Binary
-artifacts, which cargo reports only by their hard-linked final name, are
-matched to their `deps/` file by file identity. `--tee` copies the stream to
+artifacts, which cargo reports only by their final name, are matched to their
+`deps/` file by file identity where cargo hard-linked them (Linux), by byte
+equality where it copied them (macOS), and, for the `.dSYM` bundle macOS
+debug builds can carry, by the symlink cargo makes to the bundle in `deps/`.
+A copy equal to a surviving unit's file is that unit's artifact and is kept. `--tee` copies the stream to
 standard output so the recorder can sit in a pipe. The live sets are stored as
 TOML under `target/.repro-cargo-gc/live-sets/`, one file per invocation, and
 only the last K per profile directory are kept.
