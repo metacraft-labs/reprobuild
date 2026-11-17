@@ -69,6 +69,7 @@ import repro_build_engine
 import repro_cas_store
 import repro_core/paths
 import repro_local_store
+import repro_hash
 
 const
   ToolFlag = "--write-text-and-depfile"
@@ -78,8 +79,13 @@ const
 # is given to its output and a make depfile naming its input, as a compiler's
 # `-MD` does. With `AppendFlag` it APPENDS to whatever the output already
 # holds, like an incremental tool working from its previous output. The text
-# is an argv element, in no key (the weak fingerprint is given), so the bytes
-# on disk say whether it ran and what it found there.
+# is an argv element, and the bytes on disk say whether it ran and what it
+# found there. `action()` keys argv, and `builtinAction` keys its text
+# (reprobuild-pm Caching-Architecture.md §"BuildXL-Inspired Fingerprinting",
+# rider of 2026-11-16), so `markerBlind` pins each edge's key to one value:
+# the text is this file's run marker, not part of what its cases are about,
+# and a run with another marker must consult the same record a run with the
+# same bytes would.
 if paramCount() == 5 and paramStr(1) in [ToolFlag, AppendFlag]:
   var previous = ""
   if paramStr(1) == AppendFlag and fileExists(paramStr(3)):
@@ -102,6 +108,11 @@ const
 
 let Weak = weakFingerprintFromText("t-modified-output-restores")
 
+proc markerBlind(action: BuildAction; weak: ContentDigest): BuildAction =
+  ## `action` keyed on `weak` and its lock only, not on its marker text.
+  result = action
+  result.weakFingerprint = weakFingerprintFor($weak, action.governingLockIdentity)
+
 proc workspace(name: string): string =
   result = TmpDir / name / "ws"
   createDir(result / "src")
@@ -114,7 +125,7 @@ proc theAction(ws, text: string; policy = ffpChecksum): BuildAction =
     outputs = [ws / "out" / "result.txt"],
     cacheable = true, weakFingerprint = Weak,
     actionCachePolicy = policy, text = text,
-    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    governingLockIdentity = lockIdentityOutsideSolvedGraph()).markerBlind(Weak)
 
 proc consumerAction(ws, text: string): BuildAction =
   ## Reads the producer's output as a declared input, keyed by its content.
@@ -124,7 +135,8 @@ proc consumerAction(ws, text: string): BuildAction =
     cacheable = true,
     weakFingerprint = weakFingerprintFromText("t-modified-output-consumer"),
     actionCachePolicy = ffpChecksum, text = text,
-    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    governingLockIdentity = lockIdentityOutsideSolvedGraph()).markerBlind(
+      weakFingerprintFromText("t-modified-output-consumer"))
 
 proc inPlaceConfig(cacheRoot: string): BuildEngineConfig =
   ## `repro build`'s warm in-place mode, with the output payloads kept in
@@ -255,7 +267,8 @@ proc depfileAction(ws, text: string; flag = ToolFlag): BuildAction =
     outputs = [ws / "out" / "result.txt"], depfile = ws / "out" / "result.d",
     cacheable = true, weakFingerprint = weakFingerprintFromText(
       "t-modified-output-depfile"), actionCachePolicy = ffpChecksum,
-    governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    governingLockIdentity = lockIdentityOutsideSolvedGraph()).markerBlind(
+      weakFingerprintFromText("t-modified-output-depfile"))
 
 suite "owner decision 2026-11-03: a modified output is restored, not rebuilt":
 

@@ -219,15 +219,43 @@ proc freeBytes*(path: string): int64 =
     return high(int64)
   int64(st.f_bavail) * int64(st.f_frsize)
 
-proc download(urls: seq[tuple[url, dest: string]]; parallel: int) =
+proc curlQuote*(value: string): string =
+  ## `value` as a double-quoted string in curl's `-K` config syntax: `\\`
+  ## and `"` escaped. A control character is refused rather than escaped:
+  ## no legitimate URL, path or header holds one, and an unescaped newline
+  ## would end the value and start a directive of the caller's choosing
+  ## (Workspace-Bundles.md §7 step 2). The refusal names the character's
+  ## position, never the value: on the publish side the value can be a
+  ## credential (`authConfig`), such as a secret read with a trailing newline.
+  result = "\""
+  for i, c in value:
+    case c
+    of '\\', '"':
+      result.add('\\')
+      result.add(c)
+    of '\0' .. '\x1f', '\x7f':
+      bundleFail("refusing a curl config value with the control character " &
+        ($c).escape & " at offset " & $i & " of " & $value.len)
+    else:
+      result.add(c)
+  result.add('"')
+
+proc downloadConfig*(urls: seq[tuple[url, dest: string]]): string =
+  ## The `curl -K -` config for `urls`: one url/output pair per transfer,
+  ## every value quoted by `curlQuote`.
+  for (url, dest) in urls:
+    result.add("url = " & curlQuote(url) & "\noutput = " & curlQuote(dest) &
+      "\n")
+
+proc download*(urls: seq[tuple[url, dest: string]]; parallel: int) =
   ## Parallel `curl` transfers. curl honours HTTPS_PROXY and the system CA
   ## bundle (SSL_CERT_FILE), which the session needs. Only https:// and
   ## file:// are fetched, and a redirect only to https:// (`CurlProtocols`).
   if urls.len == 0: return
-  var cfg = ""
-  for (url, dest) in urls:
-    cfg.add("url = \"" & url & "\"\noutput = \"" & dest & "\"\n")
-  discard mustRun(requireExe("curl"), @["-fsS", "--retry", "3"] &
+  let cfg = downloadConfig(urls)
+  # --globoff: a URL reaches curl as itself, never as a `{a,b}` or `[1-9]`
+  # pattern that fans out into transfers the manifest does not name.
+  discard mustRun(requireExe("curl"), @["-fsS", "--globoff", "--retry", "3"] &
     @CurlProtocols & @["--parallel", "--parallel-max", $max(1, parallel),
     "-K", "-"], stdinData = cfg)
 
@@ -238,11 +266,35 @@ type
     base: string          ## directory or URL of the bundle (skDir, skUrl)
     gh: GithubSource      ## skGithub
 
+proc isHalfId(s: string): bool =
+  s.len == 32 and s.allCharsInSet({'0' .. '9', 'a' .. 'f'})
+
+proc checkHalfDir*(node: JsonNode; key, system: string): string =
+  ## The half's `dir` from the unsigned latest.json, refused unless it is
+  ## exactly the directory §5 lays that half out in: `<system>/nix/<id>`,
+  ## `sources/<id>` or `<system>/native-store/<id>`, with `<system>` the
+  ## system the bundle was read for and `<id>` 32 lowercase hex digits. It
+  ## is joined onto the bundle's base, a staging directory and curl's
+  ## config, so anything else (`..`, `/`, a quote, a newline) could reach
+  ## outside the bundle (Workspace-Bundles.md §7 step 2, §9).
+  let rel = node{"dir"}.getStr()
+  let prefix = (case key
+    of "nix": system & "/" & NixHalfDir & "/"
+    of "sources": SourcesHalfDir & "/"
+    of "native_store": system & "/" & NativeHalfDir & "/"
+    else: "")
+  if prefix.len == 0 or not rel.startsWith(prefix) or
+      not isHalfId(rel[prefix.len .. ^1]):
+    bundleFail("refusing the " & key & " half's directory " & rel.escape &
+      ": expected " & prefix & "<32 lowercase hex digits>")
+  rel
+
 proc fetchHalf(src: Source; staging: string; node: JsonNode;
                manifestName: string; parts: seq[BundlePart];
                extra: seq[string]; fetchManifest: bool; parallel: int): string =
   ## A directory holding the half's files: the half itself for a local
-  ## bundle, otherwise a staging directory they were downloaded into.
+  ## bundle, otherwise a staging directory they were downloaded into. The
+  ## half's `dir` was checked by `checkHalfDir` before anything was written.
   let rel = node["dir"].getStr()
   if src.kind == skDir:
     return src.base / rel
@@ -326,6 +378,12 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
   defer: removeDir(probeDir)
   let (src, latest) = readLatest(opts.source, system, probeDir)
   let halves = latest["halves"]
+  # §7 step 2: every half's directory is checked before anything is fetched
+  # or written, the halves already present included. A half this restorer
+  # does not know is never read, so it is not checked either.
+  for key in ["nix", "sources", "native_store"]:
+    if halves.hasKey(key):
+      discard checkHalfDir(halves[key], key, system)
   let ws = (if opts.workspaceDir.len > 0:
               normalizedPath(absolutePath(opts.workspaceDir))
             else: latest["workspace_dir"].getStr())
@@ -348,6 +406,11 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
     needSources = not sourcesHalf.sourcesPresent(ws)
     if not needSources: result.alreadyPresent.add("sources")
   let needNative = halves.hasKey("native_store")
+  # Its part names are checked here, with the other halves', before any
+  # half is fetched (§7 step 2).
+  let nativeParts = (if needNative:
+                       parsePartsJson(halves["native_store"]["parts"])
+                     else: @[])
   var nixBytes, wsBytes, compressed = 0'i64
   if needNix:
     nixBytes += nixHalf.unpackedBytes
@@ -399,7 +462,7 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
       bundleFail("this bundle has a native-store half and no importer")
     let node = halves["native_store"]
     let dir = fetchHalf(src, staging, node, NativeManifestName,
-      parsePartsJson(node["parts"]), @[], true, parallel)
+      nativeParts, @[], true, parallel)
     phase("download native-store")
     result.native = opts.importNative(dir)
     if remote: removeDir(dir)
@@ -482,11 +545,12 @@ proc authConfig(opts: PublishOptions): string =
     bundleFail("publishing needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY " &
       "in the environment")
   let region = (if opts.region.len > 0: opts.region else: "us-east-1")
-  result = "user = \"" & ak & ":" & sk & "\"\n" &
-    "aws-sigv4 = \"aws:amz:" & region & ":s3\"\n"
+  result = "user = " & curlQuote(ak & ":" & sk) & "\n" &
+    "aws-sigv4 = " & curlQuote("aws:amz:" & region & ":s3") & "\n"
   let token = getEnv("AWS_SESSION_TOKEN")
   if token.len > 0:
-    result.add("header = \"x-amz-security-token: " & token & "\"\n")
+    result.add("header = " & curlQuote("x-amz-security-token: " & token) &
+      "\n")
 
 proc curlS3(opts: PublishOptions; blocks: seq[string];
             extraArgs: seq[string] = @[]): seq[tuple[code: int, url: string]] =
@@ -510,7 +574,8 @@ proc curlS3(opts: PublishOptions; blocks: seq[string];
       " transfers (exit " & $r.code & "): " & r.errors.strip())
 
 proc remoteExists(opts: PublishOptions; url: string): bool =
-  let r = curlS3(opts, @["url = \"" & url & "\"\nhead\noutput = \"/dev/null\"\n"])
+  let r = curlS3(opts, @["url = " & curlQuote(url) &
+    "\nhead\noutput = \"/dev/null\"\n"])
   r[0].code in 200 .. 299
 
 proc uploadFiles(opts: PublishOptions; files: seq[tuple[path, url: string]];
@@ -518,9 +583,10 @@ proc uploadFiles(opts: PublishOptions; files: seq[tuple[path, url: string]];
   if files.len == 0: return
   var blocks: seq[string]
   for (path, url) in files:
-    blocks.add("upload-file = \"" & path & "\"\nurl = \"" & url & "\"\n" &
-      "header = \"Cache-Control: " & cacheControl & "\"\n" &
-      "header = \"Content-Type: " & contentType & "\"\n" &
+    blocks.add("upload-file = " & curlQuote(path) & "\nurl = " &
+      curlQuote(url) & "\n" &
+      "header = " & curlQuote("Cache-Control: " & cacheControl) & "\n" &
+      "header = " & curlQuote("Content-Type: " & contentType) & "\n" &
       "output = \"/dev/null\"\n")
   let results = curlS3(opts, blocks, @["--parallel", "--parallel-max",
     $(if opts.parallel > 0: opts.parallel else: 16)])

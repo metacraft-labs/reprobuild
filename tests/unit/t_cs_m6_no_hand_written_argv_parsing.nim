@@ -54,10 +54,11 @@ const
     # restore` takes its values from the description), and the sixth's
     # `develop` and `flake` took this file from 502 to 343, and the seventh
     # group's `build` (with `bench` and `lint`) and `clean` from 343 to
-    # 221. What `infra.nim` and `infra_image.nim` still hold is no argv
+    # 221, and its `test`, `certify`, `certificates`, `ci` and `watch` from
+    # 221 to 43. What `infra.nim` and `infra_image.nim` still hold is no argv
     # parsing (a `git describe` suffix, a table of the flags a bootstrap
     # names), but it has the shape the scan counts.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 221),
+    ("libs/repro_cli_support/src/repro_cli_support.nim", 43),
     ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
     ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
@@ -150,7 +151,23 @@ const
     # readers through `buildRequestOf`; and `clean`.
     "runBuildCommand", "runBuildVerbCommand", "loadBuildCommandLine",
     "buildRequestOf", "givenOnCommandLine", "daemonRequestProjectRoot",
-    "daemonPrewarmTargetOutputDir", "runCleanCommand"]
+    "daemonPrewarmTargetOutputDir", "runCleanCommand",
+    # The rest of the seventh group: `test` (the verb alias of a build, and
+    # the sharded CI path), `certify` (its three modes), `certificates`
+    # with `list`, `plan`, `policy`, `ci plan` and `watch`, whose daemon
+    # worker reads the client's arguments through `loadWatchCommandLine`.
+    # (`testOptionsOf`, generic over `test`'s and `certify`'s configuration,
+    # is not found by `procBody`; it reads typed fields only, and so does
+    # `buildWordsOf` in `cli_program`, which renders a build's command line
+    # from them.)
+    "runTestVerbCommand", "loadTestCommandLine", "runReproTestCommand",
+    "runReproTest", "testBuildArgs", "plainTestBuild",
+    "runCertifyingTestBuild", "runCertifyVerbCommand",
+    "loadCertifyCommandLine", "certifyFlagsGivenOutside", "runCertifyVerify",
+    "runCertifyCheckSet", "runCertificatesCommand",
+    "runCertificatesPolicyCommand", "ciPlanArgsOf", "runCiPlanCommand",
+    "runCiCommand", "runWatchVerbCommand", "loadWatchCommandLine",
+    "runWatchCommand"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.

@@ -59,6 +59,19 @@
 ## "must be explicit". Before it, two actions differing only in an environment
 ## Reprobuild itself chose shared one cache entry.
 ##
+## The second further move: reprobuild-pm `spec/Caching-Architecture.md`
+## §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16, made the engine
+## mix a process edge's argv and cwd (`keyedOnArgv`) and a filesystem
+## builtin's kind and payload (`keyedOnBuiltinPayload`,
+## `PayloadKeyedBuiltinKinds`) into its weak fingerprint, whatever
+## the caller passed (the commit that adds
+## `t_every_edge_keys_its_command_and_payload`). It moved every row built
+## through `action()` or `builtinAction()`, and none of the three object
+## literals, which compose `weakFingerprintFor` (still the id and the lock).
+## `t_workspace_declaring_nothing_unchanged` explains each row by that term.
+## Before it, two edges with one id and different command lines or texts
+## shared one cache record, and with portable caching off one peer key.
+##
 ## The precedent this sets is narrow on purpose. This fixture may be
 ## regenerated only together with an entry above naming the commit that moved
 ## it and the spec clause that required the move, and only when

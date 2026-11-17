@@ -314,6 +314,66 @@ proc reproWordsAfterCommand*(argv: openArray[string]): seq[string] =
     after = i + 1
   @argv[after .. ^1]
 
+macro fieldNamed*(obj: typed; name: static[string]): untyped =
+  ## ``obj.<name>``: the field ``name`` (a compile-time string, such as the
+  ## name ``fieldPairs`` gives) of a generated configuration or origin
+  ## object.
+  newDotExpr(obj, ident(name))
+
+proc buildWordsOf*[C, O](c: C; origin: O): seq[string] =
+  ## The command line of the build a command runs when it splices
+  ## `repro build`'s declaration into its own (`repro test`, `repro
+  ## certify`): every flag of ``c`` that is a `repro build` flag and was
+  ## given ON THE COMMAND LINE, in the canonical spelling `--<flag>=<value>`
+  ## (a switch as `--<flag>`, a negated one as `--no-<flag>`), in
+  ## declaration order. The build parses these words with
+  ## `loadBuildCommandLine`, like any other route into a build, and the
+  ## daemon receives them as the build's `rawArgs`.
+  ##
+  ## What is NOT rendered: a value that came from an environment variable a
+  ## flag declares, because the build reads the same variable itself; the
+  ## positionals (the selectors, and the words after `--`), which the caller
+  ## decides; and a switch that stands for another flag's value (`-v`,
+  ## `--release`, ...), whose effect is rendered as that flag's value
+  ## (`--log=summary`, `--variant=buildType=release`). A value the
+  ## command line set to `false` through such a switch (`--runquota`, which
+  ## sets `--no-runquota` to false) is rendered as that switch.
+  let g = ReproCommandLine.cliGrammar()
+  var buildParams = initTable[string, int]()
+  for id in g.commands[reproCommandAt(["build"])].params:
+    if g.params[id].kind == cpkFlag:
+      buildParams[g.params[id].name] = id
+  for name, value in fieldPairs(c):
+    if name in buildParams and
+        fieldNamed(origin, name).winner.kind == cokCli:
+      let id = buildParams[name]
+      let p = g.params[id]
+      when value is bool:
+        if p.alsoSets.len > 0:
+          discard
+        elif value:
+          result.add("--" & p.longName)
+        elif p.negatable:
+          result.add("--no-" & p.longName)
+        else:
+          for other in g.commands[reproCommandAt(["build"])].params:
+            for also in g.params[other].alsoSets:
+              if also.id == id and also.text == "false":
+                result.add("--" & g.params[other].longName)
+      elif value is string:
+        result.add("--" & p.longName & "=" & value)
+      elif value is seq[string]:
+        for item in value:
+          result.add("--" & p.longName & "=" & item)
+      elif value is Option[string]:
+        if value.isSome:
+          if p.hasOptionalValue and value.get.len == 0:
+            result.add("--" & p.longName)
+          else:
+            result.add("--" & p.longName & "=" & value.get)
+      else:
+        {.error: "buildWordsOf: no rendering for the type of " & name.}
+
 proc loadReproCommandLine*(argv: openArray[string];
                            conf: var ReproCommandLine): int =
   ## Parses ``argv`` (repro's arguments, without the program name) with the

@@ -831,10 +831,18 @@ proc partsJson*(parts: seq[BundlePart]): JsonNode =
     result.add(%*{"file": p.file, "bytes": p.bytes, "sha256": p.sha256})
 
 proc parsePartsJson*(node: JsonNode): seq[BundlePart] =
-  ## Refuses part names that could leave the half's directory.
+  ## Refuses part names that could leave the half's directory, or that a
+  ## consumer could split or reinterpret: a name is one path component of
+  ## `[A-Za-z0-9._-]` that does not begin with `.`. The manifest is
+  ## unsigned, and a NUL or newline in a name would split the NUL- and
+  ## line-separated job lists the bundle downloaders build
+  ## (Workspace-Bundles.md §7 step 2). Every writer names parts
+  ## `part-NNNN` or `registration`.
   for p in node:
     let name = p["file"].getStr()
-    if name.len == 0 or '/' in name or name.startsWith("."):
+    if name.len == 0 or name.startsWith(".") or
+        not name.allCharsInSet({'A' .. 'Z', 'a' .. 'z', '0' .. '9', '.', '_',
+                                '-'}):
       raise newException(StoreBundleError, "refusing part name " & name.escape)
     result.add(BundlePart(file: name, bytes: p["bytes"].getBiggestInt(),
       sha256: p["sha256"].getStr().toLowerAscii()))
