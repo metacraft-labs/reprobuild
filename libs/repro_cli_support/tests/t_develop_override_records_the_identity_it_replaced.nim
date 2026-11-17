@@ -44,8 +44,9 @@
 ##
 ## Every boundary here is the real one:
 ##
-##   * the WRITER is the real `repro develop <dependency> --into=PATH` verb
-##     (`runDevelopCommand`), one frame below the `repro` binary's `main()`;
+##   * the WRITER is the real `repro develop <dependency> --into=PATH` verb,
+##     through the same parser and dispatch the `repro` binary's `main()`
+##     uses (`runReproCommandLineInProcess`);
 ##   * the FILE is the real document at the path the verb reports, in the real
 ##     `reprobuild.develop-overrides.v1` shape;
 ##   * the consumer's committed lock is written by the real
@@ -186,7 +187,8 @@ proc developInto(consumerRoot, checkout: string;
     let sink = open(captured, fmWrite)
     discard dup2(sink.getFileHandle(), stdout.getFileHandle())
     setCurrentDir(consumerRoot)
-    rc = runDevelopCommand([dependency, "--into=" & checkout])
+    rc = runReproCommandLineInProcess(@["develop", dependency,
+      "--into=" & checkout])
     flushFile(stdout)
     sink.close()
   doAssert rc == 0, "repro develop exited " & $rc

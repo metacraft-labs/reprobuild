@@ -434,7 +434,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/e6f976ca24fce6f9d794e334372d01d6b2f21790";
+      url = "github:metacraft-labs/nim-cli-spec/8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
       flake = false;
     };
     nim-confutils-src = {
@@ -447,7 +447,7 @@
       # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/dcad14dd0f41e06dc61e8c01386923e6d5103dc3";
+      url = "github:metacraft-labs/nim-confutils/0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74";
       flake = false;
     };
     nimcrypto-src = {

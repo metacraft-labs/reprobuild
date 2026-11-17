@@ -97,9 +97,9 @@ const
     "repro dev-env deactivate", "repro up", "repro down", "repro dev",
     "repro hcr", "repro hcr coordinate", "repro hcr prepare-object",
     "repro prompt", "repro prompt init",
-    # The sixth group (workspaces and publication). The internal subcommands
-    # the managed hooks run (`hooks protocol|dispatch|cache-push`) are not
-    # compared.
+    # The sixth group (workspaces and publication, `develop` and `flake`
+    # included). The internal subcommands the managed hooks run (`hooks
+    # protocol|dispatch|cache-push`) are not compared.
     "repro workspace", "repro workspace restore", "repro workspace init",
     "repro workspace bootstrap", "repro workspace enable",
     "repro workspace disable", "repro workspace sets",
@@ -125,7 +125,9 @@ const
     "repro locking", "repro locking explain", "repro locking adopt-manifest",
     "repro gateway", "repro gateway pre-receive",
     "repro gateway post-receive", "repro gateway migrate", "repro add",
-    "repro remove"]
+    "repro remove", "repro develop", "repro flake",
+    "repro flake override-args", "repro flake refresh-lock",
+    "repro flake override-status"]
     ## The commands whose flags and environment variables are compared.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
@@ -144,13 +146,27 @@ const
     "flag\trepro dev\t--max-debounce", "flag\trepro dev\t--hcr",
     "flag\trepro dev\t--hcr-debug", "flag\trepro dev\t--hcr-mode",
     # The proposed scope flags of `repro hooks` (only the default scope is
-    # implemented), the proposed `repro lock solve` options, and `repro
-    # workspace status --verbose`, which the page describes and the command
-    # does not take.
+    # implemented) and the proposed `repro lock solve` options.
     "flag\trepro hooks ensure\t--profile",
     "flag\trepro lock solve\t--activity", "flag\trepro lock solve\t--dry-run",
+    # `repro workspace status --verbose`: specified, not implemented yet.
+    # The page defines both the default output and what `--verbose` adds,
+    # and the two are implemented together, as a change to the command's
+    # output rather than to how its command line is parsed.
     "flag\trepro workspace status\t--verbose",
-    "flag\trepro workspace status\t-v"]
+    "flag\trepro workspace status\t-v",
+    # What the pages came to specify after the sixth group moved, for the
+    # command-line and DSL usability work that implements it: the root's
+    # `--help-all` (all of a command's help tiers), `repro capabilities
+    # --json`, `repro add`'s dependency-kind flags, and `STDIN_FILENO`, a
+    # name `repro shell`'s page writes as code (its non-terminal refusal).
+    # And `XDG_STATE_HOME` in `repro health`: the page moved the per-user
+    # resource-state store from a cache directory to a state directory, and
+    # the store has not moved yet.
+    "flag\trepro\t--help-all", "flag\trepro capabilities\t--json",
+    "flag\trepro add\t--build", "flag\trepro add\t--native-build",
+    "flag\trepro add\t--runtime", "env\trepro health\tXDG_STATE_HOME",
+    "env\trepro shell\tSTDIN_FILENO"]
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
@@ -251,6 +267,10 @@ const
   # A command of the sixth group, compared since its parsing moved: the
   # pre-push gate's own input.
   WithoutCheckPushedRefs = declaredSurface("check", "pushedRefs", true)
+  # `repro develop`, compared since its parsing moved: a flag of the
+  # develop-set selection it shares with the `repro flake` verbs, removed
+  # from `develop` alone.
+  WithoutDevelopReset = declaredSurface("develop", "reset", true)
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -345,6 +365,10 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro prompt\t--workspace-root" in Declared
     check "flag\trepro up\t--lock-slice" in Declared
     check "flag\trepro down\t--ready-timeout" notin Declared
+    # The develop-set selection, shared by `develop` and the flake verbs.
+    check "flag\trepro develop\t--except" in Declared
+    check "flag\trepro flake override-status\t--lock-store" in Declared
+    check "flag\trepro flake refresh-lock\t--record-downgrade" in Declared
     check "verb\tws" notin Declared
 
   test "removing one flag's declaration fails the comparison":
@@ -372,6 +396,10 @@ suite "CS-M6: the specification pages match the declarations":
   test "removing a sixth-group command's flag fails the comparison":
     check differences(WithoutCheckPushedRefs, specified()) ==
       @["flag\trepro check\t--pushed-refs: specified, not declared"]
+
+  test "removing a flag of `repro develop` fails the comparison":
+    check differences(WithoutDevelopReset, specified()) ==
+      @["flag\trepro develop\t--reset: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==

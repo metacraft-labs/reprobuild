@@ -182,29 +182,12 @@ proc reproCommandIsShown*(command: int): bool =
     at = g.commands[at].parent
   true
 
-const RetiredFlagReplacements = [
-  # (a retired flag spelling, what replaced it). A retired spelling is an
-  # unknown flag like any other -- it is never read as what it used to mean
-  # -- and the refusal names its replacement, so the operator does not have
-  # to search for it.
-  ("--from-mainlines", "`--from=mainline`, or its shorthand `--mainline`"),
-]
-
-proc retiredFlagNote*(e: ref CliUsageError): string =
-  ## For an unknown flag that is a retired spelling, the note naming what
-  ## replaced it (" (a retired spelling; use ...)"); "" otherwise.
-  if e.kind == cekUnknownFlag:
-    for (retired, replacement) in RetiredFlagReplacements:
-      if e.spelling == retired:
-        return " (a retired spelling; use " & replacement & ")"
-  ""
-
 proc reportReproUsageError*(e: ref CliUsageError): int =
   ## A command line the generated parser rejected: its one-line message
-  ## (clispec's error taxonomy, naming the command, and for a retired flag
-  ## spelling what replaced it) and where to look next, on stderr; the usage
-  ## exit code (2).
-  stderr.writeLine("repro: " & e.msg & retiredFlagNote(e))
+  ## (clispec's error taxonomy, naming the command; for a spelling the
+  ## description declares `retired`, also what replaced it) and where to look
+  ## next, on stderr; the usage exit code (2).
+  stderr.writeLine("repro: " & e.msg)
   stderr.writeLine("Run `repro --help` for the list of commands, or " &
     "`repro help <command>` for one of them.")
   e.exitCode
