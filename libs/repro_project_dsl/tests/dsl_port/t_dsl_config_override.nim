@@ -38,3 +38,11 @@ suite "DSL-port M2 — config: override":
     check readConfigurable[int]("overridePkg.timeoutMs") == 9999
     resetConfigurable("overridePkg.timeoutMs")
     check readConfigurable[int]("overridePkg.timeoutMs") == 1000
+
+  test "an unknown leaf is rejected, not skipped":
+    expect EDslPortMissingKey:
+      setConfigurable("overridePkg.timeoutSecs", 5)
+
+  test "an unknown package is rejected, not skipped":
+    expect EDslPortMissingKey:
+      setConfigurable("noSuchPkg.timeoutMs", 5)

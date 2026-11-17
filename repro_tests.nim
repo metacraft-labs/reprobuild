@@ -10105,6 +10105,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_project_dsl_tests_dsl_port_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_package_names_sharing_an_identifier_are_refused.nim",
+    binary: "build/test-bin/t_dsl_package_names_sharing_an_identifier_are_refused",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_project_dsl_tests_dsl_port_g02",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim",
     binary: "build/test-bin/t_dsl_provisioning_expression_setters",
     defines: @[],
