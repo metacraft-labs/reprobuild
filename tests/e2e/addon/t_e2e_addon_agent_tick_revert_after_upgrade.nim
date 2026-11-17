@@ -22,9 +22,17 @@
 ##    ``sysinit.target``, the re-assertion commits the revert, and the
 ##    socket never listens: no floored unit started unchecked.
 ##
-## Falsifying build, red here: ``reassert-not-repointed`` (the units keep
+## Before step 2, the previous engine (``0cd00664cc``) enrols the host for
+## evidence and re-pins the agent (A9 review round 19, finding 4): its
+## re-pin renders the fetch unit unobserved on an observed host, a rendering
+## this engine's migration does not reproduce, so step 2 re-points only by
+## comparing with the own profile as stored.
+##
+## Falsifying builds, red here: ``reassert-not-repointed`` (the units keep
 ## the previous engine: the tick records no boot holds and its revert does
-## not hold the socket, which listens after the reboot).
+## not hold the socket, which listens after the reboot);
+## ``repoint-migrated-only`` (step 2 is refused: the fetch unit on disk is
+## no rendering of the migrated text).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_A9_PREVIOUS_ADDON``.
 ##
@@ -37,6 +45,7 @@ import repro_test_support/reasoned_skip
 
 import ./addon_testbed
 import ./agent_e2e_support
+import ./evidence_e2e_support
 
 const
   Gate = "e2e_addon_agent_tick_revert_after_upgrade"
@@ -76,6 +85,38 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   producer = bs.producer
   if not bs.ok: return
   let binary = g.run("ls -d /repro/store/prefixes/repro-addon/*/bin/repro | head -1").strip()
+  # A9 review round 19, finding 4: the previous engine enrols the host for
+  # evidence (the egress observer, so its fetch unit is rendered observed)
+  # and then re-pins the agent, which that engine renders unobserved (the
+  # renderer 908b7e9a96 later fixed). The own profile it stores, and the
+  # fetch unit on disk, are then a rendering this engine's migration does
+  # not reproduce: the upgrade must re-point from the stored text.
+  # The sink runs to the end of the gate: the evidence unit ships to it.
+  var sink = startGateSink(g)
+  defer: sink.stop()
+  if getEnv("REPRO_A9_PREVIOUS_ENROLS", "1") == "1":
+    g.provideSinkCa(sink)
+    let e = g.exec(prev & " system addon evidence-enrol --evidence-sink " &
+      HostFromGuest & ":" & $sink.port & " --evidence-sink-ca " & GuestSinkCa &
+      " --heartbeat-interval " & $GateHeartbeatSec, timeoutSec = 1800)
+    step("the previous engine enrols the host for evidence (the egress observer)",
+         e.exitCode == 0, e.stdout & e.stderr)
+    let fetchEnrolled = g.exec("cat /etc/systemd/system/repro-agent-fetch.service").stdout
+    let plan = g.exec(prev & " system addon agent-repin")
+    var digest = ""
+    for l in plan.stdout.splitLines():
+      let i = l.find("--apply ")
+      if l.startsWith("plan ") and i >= 0: digest = l[i + "--apply ".len .. ^1].strip()
+    let applied = g.exec(prev & " system addon agent-repin --apply " & digest,
+                         timeoutSec = 1800)
+    let fetchRepinned = g.exec("cat /etc/systemd/system/repro-agent-fetch.service").stdout
+    record["previousEnrolRepin"] = %*{"enrol": e.stdout & e.stderr,
+      "repin": plan.stdout & applied.stdout & applied.stderr,
+      "fetchEnrolled": fetchEnrolled, "fetchRepinned": fetchRepinned}
+    step("then re-pins the agent, rendering the fetch unit differently from " &
+         "this engine (its renderer before 908b7e9a96)",
+         digest.len > 0 and applied.exitCode == 0 and fetchRepinned != fetchEnrolled,
+         plan.stdout & applied.stdout & applied.stderr)
   let before = g.enginesOf()
   record["enginesBefore"] = %before
   # The upgrade: one local apply by this engine.

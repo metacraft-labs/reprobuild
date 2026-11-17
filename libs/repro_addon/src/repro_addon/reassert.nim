@@ -302,11 +302,14 @@ proc recoverMarker(stateDir: string; atBoot: bool;
         plan = readPendingPlan(stateDir)
         planRead = true
       except CatchableError: discard
-      # And a switch whose replay cannot run here (no plan: a reset before
-      # it was written) is reverted, and the revert confirms the generation
-      # it goes back to: when that one has a health-checked floored unit,
-      # its confirm cannot pass inside this unit either (A9 review round
-      # 17, finding 5: the hard-reset gate on the real floor).
+      # And whenever the generation a revert would go back to has a
+      # health-checked floored unit, whether or not the plan can be read:
+      # a switch whose replay cannot run here (no plan: a reset before it
+      # was written) is reverted, and a readable plan's replay can still
+      # fail and revert; either revert confirms that generation, which
+      # cannot pass inside this unit (A9 review round 17, finding 5: the
+      # hard-reset gate on the real floor; the rule as round 18, L3, states
+      # it in §10.1).
       var revertTarget = ""
       try:
         let g = generationProfiles(stateDir, m.fromGeneration)

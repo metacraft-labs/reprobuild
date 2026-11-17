@@ -1928,6 +1928,25 @@ const
                           # Conflicts=/PropagatesStopTo= naming the boot-hold
                           # unit pass (L4).
                           "boot-hold-stop-deps-unchecked",
+                          # A9 review round 19: the re-point's stored text is
+                          # the target's when an apply names one (B1).
+                          "repoint-stored-from-target",
+                          # an Accept=yes instance is told by TriggeredBy=
+                          # alone, empty once it is collected (finding 2).
+                          "accept-instances-by-triggered-by",
+                          # the parse half skips the units the profile's
+                          # drop-ins change (finding 3).
+                          "boot-hold-dropins-unchecked",
+                          # the effective half skips them (finding 3).
+                          "boot-hold-dropins-effective-unchecked",
+                          # the effective half skips every unit but the
+                          # floored units and their activators (LOW).
+                          "boot-hold-cycle-every-unit-skipped",
+                          # Conflicts=/PropagatesStopTo= naming sysinit.target
+                          # pass (L4).
+                          "sysinit-stop-deps-unchecked",
+                          # bootstrap accepts the dynamic engine (L7).
+                          "bootstrap-accepts-dynamic",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",

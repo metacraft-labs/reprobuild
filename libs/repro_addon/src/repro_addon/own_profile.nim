@@ -243,9 +243,28 @@ type
                         ## "" when no re-pointed unit is installed
     onDisk*: string     ## the engine the installed units ran before
 
+proc repointStoredTexts*(storedOnHost, target: string): seq[string] =
+  ## The texts besides the target's (``repointEngine``'s ``stored``) a unit
+  ## on disk may have been rendered from: the own profile as stored on the
+  ## host (``storedOnHost``, what the committed generation wrote) and this
+  ## build's migration of it (``migrateOwnProfile``). Never the target
+  ## alone: an apply whose target is a new own profile (`agent-repin`,
+  ## `evidence-enrol`) re-renders the very units it is about to re-point,
+  ## so the target says nothing about the bytes on disk (A9 review round
+  ## 19, B1). Empty when the host stores none (a test's own root).
+  when mutated("repoint-stored-from-target"):
+    # FALSIFYING MUTATION: round 18's choice -- the target stands in for
+    # the stored text whenever there is one, so a re-pin or an enrol of
+    # an agent host is refused.
+    if target.len > 0: return @[target, migrateOwnProfile(target)]
+  if storedOnHost.len == 0: return
+  result.add(storedOnHost)
+  let migrated = migrateOwnProfile(storedOnHost)
+  if migrated != storedOnHost: result.add(migrated)
+
 proc repointEngine*(own, engineExe: string; known: openArray[string];
                     probe: PathProbe; recorded: RecordedDigest;
-                    stored = ""): RepointOutcome =
+                    stored: openArray[string] = []): RepointOutcome =
   ## ``own`` with each of ``RepointedUnits`` it carries rendered for the
   ## newest engine (§13 decision 164 as amended by A9 review round 17,
   ## finding 1): a host an earlier engine bootstrapped runs the boot
@@ -253,13 +272,17 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
   ## which knows none of the holds later engines write.
   ##
   ## ``own`` is the target generation's own profile; on a revert or a
-  ## rollback it names an older engine than the units on disk. A unit on
-  ## disk is accepted when its bytes are an add-on rendering of ``own``'s
-  ## text for one of the engines ``known`` lists (the binary prefixes the
-  ## committed ledger records, oldest first) or for ``engineExe``, and the
-  ## committed ledger records exactly those bytes -- the known fingerprint
-  ## set. Anything else is refused (``ValueError``) before any unit is
-  ## changed, never written over.
+  ## rollback it names an older engine than the units on disk. ``stored``
+  ## holds the other texts the units on disk may have been rendered from:
+  ## the own profile as stored on the host and this build's migration of it
+  ## (``repointStoredTexts``; A9 review rounds 18 and 19, B1). A unit on
+  ## disk is accepted when the committed ledger records exactly its bytes
+  ## and they are the unit's text in ``own`` or in one of ``stored``, with
+  ## that text's engine replaced by one of the engines ``known`` lists (the
+  ## binary prefixes the committed ledger records, oldest first), by
+  ## ``engineExe``, or left as it is -- the known fingerprint set, and
+  ## nothing wider. Anything else is refused (``ValueError``) before any
+  ## unit is changed, never written over.
   ##
   ## The engine the units run afterwards is ``engineExe`` -- the static
   ## add-on image of the running engine, "" when there is none (§13
@@ -286,14 +309,21 @@ proc repointEngine*(own, engineExe: string; known: openArray[string];
       continue
     let rec = recorded(path)
     var disk = ""
-    # The bytes on disk are those of the own profile as stored -- written by
-    # the engine that rendered it -- or, once this build migrated it, of the
-    # migrated text: both are the add-on's renderings (A9 review round 18,
-    # B1: a fetch unit an engine with another fetch renderer wrote).
+    # The bytes on disk are those of the target's text, or of the own
+    # profile as stored -- written by the engine that rendered it, perhaps
+    # with another renderer than this build's -- or of this build's
+    # migration of it (A9 review rounds 18 and 19, B1: a fetch unit an
+    # engine with another fetch renderer wrote, and an apply whose target
+    # is a new own profile, as `agent-repin` and `evidence-enrol` pass).
     var renderings = @[(cur, ownExe)]
-    let storedCur = if stored.len > 0: unitContentOf(stored, u) else: ""
     when not mutated("repoint-migrated-only"):
-      if storedCur.len > 0 and storedCur != cur:
+      for st in stored:
+        let storedCur = unitContentOf(st, u)
+        if storedCur.len == 0: continue
+        var dup = false
+        for (t, _) in renderings:
+          if t == storedCur: dup = true
+        if dup: continue
         let storedExe = engineExeIn(storedCur)
         if storedExe.len > 0: renderings.add((storedCur, storedExe))
     if p.sha256.len > 0 and rec == p.sha256:

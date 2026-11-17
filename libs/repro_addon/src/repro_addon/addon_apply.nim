@@ -1865,6 +1865,35 @@ proc writeRevertStopped*(stateDir: string; units: openArray[string]) =
     return
   writeHoldFile(p, units.join("\n") & "\n")
 
+proc acceptSocketTemplates*(p: SystemProfile): HashSet[string] =
+  ## The service templates an ``Accept=yes`` socket of the generation
+  ## starts instances of (``triggeredUnits`` over the socket's file and the
+  ## profile's drop-ins onto it, as systemd reads them; systemd.socket(5),
+  ## ``Accept=``). Read from the generation, not from systemd: an instance
+  ## that has stopped is garbage-collected, and its ``TriggeredBy=`` is
+  ## then empty (A9 review round 19, finding 2; measured on systemd 260).
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        not r.suName.endsWith(".socket"):
+      continue
+    for t in triggeredUnits(r.suName, @[r.suContent] & profileDropInsOf(p, r.suName)):
+      if t.contains("@."): result.incl(t)
+
+proc instanceSocketActivated*(unit: string; acceptTemplates: HashSet[string];
+                              triggeredBy: proc (u: string): seq[string]): bool =
+  ## Whether the template instance ``unit`` is one a socket starts: its
+  ## template is one an ``Accept=yes`` socket of the generation starts
+  ## (``acceptSocketTemplates``), or, while systemd still knows it, a
+  ## socket is among its ``TriggeredBy=`` (a base socket naming it).
+  when not mutated("accept-instances-by-triggered-by"):
+    # FALSIFYING MUTATION when skipped: round 18's rule, TriggeredBy= alone,
+    # which is empty once the stopped instance is garbage-collected.
+    if templateOf(unit) in acceptTemplates: return true
+  if triggeredBy != nil:
+    for t in triggeredBy(unit):
+      if t.endsWith(".socket"): return true
+  false
+
 proc revertStoppedToStart*(recorded: openArray[string];
                            generationUnits: HashSet[string];
                            planned: openArray[string];
@@ -1873,10 +1902,10 @@ proc revertStoppedToStart*(recorded: openArray[string];
   ## Of the units a revert stopped (``recorded``), those the passing switch
   ## starts again: still installed by the generation -- an instance through
   ## its template -- not already planned, and not running. An instance a
-  ## socket started (``Accept=yes``: systemd reports the socket among its
-  ## ``TriggeredBy=``) is left to its socket, which comes back with it; any
-  ## other instance -- an enabled one, one another unit's ``Wants=`` pulled
-  ## in -- is started again (A9 review rounds 17 and 18, finding 7 / L1).
+  ## socket starts (``socketActivated``: ``instanceSocketActivated``) is
+  ## left to its socket, which comes back with it; any other instance --
+  ## an enabled one, one another unit's ``Wants=`` pulled in -- is started
+  ## again (A9 review rounds 17 to 19, finding 7 / L1).
   when mutated("revert-stopped-not-restarted"):
     return
   for u in recorded:
@@ -3224,6 +3253,48 @@ proc stemWritablePlaces*(service: string; show: ShowProps;
     let c = canonicalPlace(w, resolveLinks = true)
     if c notin result: result.add(c)
 
+proc everyUnitBootHoldProblems*(resources: openArray[SystemResource];
+    judged: HashSet[string];
+    showOf: proc (n: string): tuple[ok: bool; show: ShowProps];
+    orderedBeforeOf: proc (u: string): seq[string]): seq[string] =
+  ## The boot-hold unit's ordering cycle (§13 decision 172), the effective
+  ## half, on every unit of the generation
+  ## the floor and activator checks do not judge (``judged``): each unit
+  ## it installs and -- the owner's decision of 2026-11-17 on A9 review
+  ## round 19, finding 3 -- each unit one of its drop-ins changes, a base
+  ## unit included, read as systemd reports it (``showOf``: its ``After=``
+  ## and ``Before=``; ``ok`` false when systemd knows no such unit). A
+  ## template is skipped: its instances are what systemd orders. One
+  ## refusal line per unit that closes the cycle (``bootHoldCycleOf``).
+  when mutated("boot-hold-cycle-every-unit-skipped"):
+    # FALSIFYING MUTATION: round 17's effective half, the floored units
+    # and their activators only.
+    return
+  var seen = judged
+  var names: seq[string]
+  for r in resources:
+    let n = installedUnitName(r)
+    if n.len > 0: names.add(n)
+  when not mutated("boot-hold-dropins-effective-unchecked"):
+    for r in resources:
+      let n =
+        case r.kind
+        of srkSystemdSystemUnit: (if r.suCollision == "dropIn": r.suName else: "")
+        of srkSystemdSystemDropIn: r.diUnit
+        else: ""
+      if n.len > 0 and '.' in n and not n.startsWith("."): names.add(n)
+  for n in names:
+    if n in seen or n.contains("@."): continue
+    seen.incl(n)
+    try:
+      let (ok, show) = showOf(n)
+      if not ok: continue
+      let why = bootHoldCycleOf(n, show, orderedBeforeOf)
+      if why.len > 0:
+        result.add(refusalLine(n, "boot-hold-cycle", "Before", why))
+    except CatchableError as ex:
+      result.add(refusalLine(n, "show", "-", ex.msg))
+
 proc effectiveFloorCheck*(resources: openArray[SystemResource];
                           owned: seq[string] = @[];
                           adopted = initTable[string, string]();
@@ -3498,23 +3569,15 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
   # M2): the floored units and their activators are judged above; a plain
   # unit -- waived, or with no [Service] at all -- can close the same cycle
   # through the boot-hold unit.
-  block:
-    var judged = initHashSet[string]()
-    for n in flooredUnitNames(resources): judged.incl(n)
-    for n in flooredActivatorNames(resources): judged.incl(n)
-    for r in resources:
-      let n = installedUnitName(r)
-      if n.len == 0 or n in judged or n.contains("@."): continue
-      judged.incl(n)
-      try:
-        let rs = runSystemctl(@["show", "--no-pager", "-p", "After", "-p",
-                                "Before", "--", n])
-        if rs.exitCode != 0: continue
-        let why = bootHoldCycleOf(n, parseShow(rs.output), orderedBeforeOf)
-        if why.len > 0:
-          result.add(refusalLine(n, "boot-hold-cycle", "Before", why))
-      except CatchableError as ex:
-        result.add(refusalLine(n, "show", "-", ex.msg))
+  var judged = initHashSet[string]()
+  for n in flooredUnitNames(resources): judged.incl(n)
+  for n in flooredActivatorNames(resources): judged.incl(n)
+  result.add(everyUnitBootHoldProblems(resources, judged,
+    proc (n: string): tuple[ok: bool; show: ShowProps] =
+      let rs = runSystemctl(@["show", "--no-pager", "-p", "After", "-p",
+                              "Before", "--", n])
+      (rs.exitCode == 0, parseShow(rs.output)),
+    orderedBeforeOf))
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =
@@ -5695,16 +5758,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if replaying: parseLedger(replayPlan.fromLedgerText)
     elif fileExists(ledgerCopyPath(stateDir)): readLedger(ledgerCopyPath(stateDir))
     else: Ledger()
-  # The own profile as stored, before this build migrates it: the bytes
-  # the units on disk were rendered from (A9 review round 18, B1).
-  let storedOwn =
+  # The own profile as stored on the host: the text the committed
+  # generation's units were rendered from (A9 review rounds 18 and 19, B1).
+  let ownStored = fileExists(ownProfilePath(stateDir))
+  let ownOnHost = if ownStored: readFile(ownProfilePath(stateDir)) else: ""
+  # The target's own profile: the one an `agent-repin`, an
+  # `evidence-enrol`, a revert or a rollback names, the stored one
+  # otherwise.
+  let targetOwn =
     if replaying: replayPlan.targetOwnText
     elif opts.ownProfileText.len > 0: opts.ownProfileText
-    elif fileExists(ownProfilePath(stateDir)): readFile(ownProfilePath(stateDir))
+    elif ownStored: ownOnHost
     else: raise newException(AddonApplyError,
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
   let migratedOwn =
-    if replaying: storedOwn else: migrateOwnProfile(storedOwn)
+    if replaying: targetOwn else: migrateOwnProfile(targetOwn)
   # The objects this build added to generation 0 are installed by every
   # switch that finds them missing (§13 decision 159: a host bootstrapped
   # by an earlier engine gets the boot-hold unit at its next apply). Here,
@@ -5760,7 +5828,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         proc (path: string): string =
           for e in previous.entries:
             if e.path == path: return e.sha256
-          "", stored = storedOwn)
+          "", stored = repointStoredTexts(ownOnHost, targetOwn))
       if rp.exe.len > 0 and rp.exe == engineExe and newImage.len > 0 and
           engineExe notin known:
         let pre = realiseEnginePrefix(newImage, newImageSha)
@@ -8295,14 +8363,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 if n.len > 0: genUnits.incl(n)
               var plannedUnits: seq[string]
               for t in stepTransitions: plannedUnits.add(t.unit)
+              let acceptTemplates = acceptSocketTemplates(composed)
               for u in revertStoppedToStart(readRevertStopped(stateDir), genUnits,
                                             plannedUnits, unitIsActive,
                                             proc (v: string): bool =
-                                              try:
-                                                for t in runSystemctl(["show", "-p", "TriggeredBy", "--value", "--", v]).output.splitWhitespace():
-                                                  if t.endsWith(".socket"): return true
-                                                false
-                                              except CatchableError: false):
+                                              instanceSocketActivated(v, acceptTemplates,
+                                                proc (w: string): seq[string] =
+                                                  try:
+                                                    runSystemctl(["show", "-p", "TriggeredBy",
+                                                      "--value", "--", w]).output.splitWhitespace()
+                                                  except CatchableError: @[])):
                 stepTransitions.add(Transition(unit: u, verb: tvStart,
                   reason: "a revert stopped it while it held it; its hold is cleared"))
               revertStoppedPlanned = true
