@@ -430,8 +430,6 @@ proc atomicRecordWriter*(path, text: string) =
   ## wrappers): exclusive and durable.
   exclusiveRecordWriter(path, text)
 
-proc syncfs(fd: cint): cint {.importc, header: "<unistd.h>".}
-
 proc nearestExisting(p: string): string =
   result = parentDir(p)
   while result.len > 1 and not dirExists(result):
@@ -452,15 +450,7 @@ proc syncRemovedObjects*(removed: seq[string]) =
     if d in done: continue
     done.add(d)
     syncDirFd(d)
-    let fd = posix.open(d.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
-    if fd < 0:
-      raise newException(OSError, "cannot open " & d & ": " & $strerror(errno))
-    let rc = syncfs(fd)
-    let e = errno
-    discard posix.close(fd)
-    if rc != 0:
-      raise newException(OSError, "syncfs of the filesystem holding " & d &
-        " failed: " & $strerror(e))
+    syncFilesystemOf(d)
 
 proc writeOverrideRecord(custody: CustodySite; dir: string;
                          objects: seq[string]; why: string;

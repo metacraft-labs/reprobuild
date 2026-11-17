@@ -801,6 +801,17 @@ proc accountedFingerprint*(g: Guest; repro, fingerprint: string): string =
   ## add-on snapshot (an orphan a revert or sweep should have deleted, one
   ## uninstall left) stays in, for the comparison to see. On a base with no
   ## btrfs root nothing changes.
+  ##
+  ## Whether snapper's D-Bus service is up is left out too: the switch's
+  ## snapshot starts it (as any ``snapper`` call does) and its own idle
+  ## timeout stops it, so its ``active-units`` record says when the last
+  ## snapshot was taken, not what the add-on changed.
+  var fingerprint = fingerprint
+  if "\nactive-units\tsnapperd.service\t" in fingerprint:
+    var kept: string
+    for line in fingerprint.splitLines(keepEol = true):
+      if not line.startsWith("active-units\tsnapperd.service\t"): kept.add(line)
+    fingerprint = kept
   if "\nbtrfs-subvolumes\t" notin fingerprint: return fingerprint
   let l = g.exec(repro & " system addon root-snapshots")
   if l.exitCode != 0:
@@ -869,6 +880,18 @@ proc withoutBaseNoise*(d: seq[DiffEntry]): seq[DiffEntry] =
   ## 2026-10-30 inside a collision-matrix run). Only a change of that
   ## file's MODE is dropped; its content, owner or existence still count.
   for e in d:
+    # The Arch guests' ESP is an automount (`/efi`, x-systemd.automount
+    # with a 120 s idle timeout): whatever touched it last, its vfat mount
+    # (`efi.mount`, the mounts record `/efi#2` under the autofs one) comes
+    # and goes on its own between two fingerprints (measured 2026-11-17 on
+    # arch-btrfs-amd64 in e2e_addon_switch_is_planned_exactly). Only that
+    # mount's appearing or going is dropped; its options while it stays
+    # still count.
+    if (e.component == fcActiveUnits and e.key == "efi.mount" and
+        (e.before.len == 0 or e.after.len == 0)) or
+       (e.component == fcMounts and e.key.startsWith("/efi#") and
+        (e.before.len == 0 or e.after.len == 0)):
+      continue
     if e.component == fcEtc and e.key == "/etc/fwupd/fwupd.conf" and
         e.before.len > 0 and e.after.len > 0:
       var b = e.before.splitWhitespace()

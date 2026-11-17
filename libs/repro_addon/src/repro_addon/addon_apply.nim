@@ -6058,6 +6058,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                        "directories (§13 decision 72)")
       # Steps 4 and 5 are the drivers' writes, in the profile's apply
       # order (links and copies interleave); both are complete here.
+      # They are made durable before the marker says so. The drivers fsync
+      # what they write themselves, but not the install links `systemctl
+      # enable` creates: on ext4 the next fsync commits them with the
+      # journal, on btrfs an fsync persists only its own file, and a reset
+      # after step 4 left a generation whose unit was never enabled
+      # (measured on arch-btrfs-amd64, e2e_addon_hard_reset_at_every_step).
+      try:
+        syncFilesystemOf("/etc")
+      except OSError as ex:
+        problems.add("cannot make the switch's writes durable: " & ex.msg)
       marker.attempt = generationId
       # The generation log records the attempt's root snapshot from the
       # moment the attempt has an id (spec §7.2): its configuration, number

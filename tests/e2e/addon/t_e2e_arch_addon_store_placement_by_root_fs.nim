@@ -61,10 +61,17 @@ proc comparableLedger*(ledger: string): string =
   ## objects (the recipient key the host generated, the anchors the test
   ## bed drew for each guest, the files prefix holding them); and a root's
   ## kind word, which is the property under test (``btrfs-subvolume`` /
-  ## ``btrfs-dir`` on btrfs, ``dir`` on ext4) and is checked by the steps.
+  ## ``btrfs-dir`` on btrfs, ``dir`` on ext4) and is checked by the steps;
+  ## and, for the same reason, ``repro.mount`` -- its unit, its install
+  ## link and its mount record -- which generation 0 has on a btrfs root
+  ## only (the ``/repro`` subvolume mounted by path, spec §5.1, AR4) and
+  ## which ``reproMountEntries`` checks.
   for line in ledger.splitLines():
     let f = line.split('\t')
     if f.len < 6 or f[0] in ["generation", "#"] or line.startsWith("#"):
+      continue
+    if (f[0] in ["unit", "installLink"] and f[1].endsWith("/repro.mount")) or
+        (f[0] == "mount" and f[1] == "/repro"):
       continue
     if f[0] == "storePrefix" and "repro-addon-files" in f[1]:
       result.add("storePrefix\trepro-addon-files\n")
@@ -72,6 +79,16 @@ proc comparableLedger*(ledger: string): string =
     let declared = f[1].startsWith(FixturePrefix) or FixtureUnitName in f[1]
     result.add(f[0] & "\t" & f[1] & "\t" & f[4] & "\t" & f[5] &
       (if declared: "\t" & f[3] else: "") & "\n")
+
+proc reproMountEntries*(ledger: string): seq[string] =
+  ## The ledger's ``repro.mount`` entries: ``unit``, ``installLink`` and
+  ## ``mount /repro``, by class.
+  for line in ledger.splitLines():
+    let f = line.split('\t')
+    if f.len < 2: continue
+    if (f[0] in ["unit", "installLink"] and f[1].endsWith("/repro.mount")) or
+        (f[0] == "mount" and f[1] == "/repro"):
+      result.add(f[0])
 
 proc reproIsAPlainDirectoryInTheSnapshot(record: JsonNode): bool =
   ## The mutation's own effect: ``/repro`` is not a subvolume (its inode is
@@ -102,6 +119,10 @@ proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
     if rootIsBtrfs(b):
       Falsifier(required: @["/repro is a btrfs subvolume",
         "the snapper snapshot of / contains none of /repro/store"],
+        # A plain /repro gets no repro.mount (preflight adds it only for
+        # the subvolume bootstrap creates).
+        mayBeRed: @["generation 0 mounts the /repro subvolume by path " &
+          "(repro.mount: its unit, install link and mount)"],
         recordChecks: @[(name: "/repro is a plain directory and the " &
                            "snapshot carries its store",
                          check: reproIsAPlainDirectoryInTheSnapshot)],
@@ -159,8 +180,18 @@ proc runBase(b: BaseImage; record: JsonNode;
     let a1 = g.applyProfile(repro, "gen1", gen1Profile(exe, account))
     step("apply generation 1", a1.exitCode == 0, a1.stdout & a1.stderr)
     if a1.exitCode != 0: return fails
+    let l1 = g.ledgerOf()
     if not isOmarchyBase(b):
-      ledgers.add(comparableLedger(g.ledgerOf()))
+      ledgers.add(comparableLedger(l1))
+    let rm = reproMountEntries(l1)
+    if btrfs:
+      step("generation 0 mounts the /repro subvolume by path (repro.mount: " &
+           "its unit, install link and mount)",
+           "unit" in rm and "installLink" in rm and "mount" in rm and
+             g.exec("findmnt -n -o FSROOT /repro").stdout.strip().endsWith("/repro"),
+           $rm & "\n" & g.exec("findmnt /repro; systemctl cat repro.mount").stdout)
+    else:
+      step("no repro.mount on a root that is not btrfs", rm.len == 0, $rm)
 
     if btrfs:
       let snap = g.exec(SnapperCreate)

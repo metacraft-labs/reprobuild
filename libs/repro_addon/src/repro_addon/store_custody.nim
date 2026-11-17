@@ -173,6 +173,25 @@ proc fsyncPath*(path: string) =
   finally:
     discard posix.close(fd)
 
+proc syncfsC(fd: cint): cint {.importc: "syncfs", header: "<unistd.h>".}
+
+proc syncFilesystemOf*(dir: string) =
+  ## ``syncfs(2)`` on the filesystem that holds ``dir``: every write to it
+  ## so far is durable when this returns. An fsync makes durable only the
+  ## file it names on btrfs (its log tree), where on ext4 it commits the
+  ## whole journal, so a write a tool made without fsyncing it -- the
+  ## install links ``systemctl enable`` creates, an unlink -- needs this on
+  ## a btrfs root. Raises when the directory cannot be opened or the sync
+  ## fails.
+  let fd = posix.open(dir.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+  if fd < 0:
+    raiseOSError(osLastError(), "open " & dir & " to sync its filesystem")
+  try:
+    if syncfsC(fd) != 0:
+      raiseOSError(osLastError(), "syncfs of the filesystem holding " & dir)
+  finally:
+    discard posix.close(fd)
+
 proc syncTreeFiles(root: string) =
   ## Every file and directory under ``root``, and ``root``.
   for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
