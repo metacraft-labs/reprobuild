@@ -392,6 +392,117 @@ let
   # host relies on, and synthetic catalogs for the refusals the real one must
   # never exhibit (an ambiguous name or token, a develop interface, an
   # unknown record kind).
+  # --- realization sources ---------------------------------------
+  # The shared fixture tests/fixtures/realization-sources/cases.nix with stub
+  # derivations: resolution from a named set (the attribute the catalog
+  # names, or the canonical name, or the one the consumer gives) and from a
+  # derivation, the refusals, and the reverse identification by store path.
+  stubDrv = name: version: {
+    type = "derivation";
+    inherit name version;
+    pname = name;
+    outPath = "/nix/store/00000000000000000000000000000000-${name}-${version}";
+    meta.available = true;
+  };
+  rs = import (root + "/tests/fixtures/realization-sources/cases.nix") { mkDrv = stubDrv; };
+  neutralDocument = fromJSON (readFile (intentRoot + "/neutral/export.json"));
+  resolved = name: reprobuildLib.resolveRealizationSource { inherit name; source = rs.sources.${name}; };
+  problemsOf = sources: reprobuildLib.realizationSourceProblems { inherit sources; document = neutralDocument; };
+  mentionsAll = mentions: text: lib.all (m: contains m text) mentions;
+  realizationSourceTests =
+    # A named nixpkgs set: the catalog's attribute is looked up in it.
+    expect "a nixpkgs set source resolves the catalog's attribute from that set"
+      rs.unstableSet.bash
+      (resolved "bash").drv
+    ++ expect "a packages set source takes the canonical name as the attribute"
+      rs.flakePackages.gm5-home-pc-only
+      (resolved "gm5-home-pc-only").drv
+    ++ expect "a named attribute is a dotted path into the set"
+      rs.flakePackages.tools.rg
+      (resolved "ripgrep").drv
+    ++ expect "a derivation source is used as given" rs.llvmDerivation (resolved "llvm").drv
+    ++ expect "the well-formed mapping of selected canonical packages has no refusal" [ ]
+      (problemsOf rs.sources)
+    ++ concatMap (
+      n:
+      let
+        ps = problemsOf rs.refusals.${n}.sources;
+      in
+      expectTrue "refusal ${n} is reported and names the entry" (
+        builtins.length ps == 1 && mentionsAll rs.refusals.${n}.mentions (builtins.head ps)
+      )
+    ) (attrNames rs.refusals)
+    ++ expectTrue "a set without the attribute is that package unresolved, not a refusal"
+      (
+        let
+          r = reprobuildLib.resolveRealizationSource { name = "bash"; source = rs.unresolved.sources.bash; };
+        in
+        !r.found && mentionsAll rs.unresolved.mentions r.reason
+      )
+    # A profile without a `hosts:` registry is host-agnostic: its `default`
+    # packages are selected, so a mapping for one is not refused (and one for
+    # a package it does not select still is).
+    ++ (
+      let
+        agnostic = neutralDocument // {
+          intent = neutralDocument.intent // {
+            hosts = { };
+          };
+        };
+        problemsAgnostic =
+          sources: reprobuildLib.realizationSourceProblems { inherit sources; document = agnostic; };
+      in
+      expect "a host-agnostic profile selects its default packages" [ ] (
+        problemsAgnostic { bash.nixpkgs = rs.unstableSet; }
+      )
+      ++ expectTrue "a host-agnostic profile still refuses a mapping for a package it does not select" (
+        builtins.length (problemsAgnostic { gm5-home-pc-only.packages = rs.flakePackages; }) == 1
+      )
+    )
+    ++ expect "a nixpkgs set source for a package without a catalog record cannot name an attribute" false
+      (reprobuildLib.resolveRealizationSource {
+        name = "gm5-home-pc-only";
+        source.nixpkgs = rs.unstableSet;
+      }).found
+    # The reverse direction: a derivation a source resolves to is that
+    # canonical package, by store path; any other derivation is still
+    # looked up by name only (the fixture's pkgs has no catalog attribute).
+    ++ concatMap (
+      name:
+      let
+        r = reprobuildLib.lookupNixPackageName {
+          pkgs = { };
+          drv = rs.expected.${name};
+          realizationSources = rs.sources;
+        };
+      in
+      expect "lookupNixPackageName names the derivation of the ${name} source" name (r.name or null)
+    ) (attrNames rs.expected)
+    ++ expectTrue "a derivation no source resolves to is not named through the sources"
+      (
+        let
+          r = reprobuildLib.lookupNixPackageName {
+            pkgs = { };
+            drv = stubDrv "something-else" "1";
+            realizationSources = rs.sources;
+          };
+        in
+        !r.found
+      )
+    ++ expectTrue "two mappings to one derivation are ambiguous, never ordered"
+      (
+        let
+          r = reprobuildLib.lookupNixPackageName {
+            pkgs = { };
+            drv = rs.llvmDerivation;
+            realizationSources = rs.sources // {
+              cmake.derivation = rs.llvmDerivation;
+            };
+          };
+        in
+        !r.found && contains "nothing selects one" r.reason
+      );
+
   brewTests =
     let
       mkRecord =
@@ -898,6 +1009,7 @@ let
     ++ intentTests
     ++ refusalTests
     ++ realizationTests
+    ++ realizationSourceTests
     ++ brewTests;
 
   # Vacuity: the fixture trees were found and compared.
@@ -906,6 +1018,7 @@ let
     dataSelectionCases = builtins.length (dirs (dataRoot + "/row-selection"));
     dataRejectionCases = builtins.length (dirs (dataRoot + "/row-rejection"));
     intentCases = builtins.length intentCases;
+    realizationSourceCases = builtins.length (attrNames rs.refusals) + builtins.length (attrNames rs.sources);
   };
   vacuity =
     expectTrue "the fixture trees are populated" (
@@ -913,6 +1026,7 @@ let
       && counts.dataSelectionCases >= 6
       && counts.dataRejectionCases >= 10
       && counts.intentCases >= 2
+      && counts.realizationSourceCases >= 7
     )
     ++ expectTrue "the intent fixtures include a refusal" (
       elem true (

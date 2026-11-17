@@ -14,6 +14,12 @@
 #     defaults. A function with positional arguments must not show a braced
 #     argument set. The prose under each heading is written by hand and is
 #     not compared.
+#   * Realization sources. The bullets of the page's `#### Realization
+#     sources` subsection, each `{ <kind> = <…>; [attribute ? null;] }`,
+#     must name exactly the kinds `resolveRealizationSource` knows, and show
+#     `attribute` on exactly the kinds that accept one. The kinds are read
+#     from the library's own refusal of an empty source; whether a kind takes
+#     `attribute` is decided by resolving a probe source with one.
 #   * Module options. The region between
 #     `<!-- generated:begin nix-library-options -->` and
 #     `<!-- generated:end -->` must equal `render`, produced from the module's
@@ -135,6 +141,74 @@ let
 
   render = concatStringsSep "\n\n" (map renderOption moduleOptions);
 
+  # ── Realization sources, as the library resolves them ───────────────────
+  probeDrv = {
+    type = "derivation";
+    name = "probe";
+  };
+  resolve = source: reprobuildLib.resolveRealizationSource {
+    name = "probe";
+    inherit source;
+  };
+  # `{ kind = acceptsAttribute; }`, or null when the library has no
+  # realization sources.
+  librarySourceKinds =
+    if !(reprobuildLib ? resolveRealizationSource) then
+      null
+    else
+      let
+        reason = (resolve { }).reason or "";
+        listed = match ".*exactly one of (.*) \\(it gives.*" reason;
+        kinds =
+          if listed == null then
+            [ ]
+          else
+            map head (filter (x: !isString x) (split "`([a-z]+)`" (head listed)));
+        found = source: (resolve source).found or false;
+        acceptsAttribute =
+          k:
+          found {
+            ${k} = { probe = probeDrv; };
+            attribute = "probe";
+          }
+          || found {
+            ${k} = probeDrv;
+            attribute = "probe";
+          };
+      in
+      listToAttrs (
+        map (k: {
+          name = k;
+          value = acceptsAttribute k;
+        }) kinds
+      );
+
+  # The same, from the page's bullets.
+  documentedSourceKinds =
+    text:
+    let
+      afterHeading = lib.splitString "#### Realization sources" text;
+      # The subsection's lines, up to the next heading.
+      allLines =
+        if length afterHeading < 2 then [ ] else lib.drop 1 (lib.splitString "\n" (elemAt afterHeading 1));
+      end = lib.lists.findFirstIndex (l: lib.hasPrefix "#" l) (length allLines) allLines;
+      lines = lib.take end allLines;
+      bullet = l: match "- `\\{ ([a-z]+) = <[^>]*>;( attribute \\? null;)? }`.*" l;
+      bullets = filter (m: m != null) (map bullet lines);
+      kinds = map head bullets;
+    in
+    if length afterHeading < 2 then
+      null
+    else if length (lib.unique kinds) != length kinds then
+      { duplicate = true; }
+    else
+      listToAttrs (
+        map (m: {
+          name = head m;
+          value = elemAt m 1 != null;
+        }) bullets
+      );
+
   # ── Reading a page ──────────────────────────────────────────────────────
   # The page's `### \`…\`` headings outside code fences, each with the lines
   # that follow it until the next such heading.
@@ -251,7 +325,23 @@ let
       regionOptions = if region == null then [ ] else map (s: s.name) (sectionsOf region);
       renderedOptions = map (o: o.name) moduleOptions;
     in
-    map (n: "the library exports ${n} and the page does not document it") missing
+    (
+      let
+        lib' = librarySourceKinds;
+        page = documentedSourceKinds text;
+      in
+      if lib' == null then
+        [ ]
+      else if lib' == { } then
+        [ "could not read the realization source kinds from resolveRealizationSource's refusal of an empty source" ]
+      else if page == null then
+        [ "the page has no `#### Realization sources` subsection" ]
+      else if page ? duplicate then
+        [ "the `#### Realization sources` subsection lists a kind of source twice" ]
+      else
+        lib.optional (page != lib') "the realization source shapes on the page (${builtins.toJSON page}) differ from the library's (${builtins.toJSON lib'}; true = accepts `attribute`)"
+    )
+    ++ map (n: "the library exports ${n} and the page does not document it") missing
     ++ map (n: "the page documents ${n}, which the library does not export") unknown
     ++ signatureProblems
     ++ lib.optional (region == null) "the page has no single `${beginMarker}` region"
@@ -276,6 +366,15 @@ in
   # Empty when the deletion did not change the page (the page does not carry
   # that option's block), which the flake check treats as a failure.
   controlFailures = if mutatedText == pageText then [ ] else check mutatedText;
+  # A second control for the realization-source comparison: the `packages`
+  # bullet without `attribute`. Empty when the page has no such bullet.
+  sourceControlFailures =
+    let
+      mutated = builtins.replaceStrings [ "- `{ packages = <package set>; attribute ? null; }`" ] [
+        "- `{ packages = <package set>; }`"
+      ] pageText;
+    in
+    if !(reprobuildLib ? resolveRealizationSource) || mutated == pageText then [ ] else check mutated;
   inherit libraryNames render;
   controlOption = removedOption.name;
 }
