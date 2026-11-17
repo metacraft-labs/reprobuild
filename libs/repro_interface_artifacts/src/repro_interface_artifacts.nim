@@ -169,6 +169,7 @@ const BuiltSourcePackageRoots = [
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
   ("CLI_SPEC_SRC", compileTimeSourceRoot("CLI_SPEC_SRC")),
+  ("ENTRYPOINTS_SRC", compileTimeSourceRoot("ENTRYPOINTS_SRC")),
   # confutils: repro's own command line (``repro_cli_support/cli_program``)
   # is instantiated through it, so a nested compile of the engine needs it.
   ("CONFUTILS_SRC", compileTimeSourceRoot("CONFUTILS_SRC")),
@@ -7214,12 +7215,32 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # filtered by target architecture — `/usr/local` on Apple Silicon is
   # commonly an x86-64 Homebrew, and the store holds every architecture the
   # host has ever built for.
+  #
+  # One step comes before the Homebrew prefixes and the glob, which
+  # `config.nims` (a checkout build) has no use for: the runtime library
+  # directories an installed package publishes
+  # (`REPROBUILD_RUNTIME_LIBRARY_PATH`, which carries the package's own
+  # OpenSSL). The glob answers with the first matching store path of
+  # whatever this host happens to have realized, so it made this flag, and
+  # with it the key of every recipe compile, a function of the host's store:
+  # the same package, the same recipe and the same compiler selection on a
+  # machine whose store held another OpenSSL (one restored from a bundle,
+  # say) keyed every provider compile and interface extraction differently
+  # and rebuilt them. The package's own directory is the same on every host
+  # that runs the package.
   let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
   let opensslLibDir = block:
     var dir = firstExistingLibDir(
       [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
     if dir.len == 0:
       dir = nixLdflagsLibDir(opensslNames)
+    if dir.len == 0:
+      for runtimeDir in getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH").split(PathSep):
+        if runtimeDir.len > 0:
+          dir = firstExistingLibDir([runtimeDir], opensslNames,
+            hostArchOnly = true)
+          if dir.len > 0:
+            break
     if dir.len == 0:
       dir = firstExistingLibDir(
         ["/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl",

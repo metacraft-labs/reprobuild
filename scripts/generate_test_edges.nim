@@ -529,6 +529,11 @@ proc isProviderModePath(path: string): bool =
     "tests/integration/t_hcr_native_library_prerequisite.nim",
     "tests/unit/t_configure_build_tree_cleanup.nim",
     "tests/unit/t_constructor_fetch_tool_refs.nim",
+    # Declares `go_package`'s edges through ``buildPackageFragment`` with a
+    # provider project root, which is what makes the constructor's cache
+    # paths absolute; both exist only under this define.
+    "tests/integration/" &
+      "t_edge_reading_a_shared_tool_cache_is_never_published_cross_host.nim",
     "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",
     "tests/unit/t_from_source_go_recognition.nim",

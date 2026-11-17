@@ -1935,6 +1935,22 @@ type
       ## Empty (the default) preserves the pre-M9.R.75 behaviour
       ## byte-for-byte: the source-write check no-ops. Payload
       ## codec v22+.
+    contentKeyedToolCaches*: seq[string]
+      ## The CONTENT-KEYED tool-owned caches this action reads
+      ## (Tool-Owned-Caches.md §"Trust Boundary"): directories whose entries
+      ## a tool names by a digest of what produced them and trusts by that
+      ## name (Go's ``GOCACHE`` and module cache, zig's cache, ccache), and
+      ## which other edges write too. Their contents are not this action's
+      ## inputs, so another writer can change its outputs without moving its
+      ## key; the engine therefore treats the edge as ``host-bound`` at least
+      ## and never publishes its records to, or substitutes them from,
+      ## another host. See ``BuildAction.contentKeyedToolCaches`` in the
+      ## engine.
+      ##
+      ## Naming a cache here says what the edge reads; it does not exclude
+      ## the cache from the key (the dependency policy's ignored roots do).
+      ## Passed to ``buildAction``. Empty (the default) changes nothing.
+      ## Payload codec v35+; an older payload decodes with the list empty.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]

@@ -261,6 +261,34 @@ proc seedBorrowerSplit(f: Fixture) =
   doAssert readFile(f.a / ".git/objects/info/commit-graphs/commit-graph-chain").startsWith(
     readFile(f.pool / "objects/info/commit-graphs/commit-graph-chain"))
 
+proc stageExpiredBlob(f: Fixture; worktree: string): string =
+  ## Stage in ``worktree`` the blob of ``feat3.txt``, which only B's
+  ## unregistered history reaches, and return its id. The leaf reads it
+  ## through its alternates, so it lives in the pool alone.
+  result = must(f.pool, "rev-parse", f.bFeat & ":feat3.txt")
+  doAssert has(f.pool, result)
+  discard must(worktree, "checkout", f.bFeat, "--", "feat3.txt")
+  doAssert result in must(worktree, "ls-files", "--stage", "feat3.txt")
+  # Staging by path writes no object: A still has no copy of its own.
+  doAssert must(f.a, "count-objects", "-v").contains("in-pack: 0")
+  doAssert not fileExists(f.a / ".git" / "objects" / result[0 .. 1] /
+    result[2 .. ^1])
+
+proc reftableLeaf(f: Fixture): string =
+  ## A registered leaf on the reftable backend, in a sibling workspace of A,
+  ## whose detached HEAD is B's pool-only commit and which has no ref that
+  ## reaches it.
+  result = f.root / "ws-r" / "up"
+  createDir(result.parentDir)
+  discard must(f.root, "clone", "-q", "--ref-format=reftable", "--reference",
+    f.pool, "file://" & f.up, result)
+  doAssert must(result, "rev-parse", "--show-ref-format") == "reftable"
+  discard must(result, "checkout", "-q", "--detach", f.bFeat)
+  doAssert not dirExists(result / ".git" / "logs")
+  let wired = wireAlternates(result, f.pool, f.gitBin)
+  doAssert wired.ok, wired.diagnostic
+  doAssert result in readBorrowers(f.pool)
+
 suite "SPI-1: the pool retains what registered leaves name":
 
   test "discovery_keeps_never_until_registry_is_complete":
@@ -692,6 +720,167 @@ suite "SPI-1: the pool retains what registered leaves name":
       check has(f.pool, f.aFeat)          # the tip is still printed ...
       check not has(f.pool, f.aBase)      # ... but its parent is lost
 
+  test "staged_blob_only_expired_history_reaches_survives_gc":
+    # A blob the pool holds only through history nobody names any more,
+    # staged in the registered leaf (``git checkout <old> -- <path>``). The
+    # index is a root (§3.3): after gc the leaf can still commit it.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-staged-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let blob = stageExpiredBlob(f, f.a)
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code == 0
+      check not has(f.pool, f.bFeat)      # expiry really ran
+      check has(f.pool, blob)
+      let commit = gitIn(f.a, "commit", "-q", "-m", "staged")
+      checkpoint("commit: " & commit.output)
+      check commit.code == 0
+
+  test "staged_blob_in_removed_linked_worktree_survives_gc":
+    # The same blob staged in a linked worktree whose directory is gone: its
+    # index is read by path through ``worktrees/<id>/index``.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-staged-wt-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let wt = root / "elsewhere" / "wt"
+      createDir(wt.parentDir)
+      discard must(f.a, "worktree", "add", "-q", "--detach", wt, "HEAD")
+      let blob = stageExpiredBlob(f, wt)
+      removeDir(wt)
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code == 0
+      check not has(f.pool, f.bFeat)
+      check has(f.pool, blob)
+
+  test "mutation_hook_without_index_loses_staged_blob":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-staged-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let blob = stageExpiredBlob(f, f.a)
+      mutateHook(f.pool, "  # Staged entries", "  grep -E ")
+      discard must(f.pool, "gc", "--quiet")
+      check not has(f.pool, blob)
+
+  test "mutation_hook_without_worktree_indexes_loses_staged_blob":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-staged-wt-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let wt = root / "elsewhere" / "wt"
+      createDir(wt.parentDir)
+      discard must(f.a, "worktree", "add", "-q", "--detach", wt, "HEAD")
+      let blob = stageExpiredBlob(f, wt)
+      removeDir(wt)
+      let hook = retentionHookPath(f.pool)
+      let script = readFile(hook)
+      let anchor = " \"$common\"/worktrees/*/index; do"
+      doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
+      writeFile(hook, script.replace(anchor, "; do"))
+      discard must(f.pool, "gc", "--quiet")
+      check not has(f.pool, blob)
+
+  test "mutation_unreadable_index_skipped_prunes":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-index-unreadable-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      writeFile(f.a / ".git" / "index", "not an index\n")
+      let hook = retentionHookPath(f.pool)
+      let script = readFile(hook)
+      let anchor = "|| { indexes=1; break; }"
+      doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
+      writeFile(hook, script.replace(anchor, "|| continue"))
+      discard must(f.pool, "gc", "--quiet")
+      check not has(f.pool, f.bFeat)      # the corrupt index was ignored
+
+  test "unreadable_index_aborts_pruning":
+    # An index file that exists but cannot be read (here: corrupt, which
+    # also stands in for a permission refusal, unenforceable as root) may
+    # stage anything, so the hook refuses rather than treat it as empty.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-index-unreadable-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      writeFile(f.a / ".git" / "index", "not an index\n")
+      doAssert gitIn(f.a, "ls-files", "--stage").code != 0
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code != 0
+      check has(f.pool, f.bFeat)          # refused: nothing pruned
+
+  test "reftable_leaf_refuses_expiry_and_gc":
+    # A leaf on the reftable ref backend keeps HEAD and its reflogs in
+    # reftable stacks the hook cannot read as files (§3.3). Its detached
+    # HEAD names a pool-only commit no ref reaches; the pool must keep
+    # ``never`` and a gc must refuse rather than expire that commit.
+    if findExe("git").len == 0 or not gitAtLeast(2, 45):
+      skip("needs git on PATH, version 2.45 or newer (--ref-format=reftable)")
+    else:
+      let root = createTempDir("repro-spi1-reftable-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let r = reftableLeaf(f)
+      check not poolRetentionReady(f.gitBin, f.pool)
+      check prepareSharedBare(f.gitBin, f.pool) == ""
+      check must(f.pool, "config", "--get", "gc.pruneExpire") ==
+        PoolNeverExpire
+      discard must(f.pool, "config", "gc.pruneExpire", PoolPruneExpire)
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code != 0
+      check has(f.pool, f.bFeat)
+      check gitIn(r, "fsck", "--connectivity-only").code == 0
+
+  test "mutation_reftable_leaf_accepted_loses_detached_head":
+    if findExe("git").len == 0 or not gitAtLeast(2, 45):
+      skip("needs git on PATH, version 2.45 or newer (--ref-format=reftable)")
+    else:
+      let root = createTempDir("repro-spi1-reftable-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      discard reftableLeaf(f)
+      let hook = retentionHookPath(f.pool)
+      let script = readFile(hook)
+      let anchor = "\n  ref_storage_files \"$common\" || { status=1; continue; }"
+      doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
+      writeFile(hook, script.replace(anchor, ""))
+      discard must(f.pool, "config", "gc.pruneExpire", PoolPruneExpire)
+      discard must(f.pool, "gc", "--quiet")
+      check not has(f.pool, f.bFeat)      # the reftable HEAD protected nothing
+
   test "failing_hook_aborts_pruning":
     if findExe("git").len == 0 or not gitAtLeast(2, 42):
       skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
@@ -741,11 +930,12 @@ suite "SPI-1: the pool retains what registered leaves name":
       writeFile(cfg, readFile(cfg) & "[broken\n")
       let hook = retentionHookPath(f.pool)
       let script = readFile(hook)
-      let refuse = "|| { status=1; continue; }\n  : > "
-      doAssert script.contains(refuse), "mutation anchor not found in the hook"
+      let refuse = "--git-common-dir 2>/dev/null) || { status=1; continue; }\n"
+      doAssert script.count(refuse) == 1, "mutation anchor not found in the hook"
       let discoveryRefusal = "--git-common-dir 2>/dev/null) || return 1"
       doAssert script.contains(discoveryRefusal)
-      writeFile(hook, script.replace(refuse, "|| continue\n  : > ").replace(
+      writeFile(hook, script.replace(refuse,
+        "--git-common-dir 2>/dev/null) || continue\n").replace(
         discoveryRefusal, "--git-common-dir 2>/dev/null) || return 0"))
       discard must(f.pool, "gc", "--quiet")
       check not has(f.pool, f.aFeat)      # skipping the leaf expired its objects

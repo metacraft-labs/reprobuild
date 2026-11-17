@@ -205,7 +205,7 @@ proc unionProjectSet*(workspaceRoot: string; primary: ResolvedProject;
   ##
   ## The primary project's identity is carried through unchanged
   ## (`projectName`, `workspaceMainline`, `projectFile`): everything
-  ## that needs exactly ONE project — the lock destination, `repro add`'s
+  ## that needs exactly ONE project — the lock destination, `repro ws add`'s
   ## mutation target — keeps resolving to the primary. Only the repo set
   ## grows.
   ##

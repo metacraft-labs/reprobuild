@@ -1,4 +1,4 @@
-## RA-22 — `repro add <repo>` develop-mode policy + per-add overrides +
+## RA-22 — `repro ws add <repo>` develop-mode policy + per-add overrides +
 ## init/clone-without-add.
 ##
 ## Black-box: drives the compiled ``repro`` binary against a hermetic
@@ -10,7 +10,7 @@
 ## fetch-URL prefix whose repos default to DEVELOP mode. A repo whose remote
 ## begins with that prefix defaults to develop (a local sibling checkout plus
 ## workspace membership); every other repo defaults to BINARY (no checkout).
-## ``repro add`` never records a DEPENDENCY: dependencies are declared only in
+## ``repro ws add`` never records a DEPENDENCY: dependencies are declared only in
 ## a repo's ``repro.nim`` (owner decision 2026-11-05, CLI/add.md), so
 ## ``--depends-of`` is refused and no fragment gains a ``depends`` key.
 ## ``--develop`` / ``--binary`` override the default per-add. ``--no-membership``
@@ -38,7 +38,7 @@
 ##   * ``[repo].name`` is the ADDED REPO'S NAME, never the URL's server-side
 ##     leaf. The bare origins here are ``…/orglib.git`` directories, so the
 ##     remote planner's most-specific-base reuse would name the fragment
-##     ``orglib.git``; ``repro add`` declines any plan that renames the repo
+##     ``orglib.git``; ``repro ws add`` declines any plan that renames the repo
 ##     and falls back to a per-repo ``<repo>-origin`` remote, because a
 ##     dependent's ``repro.nim`` names the added repo by that name
 ##     (``uses: "<target>"``, discovered at ``../<target>/repro.nim``) and its
@@ -187,7 +187,7 @@ proc setupFixture(gitBin, slug: string; withDefaultProfile = false): Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc invokeAdd(fx: Fixture; extra: seq[string]): tuple[code: int; output: string] =
-  var parts = @[q(fx.reproBin), "add"]
+  var parts = @[q(fx.reproBin), "ws", "add"]
   for e in extra: parts.add(q(e))
   parts.add("--workspace-root=" & q(fx.workspaceRoot))
   parts.add("--json")
@@ -214,7 +214,7 @@ proc countRemotes(projectFile: string): int =
   for line in readFile(projectFile).splitLines():
     if line.strip() == "[[remote]]": inc result
 
-suite "RA-22 — repro add develop-mode policy and overrides":
+suite "RA-22 — repro ws add develop-mode policy and overrides":
 
   test "test_ra22_develop_org_repo_defaults_to_develop_checkout_and_edge":
     let gitBin = findExe("git")
