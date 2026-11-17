@@ -30,7 +30,7 @@
 ## No mocks; no subprocesses. Platforms: every host (the evaluation targets
 ## are named, not the host's).
 
-import std/[algorithm, json, os, sequtils, strutils, unittest]
+import std/[algorithm, json, options, os, sequtils, strutils, unittest]
 
 import repro_profile
 import repro_home_intent
@@ -69,7 +69,7 @@ proc exportDocument(intent: ProfileIntent; host: string): JsonNode =
 suite "GM4: shared data-file row-selection fixtures":
 
   test "the fixture tree is populated":
-    check caseDirs("row-selection").len >= 6
+    check caseDirs("row-selection").len >= 7
     check caseDirs("row-rejection").len >= 10
 
   test "row-selection: the planner selects the expected rows":
@@ -91,8 +91,20 @@ suite "GM4: shared data-file row-selection fixtures":
             discard evaluateHomeExport(
               exportDocument(expanded.intent, host), system, host)
           continue
+        # `nixos` is stated by the case, or left unstated; an unstated fact
+        # that a row reaches is refused (the case says `refused`).
+        let nixos =
+          if evaluation.hasKey("nixos"): some(evaluation["nixos"].getBool)
+          else: none(bool)
+        if evaluation{"refused"}.getBool:
+          checkpoint(name & ": " & host & " @ " & system &
+            " (nixos not stated: refused)")
+          expect EFactNotStated:
+            discard evaluateHomeExport(
+              exportDocument(expanded.intent, host), system, host, nixos)
+          continue
         let evaluated = evaluateHomeExport(
-          exportDocument(expanded.intent, host), system, host)
+          exportDocument(expanded.intent, host), system, host, nixos)
         var got = evaluated["packages"].getElems.mapIt(it["name"].getStr)
         got = got.deduplicate()
         got.sort()

@@ -25,56 +25,60 @@ Commands fall into four side-effect classes:
 - publishes: writes to a shared store or a remote.
 
 <!-- generated:begin cli-reference index by=domain -->
-## Building and testing
+## Build & Test
+
+`repro --help` lists `build`, `test`, `watch`, `clean` under this heading; the rest are listed by `repro --help-all`.
 
 | Command | Subcommands | What it does |
 |---|---|---|
 | `repro build` | — | Build the current project or the selected targets. |
 | `repro test` | — | Run the project's tests. |
+| `repro watch` | — | Watch for changes and rebuild or rerun continuously. |
+| `repro clean` | — | Remove the current project's build artifacts. |
 | `repro bench` | — | Run the project's benchmarks. |
 | `repro lint` | — | Run the project's lint checks. |
 | `repro certify` | — | Run the required test set and issue a signed test certificate. |
 | `repro certificates` | — | List the project's named certificates or those a plan issues. |
 | `repro ci` | — | Plan which targets a CI run must execute. |
-| `repro watch` | — | Watch for changes and rebuild or rerun continuously. |
-| `repro clean` | — | Remove the current project's build artifacts. |
-| `repro run` | — | Run a task, a build output or a target once. |
-| `repro tasks` | — | List the current project's tasks. |
-
-## Inspecting the graph
-
-| Command | Subcommands | What it does |
-|---|---|---|
 | `repro graph` | — | Render the build graph of the current context. |
-| `repro why` | — | Explain why a package or an action is in the active context. |
 | `repro deps` | `refresh` | Refresh and check scanner-inferred dependencies. |
 | `repro stats` | — | Inspect accumulated build analytics. |
-| `repro show-conventions` | — | Print the resolved convention stack of a workspace. |
 | `repro configs` | — | List the standard build configurations. |
-| `repro capabilities` | — | Describe what this build of repro supports. |
+| `repro show-conventions` | — | Print the resolved convention stack of a workspace. |
+| `repro cargo` | `gc`, `record-live`, `run` | Manage cargo target directories and run cargo as a build edge. |
 
-## Development environments
+## Environments & Services
+
+`repro --help` lists `shell`, `exec`, `up`, `down`, `run`, `tasks` under this heading; the rest are listed by `repro --help-all`.
 
 | Command | Subcommands | What it does |
 |---|---|---|
-| `repro exec` | — | Run a command inside the development environment. |
 | `repro shell` | `hook` | Enter or print the development shell environment. |
+| `repro exec` | — | Run a command inside the development environment. |
+| `repro up` | — | Start the project's services. |
+| `repro down` | — | Stop the project's supervised development session. |
+| `repro run` | — | Run a task, a build output or a target once. |
+| `repro tasks` | — | List the current project's tasks. |
+| `repro dev` | — | Run the development session with continuous rebuilds. |
+| `repro hcr` | `coordinate`, `prepare-object` | Coordinate hot code reloading. |
 | `repro allow` | — | Trust a directory's development environment, so the shell hook activates it. |
 | `repro deny` | — | Revoke the trust `repro allow` recorded for a directory. |
 | `repro dev-env` | `export`, `deactivate` | Export or deactivate a development environment for a shell. |
-| `repro up` | — | Start the project's services. |
-| `repro down` | — | Stop the project's supervised development session. |
-| `repro dev` | — | Run the development session with continuous rebuilds. |
-| `repro develop` | — | Set up a project or a dependency for development. |
-| `repro add` | — | Add a dependency to the active context. |
-| `repro remove` | — | Remove a dependency from the active context. |
-| `repro hcr` | `coordinate`, `prepare-object` | Coordinate hot code reloading. |
+| `repro prompt` | `init` | Print a workspace-state segment for the shell prompt. |
+| `repro launch-plan` | `show`, `id` | Show stored launch plans. |
 
-## Workspaces and publication
+## Dependencies & Workspaces
+
+`repro --help` lists `develop`, `add`, `why`, `lock`, `workspace` under this heading; the rest are listed by `repro --help-all`.
 
 | Command | Subcommands | What it does |
 |---|---|---|
+| `repro develop` | — | Set up a project or a dependency for development. |
+| `repro add` | — | Add a dependency to the active context. |
+| `repro why` | — | Explain why a package or an action is in the active context. |
+| `repro lock` | `list`, `solve`, `refresh`, `update`, `validate`, `diff`, `explain` | Inspect and update the project's lock. |
 | `repro workspace` (`repro ws`) | — | Manage the multi-repository workspace. |
+| `repro remove` | — | Remove a dependency from the active context. |
 | `repro sync` | — | Fast-forward the workspace's repositories toward a target. |
 | `repro pull` | — | Converge the workspace onto its declared revisions. |
 | `repro branch` | — | Fork a new sibling workspace on a new branch (with no path: print the workspace's branch). |
@@ -82,49 +86,38 @@ Commands fall into four side-effect classes:
 | `repro push` | — | Publish the current work as a reproducible workspace state. |
 | `repro check` | — | Run the publication checks (the pre-push gate). |
 | `repro hooks` | `ensure`, `reinstall`, `uninstall` | Install, repair or remove the managed hooks. |
-| `repro lock` | `list`, `solve`, `refresh`, `update`, `validate`, `diff`, `explain` | Inspect and update the project's lock. |
 | `repro locking` | `explain`, `adopt-manifest` | Explain or adopt the workspace's locking configuration. |
 | `repro flake` | `override-args`, `refresh-lock`, `override-status` | Compute the Nix flake overrides of the develop set. |
 | `repro gateway` | `pre-receive`, `post-receive`, `migrate` | Run a push-gateway hook entry point. |
-| `repro prompt` | `init` | Print a workspace-state segment for the shell prompt. |
-
-## Stores, caches and daemons
-
-| Command | Subcommands | What it does |
-|---|---|---|
-| `repro daemon` | `status`, `start`, `stop`, `restart`, `logs`, `sessions` | Manage the per-user reprobuild daemon. |
-| `repro store` | `gc`, `recover`, `roots`, `list`, `optimise`, `materialize`, `closure`, `export`, `import`, `copy`, `daemon` | Manage the local store. |
-| `repro cas` | `gc`, `verify`, `path`, `exists` | Inspect the content-addressed blob store. |
-| `repro cache` | `lookup`, `substitute`, `publish`, `derive-key`, `gen-key` | Look up, substitute and publish binary-cache entries. |
 | `repro bundle` | `create`, `publish`, `restore`, `inspect` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
-| `repro reap` | — | Run one sweep of the resource-state store. |
-| `repro launch-plan` | `show`, `id` | Show stored launch plans. |
-| `repro cert-signer` | `serve`, `registration` | Run the certificate signer for remote build workers. |
-| `repro self` | `install`, `provision`, `hold`, `which`, `list`, `prune-roots` | Install and manage reprobuild's own versions. |
 
-## Machines
+## Machines & Diagnostics
+
+`repro --help` lists `home`, `system`, `infra`, `health` under this heading; the rest are listed by `repro --help-all`.
 
 | Command | Subcommands | What it does |
 |---|---|---|
 | `repro home` | `add`, `remove`, `enable`, `disable`, `list`, `why`, `history`, `apply`, `plan`, `export`, `facts`, `compare`, `rollback`, `gc`, `set`, `get`, `adopt`, `resource`, `migrate-from-env-scripts` | Manage your home profile. |
-| `repro system` | `add`, `remove`, `list`, `why`, `sync`, `history`, `rollback`, `audit`, `addon`, `state`, `secret`, `adopt` | Manage the machine's system configuration. |
+| `repro system` | `add`, `remove`, `list`, `why`, `plan`, `apply`, `sync`, `history`, `rollback`, `audit`, `addon`, `state`, `secret`, `adopt` | Manage the machine's system configuration. |
 | `repro infra` | `plan`, `apply`, `cache-keys`, `install-root`, `image` | Plan and apply infrastructure. |
+| `repro health` | — | Diagnose the reprobuild environment; exit 1 when any check fails. |
 | `repro anywhere` | — | Bootstrap a booted distribution host into ReproOS add-on mode over SSH (Linux): without --expect-plan print the plan and exit 3, with it apply. |
 | `repro deploy-agent` | `keygen` | Run one deploy-agent tick: poll the manifests, verify them and apply the newest for the target. |
 | `repro hardware` | `probe` | Probe the machine's hardware. |
 | `repro disk` | `plan`, `apply`, `mount`, `unmount`, `generate`, `image` | Plan, apply and mount disk layouts. |
 | `repro attest` | — | Compute and check launch measurements of attested images. |
-| `repro cargo` | `gc`, `record-live`, `run` | Manage cargo target directories and run cargo as a build edge. |
-
-## About repro itself
-
-| Command | Subcommands | What it does |
-|---|---|---|
+| `repro cert-signer` | `serve`, `registration` | Run the certificate signer for remote build workers. |
+| `repro daemon` | `status`, `start`, `stop`, `restart`, `logs`, `sessions` | Manage the per-user reprobuild daemon. |
+| `repro store` | `gc`, `recover`, `roots`, `list`, `optimise`, `materialize`, `closure`, `export`, `import`, `copy`, `daemon` | Manage the local store. |
+| `repro cas` | `gc`, `verify`, `path`, `exists` | Inspect the content-addressed blob store. |
+| `repro cache` | `lookup`, `substitute`, `publish`, `derive-key`, `gen-key` | Look up, substitute and publish binary-cache entries. |
+| `repro reap` | — | Run one sweep of the resource-state store. |
+| `repro self` | `install`, `provision`, `hold`, `which`, `list`, `prune-roots` | Install and manage reprobuild's own versions. |
 | `repro pressure` | — | Show build-wait pressure from the RunQuota daemon (exit 1 when it cannot be reached or predates it). |
-| `repro health` | — | Diagnose the reprobuild environment; exit 1 when any check fails. |
+| `repro capabilities` | — | Describe what this build of repro supports. |
 | `repro debug` | `io`, `artifact` | Inspect the filesystem monitor and artifacts. |
-| `repro help` | — | Show the help of repro or of one command. |
 | `repro version` | — | Show the client version and the protocol versions it speaks. |
+| `repro help` | — | Show the help of repro or of one command. |
 | `repro completion` | — | Print a shell's completion script. |
 <!-- generated:end -->
 
@@ -133,71 +126,71 @@ Commands fall into four side-effect classes:
 <!-- generated:begin cli-reference index by=name -->
 | Command | Area | What it does |
 |---|---|---|
-| `repro add` | Development environments | Add a dependency to the active context. |
-| `repro allow` | Development environments | Trust a directory's development environment, so the shell hook activates it. |
-| `repro anywhere` | Machines | Bootstrap a booted distribution host into ReproOS add-on mode over SSH (Linux): without --expect-plan print the plan and exit 3, with it apply. |
-| `repro attest` | Machines | Compute and check launch measurements of attested images. |
-| `repro bench` | Building and testing | Run the project's benchmarks. |
-| `repro branch` | Workspaces and publication | Fork a new sibling workspace on a new branch (with no path: print the workspace's branch). |
-| `repro build` | Building and testing | Build the current project or the selected targets. |
-| `repro bundle` | Stores, caches and daemons | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
-| `repro cache` | Stores, caches and daemons | Look up, substitute and publish binary-cache entries. |
-| `repro capabilities` | Inspecting the graph | Describe what this build of repro supports. |
-| `repro cargo` | Machines | Manage cargo target directories and run cargo as a build edge. |
-| `repro cas` | Stores, caches and daemons | Inspect the content-addressed blob store. |
-| `repro cert-signer` | Stores, caches and daemons | Run the certificate signer for remote build workers. |
-| `repro certificates` | Building and testing | List the project's named certificates or those a plan issues. |
-| `repro certify` | Building and testing | Run the required test set and issue a signed test certificate. |
-| `repro check` | Workspaces and publication | Run the publication checks (the pre-push gate). |
-| `repro ci` | Building and testing | Plan which targets a CI run must execute. |
-| `repro clean` | Building and testing | Remove the current project's build artifacts. |
-| `repro completion` | About repro itself | Print a shell's completion script. |
-| `repro configs` | Inspecting the graph | List the standard build configurations. |
-| `repro daemon` | Stores, caches and daemons | Manage the per-user reprobuild daemon. |
-| `repro debug` | About repro itself | Inspect the filesystem monitor and artifacts. |
-| `repro deny` | Development environments | Revoke the trust `repro allow` recorded for a directory. |
-| `repro deploy-agent` | Machines | Run one deploy-agent tick: poll the manifests, verify them and apply the newest for the target. |
-| `repro deps` | Inspecting the graph | Refresh and check scanner-inferred dependencies. |
-| `repro dev` | Development environments | Run the development session with continuous rebuilds. |
-| `repro dev-env` | Development environments | Export or deactivate a development environment for a shell. |
-| `repro develop` | Development environments | Set up a project or a dependency for development. |
-| `repro disk` | Machines | Plan, apply and mount disk layouts. |
-| `repro down` | Development environments | Stop the project's supervised development session. |
-| `repro exec` | Development environments | Run a command inside the development environment. |
-| `repro flake` | Workspaces and publication | Compute the Nix flake overrides of the develop set. |
-| `repro gateway` | Workspaces and publication | Run a push-gateway hook entry point. |
-| `repro graph` | Inspecting the graph | Render the build graph of the current context. |
-| `repro hardware` | Machines | Probe the machine's hardware. |
-| `repro hcr` | Development environments | Coordinate hot code reloading. |
-| `repro health` | About repro itself | Diagnose the reprobuild environment; exit 1 when any check fails. |
-| `repro help` | About repro itself | Show the help of repro or of one command. |
-| `repro home` | Machines | Manage your home profile. |
-| `repro hooks` | Workspaces and publication | Install, repair or remove the managed hooks. |
-| `repro infra` | Machines | Plan and apply infrastructure. |
-| `repro launch-plan` | Stores, caches and daemons | Show stored launch plans. |
-| `repro lint` | Building and testing | Run the project's lint checks. |
-| `repro lock` | Workspaces and publication | Inspect and update the project's lock. |
-| `repro locking` | Workspaces and publication | Explain or adopt the workspace's locking configuration. |
-| `repro pressure` | About repro itself | Show build-wait pressure from the RunQuota daemon (exit 1 when it cannot be reached or predates it). |
-| `repro prompt` | Workspaces and publication | Print a workspace-state segment for the shell prompt. |
-| `repro pull` | Workspaces and publication | Converge the workspace onto its declared revisions. |
-| `repro push` | Workspaces and publication | Publish the current work as a reproducible workspace state. |
-| `repro reap` | Stores, caches and daemons | Run one sweep of the resource-state store. |
-| `repro remove` | Development environments | Remove a dependency from the active context. |
-| `repro run` | Building and testing | Run a task, a build output or a target once. |
-| `repro self` | Stores, caches and daemons | Install and manage reprobuild's own versions. |
-| `repro shell` | Development environments | Enter or print the development shell environment. |
-| `repro show-conventions` | Inspecting the graph | Print the resolved convention stack of a workspace. |
-| `repro stats` | Inspecting the graph | Inspect accumulated build analytics. |
-| `repro store` | Stores, caches and daemons | Manage the local store. |
-| `repro switch` | Workspaces and publication | Switch the workspace to a branch. |
-| `repro sync` | Workspaces and publication | Fast-forward the workspace's repositories toward a target. |
-| `repro system` | Machines | Manage the machine's system configuration. |
-| `repro tasks` | Building and testing | List the current project's tasks. |
-| `repro test` | Building and testing | Run the project's tests. |
-| `repro up` | Development environments | Start the project's services. |
-| `repro version` | About repro itself | Show the client version and the protocol versions it speaks. |
-| `repro watch` | Building and testing | Watch for changes and rebuild or rerun continuously. |
-| `repro why` | Inspecting the graph | Explain why a package or an action is in the active context. |
-| `repro workspace` (`ws`) | Workspaces and publication | Manage the multi-repository workspace. |
+| `repro add` | Dependencies & Workspaces | Add a dependency to the active context. |
+| `repro allow` | Environments & Services | Trust a directory's development environment, so the shell hook activates it. |
+| `repro anywhere` | Machines & Diagnostics | Bootstrap a booted distribution host into ReproOS add-on mode over SSH (Linux): without --expect-plan print the plan and exit 3, with it apply. |
+| `repro attest` | Machines & Diagnostics | Compute and check launch measurements of attested images. |
+| `repro bench` | Build & Test | Run the project's benchmarks. |
+| `repro branch` | Dependencies & Workspaces | Fork a new sibling workspace on a new branch (with no path: print the workspace's branch). |
+| `repro build` | Build & Test | Build the current project or the selected targets. |
+| `repro bundle` | Dependencies & Workspaces | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
+| `repro cache` | Machines & Diagnostics | Look up, substitute and publish binary-cache entries. |
+| `repro capabilities` | Machines & Diagnostics | Describe what this build of repro supports. |
+| `repro cargo` | Build & Test | Manage cargo target directories and run cargo as a build edge. |
+| `repro cas` | Machines & Diagnostics | Inspect the content-addressed blob store. |
+| `repro cert-signer` | Machines & Diagnostics | Run the certificate signer for remote build workers. |
+| `repro certificates` | Build & Test | List the project's named certificates or those a plan issues. |
+| `repro certify` | Build & Test | Run the required test set and issue a signed test certificate. |
+| `repro check` | Dependencies & Workspaces | Run the publication checks (the pre-push gate). |
+| `repro ci` | Build & Test | Plan which targets a CI run must execute. |
+| `repro clean` | Build & Test | Remove the current project's build artifacts. |
+| `repro completion` | Machines & Diagnostics | Print a shell's completion script. |
+| `repro configs` | Build & Test | List the standard build configurations. |
+| `repro daemon` | Machines & Diagnostics | Manage the per-user reprobuild daemon. |
+| `repro debug` | Machines & Diagnostics | Inspect the filesystem monitor and artifacts. |
+| `repro deny` | Environments & Services | Revoke the trust `repro allow` recorded for a directory. |
+| `repro deploy-agent` | Machines & Diagnostics | Run one deploy-agent tick: poll the manifests, verify them and apply the newest for the target. |
+| `repro deps` | Build & Test | Refresh and check scanner-inferred dependencies. |
+| `repro dev` | Environments & Services | Run the development session with continuous rebuilds. |
+| `repro dev-env` | Environments & Services | Export or deactivate a development environment for a shell. |
+| `repro develop` | Dependencies & Workspaces | Set up a project or a dependency for development. |
+| `repro disk` | Machines & Diagnostics | Plan, apply and mount disk layouts. |
+| `repro down` | Environments & Services | Stop the project's supervised development session. |
+| `repro exec` | Environments & Services | Run a command inside the development environment. |
+| `repro flake` | Dependencies & Workspaces | Compute the Nix flake overrides of the develop set. |
+| `repro gateway` | Dependencies & Workspaces | Run a push-gateway hook entry point. |
+| `repro graph` | Build & Test | Render the build graph of the current context. |
+| `repro hardware` | Machines & Diagnostics | Probe the machine's hardware. |
+| `repro hcr` | Environments & Services | Coordinate hot code reloading. |
+| `repro health` | Machines & Diagnostics | Diagnose the reprobuild environment; exit 1 when any check fails. |
+| `repro help` | Machines & Diagnostics | Show the help of repro or of one command. |
+| `repro home` | Machines & Diagnostics | Manage your home profile. |
+| `repro hooks` | Dependencies & Workspaces | Install, repair or remove the managed hooks. |
+| `repro infra` | Machines & Diagnostics | Plan and apply infrastructure. |
+| `repro launch-plan` | Environments & Services | Show stored launch plans. |
+| `repro lint` | Build & Test | Run the project's lint checks. |
+| `repro lock` | Dependencies & Workspaces | Inspect and update the project's lock. |
+| `repro locking` | Dependencies & Workspaces | Explain or adopt the workspace's locking configuration. |
+| `repro pressure` | Machines & Diagnostics | Show build-wait pressure from the RunQuota daemon (exit 1 when it cannot be reached or predates it). |
+| `repro prompt` | Environments & Services | Print a workspace-state segment for the shell prompt. |
+| `repro pull` | Dependencies & Workspaces | Converge the workspace onto its declared revisions. |
+| `repro push` | Dependencies & Workspaces | Publish the current work as a reproducible workspace state. |
+| `repro reap` | Machines & Diagnostics | Run one sweep of the resource-state store. |
+| `repro remove` | Dependencies & Workspaces | Remove a dependency from the active context. |
+| `repro run` | Environments & Services | Run a task, a build output or a target once. |
+| `repro self` | Machines & Diagnostics | Install and manage reprobuild's own versions. |
+| `repro shell` | Environments & Services | Enter or print the development shell environment. |
+| `repro show-conventions` | Build & Test | Print the resolved convention stack of a workspace. |
+| `repro stats` | Build & Test | Inspect accumulated build analytics. |
+| `repro store` | Machines & Diagnostics | Manage the local store. |
+| `repro switch` | Dependencies & Workspaces | Switch the workspace to a branch. |
+| `repro sync` | Dependencies & Workspaces | Fast-forward the workspace's repositories toward a target. |
+| `repro system` | Machines & Diagnostics | Manage the machine's system configuration. |
+| `repro tasks` | Environments & Services | List the current project's tasks. |
+| `repro test` | Build & Test | Run the project's tests. |
+| `repro up` | Environments & Services | Start the project's services. |
+| `repro version` | Machines & Diagnostics | Show the client version and the protocol versions it speaks. |
+| `repro watch` | Build & Test | Watch for changes and rebuild or rerun continuously. |
+| `repro why` | Dependencies & Workspaces | Explain why a package or an action is in the active context. |
+| `repro workspace` (`ws`) | Dependencies & Workspaces | Manage the multi-repository workspace. |
 <!-- generated:end -->

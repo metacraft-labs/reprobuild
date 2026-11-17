@@ -13,8 +13,11 @@
 ## a combinator without an evaluator cannot be written.
 ##
 ## The set is the spec's (Home-Profile-Intent-Layer.md §`when` and `if`
-## predicates): platform `windows`, `macos`, `linux`, `bsd`, `wsl`;
-## architecture `x86_64`, `arm64`, `arm32`. `host` is a value compared with
+## predicates): platform `windows`, `macos`, `linux`, `bsd`, `wsl`, `nixos`;
+## architecture `x86_64`, `arm64`, `arm32`. `wsl` and `nixos` are facts about
+## the host, not about the target's platform name: the planner reads them from
+## the machine it runs on, and a consumer evaluating for a target states
+## `nixos` itself (it is refused, never defaulted, when it does not). `host` is a value compared with
 ## `==` / `!=` / `in`, not a boolean, and is not listed here. "Headless" is
 ## deliberately absent: it is an activity selection, not a predicate
 ## (Gradual-Nix-To-Reprobuild-Migration.md §Hosts).
@@ -23,5 +26,5 @@
 ## of `repro_profile`.
 
 const
-  StandardPlatformIdents* = ["windows", "macos", "linux", "bsd", "wsl"]
+  StandardPlatformIdents* = ["windows", "macos", "linux", "bsd", "wsl", "nixos"]
   StandardArchIdents* = ["x86_64", "arm64", "arm32"]

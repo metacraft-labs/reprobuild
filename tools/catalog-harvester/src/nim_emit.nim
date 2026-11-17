@@ -43,7 +43,7 @@
 ## harvester sorts newest-first, so the newest is the default), arms in
 ## declaration order, ``env`` sorted by name, no timestamp or commit id.
 
-import std/[algorithm, strutils, tables]
+import std/[algorithm, os, strutils, tables]
 import repro_dsl_stdlib/packages_schema
 import repro_project_dsl/selector_names
 
@@ -70,6 +70,58 @@ proc harvestModuleName*(toolName: string): string =
   ## imports a selector's stdlib module by (``7zip`` -> ``pkg_7zip``,
   ## ``nil`` -> ``pkg_nil``: a module named by a keyword cannot be imported).
   if toolName.isNimIdentifier: toolName else: selectorModuleName(toolName)
+
+proc declaredPackageNames*(source: string): seq[string] =
+  ## Every top-level ``package <name>:`` declaration in ``source``: bare,
+  ## quoted or backtick spelling, with an optional trailing ``# comment``.
+  for rawLine in source.splitLines:
+    if not rawLine.startsWith("package "):
+      continue
+    var rest = rawLine["package ".len .. ^1].strip()
+    let hash = rest.find('#')
+    if hash >= 0 and (rest.count('"') mod 2 == 0):
+      rest = rest[0 ..< hash].strip()
+    if not rest.endsWith(":"):
+      continue
+    rest = rest[0 ..< rest.len - 1].strip()
+    if rest.len >= 2 and rest[0] in {'"', '`'} and rest[^1] == rest[0]:
+      rest = rest[1 ..< rest.len - 1]
+    if rest.len > 0:
+      result.add(rest)
+
+type PackageIdentifierIndex* = Table[string, (string, string)]
+  ## ``packageIdentifierKey`` -> (package name, module path declaring it).
+
+proc indexPackageIdentifiers*(outputDir: string): PackageIdentifierIndex =
+  ## Every package already declared by a ``.nim`` module under ``outputDir``.
+  if not dirExists(outputDir):
+    return
+  for path in walkDirRec(outputDir):
+    if not path.endsWith(".nim"):
+      continue
+    let source = try: readFile(path) except IOError: ""
+    for name in declaredPackageNames(source):
+      let key = packageIdentifierKey(name)
+      if key notin result:
+        result[key] = (name, path)
+
+proc findPackageIdentifierCollision*(index: PackageIdentifierIndex;
+                                     name, outPath: string): (bool, string, string) =
+  ## (found, existing name, its module) when a DIFFERENT name already holds
+  ## ``name``'s identifier key. The same name is a re-harvest, not a collision.
+  let key = packageIdentifierKey(name)
+  if key in index:
+    let (other, path) = index[key]
+    # A module's own file being replaced is not a collision.
+    if other != name and path != outPath:
+      return (true, other, path)
+
+proc packageIdentifierCollisionMessage*(name, other, path: string): string =
+  "package \"" & name & "\" and package \"" & other & "\" (declared in " &
+    path & ") sanitize to the same Nim identifier (\"" &
+    selectorModuleName(name) & "\" and \"" & selectorModuleName(other) &
+    "\", both \"" & packageIdentifierKey(name) & "\" under Nim identifier " &
+    "equality) and cannot both be declared in one registry"
 
 proc cpuToken(cpu: PlatformCpu): string =
   case cpu

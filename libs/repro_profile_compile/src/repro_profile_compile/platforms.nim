@@ -32,7 +32,7 @@
 ## is unevaluated too. Unevaluated is treated like "differs" by consumers:
 ## the document is refused for that platform.
 
-import std/[json, os, osproc, strtabs, strutils]
+import std/[json, options, os, osproc, strtabs, strutils]
 from repro_core/paths import extendedPath
 
 import repro_profile
@@ -98,10 +98,15 @@ proc compilingPlatformSystem*(): string =
       return t.system
   hostCPU & "-" & hostOS
 
-proc targetHostContext*(t: ProfileTargetPlatform; host: string): HostContext =
-  ## The facts predicates are evaluated against for host `host` running
-  ## platform `t`. `isWsl` is false (see `ProfileTargetPlatforms`).
-  HostContext(platform: t.platform, arch: t.arch, host: host, isWsl: false)
+proc targetHostContext*(t: ProfileTargetPlatform; host: string;
+                        nixos = none(bool)): HostContext =
+  ## The predicate facts of host `host` evaluated for the target platform `t`.
+  ## `isWsl` is false (see `ProfileTargetPlatforms`). `nixos` is the one fact
+  ## the system name does not carry: a consumer that says whether the target
+  ## is NixOS gets it; without it the fact is unstated and a `nixos` guard is
+  ## refused (`EFactNotStated`), never read as false.
+  HostContext(platform: t.platform, arch: t.arch, host: host, isWsl: false,
+    isNixos: nixos.get(false), nixosStated: nixos.isSome)
 
 type
   ProfileNimConfig* = object

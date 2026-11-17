@@ -2365,9 +2365,20 @@ proc runConfigsCommand(): int =
     "(or --variant buildType=<value>)"
   0
 
-proc runCapabilitiesCommand(format: string): int =
-  ## ``repro capabilities [--format=json|text]``. ``format`` is one of the
-  ## values the description allows (``json``, the default, or ``text``).
+proc capabilitiesFormat*(format: string; json: bool): string =
+  ## The output format of ``repro capabilities`` from its flags: an explicit
+  ## ``--format`` wins, then the ``--json`` shortcut, then the default
+  ## ``json`` (the ``--json`` convention of every inspection command: it is
+  ## shorthand for ``--format=json``, and ``--format`` given beside it is
+  ## the one that counts).
+  if format.len > 0: format
+  else: "json"
+
+proc runCapabilitiesCommand(format: string; json: bool): int =
+  ## ``repro capabilities [--format=json|text] [--json]``. ``format`` is
+  ## empty or one of the values the description allows (``json`` or
+  ## ``text``); see ``capabilitiesFormat`` for how it meets ``--json``.
+  let format = capabilitiesFormat(format, json)
   case format
   of "json":
     echo renderCapabilitiesJson()
@@ -105247,11 +105258,13 @@ proc runBuildVerbCommand(verb: string; args: seq[string];
     return 1
 
 proc runReproHelp(programName: string; topic: seq[string];
-                  publicCliPath: string): int =
-  ## ``repro help [<command>...]``: the help of repro or of one command, on
-  ## stdout. A migrated command's help is generated from its declarations.
-  ## An unmigrated one prints its usage synopsis (whatever words follow);
-  ## one with no synopsis, the help its declaration gives.
+                  publicCliPath: string; all = false): int =
+  ## ``repro help [--all] [<command>...]``: the help of repro or of one
+  ## command, on stdout. A migrated command's help is generated from its
+  ## declarations. An unmigrated one prints its usage synopsis (whatever
+  ## words follow); one with no synopsis, the help its declaration gives.
+  ## With ``all`` it is the page ``--help-all`` prints, which also lists
+  ## the ``secondary`` commands.
   var command = 0
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
@@ -105269,7 +105282,8 @@ proc runReproHelp(programName: string; topic: seq[string];
         return 0
       break
   try:
-    stdout.write(ReproCommandLine.helpText(reproCommandPath(command)))
+    stdout.write(ReproCommandLine.helpText(reproCommandPath(command),
+      long = all, all = all))
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
@@ -105418,14 +105432,16 @@ proc runReproCommandLine(programName: string; args: seq[string];
     stderr.write(ReproCommandLine.helpText())
     return 2
   of ReproCommandLineCommand.help:
-    return runReproHelp(programName, conf.help.topic, publicCliPath)
+    return runReproHelp(programName, conf.help.topic, publicCliPath,
+      conf.help.all)
   of ReproCommandLineCommand.version:
     return runVersionCommand(programName, conf.version.json)
   of ReproCommandLineCommand.completion:
     return runCompletionCommand(conf.completion.shell)
   of ReproCommandLineCommand.capabilities:
     try:
-      return runCapabilitiesCommand(conf.capabilities.format)
+      return runCapabilitiesCommand(conf.capabilities.format,
+        conf.capabilities.json)
     except CatchableError as err:
       stderr.writeLine("repro capabilities: error: " & err.msg)
       return 1

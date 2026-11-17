@@ -36,7 +36,9 @@
 ## writes as code.
 ##
 ## `--help` and `-h` are compared on neither side: the parser builds them into
-## every command.
+## every command. `--help-all`, which the parser builds in only when a
+## command is declared `secondary`, is compared at the root (see
+## `surfaceOf`).
 ##
 ## The falsifying mutations prove the comparison can fail: the description
 ## with one flag's declaration removed, and with one command's declaration
@@ -86,7 +88,8 @@ const
     "repro home get", "repro home adopt", "repro home resource",
     "repro home resource move", "repro home migrate-from-env-scripts",
     "repro system", "repro system add", "repro system remove",
-    "repro system list", "repro system why", "repro system sync",
+    "repro system list", "repro system why", "repro system plan",
+    "repro system apply", "repro system sync",
     "repro system history", "repro system rollback", "repro system audit",
     "repro infra", "repro infra plan", "repro infra apply",
     "repro infra cache-keys", "repro infra install-root", "repro infra image",
@@ -146,8 +149,7 @@ const
     # profile commands implemented today.
     "flag\trepro infra apply\t--activity", "flag\trepro infra apply\t--json",
     "flag\trepro infra apply\t--staged", "flag\trepro infra apply\t--yes",
-    "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--json",
-    "flag\trepro infra plan\t--strict",
+    "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--strict",
     # The proposed surface of `repro dev` beyond what is implemented: a cap
     # on how long repeated changes may postpone a cycle, and hot code
     # reloading (which `repro watch --hcr` implements).
@@ -164,13 +166,11 @@ const
     "flag\trepro workspace status\t--verbose",
     "flag\trepro workspace status\t-v",
     # What the pages came to specify after the sixth group moved, for the
-    # command-line and DSL usability work that implements it: the root's
-    # `--help-all` (all of a command's help tiers), `repro capabilities
-    # --json` and `repro add`'s dependency-kind flags. And `XDG_STATE_HOME`
+    # command-line and DSL usability work that implements it: `repro add`'s
+    # dependency-kind flags. And `XDG_STATE_HOME`
     # in `repro health`: the page moved the per-user resource-state store
     # from a cache directory to a state directory, and the store has not
     # moved yet.
-    "flag\trepro\t--help-all", "flag\trepro capabilities\t--json",
     "flag\trepro add\t--build", "flag\trepro add\t--native-build",
     "flag\trepro add\t--runtime", "env\trepro health\tXDG_STATE_HOME",
     # `repro build`'s `--no-write-stats` (turn the raw observation capture
@@ -196,6 +196,11 @@ const
     "env\trepro hooks\tINSTALL_PYTHON", "env\trepro hooks\tREPROBUILD_REPRO",
     "env\trepro hooks\tREPRO_CMD_SOURCE",
     "env\trepro hooks\tREPRO_INSTALLING_BUILD",
+    # `repro lock refresh` reads `REPRO_ALLOW_PIN_REGRESSION` itself and
+    # adds its names to `--allow-pin-regression`'s (the same variable the
+    # pre-commit gate reads), rather than as that flag's fallback, so the
+    # flag does not declare it.
+    "env\trepro lock refresh\tREPRO_ALLOW_PIN_REGRESSION",
     "env\trepro shell\tSTDIN_FILENO", "env\trepro shell\tSTD_INPUT_HANDLE",
     "env\trepro shell\tFILE_TYPE_PIPE",
     # Names `repro build`'s page writes as code that are not inputs of its
@@ -275,33 +280,56 @@ proc commandWord(stmt: NimNode): string =
     return stmt[1].strVal
   ""
 
+proc removeDeclaration(scope: NimNode; command, name: string): bool =
+  ## Removes one declaration from `scope` (see `withoutDeclaration`),
+  ## looking into the `group` sections the shown top-level commands stand
+  ## in; whether it found it.
+  for i in 0 ..< scope.len:
+    let stmt = scope[i]
+    if stmt.kind == nnkCommand and stmt.len == 3 and
+        stmt[0].eqIdent("group") and stmt[^1].kind == nnkStmtList:
+      if removeDeclaration(stmt[^1], command, name):
+        return true
+      continue
+    if commandWord(stmt) != command:
+      continue
+    if name.len == 0:
+      scope.del(i)
+      return true
+    let body = stmt[^1]
+    for j in 0 ..< body.len:
+      if paramName(body[j]) == name:
+        body.del(j)
+        return true
+  false
+
 proc withoutDeclaration(body: NimNode; command, name: string): NimNode =
   ## The description with one declaration removed: parameter `name` of the
   ## top-level command `command`, or (`name` empty) the command itself.
   result = body.copyNimTree()
-  for i in 0 ..< result.len:
-    if commandWord(result[i]) != command:
-      continue
-    if name.len == 0:
-      result.del(i)
-      return
-    let scope = result[i][^1]
-    for j in 0 ..< scope.len:
-      if paramName(scope[j]) == name:
-        scope.del(j)
-        return
-  error("no declaration " & command & "/" & name & " to remove")
+  if not removeDeclaration(result, command, name):
+    error("no declaration " & command & "/" & name & " to remove")
 
 proc surfaceOf(body: NimNode): seq[string] =
   ## The description's side, as the fixture's rows: `verb <word>` for each
   ## top-level command that is not hidden, then `flag`/`env` rows of every
   ## named command and of the root (whose flags its `call:` declares).
+  ##
+  ## `--help-all` is the one built-in spelling compared: clispec accepts it
+  ## only in a program that declares a `secondary` command (and then at
+  ## every command, where a command without one gives `--help`'s page), so
+  ## it is a row of the root, where the specification names it, exactly
+  ## when the description declares one.
   let model = parseCliModel[NoCliExtension, ReproCommandLineParamExt](body,
     NoCliExtension())
   for cmd in model.commands:
     if not cmd.anonymous and cmd.path.len == 1 and
         cmd.visibility != cvHidden:
       result.add("verb\t" & cmd.name)
+  for cmd in model.commands:
+    if not cmd.anonymous and cmd.tier == ctSecondary:
+      result.add("flag\trepro\t--help-all")
+      break
   for cmd in model.commands:
     # A `call:` holds the flags of the command it belongs to (the root's
     # own, or a namespace's that runs without a subcommand, such as `repro

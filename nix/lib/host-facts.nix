@@ -491,12 +491,16 @@ let
       profileDir,
       host,
       system,
+      # Whether the target is NixOS (null: not stated; a profile with a
+      # `nixos` guard is then refused, as `repro home facts --target` does).
+      nixos ? null,
     }:
     pkgs.runCommand "host-facts-reprobuild-${host}.json"
       {
         profile = profileDir;
         inherit host system;
         nativeBuildInputs = [ repro ];
+        nixosFlag = if nixos == null then "" else if nixos then "--nixos" else "--nixos=false";
       }
       ''
         export HOME="$TMPDIR/home"
@@ -505,7 +509,7 @@ let
         cp -R "$profile" "$TMPDIR/profile"
         chmod -R u+w "$TMPDIR/profile"
         repro home facts --profile-dir "$TMPDIR/profile" --host "$host" \
-          --target "$system" --output "$out"
+          --target "$system" $nixosFlag --output "$out"
       '';
 
   # reprobuild.lib.homeEquivalenceCheck {
@@ -515,6 +519,8 @@ let
   #   homebrew ? { }, outOfStoreRoots ? { },   passed to homeManagerFacts
   #   name ? "home-equivalence-<host>",
   #   repro ? <this flake's repro for the configuration's system>,
+  #   nixos ? <the intent module's option, else null>,   whether the host is
+  #                                      NixOS (a profile's `nixos` guards)
   # } -> a derivation that builds both facts documents and runs
   #      `repro home compare`; it fails (with the report on the log) when the
   #      comparison exits non-zero. $out holds nix.json, reprobuild.json,
@@ -529,6 +535,10 @@ let
       outOfStoreRoots ? { },
       name ? "home-equivalence-${host}",
       repro ? null,
+      # Whether the host is NixOS, for the profile's `nixos` guards: the
+      # intent module's `reprobuild.intent.nixos` when the configuration uses
+      # it, else not stated.
+      nixos ? configuration.config.reprobuild.intent.nixos or null,
     }:
     let
       pkgs = configuration.pkgs;
@@ -548,6 +558,7 @@ let
           profileDir
           host
           system
+          nixos
           ;
         repro = reproPkg;
       };

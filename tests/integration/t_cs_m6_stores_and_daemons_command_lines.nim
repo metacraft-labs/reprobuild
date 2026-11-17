@@ -130,8 +130,9 @@ suite "CS-M6: the store and daemon command lines":
     check "--bind" in s.run(["cert-signer", "serve", "--help"]).output
     check "--from" in s.run(["self", "install", "--help"]).output
     # Internal subcommands are listed by their namespace, not by the
-    # primary help.
-    let primary = s.run(["--help"]).output
+    # root's help. (`launch-plan` is listed only by the page with every
+    # command, `--help-all`.)
+    let primary = s.run(["--help-all"]).output
     check "launch-plan" in primary
     check "--daemon-exe" notin primary
     check entriesUnder(s.cwd).len == 0

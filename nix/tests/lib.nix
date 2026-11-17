@@ -63,15 +63,26 @@ let
       e:
       let
         v = predicate.validate e.predicate;
-        holdsOn =
-          if v.ok then
-            sortStrings (
-              filter (s: predicate.evaluate (predicate.factsFor s e.host) v.ast) predicateCases.systems
-            )
-          else
-            "refused: ${v.message}";
+        # `nixos` is stated by the case, or left unstated (README there).
+        facts = s: predicate.factsWith (e.nixos or null) s e.host;
       in
-      expect "predicate ${toJSON e.predicate} @ ${e.host}" (sortStrings e.holdsOn) holdsOn
+      if e.refused or false then
+        # Refused on EVERY system, never read as false: evaluating throws.
+        concatMap (
+          s:
+          expectTrue "predicate ${toJSON e.predicate} @ ${s} is refused while the nixos fact is unstated" (
+            v.ok && fails (predicate.holds (facts s) e.predicate)
+          )
+        ) predicateCases.systems
+      else
+        let
+          holdsOn =
+            if v.ok then
+              sortStrings (filter (s: predicate.holds (facts s) e.predicate) predicateCases.systems)
+            else
+              "refused: ${v.message}";
+        in
+        expect "predicate ${toJSON e.predicate} @ ${e.host}" (sortStrings e.holdsOn) holdsOn
     ) predicateCases.evaluations
     ++ concatMap (
       r:
@@ -112,10 +123,14 @@ let
           path = dir + "/data.toml";
           inherit (e) system host;
           inherit (c) hosts;
+          nixos = e.nixos or null;
         };
         case = "readData ${name}: ${e.host} @ ${e.system}";
       in
-      if e.undeclaredHost or false then
+      if e.refused or false then
+        # A `nixos` guard reached while the fact is unstated is refused.
+        expectTrue "${case} is refused while the nixos fact is unstated" (fails (r.names or r.error))
+      else if e.undeclaredHost or false then
         # A host the case's hosts: registry does not declare is refused, as
         # the planner refuses it (hosts.nix; spec Open question 6).
         expectTrue "${case} refuses the undeclared host" (
@@ -392,6 +407,32 @@ let
   # host relies on, and synthetic catalogs for the refusals the real one must
   # never exhibit (an ambiguous name or token, a develop interface, an
   # unknown record kind).
+  # --- the nixos fact -------------------------------------------------------
+  # tests/fixtures/nixos-fact: a profile whose guards reach `nixos`. The
+  # consumer states the fact (`readIntent { nixos = ...; }`) or the
+  # evaluation is refused; `cases.json` is Reprobuild's answer
+  # (`t_e2e_export_nixos_fact_required` keeps it and `export.json` true).
+  nixosFactRoot = root + "/tests/fixtures/nixos-fact";
+  nixosFactCases = fromJSON (readFile (nixosFactRoot + "/cases.json"));
+  nixosFactTests = concatMap (
+    c:
+    let
+      args = {
+        host = nixosFactCases.host;
+        inherit (c) system;
+        snapshot = nixosFactRoot + "/export.json";
+      }
+      // lib.optionalAttrs (c ? nixos) { inherit (c) nixos; };
+      case = "readIntent nixos fact @ ${c.system} ${toJSON (c.nixos or "unstated")}";
+    in
+    if c.refused or false then
+      expectTrue "${case} is refused" (fails (reprobuildLib.readIntent args).evaluation.packages)
+    else
+      expect case (sortStrings c.packages) (
+        sortStrings (map (p: p.name) (reprobuildLib.readIntent args).evaluation.packages)
+      )
+  ) nixosFactCases.cases;
+
   # --- realization sources ---------------------------------------
   # The shared fixture tests/fixtures/realization-sources/cases.nix with stub
   # derivations: resolution from a named set (the attribute the catalog
@@ -1010,6 +1051,7 @@ let
     ++ refusalTests
     ++ realizationTests
     ++ realizationSourceTests
+    ++ nixosFactTests
     ++ brewTests;
 
   # Vacuity: the fixture trees were found and compared.
