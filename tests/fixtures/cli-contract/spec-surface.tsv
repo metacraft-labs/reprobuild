@@ -194,7 +194,9 @@ flag	repro store closure	--action-cache-root
 flag	repro store closure	--freeze-dev-env
 flag	repro store closure	--json
 flag	repro store closure	--root
+flag	repro store closure	--selection
 flag	repro store closure	--store-root
+flag	repro store closure	--workspace-root
 command	repro store export
 flag	repro store export	--action-cache-root
 flag	repro store export	--freeze-dev-env
@@ -202,7 +204,9 @@ flag	repro store export	--json
 flag	repro store export	--out
 flag	repro store export	--part-size
 flag	repro store export	--root
+flag	repro store export	--selection
 flag	repro store export	--store-root
+flag	repro store export	--workspace-root
 flag	repro store export	--zstd-level
 flag	repro store export	--zstd-threads
 command	repro store import
@@ -315,6 +319,8 @@ flag	repro bundle restore	--parallel
 flag	repro bundle restore	--staging
 flag	repro bundle restore	--store-root
 flag	repro bundle restore	--workspace
+command	repro bundle inspect
+flag	repro bundle inspect	--json
 command	repro reap
 flag	repro reap	--force
 flag	repro reap	--hard-rebuild
@@ -908,6 +914,25 @@ flag	repro workspace repos remove	--delete-fragment
 flag	repro workspace repos remove	--project
 flag	repro workspace repos remove	--set
 flag	repro workspace repos remove	--workspace-root
+command	repro workspace add
+flag	repro workspace add	--binary
+flag	repro workspace add	--depends-of
+flag	repro workspace add	--develop
+flag	repro workspace add	--dry-run
+flag	repro workspace add	--json
+flag	repro workspace add	--no-develop
+flag	repro workspace add	--no-membership
+flag	repro workspace add	--remote
+flag	repro workspace add	--revision
+flag	repro workspace add	--tool-provisioning
+flag	repro workspace add	--workspace-root
+command	repro workspace remove
+flag	repro workspace remove	--dry-run
+flag	repro workspace remove	--force
+flag	repro workspace remove	--json
+flag	repro workspace remove	--tool-provisioning
+flag	repro workspace remove	--workspace-root
+flag	repro workspace remove	--yes
 command	repro workspace status
 flag	repro workspace status	--ahead-behind
 flag	repro workspace status	--file-details
@@ -1284,6 +1309,7 @@ flag	repro add	--json
 flag	repro add	--native-build
 flag	repro add	--no-develop
 flag	repro add	--no-membership
+flag	repro add	--package
 flag	repro add	--remote
 flag	repro add	--revision
 flag	repro add	--runtime
@@ -1293,6 +1319,7 @@ command	repro remove
 flag	repro remove	--dry-run
 flag	repro remove	--force
 flag	repro remove	--json
+flag	repro remove	--package
 flag	repro remove	--tool-provisioning
 flag	repro remove	--workspace-root
 flag	repro remove	--yes

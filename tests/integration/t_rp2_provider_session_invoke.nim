@@ -13,7 +13,11 @@
 ##   2. REUSE: two invokes on the same ProviderSessionKey share ONE child
 ##      process (the pool's ``launchCount`` stays 1); a DIFFERENT key launches
 ##      a distinct session (launchCount increments).
-##   3. MISMATCH: a handshake whose expected providerArtifactId disagrees with
+##   3. SLICE ISOLATION: builds whose lock slices differ never share a
+##      session, even for the SAME ProviderArtifactId; reopening an earlier
+##      slice reuses that slice's session
+##      (Project-Provider-Runtime-Protocol.md §"Identity").
+##   4. MISMATCH: a handshake whose expected providerArtifactId disagrees with
 ##      the provider's self-reported manifest is a HARD error, while a matching
 ##      (or unconstrained) expectation succeeds.
 ##
@@ -136,11 +140,11 @@ proc rootRequest(projectRoot, artifactId: string): ProviderGraphRequest =
     lockSliceId: "rp2-lock",
     activity: "default")
 
-proc engineHello(): EngineHello =
+proc engineHello(lockSliceId = "rp2-lock"): EngineHello =
   EngineHello(
     protocolVersion: ProviderProtocolVersion,
     engineCapabilities: @["rp2"],
-    lockSliceId: "rp2-lock",
+    lockSliceId: lockSliceId,
     canonicalExecutionRoot: getCurrentDir())
 
 suite "RP2 provider session: launch + handshake + invoke + reuse":
@@ -233,6 +237,58 @@ suite "RP2 provider session: launch + handshake + invoke + reuse":
     check h3.session != h1.session
     let r3 = h3.invokeEntryPoint("rp2widget.root", @[marshalRequest(request)])
     check r3.ok
+
+  test "builds whose lock slices differ never share a session":
+    ## The handshake tells a session its lock slice exactly once, so a pooled
+    ## session reused under another slice would answer with the first
+    ## build's lock. The ProviderSessionKey therefore carries the slice:
+    ## the SAME artifact opened under two slices launches two children,
+    ## and an empty slice is a third key, not an alias of either.
+    ##
+    ## NON-VACUITY: the artifact id, policy and protocol are identical across
+    ## all opens, so the slice is the only thing that can separate the keys;
+    ## and reopening the first slice proves the pool still REUSES (the
+    ## separation is not just "never reuse").
+    let tempRoot = getTempDir() / ("rp2-slice-" & $getCurrentProcessId())
+    removeDir(extendedPath(tempRoot))
+    defer: removeDir(extendedPath(tempRoot))
+    let provider = buildProvider(tempRoot)
+
+    let pool = newProviderSessionPool()
+    defer: pool.closeAll()
+    let artifact = ProviderArtifactRef(
+      binaryPath: provider.binary,
+      providerArtifactId: provider.artifactId,
+      workingDir: getCurrentDir())
+    let request = rootRequest(provider.projectRoot, provider.artifactId)
+
+    let rootA = pool.openProviderSession(artifact, defaultSessionPolicy(),
+      engineHello("root-a-slice"))
+    check pool.launchCount == 1
+    check rootA.invokeEntryPoint("rp2widget.root",
+      @[marshalRequest(request)]).ok
+
+    let rootB = pool.openProviderSession(artifact, defaultSessionPolicy(),
+      engineHello("root-b-slice"))
+    check pool.launchCount == 2
+    check rootB.session != rootA.session
+    check rootB.sessionKey != rootA.sessionKey
+    check rootB.providerArtifactId == rootA.providerArtifactId
+    check rootB.invokeEntryPoint("rp2widget.root",
+      @[marshalRequest(request)]).ok
+
+    let emptySlice = pool.openProviderSession(artifact,
+      defaultSessionPolicy(), engineHello(""))
+    check pool.launchCount == 3
+    check emptySlice.sessionKey != rootA.sessionKey
+    check emptySlice.sessionKey != rootB.sessionKey
+    check emptySlice.providerArtifactId == rootA.providerArtifactId
+
+    let rootAAgain = pool.openProviderSession(artifact,
+      defaultSessionPolicy(), engineHello("root-a-slice"))
+    check pool.launchCount == 3
+    check rootAAgain.session == rootA.session
+    check rootAAgain.sessionKey == rootA.sessionKey
 
   test "handshake protocol-version mismatch is a HARD error; a matching version succeeds":
     let tempRoot = getTempDir() / "rp2-mismatch-" & $getCurrentProcessId()

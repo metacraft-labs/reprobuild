@@ -19,7 +19,7 @@
 ##
 ## *Mocking.* None.
 
-import std/[json, os, strutils, unittest]
+import std/[json, os, sequtils, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -51,10 +51,43 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let host = g.enrol(sink)
   let c = g.exec(repro & " system addon evidence-credential-check")
   step("the enrolled credential appends and is refused list, read, " &
-       "overwrite and delete", c.exitCode == 0, c.stdout & c.stderr)
+       "overwrite and delete", c.exitCode == 0,
+       "exit " & $c.exitCode & "\n" & c.stdout & c.stderr &
+         (if c.exitCode != 0:
+            g.exec("journalctl -q -n 40 --no-pager -o cat").stdout else: ""))
   discard g.exec("systemctl start repro-addon-evidence.service")
   step("the enrol's own record reached the sink",
        sink.waitFor(host, "addon-bootstrap", "evidence-enrol", 180), "")
+  # §13 decision 181: the shipping unit, and every confined run, is its
+  # dynamic user, never uid 0, and can make no Unix socket. Its state is
+  # that user's; a process given the unit's own [Service] confinement (read
+  # back from the installed unit) is not root, cannot read the root-only
+  # credential directory, and cannot reach PID 1 or the bus.
+  let own = g.exec("stat -L -c %u /var/lib/repro-addon-evidence " &
+                   "/var/lib/repro-addon-evidence/outbox " &
+                   "/var/lib/repro-addon-evidence/last-heartbeat")
+  let ownOk = own.exitCode == 0 and own.stdout.splitLines().filterIt(
+    it.len > 0).allIt(it != "0") and own.stdout.splitLines().filterIt(
+    it.len > 0).len == 3
+  let cat = g.exec("systemctl cat repro-addon-evidence.service")
+  var props = ""
+  var inService = false
+  for l in cat.stdout.splitLines():
+    if l.startsWith("["): inService = l == "[Service]"
+    elif inService and '=' in l and not l.startsWith("Exec") and
+        not l.startsWith("Type=") and not l.startsWith("TimeoutStartSec="):
+      props.add(" -p " & quoteShell(l))
+  let probe = g.exec("systemd-run --wait --pipe --quiet --collect" & props &
+    " /bin/sh -c " & quoteShell("echo uid=$(id -u); " &
+      "cat /var/lib/repro/evidence/host-ca.key >/dev/null 2>&1 && " &
+      "echo credential-read; systemctl is-system-running 2>&1; true"))
+  record["shipIdentity"] = %(own.stdout & "\n" & probe.stdout & probe.stderr)
+  step("the shipping unit runs as its dynamic user: not root, no " &
+       "credential file, no PID 1 or bus (decision 181)",
+       ownOk and "uid=" in probe.stdout and "uid=0\n" notin probe.stdout &
+         "\n" and "credential-read" notin probe.stdout and
+         "Failed to connect" in probe.stdout,
+       own.stdout & own.stderr & "\n" & probe.stdout & probe.stderr)
   discard producer.publish(PublishSpec(sequence: 1,
     profileText: canonicalFile("/etc/repro/a11-enrol", "x\n")))
   let t = g.tickUnits()

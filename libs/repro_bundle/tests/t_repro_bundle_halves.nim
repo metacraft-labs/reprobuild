@@ -18,6 +18,13 @@
 ## `http://` source, which anyone on the path could rewrite, is refused. See
 ## reprobuild-pm issues/2026-11-12-bundle-extraction-writes-every-tar-member-
 ## under-before-checking-it-against-the-declared.md.
+##
+## The last suite protects the downloads themselves: a half's `dir` and its
+## part names come from the same unsigned latest.json, and are joined into
+## paths and written into curl's `-K` config, so each is checked and every
+## config value quoted before anything is fetched. Real curl over file://
+## URLs. See reprobuild-pm issues/2026-11-16-bundle-download-builds-a-curl-
+## config-from-unvalidated-latest-json-fields.md.
 
 import std/[algorithm, json, os, osproc, strutils, tempfiles, unittest]
 import repro_bundle
@@ -1336,3 +1343,121 @@ suite "sources half members are checked before anything is written":
       let msg = refusal(h, dir, ws)
       check "does not unpack" in msg
       check treeOf(ws) == before
+
+suite "a hostile latest.json cannot steer a download outside the bundle":
+  # reprobuild-pm issue
+  # 2026-11-16-bundle-download-builds-a-curl-config-from-unvalidated-latest-json-fields.md,
+  # Workspace-Bundles.md §7 step 2 and §9. latest.json is unsigned: every
+  # field joined into a path or written into curl's config is the bundle
+  # host's to choose. Real curl, reading file:// URLs; no mocks.
+  test "a quote and a newline in a value cannot add a curl directive":
+    if findExe("curl").len == 0:
+      skip("curl is needed")
+    else:
+      let top = createTempDir("repro-bundle-curl-", "")
+      defer: removeDir(top)
+      createDir(top / "src")
+      writeFile(top / "src" / "part-0000", "payload")
+      let planted = top / "planted"
+      # What a `dir` or part name of `x"<newline>output = "<planted>` makes
+      # of the url: it closes the quoted value, and the next line names an
+      # output of the attacker's choosing for that transfer.
+      let hostile = "file://" & top / "src" / "part-0000" & "\"\noutput = \"" &
+        planted
+      expect BundleError:
+        download(@[(hostile, top / "dest")], 1)
+      check not fileExists(planted)
+      check not fileExists(top / "dest")
+      # A quote or a backslash with no control character is a legitimate,
+      # if odd, name: it is escaped and reaches curl as itself.
+      check curlQuote("a\\b\"c") == "\"a\\\\b\\\"c\""
+      # The refusal never repeats the value: on the publish side it can be
+      # a credential read with a trailing newline.
+      var said = ""
+      try: discard curlQuote("AKIDEXAMPLE:s3cr3t\n")
+      except BundleError as e: said = e.msg
+      check "control character" in said
+      check "s3cr3t" notin said
+      let odd = top / "src" / "we\"ird\\name"
+      writeFile(odd, "odd")
+      download(@[("file://" & odd, top / "out\"put")], 1)
+      check readFile(top / "out\"put") == "odd"
+      check not fileExists(planted)
+
+  test "a half directory that is not the one §5 lays out is refused":
+    let top = createTempDir("repro-bundle-dir-", "")
+    defer: removeDir(top)
+    let system = hostSystem()
+    let id = repeat("0123456789abcdef", 2)
+    let bundle = top / "bundle"
+    createDir(bundle / system)
+    # A real half for the traversal to land in, outside the bundle.
+    createDir(top / "outside" / id)
+    proc latestWith(key, dir: string): string =
+      $(%*{"schema": BundleSchema, "name": "bundle", "system": system,
+        "workspace_dir": top / "ws", "members": [],
+        "halves": {key: {"id": id, "dir": dir, "workspace_dir": top / "ws",
+          "unpacked_bytes": 0, "compressed_bytes": 0, "parts": [],
+          "repos": {}}}})
+    for (key, dir) in [
+        ("sources", "sources/../../outside/" & id),
+        ("sources", "../outside/" & id),
+        ("sources", "/" & top / "outside" / id),
+        ("sources", "sources/" & id & "\"\noutput = \"" & top / "planted"),
+        ("sources", "sources/" & id.toUpperAscii()),
+        ("sources", "sources/" & id & "/"),
+        ("nix", "other-system/nix/" & id),
+        ("native_store", system / "nix" / id)]:
+      writeFile(bundle / system / LatestName, latestWith(key, dir))
+      var refused = ""
+      try:
+        discard restoreBundle(RestoreOptions(source: bundle,
+          workspaceDir: top / "ws", staging: top / "staging"))
+      except BundleError as e:
+        refused = e.msg
+      check "refusing the " & key & " half's directory" in refused
+      if "refusing" notin refused: echo dir.escape, ": ", refused
+    check not dirExists(top / "ws")
+    check not fileExists(top / "planted")
+    # The layout §5 prescribes is accepted.
+    check checkHalfDir(%*{"dir": "sources/" & id}, "sources", system) ==
+      "sources/" & id
+    check checkHalfDir(%*{"dir": system & "/nix/" & id}, "nix", system) ==
+      system & "/nix/" & id
+    check checkHalfDir(%*{"dir": system & "/native-store/" & id},
+      "native_store", system) == system & "/native-store/" & id
+
+  test "a part name a downloader could split or reinterpret is refused":
+    # The GitHub route hands curl NUL-separated triples through
+    # `xargs -0`: a NUL inside a name shifts them, and a fragment of the
+    # name becomes an output path relative to the restorer's directory.
+    for name in ["a\0B\0C\0.bashrc", "x\ny", "x\"y", "x y", "x/y", ".x",
+                 "x{1,2}", "x[1-2]", ""]:
+      expect StoreBundleError:
+        discard parsePartsJson(%*[{"file": name, "bytes": 1,
+          "sha256": repeat("0", 64)}])
+    check parsePartsJson(%*[{"file": "part-0000", "bytes": 1,
+      "sha256": repeat("0", 64)}])[0].file == "part-0000"
+    # And through restore, from a published bundle's latest.json, before
+    # anything is fetched.
+    let top = createTempDir("repro-bundle-part-", "")
+    defer: removeDir(top)
+    let system = hostSystem()
+    let id = repeat("0123456789abcdef", 2)
+    createDir(top / "bundle" / system)
+    writeFile(top / "bundle" / system / LatestName, $(%*{"schema": BundleSchema,
+      "name": "bundle", "system": system, "workspace_dir": top / "ws",
+      "members": [], "halves": {"sources": {"id": id, "dir": "sources/" & id,
+        "workspace_dir": top / "ws", "unpacked_bytes": 0,
+        "compressed_bytes": 0, "repos": {}, "parts": [{
+          "file": "a\0B\0C\0.bashrc", "bytes": 1,
+          "sha256": repeat("0", 64)}]}}}))
+    var refused = ""
+    try:
+      discard restoreBundle(RestoreOptions(source: top / "bundle",
+        workspaceDir: top / "ws", staging: top / "staging"))
+    except CatchableError as e:
+      refused = e.msg
+    check "refusing part name" in refused
+    check not dirExists(top / "ws")
+
