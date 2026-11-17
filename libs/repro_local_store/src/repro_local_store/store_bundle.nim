@@ -18,14 +18,21 @@
 ## The tar and zstd work is done by the system `tar` (GNU tar, for pax
 ## headers with nanosecond mtimes) and `zstd` executables. Both are present
 ## wherever the other bundle halves are produced and consumed.
+##
+## The part hashes come from the same unsigned manifest as the parts, so they
+## say nothing about what the stream may write. Before any extraction, import
+## lists the archive with the same GNU tar over the same verified parts
+## (`listBundleMembers`) and refuses unless its members are exactly the ones
+## `contents` declares (§5 step 3, `checkMembers`); the rules themselves are
+## in `tar_members`.
 
 # This module's C (including the SHA-256 it instantiates for part checks)
 # runs once per byte of a bundle, so it is optimized whatever the Nim build
 # mode is. See docs/store-bundles.md §10 for the measurement.
 {.localPassC: "-O3".}
 
-import std/[algorithm, json, monotimes, os, osproc, posix, sets, streams,
-    strutils, tables, times]
+import std/[algorithm, json, monotimes, os, osproc, posix, sequtils, sets,
+    streams, strutils, tables, times]
 import nimcrypto/sha2
 import blake3
 import repro_hash
@@ -34,6 +41,7 @@ import repro_core/ambient_execution
 import ../repro_local_store
 import ./store
 import ./prefix_paths
+import ./tar_members
 
 type
   StoreBundleError* = object of CatchableError
@@ -69,6 +77,8 @@ type
       ## Its outputs fail the in-place check: the output metadata changed
       ## since the record was written.
     skOutputOutsideRoots = "output-outside-roots"
+      ## An output outside the bundle roots, or below the store or
+      ## action-cache root outside everything a bundle carries there.
     skOutputOutsideSelection = "output-outside-selection"
     skUnplaceable = "unplaceable"
       ## A relocatable record no selected project directory holds in its
@@ -572,6 +582,50 @@ proc resolveRecordDir(record: ActionResultRecord;
       return dir
   ""
 
+proc stateAreas(store, ac: string): seq[string] =
+  ## The areas below the store and action-cache roots a closure carries
+  ## besides prefixes and edge directories (§2). `recipe-compiles/` holds
+  ## the outputs of the recipe-compile records (a compiled project provider,
+  ## an extracted interface), which §2 carries like any recorded output: a
+  ## bundle that left them out would have every importer recompile its
+  ## providers. Like `cas/`, it holds only content-keyed record outputs,
+  ## none of the importer's own state.
+  @[store / "compiler-probes", store / "tool-store" / "compiler-probes",
+    store / FrozenDevEnvDirName, ac / "cas", ac / RecipeCompilesDirName]
+
+proc carriedClassProblem(c: BundleClosure; e: BundleEntry;
+                         contentsPath: string): string =
+  ## "" when entry `e` is something a closure carries (§2), as far as the
+  ## store and action-cache roots go; otherwise why not. Below those two
+  ## roots the importer, and every later `repro`, keeps its own state
+  ## (`index.db`, `tmp/`, `gc/`, the action-cache index files, ...), which a
+  ## bundle never carries and must not be able to replace: a crafted
+  ## `index.db` could name prefix paths outside the store for a later GC to
+  ## delete. So there an entry must lie in one of the areas the closure
+  ## draws from -- a carried prefix, the compiler-probe markers, the frozen
+  ## dev-env scripts, a carried action-cache edge, the action-cache CAS --
+  ## or be a directory on the way to one of them (or to `contents`).
+  ## `contentsPath` may be "" (at export, before the id).
+  let store = c.roots.storeRoot
+  let ac = c.roots.actionCacheRoot
+  if not (e.path.isWithin(store) or e.path.isWithin(ac)):
+    return ""
+  # No exemption for a workspace root nested below either root: a bundle
+  # may declare its own workspace roots when the importer names none, and
+  # declaring `<action-cache>/action-cache` as one must not make the cache's
+  # own files carriable.
+  var areas = c.prefixes & c.edges
+  areas.add(stateAreas(store, ac))
+  if e.path.withinAny(areas):
+    return ""
+  if e.kind == bekDir and (areas & @[contentsPath]).anyIt(
+      it.len > 0 and it.isWithin(e.path)):
+    return ""
+  "bundle entry " & e.path.escape & " lies below the store or " &
+    "action-cache root outside everything a bundle carries there (carried " &
+    "prefixes, compiler probes, frozen dev-env scripts, action-cache edges " &
+    "and blobs)"
+
 proc computeClosure*(roots: BundleRoots;
                      devEnvs: openArray[FrozenDevEnv] = [];
                      selection = BundleSelection()): BundleClosure =
@@ -654,12 +708,23 @@ proc computeClosure*(roots: BundleRoots;
         touching = true
         # Import refuses any member outside the declared roots or in an
         # excluded directory, so a record writing there cannot travel (and
-        # is reported instead).
+        # is reported instead). Below the store and action-cache roots only
+        # the carried areas travel (`carriedClassProblem`): an output there
+        # must be in a receipted prefix or one of the state areas.
         var outside = ""
         var outsideKind = skOutputOutsideRoots
+        var where = "outside the bundle roots"
         for output in record.outputs:
           let p = resolvedPath(outputRoot, output.path)
           if p.isWithin(storeRoot) or p.isWithin(acRoot):
+            let prefix = prefixDirOf(p, storeRoot)
+            if not ((prefix.len > 0 and
+                fileExists(prefix / ReceiptFileName)) or
+                p.withinAny(stateAreas(storeRoot, acRoot))):
+              outside = p
+              where = "below the store or action-cache root outside " &
+                "everything a bundle carries there"
+              break
             continue
           if not p.withinAny(ws):
             outside = p
@@ -667,14 +732,12 @@ proc computeClosure*(roots: BundleRoots;
           if not p.inSelection(ws, sel):
             outside = p
             outsideKind = skOutputOutsideSelection
+            where = "outside the selection"
             break
         if outside.len > 0:
           result.skippedRecords.add(SkippedRecord(edgeDir: edgeDir,
             strongHex: strongHex, kind: outsideKind,
-            reason: (if outsideKind == skOutputOutsideRoots:
-                       "an output lies outside the bundle roots: "
-                     else: "an output lies outside the selection: ") &
-              outside))
+            reason: "an output lies " & where & ": " & outside))
           continue
         if outputRoot.len == 0:
           let mismatch = outputStateMismatch(record, "")
@@ -784,6 +847,12 @@ proc computeClosure*(roots: BundleRoots;
 
   entries.sort(proc (a, b: BundleEntry): int = cmp(a.path, b.path))
   result.entries = entries
+  # Import holds the store and action-cache side to the classes above
+  # (`checkEntryPlacement`); a bundle it would refuse is not worth writing.
+  for e in result.entries:
+    let problem = carriedClassProblem(result, e, "")
+    if problem.len > 0:
+      fail("cannot export: " & problem)
 
   # §5.3 restamps: fingerprinted inputs the bundle does not carry.
   var restampPaths: seq[string]
@@ -1313,9 +1382,12 @@ proc checkProducer*(bundle, local: BundleProducer) =
       "with the repro that made it (a workspace bundle carries it in its " &
       "Nix half), or export it again with this one")
 
-proc checkEntryPlacement*(c: BundleClosure) =
-  ## Every member must lie inside a declared root and in the selection
-  ## (§2.1), so an unpack cannot write anywhere else.
+proc checkEntryPlacement*(c: BundleClosure; contentsPath: string) =
+  ## Every declared entry must lie inside a declared root and in the
+  ## selection (§2.1), and none below a declared symlink, so that what
+  ## `contents` declares cannot write anywhere else. (`checkMembers` then
+  ## holds the archive to exactly these entries.) `contentsPath` may be ""
+  ## (at export, before the id).
   var allowed = @[c.roots.storeRoot, c.roots.actionCacheRoot]
   allowed.add(c.roots.workspaceRoots)
   for root in allowed:
@@ -1333,12 +1405,65 @@ proc checkEntryPlacement*(c: BundleClosure) =
     path.isWithin(c.roots.storeRoot) or
       path.isWithin(c.roots.actionCacheRoot) or path.inSelection(ws,
         c.selection)
+  # A prefix line names a store prefix directory and nothing else: the
+  # symlink rule below trusts what lies inside one, and the unpack excludes
+  # an intact one wholesale.
+  for prefix in c.prefixes:
+    if normalizedPath(prefix) != prefix or
+        prefixDirOf(prefix, c.roots.storeRoot) != prefix:
+      fail("bundle declares " & prefix.escape & " as a prefix, which is " &
+        "not a store prefix directory")
+  # An edge line names a per-edge record directory and nothing else: the
+  # rule below trusts what lies inside one.
+  let hot = c.roots.actionCacheRoot / "action-cache" / "hot-records"
+  for edge in c.edges:
+    var weak: ContentDigest
+    if edge.parentDir != hot or
+        not weakFromEdgeDirName(edge.extractFilename, weak):
+      fail("bundle declares " & edge.escape & " as an action-cache edge, " &
+        "which is not a per-edge record directory")
+  var links = initHashSet[string]()
   for e in c.entries:
     if not e.path.isAbsolute or normalizedPath(e.path) != e.path or
         not e.path.withinAny(allowed):
       fail("bundle entry outside its declared roots: " & e.path)
     if not inSel(e.path):
       fail("bundle entry in a directory its selection excludes: " & e.path)
+    let classProblem = carriedClassProblem(c, e, contentsPath)
+    if classProblem.len > 0:
+      fail(classProblem)
+    if e.kind == bekLink:
+      # A link at a root, or above one, moves the whole root: everything the
+      # importer writes there afterwards would follow it.
+      for root in allowed:
+        if root.isWithin(e.path):
+          fail("bundle declares the symlink " & e.path.escape & " at or " &
+            "above the root " & root.escape)
+      # After the unpack the importer, and every later `repro`, opens its
+      # own files below the store and action-cache roots (`index.db`, `cas/`,
+      # `tmp/`, the per-edge records, ...) and follows a link it finds
+      # there. Only a carried prefix holds links of its own (a package's
+      # `lib/libfoo.so -> libfoo.so.1`), and nothing writes into a prefix
+      # once it is registered, so a link anywhere else on that side is
+      # refused: `<store>/index.db -> /etc/x` would otherwise have the store
+      # open, and create, its database wherever the link points.
+      if (e.path.isWithin(c.roots.storeRoot) or
+          e.path.isWithin(c.roots.actionCacheRoot)) and
+          not c.prefixes.anyIt(e.path.isWithin(it) and e.path != it):
+        fail("bundle declares the symlink " & e.path.escape & " below the " &
+          "store or action-cache root outside every carried prefix; the " &
+          "importer would write through it")
+      links.incl(e.path)
+  if links.len > 0:
+    # A member written below a symlink lands wherever the link points, and
+    # so does a restamp's mtime write (step 5.3).
+    for path in c.entries.mapIt(it.path) & c.restamps.mapIt(it.path) &
+        @[contentsPath]:
+      var dir = path.parentDir
+      while dir.len > 1:
+        if dir in links:
+          fail("bundle path " & path & " lies below the symlink entry " & dir)
+        dir = dir.parentDir
   for r in c.records:
     if r.outputRoot.len > 0 and not r.outputRoot.inSelection(ws,
         c.selection):
@@ -1348,6 +1473,133 @@ proc checkEntryPlacement*(c: BundleClosure) =
     if not r.path.inSelection(ws, c.selection):
       fail("bundle restamp outside the workspace roots or the selection: " &
         r.path)
+
+proc deepestRoot(path: string; roots: openArray[string]): string =
+  ## The longest of `roots` that holds `path`; refuses when none does.
+  for r in roots:
+    if path.isWithin(r) and r.len > result.len:
+      result = r
+  if result.len == 0:
+    fail("bundle path outside its declared roots: " & path)
+
+proc linkedAncestor(path, root: string;
+                    memo: var Table[string, string]): string =
+  ## The first existing directory strictly between `path` and `root` that is
+  ## a symlink on this machine, or "". `memo` maps each directory already
+  ## walked to its answer, so paths sharing directories lstat each once.
+  var walked: seq[string]
+  var dir = path.parentDir
+  while dir.len > root.len and dir.isWithin(root):
+    if dir in memo:
+      result = memo[dir]
+      break
+    walked.add(dir)
+    var st: Stat
+    if lstat(dir.cstring, st) == 0 and S_ISLNK(st.st_mode):
+      result = dir
+      break
+    dir = dir.parentDir
+  for d in walked:
+    memo[d] = result
+
+proc checkNoLinkedAncestors(c: BundleClosure; contentsPath: string) =
+  ## §5 step 3, before anything is written: GNU tar follows a symlink it
+  ## finds on disk in a member's leading directories, and so do the
+  ## importer's own writes (the import marker beside `contents`). A link
+  ## already below a root, whether an earlier bundle declared it as an `l`
+  ## entry or anyone else made it, would carry this unpack out of the roots
+  ## although every member is declared. So no existing directory between a
+  ## member and the deepest root that holds it may be a symlink. The roots
+  ## themselves are the machine's own configuration and may be links.
+  var roots = @[c.roots.storeRoot, c.roots.actionCacheRoot]
+  roots.add(c.roots.workspaceRoots)
+  var memo = initTable[string, string]()
+  for path in c.entries.mapIt(it.path) & @[contentsPath]:
+    let link = linkedAncestor(path, deepestRoot(path, roots), memo)
+    if link.len > 0:
+      fail("refusing the bundle before unpacking it: " & path.escape &
+        " lies below " & link.escape & ", which is a symlink on this " &
+        "machine, so the unpack would write through it; nothing was " &
+        "written")
+
+proc listBundleMembers*(dir: string; parts: seq[BundlePart];
+                        listingPath: string; zstd = "") =
+  ## Write GNU tar's verbose listing of the stream the verified `parts` of
+  ## `dir` carry to `listingPath`, one member per line, in the form
+  ## `tar_members.parseListingLine` reads. It is the very tar that extracts
+  ## the stream, reading the same verified bytes, so the listing names what
+  ## extraction will write: a check of it is a check of the extraction.
+  ## `zstd` is the decompressor the extraction will use; empty means the one
+  ## on `PATH` (the Nix half passes its own fallback, so a host without zstd
+  ## can still be checked). Raises StoreBundleError when tar cannot read the
+  ## whole stream.
+  let zstdExe = if zstd.len > 0: zstd else: requireTool("zstd")
+  let tarExe = requireTool("tar")
+  let errPath = listingPath & ".stderr"
+  defer: removeFile(errPath)
+  # `LC_ALL=C`: every non-ASCII byte is listed as a `\ooo` escape, whatever
+  # the caller's locale.
+  let command = "set -o pipefail; (" & quoteShell(zstdExe) & " -q -dc --long=" &
+    $ZstdWindowLog & " - | LC_ALL=C " & quoteShell(tarExe) &
+    " -tvf - --quoting-style=c --numeric-owner --full-time) >" &
+    quoteShell(listingPath) & " 2>" & quoteShell(errPath)
+  let code = feedParts(dir, parts, command, stopEarly = false)
+  if code != 0:
+    fail("cannot list the bundle's archive (exit " & $code & "): " &
+      (if fileExists(errPath): readFile(errPath).strip() else: ""))
+
+proc checkMembers*(c: BundleClosure; contentsPath, listingPath: string) =
+  ## §5 step 3, before anything is written: the archive's members, as listed
+  ## in `listingPath`, must be exactly the `contents` member and one member
+  ## per `entry` (§4.1: "Every tar entry has exactly one `entry` line, and
+  ## there are no others"), each carried as the type it is declared with, a
+  ## symlink with its declared target and a hard link to a declared file; and
+  ## they must pass the rules every half applies (`tar_members.admit`,
+  ## `finish`). Raises StoreBundleError naming the first offending member.
+  template refuse(problem: string) =
+    fail("refusing the bundle before unpacking it: " & problem &
+      "; nothing was written")
+  var declared = initTable[string, DeclaredMember]()
+  declared[relToSlash(contentsPath)] = DeclaredMember(kind: dkPlainFile)
+  for e in c.entries:
+    let name = relToSlash(e.path)
+    if name in declared:
+      refuse("contents declares " & e.path.escape & " twice")
+    declared[name] =
+      case e.kind
+      of bekFile: DeclaredMember(kind: dkFile)
+      of bekDir: DeclaredMember(kind: dkDir)
+      of bekLink: DeclaredMember(kind: dkLink, target: e.digest)
+  var members = initMemberSet()
+  try:
+    for (_, m) in listingMembers(listingPath):
+      var problem = members.admit(m)
+      if problem.len == 0:
+        let name = memberPath(m)
+        if name notin declared:
+          problem = "member " & m.name.escape &
+            " is not declared in the bundle's contents"
+        else:
+          problem = declaredMemberProblem(m, declared[name])
+          if problem.len == 0 and m.kind == 'h' and
+              (m.linkTarget notin declared or
+               declared[m.linkTarget].kind != dkFile):
+            problem = "hard link " & m.name.escape & " names " &
+              m.linkTarget.escape & ", which is not a declared file entry"
+      if problem.len > 0:
+        refuse(problem)
+  except ValueError as e:
+    refuse(e.msg)
+  let late = members.finish()
+  if late.len > 0:
+    refuse(late)
+  if members.len != declared.len:
+    # Every member admitted is declared and distinct, so a short count means
+    # a declared one is missing.
+    for name in declared.keys:
+      if name notin members:
+        refuse("member " & ("/" & name).escape &
+          ", which contents declares, is not in the archive")
 
 proc entryMatches(e: BundleEntry; checkContent: bool;
                   buf: var seq[byte]): string =
@@ -1416,6 +1668,9 @@ type VerifiedContents* = object
   ## (§5 steps 1 and 2, without the comparison with the local machine).
   bundleId*: string
   parts*: seq[BundlePart]
+  contentsPath*: string
+    ## Where `contents` unpacks (`<store>/bundles/<id>/contents`), checked
+    ## against the id.
   closure*: BundleClosure
   manifest*: JsonNode
     ## The transport manifest as read; its fields are unverified.
@@ -1430,8 +1685,9 @@ proc readVerifiedContents*(dir: string;
   if contentsPathFor(c.roots.storeRoot, m.bundleId) != m.contentsPath or
       bundleIdOf(c) != m.bundleId:
     fail("bundle id does not match its contents")
-  checkEntryPlacement(c)
-  result = VerifiedContents(bundleId: m.bundleId, parts: m.parts, closure: c,
+  checkEntryPlacement(c, m.contentsPath)
+  result = VerifiedContents(bundleId: m.bundleId, parts: m.parts,
+    contentsPath: m.contentsPath, closure: c,
     manifest: parseJson(readFile(dir / manifestName)))
 
 proc importBundle*(opts: ImportOptions; local: BundleRoots;
@@ -1453,7 +1709,8 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
   # id, roots, producer and placement. Nothing is written before this.
   let verified = readVerifiedContents(dir, manifestName)
   let c = verified.closure
-  let m = (bundleId: verified.bundleId, parts: verified.parts)
+  let m = (bundleId: verified.bundleId, parts: verified.parts,
+    contentsPath: verified.contentsPath)
   checkRoots(c.roots, local)
   checkProducer(c.producer, producer)
   result.bundleId = m.bundleId
@@ -1483,7 +1740,18 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
     result.skippedExtraction = true
   else:
     phaseDone("verify contents + roots")
-    # Step 3: unpack, leaving intact content-addressed prefixes alone.
+    # Step 3: before anything is written, list the archive with the tar that
+    # will extract it and refuse unless its members are exactly the declared
+    # ones. The part hashes come from the same unsigned manifest as the
+    # parts, so they cannot confine the unpack; this check does.
+    let listingPath = dir / ("." & m.bundleId & ".members")
+    defer: removeFile(listingPath)
+    listBundleMembers(dir, m.parts, listingPath)
+    checkMembers(c, m.contentsPath, listingPath)
+    removeFile(listingPath)
+    checkNoLinkedAncestors(c, m.contentsPath)
+    phaseDone("check members")
+    # Then unpack, leaving intact content-addressed prefixes alone.
     for prefix in c.prefixes:
       if dirExists(prefix) and prefixIntact(prefix):
         excluded.incl(prefix)
@@ -1561,8 +1829,17 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
           inc result.rewitnessedRecords
 
   phaseDone("re-witness records")
-  # Step 5.3: restamp source inputs whose bytes are the recorded ones.
+  # Step 5.3: restamp source inputs whose bytes are the recorded ones. The
+  # mtime write follows symlinks in the path's directories, so a restamp
+  # below a directory that is a symlink on this machine (one an earlier
+  # bundle declared, say) would stamp a file outside the roots: it is left
+  # alone and counted as a mismatch, which costs only a rebuild of what read it.
+  var restampMemo = initTable[string, string]()
   for r in c.restamps:
+    if linkedAncestor(r.path, deepestRoot(r.path, c.roots.workspaceRoots),
+        restampMemo).len > 0:
+      inc result.restampMismatches
+      continue
     let st = liveState(r.path)
     if not st.exists or st.kind != bekFile or st.size != r.size:
       inc result.restampMismatches

@@ -186,7 +186,8 @@ restamp  <size>  <mtime-ns>  <blake3-hex>  <abs path>
 The fields above are spaced for reading; on disk each line separates them with
 a single TAB. `kind` is `f` (file), `d` (directory) or `l` (symlink, whose digest field holds
 the escaped link target). Every tar entry has exactly one `entry` line, and
-there are no others.
+there are no others; import enforces this before it writes anything (§5 step
+3). No `entry` lies below an `l` entry.
 
 The `producer` line names the `repro` that wrote the bundle: its version and
 the source revision it was built from (with `-dirty` when its tree carried
@@ -226,7 +227,38 @@ schema `reprobuild.store-bundle.v2`. They are unverified there;
    Two builds that both report `unknown` compare equal; every route that
    installs `repro` (`scripts/build_apps.sh`, the Nix package, the release
    archives) records the revision.
-3. **Unpack.** Stream the verified parts into `zstd -d | tar -x -C /`. Prefix
+3. **Check the members, then unpack.** Before anything is written, list the
+   archive with the same GNU tar that will extract it, over the same verified
+   parts (`zstd -d | LC_ALL=C tar -tv --quoting-style=c --numeric-owner
+   --full-time`), and refuse unless its members are exactly the `contents`
+   member plus one member per `entry` line (§4.1), each carried as the type
+   its line declares: a file as a file or a hard link to an earlier declared
+   file, a directory as a directory, a symlink as a symlink with the declared
+   target. A member that is missing, carried twice, of another type (fifo,
+   device), or named with a leading `/` or a `.`/`..` component is refused,
+   and so is any member below a symlink member. GNU tar follows a symlink it
+   finds on disk in a member's leading directories, so import also refuses
+   when any existing directory between a member and the root that holds it
+   is a symlink on this machine (one an earlier bundle declared, say): an
+   unpack would otherwise write through it. What `contents` declares is
+   held to the same line: no `restamp` path may lie below a declared
+   symlink either, and no symlink entry may be a root or lie above one.
+   Below the store and action-cache roots an entry must lie in something
+   the closure carries (a carried prefix, the compiler-probe markers, the
+   frozen dev-env scripts, a carried action-cache edge, the action-cache
+   blobs, the recipe-compile outputs) or be a directory on the way to one,
+   and a symlink entry there must lie inside a carried prefix. The importer, and every later `repro`,
+   keeps its own state there (`index.db`, `tmp/`, the action-cache index)
+   and would read, or follow, whatever a bundle put in its place. Export
+   leaves out (and reports) a record with an output there outside those
+   areas, and refuses to write a bundle that import would refuse on these
+   grounds. The listing is GNU tar's own
+   reading of the stream, so the check sees every name exactly as extraction
+   will. The part hashes come from the same unsigned manifest as the parts,
+   so this check, and not the hashes, is what keeps a bundle from writing
+   anywhere but its declared paths.
+
+   Then stream the verified parts into `zstd -d | tar -x -C /`. Prefix
    directories that already exist locally with a receipt whose realization
    hash matches their name are excluded from extraction. They are
    content-addressed, so this is what makes a repeated import cheap and leaves
@@ -287,7 +319,9 @@ every record would miss. For each `restamp` entry whose live file has the
 recorded size **and the recorded BLAKE3 digest**, import sets the file's mtime
 back to the recorded value. A file whose content differs is left alone, and
 its records miss, which is correct. Import never restamps a path outside a
-workspace root.
+workspace root, and it leaves alone (counting it as a mismatch) a path below
+a directory that is a symlink on this machine, since setting the mtime would
+follow that link.
 
 ## 6. Frozen dev-env activation
 
@@ -335,8 +369,9 @@ the workspace root a root. `closure` then reports the selector, its members,
 the excluded and re-included directories, the records it carries, and every
 record that touches the selection but is not carried as re-witnessable, with
 a reason class: `output-changed` (the output metadata changed since the
-record was written), `output-outside-roots`, `output-outside-selection` or
-`unplaceable`.
+record was written), `output-outside-roots` (an output outside the roots,
+or below the store or action-cache root outside everything a bundle carries
+there), `output-outside-selection` or `unplaceable`.
 
 `repro bundle inspect` reads a native-store half (or a whole workspace
 bundle, see [workspace-bundles.md](./workspace-bundles.md)) and prints the
@@ -443,6 +478,11 @@ caches dropped between runs):
 | register prefixes | 0.0 s | 0.0 s |
 | re-witness records | 5.8 s | 1.1 s |
 | total | 33.5 s | 16.4 s |
+
+These phases predate the member check of §5 step 3, which decompresses and
+lists the stream once more before the unpack. It writes nothing but the
+listing, so it should cost about the decompression share of the unpack; it
+has not been re-measured on this bundle.
 
 Plain `cat parts | zstd -d | tar -x` of the same bundle into an empty
 directory took 7.1 s, so the release unpack runs at the disk floor. Before

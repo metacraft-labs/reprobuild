@@ -47,7 +47,7 @@
 ## but the rejection-reason coverage degrades; the e2e validator picks up
 ## that gap by exercising the full path against a real toolchain.
 
-import std/[os, strutils, tables, unittest]
+import std/[os, osproc, streams, strtabs, strutils, tables, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -700,3 +700,274 @@ suite "rust convention M4":
             if action.id.startsWith("crude-build-"):
               sawMode = true
           check sawMode
+
+  # --- Features and the crate environment ----------------------------------
+  #
+  # Rust.md §"Recognition" item 6 and §"Features, lints and the crate
+  # environment" (reprobuild-pm). Mode A does no feature resolution, so a
+  # workspace in which any package declares a feature or an optional
+  # dependency builds in Mode B as a whole; and every Mode A ``rustc``
+  # action runs with the variables Cargo sets for that kind of crate.
+  # Written as the adversarial confirmation of reprobuild-pm issue
+  # ``issues/2026-11-16-rust-mode-a-may-compile-crates-with-features-or-without-cargos-crate-environment.md``:
+  # both tests failed before the convention carried the feature trigger
+  # and the crate environment. No mocks: the convention runs the real
+  # ``cargo metadata``, and the env test runs the real ``rustc`` with the
+  # emitted argv and environment.
+
+  test "emitFragment: a path-only workspace with a feature or optional dependency builds in Mode B":
+    # Two path-only workspaces of two members each, where only ONE member
+    # carries the trigger; the other is plain. The trigger is
+    # workspace-wide, so neither member may get a Mode A action.
+    #   * ``default-features``: a library with ``default = ["x"]`` that
+    #     refuses to compile with ``x`` off. Mode A would compile it with
+    #     no ``--cfg feature``, i.e. with its default features off, and
+    #     hit the ``compile_error!``.
+    #   * ``optional-dependency``: a library with an optional path
+    #     dependency on its sibling and no ``[features]`` table.
+    let cases = @[
+      ("default-features",
+        "[features]\n" &
+        "default = [\"x\"]\n" &
+        "x = []\n",
+        "#[cfg(not(feature = \"x\"))]\n" &
+        "compile_error!(\"x off\");\n" &
+        "pub fn answer() -> i32 { 42 }\n"),
+      ("optional-dependency",
+        "[dependencies]\n" &
+        "plain = { path = \"../plain\", optional = true }\n",
+        "pub fn answer() -> i32 { 42 }\n"),
+    ]
+    for (caseName, triggerToml, triggerLib) in cases:
+      checkpoint "case " & caseName
+      let scratch = getTempDir() / ("test_rust_convention_features_" & caseName)
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch / "plain" / "src")
+      createDir(scratch / "trigger" / "src")
+      writeFile(scratch / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package featuredWorkspace:\n" &
+        "  uses:\n" &
+        "    \"rust >=1.80\"\n" &
+        "\n" &
+        "  library trigger\n")
+      writeFile(scratch / "Cargo.toml",
+        "[workspace]\n" &
+        "resolver = \"2\"\n" &
+        "members = [\"plain\", \"trigger\"]\n")
+      writeFile(scratch / "plain" / "Cargo.toml",
+        "[package]\n" &
+        "name = \"plain\"\n" &
+        "version = \"0.1.0\"\n" &
+        "edition = \"2021\"\n" &
+        "publish = false\n")
+      writeFile(scratch / "plain" / "src" / "lib.rs",
+        "pub fn plain() -> i32 { 1 }\n")
+      writeFile(scratch / "trigger" / "Cargo.toml",
+        "[package]\n" &
+        "name = \"trigger\"\n" &
+        "version = \"0.1.0\"\n" &
+        "edition = \"2021\"\n" &
+        "publish = false\n" &
+        "\n" & triggerToml)
+      writeFile(scratch / "trigger" / "src" / "lib.rs", triggerLib)
+      defer:
+        removeDir(scratch)
+      if not rustToolchainAvailable():
+        skip("rustc or cargo not on PATH")
+        break
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var sawCrude = false
+      var modeAIds: seq[string] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("rustc-"):
+          modeAIds.add(action.id)
+        if action.id.startsWith("crude-build-"):
+          sawCrude = true
+      checkpoint caseName & ": Mode A actions emitted: " & $modeAIds
+      check modeAIds.len == 0
+      check sawCrude
+
+  test "emitFragment: Mode A rustc actions carry the crate environment":
+    # A binary that embeds ``env!("CARGO_PKG_VERSION")`` and
+    # ``env!("CARGO_BIN_NAME")``. The emitted metadata and link actions
+    # are run with real rustc, with the environment the action declares;
+    # without the crate environment rustc rejects ``env!``.
+    let scratch = getTempDir() / "test_rust_convention_crate_env"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    createDir(scratch / "tests")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package crateEnvExample:\n" &
+      "  uses:\n" &
+      "    \"rust >=1.80\"\n" &
+      "\n" &
+      "  executable crate-env-bin\n")
+    writeFile(scratch / "Cargo.toml",
+      "[package]\n" &
+      "name = \"crate-env\"\n" &
+      "version = \"3.4.5-rc.1+build.7\"\n" &
+      "edition = \"2021\"\n" &
+      "authors = [\"A <a@example.com>\", \"B\"]\n" &
+      "description = \"crate env probe\"\n" &
+      "homepage = \"https://example.com/home\"\n" &
+      "repository = \"https://example.com/repo\"\n" &
+      "license = \"MIT\"\n" &
+      "license-file = \"LICENSE.txt\"\n" &
+      "rust-version = \"1.70\"\n" &
+      "publish = false\n" &
+      "\n" &
+      "[lib]\n" &
+      "name = \"crate_env\"\n" &
+      "path = \"src/lib.rs\"\n" &
+      "\n" &
+      "[[bin]]\n" &
+      "name = \"crate-env-bin\"\n" &
+      "path = \"src/main.rs\"\n")
+    writeFile(scratch / "README.md", "probe\n")
+    writeFile(scratch / "LICENSE.txt", "probe\n")
+    writeFile(scratch / "src" / "lib.rs",
+      "pub const NAME: &str = env!(\"CARGO_PKG_NAME\");\n")
+    writeFile(scratch / "src" / "main.rs",
+      "fn main() {\n" &
+      "    println!(\"{} {} {}\", env!(\"CARGO_PKG_VERSION\"),\n" &
+      "        env!(\"CARGO_BIN_NAME\"), env!(\"CARGO_CRATE_NAME\"));\n" &
+      "}\n")
+    writeFile(scratch / "tests" / "probe.rs",
+      "#[test]\n" &
+      "fn bin_exe() { assert!(!env!(\"CARGO_BIN_EXE_crate-env-bin\").is_empty()); }\n")
+    defer:
+      removeDir(scratch)
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var byId = initTable[string, BuildActionDef]()
+      var order: seq[string] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        byId[action.id] = action
+        order.add(action.id)
+
+      proc envOf(action: BuildActionDef): Table[string, string] =
+        for (name, value) in action.env:
+          result[name] = value
+
+      # Every rustc action declares the package-level variables.
+      var rustcCount = 0
+      for id in order:
+        if not id.startsWith("rustc-") or id.startsWith("rustc-test-run-") or
+            id.startsWith("rustc-test-stamp-"):
+          continue
+        inc rustcCount
+        let env = envOf(byId[id])
+        checkpoint "action " & id & " env: " & $env
+        check env.getOrDefault("CARGO_PKG_NAME") == "crate-env"
+        check env.getOrDefault("CARGO_PKG_VERSION") == "3.4.5-rc.1+build.7"
+        check env.getOrDefault("CARGO_PKG_VERSION_MAJOR") == "3"
+        check env.getOrDefault("CARGO_PKG_VERSION_MINOR") == "4"
+        check env.getOrDefault("CARGO_PKG_VERSION_PATCH") == "5"
+        check env.getOrDefault("CARGO_PKG_VERSION_PRE") == "rc.1"
+        check env.getOrDefault("CARGO_PKG_AUTHORS") == "A <a@example.com>:B"
+        check env.getOrDefault("CARGO_PKG_DESCRIPTION") == "crate env probe"
+        check env.getOrDefault("CARGO_PKG_HOMEPAGE") == "https://example.com/home"
+        check env.getOrDefault("CARGO_PKG_REPOSITORY") == "https://example.com/repo"
+        check env.getOrDefault("CARGO_PKG_LICENSE") == "MIT"
+        check env.getOrDefault("CARGO_PKG_LICENSE_FILE") == "LICENSE.txt"
+        check env.getOrDefault("CARGO_PKG_RUST_VERSION") == "1.70"
+        check env.getOrDefault("CARGO_PKG_README") == "README.md"
+        check env.getOrDefault("CARGO_MANIFEST_PATH").endsWith("Cargo.toml")
+        check env.getOrDefault("CARGO_MANIFEST_DIR") ==
+          env.getOrDefault("CARGO_MANIFEST_PATH").parentDir
+        check env.getOrDefault("CARGO_PRIMARY_PACKAGE") == "1"
+        check env.getOrDefault("CARGO").len > 0
+        check "CARGO_CRATE_NAME" in env
+      check rustcCount >= 5   # lib x2, bin x2, test compile
+
+      # The integration test's compile sees the package's binary and a
+      # target tmpdir, and depends on the binary's link action.
+      var testCompileId = ""
+      var binLinkId = ""
+      for id in order:
+        if id.startsWith("rustc-test-compile-"):
+          testCompileId = id
+        elif id.startsWith("rustc-link-") and
+            byId[id].outputs[0].extractFilename.startsWith("crate_env_bin"):
+          binLinkId = id
+      require testCompileId.len > 0
+      require binLinkId.len > 0
+      let testEnv = envOf(byId[testCompileId])
+      check testEnv.getOrDefault("CARGO_BIN_EXE_crate-env-bin") ==
+        byId[binLinkId].outputs[0]
+      check testEnv.getOrDefault("CARGO_TARGET_TMPDIR").len > 0
+      check dirExists(testEnv.getOrDefault("CARGO_TARGET_TMPDIR"))
+      check binLinkId in byId[testCompileId].deps
+      var testRunId = ""
+      for id in order:
+        if id.startsWith("rustc-test-run-"):
+          testRunId = id
+      require testRunId.len > 0
+      check testEnv.getOrDefault("CARGO_TARGET_TMPDIR") in
+        byId[testRunId].scratchDirs
+      # The binary's bytes are an input of both the test compile and the
+      # run, and the run sees the variables a test reads at run time.
+      check byId[binLinkId].outputs[0] in byId[testCompileId].inputs
+      check byId[binLinkId].outputs[0] in byId[testRunId].inputs
+      check binLinkId in byId[testRunId].deps
+      let runEnv = envOf(byId[testRunId])
+      check runEnv.getOrDefault("CARGO_BIN_EXE_crate-env-bin") ==
+        byId[binLinkId].outputs[0]
+      check runEnv.getOrDefault("CARGO_TARGET_TMPDIR") ==
+        testEnv.getOrDefault("CARGO_TARGET_TMPDIR")
+      check runEnv.getOrDefault("CARGO_MANIFEST_DIR").len > 0
+      check "CARGO_CRATE_NAME" notin runEnv
+
+      # Run the lib and bin actions with real rustc and the declared
+      # environment, then run the binary.
+      proc runAction(action: BuildActionDef): (string, int) =
+        let argv = inlineArgvOf(action)
+        var envTab = newStringTable(modeCaseSensitive)
+        for k, v in envPairs():
+          envTab[k] = v
+        for (name, value) in action.env:
+          envTab[name] = value
+        let p = startProcess(argv[0], workingDir = scratch,
+          args = argv[1 .. ^1], env = envTab,
+          options = {poStdErrToStdOut})
+        let output = p.outputStream.readAll()
+        let code = p.waitForExit()
+        p.close()
+        (output, code)
+      for prefix in ["rustc-metadata-", "rustc-link-"]:
+        for id in order:
+          if id.startsWith(prefix) and
+              byId[id].outputs[0].extractFilename.startsWith("libcrate_env-"):
+            let (output, code) = runAction(byId[id])
+            checkpoint id & ": " & output
+            check code == 0
+      for prefix in ["rustc-metadata-", "rustc-link-"]:
+        for id in order:
+          if id.startsWith(prefix) and not
+              byId[id].outputs[0].extractFilename.startsWith("libcrate_env-"):
+            let (output, code) = runAction(byId[id])
+            checkpoint id & ": " & output
+            check code == 0
+      let binOut = byId[binLinkId].outputs[0]
+      require fileExists(binOut)
+      let (runOut, runCode) = execCmdEx(quoteShell(binOut))
+      check runCode == 0
+      check runOut.strip == "3.4.5-rc.1+build.7 crate-env-bin crate_env_bin"

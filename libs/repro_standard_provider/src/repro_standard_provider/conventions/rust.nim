@@ -109,10 +109,13 @@
 ##   * The convention always builds the *release* artifact. The Rust
 ##     convention spec defaults Mode A to release-profile output; debug-
 ##     profile and per-profile artifact dirs are an outstanding surface.
+##   * Each target compiles under its own edition as ``cargo metadata``
+##     reports it (a ``[lib]`` or ``[[bin]]`` table may override the
+##     package's), never under one edition per package.
 ##   * ``-C metadata`` / ``-C extra-filename`` use a stable FNV-1a hash of
-##     ``crateName & "@" & edition`` — distinct from cargo's own
-##     package-id hash because we don't have a published source URL or
-##     features set in the M13 fixtures. This is fine for the
+##     ``crateName & "@" & edition`` (the target's edition) — distinct
+##     from cargo's own package-id hash because we don't have a published
+##     source URL or features set in the M13 fixtures. This is fine for the
 ##     workspace/library cases where no downstream consumer expects
 ##     rmeta compatibility with ambient ``cargo check``.
 
@@ -169,7 +172,15 @@ type
     crateName: string
       ## ``-`` → ``_`` normalised crate name (rustc's ``--crate-name``).
       ## For libraries this is also the basename of the ``rlib``/``rmeta``.
+    rawName: string
+      ## The target's name as ``cargo metadata`` reports it, before the
+      ## ``-`` → ``_`` normalisation. Cargo names ``CARGO_BIN_NAME`` and
+      ## ``CARGO_BIN_EXE_<name>`` with it.
     edition: string
+      ## The edition rustc compiles this target under: the target's own
+      ## ``edition`` as ``cargo metadata`` reports it, which is the
+      ## package's edition unless the target table sets its own
+      ## (``targetEdition``).
     kind: RustTargetKind
     sourcePath: string
       ## Absolute path to the target's crate root (``main.rs``/``lib.rs``
@@ -201,6 +212,16 @@ type
       ## to fall through to the Mode B crude fallback rather than
       ## emitting an incomplete Mode A graph that would fail to resolve
       ## the external rlibs.
+    hasFeatures: bool
+      ## True when the package declares a feature (``features`` in
+      ## ``cargo metadata`` is non-empty) or an optional dependency.
+      ## Mode A does no feature resolution, so such a package sends the
+      ## whole workspace to Mode B (Rust.md §"Recognition" item 6).
+    crateEnv: seq[(string, string)]
+      ## The package-level variables Cargo sets for every crate of this
+      ## package (``CARGO_PKG_*``, ``CARGO_MANIFEST_DIR``,
+      ## ``CARGO_MANIFEST_PATH``), in a fixed order. Rust.md
+      ## §"Features, lints and the crate environment".
 
   RustProject = object
     ## The full project view the emitter walks. ``packages`` always
@@ -218,6 +239,12 @@ type
       ## --message-format=json`` run, but the simpler "delegate to
       ## cargo" route lands in M23 and a full ``--extern``-threading
       ## implementation is deferred).
+    hasFeatures: bool
+      ## True when any package declares a feature or an optional
+      ## dependency. Routes the entire project through Mode B: the
+      ## features enabled on one package depend on what every package
+      ## that depends on it asks for, so the trigger is workspace-wide
+      ## (Rust.md §"Features, lints and the crate environment").
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -406,6 +433,9 @@ proc collectRustSources(projectRoot: string): seq[string] =
   ##     interpreted by cargo metadata, but they DO determine the set
   ##     of bin/lib targets when ``[[bin]]`` entries auto-discover from
   ##     the filesystem — auto-discovery is on by default).
+  ##   * every ``README``, ``README.md`` and ``README.txt``: with no
+  ##     ``readme`` key in the manifest, cargo metadata reports the one it
+  ##     finds beside it, and that value becomes ``CARGO_PKG_README``.
   ##
   ## We walk recursively but skip ``target/`` and ``.repro/`` so build
   ## scratch doesn't pollute the fingerprint.
@@ -418,7 +448,8 @@ proc collectRustSources(projectRoot: string): seq[string] =
       continue
     let basename = extractFilename(entry).toLowerAscii
     let ext = splitFile(entry).ext.toLowerAscii
-    if basename == "cargo.toml" or basename == "cargo.lock" or ext == ".rs":
+    if basename == "cargo.toml" or basename == "cargo.lock" or ext == ".rs" or
+        basename in ["readme", "readme.md", "readme.txt"]:
       result.add(entry)
   result.sort(system.cmp[string])
 
@@ -528,7 +559,32 @@ proc normalisedManifestDir(path: string): string =
     d = d.toLowerAscii
   d
 
-proc extractTargets(pkgNode: JsonNode; edition: string): seq[RustTarget] =
+const CargoDefaultEdition = "2015"
+  ## The edition Cargo assumes for a package whose manifest declares none,
+  ## and rustc's own default for ``--edition``
+  ## (https://doc.rust-lang.org/cargo/reference/manifest.html#the-edition-field,
+  ## https://doc.rust-lang.org/rustc/command-line-arguments.html#--edition-specify-the-edition-to-use).
+
+proc nonEmptyStringField(node: JsonNode; key: string): string =
+  ## ``node[key]`` when it is a non-empty JSON string, else ``""``.
+  if node.kind == JObject and key in node and node[key].kind == JString:
+    node[key].getStr()
+  else:
+    ""
+
+proc targetEdition(target: JsonNode; packageEdition: string): string =
+  ## The edition one ``targets[]`` entry of ``cargo metadata`` compiles
+  ## under. A target table (``[lib]``, ``[[bin]]``, ``[[test]]``, ...) may
+  ## set its own ``edition``, which overrides the package's for that target
+  ## alone, and ``cargo metadata`` reports the result per target
+  ## (https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-edition-field).
+  ## Cargo always fills the field in; the package edition is only a
+  ## fallback for output that lacks it.
+  let own = nonEmptyStringField(target, "edition")
+  if own.len > 0: own else: packageEdition
+
+proc extractTargets(pkgNode: JsonNode;
+                    packageEdition: string): seq[RustTarget] =
   ## Walk a package's ``targets`` array and keep ``bin`` / ``lib`` targets
   ## plus (M22) ``test`` integration-test targets. Examples, benches, and
   ## custom-build targets are still skipped — those need additional
@@ -601,7 +657,8 @@ proc extractTargets(pkgNode: JsonNode; edition: string): seq[RustTarget] =
       else: rtkIntegrationTest
     result.add(RustTarget(
       crateName: normaliseCrateName(rawName),
-      edition: edition,
+      rawName: rawName,
+      edition: targetEdition(target, packageEdition),
       kind: kind,
       sourcePath: srcPath))
     if isOther:
@@ -609,6 +666,82 @@ proc extractTargets(pkgNode: JsonNode; edition: string): seq[RustTarget] =
       # target as bin/lib is unusual enough that the comment surfaces in
       # ``--log=actions`` debugging if anyone hits it.
       discard
+
+proc jsonStringField(node: JsonNode; key: string): string =
+  ## ``node[key]`` as a string, or ``""`` when absent or ``null`` — the
+  ## value Cargo gives a ``CARGO_PKG_*`` variable whose manifest key is
+  ## unset.
+  if node.kind == JObject and key in node and node[key].kind == JString:
+    node[key].getStr()
+  else:
+    ""
+
+proc semverComponents(version: string):
+    tuple[major, minor, patch, pre: string] =
+  ## Split ``MAJOR.MINOR.PATCH[-PRE][+BUILD]`` the way Cargo fills
+  ## ``CARGO_PKG_VERSION_{MAJOR,MINOR,PATCH,PRE}``. Build metadata is
+  ## dropped; ``pre`` is empty for a release version. Cargo has already
+  ## validated the version, so this does not.
+  var core = version
+  let plusIdx = core.find('+')
+  if plusIdx >= 0:
+    core = core[0 ..< plusIdx]
+  let dashIdx = core.find('-')
+  if dashIdx >= 0:
+    result.pre = core[dashIdx + 1 .. ^1]
+    core = core[0 ..< dashIdx]
+  let parts = core.split('.')
+  if parts.len > 0: result.major = parts[0]
+  if parts.len > 1: result.minor = parts[1]
+  if parts.len > 2: result.patch = parts[2]
+
+proc packageCrateEnv(pkgNode: JsonNode; manifestPath: string):
+    seq[(string, string)] =
+  ## The package-level half of the crate environment, from the
+  ## package's entry in ``cargo metadata`` (Cargo reference,
+  ## "Environment variables Cargo sets for crates"). Every variable is
+  ## present, holding ``""`` when the manifest has no value, as Cargo
+  ## does. ``CARGO_PKG_AUTHORS`` joins the authors with ``:``.
+  let version = jsonStringField(pkgNode, "version")
+  let parts = semverComponents(version)
+  var authors: seq[string] = @[]
+  if "authors" in pkgNode and pkgNode["authors"].kind == JArray:
+    for a in pkgNode["authors"]:
+      if a.kind == JString:
+        authors.add(a.getStr())
+  result = @[
+    ("CARGO_PKG_NAME", jsonStringField(pkgNode, "name")),
+    ("CARGO_PKG_VERSION", version),
+    ("CARGO_PKG_VERSION_MAJOR", parts.major),
+    ("CARGO_PKG_VERSION_MINOR", parts.minor),
+    ("CARGO_PKG_VERSION_PATCH", parts.patch),
+    ("CARGO_PKG_VERSION_PRE", parts.pre),
+    ("CARGO_PKG_AUTHORS", authors.join(":")),
+    ("CARGO_PKG_DESCRIPTION", jsonStringField(pkgNode, "description")),
+    ("CARGO_PKG_HOMEPAGE", jsonStringField(pkgNode, "homepage")),
+    ("CARGO_PKG_REPOSITORY", jsonStringField(pkgNode, "repository")),
+    ("CARGO_PKG_LICENSE", jsonStringField(pkgNode, "license")),
+    ("CARGO_PKG_LICENSE_FILE", jsonStringField(pkgNode, "license_file")),
+    ("CARGO_PKG_RUST_VERSION", jsonStringField(pkgNode, "rust_version")),
+    ("CARGO_PKG_README", jsonStringField(pkgNode, "readme")),
+    ("CARGO_MANIFEST_DIR", manifestPath.parentDir),
+    ("CARGO_MANIFEST_PATH", manifestPath),
+  ]
+
+proc packageDeclaresFeatures(pkgNode: JsonNode): bool =
+  ## A feature in ``[features]`` or an optional dependency. Either one
+  ## makes the crate's ``--cfg feature`` set depend on feature
+  ## resolution, which Mode A does not do (Rust.md §"Recognition"
+  ## item 6).
+  if "features" in pkgNode and pkgNode["features"].kind == JObject and
+      pkgNode["features"].len > 0:
+    return true
+  if "dependencies" in pkgNode and pkgNode["dependencies"].kind == JArray:
+    for dep in pkgNode["dependencies"]:
+      if dep.kind == JObject and "optional" in dep and
+          dep["optional"].kind == JBool and dep["optional"].getBool():
+        return true
+  false
 
 proc loadProject(projectRoot: string;
                  metadata: JsonNode): RustProject =
@@ -656,16 +789,20 @@ proc loadProject(projectRoot: string;
       raise newException(ValueError,
         "rust convention: cargo metadata package missing 'name' for " &
           projectRoot)
-    let edition =
-      if "edition" in pkgNode: pkgNode["edition"].getStr()
-      else: "2021"
+    # The package's edition is only the default for its targets; each
+    # target's own edition is resolved in ``extractTargets``. Real
+    # ``cargo metadata`` always reports it, so the fallback is reached
+    # only on malformed output, and then it is what Cargo and rustc assume.
+    let packageEdition = block:
+      let declared = nonEmptyStringField(pkgNode, "edition")
+      if declared.len > 0: declared else: CargoDefaultEdition
     let manifestPath =
       if "manifest_path" in pkgNode: pkgNode["manifest_path"].getStr()
       else: ""
     let manifestDir =
       if manifestPath.len > 0: manifestPath.parentDir
       else: projectRoot
-    let targets = extractTargets(pkgNode, edition)
+    let targets = extractTargets(pkgNode, packageEdition)
     var workspaceDeps: seq[string] = @[]
     var hasExternalDeps = false
     if "dependencies" in pkgNode and pkgNode["dependencies"].kind == JArray:
@@ -709,6 +846,12 @@ proc loadProject(projectRoot: string;
           workspaceDeps.add(manifestDirToName[depKey])
     if hasExternalDeps:
       result.hasExternalDeps = true
+    let hasFeatures = packageDeclaresFeatures(pkgNode)
+    if hasFeatures:
+      result.hasFeatures = true
+    let crateEnv = packageCrateEnv(pkgNode,
+      if manifestPath.len > 0: manifestPath
+      else: projectRoot / "Cargo.toml")
     if targets.len == 0:
       # Library-only packages with no bin/lib targets shouldn't happen
       # in practice (cargo always synthesises a default target). Skip
@@ -720,7 +863,9 @@ proc loadProject(projectRoot: string;
         manifestDir: manifestDir,
         targets: @[],
         workspaceDeps: workspaceDeps,
-        hasExternalDeps: hasExternalDeps))
+        hasExternalDeps: hasExternalDeps,
+        hasFeatures: hasFeatures,
+        crateEnv: crateEnv))
       continue
     result.packages.add(RustPackage(
       packageName: name,
@@ -728,7 +873,9 @@ proc loadProject(projectRoot: string;
       manifestDir: manifestDir,
       targets: targets,
       workspaceDeps: workspaceDeps,
-      hasExternalDeps: hasExternalDeps))
+      hasExternalDeps: hasExternalDeps,
+      hasFeatures: hasFeatures,
+      crateEnv: crateEnv))
   # Workspace detection: prefer ``workspace_members.len > 1`` (the
   # robust signal cargo metadata emits) but fall back to the textual
   # ``[workspace]`` scan when there's only one member but it's declared
@@ -937,6 +1084,31 @@ proc crateTypeArg(kind: RustTargetKind): string =
   of rtkDylib: "dylib"
   of rtkIntegrationTest: "bin"
 
+proc testTargetTmpDir(projectRoot, packageCrateName: string): string =
+  ## ``CARGO_TARGET_TMPDIR`` for a package's integration tests: Cargo's
+  ## ``target/tmp``, here one per package beside its ``tests/`` dir so
+  ## that no test binary's name can collide with it.
+  scratchPathFor(projectRoot, packageCrateName) / "tmp"
+
+proc targetCrateEnv(pkg: RustPackage; target: RustTarget;
+                    cargoExe: string): seq[(string, string)] =
+  ## The whole crate environment of one ``rustc`` action (Rust.md
+  ## §"Features, lints and the crate environment"): the package's
+  ## variables, then the target's ``CARGO_CRATE_NAME`` (and
+  ## ``CARGO_BIN_NAME`` for a binary), ``CARGO_PRIMARY_PACKAGE=1`` — Mode
+  ## A builds every workspace member, as ``cargo build --workspace``
+  ## selects them all — and ``CARGO``. Paths are passed as they are, not
+  ## canonicalised: ``env!`` puts them in the output. The engine's local
+  ## action key covers the declared values; the opt-in portable key
+  ## logicalises them like the argv's paths (reprobuild-pm issue
+  ## ``2026-11-17-portable-cache-key-logicalises-env-values-that-env-embeds.md``).
+  result = pkg.crateEnv
+  result.add(("CARGO_CRATE_NAME", target.crateName))
+  if target.kind == rtkBinary:
+    result.add(("CARGO_BIN_NAME", target.rawName))
+  result.add(("CARGO_PRIMARY_PACKAGE", "1"))
+  result.add(("CARGO", cargoExe))
+
 proc rustcArgvCommon(rustcExe, crateName, edition, crateType, outDir,
                      stableHash, sourcePath, emit: string;
                      applyExtraFilename: bool;
@@ -990,7 +1162,8 @@ proc emitForTarget(projectRoot, rustcExe: string;
                    linkExterns: seq[string];
                    externDepIds: seq[string];
                    inputRmetas: seq[string];
-                   inputRlibs: seq[string]): TargetActions =
+                   inputRlibs: seq[string];
+                   crateEnv: seq[(string, string)]): TargetActions =
   ## Materialise the two-action graph for a single bin/lib target.
   ##
   ## ``metadataExterns`` and ``linkExterns`` carry the pre-built
@@ -1041,7 +1214,8 @@ proc emitForTarget(projectRoot, rustcExe: string;
     pool = "compile",
     depfile = metadataDepfile,
     dependencyPolicy = makeDepfilePolicy(metadataDepfile),
-    commandStatsId = "rust.rustc-metadata")
+    commandStatsId = "rust.rustc-metadata",
+    env = crateEnv)
 
   let linkDepfile =
     linkDepfilePath(projectRoot, target.crateName, stableHash, target.kind)
@@ -1102,7 +1276,8 @@ proc emitForTarget(projectRoot, rustcExe: string;
     pool = "compile",
     depfile = linkDepfile,
     dependencyPolicy = makeDepfilePolicy(linkDepfile),
-    commandStatsId = "rust.rustc-link")
+    commandStatsId = "rust.rustc-link",
+    env = crateEnv)
 
   TargetActions(
     metadataAction: metadataAction,
@@ -1126,7 +1301,9 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
                        test: RustTarget;
                        pkg: RustPackage;
                        packageCrateName: string;
-                       libActions: TargetActions): TestTargetActions =
+                       libActions: TargetActions;
+                       binActions: seq[(RustTarget, TargetActions)];
+                       cargoExe: string): TestTargetActions =
   ## M22: emit the compile + run action pair for a single integration
   ## test (``tests/<name>.rs``).
   ##
@@ -1155,6 +1332,14 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
   ## sibling lib target the test wouldn't be able to ``use
   ## <crate>::...``; the caller short-circuits before reaching this proc
   ## when no lib is present.
+  ##
+  ## ``binActions`` are the package's binaries. As Cargo does, the compile
+  ## sees each one's path in ``CARGO_BIN_EXE_<name>`` and depends on its
+  ## link action. ``CARGO_TARGET_TMPDIR`` names a directory created here
+  ## and declared a scratch directory of the run action, so the engine
+  ## recreates it empty before the test runs, even from a cached graph,
+  ## and what the test writes and reads back there is not taken as an
+  ## input (Rust.md §"Features, lints and the crate environment").
   let testsDir = testsScratchDir(projectRoot, packageCrateName)
   let depsDir = depsPathFor(projectRoot, packageCrateName)
   createDir(extendedPath(testsDir))
@@ -1189,12 +1374,24 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     argv.add(libCrateName & "=" & libActions.rlibPath)
   argv.add(test.sourcePath)
 
+  let tmpDir = testTargetTmpDir(projectRoot, packageCrateName)
+  createDir(extendedPath(tmpDir))
+  var compileEnv = targetCrateEnv(pkg, test, cargoExe)
+  for (bin, actions) in binActions:
+    compileEnv.add(("CARGO_BIN_EXE_" & bin.rawName,
+      actions.linkAction.outputs[0]))
+  compileEnv.add(("CARGO_TARGET_TMPDIR", tmpDir))
+
   let compileInputs = block:
     var inputs: seq[string] = @[test.sourcePath, pkg.manifestPath]
     if libActions.rlibPath.len > 0:
       inputs.add(libActions.rlibPath)
     if libActions.rmetaPath.len > 0:
       inputs.add(libActions.rmetaPath)
+    for (_, actions) in binActions:
+      # The path in CARGO_BIN_EXE_<name> is stable across rebuilds, so the
+      # binary's bytes must be an input for the compile to see a change.
+      inputs.add(actions.linkAction.outputs[0])
     inputs
   let compileDeps = block:
     var deps: seq[string] = @[]
@@ -1203,6 +1400,9 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     if libActions.metadataAction.id.len > 0 and
         libActions.metadataAction.id notin deps:
       deps.add(libActions.metadataAction.id)
+    for (_, actions) in binActions:
+      if actions.linkAction.id notin deps:
+        deps.add(actions.linkAction.id)
     deps
 
   let compileAction = buildAction(
@@ -1213,20 +1413,39 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     outputs = @[binaryOutput],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "rust.rustc-test-compile")
+    commandStatsId = "rust.rustc-test-compile",
+    env = compileEnv)
 
   let stampPath =
     testRunStampPath(projectRoot, packageCrateName, test.crateName)
   let runArgv = @[binaryOutput]
+  # Cargo also sets the package, manifest, CARGO_BIN_EXE_* and
+  # CARGO_TARGET_TMPDIR variables when it runs the test, so tests that read
+  # them at run time (``std::env::var``) find them. The compile-only ones
+  # are left out.
+  var runEnv: seq[(string, string)] = @[]
+  for (k, v) in compileEnv:
+    if k notin ["CARGO_CRATE_NAME", "CARGO_BIN_NAME",
+                "CARGO_PRIMARY_PACKAGE"]:
+      runEnv.add((k, v))
+  var runInputs = @[binaryOutput]
+  var runDeps = @[compileAction.id]
+  for (_, actions) in binActions:
+    # The test executes these binaries, so a relinked binary reruns it.
+    runInputs.add(actions.linkAction.outputs[0])
+    if actions.linkAction.id notin runDeps:
+      runDeps.add(actions.linkAction.id)
   let runAction = buildAction(
     id = actionIdFor("rustc-test-run", test.crateName, "run"),
     call = inlineExecCall(runArgv, projectRoot),
-    deps = @[compileAction.id],
-    inputs = @[binaryOutput],
+    deps = runDeps,
+    inputs = runInputs,
     outputs = @[],
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "rust.rustc-test-run")
+    commandStatsId = "rust.rustc-test-run",
+    env = runEnv,
+    scratchDirs = @[tmpDir])
 
   # Stamp the run so the engine has a declared output to track. The
   # stamp's text is the test's crate name — purely diagnostic.
@@ -1507,6 +1726,13 @@ proc rustEmitFragment(projectRoot: string;
     # natively.
     if project.hasExternalDeps:
       return rustCrudeFallback(projectRoot, request)
+    # Rust.md §"Recognition" item 6: Mode A passes no ``--cfg feature``
+    # because it does no feature resolution, so a crate with default
+    # features would compile with them off. Any feature or optional
+    # dependency anywhere sends the whole workspace to Mode B, where
+    # cargo resolves them.
+    if project.hasFeatures:
+      return rustCrudeFallback(projectRoot, request)
     # Verify every declared source path actually exists; cargo metadata
     # can sometimes report stale entries if the user edits Cargo.toml
     # without saving the source file.
@@ -1541,6 +1767,10 @@ proc rustEmitFragment(projectRoot: string;
         ## ``--extern`` sources — cdylib/staticlib/dylib still land here
         ## for diagnostic completeness but their ``rlibPath`` is empty.
       var allActions: seq[BuildActionDef] = @[]
+      var binActionsByPackage =
+        initTable[string, seq[(RustTarget, TargetActions)]]()
+        ## package name → its binaries' actions, for the
+        ## ``CARGO_BIN_EXE_<name>`` of the package's integration tests.
 
       # Pass A: libraries, in topological order so each lib's
       # ``--extern`` flags can point at upstream lib rmeta/rlib paths.
@@ -1631,7 +1861,8 @@ proc rustEmitFragment(projectRoot: string;
             linkExterns = linkExterns,
             externDepIds = externDepIds,
             inputRmetas = inputRmetas,
-            inputRlibs = inputRlibs)
+            inputRlibs = inputRlibs,
+            crateEnv = targetCrateEnv(pkg, t, cargoExe))
           allActions.add(actions.metadataAction)
           allActions.add(actions.linkAction)
           discard target(t.crateName, @[actions.metadataAction, actions.linkAction])
@@ -1717,10 +1948,12 @@ proc rustEmitFragment(projectRoot: string;
             linkExterns = linkExterns,
             externDepIds = externDepIds,
             inputRmetas = inputRmetas,
-            inputRlibs = inputRlibs)
+            inputRlibs = inputRlibs,
+            crateEnv = targetCrateEnv(pkg, t, cargoExe))
           allActions.add(actions.metadataAction)
           allActions.add(actions.linkAction)
           discard target(t.crateName, @[actions.metadataAction, actions.linkAction])
+          binActionsByPackage.mgetOrPut(pkg.packageName, @[]).add((t, actions))
       if allActions.len == 0:
         raise newException(ValueError,
           "rust convention: no bin or lib targets found across " &
@@ -1763,7 +1996,9 @@ proc rustEmitFragment(projectRoot: string;
             test = t,
             pkg = pkg,
             packageCrateName = packageCrateName,
-            libActions = libActions)
+            libActions = libActions,
+            binActions = binActionsByPackage.getOrDefault(pkg.packageName),
+            cargoExe = cargoExe)
           testActions.add(pair.compileAction)
           testActions.add(pair.runAction)
           testActions.add(pair.stampAction)

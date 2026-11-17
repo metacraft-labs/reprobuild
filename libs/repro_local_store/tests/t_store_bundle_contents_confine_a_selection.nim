@@ -42,7 +42,7 @@ proc closureWith(entryPath: string; sel = selected()): BundleClosure =
 
 proc refusal(c: BundleClosure): string =
   try:
-    checkEntryPlacement(c)
+    checkEntryPlacement(c, Store / "bundles" / "0" / "contents")
   except StoreBundleError as e:
     return e.msg
   ""
@@ -67,8 +67,20 @@ suite "a bundle's contents confine import to its roots and selection":
   test "entries in the selection and in the store are accepted":
     check refusal(closureWith("/w/alpha/out")).len == 0
     check refusal(closureWith("/w/gamma/sub/out")).len == 0
-    check refusal(closureWith("/s/ab/cd/prefix/file")).len == 0
-    check refusal(closureWith("/c/action-cache/x")).len == 0
+    # Below the store and action-cache roots only what a closure carries
+    # there is accepted; the action cache's blobs are one such area.
+    check refusal(closureWith("/c/cas/ab/blob")).len == 0
+    check refusal(closureWith("/s/compiler-probes/x")).len == 0
+    # A recipe compile's outputs (a compiled provider) are record outputs a
+    # bundle carries, so a restored machine need not recompile them.
+    check refusal(closureWith("/c/recipe-compiles/provider/id/out/p")).len == 0
+
+  test "below the store and action-cache roots the importer's own state is refused":
+    for path in ["/s/index.db", "/s/tmp/x", "/c/action-cache/x",
+                 "/c/gc/x"]:
+      let msg = refusal(closureWith(path))
+      checkpoint(path & ": " & msg)
+      check "outside everything a bundle carries there" in msg
 
   test "an entry outside the roots or the selection is refused":
     for (path, needle) in [

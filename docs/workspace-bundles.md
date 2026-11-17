@@ -26,12 +26,18 @@ AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… \
   repro bundle publish DIR/<bundle> --to=s3://BUCKET/PREFIX \
     --endpoint=https://<account>.r2.cloudflarestorage.com --region=auto
 # On the target machine, with no repro installed:
-curl -fsS https://<host>/PREFIX/<bundle>/x86_64-linux/restore.sh \
+curl --proto '=https' -fsS https://<host>/PREFIX/<bundle>/x86_64-linux/restore.sh \
   | bash -s -- https://<host>/PREFIX/<bundle> --activate
 ```
 
 `repro bundle restore <url-or-dir>` does the same on a machine that already
 has `repro`. `repro bundle --help` lists every flag.
+
+A bundle is fetched over `https://` only. Both `restore.sh` and
+`repro bundle restore` refuse a plain `http://` source, and every download
+they run refuses to be redirected to anything but `https://` (curl's
+`--proto '=https,file' --proto-redir '=https'`). A local directory, a
+`file://` URL and a `github:` source work as before.
 
 ## What a bundle of a selection carries
 
@@ -112,7 +118,7 @@ credentials:
 ```sh
 repro bundle publish DIR/<bundle> --to=github:OWNER/REPO
 # On the target machine; COMMIT is the `latest` branch's commit:
-curl -fsS https://raw.githubusercontent.com/OWNER/REPO/COMMIT/<bundle>/x86_64-linux/restore.sh \
+curl --proto '=https' -fsS https://raw.githubusercontent.com/OWNER/REPO/COMMIT/<bundle>/x86_64-linux/restore.sh \
   | bash -s -- github:OWNER/REPO@COMMIT/<bundle> --activate
 ```
 
@@ -134,24 +140,40 @@ SHA-256 sums, and needs only `bash`, `curl`, `tar`, `sha256sum`, `df`,
    size);
 3. verifies them there and reads only those copies, so the bytes verified are
    the bytes unpacked even if the source directory changes meanwhile;
-4. takes Nix's own lock (`<path>.lock`, an exclusive `flock`) on each of
+4. lists the archive with the same GNU tar that will unpack it
+   (`tar -tv --quoting-style=c`), and refuses, before anything is locked,
+   written or removed, unless every member lies inside one of the store
+   paths the half's registration names (`nix/store/<path>` or below it,
+   never `nix/` or `nix/store/` themselves, nothing outside the store). It
+   also refuses a member that is not a file, directory, symlink or hard
+   link, a name with a `.` or `..` component, a name carried twice, a member
+   below a symlink member, a hard link to anything but an earlier file
+   member, and a registered path that is not a single store-path name. The
+   part hashes come from the same unsigned file as the parts, so this check
+   is what confines the unpack;
+5. takes Nix's own lock (`<path>.lock`, an exclusive `flock`) on each of
    the closure's store paths that Nix does not consider valid, waiting while
    a `nix-daemon` or another `nix` holds it. It then holds Nix's `gc.lock`
    shared, so no garbage collection runs until it has registered what it
    restores, and checks validity again; a path Nix finished meanwhile is
-   left to Nix. The locks are held until step 8;
-5. deletes whatever is on disk at each path that is still invalid: the
+   left to Nix. The locks are held until step 9;
+6. deletes whatever is on disk at each path that is still invalid: the
    partial files an interrupted restore or an interrupted Nix download
    leaves behind. Valid paths are left alone;
-6. unpacks the parts into `/nix/store` with `zstd -d --long=27 | tar
-   --skip-old-files`, excluding every valid path, using the `zstd` store
-   path it carries when the machine has none;
-7. checks each path it unpacked against the NAR hash in the registration
+7. unpacks the parts into `/nix/store` with `zstd -d --long=27 | tar
+   --skip-old-files`, using the `zstd` store path it carries when the
+   machine has none. Every valid path is excluded from the unpack
+   altogether (`--anchored --no-wildcards -X`), so a bundle can neither
+   rewrite a valid path's files nor add new ones to it;
+8. checks each path it unpacked against the NAR hash in the registration
    (`nix-hash --type sha256`), and stops without registering anything if one
    differs;
-8. registers the paths it unpacked with `nix-store --load-db`, then
+9. registers the paths it unpacked with `nix-store --load-db`, then
    releases the locks;
-9. hands over to the `repro` from that closure.
+10. hands over to the `repro` from that closure.
+
+`repro bundle restore` restores a Nix half the same way, with the same
+checks.
 
 Registration is the last step, so a restore that is killed part-way leaves
 the paths it touched unregistered, and running it again redoes them instead
@@ -223,4 +245,9 @@ captures differ.
   file+file://<checkout>/.devenv/root`, as their `.envrc` does.
 - A bundle is trusted exactly as far as the place it is fetched from: parts
   and entries are verified against the manifest, and the manifest is not
-  signed.
+  signed. What a hostile host can no longer do is write outside the bundle's
+  declared paths: the Nix half is confined to the store paths it registers
+  (and never touches a valid one), and the native-store half to exactly the
+  entries its contents list declares (see [Native-Store Bundles](store-bundles.md) §5). What
+  it can still do is serve different content at those paths, which is why
+  `https://` is required.
