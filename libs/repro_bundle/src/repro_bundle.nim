@@ -16,7 +16,7 @@ import repro_local_store/store_bundle
 import repro_bundle/[exec, select, nix_half, sources_half, bootstrap, github]
 
 export exec.BundleError, select.BundleMember, select.resolveMembers,
-  nix_half.NixHalf, nix_half.NixHalfOptions,
+  select.nativeSelection, nix_half.NixHalf, nix_half.NixHalfOptions,
   sources_half.SourcesHalf
 
 type
@@ -123,6 +123,12 @@ proc createBundle*(opts: CreateOptions): CreateReport =
   latest["workspace_dir"] = %ws
   latest["members"] = memberPaths
   latest["created"] = %now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+  let producer = localProducer()
+  latest["repro"] = %*{"version": producer.version,
+    "revision": producer.revision}
+  # What the restoring machine must provide at these absolute paths
+  # (Workspace-Bundles §5); filled in as the halves are made.
+  var provision = %*{"workspaceDir": ws}
   var halves = newJObject()
   var nixHalf: NixHalf
   var hasNix = false
@@ -133,6 +139,7 @@ proc createBundle*(opts: CreateOptions): CreateReport =
     let (h, reused) = createNixHalf(members, systemDir, no)
     nixHalf = h
     hasNix = true
+    provision["nixStore"] = %"/nix/store"
     result.halves.add(HalfReport(kind: "nix", id: h.id,
       dir: result.system / NixHalfDir / h.id, reused: reused,
       compressedBytes: h.compressedBytes, unpackedBytes: h.unpackedBytes))
@@ -152,7 +159,16 @@ proc createBundle*(opts: CreateOptions): CreateReport =
     var roots = opts.nativeRoots
     if ws notin roots.workspaceRoots:
       roots.workspaceRoots.insert(ws, 0)
-    let closure = computeClosure(roots, opts.devEnvs)
+    # The selection, not the whole workspace root (Workspace-Bundles §4):
+    # every checkout under it that the selector did not name is excluded.
+    # The store and the action cache are walked by their own rules.
+    let selection = nativeSelection(ws, members,
+      [normalizedPath(absolutePath(roots.storeRoot)),
+       normalizedPath(absolutePath(roots.actionCacheRoot))])
+    let closure = computeClosure(roots, opts.devEnvs, selection)
+    provision["storeRoot"] = %closure.roots.storeRoot
+    provision["actionCacheRoot"] = %closure.roots.actionCacheRoot
+    provision["workspaceRoots"] = %closure.roots.workspaceRoots
     let id = bundleIdOf(closure)
     let rel = result.system / NativeHalfDir / id
     let dir = bundleDir / rel
@@ -174,6 +190,7 @@ proc createBundle*(opts: CreateOptions): CreateReport =
     halves["native_store"] = node
   if halves.len == 0:
     bundleFail("nothing to bundle: every half was turned off")
+  latest["provision"] = provision
   latest["halves"] = halves
   for h in result.halves: result.unpackedBytes += h.unpackedBytes
   latest["unpacked_bytes"] = %result.unpackedBytes
@@ -191,11 +208,109 @@ proc createBundle*(opts: CreateOptions): CreateReport =
   moveFile(result.restoreScript & ".partial", result.restoreScript)
 
 # ---------------------------------------------------------------------------
-# restore
+# inspect (Store-Bundles §7.1)
 # ---------------------------------------------------------------------------
+
+const InspectSchema* = "reprobuild.bundle-inspect.v1"
 
 proc isUrl(s: string): bool =
   s.startsWith("https://") or s.startsWith("http://") or s.startsWith("file://")
+
+proc inspectJsonOf(v: VerifiedContents): JsonNode =
+  let c = v.closure
+  result = %*{
+    "schema": InspectSchema,
+    "kind": "native-store",
+    "producer": {"version": c.producer.version,
+      "revision": c.producer.revision},
+    "provision": {"storeRoot": c.roots.storeRoot,
+      "actionCacheRoot": c.roots.actionCacheRoot,
+      "workspaceRoots": %c.roots.workspaceRoots},
+    "selection": {"exclude": %c.selection.excluded,
+      "include": %c.selection.included},
+    "bundleId": v.bundleId,
+    "halves": {"native_store": v.bundleId}}
+
+proc inspectBundle*(source: string): JsonNode =
+  ## What a machine must provide to restore the bundle at `source` (a local
+  ## directory or `file://` URL): the roots to provision, the producing
+  ## `repro` and the selection, read from the native half's verified
+  ## `contents`. Writes nothing anywhere.
+  var path = source
+  if path.startsWith("file://"):
+    path = path["file://".len .. ^1]
+  if isUrl(path) or isGithubSource(path):
+    bundleFail("inspect reads a local bundle directory; fetch " & source &
+      " first, or read its latest.json")
+  path = normalizedPath(absolutePath(path))
+  if fileExists(path / NativeManifestName):
+    return inspectJsonOf(readVerifiedContents(path, NativeManifestName))
+  var systemDir = ""
+  if fileExists(path / LatestName):
+    systemDir = path
+  elif fileExists(path / hostSystem() / LatestName):
+    systemDir = path / hostSystem()
+  elif dirExists(path):
+    for kind, d in walkDir(path):
+      if kind == pcDir and fileExists(d / LatestName):
+        if systemDir.len > 0:
+          bundleFail(path & " holds bundles for several systems; name one " &
+            "of them, e.g. " & d)
+        systemDir = d
+  if systemDir.len == 0:
+    bundleFail("no bundle at " & path & " (neither " & NativeManifestName &
+      " nor <system>/" & LatestName & ")")
+  let latest =
+    try: parseJson(readFile(systemDir / LatestName))
+    except JsonParsingError as e:
+      bundleFail("malformed " & systemDir / LatestName & ": " & e.msg)
+  if latest{"schema"}.getStr() != BundleSchema:
+    bundleFail("unsupported bundle schema " & latest{"schema"}.getStr())
+  let bundleDir = systemDir.parentDir
+  let halves = latest{"halves"}
+  if halves.isNil or halves.kind != JObject:
+    bundleFail(systemDir / LatestName & " lists no halves")
+  var members = newJArray()
+  for m in latest{"members"}.getElems(): members.add(m)
+  result = %*{
+    "schema": InspectSchema,
+    "kind": "workspace",
+    "name": latest{"name"}.getStr(),
+    "selector": latest{"selector"}.getStr(),
+    "system": latest{"system"}.getStr(),
+    "members": members,
+    "producer": (if latest.hasKey("repro"): latest["repro"] else: newJNull()),
+    "provision": {"workspaceDir": latest{"workspace_dir"}.getStr()},
+    "selection": {"exclude": newJArray(), "include": newJArray()},
+    "halves": newJObject()}
+  for kind, node in halves:
+    result["halves"][kind] = %node{"id"}.getStr(
+      node{"bundleId"}.getStr())
+  if halves.hasKey("nix"):
+    result["provision"]["nixStore"] = %"/nix/store"
+  if halves.hasKey("native_store"):
+    let node = halves["native_store"]
+    let rel = node{"dir"}.getStr()
+    if rel.len == 0 or rel.isAbsolute or ".." in rel.split('/'):
+      bundleFail("latest.json names an unusable native half directory: " &
+        rel.escape)
+    let v = readVerifiedContents(bundleDir / rel, NativeManifestName)
+    if v.bundleId != rel.extractFilename:
+      bundleFail("the native half in " & rel & " has contents of bundle " &
+        v.bundleId)
+    let native = inspectJsonOf(v)
+    # The verified values win over the unverified JSON.
+    result["producer"] = native["producer"]
+    for key in ["storeRoot", "actionCacheRoot", "workspaceRoots"]:
+      result["provision"][key] = native["provision"][key]
+    result["selection"] = native["selection"]
+    result["bundleId"] = %v.bundleId
+    result["halves"]["native_store"] = %v.bundleId
+
+# ---------------------------------------------------------------------------
+# restore
+# ---------------------------------------------------------------------------
+
 
 proc freeBytes*(path: string): int64 =
   ## Free space on the filesystem holding `path` (or its nearest existing

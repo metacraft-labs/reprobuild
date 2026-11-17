@@ -254,6 +254,12 @@ proc storeBundleSelectionFlags(): NimNode {.compileTime.} =
     flag freezeDevEnv is seq[string], format = equals,
       help = "A project whose development-environment activation the " &
         "bundle carries; repeat it for several"
+    flag selection is string, format = equals,
+      help = "Carry only this project, variant, repository set or " &
+        "repository of the workspace, as `repro bundle create` does"
+    flag workspaceRoot is string, format = equals,
+      help = "The workspace `--selection` is resolved in (default: the " &
+        "one enclosing the current directory)"
 
 proc userDaemonConfigFlags(): NimNode {.compileTime.} =
   ## The per-user daemon's configuration, which every `repro daemon`
@@ -2112,6 +2118,12 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         boolFlag json is bool, help = "Print the report as JSON"
         pos source is string, help = "A bundle directory or URL, or " &
           "`github:OWNER/REPO[@REF]/BUNDLE`"
+      subcmd "inspect", help = "Print the roots to provision, the producing " &
+          "repro and the selection of a bundle, writing nothing":
+        boolFlag json is bool, help = "Print the report as JSON " &
+          "(`reprobuild.bundle-inspect.v1`)"
+        pos source is string, help = "A bundle directory, one of its " &
+          "system directories, or a native-store half"
       # `repro bundle help`: the same as `repro bundle --help`.
       subcmd "help", visibility = hidden:
         pos topic is seq[string], required = false

@@ -62,6 +62,7 @@ const
     "repro cache lookup", "repro cache substitute", "repro cache publish",
     "repro cache derive-key", "repro cache gen-key", "repro bundle",
     "repro bundle create", "repro bundle publish", "repro bundle restore",
+    "repro bundle inspect",
     "repro reap", "repro launch-plan", "repro launch-plan show",
     "repro launch-plan id", "repro cert-signer", "repro cert-signer serve",
     "repro cert-signer registration", "repro self", "repro self install",

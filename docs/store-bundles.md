@@ -44,7 +44,12 @@ when one is set. It has these parts:
    outputs lie inside the bundle roots. And, for a relocatable record (one
    whose paths are relative to the action's directory, which the record does
    not name), there is a project directory under the roots where its in-place
-   check passes; that directory is recorded with it. Any other record that
+   check passes and every input it names relative to that directory is the
+   one it fingerprinted (the recorded content where the record carries a
+   content hash, else the recorded kind, size and mtime); that directory is
+   recorded with it. (Every project's provider
+   compile names `repro.nim` by the same relative path, so an output check
+   alone would place one checkout's record in another.) Any other record that
    touches a root is reported by `closure` with the reason, and is not
    re-witnessed. It simply misses on the importing machine.
 3. **Project state.** Every `.repro/` directory under a workspace root (not
@@ -76,6 +81,42 @@ The closure deliberately does **not** include:
   to re-extract prefixes that the bundle already carries.
 
 `repro store closure` prints the closure without writing anything.
+
+### 2.1 A selection of the roots
+
+A workspace bundle is made for a selection of a workspace: some of its
+member checkouts. The workspace root holds every checkout, so the closure
+can be narrowed to a **selection** of its workspace roots, given as two lists
+of absolute directories inside them: `exclude` directories, whose content is
+not part of the selection, and `include` directories inside an excluded one,
+whose content is part of it again. A path is in the selection when it lies
+in a workspace root and the deepest of the roots, `exclude` and `include`
+directories that contain it is not an `exclude` one. With no `exclude`
+directory the closure is the whole of its roots.
+
+The selection narrows what the roots choose, and nothing else; the roots
+themselves are still what the importer must provide (§3):
+
+* an action-cache edge is carried when one of its records has an input or an
+  output in the selection; a record with an output outside it is reported
+  and is not re-witnessed;
+* project state and the candidate project directories of relocatable
+  records are searched in the selection only;
+* a restamp entry is written only for an input in the selection;
+* no bundle entry lies in an excluded directory, and import refuses a
+  bundle whose contents list declares one.
+
+An edge directory still travels whole. If it also holds a record made in an
+unselected checkout, that record travels too: two checkouts share an edge
+directory only for a relocatable record naming the same relative paths, that
+is, the same action. It is re-witnessed only if it passes the in-place check
+in a selected project directory.
+
+`repro bundle create <selector>` computes the selection from the members the
+selector resolves to: every Git checkout under the workspace root that is
+not a member is excluded, and a member inside an excluded checkout is
+included again. `repro store closure` and `repro store export` take the same
+selection with `--selection=<selector>`.
 
 ## 3. Path invariance
 
@@ -127,10 +168,13 @@ A line-oriented UTF-8 text file. Fields are separated by TAB. Path and link-targ
 with `\`, TAB and newline written as `\\`, `\t` and `\n`.
 
 ```
-reprobuild.store-bundle.contents.v1
+reprobuild.store-bundle.contents.v2
+producer  <repro-version>  <source-revision|unknown>
 root  store  <abs>
 root  action-cache  <abs>
 root  workspace  <abs>          (one per workspace root)
+exclude  <abs>                  (§2.1)
+include  <abs>                  (§2.1)
 devenv  <project-root>  <script-abs-path>
 edge  <abs edge dir>
 record  <strong-hex>  <abs edge dir>  <abs action dir, or empty>
@@ -144,6 +188,19 @@ a single TAB. `kind` is `f` (file), `d` (directory) or `l` (symlink, whose diges
 the escaped link target). Every tar entry has exactly one `entry` line, and
 there are no others.
 
+The `producer` line names the `repro` that wrote the bundle: its version and
+the source revision it was built from (with `-dirty` when its tree carried
+uncommitted changes), or `unknown` for a build that was not told its
+revision. The version alone does not identify a build. The `exclude` and
+`include` lines are the selection (§2.1). A `v1` contents list names no
+producer, and is refused by name.
+
+The transport manifest `native-store.json` carries the roots to provision
+(`roots`), the selection (`selection`) and the producer (`producer`; `v1`'s
+`reproRevision` is kept with the same value) next to the parts, under the
+schema `reprobuild.store-bundle.v2`. They are unverified there;
+`repro bundle inspect` prints them verified (§7).
+
 ## 5. Import
 
 `repro store import <dir>` runs these steps in order:
@@ -152,8 +209,21 @@ there are no others.
    into memory and its SHA-256 is checked *before* any byte of it is passed on
    to the decompressor. No unverified byte reaches the filesystem, and the
    cost is one pass over the parts.
-2. **Check the roots.** Decompress only the first tar entry (`contents`) and
-   compare its roots with the local ones (§3). Refuse on mismatch.
+2. **Check the id, the roots and the producer.** Decompress only the first
+   tar entry (`contents`), into memory, and check that the bundle id
+   recomputed from it is the one the manifest names. Compare its roots with
+   the local ones (§3), and its producer with the running `repro`: refuse
+   unless the version and the source revision are the same, naming both.
+   Refuse an entry, a record directory or a restamp outside the roots or in
+   an excluded directory. Nothing has been written at this point, not even
+   into the bundle's own directory.
+
+   The producer check exists because provider-compile and interface records
+   fingerprint the engine binary: another `repro` would miss on them and
+   rebuild what the bundle was made to save, after writing the whole bundle.
+   Two builds that both report `unknown` compare equal; every route that
+   installs `repro` (`scripts/build_apps.sh`, the Nix package, the release
+   archives) records the revision.
 3. **Unpack.** Stream the verified parts into `zstd -d | tar -x -C /`. Prefix
    directories that already exist locally with a receipt whose realization
    hash matches their name are excluded from extraction. They are
@@ -245,14 +315,31 @@ is given.
 ## 7. Command summary
 
 ```
-repro store closure --root=<dir>... [--json]
+repro store closure --root=<dir>... [--selection=<selector>
+                    [--workspace-root=<dir>]] [--json]
 repro store export  --root=<dir>... --out=<dir> [--freeze-dev-env=<project>]...
+                    [--selection=<selector> [--workspace-root=<dir>]]
                     [--part-size=64M] [--zstd-level=19]
 repro store import  <dir> [--root=<dir>...] [--allow-dev-env] [--force]
+repro bundle inspect <dir> [--json]
 ```
 
-All three accept `--store-root=` and `--action-cache-root=`, which resolve as
-for `repro build`.
+All three `store` commands accept `--store-root=` and
+`--action-cache-root=`, which resolve as for `repro build`.
+
+`--selection` resolves a selector as `repro bundle create` does, in the
+workspace enclosing the current directory or in `--workspace-root`, and makes
+the workspace root a root. `closure` then reports the selector, its members,
+the excluded and re-included directories, the records it carries, and every
+record that touches the selection but is not carried as re-witnessable, with
+a reason class: `output-changed` (the output metadata changed since the
+record was written), `output-outside-roots`, `output-outside-selection` or
+`unplaceable`.
+
+`repro bundle inspect` reads a native-store half (or a whole workspace
+bundle, see [workspace-bundles.md](./workspace-bundles.md)) and prints the
+roots to provision, the producer and the selection from the verified
+contents list, writing nothing.
 
 ## 8. Producing and consuming the half in the dev-shell bundle scripts
 

@@ -96,7 +96,7 @@ Commands fall into four side-effect classes:
 | `repro store` | `gc`, `recover`, `roots`, `list`, `optimise`, `materialize`, `closure`, `export`, `import`, `copy`, `daemon` | Manage the local store. |
 | `repro cas` | `gc`, `verify`, `path`, `exists` | Inspect the content-addressed blob store. |
 | `repro cache` | `lookup`, `substitute`, `publish`, `derive-key`, `gen-key` | Look up, substitute and publish binary-cache entries. |
-| `repro bundle` | `create`, `publish`, `restore` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
+| `repro bundle` | `create`, `publish`, `restore`, `inspect` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
 | `repro reap` | — | Run one sweep of the resource-state store. |
 | `repro launch-plan` | `show`, `id` | Show stored launch plans. |
 | `repro cert-signer` | `serve`, `registration` | Run the certificate signer for remote build workers. |

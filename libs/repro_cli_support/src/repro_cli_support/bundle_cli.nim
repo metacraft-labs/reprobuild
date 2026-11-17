@@ -188,6 +188,42 @@ else:
             echo "activated via " & r.activationFile & " (sourced from " &
               r.bashrcFile & ")"
         return 0
+      of "inspect":
+        # Store-Bundles §7.1 / docs/workspace-bundles.md: verified, and
+        # writes nothing.
+        let r = inspectBundle(a.positional)
+        if emitJson:
+          echo pretty(r)
+          return 0
+        if r{"kind"}.getStr() == "workspace":
+          echo "bundle:            " & r{"name"}.getStr() & " (" &
+            r{"system"}.getStr() & "), selector " & r{"selector"}.getStr()
+          var members: seq[string]
+          for m in r{"members"}.getElems(): members.add(m.getStr())
+          echo "members:           " & members.join(", ")
+        let producer = r{"producer"}
+        if producer.isNil or producer.kind != JObject:
+          echo "repro:             (not recorded)"
+        else:
+          echo "repro:             " & producer{"version"}.getStr() &
+            " (revision " & producer{"revision"}.getStr() & ")"
+        echo "roots to provision:"
+        let pr = r{"provision"}
+        for (label, key) in [("workspace dir", "workspaceDir"),
+                             ("store root", "storeRoot"),
+                             ("action-cache root", "actionCacheRoot"),
+                             ("nix store", "nixStore")]:
+          if pr.hasKey(key):
+            echo "  " & alignLeft(label & ":", 19) & pr[key].getStr()
+        for w in pr{"workspaceRoots"}.getElems():
+          echo "  workspace root:    " & w.getStr()
+        for d in r{"selection"}{"exclude"}.getElems():
+          echo "excluded:          " & d.getStr()
+        for d in r{"selection"}{"include"}.getElems():
+          echo "included:          " & d.getStr()
+        for kind, id in r{"halves"}:
+          echo alignLeft(kind & ":", 19) & id.getStr()
+        return 0
       else:
         return 2
     except CatchableError as e:

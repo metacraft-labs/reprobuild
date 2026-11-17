@@ -40041,6 +40041,11 @@ proc parseStoreDuration(text: string; value: var int64): bool =
 # description default is an expression in the description's own scope).
 static: doAssert DefaultGcGraceSeconds == 300
 
+proc enclosingWorkspaceRoot*(startPath: string;
+                             followWorktree = true): string
+  ## Forward declaration: `repro store closure|export --selection` resolves
+  ## its workspace as `repro bundle create` does.
+
 proc runStoreCommand*(conf: ReproCommandLineStore): int =
   ## Implements `repro store <subcommand>` for the M56 unified local
   ## content-addressed store. Supported subcommands:
@@ -40133,14 +40138,16 @@ proc runStoreCommand*(conf: ReproCommandLineStore): int =
       let c = conf.closure
       a = StoreBundleArgs(storeRoot: c.storeRoot,
         actionCacheRoot: c.actionCacheRoot, roots: c.root,
-        freezeDevEnv: c.freezeDevEnv, emitJson: c.json)
+        freezeDevEnv: c.freezeDevEnv, emitJson: c.json,
+        selection: c.selection, workspaceRoot: c.workspaceRoot)
     of ReproCommandLineStoreCommand.`export`:
       sub = "export"
       let c = conf.`export`
       a = StoreBundleArgs(storeRoot: c.storeRoot,
         actionCacheRoot: c.actionCacheRoot, roots: c.root,
         freezeDevEnv: c.freezeDevEnv, outDir: c.`out`, partSize: c.partSize,
-        zstdLevel: c.zstdLevel, zstdThreads: c.zstdThreads, emitJson: c.json)
+        zstdLevel: c.zstdLevel, zstdThreads: c.zstdThreads, emitJson: c.json,
+        selection: c.selection, workspaceRoot: c.workspaceRoot)
     else:
       sub = "import"
       let c = conf.`import`
@@ -40152,7 +40159,9 @@ proc runStoreCommand*(conf: ReproCommandLineStore): int =
       resolveActionCacheRoot: proc (explicit: string): string =
         resolveActionCacheRoot(explicit),
       allowProject: proc (projectRoot: string): int =
-        runReproAllowCommand(projectRoot)))
+        runReproAllowCommand(projectRoot),
+      workspaceRootFor: proc (startPath: string): string =
+        enclosingWorkspaceRoot(startPath)))
   of ReproCommandLineStoreCommand.materialize:
     let m = conf.materialize
     let srcDir = m.srcDir
@@ -105193,6 +105202,10 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       allowDevEnv: c.allowDevEnv, parallel: c.parallel, staging: c.staging,
       nixRoot: c.nixRoot, afterBootstrap: c.afterBootstrap,
       storeRoot: c.storeRoot, actionCacheRoot: c.actionCacheRoot,
+      emitJson: c.json), hooks)
+  of ReproCommandLineBundleCommand.inspect:
+    let c = conf.inspect
+    return runBundleCommand("inspect", BundleArgs(positional: c.source,
       emitJson: c.json), hooks)
 
 proc runReapCommand(conf: ReproCommandLineReap): int =
