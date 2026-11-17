@@ -18967,6 +18967,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker isMainModule"),
   TestSpec(
+    source: "tests/integration/t_build_declares_sizing_to_runquota.nim",
+    binary: "build/test-bin/t_build_declares_sizing_to_runquota",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
     source: "tests/integration/t_build_honours_override_provenance_for_exact_pins.nim",
     binary: "build/test-bin/t_build_honours_override_provenance_for_exact_pins",
     defines: @[],
