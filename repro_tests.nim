@@ -27756,6 +27756,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_two_checkouts_share_a_static_library_edge_macos.nim",
+    binary: "build/test-bin/t_two_checkouts_share_a_static_library_edge_macos",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g14",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_two_projects_share_a_library_built_with_the_same_flags.nim",
     binary: "build/test-bin/t_two_projects_share_a_library_built_with_the_same_flags",
     defines: @[],
@@ -27819,7 +27830,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unobserved_consumer_key_follows_producer_channel_content.nim",
