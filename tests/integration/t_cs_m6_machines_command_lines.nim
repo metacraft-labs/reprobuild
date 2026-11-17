@@ -102,7 +102,8 @@ suite "CS-M6: the machine command lines":
         @["home", "__receive-bundle"], @["home", "__transfer-bundle"],
         @["home", "__remote-activate"], @["system"], @["system", "add"],
         @["system", "remove"], @["system", "list"], @["system", "why"],
-        @["system", "sync"], @["system", "history"], @["system", "rollback"],
+        @["system", "plan"], @["system", "apply"], @["system", "sync"],
+        @["system", "history"], @["system", "rollback"],
         @["system", "audit"], @["infra"], @["infra", "plan"],
         @["infra", "apply"], @["infra", "cache-keys"],
         @["infra", "install-root"], @["infra", "image"], @["anywhere"],
@@ -137,6 +138,11 @@ suite "CS-M6: the machine command lines":
     check "__build-bundle" in homeHelp       # listed by its namespace
     check "--accept-overwrite" in s.run(["home", "apply", "--help"]).output
     check "--keep-days" in s.run(["infra", "apply", "--help"]).output
+    # `system plan|apply` take the flags `infra plan|apply` take.
+    check "--keep-days" in s.run(["system", "apply", "--help"]).output
+    check "--no-elevate" in s.run(["system", "apply", "--help"]).output
+    check "--json" in s.run(["system", "plan", "--help"]).output
+    check "--json" in s.run(["infra", "plan", "--help"]).output
     check "compile-profile" in s.run(["deploy-agent", "--help"]).output
     check "--allowed-signers" in s.run(["deploy-agent", "--help"]).output
     let primary = s.run(["--help"]).output
@@ -174,6 +180,13 @@ suite "CS-M6: the machine command lines":
         (@["system", "frob"], "unknown subcommand 'frob' for 'repro system'"),
         (@["system", "why"], "'repro system why'"),
         (@["system", "history", "--profile", "x"], "'repro system history'"),
+        (@["system", "plan", "--plan", "x"], "'repro system plan'"),
+        (@["system", "plan", "extra"], "'repro system plan'"),
+        (@["system", "apply", "--json"], "'repro system apply'"),
+        (@["system", "apply", "--keep-days=x"], "'repro system apply'"),
+        (@["system", "apply", "a", "b"], "'repro system apply'"),
+        (@["system", "why", "a", "--json"], "'repro system why'"),
+        (@["home", "why", "git", "--json"], "'repro home why'"),
         (@["infra"], "'repro infra' needs a subcommand"),
         (@["infra", "plan", "--plan", "x"], "'repro infra plan'"),
         (@["infra", "apply", "--keep-days=x"], "'repro infra apply'"),
@@ -255,6 +268,9 @@ suite "CS-M6: the machine command lines":
           "--store-root and --state-dir are required"),
         (@["infra", "apply", "--no-preview", "--keep-days", "-1"], 2,
           "--keep-days expects a non-negative integer, got -1"),
+        (@["system", "apply", "--no-preview", "--keep-days", "-1"], 2,
+          "repro system apply: --keep-days expects a non-negative " &
+            "integer, got -1"),
         (@["infra", "install-root", "--source=", "--dry-run"], 2,
           "--source must be a non-empty path"),
         (@["anywhere", "--mode", "convert"], 2,

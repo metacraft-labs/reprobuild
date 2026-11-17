@@ -4659,6 +4659,31 @@ type
     defaultNode: NimNode
     description: string
 
+var declaredPackageIdentifiers {.compileTime.}: Table[string, (string, string)]
+  ## ``packageIdentifierKey`` -> (package name, declaration site).
+
+proc refusePackageIdentifierCollision(packageName: string; nameNode: NimNode)
+    {.compileTime.} =
+  ## Package-Model.md §"Package names": two names whose sanitized forms are
+  ## the same Nim identifier cannot both be declared in one registry. The
+  ## second is refused naming both, rather than failing later with Nim's
+  ## ``redefinition of`` that names neither. Re-declaring the same name is
+  ## not this check's concern.
+  let key = packageIdentifierKey(packageName)
+  let site = nameNode.lineInfo
+  if key in declaredPackageIdentifiers:
+    let (firstName, firstSite) = declaredPackageIdentifiers[key]
+    if firstName != packageName and firstSite != site:
+      error("package \"" & packageName & "\" and package \"" & firstName &
+        "\" sanitize to the same Nim identifier (\"" &
+        selectorModuleName(packageName) & "\" and \"" &
+        selectorModuleName(firstName) & "\", both \"" & key &
+        "\" under Nim identifier equality); package names must differ in " &
+        "more than punctuation and case. \"" & firstName &
+        "\" was declared at " & firstSite, nameNode)
+  else:
+    declaredPackageIdentifiers[key] = (packageName, site)
+
 var l2ActivityConfigKeyNames {.compileTime.}: Table[string, seq[string]]
   ## ``<package>\x1f<activity>`` → its ``config:`` key names, recorded by
   ## the activity walker and read by the ``enable`` walker so an
@@ -10422,6 +10447,7 @@ macro packageImpl*(name: untyped;
     resolvedToolProvisioning, resolvedUses)
   let cliTypeChecks = takeCliModelTypeChecks()
   let packageName = pkg.packageName
+  refusePackageIdentifierCollision(packageName, name)
   # ── DSL-port M2: emit ``config:`` scalar registrations + ``versions:``
   # entries. The two emitters operate on the M1 ``sectionStmts``
   # partition and are mutually exclusive with the legacy

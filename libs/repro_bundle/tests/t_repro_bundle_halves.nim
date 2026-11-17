@@ -270,6 +270,7 @@ suite "sources into an existing root, activation, GitHub round trip":
       check readFile(fresh / "lib" / "src" / "lib.nim") == "echo 1\n"
 
 const RestoreScriptTools = ["bash", "sh", "nix-store", "nix-hash", "tar",
+  "flock", "comm", "wc", "stat",
   "zstd", "sha256sum", "df", "awk", "xargs", "mktemp", "sort", "join", "cmp",
   "diff", "cut", "sed", "tr", "cat", "chmod", "rm", "mkdir", "touch", "tee",
   "date", "dirname", "tail", "head"]
@@ -488,3 +489,296 @@ suite "nix half restore after an interrupted unpack":
       check "nix half restored" notin readFile(log)
       check not pathValid(badShRoot, a)
       check outsideUntouched(badShRoot)
+
+proc holdNixLock(root, storePath, scratch: string;
+                 register = true): Process =
+  ## A stand-in for a Nix writer (a `nix-daemon` substituting `storePath`):
+  ## it takes `<path>.lock` as Nix's `PathLocks` does (an exclusive `flock`),
+  ## writes the path's content, waits, records whether the directory it
+  ## wrote is still the one it wrote, then registers it and exits, which
+  ## releases the lock. `scratch/ready` appears once it holds the lock and
+  ## the content is in place. With `register = false` it is a writer that
+  ## fails part-way: it leaves a truncated file and registers nothing.
+  let location = storeLocationIn(root, storePath)
+  createDir(location.parentDir)
+  let entry = scratch / "entry"
+  writeFile(entry, sh("nix-store --dump-db " & quoteShell(storePath)))
+  let script = "set -e\n" &
+    "exec 9>>" & quoteShell(location & ".lock") & "\n" &
+    "flock 9\n" &
+    "cp -a " & quoteShell(storePath) & " " & quoteShell(location) & "\n" &
+    (if register: "" else:
+      "chmod -R u+w " & quoteShell(location) & "\n" &
+      "truncate -s 3 " & quoteShell(location / "lib" / "data") & "\n") &
+    "stat -c '%i %z' " & quoteShell(location) & " > " &
+      quoteShell(scratch / "before") & "\n" &
+    "touch " & quoteShell(scratch / "ready") & "\n" &
+    "sleep 3\n" &
+    "{ stat -c '%i %z' " & quoteShell(location) & " || echo gone; } > " &
+      quoteShell(scratch / "after") & " 2>/dev/null\n" &
+    (if register: "nix-store --store " & quoteShell(root) & " --load-db < " &
+      quoteShell(entry) & "\n" else: "")
+  writeFile(scratch / "holder.sh", script)
+  result = startProcess("bash", args = [scratch / "holder.sh"],
+    options = {poUsePath, poParentStreams})
+  for _ in 0 ..< 200:
+    if fileExists(scratch / "ready"): break
+    sleep(25)
+  doAssert fileExists(scratch / "ready"), "the lock holder did not start"
+
+proc holdCollectorLock(root, storePath, scratch: string): Process =
+  ## A stand-in for Nix's garbage collector: it holds `gc.lock` exclusively
+  ## for 3 s, as `collectGarbage` does for a whole collection, and records
+  ## whether `storePath` became valid in the store at `root` meanwhile.
+  let state = root / "nix" / "var" / "nix"
+  createDir(state)
+  let script = "exec 9>>" & quoteShell(state / "gc.lock") & "\n" &
+    "flock 9\n" &
+    "touch " & quoteShell(scratch / "ready") & "\n" &
+    "sleep 3\n" &
+    "if nix-store --store " & quoteShell(root) & " --check-validity " &
+      quoteShell(storePath) & " >/dev/null 2>&1; then echo registered; " &
+      "else echo waited; fi > " & quoteShell(scratch / "during-gc") & "\n"
+  writeFile(scratch / "collector.sh", script)
+  result = startProcess("bash", args = [scratch / "collector.sh"],
+    options = {poUsePath, poParentStreams})
+  for _ in 0 ..< 200:
+    if fileExists(scratch / "ready"): break
+    sleep(25)
+  doAssert fileExists(scratch / "ready"), "the GC lock holder did not start"
+
+proc holdLockThenCollect(root, storePath, scratch: string): Process =
+  ## A stand-in for a `nix-daemon` whose `addToStore` holds `storePath`'s
+  ## lock and then waits for a garbage collection (`autoGC`), which takes
+  ## `gc.lock` exclusively and deletes the lock files of the other invalid
+  ## paths, none of which is its temporary root. It gives up after 10 s and
+  ## records "deadlocked"; otherwise "collected". Either way it then writes
+  ## and registers its path and exits.
+  let location = storeLocationIn(root, storePath)
+  let state = root / "nix" / "var" / "nix"
+  createDir(location.parentDir)
+  createDir(state)
+  let entry = scratch / "entry"
+  writeFile(entry, sh("nix-store --dump-db " & quoteShell(storePath)))
+  let own = location & ".lock"
+  let script = "exec 9>>" & quoteShell(own) & "\n" &
+    "flock 9\n" &
+    "touch " & quoteShell(scratch / "ready") & "\n" &
+    "sleep 1\n" &
+    "exec 8>>" & quoteShell(state / "gc.lock") & "\n" &
+    "if flock -w 10 8; then\n" &
+    "  for f in " & quoteShell(location.parentDir) & "/*.lock; do\n" &
+    "    [ \"$f\" = " & quoteShell(own) & " ] || rm -f \"$f\"\n" &
+    "  done\n" &
+    "  echo collected\n" &
+    "else echo deadlocked; fi > " & quoteShell(scratch / "collection") & "\n" &
+    "exec 8>&-\n" &
+    "cp -a " & quoteShell(storePath) & " " & quoteShell(location) & "\n" &
+    "nix-store --store " & quoteShell(root) & " --load-db < " &
+      quoteShell(entry) & "\n"
+  writeFile(scratch / "daemon.sh", script)
+  result = startProcess("bash", args = [scratch / "daemon.sh"],
+    options = {poUsePath, poParentStreams})
+  for _ in 0 ..< 200:
+    if fileExists(scratch / "ready"): break
+    sleep(25)
+  doAssert fileExists(scratch / "ready"), "the daemon stand-in did not start"
+
+proc collectionRan(scratch: string): bool =
+  let got = readFile(scratch / "collection").strip()
+  result = got == "collected"
+  if not result:
+    echo "    the restore held gc.lock while it waited for a path lock, so a ",
+      "Nix writer waiting for a collection under that lock deadlocked (",
+      got, ")"
+
+proc waitedForCollector(scratch: string): bool =
+  result = readFile(scratch / "during-gc").strip() == "waited"
+  if not result:
+    echo "    the restore registered a path while the garbage collector ",
+      "held gc.lock"
+
+proc untouchedWhileLocked(scratch: string): bool =
+  ## Whether the path the holder wrote under its lock was still the same,
+  ## unchanged directory (inode and change time, to the nanosecond) when the
+  ## holder looked again, before it registered it. The change time catches
+  ## a deletion and re-creation that happens to reuse the inode number.
+  let before = readFile(scratch / "before").strip()
+  let after = readFile(scratch / "after").strip()
+  result = before.len > 0 and before == after
+  if not result:
+    echo "    the restore replaced or deleted the locked path while its ",
+      "lock was held (inode and ctime before: ", before, "; after: ", after,
+      ")"
+
+suite "nix half restore beside a Nix writer":
+  # Issue reprobuild-pm/issues/2026-11-15-bundle-restore-deletes-and-unpacks-
+  # invalid-store-paths-without-nix-per-path-lock.md. Workspace-Bundles.md
+  # §7 step 3.3: the restore takes Nix's per-path lock on every path it
+  # restores and re-checks validity under it, so it never deletes or writes
+  # a path that a Nix writer holding `<path>.lock` is restoring.
+  test "a path whose Nix lock is held is waited for, then left to Nix":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0 or findExe("flock").len == 0:
+      skip("nix-store, nix-hash, zstd and flock are needed")
+    else:
+      let top = createTempDir("repro-bundle-lock-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let tree = top / "payload"
+      createDir(tree / "lib")
+      writeFile(tree / "lib" / "data", "locked path\n")
+      writeFile(tree / "env.sh", "export T_REPRO_BUNDLE_LOCK=1\n")
+      let a = sh("nix-store --add " & quoteShell(tree)).strip()
+      let b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
+      let partsDir = top / "bundle" / "x86_64-linux" / NixHalfDir / "h"
+      let packed = packNixHalf(@[a, b], partsDir, 3, 1 shl 20)
+      let h = NixHalf(id: "h", system: "x86_64-linux",
+        zstd: storePathOf(expandFilename(findExe("zstd"))), paths: @[a, b],
+        unpackedBytes: packed.unpackedBytes,
+        compressedBytes: packed.compressedBytes, parts: packed.parts,
+        registration: packed.registration,
+        shells: @[BundleShell(name: "t:default", input: a, env: b)])
+
+      # The library path: `repro bundle restore`.
+      let root = top / "root"
+      let scratch = top / "lib-holder"
+      createDir(scratch)
+      let holder = holdNixLock(root, a, scratch)
+      restoreNixHalf(h, partsDir, root)
+      discard holder.waitForExit()
+      holder.close()
+      check untouchedWhileLocked(scratch)
+      check pathValid(root, a)
+      check pathValid(root, b)
+      let verified = storeVerifies(root)
+      check verified.ok
+      if not verified.ok: echo verified.output
+      check not fileExists(storeLocationIn(root, b) & ".lock")
+
+      # The bootstrap path: restore.sh.
+      let script = top / "restore.sh"
+      writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+        "name": "bundle"}, true, h))
+      let shRoot = top / "sh-root"
+      let shScratch = top / "sh-holder"
+      createDir(shScratch)
+      let log = top / "restore.log"
+      let shHolder = holdNixLock(shRoot, a, shScratch)
+      discard execCmdEx("env -i PATH=" & quoteShell(restoreScriptPath(top)) &
+        " TMPDIR=" & quoteShell(top) &
+        " REPRO_BUNDLE_LOG=" & quoteShell(log) &
+        " REPRO_BUNDLE_NIX_ROOT=" & quoteShell(shRoot) &
+        " bash " & quoteShell(script) & " " & quoteShell(top / "bundle"))
+      discard shHolder.waitForExit()
+      shHolder.close()
+      check untouchedWhileLocked(shScratch)
+      check "nix half restored" in readFile(log)
+      check pathValid(shRoot, a)
+      check pathValid(shRoot, b)
+      let shVerified = storeVerifies(shRoot)
+      check shVerified.ok
+      if not shVerified.ok: echo readFile(log) & "\n" & shVerified.output
+      check not fileExists(storeLocationIn(shRoot, b) & ".lock")
+
+  test "a writer that fails under its lock is restored over; a valid path is not written":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0 or findExe("flock").len == 0:
+      skip("nix-store, nix-hash, zstd and flock are needed")
+    else:
+      let top = createTempDir("repro-bundle-lock2-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let tree = top / "payload"
+      createDir(tree / "lib")
+      writeFile(tree / "lib" / "data", "failed writer\n")
+      writeFile(tree / "lib" / "extra", "kept out of a valid path\n")
+      writeFile(tree / "env.sh", "export T_REPRO_BUNDLE_LOCK2=1\n")
+      let a = sh("nix-store --add " & quoteShell(tree)).strip()
+      let b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
+      let partsDir = top / "bundle" / "x86_64-linux" / NixHalfDir / "h"
+      let packed = packNixHalf(@[a, b], partsDir, 3, 1 shl 20)
+      let h = NixHalf(id: "h", system: "x86_64-linux",
+        zstd: storePathOf(expandFilename(findExe("zstd"))), paths: @[a, b],
+        unpackedBytes: packed.unpackedBytes,
+        compressedBytes: packed.compressedBytes, parts: packed.parts,
+        registration: packed.registration,
+        shells: @[BundleShell(name: "t:default", input: a, env: b)])
+      let script = top / "restore.sh"
+      writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+        "name": "bundle"}, true, h))
+      let log = top / "restore.log"
+      proc runScript(root: string) =
+        discard execCmdEx("env -i PATH=" & quoteShell(restoreScriptPath(top)) &
+          " TMPDIR=" & quoteShell(top) &
+          " REPRO_BUNDLE_LOG=" & quoteShell(log) &
+          " REPRO_BUNDLE_NIX_ROOT=" & quoteShell(root) &
+          " bash " & quoteShell(script) & " " & quoteShell(top / "bundle"))
+
+      # A Nix writer that fails under its lock leaves a truncated file and
+      # registers nothing: once it lets go, the restore replaces it.
+      let root = top / "root"
+      let scratch = top / "failed-holder"
+      createDir(scratch)
+      let holder = holdNixLock(root, a, scratch, register = false)
+      restoreNixHalf(h, partsDir, root)
+      discard holder.waitForExit()
+      holder.close()
+      check untouchedWhileLocked(scratch)
+      check pathValid(root, a)
+      check storeVerifies(root).ok
+
+      # A path that is valid is Nix's even when it is damaged: neither
+      # path of the restore adds the file it lacks.
+      for viaScript in [false, true]:
+        let r = top / (if viaScript: "valid-sh-root" else: "valid-root")
+        restoreNixHalf(h, partsDir, r)
+        let extra = storeLocationIn(r, a) / "lib" / "extra"
+        makeWritable(extra.parentDir)
+        removeFile(extra)
+        discard sh("nix-store --store " & quoteShell(r) & " --delete " &
+          quoteShell(b))
+        check not pathValid(r, b)
+        if viaScript: runScript(r)
+        else: restoreNixHalf(h, partsDir, r)
+        check pathValid(r, b)
+        check not fileExists(extra)
+        if fileExists(extra): echo "    via restore.sh: ", viaScript
+
+      # The garbage collector ignores path locks and holds gc.lock while it
+      # collects: the restore waits for it before it registers anything.
+      for viaScript in [false, true]:
+        let r = top / (if viaScript: "gc-sh-root" else: "gc-root")
+        let gcScratch = top / (if viaScript: "gc-sh" else: "gc-lib")
+        createDir(gcScratch)
+        let collector = holdCollectorLock(r, a, gcScratch)
+        if viaScript: runScript(r)
+        else: restoreNixHalf(h, partsDir, r)
+        discard collector.waitForExit()
+        collector.close()
+        check waitedForCollector(gcScratch)
+        check pathValid(r, a)
+
+      # A Nix writer holds a path's lock while it waits for a collection;
+      # the restore must not hold gc.lock while it waits for that path. The
+      # collection deletes the lock files the restore already holds, so it
+      # must notice and take them again. The writer locks the path the
+      # restore locks last, so the restore holds every other lock then.
+      let last = max(a, b)
+      for viaScript in [false, true]:
+        let r = top / (if viaScript: "daemon-sh-root" else: "daemon-root")
+        let dScratch = top / (if viaScript: "daemon-sh" else: "daemon-lib")
+        createDir(dScratch)
+        let daemon = holdLockThenCollect(r, last, dScratch)
+        if viaScript: runScript(r)
+        else: restoreNixHalf(h, partsDir, r)
+        discard daemon.waitForExit()
+        daemon.close()
+        check collectionRan(dScratch)
+        check pathValid(r, a)
+        check pathValid(r, b)
+        let v = storeVerifies(r)
+        check v.ok
+        if not v.ok: echo v.output

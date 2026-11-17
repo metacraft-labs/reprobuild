@@ -85,7 +85,8 @@ const
     "repro home get", "repro home adopt", "repro home resource",
     "repro home resource move", "repro home migrate-from-env-scripts",
     "repro system", "repro system add", "repro system remove",
-    "repro system list", "repro system why", "repro system sync",
+    "repro system list", "repro system why", "repro system plan",
+    "repro system apply", "repro system sync",
     "repro system history", "repro system rollback", "repro system audit",
     "repro infra", "repro infra plan", "repro infra apply",
     "repro infra cache-keys", "repro infra install-root", "repro infra image",
@@ -145,8 +146,7 @@ const
     # profile commands implemented today.
     "flag\trepro infra apply\t--activity", "flag\trepro infra apply\t--json",
     "flag\trepro infra apply\t--staged", "flag\trepro infra apply\t--yes",
-    "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--json",
-    "flag\trepro infra plan\t--strict",
+    "flag\trepro infra plan\t--activity", "flag\trepro infra plan\t--strict",
     # The proposed surface of `repro dev` beyond what is implemented: a cap
     # on how long repeated changes may postpone a cycle, and hot code
     # reloading (which `repro watch --hcr` implements).
@@ -164,12 +164,12 @@ const
     "flag\trepro workspace status\t-v",
     # What the pages came to specify after the sixth group moved, for the
     # command-line and DSL usability work that implements it: the root's
-    # `--help-all` (all of a command's help tiers), `repro capabilities
-    # --json` and `repro add`'s dependency-kind flags. And `XDG_STATE_HOME`
+    # `--help-all` (all of a command's help tiers) and `repro add`'s
+    # dependency-kind flags. And `XDG_STATE_HOME`
     # in `repro health`: the page moved the per-user resource-state store
     # from a cache directory to a state directory, and the store has not
     # moved yet.
-    "flag\trepro\t--help-all", "flag\trepro capabilities\t--json",
+    "flag\trepro\t--help-all",
     "flag\trepro add\t--build", "flag\trepro add\t--native-build",
     "flag\trepro add\t--runtime", "env\trepro health\tXDG_STATE_HOME",
     # `repro build`'s `--no-write-stats` (turn the raw observation capture
@@ -195,6 +195,11 @@ const
     "env\trepro hooks\tINSTALL_PYTHON", "env\trepro hooks\tREPROBUILD_REPRO",
     "env\trepro hooks\tREPRO_CMD_SOURCE",
     "env\trepro hooks\tREPRO_INSTALLING_BUILD",
+    # `repro lock refresh` reads `REPRO_ALLOW_PIN_REGRESSION` itself and
+    # adds its names to `--allow-pin-regression`'s (the same variable the
+    # pre-commit gate reads), rather than as that flag's fallback, so the
+    # flag does not declare it.
+    "env\trepro lock refresh\tREPRO_ALLOW_PIN_REGRESSION",
     "env\trepro shell\tSTDIN_FILENO", "env\trepro shell\tSTD_INPUT_HANDLE",
     "env\trepro shell\tFILE_TYPE_PIPE",
     # Names `repro build`'s page writes as code that are not inputs of its

@@ -107,7 +107,7 @@ Commands fall into four side-effect classes:
 | Command | Subcommands | What it does |
 |---|---|---|
 | `repro home` | `add`, `remove`, `enable`, `disable`, `list`, `why`, `history`, `apply`, `plan`, `export`, `facts`, `compare`, `rollback`, `gc`, `set`, `get`, `adopt`, `resource`, `migrate-from-env-scripts` | Manage your home profile. |
-| `repro system` | `add`, `remove`, `list`, `why`, `sync`, `history`, `rollback`, `audit`, `addon`, `state`, `secret`, `adopt` | Manage the machine's system configuration. |
+| `repro system` | `add`, `remove`, `list`, `why`, `plan`, `apply`, `sync`, `history`, `rollback`, `audit`, `addon`, `state`, `secret`, `adopt` | Manage the machine's system configuration. |
 | `repro infra` | `plan`, `apply`, `cache-keys`, `install-root`, `image` | Plan and apply infrastructure. |
 | `repro anywhere` | — | Bootstrap a booted distribution host into ReproOS add-on mode over SSH (Linux): without --expect-plan print the plan and exit 3, with it apply. |
 | `repro deploy-agent` | `keygen` | Run one deploy-agent tick: poll the manifests, verify them and apply the newest for the target. |

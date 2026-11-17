@@ -6,17 +6,19 @@
 
 Look inside a typical repository and you'll find six descriptions of the same
 system: a `Dockerfile`, a Nix flake, a `Makefile` or task runner, a
-`docker-compose.yml`, a Terraform module, and a CI pipeline — each with its own
-language, its own cache, and its own idea of what your dependencies are.
+`docker-compose.yml`, host provisioning scripts, and a CI pipeline — each with
+its own language, its own cache, and its own idea of what your dependencies
+are.
 
 **Reprobuild** (`repro`) combines core ideas from **BuildXL**, **Nix**, and
 **Terraform** to replace them with **one compile-time-verified model** (`repro.nim`,
 `home.nim`, `system.nim`): a build graph with automatically tracked dependencies
 whose outputs are not just files, but live states — a compiled binary, a
-generated config file, a running database, a user account, a system setting, or
-a cloud resource. One typed description drives your builds, dependencies, dev
-environment, services, and infrastructure across Linux, macOS, and Windows,
-catching structural and type errors at compile time before any action runs.
+generated config file, a running database, a user account, or a system
+setting. One typed description drives your builds, dependencies, dev
+environment, services, and machine configuration across Linux, macOS, and
+Windows, catching structural and type errors at compile time before any action
+runs.
 
 Incremental builds compete with low-level executors such as **Ninja**, user-space
 filesystem monitoring (`io-mon`) prevents stale cache hits, and **RunQuota**
@@ -254,10 +256,14 @@ Reprobuild maps directly onto concepts you know:
   DSL** instead of an untyped lazy language, and by keeping store artifacts
   **path-independent**, so caches relocate cleanly across machines.
 - **Reprobuild is like Terraform** in the sense that it handles declarative
-  desired-state reconciliation for local machine state and cloud resources,
-  but differs by integrating directly with your build system and host
-  configuration management — any repository can define typed `resourceType`
-  providers, and **it can reuse existing Terraform providers**.
+  desired-state reconciliation (`repro infra plan` / `apply`, with
+  `depends_on`, drift reports, and guarded removal). It differs by managing
+  host and project state rather than cloud resources, and by integrating
+  directly with your build system — any repository can define typed
+  `resourceType` providers whose resources projects declare, reconcile, and
+  lease to the tests that use them. Reusing existing Terraform and OpenTofu
+  providers to manage cloud resources is planned, not yet implemented; until
+  then, Terraform or OpenTofu remains the tool for cloud resources.
 - **Reprobuild is like Bazel & Buck2** in the sense that it models the
   workspace as a build graph of targets with remote caching. It differs by
   describing builds in standard Nim rather than Starlark, by shipping as a
@@ -289,9 +295,10 @@ Reprobuild unifies all of these tools behind one concept: a build graph of
 tracked inputs and outputs where the outputs are not restricted to files, and
 can also represent live states (the activation of a system setting, the launch
 of a service, or the creation of a user or database).
-Reprobuild can build files, system configurations, and entire cloud fleets on
-the basis of the same abstraction. The outputs or side-effects from executing
-the edges are automatically cleaned up when they are no longer relevant.
+Reprobuild can build files, system configurations, and the configuration of
+whole fleets of machines on the basis of the same abstraction. The outputs or
+side-effects from executing the edges are automatically cleaned up when they
+are no longer relevant.
 
 ---
 

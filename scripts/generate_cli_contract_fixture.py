@@ -32,7 +32,9 @@ What it extracts, and from where:
 * `env <path> <NAME>`: the environment variables (`UPPER_CASE` names with an
   underscore) written in any code in the command's page or section. A piece of code that starts with `repro <words>` belongs to the
   command those words name (so `repro --version` in the `version` page is
-  the root command's flag); any other piece belongs to the page's command.
+  the root command's flag); a piece that starts with a subcommand word of the
+  page's command (`update ...` in the `lock` page) belongs to that
+  subcommand; any other piece belongs to the page's command.
 
 `--help` and `-h` are not recorded: every command accepts them, built into the
 parser, so neither side lists them.
@@ -132,6 +134,8 @@ COVERED_COMMANDS = [
     "system remove",
     "system list",
     "system why",
+    "system plan",
+    "system apply",
     "system sync",
     "system history",
     "system rollback",
@@ -299,8 +303,21 @@ def owner(piece: str, page_command: str, known: set[str]) -> str:
     """The command a piece of code belongs to: the longest known command its
     leading `repro <words>` name, else the page's command."""
     words = piece.split()
-    if not words or words[0] != "repro":
+    if not words:
         return page_command
+    if words[0] != "repro":
+        # A namespace page that lists its verbs writes them without the
+        # `repro <namespace>` prefix (`` `update <dependency> [--to <rev>]` ``
+        # in the `lock` page): such a piece belongs to that subcommand.
+        path = page_command.split() if page_command else []
+        best = ""
+        for word in words:
+            if not COMMAND_WORD.match(word):
+                break
+            path.append(word)
+            if " ".join(path) in known:
+                best = " ".join(path)
+        return best or page_command
     path: list[str] = []
     best = ""
     for word in words[1:]:
