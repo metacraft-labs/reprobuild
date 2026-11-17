@@ -2515,6 +2515,53 @@
               brewIntentModule = brewFixtureHomeManagerModule;
               root = ./.;
             };
+            # The user reference page of the library and the module
+            # (docs/users/content/reference/nix-library.md) names every
+            # public function of the library with its arguments, and its
+            # options region is what the module declares
+            # (nix/tests/lib-reference.nix). The build fails listing each
+            # difference; `nix eval --raw .#checks.<system>.lib-reference.render`
+            # prints the options region to paste. A control run against the
+            # page with one option deleted must fail too.
+            lib-reference =
+              let
+                result = import ./nix/tests/lib-reference.nix {
+                  inherit (pkgs) lib;
+                  inherit reprobuildLib;
+                  intentOptions =
+                    (inputs.nixos-modules.inputs.home-manager-unstable.lib.homeManagerConfiguration {
+                      inherit pkgs;
+                      modules = [
+                        intentHomeManagerModule
+                        {
+                          home = {
+                            username = "reference";
+                            homeDirectory = if pkgs.stdenv.isDarwin then "/Users/reference" else "/home/reference";
+                            stateVersion = "25.05";
+                          };
+                        }
+                      ];
+                    }).options.reprobuild.intent;
+                  pageText = builtins.readFile ./docs/users/content/reference/nix-library.md;
+                };
+                problems =
+                  result.failures
+                  ++ pkgs.lib.optional (result.controlFailures == [ ])
+                    "the control (the page without option ${result.controlOption}) passed, so the check proves nothing";
+              in
+              pkgs.runCommand "reprobuild-lib-reference"
+                {
+                  problems = builtins.concatStringsSep "\n" problems;
+                  passthru = { inherit (result) render; };
+                }
+                ''
+                  if [ -n "$problems" ]; then
+                    echo "reprobuild lib-reference: docs/users/content/reference/nix-library.md does not match the library:" >&2
+                    printf '%s\n' "$problems" | sed 's/^/  - /' >&2
+                    exit 1
+                  fi
+                  echo ok > $out
+                '';
             # readIntent's IFD mode: the packaged `repro` exports the fixture
             # profiles inside the build sandbox, on the EVALUATOR's system
             # (`builtins.currentSystem` under `--impure`, else this check's
