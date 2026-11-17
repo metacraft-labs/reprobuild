@@ -711,6 +711,19 @@ proc triggeredUnits*(show: Table[string, string]): seq[string] =
   for u in show.getOrDefault("Triggers").splitWhitespace():
     if u notin result: result.add(u)
 
+proc acceptTemplateOf*(socket: string; show: Table[string, string]): string =
+  ## The template service an ``Accept=yes`` socket triggers -- one instance
+  ## per connection, ``<stem>@.service`` (systemd.socket(5), ``Accept=``)
+  ## -- which ``systemctl show`` does not list in its ``Triggers=``; "" for
+  ## any other unit.
+  when ApplyMutation == "accept-socket-template-unmapped":
+    # FALSIFYING MUTATION: only the shown Triggers= are read.
+    return ""
+  if not socket.endsWith(".socket"): return ""
+  if show.getOrDefault("Accept").strip().toLowerAscii() notin ["yes", "true", "1", "on"]:
+    return ""
+  socket[0 ..< socket.len - len(".socket")] & "@.service"
+
 proc skippedUnderHold*(show: Table[string, string];
                        holdStampUsec: int64): bool =
   ## Whether a start of the unit whose ``systemctl show`` is ``show`` was
@@ -757,12 +770,41 @@ proc unitId*(host: LiveHost; u: string): string =
   when ApplyMutation == "alias-names-unresolved":
     # FALSIFYING MUTATION: names are matched as written.
     return u
-  if isTemplateUnit(u) or host.show == nil: return u
-  try:
-    let id = host.show(u).getOrDefault("Id").strip()
-    if id.len > 0: return id
-  except CatchableError: discard
-  u
+  if host.show == nil: return u
+  var asked = u
+  if isTemplateUnit(u):
+    # A template, which systemd will not show, is resolved through its
+    # observation instance (``observationInstanceOf``): an alias of a
+    # template (``mygetty@.service`` -> ``getty@.service``) loads its
+    # instances under the aliased template's name (§13 decision 177(a) as
+    # the owner decided it on 2026-11-17, "yes, resolve them").
+    when ApplyMutation == "template-aliases-unresolved" or not defined(posix):
+      # FALSIFYING MUTATION: a template is matched by the name written.
+      return u
+    else:
+      asked = observationInstanceOf(u)
+  var props: Table[string, string]
+  try: props = host.show(asked)
+  except CatchableError as e:
+    when ApplyMutation == "unit-names-unreadable-as-written":
+      # FALSIFYING MUTATION: a name systemd cannot be asked about is
+      # matched as written.
+      return u
+    # Fail closed (A13 review round 13, L2): an alias that cannot be
+    # resolved could be an essential unit's.
+    when defined(posix):
+      raise newException(ECarriedStatePending, "ECarriedStatePending: " &
+        "systemd could not be asked which unit " & u & " names (" & e.msg &
+        "), so whether the carried-state check may hold it cannot be decided")
+    else:
+      raise e
+  let id = props.getOrDefault("Id").strip()
+  if id.len == 0: return u
+  if isTemplateUnit(u):
+    # The instance's Id names the template it was loaded from.
+    let t = templateOfUnit(id)
+    return (if t.len > 0: t else: u)
+  id
 
 proc unitIds*(host: LiveHost; names: openArray[string]): seq[string] =
   ## ``unitId`` of each of ``names``, each once.
@@ -1069,6 +1111,43 @@ when defined(posix):
       seen.add(u)
       result.add((unit: u, wasActive: f.len > 1 and f[1].strip() == "was-active"))
 
+  proc liveCheckUnitsRecord*(held, wasActive: openArray[string]):
+      seq[tuple[unit: string; wasActive: bool]] =
+    ## What ``LiveCheckUnitsFile`` records of a hold: each held unit, marked
+    ## when it ran before the hold, and -- a template never runs itself --
+    ## each of its instances that ran, by name (A13 review round 13, M-B):
+    ## the next apply starts those again after its check, which a template
+    ## name alone could not tell it.
+    for u in held:
+      result.add((unit: u, wasActive: u in wasActive))
+      when ApplyMutation == "dead-template-instances-unrecorded":
+        # FALSIFYING MUTATION: a template is recorded without its instances.
+        continue
+      if isTemplateUnit(u):
+        let stem = u[0 .. u.find('@')]
+        let sfx = u[u.rfind('.') .. ^1]
+        for i in wasActive:
+          if i.startsWith(stem) and i.endsWith(sfx) and not isTemplateUnit(i):
+            result.add((unit: i, wasActive: true))
+
+  proc adoptDeadUnits*(dead: openArray[tuple[unit: string; wasActive: bool]];
+                       judged: openArray[string]):
+      tuple[adopted, active: seq[string]] =
+    ## Of the units a dead full apply held (``deadApplyHeld``): those this
+    ## apply adopts (``adopted``: every one it does not judge itself), and
+    ## every one that ran before the dead apply's hold (``active``), judged
+    ## here or not -- a judged unit keeps its "ran before" too, or a
+    ## running unit that is not enabled stays down after it passes this
+    ## check (§13 decision 180; A13 review round 13, M-B).
+    for (u, a) in dead:
+      if heldBy(u, judged):
+        when ApplyMutation != "dead-judged-was-active-lost":
+          # FALSIFYING MUTATION (when absent): a judged unit loses it.
+          if a and u notin result.active: result.active.add(u)
+        continue
+      if u notin result.adopted: result.adopted.add(u)
+      if a and u notin result.active: result.active.add(u)
+
   proc deadApplyHeld*(stateDir: string; holdDir = RuntimeUnitDir):
       tuple[units: seq[tuple[unit: string; wasActive: bool]];
             triggers: seq[string]] =
@@ -1147,8 +1226,31 @@ proc triggerRestarts*(triggers, refusedTriggers: openArray[string];
     if host.isActive != nil and host.isActive(t): continue
     var props: Table[string, string]
     try: props = host.show(t)
-    except CatchableError: continue
-    if props.getOrDefault("LoadState") != "loaded": continue
+    except CatchableError as e:
+      when ApplyMutation == "trigger-unreadable-counted-started":
+        # FALSIFYING MUTATION: a trigger systemd cannot be asked about
+        # counts as started.
+        continue
+      # Fail closed: unconfirmed is not started, so the record keeps it, as
+      # a trigger restart is confirmed (§13 decision 160) and the fixing
+      # switch's starts are (decision 175; A13 review round 13, M-E).
+      result.add("systemctl show " & t & " (a trigger stopped for the " &
+        "carried-state check's hold, §13 decision 151): systemd could not " &
+        "be asked: " & e.msg)
+      continue
+    # Only a unit systemd does not find was removed by the generation; a
+    # masked one, or one with a bad setting or a load error, is not started
+    # and is a problem (A13 review round 13, L1).
+    let load = props.getOrDefault("LoadState")
+    if load == "not-found": continue
+    when ApplyMutation == "unloadable-trigger-counted-removed":
+      # FALSIFYING MUTATION: any unit not loaded counts as removed.
+      if load != "loaded": continue
+    if load != "loaded":
+      result.add("systemctl start " & t & " (a trigger stopped for the " &
+        "carried-state check's hold, §13 decision 151): systemd reports " &
+        "LoadState=" & load & "; not started")
+      continue
     let s = startConfirmed(host, t, mustStayActive = true)
     if not s.ok:
       result.add("systemctl start " & t & " (a trigger stopped for the " &
@@ -1292,7 +1394,18 @@ proc systemdRequirersOf*(units: openArray[string]; host: LiveHost): seq[string] 
     let u = queue.pop()
     var props: Table[string, string]
     try: props = host.show(u)
-    except CatchableError: continue
+    except CatchableError as e:
+      when ApplyMutation == "requirers-unreadable-skipped":
+        # FALSIFYING MUTATION: a unit systemd cannot be asked about is
+        # read as required by nothing.
+        continue
+      # Fail closed (A13 review round 13, L2).
+      when defined(posix):
+        raise newException(ECarriedStatePending, "ECarriedStatePending: " &
+          "systemd could not be asked which units require " & u & " (" &
+          e.msg & "), so the requirers to hold with it cannot be decided")
+      else:
+        raise e
     for key in ["RequiredBy", "BoundBy"]:
       for d in props.getOrDefault(key).splitWhitespace():
         if d in seen or heldBy(d, units): continue
@@ -1432,8 +1545,22 @@ when defined(posix):
     var free: seq[string]
     for t in readLiveCheckTriggers(stateDir):
       var targets: seq[string]
-      try: targets = triggeredUnits(host.show(t))
-      except CatchableError: discard
+      try:
+        let props = host.show(t)
+        targets = triggeredUnits(props)
+        # An ``Accept=yes`` socket shows no ``Triggers=``: it triggers its
+        # template ``<stem>@.service``, as decision 154's planner reads it
+        # (A13 review round 13, M-D).
+        let tmpl = acceptTemplateOf(t, props)
+        if tmpl.len > 0 and tmpl notin targets: targets.add(tmpl)
+      except CatchableError:
+        # systemd cannot be asked what it triggers: kept on record, with its
+        # hold, as if its unit were held (fail closed; A13 review round 13).
+        result.left.add(t)
+        result.problems.add("systemctl show " & t & " (a trigger a full " &
+          "apply that died left on record): systemd could not be asked; " &
+          "kept on record")
+        continue
       var stillHeld = ""
       for u in targets:
         if fileExists(holdPath(u, CarriedCheckHoldName, holdDir)):
@@ -1461,6 +1588,35 @@ when defined(posix):
         result.left.add(t)
         result.problems.add(failed)
     recordLiveCheckTriggers(stateDir, result.left)
+
+proc triggerUnitsOfHold*(judged, requirers: openArray[string]): seq[string] =
+  ## The units whose triggers a full apply's hold takes with them: the
+  ## judged units and the requirers held with them (§13 decision 151 holds
+  ## the triggers of every held unit; A13 review round 13, M-F).
+  result = @judged
+  when ApplyMutation == "requirer-triggers-unheld":
+    # FALSIFYING MUTATION: a held requirer's triggers are left running.
+    return
+  for u in requirers:
+    if u notin result: result.add(u)
+
+proc postReloadTriggers*(found, known: openArray[string]; host: LiveHost):
+    tuple[stop, essential: seq[string]] =
+  ## Of the triggers systemd names for the held units only after the
+  ## drivers' reload (``found``; ``known``: those held before the writes):
+  ## those stopped now (``stop``), and the essential ones, by their
+  ## ``Id=`` (``unitId``), which are never stopped or held -- the apply
+  ## reports them (``essential``; §13 decision 177(c), A13 review round
+  ## 13, M-C: a generation's drop-in can make ``ssh.socket`` a trigger of a
+  ## held unit, which a later refusal would otherwise hold in ``/etc``).
+  for t in found:
+    if t in known or t in result.stop or t in result.essential: continue
+    var essential = isEssentialUnit(unitId(host, t))
+    when ApplyMutation == "post-reload-essential-triggers-held":
+      # FALSIFYING MUTATION: an essential trigger is stopped and held.
+      essential = false
+    if essential: result.essential.add(t)
+    else: result.stop.add(t)
 
 proc targetLeadsTo(t: string; held: openArray[string]; host: LiveHost;
                    visited: var seq[string]): bool =
@@ -1692,8 +1848,10 @@ when defined(posix):
     let units = liveReachUnits(p, dir, root)
     if units.len == 0: return
     let host = liveHost()
-    essentialInHoldSet(units, requirersToHold(p, units, host),
-                       triggersToHold(p, units, host), host)
+    let reqs = requirersToHold(p, units, host)
+    essentialInHoldSet(units, reqs,
+                       triggersToHold(p, triggerUnitsOfHold(units, reqs), host),
+                       host)
 
   proc beginLiveCheck(p: SystemProfile; dir, root, stateDir: string;
                       planned: openArray[PlannedOperation]): LiveCheck =
@@ -1716,10 +1874,9 @@ when defined(posix):
                else: (units: newSeq[tuple[unit: string; wasActive: bool]](),
                       triggers: newSeq[string]())
     result.units = liveReachUnits(p, dir, root)
-    for (u, a) in dead.units:
-      if heldBy(u, result.units) or u in result.adopted: continue
-      result.adopted.add(u)
-      if a: result.adoptedActive.add(u)
+    let adoption = adoptDeadUnits(dead.units, result.units)
+    result.adopted = adoption.adopted
+    result.adoptedActive = adoption.active
     if result.units.len == 0 and result.adopted.len == 0 and
         dead.triggers.len == 0:
       return
@@ -1729,7 +1886,8 @@ when defined(posix):
     for u in result.adopted:
       if u notin result.requirers: adopted.add(u)
     result.adopted = adopted
-    result.triggers = triggersToHold(p, result.units, host)
+    result.triggers = triggersToHold(p,
+      triggerUnitsOfHold(result.units, result.requirers), host)
     for t in dead.triggers:
       if t notin result.triggers: result.triggers.add(t)
     # The set actually held -- after any recovery the guard ran, and with
@@ -1759,10 +1917,8 @@ when defined(posix):
         runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0)
     # The units held, on record before the first hold (``LiveCheckUnitsFile``):
     # an apply that dies before its release leaves them for the next one.
-    var onRecord: seq[tuple[unit: string; wasActive: bool]]
-    for u in result.units & result.requirers & result.adopted:
-      onRecord.add((unit: u, wasActive: u in result.wasActive))
-    recordLiveCheckUnits(stateDir, onRecord)
+    recordLiveCheckUnits(stateDir, liveCheckUnitsRecord(
+      result.units & result.requirers & result.adopted, result.wasActive))
     # The dead apply's triggers it stopped are down now: remembered, so the
     # release starts them after this check.
     for t in dead.triggers:
@@ -1800,13 +1956,22 @@ when defined(posix):
       # A trigger systemd loaded only now (a host unit the generation's
       # writes linked to a held unit) is stopped too, unheld: it is
       # started again with the others once the check passes.
-      let names = liveJudgedNames(c.units, p,
+      # The held requirers' triggers as well as the judged units' (§13
+      # decision 151; A13 review round 13, M-F). An essential one is never
+      # stopped or held: it is reported (decision 177(c); round 13, M-C).
+      let names = liveJudgedNames(triggerUnitsOfHold(c.units, c.requirers), p,
         proc (t: string): seq[string] = hostRunningInstances(t))
-      for t in loadedTriggersOf(names, host):
-        if t notin c.triggers:
-          c.triggers.add(t)
-          stopTriggers(c, [t], [], host, p)
+      let late = postReloadTriggers(loadedTriggersOf(names, host), c.triggers,
+                                    host)
+      for t in late.stop:
+        c.triggers.add(t)
+        stopTriggers(c, [t], [], host, p)
     var problems: seq[string]
+    when ApplyMutation != "triggers-left-running":
+      for t in late.essential:
+        problems.add("ECarriedStatePending: " & t & " triggers a unit the " &
+          "carried-state check holds and is essential, so it is neither " &
+          "stopped nor held; the apply reports it")
     when not LiveCheckSkipped:
       # One reading of each template's running instances serves both the
       # check and the report of what it judged.
@@ -1940,7 +2105,9 @@ when defined(posix):
     # A dead apply's unit that ran before its hold starts now, after this
     # check, confirmed through systemd (M3; ``startConfirmed``).
     for u in c.adoptedActive:
-      if u notin passed or u in refused or host.isActive(u): continue
+      # An instance is matched to its template (``heldBy``).
+      if not heldBy(u, passed) or heldBy(u, refused) or host.isActive(u):
+        continue
       let s = startConfirmed(host, u, mustStayActive = false)
       if not s.ok:
         result.add("systemctl start " & u & " (held by a full apply that " &
@@ -1960,10 +2127,11 @@ proc recordComparisonProfile*(writtenText, appliedText: string): SystemProfile =
   ## which ``withCarriedRequirements`` extends with a drop-in on every unit
   ## that reaches carried state -- that drop-in alone would "change" the
   ## unit and resolve its entry. The guard compares the written text too.
-  when ApplyMutation == "full-apply-renders-full-profile":
-    # FALSIFYING MUTATION: the applied text, carried-state requirements
-    # included, is compared.
-    return parseSystemProfile(appliedText)
+  ## Since A13 review round 13 (M-A) the digest itself leaves the
+  ## requirement's drop-ins out (``withoutRequirementDropIns``), the only
+  ## thing ``withCarriedRequirements`` adds, so this choice no longer
+  ## changes any digest; it is kept so the comparison reads one text.
+  discard appliedText
   parseSystemProfile(writtenText)
 
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =

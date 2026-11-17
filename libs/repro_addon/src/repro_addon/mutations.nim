@@ -638,6 +638,32 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``restart-digest-counts-requirement``
+##     the restart record's digest counts the carried-state requirement's drop-ins (round 13, M-A)
+## ``dead-template-instances-unrecorded``
+##     a dead apply's record names a template without its running instances (round 13, M-B)
+## ``dead-judged-was-active-lost``
+##     a unit both judged and held by a dead apply loses its "ran before" (round 13, M-B)
+## ``host-trigger-dropins-unread``
+##     a profile drop-in on a host trigger unit, and Sockets=, are not read as triggers (round 13, M-C)
+## ``post-reload-essential-triggers-held``
+##     an essential trigger systemd names after the reload is stopped and held (round 13, M-C)
+## ``requirer-triggers-unheld``
+##     a held requirer's triggers are left running (round 13, M-F)
+## ``accept-socket-template-unmapped``
+##     recover reads an Accept=yes socket's targets from Triggers= only (round 13, M-D)
+## ``trigger-unreadable-counted-started``
+##     a trigger systemd cannot be asked about counts as started (round 13, M-E)
+## ``unloadable-trigger-counted-removed``
+##     a masked or unloadable trigger counts as removed (round 13, L1)
+## ``fixing-starts-dependant-of-failed-trigger``
+##     the fixing path starts a dependant whose trigger just failed (round 13, L4)
+## ``unit-names-unreadable-as-written``
+##     a unit name systemd cannot be asked about is matched as written (round 13, L2)
+## ``requirers-unreadable-skipped``
+##     a unit systemd cannot be asked about is read as required by nothing (round 13, L2)
+## ``template-aliases-unresolved``
+##     a template is matched by the name written, not its alias's target (decision 177(a), 2026-11-17)
 ## ``dead-apply-holds-lifted``             round 11's order: the next apply
 ##                                           lifts every hold a dead apply
 ##                                           left, a judged service's
@@ -678,11 +704,6 @@
 ##                                           resolved (round 12, M2)
 ## ``full-apply-clears-with-errors``       a full apply with errors clears
 ##                                           resolved entries (round 12, M2)
-## ``full-apply-renders-full-profile``     a full apply compares the record
-##                                           with its text as the carried-
-##                                           state requirements extend it,
-##                                           not the generation as written
-##                                           (round 12, M2)
 ## ``fixing-start-unreadable-skipped``     the fixing path skips a unit
 ##                                           systemd cannot be asked about
 ##                                           and clears its entry (round 12)
@@ -2116,6 +2137,20 @@ const
                           "post-reload-requirers-released",
                           # A13 review round 11.
                           "restart-success-by-exit-code",
+                          # A13 review round 13.
+                          "restart-digest-counts-requirement",
+                          "dead-template-instances-unrecorded",
+                          "dead-judged-was-active-lost",
+                          "host-trigger-dropins-unread",
+                          "post-reload-essential-triggers-held",
+                          "requirer-triggers-unheld",
+                          "accept-socket-template-unmapped",
+                          "trigger-unreadable-counted-started",
+                          "unloadable-trigger-counted-removed",
+                          "fixing-starts-dependant-of-failed-trigger",
+                          "unit-names-unreadable-as-written",
+                          "requirers-unreadable-skipped",
+                          "template-aliases-unresolved",
                           # A13 review round 12.
                           "dead-apply-holds-lifted",
                           "recover-lifts-unit-holds",
@@ -2128,7 +2163,6 @@ const
                           "target-units-held",
                           "full-apply-fixing-skips-starts",
                           "full-apply-clears-with-errors",
-                          "full-apply-renders-full-profile",
                           "fixing-start-unreadable-skipped",
                           "boot-record-starts-block",
                           "boot-fixing-starts-block",
