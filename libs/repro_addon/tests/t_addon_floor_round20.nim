@@ -21,7 +21,8 @@
 ## ``boot-hold-outer-timeout``, ``boot-hold-marker-without-record``,
 ## ``boot-hold-systemdropin-unchecked``,
 ## ``boot-hold-systemdropin-effective-unchecked``,
-## ``accept-dropin-only-sockets-skipped``, ``bootstrap-accepts-dynamic``.
+## ``accept-dropin-only-sockets-skipped``, ``bootstrap-accepts-dynamic``,
+## ``boot-hold-minimal-hold-judged``.
 ##
 ## *Mocking.* The script runs under the real ``/bin/sh`` with ``systemctl``
 ## and ``sleep`` stand-ins on PATH: the stand-in ``systemctl`` reports
@@ -125,6 +126,16 @@ suite "A9 review round 20: the boot-hold unit fails closed":
     checkpoint o
     check "cannot make" in o
     check "SLEEP 120" in o
+  test "the minimal hold the boot writes is the add-on's own to the next check":
+    # Found by the hard-reset gate: a replay's or a revert's check after a
+    # boot that put the minimal hold back refused the held unit
+    # (``rule:file-keys``) and left it held by the revert.
+    let p = RuntimeUnitDirPath & "/a9.service.d/" & StartHoldName
+    check MinimalHoldText == MinimalStartHoldText
+    check isAddonHold(p, MinimalHoldText)
+    check isAddonHold(p, StartHoldText)
+    check not isAddonHold(p, MinimalHoldText & "ExecStart=/bin/sh\n")
+    check not isAddonHold("/etc/systemd/system/a9.service.d/" & StartHoldName, MinimalHoldText)
   test "the unit has no outer timeout; TimeoutStartSec= bounds it":
     let u = bootHoldUnit()
     check "ExecStart=-/bin/sh -c '" in u
