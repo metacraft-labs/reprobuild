@@ -400,7 +400,8 @@ suite "MAC-1 thin daemon client":
       let env = daemonEnv(tempRoot, endpoint)
       let project = freshProject(tempRoot)
       for (extra, needle) in [
-          ("--bogus", "unknown flag '--bogus' for 'repro build'"),
+          ("--bogus", "error: unknown flag '--bogus' for 'repro build'"),
+          ("--dry-urn", "tip: a similar flag exists: '--dry-run'"),
           ("--json", "repro build: --json applies to --list-targets only")]:
         let args = buildArgs(project, tempRoot) & @[extra]
         let full = runCaptured(fullCliBin(), args, tempRoot, env,
@@ -414,14 +415,21 @@ suite "MAC-1 thin daemon client":
         check thin.code == 2
         check thin.errors.contains(needle)
         check not thin.errors.contains("daemon-hosted build failed")
-      # Both refusals were the daemon's, not a hand-over's: the full image
-      # refused before reaching the daemon, and the thin client's two
-      # requests were accepted, the first (a line `repro build` does not
-      # accept, so it names no project) recorded under the working
-      # directory, the second under the project its arguments name.
+        if extra != "--json":
+          # The parser's refusal is clispec's error block, the same bytes on
+          # both paths: the thin client writes the daemon's diagnostic after
+          # the "\r" it writes before every diagnostic (its progress-line
+          # clear), and nothing else.
+          check "Usage: repro build" in full.errors
+          check thin.errors == "\r" & full.errors
+      # The refusals were the daemon's, not a hand-over's: the full image
+      # refused before reaching the daemon, and the thin client's three
+      # requests were accepted, the first two (lines `repro build` does not
+      # accept, so they name no project) recorded under the working
+      # directory, the third under the project its arguments name.
       let sources = daemonBuildRequestRootSources(tempRoot)
       checkpoint("build request root sources: " & sources.join(" | "))
-      check sources == @["workingDir", "derived"]
+      check sources == @["workingDir", "workingDir", "derived"]
 
     test "integration_thin_client_serves_an_install_layout_with_no_environment":
       # WHAT THIS IS FOR. MAC-1's saving is only real if something a user

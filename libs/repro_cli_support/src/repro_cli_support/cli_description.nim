@@ -145,11 +145,12 @@ proc graphInspectionFlags(): NimNode {.compileTime.} =
   ## provisioned and where its build state and action cache live. Each takes
   ## the same value, and has the same effect, as on `repro build`.
   ##
-  ## None of them declares an environment variable: these commands do not
-  ## read `REPRO_TOOL_PROVISIONING` (a project's `defaultToolProvisioning`
-  ## applies when the flag is absent), and the work root's and the action
-  ## cache's variables are read where the paths are resolved, after the
-  ## flag, so the precedence stays in one place.
+  ## `--tool-provisioning` declares no environment variable: these commands
+  ## do not read `REPRO_TOOL_PROVISIONING` (a project's
+  ## `defaultToolProvisioning` applies when the flag is absent). The work
+  ## root and the action-cache root declare theirs, as on `repro build`:
+  ## the flag wins over `$REPROBUILD_WORK_ROOT` and
+  ## `$REPROBUILD_ACTION_CACHE_ROOT`.
   quote do:
     # Every spelling `parseToolProvisioning` accepts: the five modes, and the
     # other two spellings of `from-source` (`fromSource`, the project DSL's
@@ -159,10 +160,10 @@ proc graphInspectionFlags(): NimNode {.compileTime.} =
       help = "How the graph's tools are provisioned (`from-source` is also " &
         "spelt `fromSource` or `source`); default: the project's " &
         "`defaultToolProvisioning`"
-    flag workRoot is string,
+    flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
       help = "The work root the project's build state lives under " &
         "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
-    flag actionCacheRoot is string,
+    flag actionCacheRoot is string, env = "REPROBUILD_ACTION_CACHE_ROOT",
       help = "The action-cache root (default: " &
         "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
 
@@ -233,14 +234,18 @@ proc storeRootFlags(): NimNode {.compileTime.} =
 
 proc storeAndActionCacheRootFlags(): NimNode {.compileTime.} =
   ## The two roots of the bundle commands (`store closure|export|import`,
-  ## `bundle create|restore`), resolved as `repro build` resolves them.
+  ## `bundle create|restore`), resolved as `repro build` resolves them:
+  ## `--action-cache-root` wins over `$REPROBUILD_ACTION_CACHE_ROOT`, the
+  ## variable `resolveActionCacheRoot` reads (declared on the flag, as on
+  ## `repro build`).
   quote do:
     flag storeRoot is string, format = equals,
       help = "The store root (default: `$REPRO_STORE_ROOT`, else the " &
         "per-user store)"
     flag actionCacheRoot is string, format = equals,
+      env = "REPROBUILD_ACTION_CACHE_ROOT",
       help = "The action-cache root (default: " &
-        "`$REPRO_ACTION_CACHE_ROOT`, else the store's)"
+        "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
 
 proc storeBundleSelectionFlags(): NimNode {.compileTime.} =
   ## What `store closure` and `store export` bundle: the workspace roots and
@@ -1298,10 +1303,10 @@ proc buildToolProvisioningFlag(): NimNode {.compileTime.} =
         "`defaultToolProvisioning`)"
 
 proc buildWorkRootFlag(): NimNode {.compileTime.} =
-  ## `--work-root` of the commands that build. `$REPROBUILD_WORK_ROOT` is
-  ## read where the work root is resolved, after the flag.
+  ## `--work-root` of the commands that build: the flag wins over
+  ## `$REPROBUILD_WORK_ROOT`, which it declares.
   quote do:
-    flag workRoot is string,
+    flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
       help = "The work root the project's build state lives under " &
         "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
 
@@ -1367,9 +1372,10 @@ proc buildFlags(): NimNode {.compileTime.} =
   ## value: `--measure` adds to the empty set and `REPROBUILD_MEASURE` to the
   ## default set; a quiet `--progress` quiets `--log` and `--show` only when
   ## they were not passed on the command line; and `--runquota` is a request
-  ## a dry run's implied bypass must not override. The work root's and the
-  ## action cache's variables are read where those paths are resolved, after
-  ## the flag, as for every command that takes the flags.
+  ## a dry run's implied bypass must not override. `--work-root` and
+  ## `--action-cache-root` declare `REPROBUILD_WORK_ROOT` and
+  ## `REPROBUILD_ACTION_CACHE_ROOT`, as every command that builds or
+  ## inspects a build graph does.
   ##
   ## A switch that stands for another flag's value (`-v`, `--release`,
   ## `--runquota`, ...) refuses `=false`: written that way it would set
@@ -1398,7 +1404,7 @@ proc buildFlags(): NimNode {.compileTime.} =
       refuseFalse = true,
       help = "The same as `--variant buildType=debug`"
     `workRoot`
-    flag actionCacheRoot is string,
+    flag actionCacheRoot is string, env = "REPROBUILD_ACTION_CACHE_ROOT",
       help = "The action-cache root (default: " &
         "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
     flag lock is seq[string],
@@ -2039,7 +2045,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "clean", help = "Remove the current project's build artifacts":
       flag projectRoot is string,
         help = "The project (default: the current directory)"
-      flag workRoot is string,
+      flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
         help = "The work root the project's build state lives under " &
           "(default: `$REPROBUILD_WORK_ROOT`)"
       boolFlag dryRun is bool,
