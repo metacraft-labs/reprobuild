@@ -535,6 +535,29 @@ type
       ## §2.2 makes its ABSENCE an error). ``crkForever`` — the zero value —
       ## is what every other class carries and what every existing action
       ## keeps, so the cache read path for them is byte-for-byte unchanged.
+    contentKeyedToolCaches*: seq[string]
+      ## The CONTENT-KEYED tool-owned caches this action reads
+      ## (``Tool-Owned-Caches.md`` §"Trust Boundary"): directories such as
+      ## Go's ``GOCACHE`` or a ccache store, whose entries are named by a
+      ## digest of what produced them and are shared with other edges.
+      ##
+      ## The tool trusts such an entry by its name and never re-checks its
+      ## bytes, and the directory's contents are not inputs of this action
+      ## (its reads under it are left out of the key). So whoever else writes
+      ## the cache can change this action's outputs while its fingerprint
+      ## stays the same. The cache is therefore an unkeyed producer of this
+      ## action, and the action composes with it as with a ``host-bound``
+      ## producer (``Edge-Determinism-And-Soft-Rebuild.md`` §1.4):
+      ## ``determinismClass`` answers the strictest of the declared class and
+      ## ``edHostBound`` whenever this list is non-empty. Its records are then
+      ## kept and served on this host, and never published to, or
+      ## substituted from, a peer cache, a remote portable memo or a binary
+      ## cache. That is composition, not a per-edge override, so no
+      ## declaration lifts it (the §2.3 weakening ban is about overrides).
+      ##
+      ## Naming a directory here does NOT exclude it from the key; the
+      ## action's dependency policy does that. Empty (the default) changes
+      ## nothing for any action.
     builtinText*: string
     builtinEntries*: seq[string]
     targetNames*: seq[string]
@@ -3405,14 +3428,17 @@ proc keyedOnArgv*(fingerprint: ContentDigest; argv: openArray[string];
                   cwd = ""): ContentDigest =
   ## `fingerprint` with every element of `argv`, and `cwd`, mixed in.
   ##
-  ## `action()` keys `argv[0]` only when it lies under a content-addressed
-  ## root, and the rest of the command line not at all: an edge whose
-  ## constructor computes its fingerprint over less than what it spawns
-  ## shares one local record across command lines that compute different
-  ## things. A constructor calls this over the argv it hands to `action()`,
-  ## after every rewrite it applies, so the key covers the command by
-  ## construction rather than by a list of the arguments its author thought
-  ## could matter.
+  ## `action()` applies this to every process edge itself, over the argv it
+  ## is handed — after every rewrite its constructor applied, before any
+  ## execution-time rewrite (the monitor wrapper) — so the key covers the
+  ## command by construction rather than by a list of the arguments its
+  ## author thought could matter (Caching-Architecture.md §"BuildXL-Inspired
+  ## Fingerprinting", rider of 2026-11-16). Until then `action()` keyed
+  ## `argv[0]` only when it lay under a content-addressed root and the rest
+  ## of the command line not at all, so each constructor had to call this
+  ## itself; the calls that remain are harmless and some key a form the
+  ## engine cannot derive at construction (an expanded arg file,
+  ## `withArgFilesExpanded`).
   ##
   ## A relocatable edge passes its argv with each path named the way its
   ## record names inputs (`relocatableName`), and no `cwd`: its key must be
@@ -3613,13 +3639,78 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   framed.add($image.len & "\x1f" & image & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc argvKeyComponents*(argv: openArray[string]; cwd: string;
+                        relocatable: bool;
+                        relocationAnchors: openArray[string]):
+    tuple[argv: seq[string]; cwd: string] =
+  ## The argv and cwd `action()` mixes into every process edge's weak
+  ## fingerprint (`keyedOnArgv`), in the form the edge's record uses.
+  ##
+  ## An ordinary edge keys its argv as given and its cwd. A relocatable edge
+  ## keys each argv element the way its record names an input
+  ## (`relocatableName` against its cwd and anchors) and no cwd:
+  ## `keyedOnRelocation` keys the cwd's DEPTH instead, so a byte-identical
+  ## tree elsewhere still keys the same (Caching-Architecture.md
+  ## §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16: "A relocatable
+  ## edge keeps its relocation-safe form of each component").
+  if not relocatable:
+    return (argv: @argv, cwd: cwd)
+  let anchors = effectiveAnchors(cwd, relocationAnchors)
+  for arg in argv:
+    result.argv.add(relocatableName(arg, cwd, anchors))
+  result.cwd = ""
+
+func builtinKindName*(kind: BuildActionKind): string
+
+const PayloadKeyedBuiltinKinds* = {bakCopyFile, bakEnsureDir, bakWriteText,
+                                   bakStamp, bakPreserveTree, bakEnsureLine,
+                                   bakEnsureSnippet}
+  ## The builtins `builtinAction` keys on their kind and whole payload: the
+  ## in-process filesystem builtins, whose payload is all they compute.
+  ##
+  ## The executor-backed kinds (`bakWorkspaceVcs`, `bakForeignProvision`,
+  ## `bakBinaryCacheSubstitute`, `bakMetadataFetch`, `bakSolveLock`,
+  ## `bakLockUpdate`) keep the key their constructor computes. Their
+  ## payloads carry fields their designs keep out of the key on purpose: a
+  ## git clone's reference path, filter, depth and single-branch flag are
+  ## acceleration knobs, so a full and a shallow clone of one revision share
+  ## a receipt (`fingerprintPayload` in `repro_workspace_vcs`, RA-5 and
+  ## RA-14); a Nix provision's payload names the directory `repro` ran from.
+  ## Whether those kinds key their whole payload, or name the fields that
+  ## are identity, awaits an owner decision (reprobuild-pm issue
+  ## `issues/2026-11-16-action-default-weak-fingerprint-is-the-id-alone.md`).
+
+proc keyedOnBuiltinPayload*(fingerprint: ContentDigest; kind: BuildActionKind;
+                            text: string;
+                            entries: openArray[string]): ContentDigest =
+  ## `fingerprint` with a builtin's kind and its whole payload (`text`,
+  ## `entries`) mixed in. A builtin writes its payload; the payload is what
+  ## it computes, so two builtins with one id and different payloads are two
+  ## computations. `builtinAction` applies this to every builtin it builds,
+  ## whatever fingerprint its caller passed (Caching-Architecture.md
+  ## §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16). Length-framed,
+  ## entry count first, like `keyedOnArgv`.
+  var framed = "action-builtin-payload\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  let kindName = builtinKindName(kind)
+  framed.add($kindName.len & "\x1f" & kindName & "\x1e")
+  framed.add($text.len & "\x1f" & text & "\x1e")
+  framed.add($entries.len & "\x1e")
+  for entry in entries:
+    framed.add($entry.len & "\x1f" & entry & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc weakFingerprintFor*(id: string;
                          governingLockIdentity: LockIdentity): ContentDigest =
-  ## The fingerprint `action()` / `builtinAction()` would compute for an edge
-  ## with this id under this lock. For the call sites that construct a
-  ## `BuildAction` object literally rather than through a constructor — §7.2's
-  ## `{.requiresInit.}` field reaches those, but the constructor's mixing
-  ## cannot, so they compose it here instead of re-deriving it.
+  ## The id-and-lock part of what `action()` / `builtinAction()` compute for
+  ## an edge with this id under this lock: the constructors also mix in the
+  ## argv and cwd (`keyedOnArgv`) or the builtin payload
+  ## (`keyedOnBuiltinPayload`), which an id alone cannot supply. For the call
+  ## sites that construct a `BuildAction` object literally rather than
+  ## through a constructor — §7.2's `{.requiresInit.}` field reaches those,
+  ## but the constructor's mixing cannot, so they compose it here instead of
+  ## re-deriving it.
   keyedOnGoverningLock(weakFingerprintFromText(id), governingLockIdentity)
 
 proc legacyDepfileGatheringPolicy(depfile: string;
@@ -3661,6 +3752,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              entropyBlessedImages: openArray[EntropyBlessedTool] = [];
              determinism = none(EdgeDeterminism);
              cacheRetention = forever();
+             contentKeyedToolCaches: openArray[string] = [];
              env: openArray[string] = [];
              envPassthrough: openArray[string] = [];
              requiresElevation = false;
@@ -3740,13 +3832,28 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # subtracts that root's contents out of the key — see
     # `keyedOnContentAddressedToolRoot` for the measurement that showed
     # the two halves had never been connected.
-    weakFingerprint: keyedOnRelocation(keyedOnGoverningLock(
-      keyedOnContentAddressedToolRoot(
-        keyedOnEnvironmentIsolation(
-          keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
-          isolateHostEnvironment),
-        argv),
-      governingLockIdentity), relocatable, cwd),
+    #
+    # The argv mix is innermost, and it is the ENGINE's, not the caller's:
+    # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+    # 2026-11-16 — a caller-supplied fingerprint is mixed in addition and
+    # never replaces an engine component. The default caller fingerprint is
+    # the id alone, so before this every direct caller that did not call
+    # `keyedOnArgv` itself shared one local record (and, with portable
+    # caching off, one peer key) across command lines that differ only in a
+    # flag. A caller that already mixed its argv in is keyed on it twice,
+    # which costs nothing and changes no decision.
+    weakFingerprint: block:
+      let keyed = argvKeyComponents(argv, cwd, relocatable,
+        relocationAnchors)
+      keyedOnRelocation(keyedOnGoverningLock(
+        keyedOnContentAddressedToolRoot(
+          keyedOnEnvironmentIsolation(
+            keyedOnActionEnvironment(
+              keyedOnArgv(weakFingerprint, keyed.argv, keyed.cwd),
+              env, envPassthrough),
+            isolateHostEnvironment),
+          argv),
+        governingLockIdentity), relocatable, cwd),
     actionCachePolicy: actionCachePolicy,
     relocatable: relocatable,
     relocationAnchors: @relocationAnchors,
@@ -3767,6 +3874,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # `weak` to `strong` does not invalidate existing entries)."
     determinism: determinism,
     cacheRetention: cacheRetention,
+    contentKeyedToolCaches: @contentKeyedToolCaches,
     requiresElevation: requiresElevation)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
@@ -3796,7 +3904,15 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     cwd: cwd,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+    # The kind and payload are the ENGINE's mix, as argv is for `action()`:
+    # the default caller fingerprint is the id alone, and a caller-supplied
+    # one adds to these and never replaces them (Caching-Architecture.md
+    # §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16). Only for the
+    # kinds whose payload is all they compute: see `PayloadKeyedBuiltinKinds`.
+    weakFingerprint: keyedOnGoverningLock(
+      (if kind in PayloadKeyedBuiltinKinds:
+        keyedOnBuiltinPayload(weakFingerprint, kind, text, entries)
+      else: weakFingerprint),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     dependencyPolicy: automaticMonitorGatheringPolicy(),
@@ -4860,11 +4976,46 @@ proc allOutputsExist(action: BuildAction): bool =
 proc declaresNoOutputs(action: BuildAction): bool {.inline.} =
   action.outputs.len == 0
 
+proc readsContentKeyedToolCache*(action: BuildAction): bool {.inline.} =
+  ## Does this edge read a content-keyed tool-owned cache that other edges
+  ## write? See `BuildAction.contentKeyedToolCaches`.
+  action.contentKeyedToolCaches.len > 0
+
 proc determinismClass*(action: BuildAction): EdgeDeterminism {.inline.} =
-  ## The class this edge is treated as. `none` is §2.1's unlabelled case and
-  ## resolves to `weak`; see `BuildAction.determinism` for why the field is an
-  ## `Option`.
-  effectiveDeterminism(action.determinism)
+  ## The class this edge is treated as: its EFFECTIVE class. `none` is §2.1's
+  ## unlabelled case and resolves to `weak`; see `BuildAction.determinism` for
+  ## why the field is an `Option`.
+  ##
+  ## An edge that reads a content-keyed tool-owned cache composes with that
+  ## cache as with a `host-bound` producer (§1.4, and Tool-Owned-Caches.md
+  ## §"Trust Boundary"), so its class is never weaker than `host-bound`.
+  ## Every reader of the class -- retention, the rebuild selectors, the
+  ## cache-entry stamp and each cross-host publisher and substituter -- goes
+  ## through here, so the composition cannot be applied at one of them and
+  ## forgotten at another.
+  result = effectiveDeterminism(action.determinism)
+  if action.readsContentKeyedToolCache:
+    result = strictest(result, edHostBound)
+
+proc crossHostRefusal*(action: BuildAction): string =
+  ## Why this edge's results may neither leave this host nor be substituted
+  ## from another one, judged by its effective determinism class (§3, §5);
+  ## "" when its class allows it. A content-keyed tool-owned cache is named
+  ## in the reason, because it is not a class anyone declared and the trace
+  ## has to say where the class came from.
+  let cls = action.determinismClass
+  if cls.allowsCrossMachineSubstitution():
+    return ""
+  if action.readsContentKeyedToolCache:
+    result = "reads the content-keyed tool-owned cache " &
+      action.contentKeyedToolCaches.join(", ") & ", which other edges " &
+      "write and its key does not cover; its effective determinism class " &
+      "is " & $cls & " (declared " &
+      $effectiveDeterminism(action.determinism) & "), which forbids " &
+      "cross-machine substitution (Tool-Owned-Caches.md \"Trust Boundary\")"
+  else:
+    result = "determinism class " & $cls &
+      " forbids cross-machine substitution"
 
 proc effectiveRetention*(action: BuildAction): CacheRetention {.inline.} =
   ## Retention applies only to `volatile` edges. §1's table gives every other
@@ -4897,7 +5048,13 @@ proc entryDeterminismFor*(config: BuildEngineConfig;
   ## that cannot tell them apart will eventually mistake one for the other.
   ## It also means the overwhelming majority of edges write no sidecar and
   ## pay nothing for this milestone existing.
-  if action.determinism.isNone:
+  ##
+  ## An unlabelled edge that reads a content-keyed tool-owned cache is NOT
+  ## silent, though: its `host-bound` class is a fact the engine derived, and
+  ## the record carries it so that anything judging the RECORD alone (the
+  ## peer-cache publisher, reached with nothing but the record) refuses it as
+  ## it refuses a declared `host-bound` one.
+  if action.determinism.isNone and not action.readsContentKeyedToolCache:
     return EntryDeterminism()
   declaredDeterminism(action.determinismClass, action.effectiveRetention,
     nowUnix = config.nowUnix, buildEpoch = config.buildEpoch)
@@ -19599,7 +19756,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc publishPeerCacheBundle(query: PeerCacheActionQuery;
                               record: ActionResultRecord;
                               evidenceLevel: EvidenceLevel;
-                              actionId: string) =
+                              action: BuildAction) =
     ## Peer-Cache publisher hook. Hands the freshly recorded execution and
     ## the engine's CAS (which holds its output blobs) to the configured
     ## publisher closure; Distributed-Execution M0's two-phase publish
@@ -19616,6 +19773,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## record is already stored and keeps serving this host.
     if config.peerCacheActionPublisher == nil:
       return
+    let actionId = action.id
     if actionId in preservingIds:
       runResult.trace(actionId, "peer-cache-publish-refused",
         UnsafePreserveOutputsCrossHostRefusal)
@@ -19634,6 +19792,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # UNDECLARED record is `weak` by §2.1's default and publishes as it
     # always has -- this gate narrows nothing that was previously published
     # unless someone labelled the edge.
+    #
+    # The ACTION's effective class is judged first, and traced: it is what
+    # names a content-keyed tool-owned cache the edge reads
+    # (Tool-Owned-Caches.md "Trust Boundary"), and it also refuses a record
+    # written before the engine derived that class, which carries no sidecar
+    # and would pass the record check below.
+    let classRefusal = action.crossHostRefusal()
+    if classRefusal.len > 0:
+      runResult.trace(actionId, "peer-cache-publish-refused", classRefusal)
+      return
     if record.determinism.declared and
         not record.determinism.class.allowsCrossMachineSubstitution():
       return
@@ -20405,13 +20573,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           config.binaryCacheIntermediateScope
         # A warm build re-derives the same records; publish each once. A
         # host-bound or volatile action is never offered to another host,
-        # the rule the binary-cache publisher applies.
-        let substitutable =
-          action.determinismClass.allowsCrossMachineSubstitution()
+        # the rule the binary-cache publisher applies. The class is the
+        # EFFECTIVE one, so an edge that reads a content-keyed tool-owned
+        # cache is host-bound here, and the trace names the cache.
+        let hostBoundReason = action.crossHostRefusal()
+        let substitutable = hostBoundReason.len == 0
         if not substitutable:
           runResult.trace(action.id, "portable-memo-host-bound",
-            "determinism class " & $action.determinismClass &
-            " forbids cross-machine substitution")
+            hostBoundReason)
         # The portable record's path set is what a consumer verifies, so it
         # is the evidence counted: a record naming no input in it would be
         # accepted on its weak fingerprint alone. A FIXED-OUTPUT action is
@@ -20720,8 +20889,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # published to a binary cache." Here the ACTION is in hand, so the class
     # comes from the declaration rather than from whatever a record happens
     # to carry -- an action labelled `volatile` must not publish even if the
-    # record it produced somehow lost its sidecar.
-    if not action.determinismClass.allowsCrossMachineSubstitution():
+    # record it produced somehow lost its sidecar. The class is the EFFECTIVE
+    # one: an edge reading a content-keyed tool-owned cache is host-bound
+    # (Tool-Owned-Caches.md "Trust Boundary"), and that refusal is traced
+    # because nobody declared it.
+    let classRefusal = action.crossHostRefusal()
+    if classRefusal.len > 0:
+      if action.readsContentKeyedToolCache:
+        runResult.trace(action.id, "binary-cache-publish-refused",
+          classRefusal)
       return
     let publishStart = statStart()
     var recordOutputs: seq[string] = @[]
@@ -22507,8 +22683,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         hit = lookupMemo(memoRoot, roots, weak, resolver)
       except CatchableError as err:
         runResult.trace(id, "portable-lookup-failed", err.msg)
+      # A host-bound action is never substituted from another host (§5),
+      # and that includes an edge whose class is host-bound because it reads
+      # a content-keyed tool-owned cache (Tool-Owned-Caches.md "Trust
+      # Boundary"); that refusal is traced, naming the cache.
+      let remoteRefusal = action.crossHostRefusal()
       if hit.isNone and config.portableMemoLookup != nil and
-          action.determinismClass.allowsCrossMachineSubstitution():
+          remoteRefusal.len > 0 and action.readsContentKeyedToolCache:
+        runResult.trace(id, "portable-lookup-remote-refused", remoteRefusal)
+      if hit.isNone and config.portableMemoLookup != nil and
+          remoteRefusal.len == 0:
         source = "remote"
         try:
           hit = config.portableMemoLookup(roots, weak, resolver)
@@ -23070,12 +23254,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           var peerInstalled = false
           # Not for an UNSAFE preserve-outputs step: none of its records
           # leaves a host, and its weak fingerprint is local to that mode, so
-          # no conforming peer could answer (`preservingIds`).
-          if lookup.status in {aclMissNoRecord, aclMissInputChanged,
-              aclMissNoOutputPayload} and
-              id notin preservingIds and
-              config.peerCacheActionFetcher != nil and
-              config.peerCacheActionInstaller != nil:
+          # no conforming peer could answer (`preservingIds`). Nor for an
+          # action whose effective class forbids cross-machine substitution
+          # (§5): its records are one host's realization, which for an edge
+          # reading a content-keyed tool-owned cache includes whatever the
+          # cache's other writers left in it (Tool-Owned-Caches.md "Trust
+          # Boundary"), so no peer's record of it is one this host can take.
+          let peerMiss = lookup.status in {aclMissNoRecord,
+            aclMissInputChanged, aclMissNoOutputPayload} and
+            id notin preservingIds and
+            config.peerCacheActionFetcher != nil and
+            config.peerCacheActionInstaller != nil
+          let peerClassRefusal =
+            if peerMiss: action.crossHostRefusal() else: ""
+          if peerClassRefusal.len > 0 and action.readsContentKeyedToolCache:
+            runResult.trace(id, "peer-cache-fetch-refused", peerClassRefusal)
+          if peerMiss and peerClassRefusal.len == 0:
             let peerFetchStart = statStart()
             let peerQuery = peerCacheQueryOf(action)
             let peerReply = config.peerCacheActionFetcher(peerQuery)
@@ -23549,7 +23743,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 recordPortableFingerprint(idx, action, evidence.evidence, record,
                   evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(action), record,
-                  evidenceLevelOf(evidence.monitorStatus), action.id)
+                  evidenceLevelOf(evidence.monitorStatus), action)
                 publishBinaryCacheBundle(action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
@@ -23810,7 +24004,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
                   record, evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
-                  evidenceLevelOf(evidence.monitorStatus), plan.action.id)
+                  evidenceLevelOf(evidence.monitorStatus), plan.action)
                 publishBinaryCacheBundle(plan.action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
@@ -24471,7 +24665,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             recordPortableFingerprint(idx, action, evidence.evidence, record,
               evidenceLevelOf(evidence.monitorStatus), keyed)
             publishPeerCacheBundle(peerCacheQueryOf(action), record,
-              evidenceLevelOf(evidence.monitorStatus), action.id)
+              evidenceLevelOf(evidence.monitorStatus), action)
             publishBinaryCacheBundle(action, record)
           except UnreadableInputError as err:
             runResult.traceUnreadableInput(finished.id, idx, err.msg)

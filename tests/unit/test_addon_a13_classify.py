@@ -240,9 +240,12 @@ def green(kind, base="debian-13"):
                                       "active": "active", "recordLeft": "",
                                       "ok": True}
             rec["deadJudgedActive"] = {"before": "active", "staged": "inactive",
+                                       "socketStaged": "inactive",
                                        "exit": 0, "after": "active",
-                                       "enabled": "disabled", "holdLeft": "",
-                                       "ok": True}
+                                       "enabled": "static", "holdLeft": "",
+                                       "checkBeganAt": 300.1,
+                                       "releasedAt": 305.4,
+                                       "serviceActiveAt": 305.6, "ok": True}
             rec["essentialHostTrigger"] = {"exit": 2, "refused": True,
                                            "dropInWritten": False, "held": "",
                                            "ok": True}
@@ -490,9 +493,11 @@ def red_record(kind, base="debian-13"):
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="dead-judged-was-active-lost")
         rec["deadJudgedActive"] = {"before": "active", "staged": "inactive",
+                                   "socketStaged": "inactive",
                                    "exit": 0, "after": "inactive",
-                                   "enabled": "disabled", "holdLeft": "",
-                                   "ok": False}
+                                   "enabled": "static", "holdLeft": "",
+                                   "checkBeganAt": 300.1, "releasedAt": 305.4,
+                                   "serviceActiveAt": -1.0, "ok": False}
         rec["steps"] = [ok("bootstrap"),
                         red("M-B: a judged service a dead full apply held "
                             "while it ran, not enabled, is started again once "
@@ -1237,6 +1242,14 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutdeadactive")
         rec["deadJudgedActive"]["before"] = "inactive"
         self.assertRejected("mutdeadactive-debian-13", rec)
+        # The staging must hold: neither the service nor the socket active.
+        rec = red_record("mutdeadactive")
+        rec["deadJudgedActive"]["staged"] = "active"
+        self.assertRejected("mutdeadactive-debian-13", rec)
+        # A product record whose service ran before the release is not green.
+        rec = green("conv")
+        rec["deadJudgedActive"]["serviceActiveAt"] = 303.0
+        self.assertRejected("conv-debian-13", rec)
         rec = red_record("mutbootblock")
         rec["bootQueuedRestart"]["queued"] = True
         self.assertRejected("mutbootblock-debian-13", rec)

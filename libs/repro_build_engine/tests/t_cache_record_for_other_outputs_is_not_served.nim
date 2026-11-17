@@ -4,10 +4,10 @@
 ## Incremental-Invalidation.md §"Minimum check set per target consultation",
 ## Step 3.3, defines a hit by the action's OWN declared outputs: they exist and
 ## match the record, or they are materialized from it. A weak fingerprint does
-## not pin those outputs — `action()` derives its default from the id, and a
-## caller-supplied one need not mention them — so two actions in different
-## places can address the same record set: the same edge in two checkouts, a
-## record installed from a peer laid out elsewhere, a plain collision.
+## not pin those outputs (`action()` keys the argv and cwd, which need not
+## name them, and a caller-supplied fingerprint need not either), so two
+## actions in different places can address the same record set: a record
+## installed from a peer laid out elsewhere, a plain collision.
 ##
 ## Before the guard, such a record was served. With payload-backed records
 ## (`enableCachedOutputRestore`), the second action's lookup was a HIT, its own
@@ -71,6 +71,13 @@ proc locationAction(tempRoot, location: string;
     weakFingerprint = sharedWeak,
     actionCachePolicy = ffpChecksum,
     governingLockIdentity = lockIdentityOutsideSolvedGraph())
+  # `action()` keys the argv and cwd itself (reprobuild-pm
+  # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+  # 2026-11-16), so two locations no longer collide by construction. The
+  # guard is still the only defence when they do -- a record installed from
+  # a peer laid out elsewhere, a collision -- so the shared key is set here
+  # directly: that collision is this case's premise, not its subject.
+  result.weakFingerprint = sharedWeak
   result.monitorDepfile = rmdf
 
 proc restoreConfig(cacheRoot: string): BuildEngineConfig =

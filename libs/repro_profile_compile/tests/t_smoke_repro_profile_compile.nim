@@ -289,10 +289,14 @@ suite "M83 Phase C: profileCompileBuildAction":
     # in INSIDE the lock mix -- so the expectation composes the two in that
     # order. Innermost, the edge keys its own command line on the seed
     # (`keyedOnArgv`): `weak` names the compilers, the helper and the binary,
-    # and the profile, nimcache and `--repo-root` are only in argv.
+    # and the profile, nimcache and `--repo-root` are only in argv. `action()`
+    # then keys the same argv and cwd again itself, as it does for every
+    # process edge (reprobuild-pm Caching-Architecture.md §"BuildXL-Inspired
+    # Fingerprinting", rider of 2026-11-16), hence the second `keyedOnArgv`.
     check act.weakFingerprint ==
       keyedOnGoverningLock(
-        keyedOnActionEnvironment(keyedOnArgv(weak, act.argv, act.cwd), [],
+        keyedOnActionEnvironment(keyedOnArgv(
+          keyedOnArgv(weak, act.argv, act.cwd), act.argv, act.cwd), [],
           ProfileCompileEnvPassthrough),
         lockIdentityOutsideSolvedGraph())
     check act.envPassthrough == @[ProfileNimCompilerEnvVar, "TMPDIR", "TMP",
@@ -408,9 +412,14 @@ suite "M83 Phase C: profileRunBuildAction":
     # run's document to be encoded as this run's intent.
     check act.removeBeforeRun == @["/cache/abc.intent.json"]
     check act.envPassthrough == @["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+    # `action()` keys the argv and cwd under the constructor's `weak`
+    # (reprobuild-pm Caching-Architecture.md §"BuildXL-Inspired
+    # Fingerprinting", rider of 2026-11-16): this edge was one of the
+    # engine-defined edges that rider names, and it supplies none itself.
     check act.weakFingerprint ==
       keyedOnGoverningLock(
-        keyedOnActionEnvironment(weak, [], @ProfileCompileScratchEnvNames),
+        keyedOnActionEnvironment(keyedOnArgv(weak, act.argv, act.cwd), [],
+          @ProfileCompileScratchEnvNames),
         lockIdentityOutsideSolvedGraph())
 
   test "the run edge carries no entropy blessing of any kind":

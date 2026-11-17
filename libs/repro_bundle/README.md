@@ -1,6 +1,6 @@
 # repro_bundle
 
-Workspace bundles: `repro bundle create | publish | restore`. A bundle packs
+Workspace bundles: `repro bundle create | publish | restore | inspect`. A bundle packs
 a workspace selection's Nix dev-shell closure, its source checkouts and its
 native store into content-addressed, parallel-downloadable parts, plus a
 generated `restore.sh` that a machine without `repro` can run. The design and
@@ -8,8 +8,8 @@ the format are in [`docs/workspace-bundles.md`](../../docs/workspace-bundles.md)
 
 | Module | Does |
 | --- | --- |
-| `repro_bundle.nim` | create, restore (space check, staging, ordering, activation), publish to S3 or GitHub |
-| `repro_bundle/select.nim` | resolves a selector through the workspace manifests |
+| `repro_bundle.nim` | create, restore (space check, staging, ordering, activation), publish to S3 or GitHub, inspect |
+| `repro_bundle/select.nim` | resolves a selector through the workspace manifests; the native half's selection |
 | `repro_bundle/nix_half.nim` | dev-shell closure, `--dump-db` registration, normalised `print-dev-env` |
 | `repro_bundle/sources_half.nim` | shallow clones at their workspace paths, checkout state |
 | `repro_bundle/github.nim` | GitHub layout, push, raw download |
