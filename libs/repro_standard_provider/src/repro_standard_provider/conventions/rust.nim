@@ -1153,9 +1153,14 @@ proc targetCrateEnv(pkg: RustPackage; target: RustTarget;
   ## A builds every workspace member, as ``cargo build --workspace``
   ## selects them all — and ``CARGO``. Paths are passed as they are, not
   ## canonicalised: ``env!`` puts them in the output. The engine's local
-  ## action key covers the declared values; the opt-in portable key
-  ## logicalises them like the argv's paths (reprobuild-pm issue
-  ## ``2026-11-17-portable-cache-key-logicalises-env-values-that-env-embeds.md``).
+  ## action key covers the declared values. The portable key (used for
+  ## content-checked actions, or when portable caching is turned on) is
+  ## weaker here: it rewrites paths under the tracked roots in a declared
+  ## variable to location-independent tokens, as it does in the argv. So
+  ## two checkouts at different locations can share one entry although
+  ## the output embeds the path of only one of them, as ``rustc`` also
+  ## embeds argv paths through ``file!()`` and debug info. Closing that
+  ## gap belongs to the portable key, not to this convention.
   result = pkg.crateEnv
   result.add(("CARGO_CRATE_NAME", target.crateName))
   if target.kind == rtkBinary:
