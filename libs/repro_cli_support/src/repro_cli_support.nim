@@ -8110,6 +8110,80 @@ proc providerSnapshotUsable(snapshot: ProviderGraphSnapshot;
       ": " & err.msg)
   false
 
+proc claimActionCwd(action: BuildActionDef): string =
+  ## The directory ``action`` runs in, as the action spells it: the output
+  ## paths it declares are relative to this directory, not to the project
+  ## root (``repro_build_engine.normalizedDeclaredActionPath``). Empty when it
+  ## runs in the recipe root. Matches the exec lowering's ``effectiveCwdKind``:
+  ## a DSL ``cwdKind`` wins, otherwise a ``reprobuild.builtin`` exec call's
+  ## ``cwd`` argument.
+  if action.cwdKind != acwdRecipeRoot:
+    return action.cwdCustomPath
+  if action.call.packageName == "reprobuild.builtin" and
+      action.call.executableName == "exec":
+    for arg in action.call.arguments:
+      if arg.name == "cwd":
+        return arg.encodedValue
+  ""
+
+proc claimCwdsByAction(snapshot: ProviderGraphSnapshot):
+    Table[(string, string), string] =
+  ## ``(invocation key, action id)`` -> working directory, for every action
+  ## of ``snapshot`` that runs outside the recipe root. An action node whose
+  ## payload does not decode is skipped.
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind != gnkAction:
+        continue
+      var action: BuildActionDef
+      try:
+        action = decodeBuildActionPayload(toBytes(node.payload))
+      except CatchableError:
+        continue
+      let cwd = claimActionCwd(action)
+      if cwd.len > 0:
+        result[(fragment.invocationKey, action.id)] = cwd
+
+proc resolveClaimAgainstCwd(claim: var OwnedEffectClaim; invocationKey: string;
+                            cwds: Table[(string, string), string]) =
+  ## Re-spell a file/directory claim of an action that runs in a directory
+  ## of its own so that its identity names the file the action writes.
+  ## ``stableName`` follows ``identity``: the effect key includes it, and the
+  ## shared-output guard and the dedup compare effect keys.
+  if claim.kind notin {oekFile, oekDirectory, oekOpaqueDirectoryMember} or
+      claim.identity.len == 0 or os.isAbsolute(claim.identity):
+    return
+  let key = (invocationKey, claim.payload)
+  if key notin cwds:
+    return
+  claim.identity = os.normalizedPath(cwds[key] / claim.identity)
+  claim.stableName = claim.identity
+
+proc resolveClaimsAgainstActionCwd(snapshot: var ProviderGraphSnapshot) =
+  ## ``repro clean`` and the graph-refresh pruning resolve a claim against the
+  ## project root. An action that runs elsewhere spells its outputs relative
+  ## to that directory, so resolve each claim against it first (clean.md
+  ## §"Ownership Records"). Call after ``classifyContainerClaims``, which
+  ## compares the action's own spelling.
+  let cwds = claimCwdsByAction(snapshot)
+  if cwds.len == 0:
+    return
+  for fragment in snapshot.fragments.mitems:
+    for claim in fragment.effectClaims.mitems:
+      resolveClaimAgainstCwd(claim, fragment.invocationKey, cwds)
+
+proc outputCleanupReportAgainstActionCwd(report: ProviderRefreshReport;
+    previous: ProviderGraphSnapshot): ProviderRefreshReport =
+  ## ``report`` with its surviving snapshot and each stale claim resolved
+  ## against the producing action's working directory. A stale claim's
+  ## producer is gone from the refreshed snapshot, so its directory comes
+  ## from ``previous``, the snapshot before the refresh.
+  result = report
+  resolveClaimsAgainstActionCwd(result.snapshot)
+  let cwds = claimCwdsByAction(previous)
+  for stale in result.staleEffects.mitems:
+    resolveClaimAgainstCwd(stale.claim, stale.invocationKey, cwds)
+
 proc refreshReadableProviderGraph(config: RefreshConfig):
     ProviderRefreshReport =
   ## ``refreshProviderGraph``, refusing a graph this build cannot read.
@@ -14178,6 +14252,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
     let providerGraphStart = statStart(statsEnabled)
     var refresh: ProviderRefreshReport
+    var previousProviderSnapshot: ProviderGraphSnapshot
     progressRenderer.renderPhase("checking project provider graph snapshot")
     let freshSnapshot =
       if forceRebuild or dryRun:
@@ -14190,6 +14265,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
     else:
       progressRenderer.renderPhase("refreshing project provider graph")
+      # The snapshot before the refresh names the producers of the claims the
+      # refresh drops, and with them the directories those outputs are
+      # relative to (``outputCleanupReportAgainstActionCwd``).
+      try:
+        previousProviderSnapshot = loadProviderGraphSnapshot(providerGraphStore)
+      except CatchableError:
+        previousProviderSnapshot = ProviderGraphSnapshot()
       refresh = refreshReadableProviderGraph(RefreshConfig(
         storeRoot: providerGraphStore,
         projectId: artifact.projectInterface.packageName,
@@ -14231,8 +14313,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # ``--no-output-cleanup`` compute the plan and report it without deleting.
     if refresh.staleEffects.len > 0:
       let cleanupDryRun = dryRun or noOutputCleanup
-      let cleanup = applyOutputCleanup(refresh, projectRoot,
-        dryRun = cleanupDryRun)
+      let cleanup = applyOutputCleanup(
+        outputCleanupReportAgainstActionCwd(refresh, previousProviderSnapshot),
+        projectRoot, dryRun = cleanupDryRun)
       let cleanupMsg = cleanup.summaryLine()
       if cleanupMsg.len > 0:
         logSummary("outputCleanup: " & cleanupMsg)
@@ -34152,6 +34235,7 @@ proc runCleanCommand(projectRoot, workRoot: string; dryRun: bool): int =
     for store in projectCleanSnapshotStores(buildRoot):
       var snapshot = loadProviderGraphSnapshot(store)
       classifyContainerClaims(snapshot)
+      resolveClaimsAgainstActionCwd(snapshot)
       snapshots.add(snapshot)
 
   let res = applyProjectClean(snapshots, projectRoot, dryRun = dryRun)

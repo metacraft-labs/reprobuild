@@ -25558,7 +25558,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_update_node_failure_withholds_only_the_certificate.nim",
@@ -26230,7 +26230,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_named_layer_url_supplied_locally.nim",
@@ -26938,7 +26938,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_migration_certificate_is_rejected_with_a_reissue_remedy.nim",
@@ -27646,7 +27646,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_r9_systemd_boot.nim",
@@ -28035,6 +28035,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim",
     binary: "build/test-bin/t_repro_clean_removes_owned_outputs_and_keeps_caches",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g12",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_repro_clean_resolves_an_output_against_its_actions_cwd.nim",
+    binary: "build/test-bin/t_repro_clean_resolves_an_output_against_its_actions_cwd",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,
