@@ -60,7 +60,7 @@ proc main() =
     let after1 = readFile(hostFile)
     doAssert after1.contains("REPRO_HOME_SHELL_INTEGRATION_SMOKE"),
       "block body missing from on-disk file"
-    doAssert after1.contains("repro-managed:" & blockId),
+    doAssert after1.contains("repro:home:" & blockId),
       "managed-block sentinel missing"
 
     # 2. Observe present.
@@ -71,7 +71,7 @@ proc main() =
     destroyShellIntegration(hostFile, blockId)
     let after2 =
       if fileExists(hostFile): readFile(hostFile) else: ""
-    doAssert not after2.contains("repro-managed:" & blockId),
+    doAssert not after2.contains("repro:home:" & blockId),
       "managed-block sentinel still present after destroy"
     let obs2 = observeShellIntegration(hostFile, blockId)
     doAssert not obs2.present

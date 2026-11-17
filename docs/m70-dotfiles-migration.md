@@ -76,7 +76,7 @@ manifest. The six declared resources:
   PATH value is `REG_EXPAND_SZ`. The M68 `env.userPath` driver is
   non-destructive — pre-existing PATH entries survive.
 - **`shell.integration powershellProfileDirenv`** — a Reprobuild-managed
-  block (`repro-managed:repro-home-direnv` sentinels) in the PowerShell 7
+  block (`repro:home:repro-home-direnv` sentinels) in the PowerShell 7
   profile carrying the XDG base-directory setup and the direnv `cd`-hook,
   ported from `home-switch.ps1`'s `Ensure-PowerShellProfileDirenvHook`.
   The line-oriented `home.nim` surface constrains `content` to one
@@ -94,7 +94,7 @@ These resources are **additive and co-residential** with
 `home-switch.ps1`: the legacy script's own versioned
 `# BEGIN DOTFILES DIRENV v2` profile block, its `Ensure-GitBashInPath`
 PATH entry, and its `Ensure-DirenvConfig` env-var writes all keep
-working. The Reprobuild-managed block uses its own `repro-managed:`
+working. The Reprobuild-managed block uses its own `repro:home:`
 sentinels, so the two coexist without conflict. The `env.userPath`
 driver de-duplicates PATH entries that are *textually identical*, but
 it does not normalize representations: on the real host the legacy
@@ -162,7 +162,7 @@ gains co-residence, not ownership:
    `Ensure-PowerShellProfileDirenvHook` (`# BEGIN DOTFILES DIRENV`
    block writer), and `Ensure-DirenvConfig`'s persistent-env-var
    writes. Until then the two are additive and coexist (the
-   Reprobuild block uses its own `repro-managed:repro-home-direnv`
+   Reprobuild block uses its own `repro:home:repro-home-direnv`
    sentinels; the `env.userPath` driver de-duplicates entries).
 5. **Keep the system-scope sections** (OpenSSH, GPG secrets,
    Developer-Mode) in the script until M69 lands, then port them to a

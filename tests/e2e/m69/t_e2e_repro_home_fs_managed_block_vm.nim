@@ -61,7 +61,7 @@ proc main() =
     let after1 = readFile(target)
     doAssert after1.contains(userPreamble),
       "user preamble was not preserved"
-    doAssert after1.contains("repro-managed:" & blockId),
+    doAssert after1.contains("repro:home:" & blockId),
       "managed-block open sentinel missing"
     doAssert after1.contains(blockBody),
       "block body missing from on-disk file"
@@ -77,7 +77,7 @@ proc main() =
     let after2 = readFile(target)
     doAssert after2.contains(userPreamble),
       "user preamble was lost during destroy"
-    doAssert not after2.contains("repro-managed:" & blockId),
+    doAssert not after2.contains("repro:home:" & blockId),
       "managed-block sentinel still present after destroy"
 
     let obs2 = observeManagedBlock(target, blockId)
