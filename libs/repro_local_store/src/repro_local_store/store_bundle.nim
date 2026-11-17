@@ -36,6 +36,7 @@ import std/[algorithm, json, monotimes, os, osproc, posix, sequtils, sets,
 import nimcrypto/sha2
 import blake3
 import repro_hash
+from repro_core import ReprobuildVersion, ReprobuildSourceRevision
 import repro_core/ambient_execution
 import ../repro_local_store
 import ./store
@@ -53,6 +54,41 @@ type
     storeRoot*: string
     actionCacheRoot*: string
     workspaceRoots*: seq[string]
+
+  BundleSelection* = object
+    ## The part of the workspace roots a bundle carries (§2.1). A path is in
+    ## the selection when it lies in a workspace root and the deepest of the
+    ## roots, `exclude` and `include` directories holding it is not an
+    ## `exclude` one. Both empty: the whole of every root.
+    excluded*: seq[string]
+    included*: seq[string]
+
+  BundleProducer* = object
+    ## The `repro` that wrote a bundle (§4.1): its version and its source
+    ## revision ("unknown" when the build was not told it). The version alone
+    ## does not identify a build, so import compares both (§5 step 2).
+    version*: string
+    revision*: string
+
+  SkipKind* = enum
+    ## Why a record that touches the selection is not carried as
+    ## re-witnessable (`repro store closure`'s reason class).
+    skOutputChanged = "output-changed"
+      ## Its outputs fail the in-place check: the output metadata changed
+      ## since the record was written.
+    skOutputOutsideRoots = "output-outside-roots"
+      ## An output outside the bundle roots, or below the store or
+      ## action-cache root outside everything a bundle carries there.
+    skOutputOutsideSelection = "output-outside-selection"
+    skUnplaceable = "unplaceable"
+      ## A relocatable record no selected project directory holds in its
+      ## recorded state.
+
+  SkippedRecord* = object
+    edgeDir*: string
+    strongHex*: string
+    kind*: SkipKind
+    reason*: string
 
   BundleEntryKind* = enum
     bekFile = "f"
@@ -93,15 +129,17 @@ type
       ## against; "" when every path it names is absolute.
 
   BundleClosure* = object
+    producer*: BundleProducer
     roots*: BundleRoots
+    selection*: BundleSelection
     edges*: seq[string]
     records*: seq[BundleRecordRef]
     prefixes*: seq[string]
     entries*: seq[BundleEntry]
     restamps*: seq[RestampEntry]
     devEnvs*: seq[FrozenDevEnv]
-    skippedRecords*: seq[tuple[edgeDir, strongHex, reason: string]]
-      ## Records that touch a workspace root but were not exported as
+    skippedRecords*: seq[SkippedRecord]
+      ## Records that touch the selection but were not exported as
       ## re-witnessable, with the reason (normally a stale output).
 
   BundlePart* = object
@@ -117,7 +155,6 @@ type
     zstdLevel*: int
     zstdThreads*: int
     halfName*: string
-    reproRevision*: string
 
   ExportReport* = object
     bundleId*: string
@@ -151,8 +188,9 @@ type
       ## Wall time per §5 step, in order, for `--json` and for measuring.
 
 const
-  ContentsHeader* = "reprobuild.store-bundle.contents.v1"
-  ManifestSchema* = "reprobuild.store-bundle.v1"
+  ContentsHeader* = "reprobuild.store-bundle.contents.v2"
+  ContentsHeaderV1 = "reprobuild.store-bundle.contents.v1"
+  ManifestSchema* = "reprobuild.store-bundle.v2"
   DefaultHalfName* = "native-store"
   DefaultPartSize* = 64'i64 * 1024 * 1024
   DefaultZstdLevel* = 19
@@ -160,6 +198,12 @@ const
   BundlesDirName* = "bundles"
   FrozenDevEnvDirName* = "frozen-dev-env"
   ImportedMarkerName* = "imported"
+  MaxContentsBytes* = 1024 * 1024 * 1024
+    ## The largest `contents` list import reads. It is read into memory
+    ## before its SHA-256 is compared, from a stream the bundle's own,
+    ## unsigned manifest describes, so without a bound a crafted first
+    ## member could exhaust the importer's memory. A gibibyte is several
+    ## million entries; export refuses to write a larger list.
   ReadChunk = 1 shl 20
 
 # ---------------------------------------------------------------------------
@@ -184,6 +228,34 @@ proc withinAny(path: string; roots: openArray[string]): bool =
   for root in roots:
     if path.isWithin(root):
       return true
+
+proc inSelection*(path: string; workspaceRoots: openArray[string];
+                  sel: BundleSelection): bool =
+  ## §2.1: `path` lies in a workspace root, and the deepest of the roots and
+  ## the selection's directories that holds it is not an `exclude` one.
+  var depth = -1
+  var excluded = false
+  for root in workspaceRoots:
+    if path.isWithin(root) and root.len > depth:
+      depth = root.len
+      excluded = false
+  if depth < 0:
+    return false
+  for dir in sel.excluded:
+    if path.isWithin(dir) and dir.len > depth:
+      depth = dir.len
+      excluded = true
+  for dir in sel.included:
+    if path.isWithin(dir) and dir.len >= depth:
+      depth = dir.len
+      excluded = false
+  not excluded
+
+proc localProducer*(): BundleProducer =
+  ## The running `repro`, as a bundle's `producer` line names it.
+  BundleProducer(version: ReprobuildVersion,
+    revision: (if ReprobuildSourceRevision.len > 0: ReprobuildSourceRevision
+               else: "unknown"))
 
 proc escapeField*(value: string): string =
   ## §4.1: `\`, TAB and newline escaped so a path is always one field.
@@ -323,13 +395,16 @@ proc edgeDirs(actionCacheRoot: string): seq[string] =
       result.add(path)
   result.sort()
 
-proc recordTouches(record: ActionResultRecord;
-                   roots: openArray[string]): bool =
+proc recordTouches(record: ActionResultRecord; roots: openArray[string];
+                   sel: BundleSelection): bool =
+  ## Whether an absolute input or output of `record` is in the selection.
   for input in record.inputs:
-    if input.path.isAbsolute and input.path.normalizedPath.withinAny(roots):
+    if input.path.isAbsolute and
+        input.path.normalizedPath.inSelection(roots, sel):
       return true
   for output in record.outputs:
-    if output.path.isAbsolute and output.path.normalizedPath.withinAny(roots):
+    if output.path.isAbsolute and
+        output.path.normalizedPath.inSelection(roots, sel):
       return true
 
 # ---------------------------------------------------------------------------
@@ -346,26 +421,39 @@ proc prefixDirOf(path, storeRoot: string): string =
         return base / rest[0] / rest[1]
   ""
 
-proc findDotReproDirs(root: string; excluded: openArray[string];
-                      found: var seq[string]) =
-  ## Every `.repro/` directory under `root`, not descending into `.git`,
-  ## into a found `.repro`, or into an excluded subtree (the store and the
-  ## action cache, which have their own selection rules).
-  if not dirExists(root):
-    return
-  var stack = @[root]
-  while stack.len > 0:
-    let dir = stack.pop()
-    for kind, path in walkDir(dir):
-      if kind != pcDir:
-        continue
-      let name = path.extractFilename
-      if name == ".git" or path.withinAny(excluded):
-        continue
-      if name == ".repro":
-        found.add(path)
-      else:
-        stack.add(path)
+proc selectionWalkRoots(roots: openArray[string];
+                        sel: BundleSelection): seq[string] =
+  ## Where a walk of the selection starts: every root, and every `include`
+  ## directory (it lies in an excluded one, which the walk does not enter).
+  for root in roots: result.add(root)
+  for dir in sel.included: result.add(dir)
+
+proc findDotReproDirs(roots: openArray[string]; sel: BundleSelection;
+                      excluded: openArray[string]; found: var seq[string]) =
+  ## Every `.repro/` directory in the selection, not descending into `.git`,
+  ## into a found `.repro`, into a directory the selection excludes, or into
+  ## an `excluded` subtree (the store and the action cache, which have their
+  ## own selection rules).
+  var seen = initHashSet[string]()
+  for root in selectionWalkRoots(roots, sel):
+    if not dirExists(root):
+      continue
+    var stack = @[root]
+    while stack.len > 0:
+      let dir = stack.pop()
+      for kind, path in walkDir(dir):
+        if kind != pcDir:
+          continue
+        let name = path.extractFilename
+        if name == ".git" or path.withinAny(excluded) or
+            not path.inSelection(roots, sel):
+          continue
+        if name == ".repro":
+          if path notin seen:
+            seen.incl(path)
+            found.add(path)
+        else:
+          stack.add(path)
 
 proc scanStorePaths(text, storeRoot: string; prefixes: var HashSet[string]) =
   ## Every store prefix a text (a frozen dev-env script) names.
@@ -408,25 +496,29 @@ proc expandInto(path: string; seen: var HashSet[string];
         stack.add(child)
     entries.add(entry)
 
-proc findProjectDirs(root: string; excluded: openArray[string];
-                      found: var seq[string]) =
-  ## Every directory under `root` that holds a project file, plus `root`
-  ## itself: the candidate working directories of relocatable records.
-  if not dirExists(root):
-    return
-  found.add(root)
-  var stack = @[root]
-  while stack.len > 0:
-    let dir = stack.pop()
-    for kind, path in walkDir(dir):
-      if kind != pcDir:
-        continue
-      let name = path.extractFilename
-      if name in [".git", ".repro"] or path.withinAny(excluded):
-        continue
-      if fileExists(path / "repro.nim") or fileExists(path / "reprobuild.nim"):
-        found.add(path)
-      stack.add(path)
+proc findProjectDirs(roots: openArray[string]; sel: BundleSelection;
+                      excluded: openArray[string]; found: var seq[string]) =
+  ## Every directory in the selection that holds a project file, plus each
+  ## root and `include` directory itself: the candidate working directories
+  ## of relocatable records.
+  for root in selectionWalkRoots(roots, sel):
+    if not dirExists(root) or root in found:
+      continue
+    found.add(root)
+    var stack = @[root]
+    while stack.len > 0:
+      let dir = stack.pop()
+      for kind, path in walkDir(dir):
+        if kind != pcDir:
+          continue
+        let name = path.extractFilename
+        if name in [".git", ".repro"] or path.withinAny(excluded) or
+            not path.inSelection(roots, sel):
+          continue
+        if (fileExists(path / "repro.nim") or
+            fileExists(path / "reprobuild.nim")) and path notin found:
+          found.add(path)
+        stack.add(path)
 
 proc resolvedPath(root, path: string): string =
   if path.isAbsolute or root.len == 0: normalizedPath(path)
@@ -437,6 +529,38 @@ proc hasRelativePaths(record: ActionResultRecord): bool =
     if not output.path.isAbsolute: return true
   for input in record.inputs:
     if not input.path.isAbsolute: return true
+
+proc inputsStillRecordedAt(record: ActionResultRecord; dir: string): bool =
+  ## Whether every input `record` names relative to its directory is, under
+  ## `dir`, the input it fingerprinted: the same content where the record
+  ## carries a content hash (`hashedInputContentChanged`), else the same kind,
+  ## size and mtime. Existence is not enough: every repro project's provider
+  ## compile names `repro.nim` by the same relative path, so two checkouts
+  ## share one relocatable edge, and only the checkout whose files the record
+  ## fingerprinted is its directory. Without this a record made in an
+  ## unselected checkout was placed, and re-witnessed, in a selected one, and
+  ## its outputs travelled with the selection (§2.1).
+  ##
+  ## Absolute inputs are the same whichever directory is tried, so they do
+  ## not tell candidates apart; as before, they need only exist (the
+  ## importing build's own lookup judges them).
+  var relative = record
+  relative.inputs = @[]
+  for input in record.inputs:
+    if input.path.isAbsolute:
+      # As before: an absolute input must at least exist.
+      if input.metadata.kind == ffkRegular and not liveState(input.path).exists:
+        return false
+      continue
+    if input.hasLocalHash:
+      relative.inputs.add(input)
+    elif input.metadata.kind == ffkRegular:
+      let st = liveState(resolvedPath(dir, input.path))
+      if not st.exists or st.kind != bekFile or
+          uint64(st.size) != input.metadata.sizeBytes or
+          uint64(st.mtimeNs) != input.metadata.mtimeNs:
+        return false
+  hashedInputContentChanged(relative, dir).len == 0
 
 proc resolveRecordDir(record: ActionResultRecord;
                       candidates: openArray[string]): string =
@@ -452,21 +576,22 @@ proc resolveRecordDir(record: ActionResultRecord;
           not liveState(resolvedPath(dir, output.path)).exists:
         plausible = false
         break
-    if plausible:
-      for input in record.inputs:
-        if input.metadata.kind == ffkRegular and
-            not liveState(resolvedPath(dir, input.path)).exists:
-          plausible = false
-          break
+    if plausible and not inputsStillRecordedAt(record, dir):
+      plausible = false
     if plausible and outputStateMismatch(record, dir).len == 0:
       return dir
   ""
 
 proc stateAreas(store, ac: string): seq[string] =
   ## The areas below the store and action-cache roots a closure carries
-  ## besides prefixes and edge directories (§2).
+  ## besides prefixes and edge directories (§2). `recipe-compiles/` holds
+  ## the outputs of the recipe-compile records (a compiled project provider,
+  ## an extracted interface), which §2 carries like any recorded output: a
+  ## bundle that left them out would have every importer recompile its
+  ## providers. Like `cas/`, it holds only content-keyed record outputs,
+  ## none of the importer's own state.
   @[store / "compiler-probes", store / "tool-store" / "compiler-probes",
-    store / FrozenDevEnvDirName, ac / "cas"]
+    store / FrozenDevEnvDirName, ac / "cas", ac / RecipeCompilesDirName]
 
 proc carriedClassProblem(c: BundleClosure; e: BundleEntry;
                          contentsPath: string): string =
@@ -502,9 +627,11 @@ proc carriedClassProblem(c: BundleClosure; e: BundleEntry;
     "and blobs)"
 
 proc computeClosure*(roots: BundleRoots;
-                     devEnvs: openArray[FrozenDevEnv] = []): BundleClosure =
-  ## §2. Read-only: scans the action cache, the workspace roots and the
-  ## store; writes nothing.
+                     devEnvs: openArray[FrozenDevEnv] = [];
+                     selection = BundleSelection()): BundleClosure =
+  ## §2. Read-only: scans the action cache, the workspace roots (only the
+  ## part `selection` keeps, §2.1) and the store; writes nothing.
+  result.producer = localProducer()
   result.roots = BundleRoots(
     storeRoot: normalizedRoot(roots.storeRoot),
     actionCacheRoot: normalizedRoot(roots.actionCacheRoot))
@@ -520,6 +647,23 @@ proc computeClosure*(roots: BundleRoots;
   let acRoot = result.roots.actionCacheRoot
   if ws.len == 0:
     fail("a store bundle needs at least one workspace root (--root=DIR)")
+  # §2.1: each selection directory must lie inside a workspace root, or it
+  # selects nothing and only says something false about the bundle.
+  for (label, dirs) in [("exclude", selection.excluded),
+                        ("include", selection.included)]:
+    var seenDirs = initHashSet[string]()
+    for dir in dirs:
+      let d = normalizedRoot(dir)
+      if not d.withinAny(ws):
+        fail("the selection's " & label & " directory " & d &
+          " is not inside a workspace root")
+      if d notin seenDirs:
+        seenDirs.incl(d)
+        if label == "exclude": result.selection.excluded.add(d)
+        else: result.selection.included.add(d)
+  result.selection.excluded.sort()
+  result.selection.included.sort()
+  let sel = result.selection
 
   var selected: seq[string]
   var prefixes = initHashSet[string]()
@@ -528,8 +672,7 @@ proc computeClosure*(roots: BundleRoots;
   var inputs = initTable[string, FileFingerprint]()
 
   var projectDirs: seq[string]
-  for root in ws:
-    findProjectDirs(root, [storeRoot, acRoot], projectDirs)
+  findProjectDirs(ws, sel, [storeRoot, acRoot], projectDirs)
 
   # 1. Action-cache edges (and 2. their outputs).
   # `acRoot` is the shared cache root `resolveActionCacheRoot` returns: the
@@ -553,28 +696,26 @@ proc computeClosure*(roots: BundleRoots;
         if record.hasRelativePaths:
           outputRoot = resolveRecordDir(record, projectDirs)
           if outputRoot.len == 0:
-            if record.recordTouches(ws):
-              result.skippedRecords.add((edgeDir, strongHex,
-                "no project directory under the roots holds its relative " &
-                "outputs in the recorded state"))
+            if record.recordTouches(ws, sel):
+              result.skippedRecords.add(SkippedRecord(edgeDir: edgeDir,
+                strongHex: strongHex, kind: skUnplaceable,
+                reason: "no project directory in the selection holds its " &
+                  "relative outputs in the recorded state"))
               touching = true
             continue
-        elif not record.recordTouches(ws):
+        elif not record.recordTouches(ws, sel):
           continue
         touching = true
-        # Import refuses any member outside the declared roots, so a record
-        # writing elsewhere cannot travel (and is reported instead).
-        # Below the store and action-cache roots only the carried areas
-        # travel (`carriedClassProblem`): an output there must be in a
-        # receipted prefix or one of the state areas.
+        # Import refuses any member outside the declared roots or in an
+        # excluded directory, so a record writing there cannot travel (and
+        # is reported instead). Below the store and action-cache roots only
+        # the carried areas travel (`carriedClassProblem`): an output there
+        # must be in a receipted prefix or one of the state areas.
         var outside = ""
+        var outsideKind = skOutputOutsideRoots
         var where = "outside the bundle roots"
         for output in record.outputs:
           let p = resolvedPath(outputRoot, output.path)
-          if not (p.withinAny(ws) or p.isWithin(storeRoot) or
-              p.isWithin(acRoot)):
-            outside = p
-            break
           if p.isWithin(storeRoot) or p.isWithin(acRoot):
             let prefix = prefixDirOf(p, storeRoot)
             if not ((prefix.len > 0 and
@@ -584,14 +725,25 @@ proc computeClosure*(roots: BundleRoots;
               where = "below the store or action-cache root outside " &
                 "everything a bundle carries there"
               break
+            continue
+          if not p.withinAny(ws):
+            outside = p
+            break
+          if not p.inSelection(ws, sel):
+            outside = p
+            outsideKind = skOutputOutsideSelection
+            where = "outside the selection"
+            break
         if outside.len > 0:
-          result.skippedRecords.add((edgeDir, strongHex,
-            "an output lies " & where & ": " & outside))
+          result.skippedRecords.add(SkippedRecord(edgeDir: edgeDir,
+            strongHex: strongHex, kind: outsideKind,
+            reason: "an output lies " & where & ": " & outside))
           continue
         if outputRoot.len == 0:
           let mismatch = outputStateMismatch(record, "")
           if mismatch.len > 0:
-            result.skippedRecords.add((edgeDir, strongHex, mismatch))
+            result.skippedRecords.add(SkippedRecord(edgeDir: edgeDir,
+              strongHex: strongHex, kind: skOutputChanged, reason: mismatch))
             continue
         result.records.add(BundleRecordRef(edgeDir: edgeDir,
           strongHex: strongHex, outputRoot: outputRoot))
@@ -610,7 +762,7 @@ proc computeClosure*(roots: BundleRoots;
           if input.metadata.kind == ffkRegular and
               (input.path.isAbsolute or outputRoot.len > 0):
             let p = resolvedPath(outputRoot, input.path)
-            if p.withinAny(ws) and not p.isWithin(storeRoot) and
+            if p.inSelection(ws, sel) and not p.isWithin(storeRoot) and
                 not p.isWithin(acRoot):
               inputs[p] = input
       if touching:
@@ -619,8 +771,7 @@ proc computeClosure*(roots: BundleRoots;
 
   # 3. Project state.
   var dotRepro: seq[string]
-  for root in ws:
-    findDotReproDirs(root, [storeRoot, acRoot], dotRepro)
+  findDotReproDirs(ws, sel, [storeRoot, acRoot], dotRepro)
   selected.add(dotRepro)
 
   # Compiler-capability probe results (`repro_tool_profiles`): one success
@@ -665,13 +816,27 @@ proc computeClosure*(roots: BundleRoots;
       expandInto(prefix, seen, entries, hashBuf)
   result.prefixes.sort()
 
+  # A directory output (or a `.repro/` tree) can hold an excluded
+  # directory; nothing in one travels (§2.1).
+  if sel.excluded.len > 0:
+    var kept: seq[BundleEntry]
+    for entry in entries:
+      if entry.path.withinAny(ws) and not entry.path.inSelection(ws, sel):
+        seen.excl(entry.path)
+        continue
+      kept.add(entry)
+    entries = kept
+
   # Every member's parent directories that lie inside a root are members
-  # too, so the unpacked tree has the exporter's directory modes.
+  # too, so the unpacked tree has the exporter's directory modes. A parent
+  # the selection excludes (the checkout around an `include` directory) is
+  # not: tar creates it, and the bundle says nothing about it.
   var parents: seq[string]
   for entry in entries:
     var dir = entry.path.parentDir
     while dir.len > 1 and dir notin seen and
-        (dir.withinAny(ws) or dir.isWithin(storeRoot) or dir.isWithin(acRoot)):
+        (dir.inSelection(ws, sel) or dir.isWithin(storeRoot) or
+         dir.isWithin(acRoot)):
       seen.incl(dir)
       parents.add(dir)
       dir = dir.parentDir
@@ -720,10 +885,16 @@ proc renderContentsBody(c: BundleClosure; forId = false): string =
   ## Everything but the header. The bundle id is derived from this text, so
   ## it is a function of what the bundle carries.
   var lines: seq[string]
+  lines.add("producer\t" & escapeField(c.producer.version) & "\t" &
+    escapeField(c.producer.revision))
   lines.add("root\tstore\t" & escapeField(c.roots.storeRoot))
   lines.add("root\taction-cache\t" & escapeField(c.roots.actionCacheRoot))
   for root in c.roots.workspaceRoots:
     lines.add("root\tworkspace\t" & escapeField(root))
+  for dir in c.selection.excluded:
+    lines.add("exclude\t" & escapeField(dir))
+  for dir in c.selection.included:
+    lines.add("include\t" & escapeField(dir))
   for env in c.devEnvs:
     lines.add("devenv\t" & escapeField(env.projectRoot) & "\t" &
       escapeField(env.scriptPath))
@@ -756,9 +927,14 @@ proc bundleIdOf*(c: BundleClosure): string =
 
 proc parseContents*(text: string): BundleClosure =
   let lines = text.splitLines()
+  if lines.len > 0 and lines[0] == ContentsHeaderV1:
+    fail("unsupported contents version (" & ContentsHeaderV1 & "): the " &
+      "bundle names no producer, so this repro cannot check it was made " &
+      "by the same build; export it again with this repro")
   if lines.len == 0 or lines[0] != ContentsHeader:
     fail("not a store-bundle contents file (expected header " &
       ContentsHeader & ")")
+  var sawProducer = false
   for i in 1 ..< lines.len:
     let line = lines[i]
     if line.len == 0:
@@ -766,6 +942,12 @@ proc parseContents*(text: string): BundleClosure =
     let f = line.split('\t')
     try:
       case f[0]
+      of "producer":
+        result.producer = BundleProducer(version: unescapeField(f[1]),
+          revision: unescapeField(f[2]))
+        sawProducer = true
+      of "exclude": result.selection.excluded.add(unescapeField(f[1]))
+      of "include": result.selection.included.add(unescapeField(f[1]))
       of "root":
         let value = unescapeField(f[2])
         case f[1]
@@ -800,6 +982,8 @@ proc parseContents*(text: string): BundleClosure =
         fail("unknown contents line kind: " & f[0])
     except IndexDefect, ValueError:
       fail("malformed contents line " & $(i + 1) & ": " & line)
+  if not sawProducer:
+    fail("bundle contents names no producer")
 
 proc contentsPathFor*(storeRoot, bundleId: string): string =
   storeRoot / BundlesDirName / bundleId / "contents"
@@ -936,8 +1120,13 @@ proc manifestJson(c: BundleClosure; id, contentsPath, contentsSha: string;
     "roots": {"storeRoot": c.roots.storeRoot,
       "actionCacheRoot": c.roots.actionCacheRoot,
       "workspaceRoots": %c.roots.workspaceRoots},
+    "selection": {"exclude": %c.selection.excluded,
+      "include": %c.selection.included},
+    "producer": {"version": c.producer.version,
+      "revision": c.producer.revision},
     "frozenDevEnvs": devEnvNodes,
-    "reproRevision": opts.reproRevision
+    # `v1`'s field, kept with the producer's revision.
+    "reproRevision": c.producer.revision
   }
 
 proc exportBundle*(c: BundleClosure; opts: ExportOptions): ExportReport =
@@ -948,6 +1137,9 @@ proc exportBundle*(c: BundleClosure; opts: ExportOptions): ExportReport =
   let zstdExe = requireTool("zstd")
   let id = bundleIdOf(c)
   let contentsText = renderContents(c)
+  if contentsText.len > MaxContentsBytes:
+    fail("the bundle's contents list is " & $contentsText.len &
+      " bytes, more than import reads (" & $MaxContentsBytes & ")")
   let contentsPath = contentsPathFor(c.roots.storeRoot, id)
   createDir(contentsPath.parentDir)
   writeFile(contentsPath, contentsText)
@@ -1050,13 +1242,43 @@ proc feedWriter(shared: ptr FeedShared) {.thread.} =
         break
       offset += n
 
+type CaptureShared = object
+  ## Shared between `feedParts` and its reader thread, which drains the
+  ## command's stdout into `chan` so the command never blocks on a full
+  ## pipe while this process is busy feeding its stdin.
+  chan: Channel[string]
+  fd: cint
+  limit: int
+
+proc captureReader(shared: ptr CaptureShared) {.thread.} =
+  var buf = newString(1 shl 16)
+  var total = 0
+  while true:
+    let n = posix.read(shared.fd, addr buf[0], buf.len)
+    if n < 0:
+      if errno == EINTR: continue
+      break
+    if n == 0:
+      break
+    # Keep at most `limit` bytes in all. Past the limit the bytes are read
+    # and dropped, so the command still runs to its end; the caller sees a
+    # capture of exactly `limit` bytes and decides what that means.
+    let keep = min(n, shared.limit - total)
+    total += n
+    if keep > 0:
+      shared.chan.send(buf[0 ..< keep])
+
 proc feedParts*(dir: string; parts: seq[BundlePart]; command: string;
-               stopEarly: bool): int =
+               stopEarly: bool; captured: ptr string = nil;
+               captureLimit = high(int)): int =
   ## Run `command` with the verified parts streamed to its stdin and return
-  ## its exit code. The command must redirect its own stdout and stderr to
-  ## files: nothing reads those pipes while the feed runs. With `stopEarly`
-  ## the feed stops quietly when the command exits before reading
-  ## everything (the contents peek).
+  ## its exit code. Without `captured`, the command must redirect its own
+  ## stdout and stderr to files: nothing reads those pipes while the feed
+  ## runs. With `captured`, its stdout (at most `captureLimit` bytes) is read
+  ## into memory, so a caller that must write nothing (the contents peek,
+  ## §5 step 2) needs no scratch file; its stderr must still be redirected.
+  ## With `stopEarly` the feed stops quietly when the command exits before
+  ## reading everything (the contents peek).
   ##
   ## A writer thread pushes part N while this thread reads and hashes part
   ## N+1, so verification overlaps the unpack instead of adding to it; still,
@@ -1077,6 +1299,23 @@ proc feedParts*(dir: string; parts: seq[BundlePart]; command: string;
       # truncated stream, and reap it.
       try: p.terminate() except CatchableError: discard
       try: discard p.waitForExit(); p.close() except CatchableError: discard
+  var capture: ptr CaptureShared = nil
+  var reader: Thread[ptr CaptureShared]
+  if captured != nil:
+    capture = cast[ptr CaptureShared](allocShared0(sizeof(CaptureShared)))
+    capture.chan.open()
+    capture.fd = cint(p.outputHandle)
+    capture.limit = captureLimit
+    createThread(reader, captureReader, capture)
+  var captureJoined = false
+  defer:
+    if capture != nil and not captureJoined:
+      # A refused part: end the command so its stdout reaches end of file,
+      # then reap the reader (this runs before the defer above closes `p`).
+      try: p.terminate() except CatchableError: discard
+      joinThread(reader)
+      capture.chan.close()
+      deallocShared(capture)
   let shared = cast[ptr FeedShared](allocShared0(sizeof(FeedShared)))
   shared.chan.open(maxItems = 1)
   shared.fd = cint(p.inputHandle)
@@ -1101,6 +1340,18 @@ proc feedParts*(dir: string; parts: seq[BundlePart]; command: string;
     # closes the stream when one exists, the raw handle otherwise).
     try: p.inputStream.close() except CatchableError: discard
   result = p.waitForExit()
+  if capture != nil:
+    # The command has exited, so its stdout reaches end of file (unless a
+    # child it left behind still holds it; the commands here leave none).
+    joinThread(reader)
+    captured[].setLen(0)
+    while true:
+      let (ok, chunk) = capture.chan.tryRecv()
+      if not ok: break
+      captured[].add(chunk)
+    capture.chan.close()
+    deallocShared(capture)
+    captureJoined = true
   p.close()
   completed = true
   if writeError != 0 and result == 0 and not stopEarly:
@@ -1128,16 +1379,40 @@ proc checkRoots*(bundle, local: BundleRoots) =
     fail("bundle was produced at different absolute paths; relocation is " &
       "not supported, so nothing was imported:\n  " & problems.join("\n  "))
 
-proc checkEntryPlacement(c: BundleClosure; contentsPath: string) =
-  ## Every declared entry must lie inside a declared root, and none below a
-  ## declared symlink, so that what `contents` declares cannot write
-  ## anywhere else. (`checkMembers` then holds the archive to exactly these
-  ## entries.)
+proc checkProducer*(bundle, local: BundleProducer) =
+  ## §5 step 2: refuse, before writing anything, a bundle another `repro`
+  ## made. Its provider-compile and interface records fingerprint the engine
+  ## binary, so this one would miss on them after writing the whole bundle.
+  if bundle.version != local.version or bundle.revision != local.revision:
+    fail("bundle was made by repro " & bundle.version & " (revision " &
+      bundle.revision & "), and this is repro " & local.version &
+      " (revision " & local.revision & "); nothing was imported. Import it " &
+      "with the repro that made it (a workspace bundle carries it in its " &
+      "Nix half), or export it again with this one")
+
+proc checkEntryPlacement*(c: BundleClosure; contentsPath: string) =
+  ## Every declared entry must lie inside a declared root and in the
+  ## selection (§2.1), and none below a declared symlink, so that what
+  ## `contents` declares cannot write anywhere else. (`checkMembers` then
+  ## holds the archive to exactly these entries.) `contentsPath` may be ""
+  ## (at export, before the id).
   var allowed = @[c.roots.storeRoot, c.roots.actionCacheRoot]
   allowed.add(c.roots.workspaceRoots)
   for root in allowed:
     if not root.isAbsolute or root == "/":
       fail("bundle declares an unusable root: " & root.escape)
+  let ws = c.roots.workspaceRoots
+  for (label, dirs) in [("exclude", c.selection.excluded),
+                        ("include", c.selection.included)]:
+    for dir in dirs:
+      if not dir.isAbsolute or normalizedPath(dir) != dir or
+          not dir.withinAny(ws):
+        fail("bundle declares an " & label &
+          " directory outside its workspace roots: " & dir.escape)
+  template inSel(path: string): bool =
+    path.isWithin(c.roots.storeRoot) or
+      path.isWithin(c.roots.actionCacheRoot) or path.inSelection(ws,
+        c.selection)
   # A prefix line names a store prefix directory and nothing else: the
   # symlink rule below trusts what lies inside one, and the unpack excludes
   # an intact one wholesale.
@@ -1160,6 +1435,8 @@ proc checkEntryPlacement(c: BundleClosure; contentsPath: string) =
     if not e.path.isAbsolute or normalizedPath(e.path) != e.path or
         not e.path.withinAny(allowed):
       fail("bundle entry outside its declared roots: " & e.path)
+    if not inSel(e.path):
+      fail("bundle entry in a directory its selection excludes: " & e.path)
     let classProblem = carriedClassProblem(c, e, contentsPath)
     if classProblem.len > 0:
       fail(classProblem)
@@ -1196,13 +1473,14 @@ proc checkEntryPlacement(c: BundleClosure; contentsPath: string) =
           fail("bundle path " & path & " lies below the symlink entry " & dir)
         dir = dir.parentDir
   for r in c.records:
-    if r.outputRoot.len > 0 and not r.outputRoot.withinAny(
-        c.roots.workspaceRoots):
-      fail("bundle record directory outside the workspace roots: " &
-        r.outputRoot)
+    if r.outputRoot.len > 0 and not r.outputRoot.inSelection(ws,
+        c.selection):
+      fail("bundle record directory outside the workspace roots or the " &
+        "selection: " & r.outputRoot)
   for r in c.restamps:
-    if not r.path.withinAny(c.roots.workspaceRoots):
-      fail("bundle restamp outside the workspace roots: " & r.path)
+    if not r.path.inSelection(ws, c.selection):
+      fail("bundle restamp outside the workspace roots or the selection: " &
+        r.path)
 
 proc deepestRoot(path: string; roots: openArray[string]): string =
   ## The longest of `roots` that holds `path`; refuses when none does.
@@ -1375,47 +1653,79 @@ proc peekContents(dir: string; m: ParsedManifest): string =
   ## The `contents` member, which export writes first. It is read from the
   ## shortest prefix of the parts that yields it whole: one part, in every
   ## bundle whose compressed contents list fits in the first part. Each try
-  ## is checked against the manifest's SHA-256 of `contents`.
+  ## is checked against the manifest's SHA-256 of `contents`. It is read
+  ## into memory: §5 step 2 writes nothing, not even into the bundle's own
+  ## directory, and `repro bundle inspect` writes nothing at all.
   let zstdExe = requireTool("zstd")
   let tarExe = requireTool("tar")
-  let outPath = dir / ("." & m.bundleId & ".contents")
-  defer: removeFile(outPath)
-  let command = "(" & quoteShell(zstdExe) & " -q -dc --long=" &
-    $ZstdWindowLog & " - | " & quoteShell(tarExe) &
+  let command = quoteShell(zstdExe) & " -q -dc --long=" &
+    $ZstdWindowLog & " - 2>/dev/null | " & quoteShell(tarExe) &
     " -xOf - --occurrence=1 " & quoteShell(relToSlash(m.contentsPath)) &
-    ") >" & quoteShell(outPath) & " 2>/dev/null"
+    " 2>/dev/null"
   for count in 1 .. m.parts.len:
-    removeFile(outPath)
     # A truncated stream makes the pipeline fail; only the hash decides.
-    discard feedParts(dir, m.parts[0 ..< count], command, stopEarly = true)
-    result = (if fileExists(outPath): readFile(outPath) else: "")
-    if lowerHex(sha256.digest(result).data) == m.contentsSha:
-      return
+    var text = ""
+    discard feedParts(dir, m.parts[0 ..< count], command, stopEarly = true,
+      captured = addr text, captureLimit = MaxContentsBytes + 1)
+    if text.len > MaxContentsBytes:
+      fail("bundle contents entry is larger than " & $MaxContentsBytes &
+        " bytes; nothing was imported")
+    if lowerHex(sha256.digest(text).data) == m.contentsSha:
+      return text
   fail("bundle contents entry does not match the manifest's SHA-256 " &
     "(or is not the first member)")
 
-proc importBundle*(opts: ImportOptions; local: BundleRoots): ImportReport =
+type VerifiedContents* = object
+  ## A bundle half's `contents`, read from parts whose SHA-256 matched,
+  ## whose own SHA-256 matched the manifest and whose bundle id matched
+  ## (§5 steps 1 and 2, without the comparison with the local machine).
+  bundleId*: string
+  parts*: seq[BundlePart]
+  contentsPath*: string
+    ## Where `contents` unpacks (`<store>/bundles/<id>/contents`), checked
+    ## against the id.
+  closure*: BundleClosure
+  manifest*: JsonNode
+    ## The transport manifest as read; its fields are unverified.
+
+proc readVerifiedContents*(dir: string;
+                           manifestName = DefaultHalfName & ".json"):
+    VerifiedContents =
+  ## Read and verify a half's `contents` without writing anything. Shared by
+  ## import and by `repro bundle inspect` (§7.1).
+  let m = readManifest(dir / manifestName)
+  let c = parseContents(peekContents(dir, m))
+  if contentsPathFor(c.roots.storeRoot, m.bundleId) != m.contentsPath or
+      bundleIdOf(c) != m.bundleId:
+    fail("bundle id does not match its contents")
+  checkEntryPlacement(c, m.contentsPath)
+  result = VerifiedContents(bundleId: m.bundleId, parts: m.parts,
+    contentsPath: m.contentsPath, closure: c,
+    manifest: parseJson(readFile(dir / manifestName)))
+
+proc importBundle*(opts: ImportOptions; local: BundleRoots;
+                   producer = localProducer()): ImportReport =
   ## §5. `local` carries the roots resolved on this machine; workspace roots
   ## may be empty, in which case the bundle's are accepted as long as the
-  ## store and action-cache roots match.
+  ## store and action-cache roots match. `producer` is the `repro` doing the
+  ## import (§5 step 2).
   let dir = opts.bundleDir
   let manifestName =
     if opts.manifestName.len > 0: opts.manifestName
     else: DefaultHalfName & ".json"
-  let m = readManifest(dir / manifestName)
   var phaseStart = getMonoTime()
   template phaseDone(name: string) =
     let now = getMonoTime()
     result.phaseSeconds.add((name, (now - phaseStart).inNanoseconds.float / 1e9))
     phaseStart = now
-  # Steps 1 + 2: verify the parts that carry `contents`, read it, check roots.
-  let contentsText = peekContents(dir, m)
-  let c = parseContents(contentsText)
+  # Steps 1 + 2: verify the parts that carry `contents`, read it, check its
+  # id, roots, producer and placement. Nothing is written before this.
+  let verified = readVerifiedContents(dir, manifestName)
+  let c = verified.closure
+  let m = (bundleId: verified.bundleId, parts: verified.parts,
+    contentsPath: verified.contentsPath)
   checkRoots(c.roots, local)
-  checkEntryPlacement(c, m.contentsPath)
-  if contentsPathFor(c.roots.storeRoot, m.bundleId) != m.contentsPath or
-      bundleIdOf(c) != m.bundleId:
-    fail("bundle id does not match its contents")
+  checkProducer(c.producer, producer)
   result.bundleId = m.bundleId
   result.roots = c.roots
   result.devEnvs = c.devEnvs

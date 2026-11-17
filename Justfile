@@ -78,6 +78,14 @@ addon-static *ARCHES="amd64 arm64 armhf":
 e2e_addon_bootstrap_uninstall_byte_identity:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
 
+# Bundles: a selection bundle made by this tree's packaged repro, published
+# to a local bare repository and restored in a plain rootless podman
+# container (debian:bookworm-slim, no Nix store, no network), builds the
+# selection with no producer action. Fails when podman cannot run. See
+# scripts/run_bundle_container_gate.sh.
+e2e_bundle_restores_on_a_plain_machine:
+    bash ./scripts/run_bundle_container_gate.sh
+
 # A16 (spec §6.5): image synthesis and remote bootstrap. Both run the full
 # engine of this checkout on the build host: `just build` first.
 e2e_addon_zero_touch_image_synthesis_boots_converged:

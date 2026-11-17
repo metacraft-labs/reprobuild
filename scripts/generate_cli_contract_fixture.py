@@ -104,6 +104,7 @@ COVERED_COMMANDS = [
     "bundle create",
     "bundle publish",
     "bundle restore",
+    "bundle inspect",
     "reap",
     "launch-plan",
     "launch-plan show",

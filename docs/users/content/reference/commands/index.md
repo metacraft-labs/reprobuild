@@ -38,8 +38,8 @@ Commands fall into four side-effect classes:
 | `repro bench` | — | Run the project's benchmarks. |
 | `repro lint` | — | Run the project's lint checks. |
 | `repro certify` | — | Run the required test set and issue a signed test certificate. |
-| `repro certificates` | — | List the project's named certificates or those a plan issues. |
-| `repro ci` | — | Plan which targets a CI run must execute. |
+| `repro certificates` | `list`, `plan`, `policy` | List the project's named certificates or those a plan issues. |
+| `repro ci` | `plan` | Plan which targets a CI run must execute. |
 | `repro graph` | — | Render the build graph of the current context. |
 | `repro deps` | `refresh` | Refresh and check scanner-inferred dependencies. |
 | `repro stats` | — | Inspect accumulated build analytics. |
@@ -89,7 +89,7 @@ Commands fall into four side-effect classes:
 | `repro locking` | `explain`, `adopt-manifest` | Explain or adopt the workspace's locking configuration. |
 | `repro flake` | `override-args`, `refresh-lock`, `override-status` | Compute the Nix flake overrides of the develop set. |
 | `repro gateway` | `pre-receive`, `post-receive`, `migrate` | Run a push-gateway hook entry point. |
-| `repro bundle` | `create`, `publish`, `restore` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
+| `repro bundle` | `create`, `publish`, `restore`, `inspect` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
 
 ## Machines & Diagnostics
 

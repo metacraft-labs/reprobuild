@@ -10,7 +10,7 @@ needs to work on part of a Reprobuild workspace:
 - the **sources half**: a shallow clone of each member checkout, and the
   workspace's checkout state;
 - the **native-store half**: Reprobuild's own store and caches for the
-  workspace ([store-bundles.md](./store-bundles.md)).
+  selected part of the workspace ([store-bundles.md](./store-bundles.md)).
 
 It is made for machines that must start quickly and cannot evaluate flakes,
 build or clone, such as a cloud agent session whose setup script has a few
@@ -38,6 +38,78 @@ A bundle is fetched over `https://` only. Both `restore.sh` and
 they run refuses to be redirected to anything but `https://` (curl's
 `--proto '=https,file' --proto-redir '=https'`). A local directory, a
 `file://` URL and a `github:` source work as before.
+
+## What a bundle of a selection carries
+
+The selector names a project, variant, repository set or repository. The
+bundle carries the workspace root's own checkout and the members the
+selector resolves to, and nothing of any other checkout in the workspace:
+
+- the sources half clones only those checkouts;
+- the Nix half captures the dev shells of those checkouts (and the
+  workspace root's);
+- the native-store half carries only the action-cache records, recorded
+  outputs, project state (`.repro/`) and restamped inputs that lie in them.
+  Every Git checkout under the workspace root that the selector does not
+  name is excluded, and a member nested inside an excluded checkout is
+  included again ([store-bundles.md](./store-bundles.md), "A selection of
+  the roots"). The workspace root itself is still the root the restoring
+  machine provides.
+
+`repro store closure --selection=<selector>` prints what the native-store half
+of that selection would carry, and why any record touching it is left out,
+without writing anything.
+
+## Reading a bundle before restoring it
+
+```sh
+repro bundle inspect DIR/<bundle> [--json]
+```
+
+prints what the restoring machine must provide, without restoring and
+without writing anything:
+
+- the roots to provision at the same absolute paths: the workspace
+  directory, the store root, the action-cache root, every workspace root of
+  the native half, and `/nix/store` when there is a Nix half;
+- the `repro` version and source revision that made the bundle;
+- the selection: selector, members, and the excluded and re-included
+  directories;
+- each half's id.
+
+It verifies what it prints: it checks the SHA-256 of the parts that carry
+the native half's contents list, of the list itself, and the bundle id, and
+takes the roots, the producer and the selection from that list rather than
+from the JSON. `--json` prints one object with the schema
+`reprobuild.bundle-inspect.v1`:
+
+```json
+{
+  "schema": "reprobuild.bundle-inspect.v1",
+  "kind": "workspace",
+  "name": "pair", "selector": "pair", "system": "x86_64-linux",
+  "members": [".", "alpha", "beta"],
+  "producer": {"version": "0.2.25", "revision": "<commit>"},
+  "provision": {
+    "workspaceDir": "/work/ws",
+    "storeRoot": "/work/store",
+    "actionCacheRoot": "/work/action-cache",
+    "workspaceRoots": ["/work/ws"],
+    "nixStore": "/nix/store"
+  },
+  "selection": {"exclude": ["/work/ws/gamma"], "include": []},
+  "bundleId": "<native half id>",
+  "halves": {"nix": "<id>", "sources": "<id>", "native_store": "<id>"}
+}
+```
+
+`kind` is `native-store` when the directory is a native-store half alone;
+such a report has no `name`, `selector`, `system`, `members` or
+`workspaceDir`. `nixStore` is present only when there is a Nix half.
+Fields are only ever added to `v1`. The same values, unverified, are in
+`latest.json` (`repro`, `provision`) and in the native half's
+`native-store.json` (`roots`, `selection`, `producer`), for a caller that
+has only a URL. `inspect` reads a local directory or a `file://` URL.
 
 A bundle can also be published to a GitHub repository, for machines that
 reach GitHub but not object storage. `git push` uses the caller's own git
@@ -163,8 +235,9 @@ captures differ.
 ## Requirements and limits
 
 - The native-store half restores only at the paths it was made at, and
-  only with the same `repro` binary. Taking `repro` from the Nix half
-  guarantees the latter.
+  only with the same `repro` binary. Its import refuses, before writing
+  anything, a bundle made by another `repro` version or source revision.
+  Taking `repro` from the Nix half guarantees the same binary.
 - Shells whose evaluation downloads archives cannot be evaluated on a
   restricted machine; `create` builds every shell's `inputDerivation` so the
   closure is complete.
