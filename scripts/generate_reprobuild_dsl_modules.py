@@ -17,9 +17,10 @@ either name lands on the one definition.
 
 There are several hundred such modules and the stdlib gains packages often, so
 they are derived from the stdlib tree rather than maintained by hand. Run this
-script after adding, moving or deleting a stdlib module; the integration test
-``t_ux_m1_reprobuild_module_hierarchy_and_lsp`` fails, naming this script, when
-the two trees disagree.
+script after adding, moving or deleting a stdlib module; ``just lint`` (and so
+the pre-commit hook) runs ``--check`` and fails, naming this script, when the
+two trees disagree, as does the integration test
+``t_ux_m1_reprobuild_module_hierarchy_and_lsp``.
 
 Rules:
 

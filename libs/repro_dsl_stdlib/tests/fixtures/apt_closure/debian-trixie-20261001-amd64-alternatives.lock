@@ -1,0 +1,81 @@
+repro-apt-closure-lock v1
+archive http://snapshot.debian.org/archive/debian/20261001T000000Z
+suite trixie
+components main
+architecture amd64
+snapshot 20261001T000000Z
+inrelease-sha256 0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675
+index main/binary-amd64/Packages.xz 7778d3e3f303b7ddb8ce0fe7c8d57473a076c6bf2e8f241f75421d2396352498
+root mawk
+root iptables
+root netcat-openbsd
+deb base-files 13.8+deb13u7 amd64 pool/main/b/base-files/base-files_13.8+deb13u7_amd64.deb 88296 fcd42bb5cb63f7bfc4326a92541247872206d60a192fdff65ca14eb83ed408b9
+deb base-passwd 3.6.7 amd64 pool/main/b/base-passwd/base-passwd_3.6.7_amd64.deb 53712 cf31c6956ab5f65815d9d9ea1615c4f78ecd2893c31119658248a4756cee83e7
+deb bash 5.2.37-2+b10 amd64 pool/main/b/bash/bash_5.2.37-2+b10_amd64.deb 1500792 2fd7b04f1b7caa29c4e683f5216e6af354a41e3cdcf6e75394d7cda680f9ab82
+deb bsdutils 1:2.41.5-0+deb13u1 amd64 pool/main/u/util-linux/bsdutils_2.41.5-0+deb13u1_amd64.deb 110208 d935a5102752a1108bdf1e815c89a84ac88d1949bf049a784178f946a09b14da
+deb coreutils 9.7-3 amd64 pool/main/c/coreutils/coreutils_9.7-3_amd64.deb 3023556 1299ab6f9389a288eb2f5f3dd222c26cc777b9a2d5ecb6ee4cbd340cebcdada2
+deb dash 0.5.12-12 amd64 pool/main/d/dash/dash_0.5.12-12_amd64.deb 98504 a8902cb6d8650134764a25fb80aec8589d858ef71ece1680a62e84816c37bb04
+deb debconf 1.5.91 all pool/main/d/debconf/debconf_1.5.91_all.deb 121088 1ddc7e6c5925f748eefb7ca811d98e049f18c158bb21fbc7e122262ce6011e49
+deb debianutils 5.23.2 amd64 pool/main/d/debianutils/debianutils_5.23.2_amd64.deb 92360 720e43fda316676076498b4224ad3318049deafe60cc7c601011048de03ee97d
+deb diffutils 1:3.10-4 amd64 pool/main/d/diffutils/diffutils_3.10-4_amd64.deb 386504 d3412669f7ae53ba895c3a509620ea7494ec1a36faa204c5215442ced381a479
+deb dpkg 1.22.22 amd64 pool/main/d/dpkg/dpkg_1.22.22_amd64.deb 1537216 3e800c6d75e8e709007ed1c356e5fa8509a75c1694fb0a1183709abc9cfdc1f3
+deb findutils 4.10.0-3 amd64 pool/main/f/findutils/findutils_4.10.0-3_amd64.deb 700008 3edf02b016456b6a98cefdbab99c5ce6f829b786f63affe970badea221aecfc7
+deb gcc-14-base 14.2.0-19 amd64 pool/main/g/gcc-14/gcc-14-base_14.2.0-19_amd64.deb 49432 5b6825de4263824b78c4c51f6476414f3b4e89c2ab63e81dc8b9b5501e867cf6
+deb grep 3.11-4 amd64 pool/main/g/grep/grep_3.11-4_amd64.deb 431488 2d78ed07d86a530ebf538f05cb2415f37c8daf908596bc32fc2563cc7e88c55a
+deb gzip 1.13-1+deb13u1 amd64 pool/main/g/gzip/gzip_1.13-1+deb13u1_amd64.deb 138608 74cf12212beee4ab8d473bdc0107abf9e8cef737492198e2f4944a19f142b0ac
+deb hostname 3.25 amd64 pool/main/h/hostname/hostname_3.25_amd64.deb 11024 9c2a27e5d4d87137211fe46631b05b2ee8892ec76aae926304e4485ba02e1015
+deb init-system-helpers 1.69~deb13u1 all pool/main/i/init-system-helpers/init-system-helpers_1.69~deb13u1_all.deb 39360 addf78073e1cbc5a5508937e11d2571055e29835e00ee8fab52a66775649378f
+deb iptables 1.8.11-2 amd64 pool/main/i/iptables/iptables_1.8.11-2_amd64.deb 360924 95ba166bb68a76ca1513196dd59d91e3c33b2096884c6de80406f302b18a030e
+deb libacl1 2.3.2-2+b1 amd64 pool/main/a/acl/libacl1_2.3.2-2+b1_amd64.deb 32860 08074f01e384bc07c0c2d79a58cf4a6523f71cf75d1808101c79617656c9a39d
+deb libattr1 1:2.5.2-3 amd64 pool/main/a/attr/libattr1_2.5.2-3_amd64.deb 22876 606b5ee12ea2786be607a17f40c1fb5e65c76ceaff66665bdf8f8c6c1b71d1fb
+deb libaudit-common 1:4.0.2-2+deb13u1 all pool/main/a/audit/libaudit-common_4.0.2-2+deb13u1_all.deb 12812 b9d32e5ff04fd747aacb7d6b3ebbbbf734ddefb2f1695f0b1b2a4b5e51b1052e
+deb libaudit1 1:4.0.2-2+deb13u1 amd64 pool/main/a/audit/libaudit1_4.0.2-2+deb13u1_amd64.deb 57680 3d1dd3f031a56f01b747e2acc0e14575212580e6fa63d800c44cb0a31f1edfd7
+deb libblkid1 2.41.5-0+deb13u1 amd64 pool/main/u/util-linux/libblkid1_2.41.5-0+deb13u1_amd64.deb 171612 81535f3c2c0efc732965907c8749103a0a26377c761622c9ce39b4c92dcde52f
+deb libbsd0 0.12.2-2 amd64 pool/main/libb/libbsd/libbsd0_0.12.2-2_amd64.deb 130968 e5a85986fa6bec3307ab1bc860736b478b331882bc45e17675a7bdf88eecb43a
+deb libbz2-1.0 1.0.8-6 amd64 pool/main/b/bzip2/libbz2-1.0_1.0.8-6_amd64.deb 37912 cba4cda04244b5e481bb15524bc3c983a7d1b6f330013b9b381706a2fcb65310
+deb libc-bin 2.41-12+deb13u4 amd64 pool/main/g/glibc/libc-bin_2.41-12+deb13u4_amd64.deb 638452 dc8c79647fe3a5f37f72a400414f70263d0212f010ff2c09f990e30d91e38d1c
+deb libc6 2.41-12+deb13u4 amd64 pool/main/g/glibc/libc6_2.41-12+deb13u4_amd64.deb 2846580 967aa62605721081c3eb2a17650611a792aa802d76a6511d1840242623d204c9
+deb libcap-ng0 0.8.5-4+b1 amd64 pool/main/libc/libcap-ng/libcap-ng0_0.8.5-4+b1_amd64.deb 17584 20a9e4b0619a3eb2566338223bed135dde5a601eaa2f8fdd5f20b94506addcac
+deb libcap2 1:2.75-10+deb13u1+b3 amd64 pool/main/libc/libcap2/libcap2_2.75-10+deb13u1+b3_amd64.deb 28988 89fc4d34fc7a28ad6f0fcd0c561ab253b9dedf6f77f5a000b47c276c8295bf67
+deb libcrypt1 1:4.4.38-1 amd64 pool/main/libx/libxcrypt/libcrypt1_4.4.38-1_amd64.deb 90072 0ebc144d662e3197982d1bf3a7b8b35ca845e54c68811de0328b1f0d7c67585c
+deb libdb5.3t64 5.3.28+dfsg2-9 amd64 pool/main/d/db5.3/libdb5.3t64_5.3.28+dfsg2-9_amd64.deb 703676 18d02510ee78b67e4504ba050176797a200ff24214a7cd318082ab60ad7bf3fc
+deb libdebconfclient0 0.280 amd64 pool/main/c/cdebconf/libdebconfclient0_0.280_amd64.deb 10632 25acadc8b394bc86d05df16e70975e523f8f839a7d8d6d5e22c1cafdcef741aa
+deb libgcc-s1 14.2.0-19 amd64 pool/main/g/gcc-14/libgcc-s1_14.2.0-19_amd64.deb 72772 3c71917b490d1a17aed43196a2787a256ecf060526cdb20216a74bedc061b150
+deb libgmp10 2:6.3.0+dfsg-3 amd64 pool/main/g/gmp/libgmp10_6.3.0+dfsg-3_amd64.deb 560220 d0d0265eb01770f17afd0f7c8c0622f80479dcfbbe13653a0debeec61464e622
+deb libip4tc2 1.8.11-2 amd64 pool/main/i/iptables/libip4tc2_1.8.11-2_amd64.deb 19964 762e4d9c7f86b3fdaefee2baf61ce40073d46d7602651433f2cb7a5eabfb47b4
+deb libip6tc2 1.8.11-2 amd64 pool/main/i/iptables/libip6tc2_1.8.11-2_amd64.deb 20260 d5ecaad5595dc88d08f317997beb53a4906c45ea79ee14ec89103f72573e3f99
+deb liblastlog2-2 2.41.5-0+deb13u1 amd64 pool/main/u/util-linux/liblastlog2-2_2.41.5-0+deb13u1_amd64.deb 28772 abb76aecbf51479e6e193873dfddaa1b88667dc0b1db82a11286a67550ba1557
+deb liblzma5 5.8.1-1+deb13u1 amd64 pool/main/x/xz-utils/liblzma5_5.8.1-1+deb13u1_amd64.deb 309492 1cfcc6e0dc36f438a79b6e2189facdb9d150b08f57d190a60e01c98075c7f896
+deb libmd0 1.1.0-2+b1 amd64 pool/main/libm/libmd/libmd0_1.1.0-2+b1_amd64.deb 36272 7244ec3839b61fac0c1884fe08aaa040f26e8f1f35f1f5d3482eacefd30d1b44
+deb libmnl0 1.0.5-3 amd64 pool/main/libm/libmnl/libmnl0_1.0.5-3_amd64.deb 11928 4ec9c1096e0b954e3bdb03a62314ee7f49999045d3d55be3e4ded520ffc9baf5
+deb libmount1 2.41.5-0+deb13u1 amd64 pool/main/u/util-linux/libmount1_2.41.5-0+deb13u1_amd64.deb 210408 6d00f45f2e80e078e906e3eedecd3ba6913e39fef49bff361ee583f17f00ec05
+deb libnetfilter-conntrack3 1.1.0-1 amd64 pool/main/libn/libnetfilter-conntrack/libnetfilter-conntrack3_1.1.0-1_amd64.deb 42064 ffbac5d06fbe432d5171f2eb5b2504968377f27be133f72c81e71250a9957506
+deb libnfnetlink0 1.0.2-3 amd64 pool/main/libn/libnfnetlink/libnfnetlink0_1.0.2-3_amd64.deb 14416 5e4c3c40a04ffdb4139e4bef1136585e151a8eb8c71efa6c7250b636b3c0d1b1
+deb libnftnl11 1.2.9-1 amd64 pool/main/libn/libnftnl/libnftnl11_1.2.9-1_amd64.deb 65012 1b3eae46bfb9c6ab44e404797fb45278045f926d73974a84097ad47a3e27d983
+deb libpam-modules 1.7.0-5 amd64 pool/main/p/pam/libpam-modules_1.7.0-5_amd64.deb 178696 9679ade117f8775ac0471f48a92652ab8e8dcda4e2ff06de75158cded9cfd83c
+deb libpam-modules-bin 1.7.0-5 amd64 pool/main/p/pam/libpam-modules-bin_1.7.0-5_amd64.deb 49116 cc72066d008444317738e8e931d6131b301466b4e2dd5ef5baa75fb1a45d61a7
+deb libpam-runtime 1.7.0-5 all pool/main/p/pam/libpam-runtime_1.7.0-5_all.deb 248720 b02792c9ed6174db695a653b95ef3629fdac3a73ba1eff1754ab161b5711bfbf
+deb libpam0g 1.7.0-5 amd64 pool/main/p/pam/libpam0g_1.7.0-5_amd64.deb 69880 4f5bde27d8df2de6ea8990319b42d9974f56a3ba9907ce7296fd0f8964fc9fb1
+deb libpcre2-8-0 10.46-1~deb13u2 amd64 pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_amd64.deb 298872 1252b96a5bc44bb5db982bef8eb18e54f5047cede2aff641bce4f8e1edb91c3e
+deb libselinux1 3.8.1-1 amd64 pool/main/libs/libselinux/libselinux1_3.8.1-1_amd64.deb 84680 68bb8d32bd8d6d7d2f5952a169db03d1484b46ae1e52abccdec42a19dccea5d5
+deb libsmartcols1 2.41.5-0+deb13u1 amd64 pool/main/u/util-linux/libsmartcols1_2.41.5-0+deb13u1_amd64.deb 143216 d96bac9c8805685f2734885098a214b82950da6ebb182c27a6b7a124a0323392
+deb libsqlite3-0 3.46.1-7+deb13u2 amd64 pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_amd64.deb 914584 0a459adaffd901109f7811ab65f58e7a957b4907d05539cf3d1184efdcde0468
+deb libssl3t64 3.5.7-1~deb13u2 amd64 pool/main/o/openssl/libssl3t64_3.5.7-1~deb13u2_amd64.deb 2453872 916f7f40b34a06e6ebfaefcdab331bff458328411da672598f126a760472467d
+deb libsystemd0 257.13-1~deb13u1 amd64 pool/main/s/systemd/libsystemd0_257.13-1~deb13u1_amd64.deb 454648 ab0d4127b5e46e6f8c015a1db15a62ba9ae274cdefa150083adf90ada0600ea1
+deb libtinfo6 6.5+20250216-2 amd64 pool/main/n/ncurses/libtinfo6_6.5+20250216-2_amd64.deb 348380 8b9f6a7983e9418564e48a627518de4c03917b56efe68d7f3e93bd8fffa1cc10
+deb libudev1 257.13-1~deb13u1 amd64 pool/main/s/systemd/libudev1_257.13-1~deb13u1_amd64.deb 152300 5d41c284f5a93b05bc7d648b61a02dd2bb9ff05b2261ad1a8b7d96044a0cfa88
+deb libuuid1 2.41.5-0+deb13u1 amd64 pool/main/u/util-linux/libuuid1_2.41.5-0+deb13u1_amd64.deb 37848 c1bf4c4c3ff48c57fabf93307dfb56996b60cfa33927afc4158b5db36fb2721e
+deb libxtables12 1.8.11-2 amd64 pool/main/i/iptables/libxtables12_1.8.11-2_amd64.deb 31896 4de5aa59faef5e98d6ba9f5f521a915be5641f224f597862f8d29e8319e8db16
+deb libzstd1 1.5.7+dfsg-1 amd64 pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-1_amd64.deb 303836 2f6a2aeacfc925eba8b00ac9139bc4bfccf8cacb09eb93de067074b26948eef9
+deb mawk 1.3.4.20250131-1 amd64 pool/main/m/mawk/mawk_1.3.4.20250131-1_amd64.deb 140808 ade14470c4dff8921bca6ca8b1ea20eadc0f2178b48caff3c74534b17a633292
+deb ncurses-base 6.5+20250216-2 all pool/main/n/ncurses/ncurses-base_6.5+20250216-2_all.deb 273216 190e775260a38973c415a36ae99f33ad1b37ea6ca99929d7c5d53843fc23e914
+deb ncurses-bin 6.5+20250216-2 amd64 pool/main/n/ncurses/ncurses-bin_6.5+20250216-2_amd64.deb 438372 40a525f4761e9ed4b8adcd1783cb9a6467ff8008215ae99b3597825bdefc61e4
+deb netbase 6.5 all pool/main/n/netbase/netbase_6.5_all.deb 12436 76bafa92947ebd37b0a6f9ec6570412041f56edebc1c66d323731216d318471e
+deb netcat-openbsd 1.229-1 amd64 pool/main/n/netcat-openbsd/netcat-openbsd_1.229-1_amd64.deb 42520 d24b18012d4567e9b8fce551293a2373c2bfea5373d012d7f7e81bf5bf17b13e
+deb openssl-provider-legacy 3.5.7-1~deb13u2 amd64 pool/main/o/openssl/openssl-provider-legacy_3.5.7-1~deb13u2_amd64.deb 316132 f155c8191ae6d41da73d792f4182680aeafeb85c3dd223934ee9fdd115c4f1fa
+deb perl-base 5.40.1-6+deb13u1 amd64 pool/main/p/perl/perl-base_5.40.1-6+deb13u1_amd64.deb 1666320 b795464137a0f4d443fc9284f4b93e883fb83883cb533adf300ac660807a352a
+deb sed 4.9-2+deb13u1 amd64 pool/main/s/sed/sed_4.9-2+deb13u1_amd64.deb 330696 7071270ed4f6adda55bc4f926347fb847bacaffbdee3dff917bc6006ed7e3775
+deb sysvinit-utils 3.14-4 amd64 pool/main/s/sysvinit/sysvinit-utils_3.14-4_amd64.deb 34060 c7e957360dff89675b491e501b00047cf750695178cabab167c92fc260d358ec
+deb tar 1.35+dfsg-3.1 amd64 pool/main/t/tar/tar_1.35+dfsg-3.1_amd64.deb 814968 214c02e1aa291076a3147b8a4c4cae02fadf4c67df629186e3e313726faef1de
+deb util-linux 2.41.5-0+deb13u1 amd64 pool/main/u/util-linux/util-linux_2.41.5-0+deb13u1_amd64.deb 1242392 7d5b1176cc3d8cc6b290b3ec17af458f362d9200845f30da22057a8198744430
+deb zlib1g 1:1.3.dfsg+really1.3.1-1+b1 amd64 pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1+b1_amd64.deb 88892 015be740d6236ad114582dea500c1d907f29e16d6db00566ca32fb68d71ac90d

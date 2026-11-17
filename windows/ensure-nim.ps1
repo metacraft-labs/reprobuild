@@ -213,10 +213,29 @@ function Ensure-NimPrebuilt {
   )
 
   $version = $Toolchain["NIM_VERSION"]
-  $archiveSha256 = $Toolchain["NIM_WIN_X64_SHA256"]
-  $nimArch = ConvertTo-NimFileArch -Arch $Arch
-  $asset = "nim-$version`_$nimArch.zip"
-  $shaAsset = "$asset.sha256"
+  $archiveSha256 = Get-ToolchainArchPin -Toolchain $Toolchain -Arch $Arch `
+    -X64Key "NIM_WIN_X64_SHA256" -Arm64Key "NIM_WIN_ARM64_SHA256" -Consumer "ensure-nim"
+  if ($Arch -eq "arm64") {
+    # nim-lang publishes no Windows ARM64 archive. The arm64 prefix is the
+    # metacraft-labs/nim factory's native build of the same NIM_VERSION
+    # (reprobuild-pm Distribution-And-Packaging.md §7.1, W2), published with a
+    # SHA256SUMS beside it.
+    $zipUrl = Get-ToolchainArchPin -Toolchain $Toolchain -Arch $Arch `
+      -X64Key "NIM_URL" -Arm64Key "NIM_WIN_ARM64_URL" -Consumer "ensure-nim"
+    $asset = [IO.Path]::GetFileName(([Uri]$zipUrl).AbsolutePath)
+    if ($asset -notmatch ("^nim-" + [regex]::Escape($version) + "-.*-windows-arm64\.zip$")) {
+      throw ("ensure-nim: NIM_WIN_ARM64_URL names '$asset', which is not a windows-arm64 " +
+             "prefix of NIM_VERSION $version. The two legs share one Nim version.")
+    }
+    $shaAsset = "SHA256SUMS"
+    $shaUrl = $zipUrl.Substring(0, $zipUrl.Length - $asset.Length) + $shaAsset
+  } else {
+    $nimArch = ConvertTo-NimFileArch -Arch $Arch
+    $asset = "nim-$version`_$nimArch.zip"
+    $shaAsset = "$asset.sha256"
+    $zipUrl = "https://nim-lang.org/download/$asset"
+    $shaUrl = "https://nim-lang.org/download/$shaAsset"
+  }
   $nimVersionRoot = Join-Path $Root "nim/$version"
   $prebuiltRoot = Join-Path $nimVersionRoot "prebuilt"
   $extractDir = Join-Path $prebuiltRoot "nim-$version"
@@ -237,7 +256,8 @@ function Ensure-NimPrebuilt {
       $installedVersion -eq $version -and
       $installedSha -eq $archiveSha256.ToLowerInvariant() -and
       $installedSource -eq "prebuilt|asset=$asset|sha256=$($archiveSha256.ToLowerInvariant())" -and
-      $detectedVersion -eq $version
+      $detectedVersion -eq $version -and
+      (Get-PeMachine -Path $nimExe) -eq (Get-WindowsArchPeMachine -Arch $Arch)
     ) {
       Write-Host "Nim $version already installed at $extractDir"
       return @{
@@ -255,9 +275,6 @@ function Ensure-NimPrebuilt {
   }
 
   New-Item -ItemType Directory -Force -Path $prebuiltRoot | Out-Null
-  $baseUrl = "https://nim-lang.org/download"
-  $zipUrl = "$baseUrl/$asset"
-  $shaUrl = "$baseUrl/$shaAsset"
   $tempZip = Join-Path $env:TEMP $asset
 
   Download-File -Url $zipUrl -OutFile $tempZip
@@ -275,6 +292,7 @@ function Ensure-NimPrebuilt {
     if (-not (Test-Path $nimExe)) {
       throw "Nim extraction did not produce '$nimExe'."
     }
+    Assert-PeMachine -Path $nimExe -Arch $Arch -Consumer "ensure-nim"
 
     $detectedVersion = Get-NimCompilerVersion -NimExe $nimExe
     if ($detectedVersion -ne $version) {
@@ -506,7 +524,10 @@ function Ensure-Nim {
       if (Test-Path -LiteralPath $existingNimExe -PathType Leaf) {
         try {
           $existingVersion = Get-NimCompilerVersion -NimExe $existingNimExe
-          if ($existingVersion -eq $version) {
+          # Same version is not enough: an x64 compiler left by an emulated
+          # run must not pass for this host's native one.
+          if ($existingVersion -eq $version -and
+              (Get-PeMachine -Path $existingNimExe) -eq (Get-WindowsArchPeMachine -Arch $Arch)) {
             Write-Host "Nim $version already installed at $(Split-Path -Parent (Split-Path -Parent $existingNimExe))"
             return
           }
@@ -523,15 +544,25 @@ function Ensure-Nim {
   $result = $null
   switch ($requestedMode) {
     "prebuilt" {
-      if ($Arch -ne "x64") {
-        throw "NIM_WINDOWS_SOURCE_MODE=prebuilt is supported on Windows x64 only. Detected architecture '$Arch'. Use NIM_WINDOWS_SOURCE_MODE=source to attempt source bootstrap on this architecture."
-      }
       $result = Ensure-NimPrebuilt -Root $Root -Arch $Arch -Toolchain $Toolchain
     }
     "source" {
+      # The source route on arm64 could only start from an x64 bootstrap
+      # compiler and an x64 vcvarsall, so it would not establish a native
+      # compiler (reprobuild-pm Distribution-And-Packaging.md §7.1, W2). The
+      # native arm64 compiler comes from the factory prefix instead.
+      if ($Arch -eq "arm64") {
+        throw ("NIM_WINDOWS_SOURCE_MODE=source is not supported on Windows arm64: it " +
+               "would bootstrap from an x64 compiler. Use the native prefix " +
+               "(NIM_WINDOWS_SOURCE_MODE=prebuilt, NIM_WIN_ARM64_URL).")
+      }
       $result = Ensure-NimFromSource -Root $Root -Arch $Arch -Toolchain $Toolchain
     }
     "auto" {
+      if ($Arch -eq "arm64") {
+        $result = Ensure-NimPrebuilt -Root $Root -Arch $Arch -Toolchain $Toolchain
+        break
+      }
       try {
         $result = Ensure-NimFromSource -Root $Root -Arch $Arch -Toolchain $Toolchain
       } catch {
