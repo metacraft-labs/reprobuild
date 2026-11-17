@@ -394,6 +394,10 @@ type
 
   FileMetadataCache* = object
     entries: Table[string, FileMetadata]
+    storeEntryValidity: Table[string, bool]
+      ## Whether a package-store output path is registered VALID, looked up
+      ## once per entry for the life of this cache rather than once per
+      ## absent probe inside it. See `storeOutputPathIsValid`.
     stats: FileMetadataCacheStats
 
   FileMetadataCacheStats* = object
@@ -1968,13 +1972,16 @@ proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
       result.hasTreeDigest = false
 
 proc initFileMetadataCache*(): FileMetadataCache =
-  FileMetadataCache(entries: initTable[string, FileMetadata]())
+  FileMetadataCache(entries: initTable[string, FileMetadata](),
+    storeEntryValidity: initTable[string, bool]())
 
 proc clear*(cache: var FileMetadataCache) =
   cache.entries.clear()
+  cache.storeEntryValidity.clear()
 
 proc invalidate*(cache: var FileMetadataCache; path: string) =
   cache.entries.del(path)
+  cache.storeEntryValidity.del(path)
 
 proc metadataStats*(cache: FileMetadataCache): FileMetadataCacheStats =
   cache.stats
@@ -2069,6 +2076,92 @@ proc fingerprintMetadata(path: string;
     attributeMetadataProbe(cache, path,
       (getMonoTime() - started).inNanoseconds)
 
+const NixStoreDatabase = "/nix/var/nix/db/db.sqlite"
+  ## Where Nix registers which `/nix/store` entries are VALID. A constant for
+  ## the reason `immutableStoreOutputPath`'s prefix is one: nothing ambient
+  ## (`NIX_STATE_DIR`) may nominate a different oracle. A store whose
+  ## database lives elsewhere finds no row here, so every entry reads as not
+  ## valid and its absent probes are recorded -- the conservative direction.
+
+# Process-global, like the counters near `outputStateCheckCalls` and for the
+# same reason: the scheduler runs single-threaded. The connection is opened
+# with `SqliteOpenNoMutex`, so a second thread, or use in a child after a
+# `fork` without `exec`, would need its own connection.
+var
+  nixStoreDatabaseOpenAttempts = 0
+  nixStoreDatabaseUsable = false
+  nixStoreDatabase: Database
+  nixStoreValidityQuery: Statement
+
+const NixStoreDatabaseMaxOpenAttempts = 3
+  ## A failed open is retried on later lookups, a few times only: one
+  ## transient `SQLITE_BUSY` while Nix migrates its schema must not turn the
+  ## skip off for a long-lived process, and a database this user cannot read
+  ## must not cost an open per lookup.
+
+proc nixStoreRegistersValid(outputPath: string): bool =
+  ## Nix's own answer to "is this output path registered valid", read from
+  ## its database, or `false` when the database cannot be read.
+  ##
+  ## Read-only and WITHOUT `immutable=1`: a registration that sits in the
+  ## write-ahead log and not yet in the main file must be seen, and so must
+  ## a path invalidated there. No busy wait: on a store that uses a rollback
+  ## journal a lookup during a Nix commit would otherwise stall. Any error is
+  ## `false`, because the cost of a wrong `false` is one probe and the cost
+  ## of a wrong `true` is a stale cache hit.
+  if not nixStoreDatabaseUsable:
+    if nixStoreDatabaseOpenAttempts >= NixStoreDatabaseMaxOpenAttempts or
+        not fileExists(NixStoreDatabase):
+      return false
+    inc nixStoreDatabaseOpenAttempts
+    try:
+      nixStoreDatabase = sqlite3_binding.open(
+        "file:" & NixStoreDatabase & "?mode=ro",
+        SqliteOpenReadonly or SqliteOpenNoMutex or SqliteOpenUri,
+        busyTimeoutMs = 0)
+    except SqliteError:
+      return false
+    try:
+      nixStoreValidityQuery = nixStoreDatabase.prepare(
+        "SELECT 1 FROM ValidPaths WHERE path = ?1")
+    except SqliteError:
+      nixStoreDatabase.close()
+      return false
+    nixStoreDatabaseUsable = true
+  try:
+    nixStoreValidityQuery.reset()
+    nixStoreValidityQuery.bindText(1, outputPath)
+    result = nixStoreValidityQuery.step() == SqliteRow
+    nixStoreValidityQuery.reset()
+  except SqliteError:
+    result = false
+
+proc storeOutputPathIsValid(outputPath: string;
+                            cache: ptr FileMetadataCache): bool =
+  ## Condition 2 of the store-absence skip: the output path is registered
+  ## VALID in the store's database, and it exists now.
+  ##
+  ## Existence alone is not enough. A directory under the store that Nix has
+  ## not registered -- the leftover of an interrupted build or substitution
+  ## -- carries no immutability guarantee: Nix may replace it, and a file can
+  ## then appear where the probe found none. Validity is what Nix promises
+  ## not to add to (reprobuild-pm `spec/Filesystem-Policy-And-Observed-
+  ## Inputs.md` §"Immutable Roots Answer Absent Probes Statically",
+  ## condition 2). Existence is still required, through the same metadata
+  ## cache as before, so that a registered path someone deleted by hand is
+  ## not trusted either.
+  ##
+  ## Memoised per entry in `cache`, so the lookup happens once per distinct
+  ## output path per cache, not once per absent probe inside it.
+  if fingerprintMetadata(outputPath, cache).kind == ffkMissing:
+    return false
+  if cache.isNil:
+    return nixStoreRegistersValid(outputPath)
+  cache[].storeEntryValidity.withValue(outputPath, known):
+    return known[]
+  result = nixStoreRegistersValid(outputPath)
+  cache[].storeEntryValidity[outputPath] = result
+
 proc fingerprintRecordedMetadataImpl(path: string; recorded: FileMetadata;
                                      cache: ptr FileMetadataCache): FileMetadata =
   # A membership-tracked directory has to be re-listed, not just stat'd, and
@@ -2114,15 +2207,23 @@ proc fingerprintRecordedMetadataImpl(path: string; recorded: FileMetadata;
   #
   #   1. The path lies STRICTLY INSIDE an output path. A bare output path
   #      can appear -- see `immutableStoreOutputPath`.
-  #   2. That output path EXISTS NOW. If it does not, the package can still
-  #      be built or substituted and would bring this path with it, so the
-  #      absence is not stable and the probe must happen.
+  #   2. That output path is REGISTERED VALID in the store's database, and
+  #      exists now (`storeOutputPathIsValid`). If it does not exist, the
+  #      package can still be built or substituted and would bring this path
+  #      with it. If it exists but is not valid -- the leftover of an
+  #      interrupted build or substitution -- Nix may replace it. Either way
+  #      the absence is not stable and the probe must happen.
   #
-  # Condition 2 costs one probe per distinct output path rather than one per
-  # absent input, and it goes through this same cache, so a store root
-  # shared by hundreds of probes is stat'd once. Garbage collection does not
-  # break it: a collected output path re-materializes with the same contents
-  # under the same name, because the name is derived from what produces it.
+  # Condition 2 costs one stat and one database lookup per distinct output
+  # path rather than one per absent input, and both are memoised in this
+  # same cache, so a store root shared by hundreds of probes is checked once.
+  #
+  # The absence lasts only as long as the entry's contents. An
+  # input-addressed entry that is garbage-collected and rebuilt
+  # unreproducibly can gain a file under the same name; that residual is
+  # closed by the action key binding the entry's NAR hash, not here
+  # (reprobuild-pm `spec/Filesystem-Policy-And-Observed-Inputs.md`
+  # §"Immutable Roots Answer Absent Probes Statically").
   #
   # Keyed on the root's CLASS, decided from the path with no syscall. The
   # class-3 residue -- a PATH-resolved linker driver, `nim.cfg` searched up
@@ -2133,8 +2234,7 @@ proc fingerprintRecordedMetadataImpl(path: string; recorded: FileMetadata;
   # would have discarded.
   if recorded.kind == ffkMissing:
     let outputPath = immutableStoreOutputPath(path)
-    if outputPath.len > 0 and
-        fingerprintMetadata(outputPath, cache).kind != ffkMissing:
+    if outputPath.len > 0 and storeOutputPathIsValid(outputPath, cache):
       # Deliberately NOT counted as a metadata-cache hit: it is not one, and
       # folding it into `currentRunHits` would hide the skip inside a metric
       # that already moves for other reasons. `storeAbsenceSkips` is the only

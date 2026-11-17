@@ -24,13 +24,13 @@
 ##   * ``recognize`` returns false when:
 ##       - ``Cargo.toml`` is absent (not a Cargo project)
 ##       - ``uses:`` lists ``python`` instead of ``rust`` / ``cargo``
-##   * ``emitFragment`` against the canonical fixture produces:
-##       - exactly one ``rustc-metadata-*`` action with ``--emit=metadata,dep-info``
+##   * ``emitFragment`` against the canonical (binary-only) fixture produces:
+##       - no ``rustc-metadata-*`` action: a binary has no metadata pass
 ##       - exactly one ``rustc-link-*`` action with ``--emit=link,dep-info``
-##       - the link action declares the metadata action's id in ``deps``
-##       - both actions carry a ``depfile`` and ``dependencyPolicy ==
+##         and no deps
+##       - it carries a ``depfile`` and ``dependencyPolicy ==
 ##         bdpMakeDepfile``
-##       - both are in the ``compile`` pool
+##       - it is in the ``compile`` pool
 ##
 ## The fragment test depends on ``rustc`` AND ``cargo`` being on PATH
 ## because the convention invokes ``cargo metadata`` eagerly at emit time
@@ -322,7 +322,11 @@ suite "rust convention M4":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: two-action graph against canonical fixture":
+  test "emitFragment: a binary gets one link action and no metadata pass":
+    # A binary crate skips the metadata-only pass: pipelining exists so
+    # that dependents can type-check against a library's metadata early,
+    # and nothing depends on a binary. Cargo emits ``--emit=dep-info,link``
+    # for a binary unit too.
     if not rustToolchainAvailable():
       skip("rustc or cargo not on PATH")
     else:
@@ -345,25 +349,13 @@ suite "rust convention M4":
         elif action.id.startsWith("rustc-link-"):
           linkActions.add(action)
 
-      # Pass 1: exactly one rustc-metadata action; argv carries
-      # --emit=metadata,dep-info plus --crate-name and -C metadata=.
-      check metadataActions.len == 1
-      let metadataAction = metadataActions[0]
-      let metadataArgv = inlineArgvOf(metadataAction)
-      check "--emit=metadata,dep-info" in metadataArgv
-      check "--crate-name" in metadataArgv
-      check FixtureCrateName in metadataArgv
-      check "--edition" in metadataArgv
-      check "--crate-type" in metadataArgv
-      check "bin" in metadataArgv
-      check metadataArgv[^1].endsWith("main.rs")
-      check metadataAction.depfile.len > 0
-      check metadataAction.dependencyPolicy.kind == bdpMakeDepfile
-      check metadataAction.pool == "compile"
+      # No metadata pass, and nothing with ``--emit=metadata``.
+      check metadataActions.len == 0
+      for action in linkActions:
+        check "--emit=metadata,dep-info" notin inlineArgvOf(action)
 
-      # Pass 2: exactly one rustc-link action; argv carries
-      # --emit=link,dep-info; deps include the metadata action's id;
-      # output ends with the binary path.
+      # Exactly one rustc-link action; argv carries --emit=link,dep-info;
+      # it depends on no metadata action; output ends with the binary path.
       check linkActions.len == 1
       let linkAction = linkActions[0]
       let linkArgv = inlineArgvOf(linkAction)
@@ -374,7 +366,7 @@ suite "rust convention M4":
       check "--crate-type" in linkArgv
       check "bin" in linkArgv
       check linkArgv[^1].endsWith("main.rs")
-      check metadataAction.id in linkAction.deps
+      check linkAction.deps.len == 0
       check linkAction.depfile.len > 0
       check linkAction.dependencyPolicy.kind == bdpMakeDepfile
       check linkAction.pool == "compile"
@@ -386,15 +378,10 @@ suite "rust convention M4":
       else:
         check primaryOutput.endsWith(FixtureCrateName)
 
-      # The metadata action's rmeta is wired in as an input of the link
-      # action — captures the pipelined edge in the action cache
-      # fingerprint per Rust.md §"Cross-crate ordering edges".
-      var sawRmetaInput = false
+      # With no metadata pass there is no rmeta of its own for the link
+      # action to consume.
       for inp in linkAction.inputs:
-        if inp.endsWith(".rmeta"):
-          sawRmetaInput = true
-          break
-      check sawRmetaInput
+        check not inp.endsWith(".rmeta")
 
   # --- M22: integration-test discovery -------------------------------------
 
@@ -509,31 +496,30 @@ suite "rust convention M4":
       require conv.recognize(WorkspaceChainFixtureRoot, request)
       let fragment = conv.emitFragment(WorkspaceChainFixtureRoot, request)
 
-      # Collect actions keyed on crate name (strip the
-      # ``rustc-metadata-`` / ``rustc-link-`` prefix + ``-umbrella``
-      # suffix).
+      # Collect actions keyed on target name: an id is
+      # ``rustc-<phase>-<package>.<kind>.<target>``.
       var metadataByCrate = initTable[string, BuildActionDef]()
       var linkByCrate = initTable[string, BuildActionDef]()
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id.startsWith("rustc-metadata-") and
-            action.id.endsWith("-umbrella"):
-          let crate = action.id["rustc-metadata-".len ..^ "-umbrella".len + 1]
+        let crate = action.id.rsplit('.', maxsplit = 1)[^1]
+        if action.id.startsWith("rustc-metadata-"):
           metadataByCrate[crate] = action
-        elif action.id.startsWith("rustc-link-") and
-            action.id.endsWith("-umbrella"):
-          let crate = action.id["rustc-link-".len ..^ "-umbrella".len + 1]
+        elif action.id.startsWith("rustc-link-"):
           linkByCrate[crate] = action
 
-      # All three crates should have both passes emitted.
+      # Both libraries get both passes; the binary crate_c a link pass
+      # alone (a binary has no metadata pass).
       check "crate_a" in metadataByCrate
       check "crate_a" in linkByCrate
       check "crate_b" in metadataByCrate
       check "crate_b" in linkByCrate
-      check "crate_c" in metadataByCrate
+      check "crate_c" notin metadataByCrate
       check "crate_c" in linkByCrate
+      check linkByCrate["crate_a"].id == "rustc-link-crate-a.lib.crate_a"
+      check linkByCrate["crate_c"].id == "rustc-link-crate-c.bin.crate_c"
 
       # M23 Part A: crate_b's metadata pass must reference crate_a's
       # rmeta via ``--extern crate_a=...`` AND declare crate_a's
@@ -562,20 +548,19 @@ suite "rust convention M4":
       # only; ``--extern crate_b=...`` must be present. The transitive
       # crate_a is reached via ``-L dependency=<crate_a bin/deps dir>``
       # so we check for a ``-L`` flag referencing crate_a's dirs.
-      let crateCMetaArgv = inlineArgvOf(metadataByCrate["crate_c"])
+      let crateCLinkArgv = inlineArgvOf(linkByCrate["crate_c"])
       var sawCrateBExternInC = false
       var sawCrateASearchPathInC = false
-      for arg in crateCMetaArgv:
-        if arg.startsWith("crate_b=") and arg.endsWith(".rmeta"):
+      for arg in crateCLinkArgv:
+        if arg.startsWith("crate_b=") and arg.endsWith(".rlib"):
           sawCrateBExternInC = true
         if arg.startsWith("dependency=") and arg.contains("crate_a"):
           sawCrateASearchPathInC = true
       check sawCrateBExternInC
       check sawCrateASearchPathInC
-      # crate_c's metadata pass must list crate_b's actions in deps so
-      # the engine waits for crate_b before running rustc-metadata-crate_c.
-      check metadataByCrate["crate_b"].id in metadataByCrate["crate_c"].deps
-      check linkByCrate["crate_b"].id in metadataByCrate["crate_c"].deps
+      # crate_c's link pass must list crate_b's link action in deps so
+      # the engine waits for crate_b's rlib before linking crate_c.
+      check linkByCrate["crate_b"].id in linkByCrate["crate_c"].deps
 
   # --- M23: cdylib variant ------------------------------------------------
 
@@ -603,10 +588,10 @@ suite "rust convention M4":
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id == "rustc-metadata-rust_cdylib_example-umbrella":
+        if action.id == "rustc-metadata-rust-cdylib-example.cdylib.rust_cdylib_example":
           metadataAction = action
           sawMetadata = true
-        elif action.id == "rustc-link-rust_cdylib_example-umbrella":
+        elif action.id == "rustc-link-rust-cdylib-example.cdylib.rust_cdylib_example":
           linkAction = action
           sawLink = true
 
@@ -896,7 +881,7 @@ suite "rust convention M4":
         check env.getOrDefault("CARGO_PRIMARY_PACKAGE") == "1"
         check env.getOrDefault("CARGO").len > 0
         check "CARGO_CRATE_NAME" in env
-      check rustcCount >= 5   # lib x2, bin x2, test compile
+      check rustcCount == 4   # lib x2, bin x1 (no metadata pass), test compile
 
       # The integration test's compile sees the package's binary and a
       # target tmpdir, and depends on the binary's link action.
