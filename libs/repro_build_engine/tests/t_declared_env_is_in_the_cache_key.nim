@@ -384,20 +384,26 @@ suite "the environment key rendering is canonical and host-independent":
     # environment keep their keys.
     let base = weakFingerprintFromText("some-edge")
     check keyedOnActionEnvironment(base, [], []) == base
-    # And the constructor must agree: an action built with no env has the
-    # same fingerprint as the pre-change constructor produced, which is
-    # exactly `keyedOnGoverningLock(base, identity)`.
+    # And the constructor must agree: an action built with no env gets no
+    # environment term, so its fingerprint is the engine's other mixes of
+    # `base` and nothing else -- its argv and cwd (`keyedOnArgv`, which
+    # `action()` applies to every process edge since reprobuild-pm
+    # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+    # 2026-11-16) inside the lock.
     let identity = lockIdentityOutsideSolvedGraph()
     let a = action("id", ["/bin/true"], weakFingerprint = base,
       governingLockIdentity = identity)
-    check a.weakFingerprint == keyedOnGoverningLock(base, identity)
+    check a.weakFingerprint ==
+      keyedOnGoverningLock(keyedOnArgv(base, ["/bin/true"]), identity)
 
     # THE REACHABLE HALF. `builtinAction` takes no `env` argument at
     # all, so a built-in edge cannot declare an environment however hard
     # a caller tries — the compatibility property is not merely
-    # satisfiable for this class, it is structural. Every `ensureDir`,
-    # `copyFile`, `writeText`, `stamp`, `preserveTree`, `ensureLine` and
-    # `ensureSnippet` record ever written stays valid.
+    # satisfiable for this class, it is structural: no environment term
+    # ever enters an `ensureDir`, `copyFile`, `writeText`, `stamp`,
+    # `preserveTree`, `ensureLine` or `ensureSnippet` key. (Their keys did
+    # move once, for another reason: `builtinAction` mixes in the kind and
+    # payload, `keyedOnBuiltinPayload`, under the same 2026-11-16 rider.)
     #
     # This is what makes the identity arm non-vacuous, and it is stated
     # as an enumeration over the kinds rather than one sample so that a
@@ -410,7 +416,9 @@ suite "the environment key rendering is canonical and host-independent":
       checkpoint("built-in kind: " & $kind)
       check b.env.len == 0
       check b.envPassthrough.len == 0
-      check b.weakFingerprint == keyedOnGoverningLock(base, identity)
+      check b.weakFingerprint ==
+        keyedOnGoverningLock(keyedOnBuiltinPayload(base, kind, "", []),
+          identity)
 
   test "5. the rendering is order- and duplicate-canonical":
     let base = weakFingerprintFromText("some-edge")

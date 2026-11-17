@@ -123,7 +123,9 @@ proc githubDownload*(repo: string;
   var list = ""
   for (path, gitRef, dest) in jobs:
     list.add(dest & "\0" & path & "\0" & gitRef & "\0")
-  let curl = "curl -fsSL --retry 3 " & shellJoin(CurlProtocols)
+  # --globoff: a path or ref reaches curl as itself, never as a `{a,b}` or
+  # `[1-9]` pattern.
+  let curl = "curl -fsSL --globoff --retry 3 " & shellJoin(CurlProtocols)
   let script = "get() { " & curl & " -o \"$1\" " &
     quoteShell(githubRawBase() & "/" & repo) & "/\"$3/$2\" 2>/dev/null || " &
     curl & " -H 'Accept: application/vnd.github.raw' -o \"$1\" " &

@@ -231,8 +231,8 @@ suite "rust convention: target edition":
       checkpoint "Mode A rustc actions: " & $rustcActionIds
 
       # Every unit cargo built that Mode A also compiles must be covered:
-      # the library's two passes, each binary's two passes and the
-      # integration test's compile.
+      # the library's two passes, each binary's link pass (a binary has no
+      # metadata pass) and the integration test's compile.
       var seen = initTable[UnitKey, int]()
       for id in rustcActionIds:
         let argv = inlineArgvOf(actions[id])
@@ -243,8 +243,8 @@ suite "rust convention: target edition":
         check flagValue(argv, "--edition") ==
           cargoEditions.getOrDefault(key, "<no cargo unit>")
       check seen.getOrDefault((LibCrate, "lib", false)) == 2
-      check seen.getOrDefault((OldBinCrate, "bin", false)) == 2
-      check seen.getOrDefault((NewBinCrate, "bin", false)) == 2
+      check seen.getOrDefault((OldBinCrate, "bin", false)) == 1
+      check seen.getOrDefault((NewBinCrate, "bin", false)) == 1
       check seen.getOrDefault((TestCrate, "", true)) == 1
 
       # Run the rustc actions with the real rustc, each after its deps.

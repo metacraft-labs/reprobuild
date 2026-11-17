@@ -289,8 +289,9 @@ proc verifySource(s: Store; row: PrefixRow): PlannedPrefix =
     fail("source receipt digest does not match the index row: " & where)
   let adoptedHere = receipt.adapter.startsWith(AdoptedAdapterPrefix) and
     receipt.realizedPath == row.realizedPath
-  if result.sourceDir.extractFilename !=
-      realizationDirName(receipt.version, receipt.realizationHash) and
+  # Its 40-hex name, or an older build's 16-hex name the receipt records
+  # as exactly this path (``prefixDirMatchesReceipt``).
+  if not prefixDirMatchesReceipt(row.realizedPath, receipt) and
       not adoptedHere:
     fail("source prefix directory name does not match its receipt: " & where)
   let actual = storeTreeDigest(result.sourceDir)

@@ -6913,10 +6913,13 @@ type
     pkgConfig*: string
       ## pkg-config module name (``.pc`` basename without ``.pc``).
     soname*: string
-      ## SONAME — platform decoration applied by packagers.
+      ## The library's BASE name (``foo`` for ``libfoo.so``), not the
+      ## full SONAME: the stdlib derives that as
+      ## ``lib<soname>.so[.<sover>]`` (``sharedLibrarySoname``).
     sover*: string
-      ## SOVERSION — combined with ``soname`` to produce the fully
-      ## versioned library filename.
+      ## SOVERSION (``1`` for ``libfoo.so.1``). Appended to the derived
+      ## SONAME, which is both the library's ``DT_SONAME`` and the name
+      ## of the file it is written under. Empty: no version suffix.
     linkKind*: LibraryLinkKind
       ## How consumers link against this library — static archive,
       ## shared object, or both. ``llkUnset`` when ``linkKind`` was

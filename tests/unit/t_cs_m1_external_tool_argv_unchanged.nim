@@ -53,6 +53,11 @@
 ##   (both had moved on edits that change no command line: the envelope
 ##   version bump of 0b52b4b4c moved every package's digest), and renders the
 ##   artifact's decoded command surface instead.
+## * ``gcc`` and ``clang`` gained the optional ``soname`` flag
+##   (``-Wl,-soname,<value>``, spelled as ``zig cc``'s already is), so
+##   ``gccLink`` / ``clangLink`` bake a shared library's full SONAME into its
+##   ``DT_SONAME``, as ``LinkOptions.soname`` always promised. It is
+##   rendered only when a caller sets it: a shared link with a SONAME.
 ##
 ## The negative controls prove the comparison can fail: a model with one
 ## flag's ``alias`` changed, one with a flag's ``format`` changed, one with a

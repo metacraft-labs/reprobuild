@@ -5292,11 +5292,18 @@ proc closureSpace*(locks: seq[AptClosureLock];
             "serves it is unknown, and only an archive that does not may " &
             "be stood in for")
           continue
-      let legacy = legacyAptDebPrefixPath(storeRoot, d)
-      if dirExists(legacy):
-        result.unpackBytes += treeBytes(legacy)
-        inc result.measuredMembers
-      else:
+      # Measured from an older realiser's prefix of the same archive when
+      # one is on disk: realiser 3's (the bump to "4" re-publishes every
+      # member it published), else realiser 2's.
+      var measured = false
+      for older in [storeNamedAptDebPrefixPath(storeRoot, d),
+                    legacyAptDebPrefixPath(storeRoot, d)]:
+        if dirExists(older):
+          result.unpackBytes += treeBytes(older)
+          inc result.measuredMembers
+          measured = true
+          break
+      if not measured:
         result.unpackBytes += d.size * ClosureUnpackFactor
   result.freeBytes = availableBytes(storeRoot)
   result.reserveBytes = max(StoreSpaceReserveBytes, neededBytes(result) div 4)
@@ -5571,7 +5578,12 @@ proc filesRecovery*(prefix: string; resources: openArray[SystemResource];
   if names.len == 0:
     return Recovery(why: "no resource of this generation copies from it")
   let version = prefixVersionOf(prefix)
-  if version.len == 0 or filesPrefixPath(names, version, storeRoot) != prefix:
+  # Either name of the files prefix: an older add-on realized it at the
+  # 16-hex one, and the store realizes it again there while its index row
+  # records it there (``realizePrefix``), which is the path this
+  # generation names.
+  if version.len == 0 or not isFilesPrefixPath(prefix, names, version,
+                                               storeRoot):
     return Recovery(why: "the generation's own files do not name this " &
       "prefix's whole content")
   var files: seq[tuple[name, content: string]]
