@@ -477,6 +477,51 @@ proc infraDriftFlags(): NimNode {.compileTime.} =
       help = "Replace drifted resources (at plan time, the same as " &
         "--accept-drift)"
 
+proc systemPlanFlags(): NimNode {.compileTime.} =
+  ## The command line of the system-profile planner, which `repro infra
+  ## plan` and `repro system plan` both run. One group spliced into both,
+  ## so the two spellings cannot accept different flags.
+  let location = infraLocationFlags()
+  let registry = infraRegistryFlags()
+  let drift = infraDriftFlags()
+  quote do:
+    `location`
+    `registry`
+    `drift`
+    boolFlag json is bool,
+      help = "Print the plan as one JSON document (schema " &
+        "reprobuild.system.plan.v1)"
+
+proc systemApplyFlags(): NimNode {.compileTime.} =
+  ## The command line of the system-profile applier, which `repro infra
+  ## apply` and `repro system apply` both run. One group spliced into both,
+  ## so the two spellings cannot accept different flags.
+  let location = infraLocationFlags()
+  let registry = infraRegistryFlags()
+  let drift = infraDriftFlags()
+  quote do:
+    `location`
+    `registry`
+    `drift`
+    flag plan is string,
+      help = "The plan id (on an add-on host, the add-on plan id)"
+    boolFlag elevate is bool, negatable = true, default = true,
+      help = "Run the privileged operations (`--no-elevate` skips them)"
+    boolFlag noPreview is bool,
+      help = "Compute and apply a fresh plan without a preview"
+    boolFlag acceptFeatureDestroy is bool,
+      help = "Allow removing Windows optional features"
+    boolFlag acceptPasswdDestroy is bool,
+      help = "Allow destroying user and group records"
+    boolFlag forceUnlock is bool,
+      help = "Take the apply lock even when another apply holds it"
+    flag keepGenerations is Option[int],
+      help = "An add-on host's generation retention: how many to keep"
+    flag keepDays is Option[int],
+      help = "An add-on host's generation retention: for how many days"
+    pos planId is string, required = false,
+      help = "The plan id, as an alternative to --plan"
+
 proc addonTargetFlags(): NimNode {.compileTime.} =
   ## The add-on host a profile is compiled for on another machine (`repro
   ## anywhere`, `repro infra image`). Each value is also accepted as
@@ -1464,12 +1509,12 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let systemRollbackLocation = infraLocationFlags()
   let systemRollbackRegistry = infraRegistryFlags()
   let systemRollbackDrift = infraDriftFlags()
-  let infraPlanLocation = infraLocationFlags()
-  let infraPlanRegistry = infraRegistryFlags()
-  let infraPlanDrift = infraDriftFlags()
-  let infraApplyLocation = infraLocationFlags()
-  let infraApplyRegistry = infraRegistryFlags()
-  let infraApplyDrift = infraDriftFlags()
+  # `repro system plan|apply` and `repro infra plan|apply` run the same
+  # planner and applier, and splice the same groups.
+  let systemPlan = systemPlanFlags()
+  let systemApply = systemApplyFlags()
+  let infraPlan = systemPlanFlags()
+  let infraApply = systemApplyFlags()
   let infraCacheKeysLocation = infraLocationFlags()
   let infraImageTarget = addonTargetFlags()
   let anywhereTarget = addonTargetFlags()
@@ -1680,8 +1725,12 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       help "List the standard build configurations"
     subcmd "capabilities",
         help = "Describe what this build of repro supports":
-      flag format is string, values = ["json", "text"], default = "json",
-        help = "The output format"
+      # No default: an explicit `--format` wins over `--json`, so the
+      # command must see whether one was given (`json` when neither is).
+      flag format is string, values = ["json", "text"],
+        help = "The output format: `json` (the default) or `text`"
+      boolFlag json is bool,
+        help = "Shortcut for `--format=json` (an explicit --format wins)"
 
     # ---- Development environments ---------------------------------------
     subcmd "exec", help = "Run a command inside the development environment":
@@ -2459,11 +2508,17 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       subcmd "list", help = "List the profile's package references and " &
           "whether this host plans them":
         `homeListHost`
+        boolFlag json is bool,
+          help = "Print the list as one JSON document (schema " &
+            "reprobuild.home.list.v1)"
       subcmd "why", help = "Explain why a package is in the profile":
         `homeWhyHost`
         pos package is string, help = "The package"
-      subcmd "history":
-        help "List the home-profile generations, oldest first"
+      subcmd "history", help = "List the home-profile generations, " &
+          "oldest first":
+        boolFlag json is bool,
+          help = "Print the generations as one JSON document (schema " &
+            "reprobuild.home.history.v1)"
       subcmd "apply", help = "Apply the home profile as a new generation " &
           "(only the concerns this host's `applies:` lists are executed)":
         boolFlag plan is bool,
@@ -2487,6 +2542,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         boolFlag allowDrift is bool, help = "Exit 0 even when drift is detected"
         boolFlag reconcileDrift is bool,
           help = "Plan replacing drifted targets"
+        boolFlag json is bool,
+          help = "Print the plan as one JSON document (schema " &
+            "reprobuild.home.plan.v1); the exit code is the same as without it"
       subcmd "export", help = "Print the evaluated home-profile intent " &
           "(activities, config, hosts, resources, the host's selection, " &
           "provenance) as JSON, or check a committed export; exit 1 when " &
@@ -2636,9 +2694,20 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         pos address is string, help = "The resource address"
       subcmd "list", help = "List the system profile's resources":
         `systemListLocation`
+        boolFlag json is bool,
+          help = "Print the list as one JSON document (schema " &
+            "reprobuild.system.list.v1)"
       subcmd "why", help = "Explain why a resource is in the system profile":
         `systemWhyLocation`
         pos address is string, help = "The resource address"
+      subcmd "plan", help = "Compile the system profile and show what an " &
+          "apply would change; writes nothing but the plan (the same " &
+          "planner as `repro infra plan`)":
+        `systemPlan`
+      subcmd "apply", help = "Apply a plan `repro system plan` printed, as " &
+          "a new system generation (the same applier as `repro infra " &
+          "apply`)":
+        `systemApply`
       subcmd "sync", help = "Plan and apply the system profile in one step":
         `systemSyncLocation`
         `systemSyncRegistry`
@@ -2652,6 +2721,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       subcmd "history", help = "List the system generations":
         flag stateDir is string,
           help = "The system state directory (default: the platform's)"
+        boolFlag json is bool,
+          help = "Print the generations as one JSON document (schema " &
+            "reprobuild.system.history.v1)"
       subcmd "rollback", help = "Re-apply a past system generation " &
           "(default: the previous one)":
         `systemRollbackLocation`
@@ -2672,6 +2744,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         # `--profile` is accepted, as the page specifies, and not consulted
         # for the read.
         `systemAuditLocation`
+        boolFlag json is bool,
+          help = "Print the audit log as one JSON document (schema " &
+            "reprobuild.system.audit.v1)"
         pos generation is string, required = false,
           help = "The generation"
       # The add-on's own command line (repro_addon/cli), shared with the
@@ -2688,32 +2763,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "infra", help = "Plan and apply infrastructure":
       subcmd "plan", help = "Compile the system profile and show what an " &
           "apply would change; writes nothing but the plan":
-        `infraPlanLocation`
-        `infraPlanRegistry`
-        `infraPlanDrift`
+        `infraPlan`
       subcmd "apply", help = "Apply a plan `repro infra plan` printed, as a " &
           "new system generation":
-        `infraApplyLocation`
-        `infraApplyRegistry`
-        `infraApplyDrift`
-        flag plan is string,
-          help = "The plan id (on an add-on host, the add-on plan id)"
-        boolFlag elevate is bool, negatable = true, default = true,
-          help = "Run the privileged operations (`--no-elevate` skips them)"
-        boolFlag noPreview is bool,
-          help = "Compute and apply a fresh plan without a preview"
-        boolFlag acceptFeatureDestroy is bool,
-          help = "Allow removing Windows optional features"
-        boolFlag acceptPasswdDestroy is bool,
-          help = "Allow destroying user and group records"
-        boolFlag forceUnlock is bool,
-          help = "Take the apply lock even when another apply holds it"
-        flag keepGenerations is Option[int],
-          help = "An add-on host's generation retention: how many to keep"
-        flag keepDays is Option[int],
-          help = "An add-on host's generation retention: for how many days"
-        pos planId is string, required = false,
-          help = "The plan id, as an alternative to --plan"
+        `infraApply`
       subcmd "cache-keys", help = "Print the binary-cache entry key of every " &
           "build-action edge of the profile, for a platform":
         `infraCacheKeysLocation`

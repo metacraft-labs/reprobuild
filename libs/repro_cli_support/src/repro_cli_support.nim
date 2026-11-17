@@ -2365,9 +2365,20 @@ proc runConfigsCommand(): int =
     "(or --variant buildType=<value>)"
   0
 
-proc runCapabilitiesCommand(format: string): int =
-  ## ``repro capabilities [--format=json|text]``. ``format`` is one of the
-  ## values the description allows (``json``, the default, or ``text``).
+proc capabilitiesFormat*(format: string; json: bool): string =
+  ## The output format of ``repro capabilities`` from its flags: an explicit
+  ## ``--format`` wins, then the ``--json`` shortcut, then the default
+  ## ``json`` (the ``--json`` convention of every inspection command: it is
+  ## shorthand for ``--format=json``, and ``--format`` given beside it is
+  ## the one that counts).
+  if format.len > 0: format
+  else: "json"
+
+proc runCapabilitiesCommand(format: string; json: bool): int =
+  ## ``repro capabilities [--format=json|text] [--json]``. ``format`` is
+  ## empty or one of the values the description allows (``json`` or
+  ## ``text``); see ``capabilitiesFormat`` for how it meets ``--json``.
+  let format = capabilitiesFormat(format, json)
   case format
   of "json":
     echo renderCapabilitiesJson()
@@ -105412,7 +105423,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
     return runCompletionCommand(conf.completion.shell)
   of ReproCommandLineCommand.capabilities:
     try:
-      return runCapabilitiesCommand(conf.capabilities.format)
+      return runCapabilitiesCommand(conf.capabilities.format,
+        conf.capabilities.json)
     except CatchableError as err:
       stderr.writeLine("repro capabilities: error: " & err.msg)
       return 1

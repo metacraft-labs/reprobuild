@@ -1103,6 +1103,22 @@ proc compiledListing(commandName, profilePath, host: string;
         listing.origins.add ListedOrigin(origin: o, dataFile: file.path)
   true
 
+const
+  HomeListJsonSchema* = "reprobuild.home.list.v1"
+    ## The schema of `repro home list --json`.
+  HomeHistoryJsonSchema* = "reprobuild.home.history.v1"
+    ## The schema of `repro home history --json`.
+  HomePlanJsonSchema* = "reprobuild.home.plan.v1"
+    ## The schema of `repro home plan --json`.
+
+proc listedStateWord(state: OriginState): string =
+  ## The state word `repro home list` prints for a reference (and its JSON
+  ## form carries): the planner's rule for it.
+  case state
+  of osPlanned: "enabled"
+  of osActivityNotSelected: "inactive"
+  of osGuardFalse: "excluded"
+
 proc factsText(ctx: HostContext): string =
   "platform=" & ctx.platform & " arch=" & ctx.arch &
     (if ctx.isWsl: " wsl" else: "")
@@ -1119,15 +1135,23 @@ proc runHomeList(c: ReproCommandLineHomeList): int =
     var listing: CompiledListing
     if not compiledListing("repro home list", profilePath, host, listing):
       return 1
+    if c.json:
+      var packages = newJArray()
+      for l in listing.origins:
+        let o = l.origin
+        packages.add(%*{"package": o.packageId,
+          "state": listedStateWord(o.state), "activity": o.fromActivity,
+          "when": o.predicateText, "dataFile": l.dataFile})
+      echo pretty(%*{"schemaId": HomeListJsonSchema, "profile": profilePath,
+        "host": host, "facts": {"platform": listing.ctx.platform,
+          "arch": listing.ctx.arch, "wsl": listing.ctx.isWsl},
+        "packages": packages})
+      return 0
     echo "repro home list: profile=" & profilePath & " host=" & host
     echo "  guards evaluated for " & factsText(listing.ctx)
     for l in listing.origins:
       let o = l.origin
-      let prefix =
-        case o.state
-        of osPlanned: "  enabled  "
-        of osActivityNotSelected: "  inactive "
-        of osGuardFalse: "  excluded "
+      let prefix = "  " & alignLeft(listedStateWord(o.state), 9)
       let predStr =
         if o.predicateText.len == 0: "" else: "  when " & o.predicateText
       let dataStr = if l.dataFile.len > 0: "  data=" & l.dataFile else: ""
@@ -1210,14 +1234,58 @@ proc shortGenerationId(idHex: string): string =
   if idHex.len <= 12: idHex
   else: idHex[0 ..< 12]
 
-proc runHomeHistory(): int =
+proc dataFilesOfGeneration(store: var Store; storeOpen: var bool;
+                           rec: GenerationRecord):
+    seq[tuple[path, blake3Hex: string]] =
+  ## GM4: the plan-time data files `rec` was planned from, as recorded in
+  ## its intent snapshot (never the live files). Opens the store on first
+  ## use. Raises when the snapshot cannot be read.
+  if not storeOpen:
+    store = openStore(resolveStoreRoot())
+    storeOpen = true
+  var key: PrefixIdBytes
+  for i in 0 ..< 32:
+    key[i] = rec.envelope.intentSnapshotDigest[i]
+  let snapshot = decodeSnapshotBytes(readCasBlob(store, key))
+  for entry in snapshot.files:
+    if entry.role == ifrData:
+      result.add((entry.path, blake3.toHex(blake3.digest(entry.content))))
+
+proc runHomeHistory(json = false): int =
   ## Walks `<state-dir>/generations/` and prints one line per
   ## generation in chronological order (oldest -> newest). No history
   ## file is consulted; the only on-disk source of truth is the set
-  ## of pointer envelopes the directory enumeration finds.
+  ## of pointer envelopes the directory enumeration finds. With `json`,
+  ## one `HomeHistoryJsonSchema` document carries the same records.
   try:
     let stateDir = resolveStateDir()
     let records = enumerateGenerations(stateDir)
+    if json:
+      var store: Store
+      var storeOpen = false
+      defer:
+        if storeOpen:
+          try: store.close() except CatchableError: discard
+      var gens = newJArray()
+      for rec in records:
+        var gen = %*{"generationId": rec.generationId,
+          "shortId": shortGenerationId(rec.generationId),
+          "activationTimestamp": rec.activationTimestamp,
+          "activationTime": formatTimestamp(rec.activationTimestamp),
+          "host": rec.envelope.hostIdentity, "active": rec.isActive}
+        try:
+          var files = newJArray()
+          for f in dataFilesOfGeneration(store, storeOpen, rec):
+            files.add(%*{"path": f.path, "blake3": f.blake3Hex})
+          gen["dataFiles"] = files
+          gen["snapshotError"] = newJNull()
+        except CatchableError as e:
+          gen["dataFiles"] = newJArray()
+          gen["snapshotError"] = %e.msg
+        gens.add(gen)
+      echo pretty(%*{"schemaId": HomeHistoryJsonSchema, "stateDir": stateDir,
+        "generations": gens})
+      return 0
     if records.len == 0:
       echo "repro home history: no generations yet at " & stateDir
       return 0
@@ -1235,17 +1303,8 @@ proc runHomeHistory(): int =
       # GM4: the plan-time data files this generation was planned from, as
       # recorded in its intent snapshot (never the live files).
       try:
-        if not storeOpen:
-          store = openStore(resolveStoreRoot())
-          storeOpen = true
-        var key: PrefixIdBytes
-        for i in 0 ..< 32:
-          key[i] = rec.envelope.intentSnapshotDigest[i]
-        let snapshot = decodeSnapshotBytes(readCasBlob(store, key))
-        for entry in snapshot.files:
-          if entry.role == ifrData:
-            echo "      data " & entry.path & " blake3=" &
-              blake3.toHex(blake3.digest(entry.content))
+        for f in dataFilesOfGeneration(store, storeOpen, rec):
+          echo "      data " & f.path & " blake3=" & f.blake3Hex
       except CatchableError as e:
         echo "      data (intent snapshot unreadable: " & e.msg & ")"
     return 0
@@ -2895,6 +2954,27 @@ proc runHomePlan(c: ReproCommandLineHomePlan): int =
     let opts = DecisionOptions(reconcile: policy,
       enforcePreventDestroy: true)
     let report = composePlan(desired, recorded, opts)
+    let failsOnDrift = report.driftCount > 0 and not allowDrift and
+      not reconcileFlag
+    if c.json:
+      var actions = newJArray()
+      for a in report.actions:
+        actions.add(%*{"address": a.address, "action": $a.kind,
+          "resourceKind": $a.resourceKind, "summary": a.summary,
+          "driftExpected": a.driftExpectedHex,
+          "driftObserved": a.driftObservedHex, "deferred": a.deferred,
+          "keptVendorUpdate": a.keptVendorUpdate})
+      echo pretty(%*{"schemaId": HomePlanJsonSchema, "profile": profilePath,
+        "host": host, "actions": actions,
+        "changedCount": report.changedCount, "noOpCount": report.noOpCount,
+        "driftCount": report.driftCount,
+        "concernsApplied": (if applied.declared:
+          %describeAppliedConcerns(applied, host) else: newJNull()),
+        "notApplied": notApplied, "released": released,
+        # The exit code this plan gives, so a reader of the document alone
+        # knows whether the drift fails it.
+        "failsOnDrift": failsOnDrift})
+      return (if failsOnDrift: 1 else: 0)
     stdout.write(renderPlan(report))
     if applied.declared:
       echo "  concerns applied: " & describeAppliedConcerns(applied, host)
@@ -2903,7 +2983,7 @@ proc runHomePlan(c: ReproCommandLineHomePlan): int =
         line
     for line in released:
       echo "  release (concern no longer applied; left in place): " & line
-    if report.driftCount > 0 and not allowDrift and not reconcileFlag:
+    if failsOnDrift:
       return 1
     return 0
   except EPreventDestroy as err:
@@ -3638,7 +3718,7 @@ proc runHomeCommand*(conf: ReproCommandLineHome): int =
   of ReproCommandLineHomeCommand.disable: runHomeDisable(conf.disable)
   of ReproCommandLineHomeCommand.list: runHomeList(conf.list)
   of ReproCommandLineHomeCommand.why: runHomeWhy(conf.why)
-  of ReproCommandLineHomeCommand.history: runHomeHistory()
+  of ReproCommandLineHomeCommand.history: runHomeHistory(conf.history.json)
   of ReproCommandLineHomeCommand.apply: runHomeApply(conf.apply)
   of ReproCommandLineHomeCommand.buildBundle:
     runHomeBuildBundle(conf.buildBundle)

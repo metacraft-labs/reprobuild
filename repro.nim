@@ -469,6 +469,11 @@ const
                  "t_addon_mode_mismatch_is_refused"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/addon/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
+    # Integration tests on the same harness: `repro system plan|apply` beside
+    # `repro infra plan|apply`, and the `--json` documents.
+    rows.add TestGraphArtifacts(source: "tests/integration/" &
+      "t_system_plan_apply_symmetry_and_universal_json.nim",
+      artifacts: @[profileCompileNimSpy])
     # The clang first-run gate's positive control compiles through a "clang"
     # that drops `-fno-temp-file` (`tests/e2e/m83/exec_without_arg.nim`); a
     # compiled program for the reason `nim_spy` is one, so the control runs

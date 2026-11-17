@@ -817,7 +817,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_flag.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_pos.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_enum.nim	nim	7
-libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim	nim	3
+libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_binds_configurables.nim	nim	28
@@ -849,6 +849,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_package_empty.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_level_heads_refuse_extra_arguments.nim	nim	14
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_starting_with_digit.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_name_that_is_a_nim_keyword.nim	nim	7
+libs/repro_project_dsl/tests/dsl_port/t_dsl_package_names_sharing_an_identifier_are_refused.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_expression_setters.nim	nim	13
 libs/repro_project_dsl/tests/dsl_port/t_dsl_provisioning_literal_unchanged.nim	nim	17
 libs/repro_project_dsl/tests/dsl_port/t_dsl_runtime_library_declaration.nim	nim	11
@@ -2487,6 +2488,7 @@ tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim	n
 tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty.nim	nim	1
 tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim	nim	1
 tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim	nim	1
+tests/integration/t_system_plan_apply_symmetry_and_universal_json.nim	nim	4
 tests/integration/t_tampered_uki_detected.nim	nim	5
 tests/integration/t_tampered_uki_fails_unseal.nim	nim	6
 tests/integration/t_tarball_compiler_archiver_views.nim	nim	3
@@ -2966,7 +2968,7 @@ tests/unit/test_suite_drift_attribution.py	python	12
 tests/unit/test_test_group_fallback.py	python	6
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
-tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	8
+tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	11
 tools/catalog-harvester/tests/test_harvester_emits_contributions.nim	nim	8
 tools/catalog-harvester/tests/test_harvester_history.nim	nim	3
 tools/catalog-harvester/tests/test_harvester_history_walk.nim	nim	2
