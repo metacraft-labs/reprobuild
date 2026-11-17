@@ -132,13 +132,60 @@ lookupNixRealization name
 ### `reprobuild.lib.lookupNixPackageName`
 
 ```nix
-lookupNixPackageName { pkgs, drv, index ? null }
+lookupNixPackageName { pkgs, drv, index ? null, realizationSources ? { } }
 ```
 
 The reverse: the canonical package a derivation is, by its package name.
 Returns `{ found = true; name; attribute; packageName; }`, or
 `{ found = false; reason; packageName; }`. `index` is the reverse index of
-`pkgs`, built when not given.
+`pkgs`, built when not given. A derivation that a
+[realization source](#realization-sources) resolves to, by store path, is
+named by that source's canonical name before the package-name lookup runs;
+two sources that resolve to one derivation are refused as ambiguous. Without
+`realizationSources` nothing changes.
+
+### `reprobuild.lib.resolveRealizationSource`
+
+```nix
+resolveRealizationSource { name, source }
+```
+
+Where the Nix realization of the canonical package `name` comes from, given
+one [realization source](#realization-sources): `{ found = true; drv; label; }`,
+or `{ found = false; reason; }`. The reason says what is wrong with the source
+or what the set lacks.
+
+### `reprobuild.lib.realizationSourceProblems`
+
+```nix
+realizationSourceProblems { sources ? { }, document }
+```
+
+The refusals for a set of realization sources against an export `document`:
+a list of messages, empty when there are none. A mapping for a name that is
+not a canonical package, one for a canonical package that no host of the
+profile selects, and a malformed source are each refused, naming the entry.
+The Home Manager module throws these.
+
+#### Realization sources
+
+A profile names canonical packages and a Nix consumer realizes them from its
+own nixpkgs. A package that comes from somewhere else (nixpkgs-unstable, the
+`packages.<system>` of another flake, a flake output that is part of no set)
+is mapped by its canonical name to a source, which is exactly one of:
+
+- `{ nixpkgs = <package set>; attribute ? null; }`: a nixpkgs-like set. The
+  attribute looked up in it is the one the catalog names, unless `attribute`
+  says another.
+- `{ packages = <package set>; attribute ? null; }`: a flake's
+  `packages.<system>`. The attribute is the canonical name, unless `attribute`
+  says another.
+- `{ derivation = <derivation>; }`: a derivation given directly.
+
+`attribute` is a dotted path. A mapping is realization, never selection: it
+says where a package the profile selects comes from, and does not make any
+host get it. A selected package with neither a mapping nor a catalog record
+is still unmapped, and fails the evaluation.
 
 ### `reprobuild.lib.brewRealizationOf`
 
@@ -176,15 +223,20 @@ Every Homebrew record: a list of `{ name, kind, token, tap, catalog }`.
 ### `reprobuild.lib.homeManagerFacts`
 
 ```nix
-homeManagerFacts { configuration, host, homebrew ? { }, outOfStoreRoots ? { }, system ? null }
+homeManagerFacts { configuration, host, homebrew ? { }, outOfStoreRoots ? { }, system ? null,
+                   realizationSources ? { } }
 ```
 
 A derivation that writes the facts of a Home Manager configuration (its
 packages, files, environment and services) for `repro home compare`.
 `homebrew` lists what the host's Brewfile installs (`casks`, `formulae`,
 `masApps`); `outOfStoreRoots` maps an out-of-store link prefix to the tree
-whose files it points into. `.evaluated` holds the part known without
-building.
+whose files it points into. `realizationSources` (default: the module's
+`reprobuild.intent.realizationSources` when the configuration uses it) names
+the packages the configuration takes from another package set or flake: a
+derivation a [realization source](#realization-sources) resolves to is
+reported by its canonical name, never as an unknown derivation.
+`.evaluated` holds the part known without building.
 
 ### `reprobuild.lib.reprobuildFacts`
 
@@ -344,6 +396,13 @@ The profile directory, for IFD mode (used when `snapshot` is null).
 
 - Type: null or absolute path
 - Default: `null`
+
+### `reprobuild.intent.realizationSources`
+
+Where the Nix realization of a canonical package comes from when it is not this configuration's nixpkgs, by canonical name. A source is `{ nixpkgs = <package set>; attribute ? null; }` (the attribute is the one the catalog names, unless given), `{ packages = <package set>; attribute ? null; }` (a flake's `packages.<system>`; the attribute is the canonical name, unless given), or `{ derivation = <derivation>; }`. A mapping is realization, never selection: it decides where a package the profile selects comes from, not whether a host gets it. A mapping for a name that is not a canonical package, and one for a canonical package the profile selects on no host, fail the evaluation. A selected package with neither a mapping nor a catalog record is still unmapped.
+
+- Type: attribute set of raw value
+- Default: `{ }`
 
 ### `reprobuild.intent.snapshot`
 

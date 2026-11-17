@@ -125,6 +125,36 @@ let
     outOfStoreRoots."${homeDir}/checkout" = tree;
   };
   ev = facts.evaluated;
+
+  # Realization sources: packages the configuration takes from
+  # another package set or flake, from the shared fixture
+  # tests/fixtures/realization-sources/cases.nix. No catalog record names
+  # `gm5-home-pc-only` or `ripgrep`, so only a source can name them: facts
+  # report them by their canonical names, and without the sources they are
+  # unmapped (the control).
+  rsCases = import (root + "/tests/fixtures/realization-sources/cases.nix") {
+    mkDrv =
+      name: version:
+      pkgs.runCommand "${name}-${version}" {
+        pname = name;
+        inherit version;
+      } "mkdir $out";
+  };
+  sourcedConfiguration = configuration.extendModules {
+    modules = [
+      { home.packages = [ rsCases.expected.gm5-home-pc-only rsCases.expected.ripgrep ]; }
+    ];
+  };
+  sourcedFacts =
+    sources:
+    (reprobuildLib.homeManagerFacts {
+      configuration = sourcedConfiguration;
+      host = "gm6-host";
+      outOfStoreRoots."${homeDir}/checkout" = tree;
+      realizationSources = sources;
+    }).evaluated;
+  withSources = sourcedFacts rsCases.sources;
+  withoutSources = sourcedFacts { };
   ids = map (e: e.id);
   fails = x: !(builtins.tryEval (builtins.deepSeq x x)).success;
 
@@ -132,6 +162,24 @@ let
   targets = map (f: f.target) ev.files;
 
   results = {
+    lib_facts_name_sourced_packages =
+      let
+        byId = id: lib.findFirst (e: e.id == id) null withSources.packages;
+      in
+      builtins.elem "gm5-home-pc-only" (ids withSources.packages)
+      && builtins.elem "ripgrep" (ids withSources.packages)
+      && lib.hasInfix "realization source" (byId "ripgrep").origin
+      && !(builtins.any (n: lib.hasPrefix "gm5-home-pc-only" n) (ids withSources.unmapped))
+      # The source wins by store path: without it the ripgrep derivation is
+      # named by the catalog (its attribute's package name) as `rg`, not as
+      # the canonical `ripgrep` the profile says.
+      && !(builtins.elem "rg" (ids withSources.packages))
+      && builtins.elem "rg" (ids withoutSources.packages)
+      && !(builtins.elem "ripgrep" (ids withoutSources.packages))
+      # The control: no record names `gm5-home-pc-only`, so without the
+      # sources its derivation is unmapped, and not a canonical package.
+      && !(builtins.elem "gm5-home-pc-only" (ids withoutSources.packages))
+      && builtins.any (n: lib.hasPrefix "gm5-home-pc-only" n) (ids withoutSources.unmapped);
     schema = ev.format == "repro.host-facts" && ev.schemaVersion == 1 && ev.system == system;
     # bash and cmake through the Nix catalog; vscode through the cask.
     packages = ids ev.packages == [

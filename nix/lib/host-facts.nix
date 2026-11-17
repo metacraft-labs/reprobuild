@@ -208,6 +208,11 @@ let
   #                         for it (e.g. "${homeDirectory}/dotfiles" = self);
   #                         one into no prefix has an unknown digest (null)
   #   system ? <pkgs>,      the target system name the facts are for
+  #   realizationSources ? <the intent module's option, else { }>
+  #                         { "<canonical name>" = source; } -- packages the
+  #                         configuration takes from another package set or
+  #                         flake; a derivation a source resolves to is that
+  #                         canonical package (nix/lib/realization-sources.nix)
   # } -> derivation producing the facts JSON; `.evaluated` holds the
   #      evaluation-time half (no file digests).
   homeManagerFacts =
@@ -217,6 +222,10 @@ let
       homebrew ? { },
       outOfStoreRoots ? { },
       system ? null,
+      # Realization sources (nix/lib/realization-sources.nix) of the packages
+      # the configuration takes from another package set or flake; read from
+      # the intent module's option when the configuration uses it.
+      realizationSources ? configuration.config.reprobuild.intent.realizationSources or { },
     }:
     let
       config = configuration.config;
@@ -232,14 +241,14 @@ let
       packageResults = map (
         drv:
         let
-          r = realizations.lookupCanonical { inherit pkgs drv index; };
+          r = realizations.lookupCanonical { inherit pkgs drv index realizationSources; };
           drvName = drv.name or "(unnamed)";
         in
         if r.found then
           {
             package = {
               id = r.name;
-              origin = "home.packages ${drvName} (nixpkgs#${r.attribute})";
+              origin = "home.packages ${drvName} (${r.origin or "nixpkgs#${r.attribute}"})";
             }
             // lib.optionalAttrs (drv ? version) { version = drv.version; };
           }
