@@ -2399,7 +2399,7 @@ tests/integration/t_role_validation_refused_through_repro.nim	nim	1
 tests/integration/t_roles_resolve_from_settings_committed_at_the_revision.nim	nim	1
 tests/integration/t_root_help_tiered_and_help_all_complete.nim	nim	1
 tests/integration/t_rp1_provider_compile_edge_materializes.nim	nim	1
-tests/integration/t_rp2_provider_session_invoke.nim	nim	4
+tests/integration/t_rp2_provider_session_invoke.nim	nim	5
 tests/integration/t_rp3_bind_deps_and_sharing.nim	nim	3
 tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim	nim	1
 tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim	nim	1

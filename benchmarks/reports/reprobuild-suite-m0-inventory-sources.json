@@ -7667,7 +7667,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "buildProvider",
           "executedVariables": [],
-          "line": 113,
+          "line": 117,
           "path": "tests/integration/t_rp2_provider_session_invoke.nim",
           "patterns": [
             "repro-extract-interface"
@@ -7683,7 +7683,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "buildProvider",
           "executedVariables": [],
-          "line": 119,
+          "line": 123,
           "path": "tests/integration/t_rp2_provider_session_invoke.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -51969,7 +51969,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_rp2_provider_session_invoke.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
