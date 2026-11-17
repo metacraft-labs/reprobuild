@@ -1579,6 +1579,7 @@ tests/e2e/m83/t_e2e_data_file_edit_does_not_recompile.nim	nim	1
 tests/e2e/m83/t_e2e_data_file_rollback_restores_rows.nim	nim	1
 tests/e2e/m83/t_e2e_data_file_validation.nim	nim	4
 tests/e2e/m83/t_e2e_export_describes_other_platform_resources.nim	nim	1
+tests/e2e/m83/t_e2e_export_nixos_fact_required.nim	nim	1
 tests/e2e/m83/t_e2e_export_refuses_compile_time_dependent_intent.nim	nim	4
 tests/e2e/m83/t_e2e_home_add_appends_data_row.nim	nim	2
 tests/e2e/m83/t_e2e_home_export_check_detects_stale_snapshot.nim	nim	1

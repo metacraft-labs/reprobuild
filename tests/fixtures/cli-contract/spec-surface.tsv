@@ -441,9 +441,11 @@ command	repro home export
 flag	repro home export	--check
 flag	repro home export	--format
 flag	repro home export	--host
+flag	repro home export	--nixos
 flag	repro home export	--target
 command	repro home facts
 flag	repro home facts	--host
+flag	repro home facts	--nixos
 flag	repro home facts	--output
 flag	repro home facts	--target
 command	repro home compare

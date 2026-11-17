@@ -71,21 +71,27 @@ proc hasResourceRows(dir: string): bool =
   readFile(dir / "data.toml").contains("[[resource]]")
 
 proc nixReadData(dir: string; hosts: JsonNode;
-                 evaluations: seq[(string, string)]): JsonNode =
-  ## readData for each (host, system): `{ names }` or `{ error }`.
+                 evaluations: seq[(string, string, JsonNode)]): JsonNode =
+  ## readData for each (host, system, nixos): `{ names }`, `{ error }`, or
+  ## `{ refused }` when evaluating throws (a `nixos` guard reached while the
+  ## fact is unstated). `nixos` is a JSON bool, or null when not stated.
   var evals = newJArray()
-  for (host, system) in evaluations:
-    evals.add %*{"host": host, "system": system}
+  for (host, system, nixos) in evaluations:
+    evals.add %*{"host": host, "system": system, "nixos": nixos}
   nixEvalJson("""
     args:
     let lib = """ & nixLibExpr() & """; in
     map (e:
-      let r = lib.internal.readDataResult {
-        path = /. + args.path;
-        inherit (e) host system;
-        hosts = args.hosts;
-      };
-      in if r ? error then { inherit (r) error; } else { inherit (r) names packages; })
+      let
+        r = lib.internal.readDataResult {
+          path = /. + args.path;
+          inherit (e) host system nixos;
+          hosts = args.hosts;
+        };
+        attempt = builtins.tryEval (builtins.deepSeq r r);
+      in
+      if !attempt.success then { refused = true; }
+      else if r ? error then { inherit (r) error; } else { inherit (r) names packages; })
     args.evaluations
     """, %*{"path": dir / "data.toml",
       "hosts": (if hosts.isNil: newJObject() else: hosts),
@@ -98,7 +104,7 @@ when defined(linux) or defined(macosx):
       let sb = newProfileSandbox("gm5-readdata", profileText(nil))
       defer: sb.dispose()
 
-      var compared, nonEmpty, undeclaredRefused = 0
+      var compared, nonEmpty, undeclaredRefused, refusedUnstated = 0
       var answers: seq[seq[string]]
       for dir in caseDirs("row-selection"):
         let name = dir.extractFilename
@@ -106,17 +112,30 @@ when defined(linux) or defined(macosx):
         let hosts = caseJson{"hosts"}
         writeFile(sb.profilePath, profileText(hosts))
         sb.writeProfileFile("data.toml", readFile(dir / "data.toml"))
-        var pairs: seq[(string, string)]
+        var pairs: seq[(string, string, JsonNode)]
         for evaluation in caseJson["evaluations"]:
-          pairs.add (evaluation["host"].getStr, evaluation["system"].getStr)
+          pairs.add (evaluation["host"].getStr, evaluation["system"].getStr,
+            (if evaluation.hasKey("nixos"): evaluation["nixos"] else: newJNull()))
         let nix = nixReadData(dir, hosts, pairs)
         require nix.len == pairs.len
-        for i, (host, system) in pairs:
-          # The planner's answer, from a real export.
-          let r = sb.runRepro(["home", "export", "--format", "json",
-            "--target", system], host = host)
+        for i, (host, system, nixosFact) in pairs:
+          # The planner's answer, from a real export. `nixos` is stated by
+          # the case with `--nixos` / `--nixos=false`, or left unstated.
+          var exportArgs = @["home", "export", "--format", "json",
+            "--target", system]
+          if nixosFact.kind == JBool:
+            exportArgs.add(if nixosFact.getBool: "--nixos" else: "--nixos=false")
+          let r = sb.runRepro(exportArgs, host = host)
           checkpoint(name & ": " & host & " @ " & system & " -> exit " &
             $r.exitCode & "\n" & r.stderr)
+          if caseJson["evaluations"][i]{"refused"}.getBool:
+            # Both sides refuse a `nixos` guard whose fact is not stated.
+            check r.exitCode == 3
+            check r.stderr.contains("nixos")
+            checkpoint(name & ": nix -> " & $nix[i])
+            check nix[i]{"refused"}.getBool
+            inc refusedUnstated
+            continue
           if caseJson["evaluations"][i]{"undeclaredHost"}.getBool:
             # Both sides refuse a host the registry does not declare.
             const Undeclared = "` is not declared in the profile's hosts: " &
@@ -167,7 +186,7 @@ when defined(linux) or defined(macosx):
         let r = sb.runRepro(["home", "export", "--format", "json"])
         checkpoint(name & ": planner exit " & $r.exitCode & "\n" & r.stderr)
         check r.exitCode == 1
-        let nix = nixReadData(dir, newJObject(), @[("h", "x86_64-linux")])
+        let nix = nixReadData(dir, newJObject(), @[("h", "x86_64-linux", newJNull())])
         let message = nix[0]{"error"}.getStr
         checkpoint(name & ": nix -> " & message)
         var bothNamed = r.exitCode == 1 and message.len > 0
@@ -183,6 +202,7 @@ when defined(linux) or defined(macosx):
 
       # Vacuity.
       check undeclaredRefused >= 1
+      check refusedUnstated >= 1
       check compared >= 15
       check nonEmpty >= 10
       check answers.deduplicate().len >= 5

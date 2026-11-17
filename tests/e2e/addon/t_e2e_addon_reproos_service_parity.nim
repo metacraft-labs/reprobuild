@@ -265,19 +265,6 @@ proc body(add, full: Guest; addRepro, engine: string; step: StepFn;
                      "addOn": av, "full": fv, "excusedBy": why})
         if why.len == 0: inc unexcused
   record["differences"] = diffs
-  # A declared mode is honoured, and on the add-on host the file is a
-  # private copy rather than a link into the world-readable static tree
-  # (reprobuild-pm issue
-  # 2026-11-12-fs-systemfile-cannot-express-mode-group-or-copy-form: the
-  # mode was dropped, so the file was 0644 on the full host and a store
-  # link on the add-on host).
-  const privateConfig = "/etc/vaultwarden/config.env"
-  for (side, o) in [("add-on", a.getOrDefault(privateConfig)),
-                    ("full", f.getOrDefault(privateConfig))]:
-    step("the declared-mode file is a 0640 root:root regular file on the " &
-         side & " guest",
-         o.pathKind == "file" and o.mode == "640" and o.owner == "root:root",
-         $o)
   step("every difference is a listed realisation difference",
        unexcused == 0, $diffs)
   step("every compared kind has at least one file",

@@ -367,6 +367,104 @@
         "aarch64-windows"
       ],
       "description": "a backslash escapes the next character; the escaped quote does not close the literal"
+    },
+    {
+      "predicate": "nixos",
+      "host": "h",
+      "nixos": true,
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ],
+      "description": "nixos is the stated fact, whatever the system"
+    },
+    {
+      "predicate": "nixos",
+      "host": "h",
+      "nixos": false,
+      "holdsOn": []
+    },
+    {
+      "predicate": "not nixos",
+      "host": "h",
+      "nixos": false,
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux",
+        "x86_64-darwin",
+        "aarch64-darwin",
+        "x86_64-windows",
+        "aarch64-windows"
+      ]
+    },
+    {
+      "predicate": "linux and nixos",
+      "host": "h",
+      "nixos": true,
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ],
+      "description": "NixOS is a Linux that states it"
+    },
+    {
+      "predicate": "nixos or macos",
+      "host": "h",
+      "nixos": false,
+      "holdsOn": [
+        "x86_64-darwin",
+        "aarch64-darwin"
+      ]
+    },
+    {
+      "predicate": "nixos",
+      "host": "h",
+      "refused": true,
+      "description": "the fact is not stated: refused on every system, never read as false"
+    },
+    {
+      "predicate": "not nixos",
+      "host": "h",
+      "refused": true,
+      "description": "negating an unstated fact is still a refusal"
+    },
+    {
+      "predicate": "nixos or linux",
+      "host": "h",
+      "refused": true,
+      "description": "refused whatever the operands before `nixos` evaluate to"
+    },
+    {
+      "predicate": "linux",
+      "host": "h",
+      "nixos": true,
+      "holdsOn": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ],
+      "description": "a stated nixos fact changes no other predicate"
+    },
+    {
+      "predicate": "macos and nixos",
+      "host": "h",
+      "refused": true,
+      "description": "naming nixos is enough: macos is false on a Linux target, and the guard is still refused there"
+    },
+    {
+      "predicate": "linux or nixos",
+      "host": "h",
+      "refused": true,
+      "description": "linux is true on a Linux target, and the guard is still refused there"
+    },
+    {
+      "predicate": "not nixos and linux",
+      "host": "h",
+      "refused": true,
+      "description": "the planner canonicalizes a data file's guard (operands sorted), Nix reads it as written: the refusal must not depend on that order"
     }
   ],
   "rejections": [

@@ -18865,6 +18865,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_m83_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_export_nixos_fact_required.nim",
+    binary: "build/test-bin/t_e2e_export_nixos_fact_required",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_m83_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_export_refuses_compile_time_dependent_intent.nim",
     binary: "build/test-bin/t_e2e_export_refuses_compile_time_dependent_intent",
     defines: @[],
