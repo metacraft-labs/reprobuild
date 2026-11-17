@@ -376,8 +376,8 @@ proc declaredCheckoutPathRejection*(value: string): string =
   ## RA-22 GC ran a bare `removeDir(<workspaceRoot> / repo.path)`, so this
   ## reader was the only thing standing between a declared root repo and a
   ## recursive delete of the workspace. Relaxing the boundary without adding
-  ## the guard there made `repro remove` destroy the workspace root and exit
-  ## 0. The rule is therefore: every consumer that DELETES a computed checkout
+  ## the guard there made `repro ws remove` destroy the workspace root and
+  ## exit 0. The rule is therefore: every consumer that DELETES a computed checkout
   ## path asks for itself, and the manifest plane has four such consumers —
   ##
   ##   * `executeClone`'s half-clone cleanup, via `removeCloneTargetSafely`,

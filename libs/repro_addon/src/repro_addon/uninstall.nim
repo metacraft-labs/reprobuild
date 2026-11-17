@@ -490,7 +490,7 @@ proc shipAndConfirm*(site: ShipSite; host: string):
       "that did not finish removed it), so they " & CannotBeShipped)
   try:
     let conf = loadEvidenceConf(site.confPath)
-    let r = runEvidenceShip(site, conf, host)
+    let r = shipFor(site, conf, host)
     if r.pending == 0 and r.error.len == 0: (true, "")
     else: (false, $r.pending & " record(s) still queued" &
            (if r.error.len > 0: ": " & r.error else: ""))
@@ -1603,6 +1603,22 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
       writeStateRemovalToken(tokenPath, root, ledgerCopy, chain, preBootstrap,
                              identityOf)
       removeFile(ledgerCopy)
+      # The ledger copy's removal made durable before the identity goes
+      # (A11 round 23): otherwise a crash could keep the ledger copy on
+      # disk and lose the identity, the state round 21 refuses.
+      block:
+        let sfd = posix.open(parentDir(ledgerCopy).cstring,
+                             O_RDONLY or O_CLOEXEC)
+        if sfd < 0 or fsync(sfd) != 0:
+          let e = osErrorMsg(osLastError())
+          if sfd >= 0: discard posix.close(sfd)
+          r.errors.add(parentDir(ledgerCopy) & ": fsync after removing " &
+            "the ledger copy: " & e & "; the identity " & idFile & " is " &
+            "kept and the token " & tokenPath & " names what remains: " &
+            "uninstall, run again once the cause is cleared, finishes the " &
+            "removal")
+          return
+        discard posix.close(sfd)
       if hook != nil: hook("ledger-copy-removed", ledgerCopy)
       if keepId and (fileExists(idFile) or symlinkExists(idFile)):
         try: removeFile(idFile)
@@ -2169,6 +2185,20 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # removed unless the operator passed --discard-store-evidence (above);
   # they were removed, each checked gone, above. One that appeared since
   # is reported with the root, once the root is gone.
+  # The shipping unit's dynamic user's state (§13 decision 181: its outbox,
+  # its shipping cursor, the sink's last receipt) goes with the state, at
+  # this point and no earlier, as the outbox did when it lived under it:
+  # the gate above saw every queued entry shipped, or the operator's signed
+  # record authorised their discard.
+  if byClass[lcUnit].anyIt(it.unit == EvidenceShipUnit):
+    for leftover in EvidenceShipStatePaths:
+      try:
+        if symlinkExists(leftover): removeFile(leftover)
+        elif dirExists(leftover):
+          removeDir(leftover)
+          result.removed.add(leftover & " (the shipping unit's state)")
+      except OSError as ex:
+        result.errors.add(leftover & ": " & ex.msg)
   # The state goes last, and within it the ledger copy (§13 decision 150).
   # The pre-bootstrap inputs stay, wherever they are (§13 decisions 165
   # (b) and 166): the token carries every one, so a re-run never rmdirs

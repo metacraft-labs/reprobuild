@@ -127,6 +127,10 @@ const
     "runWorkspaceBootstrapCommand", "runWorkspaceProvisionCommand",
     "workspaceInitArgsOf", "runWorkspaceInitFromUrl", "runWorkspaceCommand",
     "addArgsOf", "removeArgsOf", "gatewayDirOf", "runGatewayCommand",
+    # `repro add|remove` as the package-dependency verbs, with the refusal of
+    # the workspace-repository flags they still parse (hidden).
+    "runPackageAddCommand", "runPackageRemoveCommand", "refusedWordsOf",
+    "refuseWorkspaceFlags",
     "runGatewayMigrateCommand", "runReproLockingCommand",
     "runReproLockingExplain", "runReproLockingAdoptManifest",
     "runReproLockCommand", "runReproLockList", "runReproLockDiff",

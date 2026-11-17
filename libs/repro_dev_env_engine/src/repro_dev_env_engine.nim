@@ -497,6 +497,19 @@ proc computeDevEnvEdgeCacheKey*(config: DevEnvEdgeConfig;
   devEnvCacheKey.computeDevEnvEdgeCacheKey(config.projectRoot, config.activity,
     config.lockSliceId, config.developOverridesPath, watchManifestPath)
 
+proc nixUserCacheDir*(): string =
+  ## `nix`'s own cache directory, resolved the way `nix` resolves it
+  ## (`$XDG_CACHE_HOME/nix`, else `$HOME/.cache/nix`); "" when neither is
+  ## set. It holds `nix`'s evaluation cache, whose entries are named by the
+  ## fingerprint of the flake evaluated and which `nix` serves by that name,
+  ## and its fetcher cache. Every `nix` invocation of this user shares it.
+  let xdgCache = getEnv("XDG_CACHE_HOME")
+  if xdgCache.len > 0:
+    return absolutePath(xdgCache) / "nix"
+  let home = getEnv("HOME")
+  if home.len > 0:
+    return absolutePath(home) / ".cache" / "nix"
+
 proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
     protocolRoot = ""): seq[string] =
   ## Prefixes the dev-env introspection edge's monitor must NOT record as
@@ -568,13 +581,9 @@ proc devEnvIntrospectionIgnoredInputPrefixes*(projectRoot: string;
     result.add(absolutePath(protocolRoot))
   if projectRoot.len > 0:
     result.add(absolutePath(projectRoot) / ".repro" / "foreign-env")
-  let xdgCache = getEnv("XDG_CACHE_HOME")
-  if xdgCache.len > 0:
-    result.add(absolutePath(xdgCache) / "nix")
-  else:
-    let home = getEnv("HOME")
-    if home.len > 0:
-      result.add(absolutePath(home) / ".cache" / "nix")
+  let nixCache = nixUserCacheDir()
+  if nixCache.len > 0:
+    result.add(nixCache)
 
 proc pathIsAtOrUnder(path, prefix: string): bool =
   ## ``path`` is ``prefix`` or lies beneath it, on a component boundary.
@@ -793,7 +802,15 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
       justification: NixDevEnvEntropyJustification)],
     dependencyPolicy = automaticMonitorGatheringPolicy(
       devEnvIntrospectionIgnoredInputPrefixes(config.projectRoot,
-        protocolRoot)))
+        protocolRoot)),
+    # `nix`'s cache is left out of the key above, and it is a content-keyed
+    # cache every `nix` invocation of this user writes: its evaluation cache
+    # serves a flake's evaluation by the flake's fingerprint. So whoever
+    # writes it can change this edge's output without moving its key, and
+    # the edge's records stay on this host (Tool-Owned-Caches.md "Trust
+    # Boundary").
+    contentKeyedToolCaches = (let nixCache = nixUserCacheDir();
+      if nixCache.len > 0: @[nixCache] else: @[]))
 
 proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
                        shellFragmentPath, navigatorStatsPath: string): BuildAction =

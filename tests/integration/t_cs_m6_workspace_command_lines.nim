@@ -130,7 +130,8 @@ const GroupCommands = [
   @["lock", "explain"], @["locking"], @["locking", "explain"],
   @["locking", "adopt-manifest"], @["gateway"], @["gateway", "pre-receive"],
   @["gateway", "post-receive"], @["gateway", "migrate"], @["add"],
-  @["remove"]]
+  @["remove"], @["workspace", "add"], @["workspace", "remove"],
+  @["ws", "add"], @["ws", "remove"]]
 
 suite "the workspace and publication command lines":
 
@@ -213,6 +214,9 @@ suite "the workspace and publication command lines":
       (@["gateway", "migrate", "--bogus"], "repro gateway migrate"),
       (@["add", "--bogus"], "repro add"),
       (@["remove", "a", "b"], "repro remove"),
+      (@["ws", "add", "--bogus"], "repro workspace add"),
+      (@["workspace", "remove", "a", "b"], "repro workspace remove"),
+      (@["remove", "a", "--build"], "repro remove"),
       # Retired spellings stay unknown.
       (@["sync", "--groups=a"], "repro sync"),
       (@["sync", "--report"], "repro sync"),
@@ -383,10 +387,44 @@ suite "the workspace and publication command lines":
       check c.repin == @["a,b"]
       check c.lowest
       check c.registry == @["r1", "r2"]
+    # `repro add|remove` edit package dependencies; the workspace-repository
+    # flags are still parsed (hidden), so the command can refuse them with a
+    # `repro ws add|remove` tip.
+    check parsed(["add", "openssl >=3.3 <4.0", "--native-build",
+      "--package=p", "--dry-run"]) == 0
+    block:
+      let c = parsedCommand.add
+      check c.dependency == "openssl >=3.3 <4.0"
+      check c.nativeBuild
+      check not c.build
+      check not c.runtime
+      check c.package == "p"
+      check c.dryRun
+      check c.remote.isNone
     check parsed(["add", "r", "--remote=u", "--no-develop"]) == 0
     check parsedCommand.add.binary
+    check parsedCommand.add.remote == some("u")
+    check parsed(["add", "r", "--remote="]) == 0
+    check parsedCommand.add.remote == some("")
     check parsed(["remove", "r", "--yes"]) == 0
     check parsedCommand.remove.force
+    check parsed(["remove", "openssl", "--package", "p"]) == 0
+    check parsedCommand.remove.dependency == "openssl"
+    check parsedCommand.remove.package == "p"
+    # `repro ws add|remove`: the workspace-repository verbs.
+    check parsed(["ws", "add", "r", "--remote=u", "--no-develop",
+      "--revision=main", "--dry-run"]) == 0
+    block:
+      let c = parsedCommand.workspace.add
+      check c.repo == "r"
+      check c.remote == some("u")
+      check c.revision == some("main")
+      check c.binary
+      check c.dryRun
+    check parsed(["workspace", "remove", "r", "--yes", "--json"]) == 0
+    check parsedCommand.workspace.remove.repo == "r"
+    check parsedCommand.workspace.remove.force
+    check parsedCommand.workspace.remove.json
 
   test "contradictions are refused by the commands":
     let s = newScratch()

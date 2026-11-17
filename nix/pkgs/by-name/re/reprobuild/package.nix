@@ -154,6 +154,15 @@
     rev = "8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
     hash = "sha256-2PXrPF+3a2dYMbyoFliukQRLVXc3wIBuvqDOYZWR/ko=";
   },
+  # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
+  # package (the declarative description of a program's entry points); the
+  # `compat/` shims in that repository are not part of the pin.
+  entrypointsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim-entrypoints";
+    rev = "8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
+    hash = "sha256-2zjGCBISzkUw3tim4kUzm6sPPxyeLeX+PCrKYzbPjGk=";
+  },
   # Added after the `src` commit too: confutils over a clispec description,
   # which repro's own command line is.
   confutilsSrc ? fetchFromGitHub {
@@ -320,6 +329,7 @@ stdenv.mkDerivation (finalAttrs: {
     SHM_GSET_SRC = "${shmGsetSrc}/src";
     SHM_QUEUE_SRC = "${shmQueueSrc}/src";
     CLI_SPEC_SRC = "${cliSpecSrc}/src";
+    ENTRYPOINTS_SRC = "${entrypointsSrc}/src";
     CONFUTILS_SRC = "${confutilsSrc}";
     # Tier 3 of `config.nims`'s incremental-test-seam resolution, and the tier
     # this build has always needed. It runs in a pure sandbox with no
@@ -479,6 +489,7 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default SHM_GSET_SRC ${shmGsetSrc}/src \
         --set-default SHM_QUEUE_SRC ${shmQueueSrc}/src \
         --set-default CLI_SPEC_SRC ${cliSpecSrc}/src \
+        --set-default ENTRYPOINTS_SRC ${entrypointsSrc}/src \
         --set-default CONFUTILS_SRC ${confutilsSrc} \
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
@@ -577,6 +588,7 @@ stdenv.mkDerivation (finalAttrs: {
         shmGsetSrc
         shmQueueSrc
         cliSpecSrc
+        entrypointsSrc
         confutilsSrc
         codetracerSrc
         ctTestRunnerSrc

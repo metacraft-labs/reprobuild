@@ -357,9 +357,13 @@ Reprobuild wraps all development workflows under one CLI.
 
 ### Package Management
 
-- `repro add <repo> --remote=URL` / `repro remove <repo>` — add a repository
-  to, or remove it from, the workspace (develop-mode policy and workspace
-  membership; these do not manage package dependencies).
+- `repro add <package[@constraint]>` — add a package dependency to the
+  current project's `repro.nim`, and `repro remove <package>` removes one
+  (`uses:` by default; `--build`, `--native-build` or `--runtime` for the
+  other dependency sections; `--dry-run` previews the edit).
+- `repro ws add <repo> --remote=URL` — add a repository to the workspace;
+  `repro ws remove <repo>` removes it (develop-mode policy and workspace
+  membership).
 - `repro why [package]` — explain why a dependency is present.
 
 ### Task Running

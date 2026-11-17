@@ -244,6 +244,7 @@ export lock_consistency.flakeRevPinEditRemedy, lock_consistency.lockUpdateComman
 # HL-11 M4: the recipe rewrites `repro lock update` makes (an exact pin in
 # `flake.nix` or `repro.nim`) and the resolution of the name it is given.
 import repro_cli_support/recipe_pin_edit
+import repro_cli_support/recipe_dependency_edit
 
 proc cloneUrlFor*(repo: ResolvedRepo): string =
   ## Fetch URL to clone this repo from: the ``repo.remotes`` entry that
@@ -3303,6 +3304,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     result.removeBeforeRun = payload.removeBeforeRun
     result.optionalOutputs = payload.optionalOutputs
     result.readOnlyRoots = payload.readOnlyRoots
+    # The content-keyed tool-owned caches the edge reads. Copied here, on
+    # every branch, because the engine derives the edge's effective
+    # determinism class from them (`host-bound` at least; Tool-Owned-
+    # Caches.md "Trust Boundary"): a branch that dropped them would let the
+    # edge's records leave this host.
+    result.contentKeyedToolCaches = payload.contentKeyedToolCaches
   # Caching-Architecture D2: an edge that states no policy takes the one its
   # resolved tools declare, else the owner-decided default, timestamp.
   var policyFromTools = false
@@ -4951,7 +4958,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 17'u16
+  LoweredGraphCacheVersion = 18'u16
+    # v18: ``BuildAction.contentKeyedToolCaches``, a string list after
+    # ``widthFlag``. A v17 record decoded without it would make a cache-
+    # reading edge `weak` again on the warm path only, and its records would
+    # be offered to other hosts (Tool-Owned-Caches.md "Trust Boundary").
     # v17: ``BuildAction.cpuMinMilli``, ``cpuPreferredMilli`` (u32 each) and
     # ``widthFlag`` (a string) after ``subToolIdentityRefs``: a negotiated
     # width range and the flag that passes the grant to the command. A v16
@@ -6096,6 +6107,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeU32Le(action.cpuMinMilli)
   outp.writeU32Le(action.cpuPreferredMilli)
   outp.writeString(action.widthFlag)
+  outp.writeStringSeq(action.contentKeyedToolCaches)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6187,6 +6199,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.cpuMinMilli = readU32Le(bytes, pos)
   result.cpuPreferredMilli = readU32Le(bytes, pos)
   result.widthFlag = readString(bytes, pos)
+  result.contentKeyedToolCaches = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -51953,7 +51966,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
           # branch was classified above and gets a different remedy.
           let remedy = "ensure read access to '" & repo.fetchUrl &
             "' (auth / network), then re-run 'repro sync'; or run " &
-            "'repro remove " & repo.name & "' to drop the dependency"
+            "'repro ws remove " & repo.name & "' to drop the repository"
           checkoutStatus[repoIdx] = ("clone_failed",
             "clone of newly-declared repo failed: " &
             "status=" & $outcome.status & " reason=" & outcome.reason &
@@ -83889,10 +83902,12 @@ proc runSwitchCommand*[T](c: T): int =
       stdout.writeLine(line)
   report.exitCode
 
-# --- RA-22: `repro add <repo>` (workspace membership / develop-mode policy) -
+# --- RA-22: `repro workspace add <repo>` (membership / develop-mode policy)
 #
 # Per CLI/add.md §"Develop-Mode Policy" + Workspace-And-Develop-Mode.md
-# §"Workspace Membership": `repro add` is the single verb for bringing a
+# §"Workspace Membership": `repro workspace add` (`repro ws add`; top-level
+# `repro add` until it became the package-dependency verb) is the verb for
+# bringing a
 # dependency into the workspace. Whether the dependency materializes as a
 # DEVELOP-mode local sibling checkout (a `depends`-graph repo fragment that is
 # cloned) or a BINARY pinned dependency (recorded but NOT checked out) is
@@ -83903,6 +83918,26 @@ proc runSwitchCommand*[T](c: T): int =
 # to develop mode; everything else defaults to binary. An explicit, NON-default
 # `--no-membership` mode clones a repo WITHOUT making it a workspace
 # dependency (useful to inspect a repo you don't intend to depend on).
+
+type
+  ProjectRepoDeclaration = object
+    ## What `declareRepoInProject` did to a project manifest.
+    code: int             ## 0 declared (or already declared); 1 refused
+    diagnostic: string
+    repoName: string      ## the fragment's `[repo].name`
+    remoteName: string    ## the `[[remote]]` the fragment names
+    mintedFetch: string   ## the fetch base of a remote added for it, or ""
+    fragmentWritten: bool
+    edgeAdded: bool
+
+proc declareRepoInProject(manifestRoot, projectFile, repo, remoteUrl,
+    checkoutPath, mainline, profile, revision: string;
+    writeFragment, preserveRepoName: bool): ProjectRepoDeclaration
+  ## Declared with the `workspace repos` authoring helpers below.
+
+proc dropRepoEdgesInProject(manifestRoot, projectFile, repo: string):
+    tuple[code: int; dropped: bool; diagnostic: string]
+  ## Declared with the `workspace repos` authoring helpers below.
 
 type
   AddMode = enum
@@ -83954,15 +83989,15 @@ proc toJsonNode*(report: AddReport): JsonNode =
   result["diagnostic"] = %report.diagnostic
   result["exitCode"] = %report.exitCode
 
-proc addArgsOf*(c: ReproCommandLineAdd): AddArgs =
-  ## ``repro add <repo> --remote=<url> [--develop|--binary|--no-membership]
-  ## [--revision=REV] [--depends-of=REPO] [--dry-run] [--json]`` from its
-  ## configuration. The mode flags name one mode; two different ones are a
-  ## contradiction.
+proc addArgsOf*(c: ReproCommandLineWorkspaceAdd): AddArgs =
+  ## ``repro workspace add <repo> --remote=<url>
+  ## [--develop|--binary|--no-membership] [--revision=REV] [--depends-of=REPO]
+  ## [--dry-run] [--json]`` from its configuration. The mode flags name one
+  ## mode; two different ones are a contradiction.
   result.workspaceRoot = c.workspaceRoot
-  result.remoteUrl = c.remote
-  result.revision = c.revision
-  result.dependsOf = c.dependsOf
+  result.remoteUrl = c.remote.get("")
+  result.revision = c.revision.get("")
+  result.dependsOf = c.dependsOf.get("")
   result.toolProvisioning =
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
@@ -83979,17 +84014,18 @@ proc addArgsOf*(c: ReproCommandLineAdd): AddArgs =
     modes.add("--no-membership")
   if modes.len > 1:
     raise newException(ValueError,
-      "`repro add` was given " & modes.join(" and ") & "; name one mode")
+      "`repro workspace add` was given " & modes.join(" and ") &
+        "; name one mode")
   result.dryRun = c.dryRun
   result.json = c.json
   result.target = c.repo
   if result.target.len == 0:
     raise newException(ValueError,
-      "`repro add` requires a repo name positional argument")
+      "`repro workspace add` requires a repo name positional argument")
   if result.remoteUrl.len == 0:
     raise newException(ValueError,
-      "`repro add` requires `--remote=<fetch-url>` so the develop-vs-binary " &
-        "policy can classify the dependency's origin")
+      "`repro workspace add` requires `--remote=<fetch-url>` so the " &
+        "develop-vs-binary policy can classify the repo's origin")
   result.workspaceRoot =
     if result.workspaceRoot.len > 0: absolutePath(result.workspaceRoot)
     else: getCurrentDir()
@@ -84007,10 +84043,10 @@ proc resolveAddProject(parsed: AddArgs): ResolvedProject =
   ## manifest-present workspace.
   if isCompositionalWorkspaceToml(parsed.workspaceRoot, parsed.projectName):
     raise newException(ValueError,
-      "`repro add` is not supported in a compositional (multi-layer) " &
+      "`repro workspace add` is not supported in a compositional (multi-layer) " &
         "workspace; add the repo to the owning manifest layer directly")
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
-    "`repro add <repo>`").resolved
+    "`repro workspace add <repo>`").resolved
 
 proc developPolicyMatches(remoteUrl: string; workspaceRoot: string): bool =
   ## RA-22 develop-vs-binary POLICY DEFAULT. The decision is driven ENTIRELY
@@ -84044,9 +84080,10 @@ proc defaultProfileMainline(rs: RoleSettings): string =
 proc cloneAddSibling(workspaceRoot, repoPath, fetchUrl, revision: string;
                      identity: GitToolIdentity):
     tuple[ok: bool; diagnostic: string] =
-  ## Arrange the develop-mode sibling checkout for ``repro add --develop`` by
-  ## scheduling a one-shot ``bakWorkspaceVcs`` clone through the SAME
-  ## ``gitCloneAction`` engine path ``init``/``sync`` use (RA-5c). The target
+  ## Arrange the develop-mode sibling checkout for
+  ## ``repro workspace add --develop`` by scheduling a one-shot
+  ## ``bakWorkspaceVcs`` clone through the SAME ``gitCloneAction`` engine path
+  ## ``init``/``sync`` use (RA-5c). The target
   ## ``<workspaceRoot>/<repoPath>`` must not pre-exist.
   let absTarget = workspaceRoot / repoPath
   if dirExists(absTarget):
@@ -84141,7 +84178,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
     result.checkedOut = false
     if parsed.dryRun:
       result.exitCode = 0
-      stderr.writeLine("repro add would record '" & parsed.target &
+      stderr.writeLine("repro workspace add would record '" & parsed.target &
         "' as a BINARY dependency of project '" & resolved.projectName &
         "' (no checkout)")
       return
@@ -84169,7 +84206,7 @@ proc executeAdd(parsed: AddArgs): AddReport =
       return
     if parsed.dryRun:
       result.exitCode = 0
-      stderr.writeLine("repro add would clone '" & parsed.target & "' as a " &
+      stderr.writeLine("repro workspace add would clone '" & parsed.target & "' as a " &
         (if isMembership: "DEVELOP-mode sibling" else: "standalone checkout") &
         " of project '" & resolved.projectName & "'" &
         (if isMembership: " and record it as a dependency" else: ""))
@@ -84191,85 +84228,59 @@ proc executeAdd(parsed: AddArgs): AddReport =
       result.declarationChanged = false
       result.exitCode = 0
       return
-    # Develop membership: record the remote, the repo fragment, and the
-    # `includes` edge so the dependency participates in the workspace.
-    # Reuse a declared remote that already serves this URL for this repo
-    # name; only fall back to a per-repo remote when none can. `repro add`
-    # keeps `[repo].name == target` because a dependent's repro.nim names the
-    # added repo by that name (`uses: "<target>"`, discovered at
-    # `../<target>/repro.nim`) and its lock records it under it — a fragment
-    # named after its server-side path would leave that name pointing at
-    # nothing. So the plan is asked to PRESERVE the name (`repro workspace
-    # repos add` takes the unrestricted plan and may put a server-side path
-    # in `name`), and a plan
-    # that would still rename the repo — a bare `…/<repo>.git` directory URL,
-    # where the name can only come out as `<repo>.git` — is declined in favour
-    # of a per-repo remote that keeps the fragment's identity intact.
-    var remoteName = ""
-    var remoteFetch = parsed.remoteUrl
-    try:
-      let declared = readProjectManifest(resolved.projectFile)
-      let defaultRemote =
-        if declared.project.default_remote.isSome:
-          declared.project.default_remote.get()
-        else:
-          ""
-      let plan = planRepoRemote(declared.remote, defaultRemote,
-        parsed.target, parsed.remoteUrl, preserveRepoName = true)
-      if plan.error.len == 0 and plan.repoName == parsed.target:
-        remoteName = plan.remoteName
-        remoteFetch = plan.mintedFetch
-    except CatchableError:
-      discard
-    if remoteName.len == 0:
-      remoteName = parsed.target & "-origin"
-      remoteFetch = parsed.remoteUrl
-    # The project file is edited through the manifest editor: the `[[remote]]`
-    # entry is added only when no remote of that name exists, and lands after
-    # the last `[[remote]]` block (never above a top-level key, which would
-    # re-bind that key to the remote table).
-    var projectDoc = loadManifestDoc(resolved.projectFile)
-    if remoteFetch.len > 0:
-      discard projectDoc.ensureArrayTableEntry("remote",
-        @[tomlField("name", tomlStr(remoteName)),
-          tomlField("fetch", tomlStr(remoteFetch))])
-    let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
-    createDir(manifestsRoot / "repos")
-    let fragmentRel = "repos/" & parsed.target & ".toml"
-    let fragmentAbs = manifestsRoot / "repos" / (parsed.target & ".toml")
+    # Develop membership: the remote, the repo fragment and the membership
+    # edge, declared by the SAME code `repro workspace repos add` declares a
+    # repo into a project with (`declareRepoInProject`), so the two verbs
+    # write identical manifests for the same repo, URL and mainline.
+    #
+    # The name is PRESERVED (`preserveRepoName`): `[repo].name` stays the
+    # target because a dependent's repro.nim names the added repo by that name
+    # (`uses: "<target>"`, discovered at `../<target>/repro.nim`) and its lock
+    # records it under it. A remote plan that would rename the repo — a bare
+    # `…/<repo>.git` directory URL, where the name can only come out as
+    # `<repo>.git` — is declined in favour of a per-repo remote.
+    #
     # `revision` is written only for a commit pin: a branch is the
     # fragment's `mainline`, and a redundant pin would freeze the repo on the
     # day it was added and silently stop it tracking that branch.
-    if not fileExists(fragmentAbs):
-      writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-        repo: RepoBody(name: parsed.target, path: repoPath,
-          remote: some(remoteName),
-          mainline: (if fragmentMainline.len > 0: some(fragmentMainline)
-                     else: none(string)),
-          revision: (if revisionIsPin: some(parsed.revision)
-                     else: none(string))))))
-    result.declarationChanged = projectDoc.appendInclude(fragmentRel)
-    projectDoc.saveManifestDoc()
+    let manifestsRoot = manifestsRoot(parsed.workspaceRoot)
+    let declared = declareRepoInProject(manifestsRoot, resolved.projectFile,
+      parsed.target, parsed.remoteUrl, checkoutPath = repoPath,
+      mainline = fragmentMainline, profile = "",
+      revision = (if revisionIsPin: parsed.revision else: ""),
+      writeFragment = not fileExists(
+        manifestsRoot / "repos" / (parsed.target & ".toml")),
+      preserveRepoName = true)
+    if declared.code != 0:
+      result.exitCode = declared.code
+      result.diagnostic = declared.diagnostic
+      return
+    result.declarationChanged = declared.edgeAdded
     result.exitCode = 0
+    # The repo list of the project changed, so the generated index has to
+    # follow (CLI/workspace.md, "The Generated Project Index").
+    refreshWorkspaceProjectsIndexBestEffort(parsed.workspaceRoot,
+      "repro workspace add")
 
 proc renderAddTextLines*(report: AddReport): seq[string] =
   if report.exitCode != 0:
-    result.add("repro add: error: " & report.diagnostic)
+    result.add("repro workspace add: error: " & report.diagnostic)
     return
-  var line = "repro add: " & report.target & " -> " & report.resolvedMode
+  var line = "repro workspace add: " & report.target & " -> " & report.resolvedMode
   if report.overridden:
     line.add(" (override; policy default was " & report.policyDefault & ")")
   result.add(line)
   if report.checkedOut:
-    result.add("repro add: checked out '" & report.target & "'")
+    result.add("repro workspace add: checked out '" & report.target & "'")
   if report.dependsEdgeOn.len > 0:
-    result.add("repro add: recorded depends edge: '" & report.dependsEdgeOn &
+    result.add("repro workspace add: recorded depends edge: '" & report.dependsEdgeOn &
       "' -> '" & report.target & "'")
 
-proc runAddCommand*(c: ReproCommandLineAdd): int =
-  ## ``repro add <repo> --remote=URL [--develop|--binary|--no-membership]
-  ## [--depends-of=REPO] …``. RA-22 develop-mode policy + workspace
-  ## membership (CLI/add.md, Workspace-And-Develop-Mode.md).
+proc runWorkspaceAddCommand*(c: ReproCommandLineWorkspaceAdd): int =
+  ## ``repro workspace add <repo> --remote=URL
+  ## [--develop|--binary|--no-membership] [--depends-of=REPO] …``. RA-22
+  ## develop-mode policy + workspace membership (CLI/workspace.md,
+  ## Workspace-And-Develop-Mode.md).
   let parsed = addArgsOf(c)
   let report = executeAdd(parsed)
   if parsed.json:
@@ -84279,7 +84290,7 @@ proc runAddCommand*(c: ReproCommandLineAdd): int =
       stdout.writeLine(line)
   report.exitCode
 
-# --- RA-9: `repro remove <repo>` (workspace context) ----------------------
+# --- RA-9: `repro workspace remove <repo>` (workspace context) ------------
 #
 # Per CLI/remove.md (workspace/develop-mode responsibilities) + the RA-10
 # note: removing a repo from the active workspace drops its declaration AND
@@ -84340,9 +84351,9 @@ proc toJsonNode*(report: RemoveReport): JsonNode =
     repos.add(obj)
   result["repos"] = repos
 
-proc removeArgsOf*(c: ReproCommandLineRemove): RemoveArgs =
-  ## ``repro remove <repo> [--force|--yes] [--dry-run] [--json]`` from its
-  ## configuration.
+proc removeArgsOf*(c: ReproCommandLineWorkspaceRemove): RemoveArgs =
+  ## ``repro workspace remove <repo> [--force|--yes] [--dry-run] [--json]``
+  ## from its configuration.
   result.toolProvisioning =
     if c.toolProvisioning.len > 0: parseToolProvisioning(c.toolProvisioning)
     else: tpmPathOnly
@@ -84352,7 +84363,7 @@ proc removeArgsOf*(c: ReproCommandLineRemove): RemoveArgs =
   result.target = c.repo
   if result.target.len == 0:
     raise newException(ValueError,
-      "`repro remove` requires a repo name positional argument")
+      "`repro workspace remove` requires a repo name positional argument")
   result.workspaceRoot =
     if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot)
     else: getCurrentDir()
@@ -84366,7 +84377,7 @@ proc resolveRemoveProject(parsed: RemoveArgs): ResolvedProject =
   ## disk) now resolves through the unified committed-lock source instead of
   ## raising — every manifest-present path is byte-unchanged.
   resolveWorkspaceProjectShared(parsed.workspaceRoot, parsed.projectName,
-    "`repro remove <repo>`").resolved
+    "`repro workspace remove <repo>`").resolved
 
 proc reachableExcluding(repos: seq[ResolvedRepo];
                         rootNames: HashSet[string];
@@ -84400,7 +84411,7 @@ proc reachableExcluding(repos: seq[ResolvedRepo];
 proc undeletableCheckoutDiagnostic(repo: ResolvedRepo; rejection: string;
                                    projectFile, workspaceRoot: string;
                                    landingStated = false): string =
-  ## The RA-28 shape of a `repro remove` refusal
+  ## The RA-28 shape of a `repro workspace remove` refusal
   ## (Interactive-UX-And-Progress.md Principle 2): NAME the offender and NAME
   ## a copy-pasteable remedy.
   ##
@@ -84412,7 +84423,8 @@ proc undeletableCheckoutDiagnostic(repo: ResolvedRepo; rejection: string;
   ## out of the project with nowhere to go. The remedy is real and specific:
   ## the DECLARATION can be dropped without touching the tree, by removing the
   ## fragment's line from the project's `includes` — which is exactly what
-  ## `repro remove` would have done, minus the delete it must not perform.
+  ## `repro workspace remove` would have done, minus the delete it must not
+  ## perform.
   ##
   ## And that is a COMMAND, not an editing instruction. `repro workspace repos
   ## remove <fragment>` drops the include edge from every membership that
@@ -84487,9 +84499,9 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
 
   let target = resolved.repos[matchIdx]
 
-  # `repro remove` ends in a `removeDir(<workspaceRoot> / repo.path)`, so it is
-  # a delete site and owes the OWN-TREE question — `checkoutPathRejection`,
-  # the same proc `runWorkspaceDisableCommand` asks immediately in front of
+  # `repro workspace remove` ends in a `removeDir(<workspaceRoot> /
+  # repo.path)`, so it is a delete site and owes the OWN-TREE question —
+  # `checkoutPathRejection`, the same proc `runWorkspaceDisableCommand` asks immediately in front of
   # its own `removeDir`. It is not the schema boundary's question: the reader
   # asks `declaredCheckoutPathRejection`, which admits `path = "."` because
   # that is how a workspace declares its ROOT repo. A value the model needs to
@@ -84499,9 +84511,9 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # The root reaches this command by two different routes, and they do not get
   # the same answer:
   #
-  #   * NAMED as the target (`repro remove ws-root`, or `repro remove .` —
-  #     the lookup above matches on `repo.name` OR `repo.path`). Refuse the
-  #     REQUEST, here, before anything is mutated. A GC that silently skipped
+  #   * NAMED as the target (`repro workspace remove ws-root`, or
+  #     `repro workspace remove .` — the lookup above matches on `repo.name`
+  #     OR `repo.path`). Refuse the REQUEST, here, before anything is mutated. A GC that silently skipped
   #     the delete would still drop the target's `includes` edge and still
   #     print a per-repo line, so the operator would be told a repo was
   #     removed while its tree stayed: the declaration and the disk
@@ -84666,7 +84678,7 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # declines is the preview being wrong, which is the one thing a preview
   # cannot be.
   let effectVerb = if parsed.dryRun: "would remove" else: "remove"
-  stderr.writeLine("repro remove will " & effectVerb & " " &
+  stderr.writeLine("repro workspace remove will " & effectVerb & " " &
     $(plan.len - refusedRemovals) &
     " repo(s) from project '" & resolved.projectName & "':")
   for p in plan:
@@ -84733,8 +84745,31 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # The `includes` entry is matched on its RESOLVED absolute fragment path,
   # so a `repos/<repo>.toml` entry is identified even if another repo shares
   # a name prefix, and only the `includes` array is edited.
+  #
+  # A fragment and project in this workspace's manifest repo are edited by
+  # the code `repro workspace repos remove` drops a project's edge with
+  # (`dropRepoEdgesInProject`), which drops it from whichever array carries
+  # it — `includes` (matched by resolved path there too) or `member_repos` —
+  # so this verb undoes what `repro workspace add` wrote in either spelling.
+  # A layout that code cannot reach (a manifest checkout under
+  # `.repro/manifests`) keeps the `includes` match below.
   var changed = false
-  block dropInclude:
+  let manifestsRootDir = manifestsRoot(parsed.workspaceRoot)
+  let fragmentStem = target.fragmentPath.splitFile.name
+  let nativeLayout =
+    target.fragmentPath.len > 0 and
+    os.normalizedPath(absolutePath(target.fragmentPath)) ==
+      os.normalizedPath(absolutePath(
+        manifestsRootDir / "repos" / (fragmentStem & ".toml"))) and
+    os.normalizedPath(absolutePath(resolved.projectFile.parentDir.parentDir)) ==
+      os.normalizedPath(absolutePath(manifestsRootDir))
+  if nativeLayout:
+    let dropped = dropRepoEdgesInProject(manifestsRootDir,
+      resolved.projectFile, fragmentStem)
+    if dropped.code != 0:
+      stderr.writeLine("repro workspace remove: " & dropped.diagnostic)
+    changed = dropped.dropped
+  else:
     var projectDoc = loadManifestDoc(resolved.projectFile)
     let includeRoot = parentDir(parentDir(absolutePath(resolved.projectFile)))
     for raw in projectDoc.arrayMembers("", "includes"):
@@ -84765,10 +84800,15 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
   # A refused removal means the run did NOT do what it previewed, so it must
   # not exit 0 — the same convention `repro workspace disable` follows.
   result.exitCode = if refusedRemovals > 0: 1 else: 0
+  # The project's repo list changed, so the generated index has to follow
+  # (CLI/workspace.md, "The Generated Project Index"); best-effort.
+  if changed:
+    refreshWorkspaceProjectsIndexBestEffort(parsed.workspaceRoot,
+      "repro workspace remove")
 
 proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
   for entry in report.repos:
-    var line = "repro remove: " & entry.path & " " & entry.effect
+    var line = "repro workspace remove: " & entry.path & " " & entry.effect
     if entry.diagnostic.len > 0:
       line.add(" (" & entry.diagnostic & ")")
     result.add(line)
@@ -84777,11 +84817,11 @@ proc renderRemoveTextLines*(report: RemoveReport): seq[string] =
   # has to be told which of the two halves happened. Every path that does not
   # touch the project file sets `declarationChanged = false` explicitly.
   if report.declarationChanged:
-    result.add("repro remove: dropped '" & report.target &
+    result.add("repro workspace remove: dropped '" & report.target &
       "' from project '" & report.project & "'")
 
-proc runRemoveCommand*(c: ReproCommandLineRemove): int =
-  ## ``repro remove <repo> [--force] [--dry-run] [--json]
+proc runWorkspaceRemoveCommand*(c: ReproCommandLineWorkspaceRemove): int =
+  ## ``repro workspace remove <repo> [--force] [--dry-run] [--json]
   ## [--workspace-root=PATH]``. RA-9 destructive-command safety: preview +
   ## confirm + refuse-cleanly-in-non-TTY for a workspace repo removal.
   let parsed = removeArgsOf(c)
@@ -84792,6 +84832,334 @@ proc runRemoveCommand*(c: ReproCommandLineRemove): int =
     for line in renderRemoveTextLines(report):
       stdout.writeLine(line)
   report.exitCode
+
+# --- `repro add <package>` / `repro remove <package>` -----------------------
+#
+# Per CLI/add.md and CLI/remove.md: the top-level verbs edit
+# the PACKAGE dependencies of the current project's `repro.nim` — `uses:` by
+# default, `buildDeps:` / `nativeBuildDeps:` / `runtimeDeps:` with
+# `--build` / `--native-build` / `--runtime` — the way `cargo add` edits
+# `Cargo.toml`. The edit itself is `recipe_dependency_edit` (pure, minimal,
+# byte-preserving). Workspace repositories are `repro workspace add|remove`;
+# the flags those verbs take are declared on these commands too, hidden, so
+# that a command line carrying one is REFUSED (exit 2, nothing changed) with
+# the exact `repro ws add|remove` command line that does what it asked.
+
+proc findProjectRecipe*(start: string): string =
+  ## The `repro.nim` of the project `start` is in: `start`'s own, else the
+  ## nearest ancestor's, looking no higher than the enclosing repository (the
+  ## nearest directory with a `.git` file or directory) or workspace root
+  ## (the nearest with `.repro/workspace-state.toml`), whichever is nearer;
+  ## "" when there is none within that boundary.
+  ##
+  ## The boundary is what keeps the edit inside the project: a repository
+  ## without a `repro.nim` of its own is not a project, and climbing past its
+  ## root would edit the recipe of whatever encloses it (a workspace root's
+  ## `repro.nim`, an unrelated checkout's) instead of saying there is none.
+  var dir = absolutePath(start)
+  while true:
+    if fileExists(dir / "repro.nim"):
+      return dir / "repro.nim"
+    if fileExists(dir / ".git") or dirExists(dir / ".git") or
+        fileExists(dir / ".repro" / "workspace-state.toml"):
+      return ""
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      return ""
+    dir = parent
+
+proc refusedWordsOf(c: ReproCommandLineAdd): tuple[flags, words: seq[string]] =
+  ## The workspace-repository flags given to `repro add` (`flags`, as their
+  ## names) and the same flags as `repro ws add` takes them (`words`).
+  if c.remote.isSome:
+    result.flags.add("--remote")
+    result.words.add("--remote=" & c.remote.get())
+  if c.revision.isSome:
+    result.flags.add("--revision")
+    result.words.add("--revision=" & c.revision.get())
+  if c.develop:
+    result.flags.add("--develop")
+    result.words.add("--develop")
+  if c.binary:
+    result.flags.add("--binary")
+    result.words.add("--binary")
+  if c.noMembership:
+    result.flags.add("--no-membership")
+    result.words.add("--no-membership")
+  if c.dependsOf.isSome:
+    result.flags.add("--depends-of")
+    result.words.add("--depends-of=" & c.dependsOf.get())
+  if c.workspaceRoot.len > 0:
+    result.flags.add("--workspace-root")
+    result.words.add("--workspace-root=" & c.workspaceRoot)
+  if c.toolProvisioning.len > 0:
+    result.flags.add("--tool-provisioning")
+    result.words.add("--tool-provisioning=" & c.toolProvisioning)
+  if c.json:
+    result.flags.add("--json")
+    result.words.add("--json")
+
+proc refusedWordsOf(c: ReproCommandLineRemove): tuple[flags,
+    words: seq[string]] =
+  ## The workspace-repository flags given to `repro remove`, as for `add`.
+  if c.force:
+    result.flags.add("--force")
+    result.words.add("--force")
+  if c.workspaceRoot.len > 0:
+    result.flags.add("--workspace-root")
+    result.words.add("--workspace-root=" & c.workspaceRoot)
+  if c.toolProvisioning.len > 0:
+    result.flags.add("--tool-provisioning")
+    result.words.add("--tool-provisioning=" & c.toolProvisioning)
+  if c.json:
+    result.flags.add("--json")
+    result.words.add("--json")
+
+proc refuseWorkspaceFlags(verb, target: string; flags, words: seq[string];
+                          dryRun: bool; dropped: seq[string]): int =
+  ## The refusal of a workspace-repository flag given to top-level `repro
+  ## add|remove`: `error:` naming the flags, `tip:` with the exact `repro ws
+  ## <verb>` command line carrying them. Exit 2; nothing has been read or
+  ## written.
+  var tip = @["repro", "ws", verb,
+    (if target.len > 0: quoteShell(target) else: "<repo>")]
+  for w in words: tip.add(quoteShell(w))
+  if dryRun: tip.add("--dry-run")
+  var plural = flags.len > 1
+  var quoted: seq[string]
+  for f in flags: quoted.add("`" & f & "`")
+  stderr.writeLine("repro " & verb & ": error: " & quoted.join(", ") &
+    (if plural: " are flags" else: " is a flag") &
+    " of `repro workspace " & verb & "` (workspace repositories); `repro " &
+    verb & "` " & (if verb == "add": "adds a package dependency to"
+                   else: "removes a package dependency from") &
+    " the current project's repro.nim. Nothing was changed.")
+  if dropped.len > 0:
+    stderr.writeLine("repro " & verb & ": note: " & dropped.join(", ") &
+      " only apply to package dependencies and are left out below.")
+  stderr.writeLine("tip: to " & verb & " the workspace repository, run: " &
+    tip.join(" "))
+  2
+
+proc declaredWorkspaceRepo(name: string): string =
+  ## The fragment declaring `name` as a repository of the workspace the
+  ## current directory is in (`repos/<name>.toml`, or a fragment whose
+  ## `[repo].name` or `path` is `name`, the two ways `repro ws remove`
+  ## matches its target), or "" when there is none or no workspace. Read only
+  ## to word a hint, so an unreadable fragment is skipped, never an error.
+  let root = findWorkspaceRoot(getCurrentDir())
+  if root.len == 0 or name.len == 0: return ""
+  let reposDir = manifestsRoot(root) / "repos"
+  if fileExists(reposDir / (name & ".toml")):
+    return reposDir / (name & ".toml")
+  if not dirExists(reposDir): return ""
+  for kind, path in walkDir(reposDir):
+    if kind notin {pcFile, pcLinkToFile} or not path.endsWith(".toml"):
+      continue
+    try:
+      let fragment = readRepoFragment(path)
+      if fragment.repo.name == name or fragment.repo.path == name:
+        return path
+    except CatchableError:
+      discard
+  ""
+
+proc projectRecipeOrTip(verb, target: string): string =
+  ## The current project's `repro.nim`, or "" after saying there is none
+  ## (with the workspace verb as a tip: the old meaning of this command).
+  result = findProjectRecipe(getCurrentDir())
+  if result.len == 0:
+    stderr.writeLine("repro " & verb & ": error: no repro.nim in " &
+      getCurrentDir() & " or above it within its repository or " &
+      "workspace; `repro " & verb & "` edits the package dependencies of " &
+      "the current project's repro.nim")
+    stderr.writeLine("tip: to " & verb & " a workspace repository, run: " &
+      "repro ws " & verb & " " &
+      (if target.len > 0: quoteShell(target) else: "<repo>") &
+      (if verb == "add": " --remote=<url>" else: ""))
+
+proc printLockFollowUp(verb, recipe, package, edited: string;
+                       sections: seq[string]; removed: seq[string]) =
+  ## The lock step after an edit (CLI/add.md, "The lock"). The edit changes
+  ## the recipe, not the lock, and the command does not solve. It VALIDATES
+  ## the lock against the edit offline instead (`compareWithLock`: the
+  ## lock's resolved packages against the unconditional entries of the
+  ## sections edited, by name and version range), says which of the outcomes
+  ## holds, and names the command that re-solves it.
+  let dir = recipe.parentDir
+  let refresh = "repro lock refresh " & quoteShell(dir)
+  let lockPath = dir / CommittedLockFileName
+  if not fileExists(lockPath):
+    stdout.writeLine("repro " & verb & ": the project has no repro.lock; " &
+      "solve one with: " & refresh)
+    return
+  var quotedSections: seq[string]
+  for sec in sections: quotedSections.add("`" & sec & ":`")
+  let what = quotedSections.join(", ") & " of package '" & package & "'"
+  let cmp = compareWithLock(edited, package, sections, readFile(lockPath),
+    removed)
+  case cmp.agreement
+  of laUnreadable:
+    stdout.writeLine("repro " & verb & ": repro.lock could not be read as " &
+      "a lock (" & cmp.diagnostic & "), so it was not compared with the " &
+      "edit; re-solve it with: " & refresh)
+    return
+  of laStale:
+    var parts: seq[string]
+    if cmp.missing.len > 0:
+      parts.add("it resolves no package for " & cmp.missing.join(", "))
+    if cmp.outside.len > 0:
+      parts.add("it resolves outside the range of " & cmp.outside.join(", "))
+    stdout.writeLine("repro " & verb & ": repro.lock is stale for " & what &
+      ": " & parts.join("; ") & "; re-solve it with: " & refresh)
+  of laUndecided:
+    stdout.writeLine("repro " & verb & ": repro.lock still resolves " &
+      cmp.stillLocked.join(", ") & "; the lock records no dependency " &
+      "edges, so whether another dependency still requires it is decided " &
+      "only by a solve; re-solve it with: " & refresh)
+  of laConsistent:
+    stdout.writeLine("repro " & verb & ": repro.lock is consistent with " &
+      what & ": it resolves each of its " & $cmp.compared &
+      " unconditional entr" & (if cmp.compared == 1: "y" else: "ies") &
+      " within its range" &
+      (if removed.len > 0: " and no longer resolves " & removed.join(", ")
+       else: "") & "; it was solved before this edit, so re-solving " &
+      "records the edit: " & refresh)
+  if cmp.notCompared.len > 0:
+    stdout.writeLine("repro " & verb & ": note: not compared (a locked " &
+      "version the range grammar cannot read): " & cmp.notCompared.join(", "))
+
+proc printWorkspaceRepoNote(verb, name: string) =
+  ## Bare `repro add|remove <repo>` once managed workspace repositories. When
+  ## the package named is also a repository this workspace declares, say
+  ## which verb manages repositories, so an old command line that now edited
+  ## repro.nim is noticed.
+  let fragment = declaredWorkspaceRepo(name)
+  if fragment.len > 0:
+    stdout.writeLine("repro " & verb & ": note: '" & name & "' is also a " &
+      "repository of this workspace (" & fragment & "); `repro ws " & verb &
+      "` manages workspace repositories, `repro " & verb & "` the package " &
+      "dependencies of repro.nim")
+
+proc runPackageAddCommand*(c: ReproCommandLineAdd): int =
+  ## ``repro add <package[@constraint]> [--build|--native-build|--runtime]
+  ## [--package=NAME] [--dry-run]``.
+  var scopes: seq[string]
+  var section = "uses"
+  if c.build:
+    scopes.add("--build")
+    section = "buildDeps"
+  if c.nativeBuild:
+    scopes.add("--native-build")
+    section = "nativeBuildDeps"
+  if c.runtime:
+    scopes.add("--runtime")
+    section = "runtimeDeps"
+  let refused = refusedWordsOf(c)
+  if refused.flags.len > 0:
+    var dropped = scopes
+    if c.package.len > 0: dropped.add("--package")
+    return refuseWorkspaceFlags("add", c.dependency, refused.flags,
+      refused.words, c.dryRun, dropped)
+  if c.dependency.len == 0:
+    stderr.writeLine("repro add: error: name the package to add " &
+      "(`repro add <package[@constraint]>`)")
+    return 2
+  if scopes.len > 1:
+    stderr.writeLine("repro add: error: " & scopes.join(" and ") &
+      " name different sections; give at most one")
+    return 2
+  let request = parseDependencyRequest(c.dependency)
+  if not request.ok:
+    stderr.writeLine("repro add: error: " & request.diagnostic)
+    return 2
+  let recipe = projectRecipeOrTip("add", request.selector)
+  if recipe.len == 0:
+    return 1
+  let before = readFile(recipe)
+  let choice = choosePackage(before, c.package, recipe)
+  if not choice.ok:
+    stderr.writeLine("repro add: error: " & choice.diagnostic)
+    return (if choice.usage: 2 else: 1)
+  let edit = addDependency(before, choice.name, section, request.entry)
+  case edit.status
+  of desUnchanged:
+    stdout.writeLine("repro add: " & edit.diagnostic & "; nothing to change")
+    return 0
+  of desRefused, desNotFound:
+    stderr.writeLine("repro add: error: " & edit.diagnostic & " (" &
+      recipe & ")")
+    return 1
+  of desChanged:
+    let label = relativePath(recipe, getCurrentDir())
+    if c.dryRun:
+      stdout.write(renderDependencyDiff(label, before, edit.hunks))
+      stdout.writeLine("repro add: --dry-run: " & label & " was not written")
+      printWorkspaceRepoNote("add", request.selector)
+      return 0
+    writeFile(recipe, edit.text)
+    stdout.writeLine("repro add: added \"" & request.entry & "\" to `" &
+      section & ":` of package '" & choice.name & "' in " & label)
+    printWorkspaceRepoNote("add", request.selector)
+    printLockFollowUp("add", recipe, choice.name, edit.text, @[section], @[])
+    return 0
+
+proc runPackageRemoveCommand*(c: ReproCommandLineRemove): int =
+  ## ``repro remove <package> [--package=NAME] [--dry-run]``.
+  let refused = refusedWordsOf(c)
+  if refused.flags.len > 0:
+    var dropped: seq[string]
+    if c.package.len > 0: dropped.add("--package")
+    return refuseWorkspaceFlags("remove", c.dependency, refused.flags,
+      refused.words, c.dryRun, dropped)
+  if c.dependency.len == 0:
+    stderr.writeLine("repro remove: error: name the package to remove " &
+      "(`repro remove <package>`)")
+    return 2
+  let request = parseDependencyRequest(c.dependency)
+  if not request.ok or request.entry != request.selector:
+    stderr.writeLine("repro remove: error: " &
+      (if request.ok: "'" & c.dependency & "': name the package alone; " &
+         "`repro remove` removes every unconditional entry naming it"
+       else: request.diagnostic))
+    return 2
+  let recipe = projectRecipeOrTip("remove", request.selector)
+  if recipe.len == 0:
+    return 1
+  let before = readFile(recipe)
+  let choice = choosePackage(before, c.package, recipe)
+  if not choice.ok:
+    stderr.writeLine("repro remove: error: " & choice.diagnostic)
+    return (if choice.usage: 2 else: 1)
+  let edit = removeDependency(before, choice.name, request.selector)
+  case edit.status
+  of desUnchanged, desNotFound, desRefused:
+    stderr.writeLine("repro remove: error: " & edit.diagnostic & " (" &
+      recipe & ")")
+    if edit.status == desNotFound:
+      # Bare `repro remove <repo>` once removed a workspace repository.
+      let fragment = declaredWorkspaceRepo(request.selector)
+      if fragment.len > 0:
+        stderr.writeLine("tip: '" & request.selector & "' is a repository " &
+          "of this workspace (" & fragment & "); to remove it from the " &
+          "workspace, run: repro ws remove " & quoteShell(request.selector))
+    return 1
+  of desChanged:
+    let label = relativePath(recipe, getCurrentDir())
+    if c.dryRun:
+      stdout.write(renderDependencyDiff(label, before, edit.hunks))
+      stdout.writeLine("repro remove: --dry-run: " & label &
+        " was not written")
+      return 0
+    writeFile(recipe, edit.text)
+    var sections: seq[string]
+    for sec in edit.sections: sections.add("`" & sec & ":`")
+    stdout.writeLine("repro remove: removed '" & request.selector &
+      "' from " & sections.join(", ") & " of package '" & choice.name &
+      "' in " & label)
+    printLockFollowUp("remove", recipe, choice.name, edit.text,
+      edit.sections, @[request.selector])
+    return 0
 
 proc copyWorkingTreeChanges(identity: GitToolIdentity;
                             srcRepo, dstRepo, scratchDir, label: string):
@@ -103412,6 +103780,145 @@ proc projectEdgeStyle(projectFile: string): ProjectEdgeStyle =
     discard
   pesNone
 
+proc declareRepoInProject(manifestRoot, projectFile, repo, remoteUrl,
+    checkoutPath, mainline, profile, revision: string;
+    writeFragment, preserveRepoName: bool): ProjectRepoDeclaration =
+  ## Declare `repo`, fetched from `remoteUrl`, in the PROJECT manifest
+  ## `projectFile`: its fragment `repos/<repo>.toml` (when `writeFragment`),
+  ## the `[[remote]]` that fragment names (when the remote plan mints one),
+  ## and the membership edge, in the spelling the file already uses
+  ## (`projectEdgeStyle`). The one implementation of "declare a repo in a
+  ## project" that `repro workspace repos add` and `repro workspace add`
+  ## (develop mode) share, so the two verbs cannot write different
+  ## manifests for the same repo, URL and mainline.
+  ##
+  ## `preserveRepoName` keeps `[repo].name == repo` whatever the URL's
+  ## server-side path is: a plan that would rename the repo is declined in
+  ## favour of a per-repo `<repo>-origin` remote carrying the full URL.
+  ## `repro workspace add` asks for it because a dependent's repro.nim names
+  ## the repo by that name; `repos add` takes the unrestricted plan.
+  var manifest: ProjectManifest
+  try:
+    manifest = readProjectManifest(projectFile)
+  except CatchableError as exc:
+    result.code = 1
+    result.diagnostic = "cannot read " & projectFile & ": " & exc.msg
+    return
+  let defaultRemote = manifest.project.default_remote.get("")
+  let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remoteUrl,
+    preserveRepoName = preserveRepoName)
+  if preserveRepoName and (plan.error.len > 0 or plan.repoName != repo):
+    result.repoName = repo
+    result.remoteName = repo & "-origin"
+    result.mintedFetch = remoteUrl
+  elif plan.error.len > 0:
+    result.code = 1
+    result.diagnostic = plan.error
+    return
+  else:
+    result.repoName = plan.repoName
+    result.remoteName = plan.remoteName
+    result.mintedFetch = plan.mintedFetch
+  let checkout = if checkoutPath.len > 0: checkoutPath else: repo
+  if writeFragment:
+    createDir(manifestRoot / "repos")
+    writeWorkspaceManifestFile(manifestRoot / "repos" / (repo & ".toml"),
+      repoFragmentText(RepoFragment(
+        repo: RepoBody(name: result.repoName, path: checkout,
+          remote: some(result.remoteName),
+          mainline: (if mainline.len > 0: some(mainline) else: none(string)),
+          profile: (if profile.len > 0: some(profile) else: none(string)),
+          revision: (if revision.len > 0: some(revision)
+                     else: none(string))))))
+    result.fragmentWritten = true
+  if result.mintedFetch.len > 0:
+    # Added only when no remote of that name exists, after the last
+    # `[[remote]]` block (never above a top-level key, which would re-bind
+    # that key to the remote table).
+    var projectDoc = loadManifestDoc(projectFile)
+    discard projectDoc.ensureArrayTableEntry("remote",
+      @[tomlField("name", tomlStr(result.remoteName)),
+        tomlField("fetch", tomlStr(result.mintedFetch))])
+    projectDoc.saveManifestDoc()
+  # THE EDGE. Which spelling it takes is read off the project FILE, but only
+  # for a file that ALREADY uses one: a project is the one file kind that can
+  # be authored either way, `includes` (fragment PATHS, the deprecated
+  # original) or `member_repos` (NAMES, the membership model's spelling).
+  #
+  # Writing `member_repos` unconditionally appended a SECOND membership array
+  # beside an `includes`-only project's, and `repos remove`, which answered
+  # "who still references this fragment" from `includes`, could no longer see
+  # the edge. Writing an `includes` path unconditionally is the regression
+  # `t_repos_add_records_project_membership_by_key` pins: in a converted
+  # manifest the path landed inside `member_sets` and the project stopped
+  # resolving. Neither spelling is right for both shapes; the file's own is.
+  case projectEdgeStyle(projectFile)
+  of pesIncludes:
+    # Located by key, never positionally. `includes` is deprecated; this arm
+    # exists only so that adding one repo does not convert the file.
+    result.edgeAdded = addArrayMemberInFile(projectFile, "", includesKey,
+      "repos/" & repo & ".toml")
+  of pesNone, pesMembers:
+    # `pesNone` — a project scaffolded with neither array — is authored on the
+    # membership model's spelling. The key is read off what the name resolves
+    # to, and the array located BY ITS KEY; the manifest editor creates a
+    # missing array ahead of the first table header, where a top-level key
+    # has to sit.
+    let memberKey = membershipKeyFor(manifestRoot, repo)
+    if memberKey != memberReposKey:
+      result.code = 2
+      result.diagnostic = "'" & repo & "' does not resolve to a repo " &
+        "fragment (" & (manifestRoot / "repos" / (repo & ".toml")) &
+        "); refusing to guess which membership key it belongs under"
+      return
+    result.edgeAdded = addArrayMemberInFile(projectFile, "", memberKey, repo)
+
+proc dropRepoEdgesInProject(manifestRoot, projectFile, repo: string):
+    tuple[code: int; dropped: bool; diagnostic: string] =
+  ## Drop the membership edge naming the fragment `repos/<repo>.toml` from
+  ## the PROJECT manifest `projectFile`: the one implementation `repro
+  ## workspace repos remove` and `repro workspace remove` share.
+  ##
+  ## It mirrors `declareRepoInProject`, and has to mirror BOTH of its
+  ## spellings: a project declares its repos either as fragment paths under
+  ## `includes` or as names under `member_repos`. Both are attempted rather
+  ## than one selected, because a half-converted project can carry the same
+  ## repo in both arrays, and dropping only one would leave the repo declared
+  ## after a command that reported it removed.
+  ##
+  ## An `includes` entry is a PATH, resolved against the manifest root (the
+  ## project file's grandparent), so it is matched on the path it resolves to
+  ## — `repos/x.toml`, `./repos/x.toml` and `repos//x.toml` name one fragment
+  ## — and never on a name prefix (`repos/x.toml` is not `repos/xy.toml`).
+  let fragmentAbs = os.normalizedPath(absolutePath(
+    manifestRoot / "repos" / (repo & ".toml")))
+  let includeRoot = parentDir(parentDir(absolutePath(projectFile)))
+  var spelled: seq[string]
+  try:
+    for raw in loadManifestDoc(projectFile).arrayMembers("", includesKey):
+      if os.normalizedPath(absolutePath(
+          includeRoot / raw.replace('/', DirSep))) == fragmentAbs:
+        spelled.add(raw)
+  except CatchableError as exc:
+    result.code = 1
+    result.diagnostic = "cannot read " & projectFile & ": " & exc.msg
+    return
+  for raw in spelled:
+    if removeArrayMemberInFile(projectFile, "", includesKey, raw):
+      result.dropped = true
+  let memberKey = membershipKeyFor(manifestRoot, repo)
+  if memberKey.len == 0:
+    if not result.dropped:
+      result.code = 2
+      result.diagnostic = "'" & repo & "' resolves to neither a repo " &
+        "fragment nor a repo-set (looked for " &
+        (manifestRoot / "repos" / (repo & ".toml")) & " and " &
+        (manifestRoot / "repo-sets" / (repo & ".toml")) &
+        "); refusing to guess which membership key to edit in " &
+        relativePath(projectFile, manifestRoot).replace('\\', '/')
+  elif removeArrayMemberInFile(projectFile, "", memberKey, repo):
+    result.dropped = true
+
 proc projectsIncludingFragment(manifestRoot, fragmentRel: string): seq[string] =
   ## Which projects carry an ``includes`` edge to ``fragmentRel``. This is the
   ## authority for "is this fragment still referenced" — the question both
@@ -104480,118 +104987,23 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
           (if plan.mintedUrl.len > 0: " (new prefix, url " & plan.mintedUrl & ")"
            else: " (reused)"))
       of mkProject:
-        var manifest: ProjectManifest
-        try:
-          manifest = readProjectManifest(target.abs)
-        except CatchableError as exc:
-          stderr.writeLine("repro workspace repos add: cannot read " &
-            target.abs & ": " & exc.msg)
-          return 1
-        let defaultRemote =
-          if manifest.project.default_remote.isSome:
-            manifest.project.default_remote.get()
-          else:
-            ""
-        let plan = planRepoRemote(manifest.remote, defaultRemote, repo, remote)
-        if plan.error.len > 0:
-          stderr.writeLine("repro workspace repos add: " & target.name & ": " &
-            plan.error)
-          return 1
-        if not fragmentExisted:
-          createDir(manifestRoot / "repos")
-          writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            repo: RepoBody(name: plan.repoName, path: effectivePath,
-              remote: some(plan.remoteName),
-              mainline: (if mainline.len > 0: some(mainline)
-                         else: none(string)),
-              profile: (if profile.len > 0: some(profile) else: none(string)),
-              revision: (if revision.len > 0: some(revision)
-                         else: none(string))))))
+        # The fragment, its remote and the project's membership edge, by the
+        # code `repro workspace add` declares a develop-mode repo with.
+        let declared = declareRepoInProject(manifestRoot, target.abs, repo,
+          remote, checkoutPath = effectivePath, mainline = mainline,
+          profile = profile, revision = revision,
+          writeFragment = not fragmentExisted, preserveRepoName = false)
+        if declared.code != 0:
+          stderr.writeLine("repro workspace repos add: " & target.name &
+            ": " & declared.diagnostic)
+          return declared.code
+        if declared.fragmentWritten:
           paths.add(fragmentRel)
           fragmentExisted = true
-        if plan.mintedFetch.len > 0:
-          var projectDoc = loadManifestDoc(target.abs)
-          discard projectDoc.ensureArrayTableEntry("remote",
-            @[tomlField("name", tomlStr(plan.remoteName)),
-              tomlField("fetch", tomlStr(plan.mintedFetch))])
-          projectDoc.saveManifestDoc()
-        # THE EDGE. Declaring the fragment is only half of `repos add`: the
-        # project has to say it participates, or the manifest is left
-        # incoherent — a fragment nothing references (CLI/workspace.md
-        # §"`repro workspace project`": "records a repo fragment
-        # (`repos/<repo>.toml`), wires its remote + `includes` edge into the
-        # project manifest, commits, and pushes").
-        #
-        # WHICH spelling the edge takes is read off the project FILE, but
-        # only for a file that ALREADY uses one. A project is the one file
-        # kind that can be authored either way: `includes` (fragment PATHS,
-        # the deprecated original) or `member_repos` (NAMES, the membership
-        # model's spelling, which every project manifest in the metacraft
-        # manifest repo now carries). Both still resolve — `resolveProject`
-        # expands `member_*` after `includes` — so a manifest may sit in
-        # either state, and the verb must add to the array that is THERE
-        # rather than convert the file as a side effect of adding one repo.
-        #
-        # A file that uses NEITHER is not a style question: it is authored on
-        # the model. See the `pesNone` arm below.
-        #
-        # Writing `member_repos` unconditionally is what this branch used to
-        # do, and against an `includes`-only project it appended a SECOND,
-        # empty-until-now membership array beside the `includes` array the
-        # project actually uses. The repo resolved, so the damage was quiet:
-        # `includes` no longer listed every repo the project declares, and
-        # `repos remove`, which answers "who still references this fragment"
-        # from `includes`, could no longer see the edge it had just written.
-        #
-        # Conversely, writing an `includes` path unconditionally is the
-        # regression `t_repos_add_records_project_membership_by_key` pins: in
-        # a converted manifest a positional include-append put the
-        # path inside `member_sets` and the project stopped resolving
-        # entirely. Neither spelling is right for both shapes; the file's own
-        # is.
-        case projectEdgeStyle(target.abs)
-        of pesIncludes:
-          # An `includes`-only project keeps being authored in `includes`.
-          # Located by key, never positionally, for the reason above.
-          #
-          # This branch exists only to avoid CONVERTING a file as a side
-          # effect of adding one repo. `includes` is deprecated and nothing
-          # new is authored into it (see `pesNone` below); a manifest that
-          # still carries it is edited in place until someone converts it
-          # deliberately.
-          discard addArrayMemberInFile(target.abs, "", includesKey,
-            fragmentRel)
-        of pesNone, pesMembers:
-          # Same rule as the repo-set branch above: the membership key is read
-          # off what the name resolves to, and the array is located BY ITS KEY.
-          #
-          # `pesNone` — a project scaffolded by `projects add` with no
-          # `--template`, which carries neither array — is authored HERE, on
-          # the membership model's spelling, not on `includes`. `includes` is
-          # the superseded mechanism: all 12 project manifests in the metacraft
-          # manifest repo carry `member_sets`/`member_repos` and none carries
-          # an `includes` array, so authoring a new project onto `includes`
-          # would create, on every `projects add`, the one shape a conversion
-          # exists to remove.
-          #
-          # A freshly scaffolded file has no array to extend, so the manifest
-          # editor creates one — ahead of the FIRST table header, because a
-          # bare `member_repos = [ … ]` written after `[project]` is
-          # TOML-bound to that table and the strict decode then rejects
-          # `project.member_repos`. The editor enforces that placement for
-          # every top-level key, and a `pesNone` project is precisely the
-          # file that needs it.
-          let memberKey = membershipKeyFor(manifestRoot, repo)
-          if memberKey != memberReposKey:
-            stderr.writeLine("repro workspace repos add: '" & repo &
-              "' does not resolve to a repo fragment (" &
-              (manifestRoot / "repos" / (repo & ".toml")) &
-              "); refusing to guess which membership key it belongs under")
-            return 2
-          discard addArrayMemberInFile(target.abs, "", memberKey, repo)
         paths.add(target.rel)
-        remoteNames.add(target.name & "=" & plan.remoteName &
-          (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
+        remoteNames.add(target.name & "=" & declared.remoteName &
+          (if declared.mintedFetch.len > 0:
+             " (new, fetch " & declared.mintedFetch & ")"
            else: " (reused)"))
 
     let docRel = "repos/" & repo & ".md"
@@ -104662,31 +105074,13 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
           return 2
         dropped = removeArrayMemberInFile(target.abs, "", memberKey, repo)
       of mkProject:
-        # Mirrors the add path, and has to mirror BOTH of its spellings: a
-        # project declares its repos either as fragment paths under `includes`
-        # or as names under `member_repos`, so `remove` drops the edge from
-        # whichever array carries it or it cannot undo what `add` wrote.
-        #
-        # Both are attempted rather than one being selected, because a
-        # half-converted project can legitimately carry the same repo in both
-        # arrays (that is what a conversion in progress looks like), and
-        # dropping only the spelling that `projectEdgeStyle` prefers would
-        # leave the other edge behind — the repo would still be declared after
-        # a command that reported it removed.
-        if removeArrayMemberInFile(target.abs, "", includesKey, fragmentRel):
-          dropped = true
-        let memberKey = membershipKeyFor(manifestRoot, repo)
-        if memberKey.len == 0:
-          if not dropped:
-            stderr.writeLine("repro workspace repos remove: '" & repo &
-              "' resolves to neither a repo fragment nor a repo-set (looked " &
-              "for " & (manifestRoot / "repos" / (repo & ".toml")) & " and " &
-              (manifestRoot / "repo-sets" / (repo & ".toml")) &
-              "); refusing to guess which membership key to edit in " &
-              target.rel)
-            return 2
-        elif removeArrayMemberInFile(target.abs, "", memberKey, repo):
-          dropped = true
+        # The edge is dropped by the code `repro workspace remove` drops it
+        # with: from `includes` and from `member_repos`, whichever carry it.
+        let res = dropRepoEdgesInProject(manifestRoot, target.abs, repo)
+        if res.code != 0:
+          stderr.writeLine("repro workspace repos remove: " & res.diagnostic)
+          return res.code
+        dropped = res.dropped
       if dropped:
         droppedFrom.add(project)
         paths.add(target.rel)
@@ -105330,6 +105724,12 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
     of Cmd.repos:
       label = "repro workspace repos"
       return runWorkspaceReposCommand(c.repos)
+    of Cmd.add:
+      label = "repro workspace add"
+      return runWorkspaceAddCommand(c.add)
+    of Cmd.remove:
+      label = "repro workspace remove"
+      return runWorkspaceRemoveCommand(c.remove)
     of Cmd.status:
       label = "repro workspace status"
       return runWorkspaceStatusCommand(c.status)
@@ -105767,18 +106167,17 @@ proc runReproCommandLine(programName: string; args: seq[string];
       stderr.writeLine("repro lock: error: " & err.msg)
       return 1
   of ReproCommandLineCommand.add:
-    # `repro add <repo>`: workspace membership and develop-mode
-    # policy. The policy (`[develop] org_urls`) decides develop vs binary by
-    # default; `--develop`/`--binary` override; `--no-membership` clones
-    # without adding.
+    # `repro add <package>`: a package dependency of the current project's
+    # repro.nim. A workspace-repository flag is refused with the `repro ws
+    # add` command line that takes it.
     try:
-      return runAddCommand(conf.add)
+      return runPackageAddCommand(conf.add)
     except CatchableError as err:
       stderr.writeLine("repro add: error: " & err.msg)
       return 1
   of ReproCommandLineCommand.remove:
     try:
-      return runRemoveCommand(conf.remove)
+      return runPackageRemoveCommand(conf.remove)
     except CatchableError as err:
       stderr.writeLine("repro remove: error: " & err.msg)
       return 1

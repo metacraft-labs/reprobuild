@@ -69,6 +69,18 @@ overwritten; `evidence-enrol` refuses a host that already has either one.
   let the host append. Remove it from there to revoke that host alone.
   Until you copy it, records wait on the host.
 
+The unit that ships records, `repro-addon-evidence.service`, does not run
+as root. It runs as its own dynamic user (`repro-addon-evidence`) with no
+capabilities, and systemd hands it the sink credential at start
+(`LoadCredential=`), so the credential file itself stays readable by root
+only. The unit can reach the sink's address and nothing else; it cannot
+open a Unix socket, so it cannot talk to systemd or the system bus. Its
+queue of records waiting to leave, the outbox, lives in that user's state
+directory, `/var/lib/private/repro-addon-evidence/outbox`.
+`evidence-credential-check`, `contain` and `release` reach the sink the
+same way: they start a short-lived unit with exactly that confinement and
+read its result.
+
 To check the credential from the host, run
 `repro system addon evidence-credential-check`. An append must be
 acknowledged, and a list, a read, an overwrite and a delete must each be

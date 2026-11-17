@@ -231,7 +231,7 @@ type
       ## the CLI fills it from each checkout's lock when it resolves a
       ## workspace (`withRecipeDerivedEdges` in `repro_cli_support`). Every
       ## closure question (the pre-push gate's scope, `repro push` ordering,
-      ## the mutual-pin rule, `repro remove`'s reachability) walks these.
+      ## the mutual-pin rule, `repro ws remove`'s reachability) walks these.
     directDepends*: seq[string]
       ## The subset of `depends` this repo's own recipe names: the `depends`
       ## of its committed `repro.lock`'s root entry, which lock generation
@@ -693,7 +693,7 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
 # got — see `preserveRepoName` below.
 #
 # `preserveRepoName` is for callers that cannot accept a server-side name:
-# `repro add` adds a repo that a `repro.nim` `uses:` selector names by its
+# `repro ws add` adds a repo that a `repro.nim` `uses:` selector names by its
 # `[repo].name` (and checks it out at that name), so a fragment whose `name` is
 # not the added repo's own name would leave the selector naming nothing. Such a
 # caller asks for a plan that keeps the name, which restricts rule 1 to bases

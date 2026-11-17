@@ -3,7 +3,7 @@
 ##
 ## * The shipping unit runs with no capability, reaches the sink's address
 ##   only, and cannot see the attestation key, the recipient key, the
-##   secrets or the store; the path unit starts it the moment a record is
+##   secrets or anything else of ``/var/lib/repro`` (§13 decision 181); the path unit starts it the moment a record is
 ##   written; the timer heartbeats. A host bootstrapped without a sink has
 ##   none of these objects and keeps its generation 0 byte for byte.
 ## * Every tick outcome that threat model §9 names maps to its detector.
@@ -52,13 +52,14 @@ suite "generation 0 with an Evidence sink":
     check "ProtectSystem=strict\n" in u
     check "IPAddressDeny=any\n" in u
     check "IPAddressAllow=10.0.2.100\n" in u
-    check "/var/lib/repro/agent" in u
+    # §13 decision 181: the whole of /var/lib/repro is hidden (the agent's
+    # keys with it), and the unit writes only its own state directory.
+    var hidden = false
     for line in u.splitLines():
       if line.startsWith("InaccessiblePaths=") and "-/run/repro" in line:
-        check "-/var/lib/repro/agent" in line
-      if line.startsWith("ReadWritePaths="):
-        check line == "ReadWritePaths=" & EvidenceStateDir & " " &
-          EvidenceOutboxPath
+        hidden = "-/var/lib/repro " in line & " "
+      check not line.startsWith("ReadWritePaths=")
+    check hidden
   test "a burst of records cannot rate-limit the shipping units (F2)":
     check "StartLimitIntervalSec=0\n" in evidenceShipUnit(Exe, ev)
     check "TriggerLimitIntervalSec=0\n" in evidenceShipPathUnit()

@@ -295,7 +295,11 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 34'u16
+  BuildActionPayloadVersion* = 35'u16
+    ## v35: ``contentKeyedToolCaches`` -- the content-keyed tool-owned caches
+    ## the action reads (Tool-Owned-Caches.md §"Trust Boundary"), a string
+    ## list appended after the width fields. v34-and-earlier payloads decode
+    ## with the list empty, which is what every action declared before it.
     ## v34: Caching-Architecture D2 -- the action cache policy byte gains
     ## ``acfpUnstated`` as value 0 (the edge stated no policy), and the
     ## stated policies move up by one. A v9..v33 byte (0 timestamp,
@@ -2172,7 +2176,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   scratchDirs: openArray[string] = [];
                   removeBeforeRun: openArray[string] = [];
                   optionalOutputs: openArray[string] = [];
-                  sizedBy = ""):
+                  sizedBy = "";
+                  contentKeyedToolCaches: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``sizedBy``: the width flag of a command that is not a typed call but
   ## runs a parallel tool (``sized_tools.sizedWidthByFlag``). The edge then
@@ -2220,6 +2225,11 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## ``ProfileBuildAction``, which is not a route any recipe has. A cache
   ## hit does NOT re-raise it, and the versioned payload codec does not
   ## carry it — see the field's own comment in ``types.nim`` for why.
+  ##
+  ## ``contentKeyedToolCaches``: the content-keyed tool-owned caches the
+  ## action reads and shares with other edges (Go's build cache, ccache).
+  ## The engine then treats the edge as ``host-bound`` at least, so its
+  ## records never leave this host; see the field in ``types.nim``.
   # M9.R.34: stamp the recipe-revision fingerprint at registration
   # time so edits to ``repro.nim`` / ``reprobuild.nim`` bus the local
   # action-cache key. ``computeRecipeRevisionFingerprint`` returns the
@@ -2276,7 +2286,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     declaredOutputs: @declaredOutputs,
     readOnlyRoots: @readOnlyRoots,
     scratchDirs: @scratchDirs,
-    removeBeforeRun: @removeBeforeRun)
+    removeBeforeRun: @removeBeforeRun,
+    contentKeyedToolCaches: @contentKeyedToolCaches)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -4504,6 +4515,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
     payload.writeU32Le(action.cpuMinMilli)
     payload.writeU32Le(action.cpuPreferredMilli)
     payload.writeString(action.widthFlag)
+  # v35: the content-keyed tool-owned caches the action reads.
+  if version >= 35'u16:
+    payload.writeStringSeq(action.contentKeyedToolCaches)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4790,6 +4804,12 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.cpuMinMilli = 0'u32
     result.cpuPreferredMilli = 0'u32
     result.widthFlag = ""
+  if version >= 35'u16:
+    result.contentKeyedToolCaches = readStringSeq(bytes, pos)
+  else:
+    # An older payload names no cache: absence of the list is absence of the
+    # declaration, which is what every action said before the field existed.
+    result.contentKeyedToolCaches = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

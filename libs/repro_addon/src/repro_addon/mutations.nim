@@ -1274,6 +1274,23 @@
 ##                                            the identity's directory is gone,
 ##                                            whether or not the ledger copy is
 ##                                            (decision 178)
+## ``evidence-ship-runs-as-root``            the shipping unit and its
+##                                            confined runs run as root again
+##                                            (decision 181)
+## ``evidence-ship-unix-sockets``             the shipping confinement allows
+##                                            AF_UNIX: PID 1's private socket
+##                                            and the system bus reachable
+##                                            (decision 181)
+## ``ship-decoded-as-root``                   contain, release, uninstall and
+##                                            the credential check decode the
+##                                            sink's bytes in the calling root
+##                                            process (decision 181)
+## ``outbox-written-by-path``                 a root writer writes the outbox
+##                                            entry by path, through names the
+##                                            outbox's owner controls
+##                                            (decision 181)
+## ``egress-units-unix-sockets``              the egress units may make Unix
+##                                            sockets (decision 181)
 ## ``first-use-without-ledger-copy``         with no identity and no ledger
 ##                                            copy, the records' directory is
 ##                                            recorded at first use, a
@@ -2371,6 +2388,11 @@ const
                           "state-gone-from-addon-dir-alone",
                           "token-cleared-before-identity",
                           "first-use-without-ledger-copy",
+                          "evidence-ship-runs-as-root",
+                          "evidence-ship-unix-sockets",
+                          "ship-decoded-as-root",
+                          "outbox-written-by-path",
+                          "egress-units-unix-sockets",
                           "verify-absent-dir-without-identity-noted",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",

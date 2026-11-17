@@ -120,7 +120,8 @@ const
     "repro workspace projects resolve", "repro workspace projects add",
     "repro workspace projects remove", "repro workspace repos",
     "repro workspace repos list", "repro workspace repos add",
-    "repro workspace repos remove", "repro workspace status",
+    "repro workspace repos remove", "repro workspace add",
+    "repro workspace remove", "repro workspace status",
     "repro workspace lock", "repro workspace list",
     "repro workspace manifests", "repro workspace branch-roles",
     "repro workspace forall", "repro workspace shared-clones",
@@ -170,11 +171,6 @@ const
     # output rather than to how its command line is parsed.
     "flag\trepro workspace status\t--verbose",
     "flag\trepro workspace status\t-v",
-    # What the pages came to specify after the sixth group moved, for the
-    # command-line and DSL usability work that implements it: `repro add`'s
-    # dependency-kind flags.
-    "flag\trepro add\t--build", "flag\trepro add\t--native-build",
-    "flag\trepro add\t--runtime",
     # `repro build`'s `--no-write-stats` (turn the raw observation capture
     # off for one build): specified, not implemented yet (its issue is the
     # derived stats store's).
