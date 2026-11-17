@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2917,
+    "nimTestBinaries": 2918,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 781,
     "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2965
+    "testEntries": 2966
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1643,7 +1643,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1616,
+      "integration": 1617,
       "platform/destructive": 191,
       "pure unit": 781,
       "unclassified": 353
@@ -1860,9 +1860,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2917,
+    "nimTestBinaryCount": 2918,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2965
+    "testEntryCount": 2966
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -48875,6 +48875,24 @@
       "source": "tests/integration/t_post_commit_dispatch_returns_and_detached_push_lands.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_post_commit_leaves_the_committed_repro_lock_alone_in_a_routed_workspace",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_post_commit_leaves_the_committed_repro_lock_alone_in_a_routed_workspace.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

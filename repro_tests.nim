@@ -24838,7 +24838,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim",
@@ -25438,7 +25438,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_store_inside_another_repo_is_not_publishable.nim",
@@ -26098,7 +26098,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_moved_package_without_catalog_names_where_it_looked.nim",
@@ -26631,6 +26631,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_post_commit_dispatch_returns_and_detached_push_lands.nim",
     binary: "build/test-bin/t_post_commit_dispatch_returns_and_detached_push_lands",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_post_commit_leaves_the_committed_repro_lock_alone_in_a_routed_workspace.nim",
+    binary: "build/test-bin/t_post_commit_leaves_the_committed_repro_lock_alone_in_a_routed_workspace",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,
