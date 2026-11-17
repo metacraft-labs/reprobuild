@@ -1220,6 +1220,10 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
         r'binary:\s*"([^"]+)",\s*'
         r"defines:\s*@\[(.*?)\],\s*"
         r"requiresReproBinary:\s*(true|false),\s*"
+        # Optional so a table (or a test fixture) written before the field
+        # existed still parses. Non-capturing: the inventory does not record
+        # it, and the group numbers below stay as they were.
+        r"(?:requiresMonitorShim:\s*(?:true|false),\s*)?"
         r"extraPassC:\s*@\[(.*?)\],\s*"
         r"extraPassL:\s*@\[(.*?)\],\s*"
         r"targetOs:\s*(\w+),\s*"

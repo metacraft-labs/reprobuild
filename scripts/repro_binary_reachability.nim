@@ -66,6 +66,32 @@
 ## it exists, and every caller of it is tainted by step 3 — the analysis
 ## has no table to keep in sync.
 ##
+## The second question: the in-tree monitor shim
+## ----------------------------------------------
+## The same machinery answers "does running this test need
+## ``build/lib/librepro_monitor_shim.<ext>`` on disk?" (``analyze`` with
+## ``target = rtMonitorShim``; query ``needsMonitorShim``). The shim is a
+## graph-built fixture exactly as the CLI is, produced by the
+## ``reprobuild.test_fixtures.monitor_shim`` edge, and a test that needs it
+## but whose execute edge does not depend on that edge passes only after
+## something else happened to build it (reprobuild-pm
+## ``issues/2026-11-16-tool-identity-env-plumbing-execute-edge-does-not-declare-the-monitor-shim.md``).
+##
+## Two things differ from the CLI question, both deliberately:
+##
+##   * the SEED (``namesMonitorShim``) is the in-tree shim location —
+##     the library's file name together with ``build/lib`` — or a call of
+##     io-mon's ``findShimLibrary``, whose discovery arms resolve to that
+##     location in a checkout. io-mon is a sibling and is not scanned, so
+##     naming the procedure is the only way its use can be seen here.
+##   * seeding is confined to TEST code (``isTestCode``). Product code
+##     resolves the shim too — the engine does it for every monitored
+##     action — but there a missing shim means "monitoring bypassed", not
+##     a failure, so seeding it would tag every engine-driving test with a
+##     fixture it does not require and tie each of their cache keys to the
+##     shim's bytes. Test code that names the location is asserting the
+##     file is there.
+##
 ## Known limits (stated so the next reader does not over-trust it)
 ## ---------------------------------------------------------------
 ## * The visibility model is per-module, not per-symbol-origin: a name is
@@ -97,6 +123,11 @@ const
     ## against it.
 
 type
+  ReachabilityTarget* = enum
+    ## Which graph-built artifact the analysis is asked about.
+    rtReproBinary   ## ``build/bin/repro`` (and its engine image)
+    rtMonitorShim   ## ``build/lib/librepro_monitor_shim.<ext>``
+
   Symbol = object
     name: string
     exported: bool
@@ -120,7 +151,8 @@ type
 
   Reachability* = object
     ## Result of one whole-repo analysis pass. Query it with
-    ## ``needsReproBinary``.
+    ## ``needsReproBinary`` or ``needsMonitorShim``, matching ``target``.
+    target: ReachabilityTarget
     modules: Table[string, ModuleInfo]
     tainted: Table[string, HashSet[string]]
       ## module rel -> tainted symbol names defined in it
@@ -605,10 +637,51 @@ proc namesReproBinary*(text: string): bool =
     return true
   false
 
-proc analyze*(repoRoot: string; seeds: openArray[string] = []): Reachability =
+const MonitorShimLibraryStem* = "librepro_monitor_shim"
+  ## The shim's file name without its platform extension. Every spelling of
+  ## the in-tree location this repository uses carries it literally.
+
+proc isTestCode*(rel: string): bool =
+  ## Test code, as the shim seed is scoped to it: a test or test helper
+  ## (anything under a ``tests`` directory) or the shared test-support
+  ## library, which is where ``monitorShimPath`` lives.
+  let rel = rel.toForwardSlashes()
+  rel.startsWith("tests/") or "/tests/" in rel or
+    rel.startsWith("libs/repro_test_support/")
+
+proc namesMonitorShim*(text: string): bool =
+  ## The SEED predicate for ``rtMonitorShim``: does this chunk of Nim
+  ## source name the in-tree monitor shim?
+  ##
+  ##   * the library's file name together with its ``build/lib``
+  ##     directory, joined (``"build/lib/librepro_monitor_shim.so"``) or
+  ##     as components (``root / "build" / "lib"`` … ``"librepro_monitor_shim.so"``,
+  ##     which is how ``repro_test_support.monitorShimPath`` spells it);
+  ##   * a call of io-mon's ``findShimLibrary``, matched as an identifier.
+  ##     In a checkout its discovery arms land on that same file.
+  ##
+  ## The file name alone is not a seed: it also appears where a test only
+  ## reasons about the name (lowering tables, packaging manifests) without
+  ## opening the in-tree file.
+  if "findShimLibrary" in identifiers(text):
+    return true
+  if MonitorShimLibraryStem notin text:
+    return false
+  let dense = collapseSpaces(text)
+  "build/lib" in text or "build\\lib" in text or "\"build\"/\"lib\"" in dense
+
+proc seedsTarget(target: ReachabilityTarget; rel, text: string): bool =
+  case target
+  of rtReproBinary: namesReproBinary(text)
+  of rtMonitorShim: isTestCode(rel) and namesMonitorShim(text)
+
+proc analyze*(repoRoot: string; seeds: openArray[string] = [];
+              target = rtReproBinary): Reachability =
   ## Run one pass over ``seeds`` (repo-relative paths) and their
   ## transitive in-repo import closure. An empty ``seeds`` scans every Nim
-  ## file under the repository's source roots.
+  ## file under the repository's source roots. ``target`` picks the
+  ## artifact the pass asks about; see the module header.
+  result.target = target
   result.modules = collectModules(repoRoot, seeds)
   expandIncludes(result.modules)
   result.closure = initTable[string, seq[string]]()
@@ -620,9 +693,9 @@ proc analyze*(repoRoot: string; seeds: openArray[string] = []): Reachability =
   # SEED.
   for rel, info in result.modules:
     for sym in info.symbols:
-      if namesReproBinary(sym.body):
+      if seedsTarget(target, rel, sym.body):
         result.tainted[rel].incl(sym.name)
-    if namesReproBinary(info.leftover):
+    if seedsTarget(target, rel, info.leftover):
       # Module-initialisation code names the binary: every importer of
       # this module runs it, so taint the module as a whole.
       result.tainted[rel].incl("")
@@ -694,14 +767,28 @@ proc reachedThrough(r: Reachability; rel: string): seq[string] =
           sym.name in info.tokens and sym.name notin result:
         result.add(sym.name)
 
-proc needsReproBinary*(r: Reachability; rel: string): bool =
-  ## Does the test at repo-relative ``rel`` end up executing
-  ## ``build/bin/repro``?
+proc needsTarget(r: Reachability; rel: string): bool =
   if rel notin r.modules:
     return false
-  if namesReproBinary(r.modules[rel].stripped):
+  if seedsTarget(r.target, rel, r.modules[rel].stripped):
     return true
   reachedThrough(r, rel).len > 0
+
+proc needsReproBinary*(r: Reachability; rel: string): bool =
+  ## Does the test at repo-relative ``rel`` end up executing
+  ## ``build/bin/repro``? ``r`` must come from ``analyze`` with
+  ## ``target = rtReproBinary``.
+  doAssert r.target == rtReproBinary,
+    "needsReproBinary asked of a " & $r.target & " analysis"
+  needsTarget(r, rel)
+
+proc needsMonitorShim*(r: Reachability; rel: string): bool =
+  ## Does the test at repo-relative ``rel`` need the graph-built
+  ## ``build/lib/librepro_monitor_shim.<ext>`` on disk? ``r`` must come
+  ## from ``analyze`` with ``target = rtMonitorShim``.
+  doAssert r.target == rtMonitorShim,
+    "needsMonitorShim asked of a " & $r.target & " analysis"
+  needsTarget(r, rel)
 
 proc taintedSymbolsFor*(r: Reachability; rel: string): seq[string] =
   ## Diagnostic: the helper names through which ``rel`` reaches the

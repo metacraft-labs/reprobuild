@@ -34,6 +34,10 @@ on:
 #               matrix and the exact asset list the release must carry.
 #   build    -- per-platform build/package/verify. Publishes NOTHING. Emits a
 #               workflow artifact and a checksum.
+#   cache    -- `publish-nix-cache` builds the revision's Nix package and
+#               pushes it to the organisation's Attic cache. A convenience for
+#               consumers, not an asset: `publish` does NOT wait for it, and a
+#               failed push is re-run on its own.
 #   publish  -- runs only for tags, gated on EVERY leg succeeding, asserts the
 #               full asset set is present, then creates the release as a DRAFT,
 #               uploads everything, re-verifies against the API, and only then
@@ -418,52 +422,10 @@ jobs:
           set -euo pipefail
           dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#release
 
-      # Publish the Nix package of THIS revision to the organisation cache.
-      #
-      # Consumers that bind an explicit Linux Repro runtime run
-      # `nix build github:metacraft-labs/reprobuild/<pin>#reprobuild`. Nothing
-      # used to build that attribute for a release revision (ci.yml builds
-      # `.#default` only on `main`/`dev` pushes and on pull requests not
-      # targeting `agents`), so every such lane compiled the engine from source
-      # for 28-38 minutes (reprobuild-pm issue
-      # 2026-11-12-the-reprobuild-package-at-a-pinned-agents-revision-is-in-no-binary-cache-...).
-      # The flake reference below is spelled exactly as the consumers spell it,
-      # so the store path pushed here is the one they ask for. `attic push`
-      # sends the whole closure and skips what the cache already holds; the
-      # watch-store started by setup-nix would also pick the paths up, but
-      # asynchronously, and a release should not depend on it winning a race
-      # with the end of the job. Linux only: that is the platform the consumer
-      # lanes build, and setup-nix does not start the watcher on macOS.
-      # The refresh above is itself over an hour old by the time `.#release`
-      # has built (dispatch run 43294626712: the flake fetch below failed with
-      # "HTTP error 401 ... Bad credentials"), so mint a new token for this
-      # phase too.
-      - name: Refresh build authentication (cache publish)
-        if: runner.os == 'Linux'
-        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
-        with:
-          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
-          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
-          owner: metacraft-labs
-
-      - name: Publish the Nix package to the organisation cache
-        if: runner.os == 'Linux'
-        shell: bash
-        env:
-          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
-          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${ATTIC_TOKEN}" || -z "${ATTIC_CACHE}" ]]; then
-            echo "::error::ATTIC_TOKEN and vars.ATTIC_CACHE are required to publish the reprobuild package"
-            exit 1
-          fi
-          package="$(nix build --no-link --print-out-paths --no-update-lock-file \
-            "github:${GITHUB_REPOSITORY}/${GITHUB_SHA}#reprobuild")"
-          test -x "$package/bin/repro"
-          # setup-nix ran `attic login --set-default ci` for this job.
-          nix shell --accept-flake-config nixpkgs#attic-client -c attic push "$ATTIC_CACHE" "$package"
-          echo "Published $package (reprobuild $GITHUB_SHA)"
+      # The Nix package of this revision is published to the organisation
+      # cache by the `publish-nix-cache` job, not by this leg: that push needs
+      # nothing this leg builds, and a failure in it must not cost the leg
+      # (see that job).
 
       - name: Bootstrap and Build (Windows)
         if: matrix.os-name == 'windows'
@@ -1080,8 +1042,153 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # ── The Nix package, to the organisation cache, in a job of its own ───────
+  #
+  # Consumers that bind an explicit Linux Repro runtime run
+  # `nix build github:metacraft-labs/reprobuild/<pin>#reprobuild`. Nothing
+  # used to build that attribute for a release revision (ci.yml builds
+  # `.#default` only on `main`/`dev` pushes and on pull requests not targeting
+  # `agents`), so every such lane compiled the engine from source for 28-38
+  # minutes. This job builds that attribute and pushes its closure to Attic.
+  #
+  # WHY A JOB OF ITS OWN. It was the last step of the Linux build leg. On
+  # v0.2.26 (run 43892878762, attempt 1) the leg built every asset in 8 h,
+  # then atticd answered the push with HTTP 500 (InternalServerError) for 19
+  # minutes; the step failed, so the leg failed, so the all-or-nothing publish
+  # refused, and the only way forward was an 8-hour re-run of the leg. The push
+  # needs nothing the leg builds: the flake reference below is self-contained
+  # (`github:<repo>/<sha>`, the locked inputs), so this job rebuilds nothing
+  # the leg made and the leg hands it nothing. Here it runs beside the legs on
+  # general Linux capacity, and "Re-run failed jobs" repeats only this job
+  # (a build of the package plus the push; consumer lanes measured that build
+  # at 28-38 minutes) -- not the leg.
+  #
+  # WHY NO CLOSURE IS HANDED OVER FROM THE LEG. That was considered and
+  # rejected. The package closure is about 1.5 GiB (reprobuild 0.2.19:
+  # 74 paths, a 686 MiB source tree among them), uploaded as an artifact by
+  # every release; and importing it here needs `nix-store --import` or
+  # `nix copy --no-check-sigs` of unsigned paths, which the nix-daemon refuses
+  # to an untrusted client -- and the ephemeral `eph-linux-x64` guests are
+  # untrusted Nix clients.
+  #
+  # IT DOES NOT GATE THE RELEASE. `publish-release` does not need this job:
+  # the cache entry is a convenience for consumers, not a release asset, and a
+  # transient cache-service failure must not stop a release that built every
+  # asset. Its failure is still loud -- the job and the run go red, the push
+  # step annotates the attempt history, and the last step writes the re-run
+  # instruction into the job summary. Nothing reads the cache at publish time;
+  # consumers fetch the package only after a pin moves to this revision, and
+  # a pin should move only once this job is green.
+  #
+  # Like the step it replaces, it runs on every run of this workflow, a branch
+  # dispatch included, so a dispatch exercises it before a tag depends on it.
+  publish-nix-cache:
+    name: Publish the Nix package to the organisation cache
+    permissions:
+      contents: read
+    # General Linux capacity, like `plan`: the release lane has a single runner
+    # and the Linux leg holds it for hours.
+    runs-on: [self-hosted, linux, x64]
+    # The build step's cap, plus the push step's, plus setup.
+    timeout-minutes: 500
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # The package's locked flake inputs include private metacraft-labs
+      # repositories (runquota and the other `*-src` inputs), so Nix needs the
+      # installation token to fetch them, as in build-release.
+      - name: Mint installation token for private flake inputs
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      # The action setup-dev-env runs for the `nix` flavour, without the dev
+      # shell and the sibling clones this job does not use. `attic-token`
+      # without `attic-cache` configures only the read half (setup-nix's
+      # `attic-token` input): Nix substitutes from the private cache, and no
+      # `attic watch-store` is started. The push is the explicit, bounded step
+      # below; a background watcher would upload every path the build produces
+      # to the same atticd at the same time, with nobody checking its result.
+      - name: Setup Nix
+        uses: metacraft-labs/metacraft-github-actions/setup-nix@dev
+        with:
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+
+      # Spelled exactly as the consumers spell it, so the store path pushed
+      # below is the one they ask for.
+      - name: Build the Nix package of this revision
+        id: package
+        timeout-minutes: 240
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(nix build --no-link --print-out-paths --no-update-lock-file \
+            "github:${GITHUB_REPOSITORY}/${GITHUB_SHA}#reprobuild")"
+          test -x "$package/bin/repro"
+          echo "path=$package" >> "$GITHUB_OUTPUT"
+          echo "Built $package (reprobuild $GITHUB_SHA)"
+
+      # `attic push` sends the whole closure and skips what the cache, or its
+      # upstream cache.nixos.org, already holds. atticd answers in bursts of
+      # HTTP 500 when its database pool times out, so the push is retried with
+      # backoff (1, 2, 4, 8, 16 minutes) on transient failures and fails at
+      # once on credential and request errors; the classification and its
+      # sources are in scripts/release/attic_push_with_retry.sh. The step's
+      # cap is that script's worst case, 6 x 30 + 31 = 211 minutes, rounded up.
+      - name: Push the package to Attic
+        timeout-minutes: 220
+        shell: bash
+        env:
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          PACKAGE: ${{ steps.package.outputs.path }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ATTIC_TOKEN}" || -z "${ATTIC_CACHE}" || -z "${ATTIC_ENDPOINT}" ]]; then
+            echo "::error::ATTIC_TOKEN, vars.ATTIC_CACHE and vars.ATTIC_ENDPOINT are required to publish the reprobuild package"
+            exit 1
+          fi
+          echo "::add-mask::$ATTIC_TOKEN"
+          attic="$(nix build --no-link --print-out-paths --accept-flake-config nixpkgs#attic-client)/bin/attic"
+          "$attic" login --set-default release "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
+          ATTIC="$attic" bash scripts/release/attic_push_with_retry.sh "$ATTIC_CACHE" "$PACKAGE"
+          echo "Published $PACKAGE (reprobuild $GITHUB_SHA)"
+
+      - name: Say how to repeat the cache publish
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "### The Nix package of ${GITHUB_SHA} is NOT in the organisation cache"
+            echo ""
+            echo "This job does not gate the GitHub release, which publishes without it."
+            echo "Consumers of \`github:${GITHUB_REPOSITORY}/${GITHUB_SHA}#reprobuild\` build"
+            echo "the engine from source until it is pushed. Do not move a reprobuild pin to"
+            echo "this revision before this job is green."
+            echo ""
+            echo "Repeat it with **Re-run failed jobs** on this run once the cache is healthy"
+            echo "(\`curl -fsS ${ATTIC_ENDPOINT:-https://cache.metacraft-labs.com/}\`). That re-runs this"
+            echo "job alone; it does not rebuild the release legs."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::The Nix package of ${GITHUB_SHA} was not published to the organisation cache. Re-run this job (Re-run failed jobs); the release does not depend on it."
+        env:
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+
   publish-release:
     name: Publish release (all-or-nothing)
+    # Not `publish-nix-cache`, deliberately: the cache entry is not a release
+    # asset, and a cache-service failure must not hold back a release whose
+    # assets all built. See that job.
     needs: [plan, build-release, build-addon-static]
     # A job-level `permissions:` block REPLACES the workflow-level one rather
     # than merging with it, so `contents: write` is restated here -- without it

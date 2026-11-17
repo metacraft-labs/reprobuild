@@ -1,5 +1,6 @@
 ## The add-on after the A9 review's round 19 (ReproOS Add-On Mode spec
-## §6.2 step 4, §10.1; §13 decisions 172, 173 and 174):
+## §6.2 step 4, §10.1; the boot-hold unit's ordering and the agent's
+## re-pointed units, and the static add-on image only, as §13 records them):
 ##
 ## - B1: the re-point compares the units on disk with the own profile as
 ##   stored on the host and this build's migration of it, besides the
@@ -10,7 +11,8 @@
 ##   generation's sockets, not by ``TriggeredBy=``, which is empty once
 ##   systemd has collected the stopped instance;
 ## - finding 3 (the owner's decision of 2026-11-17, "Yes, check drop-ins"):
-##   both halves of decision 172 and the stop-dependency refusal cover the
+##   both halves of the boot-hold unit's ordering refusal (decision 172)
+##   and the stop-dependency refusal cover the
 ##   units the profile's drop-ins change; the effective half's every-unit
 ##   pass is driven here directly;
 ## - L4: ``Conflicts=`` / ``PropagatesStopTo=`` naming ``sysinit.target``

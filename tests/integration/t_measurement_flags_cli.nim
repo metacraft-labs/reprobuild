@@ -93,8 +93,11 @@ suite "measurement flags: retired names are gone":
           "--diagnostics=/tmp/d.txt", "--benchmark=/tmp/b.json"]:
         let res = runRepro(["build", "--dry-run", retired, "."])
         checkpoint(retired & " -> exit=" & $res.exitCode)
-        check res.exitCode != 0
-        check res.output.contains("unsupported build flag: " & retired)
+        # A usage error from the parser generated from repro's command-line
+        # description, naming the flag without its value.
+        check res.exitCode == 2
+        check res.output.contains("unknown flag '" &
+          retired.split('=')[0] & "' for 'repro build'")
 
   test "the retired workspace report flag fails as an unknown flag":
     if not fileExists(reproBin):
