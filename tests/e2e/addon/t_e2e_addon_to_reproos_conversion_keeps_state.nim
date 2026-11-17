@@ -2024,46 +2024,88 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "\nrecord: " & m2Record)
     # A13 review round 13, M-B: a full apply that died before its release
     # held a judged service that was running and is not enabled (the R10
-    # socket's service, started by a connection). The next full apply's
-    # check passes it and must start it again: "ran before the dead hold"
-    # is kept for a unit this apply judges too. No connection is made
-    # after the staging, so nothing else starts it. Falsifier: the engine
-    # build dead-judged-was-active-lost (the service stays down).
+    # socket's service, started by a connection), with its socket stopped:
+    # staged as such an apply leaves the host -- both stopped, both held,
+    # the socket on the record of triggers and the service on the record of
+    # units as one that ran -- and no connection afterwards. The next full
+    # apply's check passes it and must start it again, only after its own
+    # check: "ran before the dead hold" is kept for a unit this apply judges
+    # too. The order is measured on the guest, as in the M3 step: when the
+    # check began (a hold of the judged path service appears), when it
+    # released (that hold goes), when the service first ran. Falsifier: the
+    # engine build dead-judged-was-active-lost (the service stays down).
     block:
       discard nw.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
         $R10Port & "' 2>/dev/null; for i in $(seq 15); do systemctl " &
         "is-active --quiet " & R10SocketSvc & " && break; sleep 1; done; true")
       let mbBefore = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
-      discard nw.run("systemctl stop " & R10SocketSvc & "; mkdir -p " &
-        "/run/systemd/system/" & R10SocketSvc & ".d && printf '[Unit]\\n" &
-        "ConditionPathExists=!/\\n' > /run/systemd/system/" & R10SocketSvc &
-        ".d/zz-repro-carried-check-hold.conf && printf '" & R10SocketSvc &
-        "\\twas-active\\n' > /var/lib/repro/system/live-check-units && " &
-        "systemctl daemon-reload")
+      discard nw.run("systemctl stop " & R10Socket & " " & R10SocketSvc &
+        "; for u in " & R10Socket & " " & R10SocketSvc & "; do mkdir -p " &
+        "/run/systemd/system/$u.d && printf '[Unit]\\nConditionPathExists=!/\\n' > " &
+        "/run/systemd/system/$u.d/zz-repro-carried-check-hold.conf; done; " &
+        "printf '" & R10Socket & "\\n' > /var/lib/repro/system/live-check-triggers; " &
+        "printf '" & R10SocketSvc & "\\twas-active\\n' > " &
+        "/var/lib/repro/system/live-check-units; systemctl daemon-reload")
       let mbStaged = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
+      let mbSocketStaged = nw.exec("systemctl is-active " & R10Socket).stdout.strip()
+      let mbWatch = "H=/run/systemd/system/" & R10PathSvc &
+        ".d/zz-repro-carried-check-hold.conf\nh=; r=; s=\n" &
+        "while [ ! -e /run/a13mb-stop ]; do\n" &
+        "  t=$(cut -d' ' -f1 /proc/uptime)\n" &
+        "  if [ -z \"$h\" ] && [ -e \"$H\" ]; then h=$t; echo \"check $t\" >> /run/a13mb.log; fi\n" &
+        "  if [ -n \"$h\" ] && [ -z \"$r\" ] && [ ! -e \"$H\" ]; then r=$t; echo \"release $t\" >> /run/a13mb.log; fi\n" &
+        "  if [ -z \"$s\" ] && systemctl is-active --quiet " & R10SocketSvc &
+        "; then s=$t; echo \"service $t\" >> /run/a13mb.log; fi\n" &
+        "  sleep 0.1\ndone\n"
+      writeFile(work / "a13mb-watch.sh", mbWatch)
+      nw.copyTo(work / "a13mb-watch.sh", "/run/a13mb-watch.sh")
+      discard nw.exec("rm -f /run/a13mb.log /run/a13mb-stop; nohup bash " &
+        "/run/a13mb-watch.sh >/dev/null 2>&1 &")
       let mbApply = nw.exec(env & eng & " infra apply --profile " & RefDir &
         "/system_next.nim --host " & AgentTarget & " --no-preview",
         timeoutSec = 3600)
       discard nw.exec("for i in $(seq 15); do systemctl is-active --quiet " &
-        R10SocketSvc & " && break; sleep 1; done; true")
+        R10SocketSvc & " && break; sleep 1; done; sleep 1; touch /run/a13mb-stop; " &
+        "sleep 1; true")
+      let mbOrder = nw.exec("cat /run/a13mb.log 2>/dev/null").stdout
+      var mbCheck, mbRelease, mbService = -1.0
+      for l in mbOrder.splitLines():
+        let w = l.splitWhitespace()
+        if w.len != 2: continue
+        var t = -1.0
+        try: t = parseFloat(w[1])
+        except ValueError: continue
+        case w[0]
+        of "check": mbCheck = t
+        of "release": mbRelease = t
+        of "service": mbService = t
+        else: discard
       let mbAfter = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
       let mbEnabled = nw.exec("systemctl is-enabled " & R10SocketSvc &
         " 2>&1").stdout.strip()
       let mbHold = nw.exec("ls /run/systemd/system/" & R10SocketSvc &
         ".d/zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+      let mbAfterRelease = mbService >= 0 and mbCheck >= 0 and
+        mbRelease >= 0 and mbService >= mbRelease
       let mbOk = mbBefore == "active" and mbStaged != "active" and
-        mbApply.exitCode == 0 and mbAfter == "active" and mbHold.len == 0
+        mbSocketStaged != "active" and mbApply.exitCode == 0 and
+        mbAfter == "active" and mbHold.len == 0 and mbAfterRelease
       record["deadJudgedActive"] = %*{"before": mbBefore, "staged": mbStaged,
-        "exit": mbApply.exitCode, "after": mbAfter, "enabled": mbEnabled,
-        "holdLeft": mbHold, "ok": mbOk}
-      discard nw.run("rm -f /var/lib/repro/system/live-check-units /run/" &
-        "systemd/system/" & R10SocketSvc & ".d/zz-repro-carried-check-hold.conf; " &
-        "systemctl daemon-reload; systemctl start " & R10Socket & "; true")
+        "socketStaged": mbSocketStaged, "exit": mbApply.exitCode,
+        "after": mbAfter, "enabled": mbEnabled, "holdLeft": mbHold,
+        "checkBeganAt": mbCheck, "releasedAt": mbRelease,
+        "serviceActiveAt": mbService, "ok": mbOk}
+      discard nw.run("rm -f /var/lib/repro/system/live-check-units " &
+        "/var/lib/repro/system/live-check-triggers; for u in " & R10Socket &
+        " " & R10SocketSvc & "; do rm -f /run/systemd/system/$u.d/" &
+        "zz-repro-carried-check-hold.conf; done; systemctl daemon-reload; " &
+        "systemctl start " & R10Socket & "; true")
       step("M-B: a judged service a dead full apply held while it ran, not " &
            "enabled, is started again once the next apply's check passes it",
            mbOk, mbApply.stdout & mbApply.stderr & "\nbefore: " & mbBefore &
-           " staged: " & mbStaged & " after: " & mbAfter & " enabled: " &
-           mbEnabled & " hold: " & mbHold)
+           " staged: " & mbStaged & " socket staged: " & mbSocketStaged &
+           " after: " & mbAfter & " enabled: " & mbEnabled & " hold: " &
+           mbHold & "\norder (uptime s): " & mbOrder)
     # A13 review round 13, M-C: a profile drop-in that points ssh.socket at a
     # judged unit makes an essential trigger of it; the apply is refused
     # before it writes anything, by that refusal and no other, and ssh.socket
