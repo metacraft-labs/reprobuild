@@ -3,8 +3,9 @@
 ## workspace nests it, `origin` set to the real remote, and the workspace's
 ## checkout state.
 
-import std/[algorithm, json, os, strutils, tempfiles]
+import std/[algorithm, json, os, sets, strutils, tempfiles]
 import repro_local_store/store_bundle
+import repro_local_store/tar_members
 import ./exec
 import ./select
 import ./nix_half
@@ -159,16 +160,169 @@ proc sourcesPresent*(h: SourcesHalf; workspaceDir: string): bool =
   let marker = workspaceDir / SourcesMarker
   fileExists(marker) and readFile(marker).strip() == h.id
 
+proc hasControlChar(path: string): bool =
+  for ch in path:
+    if ord(ch) < 0x20 or ord(ch) == 0x7f: return true
+
+proc isCanonicalRelative(path: string): bool =
+  relativeNameProblem(path).len == 0
+
+proc within(path, dir: string): bool =
+  ## Whether `path` is `dir` or lies beneath it.
+  path == dir or path.startsWith(dir & "/")
+
+proc parentPaths(path: string): seq[string] =
+  ## The strict ancestors of a canonical relative path, shortest first:
+  ## `a/b/c` gives `a`, `a/b`.
+  var i = path.find('/')
+  while i >= 0:
+    result.add(path[0 ..< i])
+    i = path.find('/', i + 1)
+
+proc checkSourcesDeclarations*(h: SourcesHalf): string =
+  ## §7 step 4.1. The half's top directory name (returned), its declared
+  ## checkout paths and its carried state files must be paths the member
+  ## check can compare against: a single directory name, and canonical
+  ## relative paths beneath it. A declared path holds no control character,
+  ## because a checkout path becomes a line of `.git/info/exclude`, and no
+  ## checkout lies in the root's `.git`, which a members-only restore
+  ## writes. The id, which names the marker the restore writes, is the 32
+  ## lowercase hex digits `sourcesHalfId` makes.
+  result = extractFilename(h.workspaceDir)
+  if result.len == 0 or result == "." or result == ".." or '/' in result or
+      '\0' in result:
+    bundleFail("the sources half's workspace directory name " &
+      result.escape & " (from workspace_dir " & h.workspaceDir.escape &
+      ") is not a single directory name")
+  if h.id.len != 32 or not h.id.allCharsInSet({'0' .. '9', 'a' .. 'f'}):
+    bundleFail("the sources half's id " & h.id.escape &
+      " is not 32 lowercase hex digits")
+  for r in h.repos:
+    if r.relPath == ".": continue
+    if not isCanonicalRelative(r.relPath) or hasControlChar(r.relPath):
+      bundleFail("the sources half declares the checkout path " &
+        r.relPath.escape & ", which is not a canonical relative path")
+    if r.relPath.within(".git"):
+      bundleFail("the sources half declares the checkout path " &
+        r.relPath.escape & ", which lies in the workspace root's .git")
+  for (path, _) in h.stateFiles:
+    if not isCanonicalRelative(path) or hasControlChar(path):
+      bundleFail("the sources half declares the state file " & path.escape &
+        ", which is not a canonical relative path")
+
+proc checkSourcesPlacement*(h: SourcesHalf; name: string;
+                            members: seq[TarMember]) =
+  ## §7 step 4.2, placement: every member is the top directory `<name>`
+  ## itself, or `<name>/<rel>` where `<rel>` is a declared checkout's path or
+  ## lies within one, is a carried state file, or (a directory only) is on
+  ## the way to one of those. A hard link's target is an earlier member
+  ## (`tar_members.admit`), so it has passed this check too. The restore
+  ## writes its marker into `.repro` after the unpack, so `<name>/.repro`
+  ## may only be a directory and the marker itself is never a member.
+  var rootDeclared = false
+  var checkouts: seq[string]
+  for r in h.repos:
+    if r.relPath == ".": rootDeclared = true
+    else: checkouts.add(r.relPath)
+  var state = initHashSet[string]()
+  for (path, _) in h.stateFiles: state.incl(path)
+  let markerDir = SourcesMarker.parentDir
+  for m in members:
+    let path = m.memberPath
+    if path == name:
+      if m.kind != 'd':
+        bundleFail("the sources half's top member " & m.name.escape &
+          " is not a directory")
+      continue
+    if not path.startsWith(name & "/"):
+      bundleFail("the sources half's member " & m.name.escape &
+        " lies outside its workspace directory " & (name & "/").escape)
+    let rel = path[name.len + 1 .. ^1]
+    if rel == SourcesMarker or (rel == markerDir and m.kind != 'd'):
+      bundleFail("the sources half's member " & m.name.escape &
+        " would take the place of the restore's own " &
+        (if rel == SourcesMarker: "marker" else: "directory " & markerDir))
+    var ok = rootDeclared or rel in state
+    if not ok:
+      for d in checkouts:
+        if rel.within(d) or (m.kind == 'd' and d.startsWith(rel & "/")):
+          ok = true
+          break
+    if not ok and m.kind == 'd':
+      for s in state:
+        if s.startsWith(rel & "/"):
+          ok = true
+          break
+    if not ok:
+      bundleFail("the sources half's member " & m.name.escape &
+        " lies in no checkout and is no state file the half declares")
+
+proc checkNoSymlinkOnDisk*(ws, name: string; members: seq[TarMember]) =
+  ## §7 step 4.3. GNU tar follows a symlink it finds among a member's
+  ## leading directories, and `--skip-old-files` keeps one that exists, so a
+  ## link already inside the workspace would carry the unpack out of it even
+  ## though every member is declared. Every directory between `ws` (the
+  ## caller's, not checked) and each member, or its hard-link target, must
+  ## not be a symlink.
+  var checked = initHashSet[string]()
+  for m in members:
+    var names = @[m.memberPath]
+    if m.kind == 'h': names.add(m.linkTarget)
+    for n in names:
+      if not n.startsWith(name & "/"): continue
+      for p in parentPaths(n[name.len + 1 .. ^1]):
+        if checked.containsOrIncl(p): continue
+        if symlinkExists(ws / p):
+          bundleFail(ws / p & " is a symlink; unpacking the sources half " &
+            "would follow it to write " & (ws / n[name.len + 1 .. ^1]) &
+            ", so nothing was unpacked")
+
+proc listSourcesMembers*(h: SourcesHalf; partsDir: string): seq[TarMember] =
+  ## §7 step 4.2, the rules every half shares: the archive in `h`'s verified
+  ## parts, listed by the tar that will extract it, holds only files, hard
+  ## links, symlinks and directories with canonical relative names, each
+  ## once; a hard link's target is an earlier file; no member lies beneath a
+  ## symlink member (`tar_members.admit`, `finish`). The listing is written
+  ## to a fresh private directory, not beside the parts: a local bundle's
+  ## parts directory may be writable by others, who could otherwise plant a
+  ## symlink there for the redirection to follow, or swap the listing
+  ## before it is read.
+  let scratch = createTempDir("repro-bundle-sources-", "")
+  defer: removeDir(scratch)
+  let listing = scratch / "members"
+  try:
+    listBundleMembers(partsDir, h.parts, listing)
+  except StoreBundleError as e:
+    bundleFail("cannot check the sources half: " & e.msg)
+  var admitted = initMemberSet()
+  var problem = ""
+  try:
+    for (_, m) in listingMembers(listing):
+      problem = admitted.admit(m)
+      if problem.len > 0: break
+      result.add(m)
+  except ValueError as e:
+    problem = e.msg
+  if problem.len == 0: problem = admitted.finish()
+  if problem.len > 0:
+    bundleFail("refusing the sources half before unpacking it: " & problem &
+      "; nothing was written")
+
 proc restoreSourcesHalf*(h: SourcesHalf; partsDir, workspaceDir: string): bool =
   ## §7 step 4: into the workspace's parent with `--skip-old-files`, so a
   ## checkout that already exists is never overwritten. When the workspace
   ## root is itself a checkout already (the environment cloned it), only the
   ## member checkouts are unpacked, and they are added to the root's
   ## `.git/info/exclude`. Returns whether that members-only path was taken.
+  ##
+  ## Before anything is written, the half's declarations, every member of
+  ## its archive and the directories already on disk that the unpacked
+  ## members lie beneath are checked (steps 4.1–4.3); the part hashes
+  ## cannot stand in for that, because the manifest that names them is not
+  ## signed (§9).
   let ws = normalizedPath(absolutePath(workspaceDir))
   let parent = ws.parentDir
-  createDir(parent)
-  let name = extractFilename(h.workspaceDir)
+  let name = checkSourcesDeclarations(h)
   let errPath = partsDir / ".unpack.stderr"
   let rootIsCheckout = dirExists(ws / ".git")
   var members: seq[string]
@@ -176,12 +330,49 @@ proc restoreSourcesHalf*(h: SourcesHalf; partsDir, workspaceDir: string): bool =
     for r in h.repos:
       if r.relPath != ".": members.add(name & "/" & r.relPath)
   result = rootIsCheckout
+  if not rootIsCheckout or members.len > 0:
+    let listed = listSourcesMembers(h, partsDir)
+    checkSourcesPlacement(h, name, listed)
+    # Members-only, tar unpacks each named checkout and what lies within it.
+    var unpacked: seq[TarMember]
+    for m in listed:
+      if not rootIsCheckout:
+        unpacked.add(m)
+        continue
+      for sel in members:
+        if m.memberPath.within(sel):
+          unpacked.add(m)
+          break
+    # A hard link whose target is not unpacked would be made to the file
+    # already on disk under that name, such as the root checkout's own
+    # `.git/config`, and give the member an alias to it.
+    var unpackedNames = initHashSet[string]()
+    for m in unpacked: unpackedNames.incl(m.memberPath)
+    for m in unpacked:
+      if m.kind == 'h' and m.linkTarget notin unpackedNames:
+        bundleFail("the sources half's member " & m.name.escape &
+          " is a hard link to " & m.linkTarget.escape &
+          ", which this restore does not unpack")
+    checkNoSymlinkOnDisk(ws, name, unpacked)
+  createDir(parent)
   # The archive's top directory is the creating workspace's name; a restore
   # under another name renames it on the way.
+  # Every member is `name` or lies beneath it (step 4.2), so the first
+  # component is matched as `[^/]*` and `name` never enters the expression.
+  # In the replacement `\`, `&` and the `,` delimiter are escaped; see
+  # https://www.gnu.org/software/tar/manual/html_node/transform.html. The
+  # flags apply it to member names and hard-link targets, not to the text
+  # of a symlink.
+  var target = ""
+  for ch in extractFilename(ws):
+    if ch in {'\\', '&', ','}: target.add('\\')
+    target.add(ch)
   let transform = (if extractFilename(ws) != name:
-      " --transform=" & quoteShell("s|^" & name & "|" & extractFilename(ws) & "|")
+      " --transform=" & quoteShell("flags=rh;s,^[^/]*," & target & ",")
     else: "")
+  # After `--`, so that tar reads a member that starts with `-` as a name.
   var memberArgs = ""
+  if members.len > 0: memberArgs = " --"
   for m in members: memberArgs.add(" " & quoteShell(m))
   let command = "set -o pipefail; (" & quoteShell(requireExe("zstd")) &
     " -q -dc --long=" & $ZstdWindowLog & " - | " &

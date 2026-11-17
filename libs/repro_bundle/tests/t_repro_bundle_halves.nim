@@ -19,7 +19,7 @@
 ## reprobuild-pm issues/2026-11-12-bundle-extraction-writes-every-tar-member-
 ## under-before-checking-it-against-the-declared.md.
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, osproc, strutils, tempfiles, unittest]
 import repro_bundle
 import repro_bundle/[nix_half, sources_half, select, bootstrap, github]
 import repro_local_store/store_bundle
@@ -1077,3 +1077,262 @@ suite "bundles are fetched over https only":
       check code != 0
       check "refusing" in log
       check variable in log
+
+# Workspace-Bundles.md §7 step 4: a sources half's members are checked
+# against the checkouts and state files the half declares, and against
+# symlinks, before anything is written. Each archive below is crafted with
+# GNU tar to be what a hostile host or a buggy publisher could serve; the
+# part hashes are right, because they come from the same unsigned manifest
+# (§9). Regression tests for reprobuild-pm issue
+# 2026-11-16-sources-half-extraction-is-not-checked-against-the-half-s-declared-checkouts.md.
+
+proc craftedHalf(top, label, wsName: string; repos, state: openArray[string];
+                 script: string): tuple[half: SourcesHalf; dir: string] =
+  ## A sources half whose archive is whatever `script` (bash, run in an
+  ## empty directory holding the file `f`) leaves in `archive.tar`, split
+  ## into parts with their real hashes. The half declares `repos` as its
+  ## checkouts and `state` as its carried state files, and says it was
+  ## created at `/created/<wsName>`. Its id is well formed but is not the
+  ## digest of its declarations; nothing here depends on that.
+  let stage = top / ("stage-" & label)
+  createDir(stage)
+  writeFile(stage / "f", "planted\n")
+  discard sh("bash -c " & quoteShell("set -e; " & script), stage)
+  result.dir = top / ("parts-" & label)
+  let (parts, total) = writeCompressedParts("cat " &
+    quoteShell(stage / "archive.tar") & " | " &
+    zstdCompressCommand(findExe("zstd"), 1, 0), result.dir, DefaultPartSize)
+  result.half = SourcesHalf(id: repeat('a', 32),
+    workspaceDir: "/created/" & wsName,
+    parts: parts, compressedBytes: total)
+  for r in repos:
+    result.half.repos.add(SourceRepo(relPath: r, rev: repeat('0', 40)))
+  for s in state:
+    result.half.stateFiles.add((s, repeat('0', 64)))
+
+proc addAs(names: varargs[string]): string =
+  ## bash appending `f` to `archive.tar` once under each of `names`.
+  for n in names:
+    result.add("tar --format=posix -P --transform=" &
+      quoteShell("flags=r;s|^f$|" & n & "|") & " -rf archive.tar f; ")
+
+proc treeOf(dir: string): seq[string] =
+  ## Every path under `dir`, links not followed, sorted.
+  if not dirExists(dir): return
+  for p in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+      pcLinkToDir}, relative = true):
+    result.add(p)
+  result.sort()
+
+proc refusal(h: SourcesHalf; dir, ws: string): string =
+  ## The restore's refusal message, or "" when it unpacked.
+  try: discard restoreSourcesHalf(h, dir, ws)
+  except BundleError as e: return e.msg
+
+suite "sources half members are checked before anything is written":
+  setup:
+    let haveTools = findExe("zstd").len > 0 and findExe("tar").len > 0
+    let top = createTempDir("repro-bundle-members-", "")
+  teardown:
+    removeDir(top)
+
+  test "a member outside the workspace directory is refused":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let (h, dir) = craftedHalf(top, "sibling", "ws", ["."], [],
+        addAs("ws/ok", "sibling/evil"))
+      let parent = top / "restore"
+      let msg = refusal(h, dir, parent / "ws")
+      check "sibling/evil" in msg
+      check treeOf(parent).len == 0
+
+  test "a .. component and an absolute name are refused, not stripped":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      for (label, name, reason) in [
+          ("dotdot", "ws/../evil", "not canonical"),
+          ("abs", "/tmp/evil", "an absolute name"),
+          ("dot", "ws/./x", "not canonical"),
+          ("empty", "ws//x", "not canonical")]:
+        let (h, dir) = craftedHalf(top, label, "ws", ["."], [], addAs(name))
+        let parent = top / ("restore-" & label)
+        let msg = refusal(h, dir, parent / "ws")
+        check reason in msg
+        check treeOf(parent).len == 0
+
+  test "a member in no declared checkout or state file is refused":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let (h, dir) = craftedHalf(top, "undeclared", "ws", ["lib"],
+        [".repro/workspace-state.toml"],
+        addAs("ws/lib/a", "ws/.repro/workspace-state.toml", "ws/other/x"))
+      let parent = top / "restore"
+      let msg = refusal(h, dir, parent / "ws")
+      check "ws/other/x" in msg
+      check treeOf(parent).len == 0
+      # The same declarations without the stray member restore, directories
+      # on the way to a declared path included.
+      let (good, goodDir) = craftedHalf(top, "declared", "ws", ["lib"],
+        [".repro/workspace-state.toml"],
+        "mkdir -p d/lib d/.repro; tar --format=posix --transform=" &
+        quoteShell("s|^d|ws|") & " -cf archive.tar d; " &
+        addAs("ws/lib/a", "ws/.repro/workspace-state.toml"))
+      let ok = top / "restore-ok" / "ws"
+      check refusal(good, goodDir, ok) == ""
+      check readFile(ok / "lib" / "a") == "planted\n"
+      check readFile(ok / ".repro" / "workspace-state.toml") == "planted\n"
+
+  test "a member beneath a symlink member is refused":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let outside = top / "outside"
+      createDir(outside)
+      let (h, dir) = craftedHalf(top, "beneath", "ws", ["lib"], [],
+        "ln -s " & quoteShell(outside) & " l; tar --format=posix " &
+        "--transform=" & quoteShell("flags=r;s|^l$|ws/lib/l|") &
+        " -cf archive.tar l; " & addAs("ws/lib/l/x"))
+      let parent = top / "restore"
+      let msg = refusal(h, dir, parent / "ws")
+      check "below the symlink member" in msg
+      check treeOf(parent).len == 0
+      check treeOf(outside).len == 0
+
+  test "duplicates, special files and a dangling hard link are refused":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let cases = [
+        ("dup", addAs("ws/lib/a", "ws/lib/a"), "more than once"),
+        ("fifo", "mkfifo p; tar --format=posix --transform=" &
+          quoteShell("s|^p$|ws/lib/p|") & " -cf archive.tar p", "type"),
+        ("hardlink", "ln f h; tar --format=posix --transform=" &
+          quoteShell("flags=rh;s|^f$|ws/lib/a|;s|^h$|ws/lib/b|") &
+          " -cf archive.tar f h; tar --delete -f archive.tar ws/lib/a",
+          "hard link")]
+      for (label, script, reason) in cases:
+        let (h, dir) = craftedHalf(top, label, "ws", ["lib"], [], script)
+        let parent = top / ("restore-" & label)
+        let msg = refusal(h, dir, parent / "ws")
+        check reason in msg
+        check treeOf(parent).len == 0
+
+  test "the half's own declarations must be canonical":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let (badName, dir1) = craftedHalf(top, "name", "..", ["."], [],
+        addAs("../x"))
+      check "workspace directory name" in refusal(badName, dir1,
+        top / "r1" / "ws")
+      let (badRepo, dir2) = craftedHalf(top, "repo", "ws", ["../up"], [],
+        addAs("ws/../up/x"))
+      check "checkout path" in refusal(badRepo, dir2, top / "r2" / "ws")
+      let (badState, dir3) = craftedHalf(top, "state", "ws", ["lib"],
+        ["/etc/x"], addAs("ws/lib/a"))
+      check "state file" in refusal(badState, dir3, top / "r3" / "ws")
+      check treeOf(top / "r1").len == 0
+      check treeOf(top / "r2").len == 0
+      check treeOf(top / "r3").len == 0
+
+  test "a symlink already on disk inside the workspace is not followed":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let outside = top / "outside"
+      createDir(outside)
+      for membersOnly in [false, true]:
+        let label = (if membersOnly: "members-only" else: "whole")
+        let (h, dir) = craftedHalf(top, label, "ws", [".", "lib"], [],
+          addAs("ws/README", "ws/lib/sub/a"))
+        let ws = top / ("restore-" & label) / "ws"
+        createDir(ws)
+        if membersOnly: createDir(ws / ".git")
+        createSymlink(outside, ws / "lib")
+        let before = treeOf(ws)
+        let msg = refusal(h, dir, ws)
+        check "symlink" in msg
+        check (ws / "lib") in msg
+        check treeOf(ws) == before
+        check treeOf(outside).len == 0
+
+  test "a restore under another name renames only the top directory":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      # A regex in the creating name, and `\`, `&` and `,` in the target
+      # name, must neither widen nor break the rename.
+      let (h, dir) = craftedHalf(top, "rename", ".*q", ["lib"], [],
+        "ln -s .*q/x s; tar --format=posix --transform=" &
+        quoteShell("flags=r;s|^s$|.*q/lib/s|") & " -cf archive.tar s; " &
+        addAs(".*q/lib/a"))
+      let parent = top / "restore"
+      let base = "dst&,\\x"
+      let ws = parent / base
+      check refusal(h, dir, ws) == ""
+      check readFile(ws / "lib" / "a") == "planted\n"
+      check expandSymlink(ws / "lib" / "s") == ".*q/x"
+      for p in treeOf(parent):
+        check p == base or p.startsWith(base & "/")
+
+  test "an option-like top directory name is a name, not a tar option":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let name = "--to-command=touch pwned;#"
+      let (h, dir) = craftedHalf(top, "option", name, [".", "lib"], [],
+        addAs(name & "/lib/a"))
+      for same in [true, false]:
+        let parent = top / ("restore-" & $same)
+        let ws = parent / (if same: name else: "ws")
+        createDir(ws / ".git")
+        check refusal(h, dir, ws) == ""
+        check readFile(ws / "lib" / "a") == "planted\n"
+        check not fileExists(parent / "pwned")
+        check not fileExists(getCurrentDir() / "pwned")
+
+  test "the archive cannot take the place of the restore's marker":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let outside = top / "outside"
+      createDir(outside)
+      let cases = [
+        ("link", "ln -s " & quoteShell(outside) & " l; tar --format=posix " &
+          "--transform=" & quoteShell("flags=r;s|^l$|ws/.repro|") &
+          " -cf archive.tar l", "directory .repro"),
+        ("marker", addAs("ws/.repro/bundle-sources-id"), "marker")]
+      for (label, script, reason) in cases:
+        let (h, dir) = craftedHalf(top, label, "ws", ["."], [], script)
+        let parent = top / ("restore-" & label)
+        let msg = refusal(h, dir, parent / "ws")
+        check reason in msg
+        check treeOf(parent).len == 0
+        check treeOf(outside).len == 0
+
+  test "ids, checkout paths and state files are held to their shapes":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      var (badId, dir1) = craftedHalf(top, "id", "ws", ["lib"], [],
+        addAs("ws/lib/a"))
+      badId.id = "../../x"
+      check "id" in refusal(badId, dir1, top / "r1" / "ws")
+      let (inGit, dir2) = craftedHalf(top, "git", "ws", [".git/info"], [],
+        addAs("ws/.git/info/exclude"))
+      check ".git" in refusal(inGit, dir2, top / "r2" / "ws")
+      let (newline, dir3) = craftedHalf(top, "newline", "ws", ["a\nb"], [],
+        addAs("ws/lib/a"))
+      check "checkout path" in refusal(newline, dir3, top / "r3" / "ws")
+      let (beneath, dir4) = craftedHalf(top, "beneath-state", "ws", ["lib"],
+        ["workspace-projects.md"], addAs("ws/workspace-projects.md/evil"))
+      check "lies in no checkout" in refusal(beneath, dir4, top / "r4" / "ws")
+      for r in ["r1", "r2", "r3", "r4"]:
+        check treeOf(top / r).len == 0
+
+  test "members-only, a hard link to a member left on disk is refused":
+    if not haveTools: skip("tar and zstd are needed")
+    else:
+      let (h, dir) = craftedHalf(top, "alias", "ws", [".", "lib"], [],
+        "ln f h; tar --format=posix --transform=" &
+        quoteShell("flags=rh;s|^f$|ws/.git/config|;s|^h$|ws/lib/h|") &
+        " -cf archive.tar f h")
+      let ws = top / "restore" / "ws"
+      createDir(ws / ".git")
+      writeFile(ws / ".git" / "config", "mine\n")
+      let before = treeOf(ws)
+      let msg = refusal(h, dir, ws)
+      check "does not unpack" in msg
+      check treeOf(ws) == before
