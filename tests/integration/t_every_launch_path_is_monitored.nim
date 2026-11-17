@@ -1084,16 +1084,21 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # spawn of the ``runquotad`` an invocation owns), which starts nothing
     # either, so the engine's own import is down to ``fcntl`` and
     # ``F_DUPFD_CLOEXEC`` and the allowlist below with it.
+    #
+    # The rest of the spawn context then moved too, to
+    # ``repro_core/monitor_spawn_stdio`` (shared with the Go standard
+    # convention's monitored ``go list``), which starts nothing. The engine no
+    # longer names ``Mode``, ``umask``, ``dup2``, ``close``, ``fcntl`` or
+    # ``F_DUPFD_CLOEXEC`` at all, so they are no longer allowed here: an
+    # engine that imports one of them again has to be classified again.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
       # `lstat` and the `S_IS*` tests: `endpointRootOwned` reads the
       # ownership and type of a daemon endpoint's path components
       # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
-      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
+      inert: @["kill", "setpgid", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
-                        "Mode", "umask", "dup2", "close", "fcntl",
-                        "F_DUPFD_CLOEXEC",
                         "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],
