@@ -139,6 +139,28 @@ suite "home managed blocks share the one writer":
       hostFilePath: rc, blockId: Id, postWriteBlockBytes: toBytes("a\n")))
     check report.drifted
 
+  test "a rollback refuses a malformed block before it writes anything":
+    # Review finding: with `--accept-overwrite` a block the locator refuses
+    # is only recorded as drift in step 6, and step 7 restores files before
+    # it rewrites blocks -- so the rewrite raising there left the rollback
+    # half done. `runRollback` runs this check before step 7.
+    let rc = scratchRc()
+    let doubled = legacySeed("a\n") & CurrentOpen & "\nb\n" & CurrentClose & "\n"
+    writeFile(rc, doubled)
+    var current, target: ActivationManifest
+    current.managedBlocks = @[ManagedBlock(hostFilePath: rc, blockId: Id,
+      postWriteBlockBytes: toBytes("a\n"))]
+    target.managedBlocks = @[ManagedBlock(hostFilePath: rc, blockId: Id,
+      postWriteBlockBytes: toBytes("old\n"))]
+    let plan = buildRollbackPlan(current, target, PointerEnvelope())
+    check plan.blockOps.len == 1
+    expect EHomeRollback:
+      refuseMalformedManagedBlocks(plan)
+    check readFile(rc) == doubled
+    # Control: the same plan over a well-formed file passes the check.
+    writeFile(rc, legacySeed("a\n"))
+    refuseMalformedManagedBlocks(plan)
+
   test "an empty block stays empty, and its earlier record keeps verifying":
     # Review finding: a writer that gave an empty body a blank line changed
     # the bytes between the sentinels on migration.
@@ -180,6 +202,16 @@ suite "home managed blocks share the one writer":
     check not verifyManagedBlockAgainstCurrent(ManagedBlock(
       hostFilePath: rc, blockId: Id,
       postWriteBlockBytes: toBytes(content))).drifted
+
+  test "a body ending in a lone CR digests as it reads back":
+    # Review finding: the writer terminates "x\r" as "x\r\n", which the
+    # reader folds to "x\n"; a desired digest of "x\r\n" never matched.
+    let rc = scratchRc()
+    writeFile(rc, "u\n")
+    discard applyManagedBlockResource(rc, Id, "x\r")
+    let desired = Resource(kind: rkFsManagedBlock, hostFilePath: rc,
+      managedBlockId: Id, managedBlockContent: "x\r")
+    check digestFsManagedBlock(desired) == observeManagedBlock(rc, Id).digest
 
   test "the host file never disappears while its block is rewritten":
     # A crash between "delete the rc file" and "rename the new one into

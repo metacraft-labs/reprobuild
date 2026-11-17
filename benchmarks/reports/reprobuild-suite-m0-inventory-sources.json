@@ -19633,7 +19633,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_rollback/tests/t_home_managed_blocks_share_the_one_writer.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -24,6 +24,7 @@
 
 import std/[algorithm, os, sets, strutils, times]
 from repro_core/paths import extendedPath
+from repro_core/managed_block import ManagedBlockError
 
 import repro_home_apply
 import repro_home_generations
@@ -637,6 +638,25 @@ proc refuseUnmanagedAppBundleRestores(plan: RollbackPlan) =
       e.targetPath = path
       raise e
 
+proc refuseMalformedManagedBlocks*(plan: RollbackPlan) =
+  ## Before any rollback op runs: every host file a block op will touch must
+  ## hold its block at most once and terminated. Step 7 restores files
+  ## before it rewrites blocks, so a block the shared locator refuses there
+  ## would leave the rollback half done; `--accept-overwrite` accepts a
+  ## changed block body, never one the writer cannot locate.
+  for op in plan.blockOps:
+    if op.kind notin {rokRemoveBlock, rokRestoreBlock, rokUpdateBlock}:
+      continue
+    if not fileExists(extendedPath(op.hostFilePath)):
+      continue
+    try:
+      discard readHomeManagedBlockBody(
+        readFile(extendedPath(op.hostFilePath)), op.blockId, op.hostFilePath)
+    except ManagedBlockError as err:
+      raise newException(EHomeRollback, "repro home rollback: " & err.msg &
+        "; nothing was changed. Repair or remove the block's sentinels in " &
+        op.hostFilePath.escape & " and run the rollback again")
+
 proc discardStagedAppBundles(staged: seq[StagedAppBundle]) =
   ## Drop staged copies that will not be committed, newest first (so an
   ## Applications directory the first staging created is removed last).
@@ -774,6 +794,7 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
           activeIdHex)
 
       refuseUnmanagedAppBundleRestores(plan)
+      refuseMalformedManagedBlocks(plan)
 
       # ---- Step 6b: stage + verify re-placed application bundles ----
       let stagedBundles = stageAppBundleRestores(store, tgt.manifest,

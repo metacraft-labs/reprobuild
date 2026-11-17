@@ -85,6 +85,9 @@ proc managedBlockBodyDigest(content: string): Digest256 =
   var normalized = content.replace("\r\n", "\n")
   if normalized.len > 0 and normalized[^1] != '\n':
     normalized.add('\n')
+    # A body ending in a lone `\r` is now terminated `\r\n`, which the
+    # reader folds too.
+    normalized = normalized.replace("\r\n", "\n")
   var buf = newSeq[byte](normalized.len)
   for i, ch in normalized:
     buf[i] = byte(ord(ch))
