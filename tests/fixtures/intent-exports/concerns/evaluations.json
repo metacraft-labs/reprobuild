@@ -30,7 +30,7 @@
           "binaries": [],
           "activity": "default",
           "concern": "packages",
-          "resolved": false
+          "resolved": true
         }
       ],
       "resources": [
@@ -156,7 +156,7 @@
           "binaries": [],
           "activity": "default",
           "concern": "packages",
-          "resolved": false
+          "resolved": true
         }
       ],
       "resources": [
@@ -1449,7 +1449,7 @@
           "binaries": [],
           "activity": "default",
           "concern": "packages",
-          "resolved": false
+          "resolved": true
         }
       ],
       "resources": [
@@ -1569,7 +1569,7 @@
           "binaries": [],
           "activity": "default",
           "concern": "packages",
-          "resolved": false
+          "resolved": true
         }
       ],
       "resources": [
