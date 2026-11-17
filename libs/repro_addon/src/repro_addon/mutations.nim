@@ -1253,6 +1253,16 @@
 ##                                            the identity's directory is gone,
 ##                                            whether or not the ledger copy is
 ##                                            (decision 178)
+## ``first-use-without-ledger-copy``         with no identity and no ledger
+##                                            copy, the records' directory is
+##                                            recorded at first use, a
+##                                            swapped one included (decision
+##                                            178, A11 round 22)
+## ``verify-absent-dir-without-identity-noted`` verify notes, not reports,
+##                                            an absent records' directory
+##                                            whose identity's directory is
+##                                            gone beside a ledger copy
+##                                            (decision 178)
 ## ``token-cleared-before-identity``          bootstrap clears a stale token,
 ##                                            and keeps a directory it made,
 ##                                            before it knows the directory
@@ -2304,6 +2314,8 @@ const
                           "identity-removed-before-ledger-copy",
                           "state-gone-from-addon-dir-alone",
                           "token-cleared-before-identity",
+                          "first-use-without-ledger-copy",
+                          "verify-absent-dir-without-identity-noted",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",
                           "uninstall-records-dir-unbound",

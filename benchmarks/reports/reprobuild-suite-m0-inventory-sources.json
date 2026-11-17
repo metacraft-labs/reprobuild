@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2902,
+    "nimTestBinaries": 2903,
     "pureUnitConsolidationGroups": 83,
     "pureUnitTests": 782,
     "staticallyDetectedRuntimeCompilerFlowTests": 145,
-    "testEntries": 2949
+    "testEntries": 2950
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1644,7 +1644,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1603,
+      "integration": 1604,
       "platform/destructive": 190,
       "pure unit": 782,
       "unclassified": 351
@@ -1861,9 +1861,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2902,
+    "nimTestBinaryCount": 2903,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2949
+    "testEntryCount": 2950
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10492,8 +10492,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 15,
-      "staticCaseCount": 67,
+      "sourceSuiteCount": 16,
+      "staticCaseCount": 73,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13471,7 +13471,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51523,6 +51523,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_rqe_cg3_wrapper_is_transparent.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg3_wrapper_is_transparent_fixture_crates",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg3_wrapper_is_transparent_fixture_crates.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
