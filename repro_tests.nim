@@ -781,6 +781,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let onHost = ownOf(E1)"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_floor_round20.nim",
+    binary: "build/test-bin/t_addon_floor_round20",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let svc = \"systemd.systemUnit {\\n  name = \\\"a9a@.service\\\"\\n..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_floor_round3.nim",
     binary: "build/test-bin/t_addon_floor_round3",
     defines: @[],
