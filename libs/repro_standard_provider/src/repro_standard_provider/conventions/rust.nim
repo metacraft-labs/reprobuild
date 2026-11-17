@@ -109,10 +109,13 @@
 ##   * The convention always builds the *release* artifact. The Rust
 ##     convention spec defaults Mode A to release-profile output; debug-
 ##     profile and per-profile artifact dirs are an outstanding surface.
+##   * Each target compiles under its own edition as ``cargo metadata``
+##     reports it (a ``[lib]`` or ``[[bin]]`` table may override the
+##     package's), never under one edition per package.
 ##   * ``-C metadata`` / ``-C extra-filename`` use a stable FNV-1a hash of
-##     ``crateName & "@" & edition`` — distinct from cargo's own
-##     package-id hash because we don't have a published source URL or
-##     features set in the M13 fixtures. This is fine for the
+##     ``crateName & "@" & edition`` (the target's edition) — distinct
+##     from cargo's own package-id hash because we don't have a published
+##     source URL or features set in the M13 fixtures. This is fine for the
 ##     workspace/library cases where no downstream consumer expects
 ##     rmeta compatibility with ambient ``cargo check``.
 
@@ -174,6 +177,10 @@ type
       ## ``-`` → ``_`` normalisation. Cargo names ``CARGO_BIN_NAME`` and
       ## ``CARGO_BIN_EXE_<name>`` with it.
     edition: string
+      ## The edition rustc compiles this target under: the target's own
+      ## ``edition`` as ``cargo metadata`` reports it, which is the
+      ## package's edition unless the target table sets its own
+      ## (``targetEdition``).
     kind: RustTargetKind
     sourcePath: string
       ## Absolute path to the target's crate root (``main.rs``/``lib.rs``
@@ -552,7 +559,32 @@ proc normalisedManifestDir(path: string): string =
     d = d.toLowerAscii
   d
 
-proc extractTargets(pkgNode: JsonNode; edition: string): seq[RustTarget] =
+const CargoDefaultEdition = "2015"
+  ## The edition Cargo assumes for a package whose manifest declares none,
+  ## and rustc's own default for ``--edition``
+  ## (https://doc.rust-lang.org/cargo/reference/manifest.html#the-edition-field,
+  ## https://doc.rust-lang.org/rustc/command-line-arguments.html#--edition-specify-the-edition-to-use).
+
+proc nonEmptyStringField(node: JsonNode; key: string): string =
+  ## ``node[key]`` when it is a non-empty JSON string, else ``""``.
+  if node.kind == JObject and key in node and node[key].kind == JString:
+    node[key].getStr()
+  else:
+    ""
+
+proc targetEdition(target: JsonNode; packageEdition: string): string =
+  ## The edition one ``targets[]`` entry of ``cargo metadata`` compiles
+  ## under. A target table (``[lib]``, ``[[bin]]``, ``[[test]]``, ...) may
+  ## set its own ``edition``, which overrides the package's for that target
+  ## alone, and ``cargo metadata`` reports the result per target
+  ## (https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-edition-field).
+  ## Cargo always fills the field in; the package edition is only a
+  ## fallback for output that lacks it.
+  let own = nonEmptyStringField(target, "edition")
+  if own.len > 0: own else: packageEdition
+
+proc extractTargets(pkgNode: JsonNode;
+                    packageEdition: string): seq[RustTarget] =
   ## Walk a package's ``targets`` array and keep ``bin`` / ``lib`` targets
   ## plus (M22) ``test`` integration-test targets. Examples, benches, and
   ## custom-build targets are still skipped — those need additional
@@ -626,7 +658,7 @@ proc extractTargets(pkgNode: JsonNode; edition: string): seq[RustTarget] =
     result.add(RustTarget(
       crateName: normaliseCrateName(rawName),
       rawName: rawName,
-      edition: edition,
+      edition: targetEdition(target, packageEdition),
       kind: kind,
       sourcePath: srcPath))
     if isOther:
@@ -757,16 +789,20 @@ proc loadProject(projectRoot: string;
       raise newException(ValueError,
         "rust convention: cargo metadata package missing 'name' for " &
           projectRoot)
-    let edition =
-      if "edition" in pkgNode: pkgNode["edition"].getStr()
-      else: "2021"
+    # The package's edition is only the default for its targets; each
+    # target's own edition is resolved in ``extractTargets``. Real
+    # ``cargo metadata`` always reports it, so the fallback is reached
+    # only on malformed output, and then it is what Cargo and rustc assume.
+    let packageEdition = block:
+      let declared = nonEmptyStringField(pkgNode, "edition")
+      if declared.len > 0: declared else: CargoDefaultEdition
     let manifestPath =
       if "manifest_path" in pkgNode: pkgNode["manifest_path"].getStr()
       else: ""
     let manifestDir =
       if manifestPath.len > 0: manifestPath.parentDir
       else: projectRoot
-    let targets = extractTargets(pkgNode, edition)
+    let targets = extractTargets(pkgNode, packageEdition)
     var workspaceDeps: seq[string] = @[]
     var hasExternalDeps = false
     if "dependencies" in pkgNode and pkgNode["dependencies"].kind == JArray:
