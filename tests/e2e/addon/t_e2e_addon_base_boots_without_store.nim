@@ -44,6 +44,7 @@ import repro_test_support/reasoned_skip
 import repro_addon/ledger
 
 import ./addon_testbed
+import ./gate_bases
 
 const
   Service = "[Unit]\nDescription=fixture that outlives nothing\n[Service]\n" &
@@ -64,9 +65,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
   try:
-    g = newGuest(b)
+    g = newGateGuest(b)
     g.boot()
-    g.prepareBase()
+    g.prepareGateBase()
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     if not g.bootstrapAddon(repro, step): return fails
@@ -158,7 +159,7 @@ suite "e2e_addon_base_boots_without_store":
       skip("a reboot without the store is of a disk image; QEMU only")
     else:
       var failures: seq[string]
-      for b in selectedBases():
+      for b in selectedGateBases():
         let record = %*{"gate": "e2e_addon_base_boots_without_store",
           "base": b.name, "arch": b.debArch, "backend": "qemu",
           "mutation": mutation(), "reprobuild": gitHead(),

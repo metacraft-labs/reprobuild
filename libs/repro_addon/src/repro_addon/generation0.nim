@@ -89,6 +89,18 @@ type
       ## The Evidence sink and the units that ship to it (A11, spec §10.4);
       ## none when ``evidence.sinkAddress`` is empty, so a host bootstrapped
       ## without a sink keeps the generation 0 it had.
+    reproSubvolume*: ReproSubvolumeMount
+      ## On a btrfs root, where ``/repro``'s subvolume is (spec §5.1):
+      ## ``repro.mount`` mounts it by that path, so a root snapshot booted
+      ## from the boot menu still finds the store. Empty otherwise.
+
+  ReproSubvolumeMount* = object
+    ## The ``/repro`` subvolume as a mount names it from any root: the
+    ## filesystem's device by UUID and the subvolume's path from the
+    ## filesystem's top (``/@/repro`` under Omarchy's ``@``, ``/repro``
+    ## when ``/`` is the top-level subvolume). btrfs(5) ``subvol=``.
+    what*: string    ## ``/dev/disk/by-uuid/<uuid>``
+    subvol*: string  ## the path for ``subvol=``
 
   EgressObserverInputs* = object
     ## The deploy agent's egress observer (owner decision 2026-11-04, threat
@@ -437,6 +449,23 @@ Before=shutdown.target
 [Install]
 WantedBy=multi-user.target
 """
+
+const ReproMountUnit* = "repro.mount"
+  ## ``/repro`` mounted from its own subvolume (btrfs roots only).
+
+proc reproMountUnit*(m: ReproSubvolumeMount): string =
+  ## ``/repro``'s subvolume mounted at ``/repro`` by its path from the
+  ## filesystem's top (spec §5.1, AR4). In the running root the subvolume
+  ## is already there, nested, and the mount puts it over itself; in a
+  ## snapshot of the root booted from the boot menu, ``/repro`` is the
+  ## empty directory btrfs leaves where a nested subvolume was (a snapshot
+  ## never descends into one), and this mount is what brings the store
+  ## back, not rolled back. ``repro-store.mount``'s ``RequiresMountsFor=
+  ## /repro`` orders the store's read-only bind after it.
+  "[Unit]\nDescription=Reprobuild add-on root (its own btrfs subvolume)\n" &
+    "Before=repro-addon.target\n\n[Mount]\nWhat=" & m.what &
+    "\nWhere=/repro\nType=btrfs\nOptions=subvol=" & m.subvol &
+    "\n\n[Install]\nWantedBy=repro-addon.target\n"
 
 proc storeMountUnit(): string =
   # A bind mount of the store over itself, read-only. ``DefaultDependencies``
@@ -1313,7 +1342,13 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
     OwnObject(kind: ookEtcFile, path: CachesConfPath,
               content: renderCachesConf(inp.cacheUrl, inp.cachePublishers)),
     OwnObject(kind: ookUnit, unit: AddonTarget, path: unitPath(AddonTarget),
-              content: targetUnit(), enabled: true),
+              content: targetUnit(), enabled: true)]
+  if inp.reproSubvolume.what.len > 0:
+    result.add(OwnObject(kind: ookUnit, unit: ReproMountUnit,
+                         path: unitPath(ReproMountUnit),
+                         content: reproMountUnit(inp.reproSubvolume),
+                         enabled: true))
+  result.add @[
     OwnObject(kind: ookUnit, unit: StoreMountUnit,
               path: unitPath(StoreMountUnit), content: storeMountUnit(),
               enabled: true),

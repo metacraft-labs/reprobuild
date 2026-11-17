@@ -101,6 +101,7 @@ import ./ledger
 import ./mutations
 import ./omarchy
 import ./pending_plan
+import ./root_snapshot
 import ./seams
 import ./static_tree
 import ./store_custody
@@ -210,6 +211,10 @@ type
       ## marker so a recovery that finishes the revert can record the
       ## attempt as rolled back.
     revertReason*: string
+    revertSnapshot*: string
+      ## A revert: the key of the root snapshot the failed attempt took
+      ## (``root_snapshot``), recorded in the revert's marker; the actor
+      ## that completes the revert deletes it (spec §7.2, §13 decision 105).
     replayOf*: string
       ## A replay: the purpose of the switch it replays (a replayed revert
       ## is still a revert: it does not revert itself).
@@ -312,6 +317,16 @@ type
     baseIdentity*: BaseIdentity    ## the base observed at plan time (§7.4)
     previousBase*: BaseIdentity    ## the one the current generation recorded
     baseChanges*: seq[string]      ## what changed between the two (§7.9)
+    rootSnapshotPlan*: string
+      ## The plan's ``root snapshot: ...`` line (spec §7.2, §8.5): the
+      ## snapper configuration it is taken with, or why none is.
+    rootSnapshot*: string
+      ## The snapshot this switch took (``<config>#<number>
+      ## (repro-addon=<key>)``); "" when none.
+    snapshotNotes*: seq[string]
+      ## What the switch did with the add-on's other snapshots: the ones
+      ## the sweep or retention deleted, and an ``EAddOnSnapshotLeft`` line
+      ## for each it could not delete (spec §7.2, §8.4).
     baseLayerOverrides*: seq[string]
       ## Every ``collision = "overrideBaseLayer"`` of the profile and what
       ## it acknowledges: ``<address>\t<path or unit>\t<what>`` (spec
@@ -3998,6 +4013,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if hasPendingMarker(stateDir):
       raise newException(AddonApplyError, "an interrupted switch is " &
         "pending (" & pendingMarkerPath(stateDir) & "); " & why)
+  # The orphan sweep (spec §7.2, §13 decision 116): every apply's pending
+  # check, under the host apply lock, once the marker has been decided.
+  # A replay or a revert runs inside the recovery that sweeps.
+  if not opts.planOnly and purpose notin ["replay", "revert"]:
+    result.snapshotNotes.add(sweepFor(stateDir, markerStateDirs(stateDir)))
   var replayPlan: PendingPlan
   if opts.replay:
     replayPlan = readPendingPlan(stateDir)
@@ -4233,6 +4253,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # On any other base an acknowledgement is listed as acknowledging
       # nothing (``omarchy.baseLayerPass``).
       result.baseLayerOverrides = baseLayerPass(result.baseIdentity.id, user)
+  # The switch's own root snapshot (spec §7.2, §8.5): decided at plan time,
+  # so `required` on a host without a snapper configuration for `/` is
+  # refused before step 1 and before anything is written. Only a fresh
+  # apply of an operator profile takes one: a rollback, a revert, a replay,
+  # a record-only pass and generation 0 (bootstrap's own apply, which
+  # carries no operator profile and so no setting) take none.
+  let snapshotSite = hostSnapshotSite()
+  let snapPlan = planRootSnapshot(user.addOn.rootSnapshot,
+    fresh = purpose == "apply" and not replaying and not opts.recordOnly and
+            opts.ownProfileText.len == 0,
+    site = snapshotSite)
+  result.rootSnapshotPlan = snapPlan.line
+  if snapPlan.refusal.len > 0:
+    raise newAddOnError(adRootSnapshot, snapPlan.refusal)
   let baseIdentityText = renderBaseIdentity(result.baseIdentity)
   # A package that arrived since the add-on took a unit name (spec §4.3):
   # reported on every plan and apply as actionable drift.
@@ -5713,6 +5747,27 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let probeExe = if opts.reproExe.len > 0: opts.reproExe
                  else: SelfExeAtStart
 
+  # The root snapshot (spec §7.2; §13 decisions 90, 100): after every
+  # plan-time refusal and after step 1, which touched only the store, and
+  # before the write-ahead plan and the marker -- so a refused apply has
+  # taken none, and a crash between `snapper create` and the marker leaves
+  # a snapshot whose record (written before `create`) the orphan sweep
+  # finds.
+  var snapshotKey = ""
+  if snapPlan.take:
+    let taken = takeRootSnapshot(stateDir, snapPlan,
+      "repro-addon gen " & (if committedPrevious.len > 0: committedPrevious
+                            else: "0") & " -> next", snapshotSite)
+    if taken.ok:
+      snapshotKey = taken.record.key
+      result.rootSnapshot = taken.record.config & "#" & $taken.record.number &
+        " (" & SnapperUserdataKey & "=" & snapshotKey & ")"
+    elif user.addOn.rootSnapshot == rsRequired:
+      raise newAddOnError(adRootSnapshot, "rootSnapshot = \"required\": " &
+        taken.why & "; nothing was switched")
+    else:
+      result.rootSnapshotPlan = "root snapshot: none (" & taken.why &
+        "); no second way back exists"
   # The write-ahead plan, BEFORE the marker that makes it meaningful and
   # before anything on the base changes. A replay keeps the plan of the
   # switch it replays: only that one recorded the host as it was.
@@ -5752,12 +5807,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   var marker = PendingMarker(fromGeneration: committedPrevious,
     newStatic: treePath, previousStatic: previousStatic, step: ssRealise,
     status: "in-progress", purpose: purpose, revertOf: opts.revertOf,
-    revertReason: opts.revertReason)
+    revertReason: opts.revertReason, rootSnapshot: snapshotKey,
+    revertSnapshot: opts.revertSnapshot)
   if replaying:
     # What the interrupted switch stopped and disabled stays on record
     # until this one finishes.
     marker.stopped = priorMarker.stopped
     marker.disabled = priorMarker.disabled
+    # So does its root snapshot: the replay's attempt owns it now, and the
+    # generation the replay commits keeps it (spec §7.2).
+    marker.rootSnapshot = priorMarker.rootSnapshot
+    if marker.revertSnapshot.len == 0:
+      marker.revertSnapshot = priorMarker.revertSnapshot
     # A replayed revert stays a revert, with what it reverts, so a crash
     # during the replay is recovered as one too.
     if priorMarker.purpose.len > 0: marker.purpose = priorMarker.purpose
@@ -5998,6 +6059,23 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # Steps 4 and 5 are the drivers' writes, in the profile's apply
       # order (links and copies interleave); both are complete here.
       marker.attempt = generationId
+      # The generation log records the attempt's root snapshot from the
+      # moment the attempt has an id (spec §7.2): its configuration, number
+      # and key. A record whose number snapper never returned names its key.
+      if marker.rootSnapshot.len > 0:
+        var where = "snapper:(unrecorded)"
+        for rec in readRecords(stateDir):
+          if rec.key == marker.rootSnapshot:
+            where = "snapper:" & rec.config & "#" & $rec.number
+        try:
+          appendAuditRecord(applyLogPath(stateDir, generationId), AuditRecord(
+            timestamp: getTime().toUnix(), operationKind: "addon.root-snapshot",
+            resourceAddress: where, outcome: "taken",
+            diagnostic: SnapperUserdataKey & "=" & marker.rootSnapshot,
+            recordClass: AuditClassLiveState))
+        except CatchableError as ex:
+          problems.add("cannot record the root snapshot in the generation " &
+                       "log: " & ex.msg)
       marker.step = ssReconcileLinks
       writePendingMarker(stateDir, marker)
       seamPause(stateDir, seamPrefix & "step-4")
@@ -6593,9 +6671,19 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       clearPendingMarker(stateDir)
       clearPendingPlan(stateDir)
       releasePendingRoot()
+      # Its own root snapshot goes as it is undone (spec §7.2, §13 decision
+      # 116); no `rolled-back` record is written on this path. One that
+      # cannot be deleted is reported, and swept later.
+      var left: seq[string]
+      if marker.rootSnapshot.len > 0:
+        left = deleteSnapshotByKey(stateDir, marker.rootSnapshot,
+          "the refused switch's undo", snapshotSite).left
       if undoProblems.len > 0:
         raise newException(AddonApplyError, e.msg & "\nputting back what " &
-          "step 2 stopped failed: " & undoProblems.join("; "))
+          "step 2 stopped failed: " & undoProblems.join("; ") &
+          (if left.len > 0: "\n" & left.join("\n") else: ""))
+      if left.len > 0:
+        e.msg.add("\n" & left.join("\n"))
       raise e
     infraError = "repro infra apply failed: " & e.msg
   except CatchableError as e:
@@ -6711,6 +6799,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         purpose: "revert",
         assumeActive: assume, retention: opts.retention,
         reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
+        revertSnapshot: marker.rootSnapshot,
         nonBlockingStarts: opts.nonBlockingStarts,
         confirmCapSec: opts.confirmCapSec))
     except CatchableError as e:
@@ -6720,9 +6809,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         " records it; run `repro system addon recover`")
     recordRolledBack(stateDir, hookGeneration, committedPrevious,
                      reverted.generationId, why, hookHealthFailed)
+    # This process completed the revert: it deletes the attempt's root
+    # snapshot (spec §7.2, §13 decisions 105, 119). One it cannot delete
+    # is reported with `EAddOnSnapshotLeft`; the orphan sweep retries it.
+    var left: seq[string]
+    if marker.rootSnapshot.len > 0:
+      left = deleteSnapshotByKey(stateDir, marker.rootSnapshot,
+        "the revert", snapshotSite).left
     var err = newException(AddonRolledBack, "the switch was rolled back to " &
       committedPrevious & " (re-applied as generation " &
-      reverted.generationId & "): " & why)
+      reverted.generationId & "): " & why &
+      (if left.len > 0: "\n" & left.join("\n") else: ""))
     raise err
 
   # A8, spec §7.5: the rollback floor kept a failed switch in place.
@@ -6766,9 +6863,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       running, invocationsBefore, startedBySwitch, result.generationId,
       committedPrevious, tableExisted = fileExists(tablePath))
     writeInvocationTable(tablePath, table)
+  # The committed generation owns the attempt's root snapshot (spec §7.2),
+  # recorded before the marker goes: until then the marker owns it.
+  if marker.rootSnapshot.len > 0:
+    recordGenerationSnapshot(stateDir, result.generationId, marker.rootSnapshot)
   result.retentionDropped = pruneGenerationRoots(result.generationId,
     committedPrevious, opts.retention.get(DefaultRetention),
     held = heldGenerations(stateDir, newLedger, result.generationId))
+  # A generation retention drops loses its snapshot (spec §7.2).
+  result.snapshotNotes.add(deleteGenerationSnapshots(stateDir,
+    result.retentionDropped, snapshotSite))
   marker.step = ssCommit
   writePendingMarker(stateDir, marker)
   seamPause(stateDir, seamPrefix & "step-9")
@@ -6803,6 +6907,9 @@ type
     generationId*: string  ## the revert's generation (when reverted)
     why*: string           ## why no revert was possible (when not)
     source*: string        ## what the revert re-applied (when reverted)
+    snapshotLeft*: seq[string]
+      ## ``EAddOnSnapshotLeft`` for the attempt's root snapshot when the
+      ## revert could not delete it (the sweep retries it)
 
 proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
                               replayError: string;
@@ -6925,6 +7032,7 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
     userProfileText: back.user, storedTarget: true, driver: driver,
     purpose: "revert",
     assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
+    revertSnapshot: prior.rootSnapshot,
     nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
   # Step 2 disabled the units the switch was removing, recording each
   # first. When the switch got no further, their files are still the old
@@ -6943,8 +7051,14 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
       discard        # reported by the next check as drift
   recordRolledBack(stateDir, prior.attempt, fromGen, r.generationId, reason,
                    false)
+  # The recovery completed the revert: it deletes the attempt's root
+  # snapshot (spec §13 decisions 105, 119).
+  var left: seq[string]
+  if prior.rootSnapshot.len > 0:
+    left = deleteSnapshotByKey(stateDir, prior.rootSnapshot,
+      "the recovery's revert", hostSnapshotSite()).left
   FailedReplayRevert(reverted: true, generationId: r.generationId,
-                     source: backFrom)
+                     source: backFrom, snapshotLeft: left)
 
 proc renderLedgerDiff*(r: AddonApplyResult): string =
   ## The plan's ledger diff section (spec §7.1).

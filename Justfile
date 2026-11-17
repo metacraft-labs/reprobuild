@@ -133,6 +133,33 @@ e2e_omarchy_addon_base_layer_refusal:
 e2e_arch_addon_no_base_layer_on_plain_arch:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_no_base_layer_on_plain_arch
 
+# AR4: A4's switch gates and A5's crash and rollback gates, unchanged, on
+# the Arch guests (and A5's on the Omarchy VM); the per-base fixtures are
+# tests/e2e/addon/gate_bases.nim's. Every gate runs, and the recipe fails
+# when any did.
+e2e_arch_addon_switch_gates:
+    #!/usr/bin/env bash
+    rc=0
+    for t in t_e2e_addon_switch_is_planned_exactly t_e2e_addon_exclusive_never_overlaps t_e2e_addon_gc_keeps_current_and_previous; do
+      REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh "$t" || rc=1
+    done
+    exit $rc
+
+e2e_arch_addon_crash_and_rollback_gates:
+    #!/usr/bin/env bash
+    rc=0
+    for t in t_e2e_addon_hard_reset_at_every_step t_e2e_addon_base_boots_without_store t_e2e_addon_confirm_or_revert; do
+      REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh "$t" || rc=1
+    done
+    exit $rc
+
+# AR4: the switch's own root snapshot (spec §7.2, §8.5).
+e2e_omarchy_addon_root_snapshot_rollback:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_root_snapshot_rollback
+
+e2e_arch_addon_root_snapshot_setting:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_root_snapshot_setting
+
 e2e_addon_bootstrap_changes_nothing_preexisting:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
 

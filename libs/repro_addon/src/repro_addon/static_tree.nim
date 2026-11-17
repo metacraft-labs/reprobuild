@@ -86,6 +86,15 @@ type
                               ## `writePendingMarker`); 0 for a marker an
                               ## older build wrote
     ownerBoot*: string        ## the kernel boot id when it was written
+    rootSnapshot*: string     ## the key of the root snapshot this attempt
+                              ## took (``root_snapshot``, spec §7.2); ""
+                              ## when it took none. The attempt owns it
+                              ## while the marker is present; a replay
+                              ## carries it forward
+    revertSnapshot*: string   ## a revert: the key of the snapshot the
+                              ## attempt it reverts took, which the actor
+                              ## completing the revert deletes (§13
+                              ## decision 105)
 
 const
   StaticLinkPath* = "/etc/repro/static"
@@ -574,6 +583,12 @@ proc render*(m: PendingMarker): string =
   result.add("revert-reason\t" & escapeField(m.revertReason) & "\n")
   result.add("owner-pid\t" & $m.ownerPid & "\n")
   result.add("owner-boot\t" & escapeField(m.ownerBoot) & "\n")
+  # Only when set, so a marker of a switch that took no snapshot reads
+  # exactly as before.
+  if m.rootSnapshot.len > 0:
+    result.add("root-snapshot\t" & escapeField(m.rootSnapshot) & "\n")
+  if m.revertSnapshot.len > 0:
+    result.add("revert-snapshot\t" & escapeField(m.revertSnapshot) & "\n")
 
 proc parsePendingMarker*(text: string): PendingMarker =
   let lines = text.splitLines()
@@ -614,6 +629,8 @@ proc parsePendingMarker*(text: string): PendingMarker =
       except ValueError:
         raise newException(StaticTreeError, "malformed owner-pid " & v)
     of "owner-boot": result.ownerBoot = v
+    of "root-snapshot": result.rootSnapshot = v
+    of "revert-snapshot": result.revertSnapshot = v
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
 

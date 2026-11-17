@@ -110,6 +110,12 @@ type
       ## `omarchyAccount: "<name>"` (§4.3.2, §8.5): the account whose home
       ## holds Omarchy's hook directory, on an Omarchy base only; "" when
       ## not declared.
+    rootSnapshot*: string
+      ## `rootSnapshot: required | ifConfigured | off` (§7.2, §8.5): the
+      ## switch's own snapper snapshot of `/`; "" when not declared (the
+      ## default, `ifConfigured`, applies). The value is checked when the
+      ## compiled profile is rendered to the text form
+      ## (`repro_infra.rootSnapshotValueError`).
 
   BaseOsBootFile* = object
     ## One boot firmware file of a `baseOs:` section (`config.txt`,

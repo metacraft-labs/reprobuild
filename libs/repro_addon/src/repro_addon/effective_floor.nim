@@ -203,7 +203,8 @@ const
     "IgnoreOnIsolate", "CollectMode", "SurviveFinalKillSignal",
     # Start, stop and restart policy, timeouts and signals.
     "Type", "ExitType", "Restart", "RestartMode", "RestartUSec",
-    "RestartSteps", "RestartMaxDelayUSec", "RestartPreventExitStatus",
+    "RestartSteps", "RestartMaxDelayUSec", "RestartRandomizedDelayUSec",
+    "RestartPreventExitStatus",
     "RestartForceExitStatus", "SuccessExitStatus", "RemainAfterExit",
     "GuessMainPID", "PIDFile", "BusName", "NotifyAccess", "TimeoutStartUSec",
     "TimeoutStopUSec", "TimeoutAbortUSec", "TimeoutCleanUSec",
@@ -234,7 +235,13 @@ const
     "MemoryZSwapMax", "StartupMemoryZSwapMax", "MemoryZSwapWriteback",
     "MemoryLimit", "MemoryCurrent", "MemoryPeak", "MemorySwapCurrent",
     "MemorySwapPeak", "MemoryZSwapCurrent", "MemoryKSM",
-    "MemoryPressureWatch", "MemoryPressureThresholdUSec", "TasksAccounting",
+    "MemoryPressureWatch", "MemoryPressureThresholdUSec",
+    # systemd 258-262's CPU and IO pressure watches: the memory one's
+    # siblings (PSI notification thresholds for the service's own cgroup),
+    # and per-cgroup transparent huge pages (measured on Arch's systemd 262,
+    # AR4).
+    "CPUPressureWatch", "CPUPressureThresholdUSec", "IOPressureWatch",
+    "IOPressureThresholdUSec", "MemoryTHP", "TasksAccounting",
     "TasksCurrent", "TasksMax", "IPAccounting", "IPIngressBytes",
     "IPIngressPackets", "IPEgressBytes", "IPEgressPackets",
     "ManagedOOMSwap", "ManagedOOMMemoryPressure",
@@ -296,6 +303,21 @@ const
     ## families until round 5; every name is now listed (A9 review round 5,
     ## finding 3), and a ``Limit*`` is compared with the manager's default
     ## (``LimitProps``).
+
+const UnsetOnlyProps* = ["BindNetworkInterface", "CPUSetPartition",
+    "LUOSession", "OOMRules", "RefreshOnReload", "RootMStack"]
+  ## Properties a newer systemd reports (systemd 262 on the Arch guests and
+  ## the Omarchy VM, measured with ``busctl introspect`` in AR4) that are
+  ## reviewed only as UNSET: empty, as ``systemctl show`` prints them for a
+  ## unit that does not set them, they cannot change what the service may
+  ## do; any value refuses the unit until it is reviewed. ``RootMStack=``
+  ## gives the service another root (as ``RootDirectory=`` and
+  ## ``RootImage=`` do, which are compared), ``LUOSession=`` hands it a
+  ## live-update session across a kexec, ``BindNetworkInterface=`` binds
+  ## its sockets to a device, ``RefreshOnReload=`` re-reads its credentials
+  ## and extensions on a reload, ``CPUSetPartition=`` makes its cgroup a
+  ## cpuset partition (CPUs taken from everything else) and ``OOMRules=``
+  ## changes how the out-of-memory killer treats it.
 
 const LimitProps* = [
     "LimitAS", "LimitASSoft", "LimitCORE", "LimitCORESoft", "LimitCPU",
@@ -1762,6 +1784,11 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         continue
       if k in ComparedProps or k in LimitProps or
           isExecProp(k) or isInertProp(k): continue
+      if k in UnsetOnlyProps:
+        if val.len == 0: continue
+        problem2("unset-only", k, "the property " & k & "=" & val & " is " &
+                "reviewed only as unset; refused")
+        continue
       problem2("default-deny", k, "the property " & k & "=" & val & " is neither compared " &
               "with the floor nor reviewed as inert; refused")
     # The commands, from the Ex forms (which carry the flags).

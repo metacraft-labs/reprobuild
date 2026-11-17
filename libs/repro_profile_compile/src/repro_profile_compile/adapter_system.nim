@@ -1087,6 +1087,13 @@ proc adaptSystemProfile*(p: ProfileIntent;
       if problem.len > 0:
         raise newException(ValueError, "addOn: " & problem)
       result.profile.addOn.omarchyAccount = p.addOn.omarchyAccount
+    if p.addOn.rootSnapshot.len > 0:
+      let problem = rootSnapshotValueError("\"" & p.addOn.rootSnapshot & "\"")
+      if problem.len > 0:
+        raise newException(ValueError, "addOn: " & problem)
+      result.profile.addOn.rootSnapshot =
+        parseRootSnapshotSetting("\"" & p.addOn.rootSnapshot & "\"")
+      result.profile.addOn.rootSnapshotDeclared = true
   for r in selected:
     if r.kind == SecretFileStanzaTag:
       # A declaration, not a resource (`SecretFileDecl`): it is carried
@@ -1202,6 +1209,9 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       (if sp.addOn.omarchyAccount.len > 0:
          "  omarchyAccount = " & quoteSystemValue(sp.addOn.omarchyAccount) &
            "\n"
+       else: "") &
+      (if sp.addOn.rootSnapshotDeclared:
+         "  rootSnapshot = " & quoteSystemValue($sp.addOn.rootSnapshot) & "\n"
        else: "") & "}\n\n")
   # The secrets the profile declares (`secrets.secretFile`), each once and
   # in profile order: they are not resources, but a unit's `credentials`

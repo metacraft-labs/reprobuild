@@ -506,6 +506,8 @@ proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
     result.add("  confirmTimeout = " & $settings.confirmTimeoutSec)
   if settings.omarchyAccount.len > 0:
     result.add("  omarchyAccount = " & quoteSystemValue(settings.omarchyAccount))
+  if settings.rootSnapshotDeclared:
+    result.add("  rootSnapshot = " & quoteSystemValue($settings.rootSnapshot))
   result.add("}")
 
 proc renderSecretFileStanza*(d: SecretFileDecl): seq[string] =

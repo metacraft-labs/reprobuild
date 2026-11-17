@@ -1129,10 +1129,24 @@ proc parseAddOnSection(body: NimNode; profileVar: NimNode): NimNode =
         result.add quote do:
           `profileVar`.addOn.omarchyAccount = `account`
         continue
+      if entry[0].kind == nnkIdent and $entry[0] == "rootSnapshot":
+        # `rootSnapshot: ifConfigured` (§7.2, §8.5): one of the three
+        # settings, written bare as the spec writes it, or quoted.
+        if entry.len < 2 or entry[1].kind != nnkStmtList or
+            entry[1].len != 1 or
+            entry[1][0].kind notin {nnkIdent, nnkStrLit, nnkRStrLit} or
+            (if entry[1][0].kind == nnkIdent: $entry[1][0]
+             else: entry[1][0].strVal) notin ["required", "ifConfigured", "off"]:
+          error("rootSnapshot: expects required, ifConfigured or off", entry)
+        let setting = newStrLitNode(if entry[1][0].kind == nnkIdent:
+                                      $entry[1][0] else: entry[1][0].strVal)
+        result.add quote do:
+          `profileVar`.addOn.rootSnapshot = `setting`
+        continue
       if entry[0].kind != nnkIdent or $entry[0] != "managedEtcPrefixes":
         error("addOn: unknown field " & entry[0].repr &
               " (known: managedEtcPrefixes, confirmTimeout, " &
-              "omarchyAccount)", entry)
+              "omarchyAccount, rootSnapshot)", entry)
       if entry.len < 2 or entry[1].kind != nnkStmtList:
         error("managedEtcPrefixes must be an indented block of string " &
               "literals", entry)

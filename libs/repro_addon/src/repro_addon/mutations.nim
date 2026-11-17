@@ -1019,6 +1019,18 @@
 ##                                            path, and no plan refuses a
 ##                                            prefix, file or unit Omarchy's
 ##                                            scripts write
+## ``snapshot-cleanup-number``                the switch's root snapshot is
+##                                            created with
+##                                            ``--cleanup-algorithm number``,
+##                                            so snapper's (and every
+##                                            ``omarchy update``'s) ``cleanup
+##                                            number`` can delete it
+## ``snapshot-sweep-ignores-retention``       the orphan sweep reads no
+##                                            store roots, so it treats
+##                                            only the current and previous
+##                                            generation as retained
+## ``uninstall-keeps-snapshots``              uninstall deletes none of the
+##                                            add-on's snapper snapshots
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1696,7 +1708,12 @@ const
                           "takeover-replay-refuses",
                           # Omarchy as a third owner: the base-layer path
                           # set read as empty (omarchy.nim).
-                          "omarchy-path-set-empty"]
+                          "omarchy-path-set-empty",
+                          # The switch's root snapshot (root_snapshot.nim,
+                          # AR4).
+                          "snapshot-cleanup-number",
+                          "snapshot-sweep-ignores-retention",
+                          "uninstall-keeps-snapshots"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

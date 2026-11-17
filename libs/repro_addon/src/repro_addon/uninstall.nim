@@ -57,6 +57,7 @@ import ./ledger
 import ./nft_tables
 from ./reassert import guardStateDirs
 import ./mutations
+import ./root_snapshot
 import ./static_tree
 import ./store_custody
 import ./store_root
@@ -1062,6 +1063,17 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   #    copy, so the leftover stays identified and a second uninstall (after
   #    the operator restored or accepted the object) can finish the job.
   #    Only a complete reversal removes the state.
+  #
+  #    Before the state: every snapper snapshot whose userdata carries
+  #    `repro-addon`, in every configuration, and only those (spec §6.4,
+  #    §7.2; §13 decision 100). A snapshot of `/` holds `/var/lib/repro`,
+  #    the recipient key among it (threat model T61). One that cannot be
+  #    deleted is reported with `EAddOnSnapshotLeft` and keeps the
+  #    uninstall incomplete, like drift.
+  block:
+    let snaps = deleteEveryAddonSnapshot(stateDir, hostSnapshotSite())
+    for n in snaps.deleted: result.removed.add("root snapshot " & n)
+    result.errors.add(snaps.errors)
   when not mutated("uninstall-discards-state-on-drift"):
     if result.drift.len > 0 or result.errors.len > 0:
       # The ledger must describe what the add-on still owns NOW: the
@@ -1088,6 +1100,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.errors.add(k.path & ": " & ex.msg)
   if dirExists(StoreRoot) and isMountPoint(StoreRoot):
     result.errors.add(StoreRoot & " is still mounted; the store is kept")
+  elif dirExists(ReproRoot) and isMountPoint(ReproRoot) and not opts.keepStore:
+    # `repro.mount` (a btrfs root, spec §5.1): its stop above failed, and
+    # the subvolume cannot be deleted through its own mount.
+    result.errors.add(ReproRoot & " is still mounted; the store is kept")
   elif not opts.keepStore:
     try:
       removeReproRoot()

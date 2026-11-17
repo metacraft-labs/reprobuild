@@ -406,6 +406,8 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
       result.add ",\"confirmTimeout\":" & $p.addOn.confirmTimeoutSec
     if p.addOn.omarchyAccount.len > 0:
       result.add ",\"omarchyAccount\":" & escapeJson(p.addOn.omarchyAccount)
+    if p.addOn.rootSnapshot.len > 0:
+      result.add ",\"rootSnapshot\":" & escapeJson(p.addOn.rootSnapshot)
     result.add "}"
   # ReproOS add-on mode A16: the `baseOs:` section, only when declared, so
   # the key set of a profile without one is unchanged.
@@ -662,6 +664,12 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         raise newException(ValueError,
           "addOn.omarchyAccount must be a non-empty string")
       result.addOn.omarchyAccount = a["omarchyAccount"].getStr()
+    if a.hasKey("rootSnapshot"):
+      if a["rootSnapshot"].kind != JString or
+          a["rootSnapshot"].getStr() notin ["required", "ifConfigured", "off"]:
+        raise newException(ValueError,
+          "addOn.rootSnapshot must be \"required\", \"ifConfigured\" or \"off\"")
+      result.addOn.rootSnapshot = a["rootSnapshot"].getStr()
   # Optional; absent when the profile has no `baseOs:` section.
   if root.hasKey("baseOs"):
     result.baseOs = parseBaseOs(root["baseOs"])

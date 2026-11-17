@@ -66,6 +66,7 @@ import repro_addon/health
 import repro_infra/audit_log
 
 import ./addon_testbed
+import ./gate_bases
 
 const
   Port = 18080
@@ -185,9 +186,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
   try:
-    g = newGuest(b)
+    g = newGateGuest(b)
     g.boot()
-    g.prepareBase()
+    g.prepareGateBase()
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     if not g.bootstrapAddon(repro, step): return fails
@@ -240,7 +241,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("systemctl is-active repro-fixture-web.service").stdout.strip() ==
            "active" and g.served() == "page-A", g.served())
     let fp = g.takeFingerprint(repro)
-    let same = identityReport(fpA, fp)
+    let same = identityReport(fpA, fp, bootVariance(b, newSeq[string]()))
     step("the host's fingerprint equals A's", same.ok, same.text)
     let currentNow = g.run("readlink /var/lib/repro/system/current").strip()
     step("current moved to a new generation with A's content",
@@ -278,7 +279,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          rb.stdout & rb.stderr)
     step("rollback: A's page is served again", g.served() == "page-A", "")
     let fpRb = g.takeFingerprint(repro)
-    let sameRb = identityReport(fpA, fpRb)
+    let sameRb = identityReport(fpA, fpRb, bootVariance(b, newSeq[string]()))
     step("rollback: the host's fingerprint equals A's", sameRb.ok, sameRb.text)
     let rb2 = g.exec(repro & " system rollback " & extractFilename(genA2),
                      timeoutSec = 1200)
@@ -303,7 +304,7 @@ suite "e2e_addon_confirm_or_revert":
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just e2e_addon_confirm_or_revert)")
     else:
       var failures: seq[string]
-      for b in selectedBases():
+      for b in selectedGateBases():
         let record = %*{"gate": "e2e_addon_confirm_or_revert",
           "base": b.name, "arch": b.debArch,
           "backend": (if useIncus(): "incus" else: "qemu"),

@@ -56,6 +56,7 @@ import std/[json, os, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 
 import ./addon_testbed
+import ./gate_bases
 
 const
   Service = "[Unit]\nDescription=gc fixture\n[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n"
@@ -66,10 +67,12 @@ const
   # Cannot start: the switch fails in step 7.
   FailingUnit = "[Unit]\nDescription=failing fixture\n[Service]\nType=oneshot\nExecStart=/bin/false\n\n[Install]\nWantedBy=multi-user.target\n"
 
-proc cronDropIn(gen: int; held: bool): string =
-  ## A drop-in of the distribution's cron.service; ``held`` sets
-  ## ``restartIfChanged = false``, so cron keeps running the older drop-in.
-  "\nsystemd.systemDropIn {\n  unit = \"cron.service\"\n  name = \"gc-fixture\"\n" &
+proc cronDropIn(gen: int; held: bool; cron = "cron.service"): string =
+  ## A drop-in of the distribution's cron daemon's unit (``cron.service``
+  ## on Debian, ``cronie.service`` on Arch: ``gate_bases.cronUnit``);
+  ## ``held`` sets ``restartIfChanged = false``, so cron keeps running the
+  ## older drop-in.
+  "\nsystemd.systemDropIn {\n  unit = \"" & cron & "\"\n  name = \"gc-fixture\"\n" &
     "  content = \"[Service]\nEnvironment=REPRO_GC_FIXTURE=" & $gen & "\n\"\n" &
     (if held: "  restartIfChanged = false\n" else: "") & "}\n"
 
@@ -91,9 +94,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
   try:
-    g = newGuest(b)
+    g = newGateGuest(b)
     g.boot()
-    g.prepareBase()
+    g.prepareGateBase()
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     if not g.bootstrapAddon(repro, step): return fails
@@ -152,8 +155,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("after reboot: verify is ok", ver.exitCode == 0 and "verify: ok" in ver.stdout,
          ver.stdout & ver.stderr)
     # --- Retention after the reboot (F4, F9, F10, round 3). ---
-    discard g.run("export DEBIAN_FRONTEND=noninteractive; " &
-      "apt-get install -y -qq cron >/dev/null; systemctl start cron.service", timeoutSec = 1200)
+    let cron = cronUnit(b)
+    g.installCron()
+    discard g.run("systemctl start " & cron, timeoutSec = 1200)
     # The clock steps back 30 days before generation 6 and stays there
     # until generation 10 is retained: the generations registered from
     # here on are "older" than generation 5, the way a host without a
@@ -172,7 +176,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # 9 change it under restartIfChanged = false, so cron keeps running
     # generation 7's drop-in.
     proc dropInOf(n: int): string =
-      if n < 7: "" elif n == 7: cronDropIn(7, false) else: cronDropIn(8, true)
+      if n < 7: "" elif n == 7: cronDropIn(7, false, cron) else: cronDropIn(8, true, cron)
     for n in 6 .. 9:
       let held = HeldUnit.replace("@V@", (if n == 6: "v1" else: "v2"))
       let r = g.applyProfile(repro, "g" & $n, profile(n, held) & dropInOf(n))
@@ -252,7 +256,7 @@ suite "e2e_addon_gc_keeps_current_and_previous":
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just e2e_addon_gc_keeps_current_and_previous)")
     else:
       var failures: seq[string]
-      for b in selectedBases():
+      for b in selectedGateBases():
         let record = %*{"gate": "e2e_addon_gc_keeps_current_and_previous",
           "base": b.name, "arch": b.debArch,
           "backend": (if useIncus(): "incus" else: "qemu"),

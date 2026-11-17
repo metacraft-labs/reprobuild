@@ -55,6 +55,7 @@ import ./ledger
 import ./mutations
 import ./pending_plan
 import ./preflight
+import ./root_snapshot
 import ./static_tree
 import ./store_root
 import ./seams
@@ -78,6 +79,10 @@ type
       ## step 7) or will finish its own marker, so there is nothing to
       ## recover yet and nothing to wait for.
     lines*: seq[string]
+    swept*: seq[string]
+      ## What the orphan sweep of the root snapshots deleted, and an
+      ## ``EAddOnSnapshotLeft`` line for each it could not (spec §7.2).
+      ## Apart from ``lines``: a sweep is not a recovered switch.
 
 proc reassertReportPath*(stateDir: string): string =
   stateDir / "addon" / "reassert-report"
@@ -157,20 +162,30 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   # less.
   let ledger = if fileExists(lp): readLedger(lp)
                else: readLedger(ledgerCopyPath(stateDir))
-  discard pruneGenerationRoots(current, previous,
+  # The committed generation owns its attempt's root snapshot, recorded
+  # before the marker goes (spec §7.2).
+  if m.rootSnapshot.len > 0:
+    recordGenerationSnapshot(stateDir, current, m.rootSnapshot)
+  let dropped = pruneGenerationRoots(current, previous,
     held = heldGenerations(stateDir, ledger, current))
+  var notes = deleteGenerationSnapshots(stateDir, dropped, hostSnapshotSite())
   if m.purpose == "revert":
     recordRolledBack(stateDir, m.revertOf, m.fromGeneration, current,
       m.revertReason & " (the revert was finished at boot)", false)
+    # This recovery completed the revert: the reverted attempt's root
+    # snapshot goes (spec §13 decisions 105, 119).
+    if m.revertSnapshot.len > 0:
+      notes.add(deleteSnapshotByKey(stateDir, m.revertSnapshot,
+        "the recovery's revert", hostSnapshotSite()).left)
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
   # A switch the rollback floor kept in place is resolved by its commit.
   if fileExists(floorHoldPath(stateDir)): removeFile(floorHoldPath(stateDir))
   @["the switch to " & current & " had committed (marker at step " &
-    $m.step & "); finished its step 9"]
+    $m.step & "); finished its step 9"] & notes
 
-proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
-                           driver: CollisionDriver = nil): RecoveryOutcome =
+proc recoverMarker(stateDir: string; atBoot: bool;
+                   driver: CollisionDriver = nil): RecoveryOutcome =
   ## Finish or revert an interrupted switch (see the module header).
   if not hasPendingMarker(stateDir):
     return RecoveryOutcome(resolved: true)
@@ -242,9 +257,13 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
       replayOf: m.purpose, confirmCapSec: cap))
     if m.purpose == "revert":
       # The interrupted switch was itself the revert of a failed one: the
-      # failed attempt is recorded rolled-back now that the revert is done.
+      # failed attempt is recorded rolled-back now that the revert is done,
+      # and its root snapshot goes (spec §13 decisions 105, 119).
       recordRolledBack(stateDir, m.revertOf, m.fromGeneration, r.generationId,
         m.revertReason & " (the revert was finished at boot)", false)
+      if m.revertSnapshot.len > 0:
+        result.lines.add(deleteSnapshotByKey(stateDir, m.revertSnapshot,
+          "the recovery's revert", hostSnapshotSite()).left)
     result.lines.add("replayed the switch to completion: generation " &
       r.generationId & " is current")
     # What the replay kept rather than undo (an object changed since the
@@ -268,6 +287,7 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
         result.lines.add("the replay failed (" & failed & "); reverted to " &
           m.fromGeneration & " (re-applied as generation " &
           rv.generationId & ", from " & rv.source & ")")
+        result.lines.add(rv.snapshotLeft)
         result.resolved = true
       else:
         result.lines.add("the switch could be neither finished nor " &
@@ -277,6 +297,24 @@ proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
       result.lines.add("the switch could be neither finished nor " &
         "reverted; the marker stays for an operator (`repro system addon " &
         "recover`): " & failed & "; the revert failed too: " & e2.msg)
+
+proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
+                           driver: CollisionDriver = nil): RecoveryOutcome =
+  ## Finish or revert an interrupted switch (``recoverMarker``), then run
+  ## the orphan sweep of the add-on's root snapshots (spec §7.2, §7.7 step
+  ## 1; §13 decision 116): in every recovery, whether or not a marker was
+  ## found, under the host apply lock and after the marker was decided.
+  ## A recovery that deferred to the live switch leaves the sweep to that
+  ## switch; one that finds another apply holding the lock leaves it to
+  ## that apply's own pending check.
+  result = recoverMarker(stateDir, atBoot, driver)
+  if result.deferred: return
+  when mutated("reassert-skips-recovery"):
+    return
+  var (hostLock, holder, _) = tryAcquireHostApplyLock("add-on snapshot sweep")
+  if holder.len > 0: return
+  defer: hostLock.release()
+  result.swept = sweepFor(stateDir, markerStateDirs(stateDir))
 
 proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## After a recovery: every unit the current generation started is
@@ -370,10 +408,8 @@ proc guardStateDirs*(applyStateDir: string;
   ## bootstrap recorded it (an add-on bootstrapped with `--state-dir X` is
   ## found even by an apply that was not given X, such as a deploy-agent
   ## tick), the resolved system state directory, and the default.
-  ## Deduplicated, in that order.
-  for d in [applyStateDir, readAddonStateDirPointer(pointer, pointerOwner),
-            resolveSystemStateDir(), DefaultStateDir]:
-    if d.len > 0 and d notin result: result.add(d)
+  ## Deduplicated, in that order (``root_snapshot.markerStateDirs``).
+  markerStateDirs(applyStateDir, pointer, pointerOwner)
 
 proc ownerlessSwitchMayBeLive*(stateDir: string; pid: int): string =
   ## For a marker that records no owner (a build before 931aae1ed2 wrote
@@ -425,6 +461,11 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
     let rec = recover(dir)
     if not (rec.resolved and not rec.deferred):
       return (false, dir & ": " & rec.lines.join("; "))
+  # Every apply's pending check runs the orphan sweep once the markers are
+  # decided (spec §7.2, §13 decision 116); the caller holds the host apply
+  # lock. What it could not delete is reported by the next recovery too.
+  discard sweepFor(applyStateDir, markerStateDirs(applyStateDir, pointer,
+                                                   pointerOwner))
   (true, "")
 
 proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
@@ -586,6 +627,10 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
   try:
     let rec = recoverPendingSwitch(stateDir, atBoot, driver)
     result.recovery = rec.lines
+    # The sweep's report (spec §7.2): what it deleted, and an
+    # `EAddOnSnapshotLeft` line for each it could not. Neither is drift of
+    # the host's configuration, so neither changes the status.
+    result.notes.add(rec.swept)
     if rec.deferred:
       # Mid-switch: the live state is the switch's, not drift. Report and
       # leave the check to the run after the switch.

@@ -50,6 +50,15 @@ type
       ## Uninstall refused because a switch's pending marker exists (spec
       ## §6.4 step 0, §8.4): finish the switch or run `repro system addon
       ## recover` first. Nothing was changed.
+    adSnapshotLeft = "EAddOnSnapshotLeft"
+      ## A `repro-addon` snapper snapshot could not be deleted: by a revert
+      ## (which still records `rolled-back`), the orphan sweep, retention,
+      ## or uninstall (which then stays incomplete). Names the snapshot and
+      ## the error (spec §7.2, §8.4; §13 decision 119).
+    adRootSnapshot = "EAddOnRootSnapshot"
+      ## `rootSnapshot = "required"` and no snapper configuration covers
+      ## `/`, or `snapper create` failed: the apply is refused before
+      ## anything is written (spec §7.2, §8.5).
 
   EAddOn* = object of CatchableError
     ## Base of every add-on refusal.

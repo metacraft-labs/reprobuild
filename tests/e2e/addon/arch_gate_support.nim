@@ -17,7 +17,7 @@
 ## *Mocking.* None: real Arch guests, real systemd and pacman, the real static
 ## add-on binary.
 
-import std/[json, strutils]
+import std/[json, os, strutils]
 
 import ./addon_testbed
 import ./arch_testbed
@@ -158,9 +158,11 @@ proc settleBaseline*(g: Guest; step: StepFn) =
 proc fingerprintArch*(g: Guest; repro: string; omarchyAccount = ""): string =
   ## The fingerprint with the Arch components (``pacman-local``,
   ## ``btrfs-subvolumes`` on a btrfs root, ``omarchy-hooks`` for an account).
-  g.run(repro & " system addon fingerprint" &
+  ## The add-on's own root snapshots are accounted for, not compared
+  ## (``addon_testbed.accountedFingerprint``).
+  g.accountedFingerprint(repro, g.run(repro & " system addon fingerprint" &
         (if omarchyAccount.len > 0: " --omarchy-account " & omarchyAccount
-         else: ""))
+         else: "")))
 
 proc rootIsBtrfs*(b: BaseImage): bool =
   ## The base's root filesystem as the test bed builds it: btrfs for the
@@ -221,6 +223,111 @@ proc bootstrapArch*(g: Guest; repro: string; step: StepFn;
     planDigestOf(pre.stdout) & anchorFlags & flags, timeoutSec = 1800)
   step("bootstrap", boot.exitCode == 0, boot.stdout & boot.stderr)
   result.ok = boot.exitCode == 0
+
+# ---------------------------------------------------------------------------
+# Root snapshots (spec §7.2, §8.5; milestone AR4).
+# ---------------------------------------------------------------------------
+
+type SnapperRow* = object
+  ## One snapshot of a snapper configuration, as ``snapper --csvout list``
+  ## prints it.
+  number*: int
+  cleanup*: string
+  userdata*: string   ## ``key=value[, ...]``
+
+proc snapperRows*(g: Guest; config = "root"): seq[SnapperRow] =
+  ## Every snapshot of ``config`` but snapshot 0 (the live subvolume), read
+  ## with snapper itself (snapper(8) ``--csvout list --columns``).
+  let o = g.run("snapper --csvout -c " & config &
+                " list --columns number,cleanup,userdata")
+  for l in o.splitLines()[1 .. ^1]:
+    let f = l.split(',', 2)
+    if f.len < 3: continue
+    let n = try: parseInt(f[0].strip()) except ValueError: -1
+    if n <= 0: continue
+    result.add(SnapperRow(number: n, cleanup: f[1].strip(),
+                          userdata: f[2].strip().strip(chars = {'"'})))
+
+proc isAddonRow*(r: SnapperRow): bool = "repro-addon=" in r.userdata
+
+proc addonRows*(g: Guest): seq[SnapperRow] =
+  for r in g.snapperRows():
+    if r.isAddonRow: result.add(r)
+
+proc numbersOf*(rows: openArray[SnapperRow]): seq[int] =
+  for r in rows: result.add(r.number)
+
+proc rootSnapshotStanza*(setting, account: string; prefixes = @[FixturePrefix]): string =
+  ## The ``addOn`` stanza with ``rootSnapshot = "<setting>"``.
+  var quoted: seq[string]
+  for p in prefixes: quoted.add("\"" & p & "\"")
+  "addOn {\n  managedEtcPrefixes = [" & quoted.join(", ") & "]\n" &
+    (if account.len > 0: "  omarchyAccount = \"" & account & "\"\n" else: "") &
+    (if setting.len > 0: "  rootSnapshot = \"" & setting & "\"\n" else: "") &
+    "}\n\n"
+
+const
+  RebootVariance* = ArchBootVariance
+    ## ``arch_testbed.ArchBootVariance``.
+  SnapperdActivation* = "active-units:snapperd.service"
+    ## snapper's D-Bus service (``arch_testbed.ArchBootVariance``), for a
+    ## comparison within one boot.
+
+proc currentGeneration*(g: Guest): string =
+  g.run("readlink /var/lib/repro/system/current").strip().extractFilename()
+
+proc loggedSnapshot*(g: Guest; generation: string): tuple[number: int; key: string] =
+  ## The root snapshot the generation log of ``generation`` records
+  ## (``addon.root-snapshot`` ... ``snapper:<config>#<n>`` ...
+  ## ``repro-addon=<key>``): the RBSL log is binary, read with ``-a``.
+  let o = g.run("tr -c '[:print:]\\n' ' ' < /var/lib/repro/system/generations/" &
+    generation & "/log/apply.log | grep -o 'snapper:[a-z]*#[0-9]*.*repro-addon=[0-9a-f]*' | head -1")
+  let h = o.find('#')
+  let k = o.find("repro-addon=")
+  if h < 0 or k < 0: return (0, "")
+  var digits = ""
+  for c in o[h + 1 .. ^1]:
+    if c in '0'..'9': digits.add(c) else: break
+  result.number = (try: parseInt(digits) except ValueError: 0)
+  for c in o[k + "repro-addon=".len .. ^1]:
+    if c in HexDigits: result.key.add(c) else: break
+
+const
+  BootLoaderBackup* = "/boot/limine.conf.repro-gate"
+    ## The boot loader configuration as it was before a gate pointed the
+    ## next boot at a snapshot; on the ESP, so it outlives the snapshot boot.
+
+proc bootSnapshotNext*(g: Guest; number: int): tuple[ok: bool; detail: string] =
+  ## Make the next boot boot snapshot ``number`` exactly as Omarchy's boot
+  ## menu does: the entry limine-snapper-sync generated for it (its UKI and
+  ## its ``rootflags=subvol=/@/.snapshots/<n>/snapshot``), copied to the top
+  ## of ``/boot/limine.conf`` and made the default (Limine CONFIG.md:
+  ## ``default_entry``). ``restoreBootLoader`` puts the file back.
+  let n = $number
+  let r = g.exec("set -e; for i in $(seq 1 60); do grep -q \"///" & n &
+    " \" /boot/limine.conf && break; sleep 2; done; " &
+    "test -e " & BootLoaderBackup & " || cp /boot/limine.conf " & BootLoaderBackup & "; " &
+    "awk -v n=" & n & " 'BEGIN{s=0;e=0} $0 ~ \"^[ \\t]*///\" n \" \" {s=1;next} " &
+    "s && $0 ~ /^[ \\t]*\\/\\/\\/\\/[^\\/]/ {e=1;next} e && $0 ~ /^[ \\t]*\\// {exit} " &
+    "e {sub(/^[ \\t]+/,\"\"); print}' " & BootLoaderBackup & " > /root/addon/snapentry; " &
+    "grep -q 'subvol=/@/.snapshots/" & n & "/snapshot' /root/addon/snapentry; " &
+    "awk 'BEGIN{d=0} /^default_entry:/ {print \"default_entry: 1\"; next} " &
+    "!d && /^\\// {print \"/repro-gate-snapshot\"; while ((getline l < \"/root/addon/snapentry\") > 0) print \"  \" l; d=1} {print}' " &
+    BootLoaderBackup & " > /boot/limine.conf.new; mv /boot/limine.conf.new /boot/limine.conf; sync; " &
+    "sed -n '/repro-gate-snapshot/,+6p' /boot/limine.conf")
+  (r.exitCode == 0 and "/repro-gate-snapshot" in r.stdout, r.stdout & r.stderr)
+
+proc restoreBootLoader*(g: Guest) =
+  ## Undo ``bootSnapshotNext``.
+  discard g.run("if test -e " & BootLoaderBackup & "; then cp " & BootLoaderBackup &
+    " /boot/limine.conf && rm -f " & BootLoaderBackup & " && sync; fi")
+
+proc bootedSubvol*(g: Guest): string =
+  ## The ``subvol=`` the running kernel was asked to mount as ``/``.
+  for w in g.run("cat /proc/cmdline").splitWhitespace():
+    if w.startsWith("rootflags="):
+      for o in w["rootflags=".len .. ^1].split(','):
+        if o.startsWith("subvol="): result = o["subvol=".len .. ^1]
 
 proc archGateRecord*(gate: string): JsonNode =
   ## The record every Arch gate writes: the Debian gates' fields plus the Arch pins.

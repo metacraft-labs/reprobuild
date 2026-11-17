@@ -611,6 +611,42 @@ proc baseMatrixNote*(id, versionId: string): string =
       return b.note
   ""
 
+proc rootBtrfsMount*(mountinfo: string): tuple[source, subvol: string] =
+  ## The device ``/`` is mounted from and the subvolume path that mount
+  ## names, from ``/proc/self/mountinfo`` (proc_pid_mountinfo(5): field 4
+  ## is the root of the mount within its filesystem, the field after ``-``
+  ## the type, then the source); ("", "") unless ``/`` is a btrfs mount.
+  for l in mountinfo.splitLines():
+    let f = l.splitWhitespace()
+    if f.len < 10 or f[4] != "/": continue
+    let sep = f.find("-")
+    if sep < 0 or sep + 2 >= f.len: continue
+    if f[sep + 1] != "btrfs": return ("", "")
+    result = (f[sep + 2], f[3])
+
+proc deviceUuidLink*(source: string; byUuid = "/dev/disk/by-uuid"): string =
+  ## ``/dev/disk/by-uuid/<uuid>`` for the block device ``source`` (the link
+  ## udev makes for the filesystem on it), or "" when there is none.
+  if not source.isAbsolute or not dirExists(byUuid): return ""
+  let dev = try: expandFilename(source) except OSError: source
+  for kind, p in walkDir(byUuid):
+    if kind notin {pcLinkToFile, pcFile, pcLinkToDir}: continue
+    let target = try: expandFilename(p) except OSError: continue
+    if target == dev: return p
+  ""
+
+proc reproSubvolumeMountFor*(mountinfo: string;
+                             byUuid = "/dev/disk/by-uuid"): ReproSubvolumeMount =
+  ## Where ``/repro``'s subvolume will be on a btrfs root (spec §5.1, AR4):
+  ## below the subvolume ``/`` is mounted from, named by the filesystem's
+  ## UUID. Empty when ``/`` is not btrfs or its device has no UUID link.
+  let m = rootBtrfsMount(mountinfo)
+  if m.source.len == 0: return
+  let what = deviceUuidLink(m.source, byUuid)
+  if what.len == 0: return
+  let parent = if m.subvol.len == 0 or m.subvol == "/": "" else: m.subvol
+  ReproSubvolumeMount(what: what, subvol: parent & ReproRoot)
+
 proc snapperConfigSubvolume*(configText: string): string =
   ## ``SUBVOLUME`` of a snapper configuration file
   ## (``/etc/snapper/configs/<name>``, shell-style ``KEY="value"``; see
@@ -1104,7 +1140,16 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
 
   # Generation 0 must find every one of its paths absent.
   let reproExe = reproExeFor(result.binarySha256)
+  # On a btrfs root bootstrap creates /repro as a subvolume; generation 0
+  # mounts it by its path so a booted root snapshot finds the store (spec
+  # §5.1, AR4). Not for a /repro taken over as it is.
+  var reproSubvolume = ReproSubvolumeMount()
+  when not mutated("repro-root-plain-dir-on-btrfs"):
+    if fsType == "btrfs" and ReproRoot notin occupancy.inputs.roots:
+      reproSubvolume = reproSubvolumeMountFor(
+        try: readFile("/proc/self/mountinfo") except IOError, OSError: "")
   result.gen0Inputs = Gen0Inputs(reproExe: reproExe,
+    reproSubvolume: reproSubvolume,
     packageManagerHook: (if archFamily: pmhNone else: pmhApt),
     deploySigners: signers,
     cacheUrl: (if anchorsError.len > 0: "" else: inp.cacheUrl),

@@ -440,6 +440,26 @@ type
       ## on an Omarchy base and refused on any other (checked against the
       ## host by `repro_addon/omarchy.omarchyAccountRefusal`); "" when not
       ## declared.
+    rootSnapshot*: RootSnapshotSetting
+      ## `rootSnapshot = "required" | "ifConfigured" | "off"` (§7.2, §8.5;
+      ## §13 decisions 90, 101): whether the switch takes a snapper
+      ## snapshot of `/` of its own before its pending marker. Defaults to
+      ## `ifConfigured` when not declared (`rootSnapshotDeclared` false).
+    rootSnapshotDeclared*: bool
+      ## True when the stanza names `rootSnapshot` (a second one is
+      ## refused, and the rendered stanza carries it only then).
+
+  RootSnapshotSetting* = enum
+    ## The values of `addOn { rootSnapshot = ... }` (§7.2, §8.5).
+    rsIfConfigured = "ifConfigured"
+      ## snapshot when snapper has a configuration for `/`; otherwise the
+      ## plan says that no second way back exists (the default, §13
+      ## decision 101)
+    rsRequired = "required"
+      ## refuse the apply, before anything is written, when no snapper
+      ## configuration covers `/` or `snapper create` fails
+    rsOff = "off"
+      ## never take one
 
   SecretFileDecl* = object
     ## A `secrets.secretFile { service = "<s>"  name = "<n>" }` declaration
@@ -1937,6 +1957,29 @@ proc omarchyAccountNameError*(name: string): string =
         "digits, '_', '-' and '.'"
   ""
 
+proc rootSnapshotValueError*(rawValue: string): string =
+  ## Why `rawValue` is not a `rootSnapshot` value of the text form (a
+  ## quoted `required`, `ifConfigured` or `off`, §8.5); "" when it is.
+  let v = rawValue.strip()
+  if v.len < 2 or v[0] != '"' or v[^1] != '"':
+    return "'" & AddOnStanzaTag & "' rootSnapshot must be a quoted " &
+      "string (\"required\", \"ifConfigured\" or \"off\"), got: " & rawValue
+  let name = v[1 ..< v.len - 1]
+  for s in RootSnapshotSetting:
+    if $s == name: return ""
+  "'" & AddOnStanzaTag & "' rootSnapshot '" & name & "' is not one of " &
+    "required, ifConfigured, off"
+
+proc parseRootSnapshotSetting*(rawValue: string): RootSnapshotSetting =
+  ## The setting a valid quoted value names (`rootSnapshotValueError` is
+  ## "" for it); raises `ESystemProfileInvalid` otherwise.
+  let err = rootSnapshotValueError(rawValue)
+  if err.len > 0: raiseSystemProfileInvalid(err)
+  let v = rawValue.strip()
+  let name = v[1 ..< v.len - 1]
+  for s in RootSnapshotSetting:
+    if $s == name: return s
+
 proc parseAddOnStanza*(body: string): AddOnSettings =
   ## The `addOn { managedEtcPrefixes = [...] }` stanza.
   result.declared = true
@@ -1979,10 +2022,19 @@ proc parseAddOnStanza*(body: string): AddOnSettings =
       if err.len > 0:
         raiseSystemProfileInvalid(err)
       result.omarchyAccount = name
+    of "rootSnapshot":
+      if result.rootSnapshotDeclared:
+        raiseSystemProfileInvalid("'" & AddOnStanzaTag &
+          "' declares rootSnapshot twice")
+      let err = rootSnapshotValueError(rawValue)
+      if err.len > 0:
+        raiseSystemProfileInvalid(err)
+      result.rootSnapshot = parseRootSnapshotSetting(rawValue)
+      result.rootSnapshotDeclared = true
     else:
       raiseSystemProfileInvalid("'" & AddOnStanzaTag &
         "' has no field '" & key & "' (known: managedEtcPrefixes, " &
-        "confirmTimeout, omarchyAccount)")
+        "confirmTimeout, omarchyAccount, rootSnapshot)")
 
 proc isUnderManagedPrefix*(path, prefix: string): bool =
   ## Does `prefix` (as declared, see `managedPrefixError`) cover `path`?

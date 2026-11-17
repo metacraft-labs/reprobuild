@@ -99,6 +99,11 @@ const
   KeyOmarchyAccount = "omarchyAccount"
     ## Inside the `addOn` map: the Omarchy account (ReproOS-Add-On-Mode
     ## §8.5), as text. Optional; omitted when not declared.
+  KeyRootSnapshot = "rootSnapshot"
+    ## Inside the `addOn` map: the switch's root snapshot setting
+    ## (ReproOS-Add-On-Mode §7.2, §8.5), as the text `required`,
+    ## `ifConfigured` or `off`. Optional; omitted when not declared, so a
+    ## section without it encodes as before.
   KeyConfirmTimeout = "confirmTimeout"
     ## Inside the `addOn` map: the add-on switch's `confirmTimeout` in
     ## seconds (ReproOS-Add-On Mode §7.5), as an unsigned integer. Optional;
@@ -368,6 +373,8 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
       ao.add entry(KeyConfirmTimeout, cborUInt(uint64(p.addOn.confirmTimeoutSec)))
     if p.addOn.omarchyAccount.len > 0:
       ao.add entry(KeyOmarchyAccount, cborText(p.addOn.omarchyAccount))
+    if p.addOn.rootSnapshot.len > 0:
+      ao.add entry(KeyRootSnapshot, cborText(p.addOn.rootSnapshot))
     entries.add entry(KeyAddOn, cborMap(ao))
   if p.baseOs.declared:
     entries.add entry(KeyBaseOs, cborText(encodeBaseOs(p.baseOs)))
@@ -712,6 +719,14 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
       if name.len == 0:
         raiseRbpiCorrupt("body", "addOn.omarchyAccount must not be empty")
       result.addOn.omarchyAccount = name
+    var rsFound = false
+    let rs = lookupOpt(ao, KeyRootSnapshot, rsFound)
+    if rsFound:
+      let setting = expectText(rs, KeyRootSnapshot)
+      if setting notin ["required", "ifConfigured", "off"]:
+        raiseRbpiCorrupt("body", "addOn.rootSnapshot must be required, " &
+          "ifConfigured or off")
+      result.addOn.rootSnapshot = setting
   # ReproOS add-on mode A16: the `baseOs:` section is OPTIONAL on the wire.
   # A malformed one is corrupt, never dropped.
   var boFound = false

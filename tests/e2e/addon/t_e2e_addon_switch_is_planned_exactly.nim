@@ -38,7 +38,12 @@
 ## with ``reloadIfChanged``, reloads) that unit and nothing else.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_switch_is_planned_exactly``).
-## Bases: ``REPRO_ADDON_BASES`` (default here: debian-13-amd64,ubuntu-24.04-amd64).
+## Bases: ``REPRO_ADDON_BASES`` (default here: debian-13-amd64,ubuntu-24.04-amd64;
+## the Arch guests through ``just e2e_arch_addon_switch_gates``, milestone
+## AR4). The distribution unit the drop-in generations drop into is the
+## base's cron daemon (``gate_bases.cronUnit``): ``cron.service`` on
+## Debian, ``cronie.service`` on Arch; the generations are written with the
+## Debian name and given the base's.
 ##
 ## *Mocking.* None: real images, systemd, the journal and the static
 ## add-on binary.
@@ -49,6 +54,7 @@ import repro_test_support/reasoned_skip
 import repro_addon/[ledger, transitions]
 
 import ./addon_testbed
+import ./gate_bases
 
 const
   Prefixes = """addOn {
@@ -203,8 +209,19 @@ proc expectedObservations(ts: seq[Transition]): Table[string, seq[string]] =
     of tvReload: result[t.unit] = @["reloaded"]
     of tvLeave: discard
 
-proc isFixtureUnit(u: string): bool =
-  u.startsWith("repro-fixture-") or u == "cron.service"
+proc isFixtureUnit(u, cron: string): bool =
+  u.startsWith("repro-fixture-") or u == cron
+
+proc forBase(gen: Generation; cron: string): Generation =
+  ## ``gen`` with the base's cron unit for Debian's ``cron.service``.
+  result = gen
+  result.profile = gen.profile.replace("cron.service", cron)
+  result.expected.setLen(0)
+  for (v, u) in gen.expected:
+    result.expected.add((v, if u == "cron.service": cron else: u))
+  result.active = initTable[string, string]()
+  for u, s in gen.active:
+    result.active[if u == "cron.service": cron else: u] = s
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest
@@ -214,12 +231,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
   try:
-    g = newGuest(b)
+    g = newGateGuest(b)
     g.boot()
-    g.prepareBase()
+    g.prepareGateBase()
     # The drop-in generations need a distribution unit to drop into.
-    discard g.run("export DEBIAN_FRONTEND=noninteractive; " &
-      "apt-get install -y -qq cron >/dev/null", timeoutSec = 1200)
+    let cron = cronUnit(b)
+    g.installCron()
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     if not g.bootstrapAddon(repro, step): return fails
@@ -229,7 +246,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       for line in text.splitLines():
         if line.startsWith("add-on plan-id: "):
           return line["add-on plan-id: ".len .. ^1].strip()
-    for gen in generations:
+    for debianGen in generations:
+      let gen = forBase(debianGen, cron)
       if gen.name == "g3-dependency-only":
         # The pinned plan goes stale: a unit it saw active crashes.
         let stalePlan = g.planProfile(repro, gen.name & "-stale", gen.profile)
@@ -276,7 +294,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let jobs = g.observedJobs(cursor)
       var perUnit = initTable[string, seq[string]]()
       for (verb, u) in jobs:
-        if isFixtureUnit(u): perUnit.mgetOrPut(u, @[]).add(verb)
+        if isFixtureUnit(u, cron): perUnit.mgetOrPut(u, @[]).add(verb)
       let expected = expectedObservations(planned)
       var same = true
       var detail = ""
@@ -331,8 +349,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              "/etc/tmpfiles.d/repro-fixture.conf=copy" in forms, $forms)
       of "g4-dropin-sysctl":
         step("g4: the drop-in is a link systemd reports and the sysctl is set",
-             "/etc/systemd/system/cron.service.d/50-repro-fixture.conf" in
-               g.run("systemctl show -p DropInPaths --value cron.service") and
+             "/etc/systemd/system/" & cron & ".d/50-repro-fixture.conf" in
+               g.run("systemctl show -p DropInPaths --value " & cron) and
              g.run("cat /proc/sys/net/ipv4/ip_forward").strip() == "1", "")
       of "g6-held-restart-and-reload":
         # systemd reports the reloaded file's Description; the running
@@ -372,7 +390,7 @@ suite "e2e_addon_switch_is_planned_exactly":
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just e2e_addon_switch_is_planned_exactly)")
     else:
       var failures: seq[string]
-      for b in selectedBases():
+      for b in selectedGateBases():
         let record = %*{"gate": "e2e_addon_switch_is_planned_exactly",
           "base": b.name, "arch": b.debArch,
           "backend": (if useIncus(): "incus" else: "qemu"),

@@ -6,7 +6,9 @@
 ## has, an exclusive unit whose file changes (stop-start) and that B also
 ## changes with a drop-in, a unit only A has and one only B has, a sysctl
 ## key with different values, and -- B only -- a sysusers account, a
-## tmpfiles directory and a diversion of a package's conffile. From A, the
+## tmpfiles directory and a diversion of a package's conffile (on an
+## Arch-family base, where ``divert`` is out of scope, a ``takeOver`` of a
+## pacman package's backup file: ``gate_bases.conffileCollision``). From A, the
 ## switch to B is stopped at a point by the seam build's pause and the
 ## guest is hard-reset there with QEMU ``system_reset``, after a settle of
 ## a few seconds (``hardResetAfterSettle``: the journal has committed the
@@ -95,6 +97,7 @@ import std/[json, os, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 
 import ./addon_testbed
+import ./gate_bases
 
 const
   BootVariance* = ["mounts:/tmp", "mounts:/dev", "mounts:/run"]
@@ -171,11 +174,15 @@ proc profileA(): string =
     unit("repro-fixture-a.service", unitText("A", "fixture of A")) &
     sysctl("1024")
 
+var conffileCollisionOfBase = "divert"
+  ## How B takes the package's conffile on the base under test
+  ## (``gate_bases.conffileCollision``), set per base by ``runBase``.
+
 proc profileB(check = ""; timeout = 0): string =
   prefixes(timeout) &
     file("/etc/repro-fixture/common.conf", "generation B\n") &
     file("/etc/repro-fixture/only-b.conf", "only in B\n") &
-    file(Diverted, "ours\n", "  collision = \"divert\"\n") &
+    file(Diverted, "ours\n", "  collision = \"" & conffileCollisionOfBase & "\"\n") &
     unit("repro-fixture-common.service", unitText("B", "common fixture"),
          "  exclusive = true\n") &
     "systemd.systemDropIn {\n  unit = \"repro-fixture-common.service\"\n" &
@@ -223,16 +230,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
   try:
-    g = newGuest(b)
+    g = newGateGuest(b)
     g.boot()
-    g.prepareBase()
-    # The package whose conffile B diverts: part of the base.
-    g.installEquivs()
-    let deb = g.buildEquivsPackage("repro-fixture-conf", "1.0",
-      @[(name: "fixture.conf", content: "the package's\n",
-         destDir: "/etc/repro-fixture")])
-    discard g.run("export DEBIAN_FRONTEND=noninteractive; dpkg -i " & deb &
-                  " >/dev/null < /dev/null")
+    g.prepareGateBase()
+    # The package whose conffile B diverts (takes over, on Arch): part of
+    # the base.
+    conffileCollisionOfBase = conffileCollision(b)
+    g.installConffilePackage("repro-fixture-conf", Diverted, "the package's\n")
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
     if not g.bootstrapAddon(repro, step): return fails
@@ -250,9 +254,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let sb = servicesOf(g, "B")
     step("reference B: services", sb.ok, sb.detail)
     step("vacuity guard: A and B fingerprints differ",
-         not identityReport(fpA, fpB, BootVariance).ok, "")
+         not identityReport(fpA, fpB, bootVariance(b, BootVariance)).ok, "")
     step("vacuity guard: B diverted the package's conffile and made its account",
-         g.exec("dpkg-divert --list " & Diverted).stdout.contains(Diverted) and
+         g.conffileTaken(Diverted) and
          g.exec("getent passwd " & BAccount).exitCode == 0 and
          g.exec("test -d /var/lib/repro-fixture-b").exitCode == 0, "")
     r = g.applyProfile(repro, "a", profileA())
@@ -263,7 +267,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "'fixture\\|repro' | tail -60").stdout))
     var inB = false
     let outcomes = newJObject()
-    let aExceptions = @BootVariance & @KeptAccount
+    let aExceptions = bootVariance(b, BootVariance) & resetVariance(b) & @KeptAccount
 
     proc judge(label: string; journal, marker: string): string =
       ## After a reset and boot: which generation the host is in, with
@@ -272,7 +276,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                      timeoutSec = 600)
       let fp = g.takeFingerprint(repro)
       let isA = identityReport(fpA, fp, aExceptions)
-      let isB = identityReport(fpB, fp, BootVariance)
+      let isB = identityReport(fpB, fp, bootVariance(b, BootVariance) & resetVariance(b))
       result = if isA.ok: "A" elif isB.ok: "B" else: "neither"
       step(label & ": after the reset the host is exactly A or B (" &
            result & ")", isA.ok or isB.ok,
@@ -479,7 +483,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         step("refusal: the apply failed and says it rolled back",
              res.exitCode != 0 and "rolled back" in res.stdout, res.stdout)
         let fp = g.takeFingerprint(repro)
-        let same = identityReport(fpA0, fp, ["etc:/etc/repro-fixture/only-b.conf"])
+        let same = identityReport(fpA0, fp, @["etc:/etc/repro-fixture/only-b.conf"] &
+                                  bootVariance(b, newSeq[string]()))
         step("refusal: the host is A again (but for the planted link)",
              same.ok, same.text)
         let sv = servicesOf(g, "A")
@@ -632,7 +637,7 @@ suite "e2e_addon_hard_reset_at_every_step":
       skip("a hard reset is of a disk image; QEMU only")
     else:
       var failures: seq[string]
-      for b in selectedBases():
+      for b in selectedGateBases():
         let record = %*{"gate": "e2e_addon_hard_reset_at_every_step",
           "base": b.name, "arch": b.debArch, "backend": "qemu",
           "mutation": mutation(), "testSeams": testSeams(),

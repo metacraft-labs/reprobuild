@@ -754,8 +754,66 @@ proc installArtefact*(g: Guest; dir = "/root/addon"): tuple[repro, sha: string] 
   discard g.run("chmod 0755 " & dir & "/reprobuild-sandbox-launcher")
   (dir & "/repro", a.sha256)
 
+proc ownedSnapshotNumbers*(listing: string):
+    tuple[owned: seq[string]; problems: seq[string]] =
+  ## From ``repro system addon root-snapshots``: the numbers of the add-on's
+  ## snapshots a retained generation or a present marker owns, and every
+  ## ``missing:`` line (a snapshot an owner records that is not on the
+  ## host). An orphan or an unrecorded snapshot is in neither: it stays in
+  ## the fingerprint, where a comparison sees it.
+  for l in listing.splitLines():
+    let line = l.strip()
+    if line.len == 0: continue
+    if line.startsWith("missing: "):
+      result.problems.add(line)
+      continue
+    let hash = line.find('#')
+    let sp = line.find(' ')
+    let at = line.find(" owner=")
+    if hash < 0 or sp < hash or at < 0:
+      result.problems.add("unreadable root-snapshots line: " & line)
+      continue
+    let owner = line[at + " owner=".len .. ^1]
+    if owner.startsWith("generation ") or owner.startsWith("marker "):
+      result.owned.add(line[hash + 1 ..< sp])
+
+proc withoutOwnedSnapshots*(fingerprint: string; owned: openArray[string]): string =
+  ## ``fingerprint`` without the ``btrfs-subvolumes`` records of the
+  ## snapshots in ``owned`` (``<subvolume>/.snapshots/<n>/snapshot``).
+  for line in fingerprint.splitLines(keepEol = true):
+    if line.startsWith("btrfs-subvolumes\t"):
+      let key = line.split('\t')[1]
+      var drop = false
+      for n in owned:
+        let tail = ".snapshots/" & n & "/snapshot"
+        if key == tail or key.endsWith("/" & tail): drop = true
+      if drop: continue
+    result.add(line)
+
+proc accountedFingerprint*(g: Guest; repro, fingerprint: string): string =
+  ## A fingerprint compared with another across the add-on's switches, on a
+  ## base where the switch takes its own root snapshot (spec §7.2): each
+  ## attempt's snapshot is a new subvolume, so two runs that reach the same
+  ## generation never carry the same one, and identity cannot hold for
+  ## them. Instead every snapshot the add-on owns -- a retained generation's
+  ## or the present marker's, as ``repro system addon root-snapshots`` reads
+  ## the state -- is checked to be on the host and then left out; any other
+  ## add-on snapshot (an orphan a revert or sweep should have deleted, one
+  ## uninstall left) stays in, for the comparison to see. On a base with no
+  ## btrfs root nothing changes.
+  if "\nbtrfs-subvolumes\t" notin fingerprint: return fingerprint
+  let l = g.exec(repro & " system addon root-snapshots")
+  if l.exitCode != 0:
+    raise newException(TestBedError, "repro system addon root-snapshots " &
+      "failed: " & l.stdout & l.stderr)
+  let a = ownedSnapshotNumbers(l.stdout)
+  if a.problems.len > 0:
+    raise newException(TestBedError, "the add-on's root snapshots do not " &
+      "account: " & a.problems.join("; "))
+  withoutOwnedSnapshots(fingerprint, a.owned)
+
 proc takeFingerprint*(g: Guest; repro: string): string =
-  g.run(repro & " system addon fingerprint")
+  g.accountedFingerprint(repro, g.run(repro & " system addon fingerprint"))
 
 proc gostiHead*(): string
 
@@ -900,6 +958,19 @@ type
   StepFn* = proc(name: string; ok: bool; detail: string)
     ## A gate's step recorder (see each gate's ``runBase``).
 
+type BaseAdapter* = object
+  ## What a base needs of every profile and every bootstrap that the Debian
+  ## bases do not: registered by ``gate_bases`` for the Omarchy VM, where
+  ## every operator profile must name ``omarchyAccount`` and the preflight
+  ## and bootstrap must be given the host's first profile (spec §4.3.2,
+  ## §6.1, §8.5). Nil procs: nothing changes (every Debian base).
+  profileText*: proc (g: Guest; text: string): string
+    ## ``text`` as this guest's profiles must read
+  bootstrapFlags*: proc (g: Guest): string
+    ## extra preflight and bootstrap flags
+
+var baseAdapter*: BaseAdapter
+
 proc bootstrapAddonWithAnchors*(g: Guest; repro: string; step: StepFn):
     tuple[ok: bool; anchors: Anchors] =
   ## Preflight, then bootstrap with the acknowledged plan digest; also
@@ -908,11 +979,14 @@ proc bootstrapAddonWithAnchors*(g: Guest; repro: string; step: StepFn):
   ## (the step is recorded red).
   let anchors = g.installAnchors()
   result.anchors = anchors
-  let pre = g.exec(repro & " system addon preflight" & anchors.flags)
+  let extra = if baseAdapter.bootstrapFlags != nil: baseAdapter.bootstrapFlags(g)
+              else: ""
+  let pre = g.exec(repro & " system addon preflight" & anchors.flags & extra)
   step("preflight is compatible", pre.exitCode == 0, pre.stdout & pre.stderr)
   if pre.exitCode != 0: return
   let boot = g.exec(repro & " system addon bootstrap --plan " &
-                    planDigestOf(pre.stdout) & anchors.flags, timeoutSec = 1800)
+                    planDigestOf(pre.stdout) & anchors.flags & extra,
+                    timeoutSec = 1800)
   step("bootstrap", boot.exitCode == 0, boot.stdout & boot.stderr)
   result.ok = boot.exitCode == 0
 
@@ -922,13 +996,27 @@ proc bootstrapAddon*(g: Guest; repro: string; step: StepFn): bool =
   g.bootstrapAddonWithAnchors(repro, step).ok
 
 proc putProfile*(g: Guest; name, text: string): string =
-  ## Write a profile into the guest; returns its guest path.
+  ## Write a profile into the guest; returns its guest path. The base's
+  ## adapter (``baseAdapter.profileText``) sees it first.
+  let text = if baseAdapter.profileText != nil: baseAdapter.profileText(g, text)
+             else: text
   writeFile(g.runDir / (name & ".profile"), text)
   result = "/root/addon/" & name & ".profile"
   g.copyTo(g.runDir / (name & ".profile"), result)
 
 proc applyProfile*(g: Guest; repro, name, text: string; flags = ""): ExecOut =
-  ## ``repro infra apply --profile <text>`` in the guest.
+  ## ``repro infra apply --profile <text>`` in the guest. In the seam build
+  ## a foreground apply never means to pause, so any pause control left in
+  ## the state directory is stale and is removed first: a reset can bring
+  ## back one a paused switch had consumed (its unlink is not synced, see
+  ## ``waitReasserted``), and on a btrfs root one came back where clearing
+  ## after the reset did not catch it (measured 2026-11-17 on
+  ## arch-btrfs-amd64: the next foreground apply waited at ``step-3`` for a
+  ## resume nobody sent).
+  if testSeams():
+    discard g.run("rm -f /var/lib/repro/system/addon/test-pause-at " &
+      "/var/lib/repro/system/addon/test-paused-at " &
+      "/var/lib/repro/system/addon/test-resume; sync")
   let p = g.putProfile(name, text)
   g.exec(repro & " infra apply --profile " & p & flags, timeoutSec = 1200)
 
@@ -1029,12 +1117,22 @@ proc holdWriteback*(g: Guest) =
   ## then reaches the disk, at the switch's next fsync of anything (which
   ## commits the journal, renames included), as an empty file. The
   ## settings are in memory only and end with the reset.
+  ##
+  ## On a btrfs root (the Arch guests, the Omarchy VM) the transaction
+  ## commit interval is raised the same way (``commit=600``); btrfs has no
+  ## ``auto_da_alloc`` to turn off, and flushes a file renamed over another
+  ## itself (https://btrfs.readthedocs.io/en/latest/ch-mount-options.html),
+  ## so there a missing fsync before a rename is caught less often: the
+  ## durability falsifiers are run on ext4.
+  let fs = g.exec("findmnt -n -o FSTYPE /").stdout.strip()
+  let opts = if fs == "btrfs": "commit=600" else: "commit=600,noauto_da_alloc"
   let r = g.exec("sysctl -q -w vm.dirty_writeback_centisecs=0 " &
     "vm.dirty_expire_centisecs=360000 vm.dirty_background_ratio=90 " &
-    "vm.dirty_ratio=95 && mount -o remount,commit=600,noauto_da_alloc / " &
+    "vm.dirty_ratio=95 && mount -o remount," & opts & " / " &
     "&& findmnt -n -o FSTYPE,OPTIONS /")
-  if r.exitCode != 0 or not r.stdout.startsWith("ext4") or
-      "noauto_da_alloc" notin r.stdout:
+  if r.exitCode != 0 or not r.stdout.startsWith(fs) or
+      fs notin ["ext4", "btrfs"] or "commit=600" notin r.stdout or
+      (fs == "ext4" and "noauto_da_alloc" notin r.stdout):
     raise newException(TestBedError, "could not hold writeback back: " &
       r.stdout & r.stderr)
 

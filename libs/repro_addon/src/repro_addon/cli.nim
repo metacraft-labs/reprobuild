@@ -30,6 +30,7 @@
 ##   repro system addon import --unit <name>
 ##   repro system addon state backup|release|verify|restore|digest|unit
 ##   repro system addon retention [--keep-generations N] [--keep-days D]
+##   repro system addon root-snapshots
 ##   repro system addon selfcheck-write <path>
 ##   repro system adopt <address> --profile <file>
 ##   repro infra plan --profile <file>
@@ -80,6 +81,7 @@ import ./linux_fs
 import ./health
 import ./preflight
 import ./reassert
+import ./root_snapshot
 import ./seams
 import ./secrets_ops
 import ./agent_split
@@ -273,7 +275,14 @@ commands:
   retention [--keep-generations N] [--keep-days D]
       Release the store roots of generations outside the policy now (the
       current and the previous generation are always kept); default last
-      5 generations or 30 days, whichever retains more.
+      5 generations or 30 days, whichever retains more. A generation whose
+      root is released loses its root snapshot too.
+  root-snapshots
+      Every snapper snapshot carrying the repro-addon userdata, with what
+      owns it: a retained generation, the pending switch's marker, nothing
+      (an orphan the next recovery or apply deletes), or not this state
+      (unrecorded: never deleted but by uninstall); and every snapshot a
+      generation or the marker owns that is not on the host. Read only.
   selfcheck-btrfs <mount point>
       Create and delete a btrfs subvolume under a btrfs mount the way the
       store root is created on a btrfs root (a test of that leg).
@@ -837,6 +846,13 @@ proc runAddonCli*(args: seq[string]): int =
         raise newException(ValueError, "selfcheck-write needs a path")
       stdout.write(selfcheckManagedWrite(rest[0]) & "\n")
       return 0
+    of "root-snapshots":
+      if rest.len != 0:
+        raise newException(ValueError, "root-snapshots takes no arguments")
+      let a = accountRootSnapshots(DefaultStateDir,
+                                   markerStateDirs(DefaultStateDir))
+      stdout.write(renderRootSnapshots(a))
+      return 0
     of "retention":
       var policy = DefaultRetention
       var i = 0
@@ -854,11 +870,18 @@ proc runAddonCli*(args: seq[string]): int =
       let dropped = pruneGenerationRoots(current, previous, policy,
         held = heldGenerations(DefaultStateDir,
           readLedger(ledgerCopyPath(DefaultStateDir)), current))
+      # A generation retention drops loses its root snapshot (spec §7.2).
+      let notes = deleteGenerationSnapshots(DefaultStateDir, dropped,
+                                            hostSnapshotSite())
       stdout.write("kept: " & current & " (current)" &
         (if previous.len > 0: ", " & previous & " (previous)" else: "") & "\n")
       stdout.write("released store roots (" & $dropped.len & "):\n")
       for g in dropped: stdout.write("  " & g & "\n")
-      return 0
+      for n in notes: stdout.write("root snapshots: " & n & "\n")
+      var left = false
+      for n in notes:
+        if n.startsWith($adSnapshotLeft): left = true
+      return (if left: 1 else: 0)
     else:
       raise newException(ValueError, "unknown command " & cmd)
   except ValueError as e:
@@ -890,6 +913,14 @@ proc renderAddonSections*(r: AddonApplyResult): string =
     # every plan (§4.3.2).
     result.add("base-layer overrides (collision = \"overrideBaseLayer\"):\n")
     for l in r.baseLayerOverrides: result.add("  " & l & "\n")
+  # The switch's own root snapshot (spec §7.2, §8.5): in every plan, what
+  # will be done; after an apply, what was taken and what else happened to
+  # the add-on's snapshots.
+  if r.rootSnapshotPlan.len > 0:
+    result.add(r.rootSnapshotPlan & "\n")
+  if r.rootSnapshot.len > 0:
+    result.add("root snapshot taken: " & r.rootSnapshot & "\n")
+  for n in r.snapshotNotes: result.add("root snapshots: " & n & "\n")
   if r.baseIdentity.id.len > 0:
     # The base the plan was computed against (§7.4) and, after a
     # distribution upgrade, what changed since the current generation (§7.9).

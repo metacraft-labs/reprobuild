@@ -217,20 +217,35 @@ suite "round 4: the effective-unit check is the authority":
 
 suite "round 4: every property systemd reports is classified":
   test "each D-Bus property of a service unit on the four bases":
-    # The fixture is what systemd 252, 255, 257 and 259 expose
-    # (fixtures/systemd_properties); one in no group would refuse every
-    # floored unit on that base (the round-4 matrix found
-    # StateDirectorySymlink= this way).
+    # The fixture is what systemd 252, 255, 257, 259 and (Arch, AR4) 262
+    # expose (fixtures/systemd_properties); one in no group would refuse
+    # every floored unit on that base (the round-4 matrix found
+    # StateDirectorySymlink= this way, AR4's Arch gates twelve more).
     var unclassified: seq[string]
     for l in lines(currentSourcePath().parentDir / "fixtures" /
                    "systemd_properties" / "service-unit-properties.tsv"):
       if l.len == 0 or l[0] == '#': continue
       let k = l.split('\t')[0]
       if k notin ComparedProps and k notin LimitProps and
-          k notin FileJudgedProps and not isExecProp(k) and not isInertProp(k):
+          k notin FileJudgedProps and k notin UnsetOnlyProps and
+          not isExecProp(k) and not isInertProp(k):
         unclassified.add(k)
     check unclassified.len == 0
     checkpoint unclassified.join(" ")
+
+  test "systemd 262's unreviewed settings pass only unset (AR4)":
+    for k in UnsetOnlyProps:
+      var e = goodInput()
+      e.show[k] = ""
+      check problemsOf(e) == ""
+      e.show[k] = "x"
+      checkpoint k
+      check ("the property " & k & "=x is reviewed only as unset") in problemsOf(e)
+    for k in ["CPUPressureWatch", "IOPressureWatch", "MemoryTHP",
+              "RestartRandomizedDelayUSec"]:
+      var e = goodInput()
+      e.show[k] = "auto"
+      check problemsOf(e) == ""
 
   test "directory symlinks stay inside the directory root":
     var e = goodInput()

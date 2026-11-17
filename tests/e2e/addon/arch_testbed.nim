@@ -186,6 +186,25 @@ const
     file: OmarchyIso.file, osId: "omarchy", versionId: "4.5.0",
     note: "Omarchy 4.5.0-3 installed by its own ISO installer")
 
+const ArchBootVariance* = ["active-units:dev-disk-by*.swap", "mounts:/dev",
+                          "mounts:/run", "mounts:/tmp", "mounts:/efi",
+                          "sysctl:net.ipv4.tcp_rmem", "sysctl:net.ipv4.tcp_wmem",
+                          "sysctl:net.ipv4.tcp_mem", "sysctl:net.ipv4.udp_mem",
+                          "active-units:snapperd.service"]
+  ## Fingerprint records two boots of the same Arch-family guest differ in
+  ## that no switch makes (measured 2026-11-17 across reboots and resets in
+  ## the AR4 gates): the zram swap device the Omarchy VM's zram generator
+  ## names by a UUID drawn at every boot; the sizes of the boot's own
+  ## tmpfs and devtmpfs mounts; the ``/efi`` automount's options, which
+  ## name the descriptor and pipe inode systemd gave it at this boot; and
+  ## the TCP and UDP buffer limits the kernel derives from the memory free
+  ## at boot (``tcp_rmem``'s maximum moved by 32 bytes; ip-sysctl in the
+  ## kernel's documentation). And, on the Omarchy VM, whether snapper's
+  ## D-Bus service is up: any ``snapper`` call starts it (the switch's own
+  ## root snapshot among them) and its idle timeout stops it, so within one
+  ## boot as across two it is a matter of timing. The Debian gates'
+  ## ``BootVariance`` is the same idea for their bases.
+
 proc archBaseNamed*(name: string): BaseImage =
   ## An Arch base by name, the Omarchy guest (``omarchy-amd64``) included.
   if name == OmarchyBase.name: return OmarchyBase
