@@ -41266,7 +41266,8 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     let parsed = parseBrokerModeArgs(args)
     doAssert parsed.isBrokerMode
     let ctx = FixtureContext(filePrefix: parsed.filePrefix)
-    return runBrokerSession(parsed.channel, parsed.token, ctx)
+    return runBrokerSession(parsed.channel, parsed.token, parsed.parentPid,
+      parsed.parentStart, ctx)
   except EElevation as err:
     stderr.writeLine("repro --privileged-broker: " & err.msg)
     return 7

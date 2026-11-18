@@ -6493,6 +6493,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_elevation_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_elevation/tests/t_elevation_pipe_squatting.nim",
+    binary: "build/test-bin/t_elevation_pipe_squatting",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_elevation_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_elevation/tests/t_inline_exec_deadline_and_output.nim",
     binary: "build/test-bin/t_inline_exec_deadline_and_output",
     defines: @[],

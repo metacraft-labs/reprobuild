@@ -22,14 +22,12 @@
 ## default DACL, so a same-user process could read the nonce from the
 ## pipe list and create a second instance for the broker to reach.
 ##
-## The Windows cases are the attack itself: this process plays the
-## same-user squatter against the production `createListeningChannel`.
-## On the code before the fix the squatter's `CreateNamedPipeW` succeeds
-## and the parent's creation joins a pre-existing name.
+## This file holds the platform-pure half: the command line and its
+## parsing. The attack on the pipe itself is
+## `t_elevation_pipe_squatting.nim`, kept apart so that it also compiles
+## against the code before the fix and can be shown red there.
 ##
-## MOCKS: none. The production channel code runs against the real named
-## pipe file system. The POSIX build runs the platform-pure cases only;
-## the POSIX transport is not implemented yet (`ipc.nim`).
+## MOCKS: none.
 
 import std/[strutils, unittest]
 
@@ -40,7 +38,8 @@ suite "elevation channel: the name carries no secret":
     let channelId = generateChannelId()
     let nonce = generateNonce()
     check channelId != nonce
-    let args = brokerCommandArgs(channelId, nonce)
+    let args = brokerCommandArgs(channelId, nonce, 4242,
+      133000000000000000'u64)
     let channelArg = args[args.find(BrokerChannelFlag) + 1]
     let tokenArg = args[args.find(BrokerTokenFlag) + 1]
     check tokenArg == nonce
@@ -55,65 +54,21 @@ suite "elevation channel: the name carries no secret":
                 "0123456789abcdef0123456789abcde"]:
       expect EProtocol:
         discard parseBrokerModeArgs(@["--privileged-broker",
-          "--channel", bad, "--token", "t"])
+          "--channel", bad, "--token", "t", "--parent-pid", "4242",
+          "--parent-start", "1"])
       expect EProtocol:
         discard pipeNameForChannel(bad)
+
+  test "the broker refuses to start without the parent's identity":
+    # Without it the broker could not tell a live parent's pipe from one
+    # a squatter created after killing the parent.
+    for args in [@["--parent-pid", "4242"], @["--parent-start", "1"],
+                 @["--parent-pid", "0", "--parent-start", "1"],
+                 @["--parent-pid", "x", "--parent-start", "1"]]:
+      expect EProtocol:
+        discard parseBrokerModeArgs(@["--privileged-broker", "--channel",
+          "0123456789abcdef0123456789abcdef", "--token", "t"] & args)
 
   test "channel ids are fresh":
     check generateChannelId() != generateChannelId()
     check isChannelId(generateChannelId())
-
-when defined(windows):
-  import std/[os, winlean]
-
-  const
-    PipeAccessDuplex = 0x00000003'i32
-    PipeUnlimitedInstances = 255'i32
-    PipeRejectRemoteClients = 0x00000008'i32
-    OpenExisting = 3'i32
-    GenericReadWrite = cast[int32](0xC0000000'u32)
-
-  proc squatInstance(name: string): Handle =
-    ## What a same-user process would do: create an instance of `name`
-    ## with the default DACL and room for more instances.
-    createNamedPipe(newWideCString(name), PipeAccessDuplex,
-      PipeRejectRemoteClients, PipeUnlimitedInstances, 4096, 4096, 0, nil)
-
-  suite "elevation channel: the parent's pipe is the only instance":
-    test "a second instance cannot be created beside the parent's":
-      let channelId = generateChannelId()
-      var ch = createListeningChannel(channelId)
-      defer: ch.close()
-      let squatter = squatInstance(pipeNameForChannel(channelId))
-      let err = osLastError()
-      if squatter != INVALID_HANDLE_VALUE:
-        discard closeHandle(squatter)
-      check squatter == INVALID_HANDLE_VALUE
-      checkpoint "squatter CreateNamedPipeW status " & $int(err)
-
-    test "the parent refuses a name somebody created first":
-      let channelId = generateChannelId()
-      let squatter = squatInstance(pipeNameForChannel(channelId))
-      check squatter != INVALID_HANDLE_VALUE
-      defer: discard closeHandle(squatter)
-      expect EBrokerLaunch:
-        var ch = createListeningChannel(channelId)
-        ch.close()
-
-    test "only an elevated process can open the pipe as a client":
-      let channelId = generateChannelId()
-      var ch = createListeningChannel(channelId)
-      defer: ch.close()
-      let client = createFileW(newWideCString(pipeNameForChannel(channelId)),
-        GenericReadWrite, 0, nil, OpenExisting, 0, 0)
-      let err = osLastError()
-      if isProcessElevated():
-        # The elevated case: the client is admitted, and the parent's
-        # elevation check accepts it.
-        check client != INVALID_HANDLE_VALUE
-        acceptAuthenticatedClient(ch)
-      else:
-        check client == INVALID_HANDLE_VALUE
-        check int(err) == ERROR_ACCESS_DENIED
-      if client != INVALID_HANDLE_VALUE:
-        discard closeHandle(client)

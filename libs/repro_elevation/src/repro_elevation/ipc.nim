@@ -234,7 +234,10 @@ when defined(windows):
     let opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1,
       addr token) != 0
     let openStatus = GetLastError()
-    discard RevertToSelf()
+    if RevertToSelf() == 0:
+      # Still impersonating: nothing more may run on this thread.
+      quit("repro: RevertToSelf failed after identifying the elevation " &
+        "client; stopping", QuitFailure)
     if not opened:
       raiseChannelAuth("could not open the connecting client's token " &
         "(status " & $openStatus & ")")
@@ -342,8 +345,9 @@ when defined(windows):
         PIPE_REJECT_REMOTE_CLIENTS,
       1, 64 * 1024, 64 * 1024, 0, addr sa)
     if h == invalidHandle():
+      let err = GetLastError()
       raiseBrokerLaunch("CreateNamedPipeW failed for " & name &
-        " (status " & $GetLastError() & "); a process that already " &
+        " (status " & $err & "); a process that already " &
         "holds this name is refused, never joined")
     result.handle = h
     result.isServer = true
@@ -373,6 +377,79 @@ when defined(windows):
       discard DisconnectNamedPipe(ch.handle)
       raiseChannelAuth("the connecting client is not elevated; " &
         "refusing to serve it as the broker")
+
+  # ---- broker side: the parent must stay alive across the connect -------
+
+  proc OpenProcess(desiredAccess: DWORD; inheritHandle: BOOL;
+                   processId: DWORD): HANDLE
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc GetProcessTimes(process: HANDLE; creation, exit, kernel,
+                       user: ptr uint64): BOOL
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc WaitForSingleObject(handle: HANDLE; ms: DWORD): DWORD
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc GetCurrentProcessId(): DWORD
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc GetCurrentProcess(): HANDLE
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  const
+    SYNCHRONIZE: DWORD = 0x00100000
+    PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000
+    WAIT_TIMEOUT: DWORD = 258
+
+  type
+    ParentWatch* = object
+      ## A handle the broker holds on the parent that launched it. While
+      ## the handle is open the parent's pid cannot be reused.
+      handle: HANDLE
+
+  proc processStartTime(h: HANDLE): uint64 =
+    var creation, exitT, kernelT, userT: uint64
+    if GetProcessTimes(h, addr creation, addr exitT, addr kernelT,
+        addr userT) == 0:
+      raiseChannelAuth("GetProcessTimes failed (status " &
+        $GetLastError() & ")")
+    creation
+
+  proc currentProcessIdentity*(): tuple[pid: int, start: uint64] =
+    ## PARENT: its own pid and creation time, passed to the broker so
+    ## the broker can hold the parent and know it is the same process.
+    (int(GetCurrentProcessId()), processStartTime(GetCurrentProcess()))
+
+  proc watchParent*(pid: int; start: uint64): ParentWatch =
+    ## BROKER, before connecting: open the parent and check it is the
+    ## process that launched this broker (pid AND creation time).
+    let h = OpenProcess(SYNCHRONIZE or PROCESS_QUERY_LIMITED_INFORMATION,
+      0, DWORD(pid))
+    if h == nil:
+      raiseChannelAuth("cannot open the launching parent (pid " & $pid &
+        ", status " & $GetLastError() & "); refusing to connect")
+    result.handle = h
+    if processStartTime(h) != start:
+      discard CloseHandle(h)
+      raiseChannelAuth("pid " & $pid & " is not the launching parent " &
+        "(its creation time differs); refusing to connect")
+
+  proc requireParentAlive*(w: ParentWatch) =
+    ## BROKER, after connecting: the parent must still be running. The
+    ## parent holds its pipe's only instance until the broker exits, so
+    ## a parent that was alive from before the connect until after it
+    ## means the name was never released, and the instance the broker
+    ## reached is the parent's. A parent that died (was killed) may
+    ## have released the name to a squatter: refuse.
+    if WaitForSingleObject(w.handle, 0) != WAIT_TIMEOUT:
+      raiseChannelAuth("the launching parent exited before the broker " &
+        "connected; the pipe may not be the parent's")
+
+  proc close*(w: var ParentWatch) =
+    if w.handle != nil:
+      discard CloseHandle(w.handle)
+      w.handle = nil
 
   # ---- broker side: connect back to the parent ---------------------------
 
@@ -420,6 +497,19 @@ else:
 
   proc acceptAuthenticatedClient*(ch: var ElevationChannel) =
     raiseNotImplementedPlatform("Unix-domain-socket peer-cred accept")
+
+  type ParentWatch* = object
+
+  proc currentProcessIdentity*(): tuple[pid: int, start: uint64] =
+    raiseNotImplementedPlatform("parent identity for the elevation channel")
+
+  proc watchParent*(pid: int; start: uint64): ParentWatch =
+    raiseNotImplementedPlatform("parent watch for the elevation channel")
+
+  proc requireParentAlive*(w: ParentWatch) =
+    raiseNotImplementedPlatform("parent watch for the elevation channel")
+
+  proc close*(w: var ParentWatch) = discard
 
   proc connectToParent*(channelId: string;
                         timeoutMs: int = 20_000): ElevationChannel =

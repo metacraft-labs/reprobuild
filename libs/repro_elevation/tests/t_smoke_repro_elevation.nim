@@ -325,10 +325,13 @@ suite "repro_elevation: --no-elevate skip path":
 suite "repro_elevation: broker-mode arg parsing":
   test "parses --privileged-broker --channel --token":
     let parsed = parseBrokerModeArgs(@["--privileged-broker",
-      "--channel", "0123456789abcdef0123456789abcdef", "--token", "xyz"])
+      "--channel", "0123456789abcdef0123456789abcdef", "--token", "xyz",
+      "--parent-pid", "4242", "--parent-start", "133000000000000000"])
     check parsed.isBrokerMode
     check parsed.channel == "0123456789abcdef0123456789abcdef"
     check parsed.token == "xyz"
+    check parsed.parentPid == 4242
+    check parsed.parentStart == 133000000000000000'u64
 
   test "non-broker args are reported as not-broker-mode":
     let parsed = parseBrokerModeArgs(@["home", "apply"])

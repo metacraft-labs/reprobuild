@@ -37,6 +37,8 @@ const
   BrokerModeFlag* = "--privileged-broker"
   BrokerChannelFlag* = "--channel"
   BrokerTokenFlag* = "--token"
+  BrokerParentPidFlag* = "--parent-pid"
+  BrokerParentStartFlag* = "--parent-start"
   BrokerProtocolVersion*: uint16 = 1
   BrokerFilePrefixFlag* = "--file-prefix"
     ## Test-only flag: the gate passes the broker the sandbox prefix
@@ -76,15 +78,20 @@ proc generateNonce*(): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
 
-proc brokerCommandArgs*(channelId, nonce: string;
+proc brokerCommandArgs*(channelId, nonce: string; parentPid: int;
+                        parentStart: uint64;
                         extraArgs: openArray[string] = []): seq[string] =
   ## The broker's arguments: `--privileged-broker --channel <id>
-  ## --token <nonce> [extra...]`. The channel id names the pipe; the
-  ## nonce is passed beside it and never inside it.
+  ## --token <nonce> --parent-pid <pid> --parent-start <creation time>
+  ## [extra...]`. The channel id names the pipe; the nonce is passed
+  ## beside it and never inside it. The parent's pid and creation time
+  ## let the broker hold the parent and refuse a pipe reached after the
+  ## parent died.
   if not isChannelId(channelId):
     raiseBrokerLaunch("not an elevation channel id: '" & channelId & "'")
   result = @[BrokerModeFlag, BrokerChannelFlag, channelId,
-    BrokerTokenFlag, nonce]
+    BrokerTokenFlag, nonce, BrokerParentPidFlag, $parentPid,
+    BrokerParentStartFlag, $parentStart]
   for a in extraArgs:
     result.add(a)
 
@@ -244,7 +251,9 @@ when defined(windows):
 
   proc brokerParams(channelId, nonce: string;
                     extraArgs: openArray[string]): string =
-    for a in brokerCommandArgs(channelId, nonce, extraArgs):
+    let me = currentProcessIdentity()
+    for a in brokerCommandArgs(channelId, nonce, me.pid, me.start,
+        extraArgs):
       if result.len > 0:
         result.add(" ")
       result.add(quoteArg(a))
@@ -542,9 +551,10 @@ proc launchAndDriveBroker*(reproExe: string;
   result.brokerPid = brokerProcessId(proc0)
   try:
     acceptAuthenticatedClient(ch)
-  except EChannelAuth:
-    # Something other than an elevated process took the pipe's one
-    # instance. Keep holding the name until the broker has exited —
+  except CatchableError:
+    # The accept failed — most likely something other than an
+    # elevated process took the pipe's one instance. Keep holding the
+    # name until the broker has exited —
     # it cannot connect while the instance is not listening and gives
     # up after its connect timeout. Releasing the name first would let
     # a squatter create it for the elevated broker to connect to.
@@ -559,7 +569,8 @@ proc launchAndDriveBroker*(reproExe: string;
 # Broker: the --privileged-broker session loop.
 # ===========================================================================
 
-proc runBrokerSession*(channelId, nonce: string; ctx: FixtureContext): int =
+proc runBrokerSession*(channelId, nonce: string; parentPid: int;
+                       parentStart: uint64; ctx: FixtureContext): int =
   ## BROKER side. Connects back to the parent, authenticates the
   ## nonce, then services `Operation` frames until `Done`. Each
   ## operation is dispatched through `dispatch.dispatchOperation`
@@ -569,8 +580,15 @@ proc runBrokerSession*(channelId, nonce: string; ctx: FixtureContext): int =
   ## channel drop.
   ##
   ## Returns the broker process exit code: 0 = clean.
+  # Hold the parent BEFORE connecting, and require it alive AFTER: the
+  # parent keeps its pipe's only instance until the broker exits, so a
+  # parent alive across the connect means the pipe was never released
+  # to a squatter. (Killing the parent frees the name.)
+  var parent = watchParent(parentPid, parentStart)
+  defer: parent.close()
   var ch = connectToParent(channelId)
   defer: ch.close()
+  requireParentAlive(parent)
 
   # Handshake: the parent's Hello must echo the nonce the broker was
   # launched with. A mismatch means an unrelated process connected —
@@ -799,6 +817,8 @@ type
     isBrokerMode*: bool
     channel*: string
     token*: string
+    parentPid*: int
+    parentStart*: uint64
     filePrefix*: string
 
 proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
@@ -822,6 +842,17 @@ proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
         raiseProtocol("--token requires a value")
       result.token = args[i + 1]
       i += 2
+    of BrokerParentPidFlag, BrokerParentStartFlag:
+      if i + 1 >= args.len:
+        raiseProtocol(args[i] & " requires a value")
+      try:
+        if args[i] == BrokerParentPidFlag:
+          result.parentPid = parseInt(args[i + 1])
+        else:
+          result.parentStart = parseBiggestUInt(args[i + 1]).uint64
+      except ValueError:
+        raiseProtocol(args[i] & " is not a number: '" & args[i + 1] & "'")
+      i += 2
     of BrokerFilePrefixFlag:
       if i + 1 >= args.len:
         raiseProtocol("--file-prefix requires a value")
@@ -834,3 +865,6 @@ proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
   if not isChannelId(result.channel):
     raiseProtocol("--privileged-broker requires a --channel id " &
       "(32 lower-case hex digits), got '" & result.channel & "'")
+  if result.parentPid <= 0 or result.parentStart == 0:
+    raiseProtocol("--privileged-broker requires --parent-pid and " &
+      "--parent-start")
