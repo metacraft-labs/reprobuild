@@ -97,7 +97,8 @@ suite "repro reap is a dispatched verb":
     # as a stray argument, and before the flag after it) and points at help.
     check undispatched.output.contains(
       "unknown subcommand 'reapx' for 'repro'")
-    check undispatched.output.contains("Run `repro --help`")
+    check undispatched.output.contains("For more information, try 'repro --help'.")
+    check undispatched.output.contains("tip: a similar subcommand exists: 'reap'")
     check not undispatched.output.contains("repro reap: state-root=")
     # The exit code is the sharper half of the control, and the pair is what
     # makes arm 1 meaningful: a dispatched verb with nothing to do exits 0, an

@@ -1269,11 +1269,11 @@
 ##                                            of the records' directory with
 ##                                            the rest of the state, before
 ##                                            the ledger copy (decision 178)
-## ``state-gone-from-addon-dir-alone``        the records directory counts as
-##                                            bound to a removed state when
-##                                            the identity's directory is gone,
-##                                            whether or not the ledger copy is
-##                                            (decision 178)
+## ``state-gone-from-addon-dir-alone``        the uninstall records'
+##                                            directory counts as bound to a
+##                                            removed state when the identity's
+##                                            directory is gone, whether or not
+##                                            the ledger copy is (decision 178)
 ## ``evidence-ship-runs-as-root``            the shipping unit and its
 ##                                            confined runs run as root again
 ##                                            (decision 181)

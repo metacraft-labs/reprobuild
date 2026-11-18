@@ -118,6 +118,8 @@ flag	repro graph	--target
 flag	repro graph	--tool-provisioning
 flag	repro graph	--view
 flag	repro graph	--work-root
+env	repro graph	REPROBUILD_ACTION_CACHE_ROOT
+env	repro graph	REPROBUILD_WORK_ROOT
 command	repro why
 flag	repro why	--action
 flag	repro why	--action-cache-root
@@ -125,6 +127,8 @@ flag	repro why	--format
 flag	repro why	--json
 flag	repro why	--tool-provisioning
 flag	repro why	--work-root
+env	repro why	REPROBUILD_ACTION_CACHE_ROOT
+env	repro why	REPROBUILD_WORK_ROOT
 command	repro deps
 command	repro deps refresh
 flag	repro deps refresh	--check
@@ -152,6 +156,8 @@ flag	repro stats	--tool-provisioning
 flag	repro stats	--top
 flag	repro stats	--watch-session
 flag	repro stats	--work-root
+env	repro stats	REPROBUILD_ACTION_CACHE_ROOT
+env	repro stats	REPROBUILD_WORK_ROOT
 command	repro daemon
 flag	repro daemon	--daemon-exe
 flag	repro daemon	--dev
@@ -197,6 +203,7 @@ flag	repro store closure	--root
 flag	repro store closure	--selection
 flag	repro store closure	--store-root
 flag	repro store closure	--workspace-root
+env	repro store closure	REPROBUILD_ACTION_CACHE_ROOT
 command	repro store export
 flag	repro store export	--action-cache-root
 flag	repro store export	--freeze-dev-env
@@ -209,6 +216,7 @@ flag	repro store export	--store-root
 flag	repro store export	--workspace-root
 flag	repro store export	--zstd-level
 flag	repro store export	--zstd-threads
+env	repro store export	REPROBUILD_ACTION_CACHE_ROOT
 command	repro store import
 flag	repro store import	--action-cache-root
 flag	repro store import	--allow-dev-env
@@ -216,6 +224,7 @@ flag	repro store import	--force
 flag	repro store import	--json
 flag	repro store import	--root
 flag	repro store import	--store-root
+env	repro store import	REPROBUILD_ACTION_CACHE_ROOT
 command	repro store copy
 flag	repro store copy	--json
 flag	repro store copy	--root-id
@@ -301,6 +310,7 @@ flag	repro bundle create	--repro
 flag	repro bundle create	--store-root
 flag	repro bundle create	--workspace-root
 flag	repro bundle create	--zstd
+env	repro bundle create	REPROBUILD_ACTION_CACHE_ROOT
 command	repro bundle publish
 flag	repro bundle publish	--endpoint
 flag	repro bundle publish	--parallel
@@ -319,6 +329,7 @@ flag	repro bundle restore	--parallel
 flag	repro bundle restore	--staging
 flag	repro bundle restore	--store-root
 flag	repro bundle restore	--workspace
+env	repro bundle restore	REPROBUILD_ACTION_CACHE_ROOT
 command	repro bundle inspect
 flag	repro bundle inspect	--json
 command	repro reap
@@ -1471,6 +1482,7 @@ flag	repro build	--write-report
 flag	repro build	--write-stats
 flag	repro build	-v
 flag	repro build	-vv
+env	repro build	REPROBUILD_ACTION_CACHE_ROOT
 env	repro build	REPROBUILD_LOG
 env	repro build	REPROBUILD_MEASURE
 env	repro build	REPROBUILD_MONITOR_HOSTING
@@ -1478,6 +1490,7 @@ env	repro build	REPROBUILD_NO_RUNQUOTA
 env	repro build	REPROBUILD_PROGRESS
 env	repro build	REPROBUILD_PROGRESS_BARS
 env	repro build	REPROBUILD_SHOW
+env	repro build	REPROBUILD_WORK_ROOT
 env	repro build	REPRO_DAEMON
 env	repro build	REPRO_PROGRESS
 env	repro build	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1539,6 +1552,7 @@ flag	repro bench	--write-report
 flag	repro bench	--write-stats
 flag	repro bench	-v
 flag	repro bench	-vv
+env	repro bench	REPROBUILD_ACTION_CACHE_ROOT
 env	repro bench	REPROBUILD_LOG
 env	repro bench	REPROBUILD_MEASURE
 env	repro bench	REPROBUILD_MONITOR_HOSTING
@@ -1546,6 +1560,7 @@ env	repro bench	REPROBUILD_NO_RUNQUOTA
 env	repro bench	REPROBUILD_PROGRESS
 env	repro bench	REPROBUILD_PROGRESS_BARS
 env	repro bench	REPROBUILD_SHOW
+env	repro bench	REPROBUILD_WORK_ROOT
 env	repro bench	REPRO_DAEMON
 env	repro bench	REPRO_PROGRESS
 env	repro bench	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1607,6 +1622,7 @@ flag	repro lint	--write-report
 flag	repro lint	--write-stats
 flag	repro lint	-v
 flag	repro lint	-vv
+env	repro lint	REPROBUILD_ACTION_CACHE_ROOT
 env	repro lint	REPROBUILD_LOG
 env	repro lint	REPROBUILD_MEASURE
 env	repro lint	REPROBUILD_MONITOR_HOSTING
@@ -1614,6 +1630,7 @@ env	repro lint	REPROBUILD_NO_RUNQUOTA
 env	repro lint	REPROBUILD_PROGRESS
 env	repro lint	REPROBUILD_PROGRESS_BARS
 env	repro lint	REPROBUILD_SHOW
+env	repro lint	REPROBUILD_WORK_ROOT
 env	repro lint	REPRO_DAEMON
 env	repro lint	REPRO_PROGRESS
 env	repro lint	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1623,6 +1640,7 @@ command	repro clean
 flag	repro clean	--dry-run
 flag	repro clean	--project-root
 flag	repro clean	--work-root
+env	repro clean	REPROBUILD_WORK_ROOT
 command	repro test
 flag	repro test	--action-cache-root
 flag	repro test	--action-output
@@ -1692,6 +1710,7 @@ flag	repro test	--write-report
 flag	repro test	--write-stats
 flag	repro test	-v
 flag	repro test	-vv
+env	repro test	REPROBUILD_ACTION_CACHE_ROOT
 env	repro test	REPROBUILD_LOG
 env	repro test	REPROBUILD_MEASURE
 env	repro test	REPROBUILD_MONITOR_HOSTING
@@ -1699,6 +1718,7 @@ env	repro test	REPROBUILD_NO_RUNQUOTA
 env	repro test	REPROBUILD_PROGRESS
 env	repro test	REPROBUILD_PROGRESS_BARS
 env	repro test	REPROBUILD_SHOW
+env	repro test	REPROBUILD_WORK_ROOT
 env	repro test	REPRO_DAEMON
 env	repro test	REPRO_PROGRESS
 env	repro test	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1779,6 +1799,7 @@ flag	repro certify	--write-report
 flag	repro certify	--write-stats
 flag	repro certify	-v
 flag	repro certify	-vv
+env	repro certify	REPROBUILD_ACTION_CACHE_ROOT
 env	repro certify	REPROBUILD_LOG
 env	repro certify	REPROBUILD_MEASURE
 env	repro certify	REPROBUILD_MONITOR_HOSTING
@@ -1786,6 +1807,7 @@ env	repro certify	REPROBUILD_NO_RUNQUOTA
 env	repro certify	REPROBUILD_PROGRESS
 env	repro certify	REPROBUILD_PROGRESS_BARS
 env	repro certify	REPROBUILD_SHOW
+env	repro certify	REPROBUILD_WORK_ROOT
 env	repro certify	REPRO_DAEMON
 env	repro certify	REPRO_PROGRESS
 env	repro certify	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1852,6 +1874,7 @@ flag	repro watch	--write-report
 flag	repro watch	--write-stats
 env	repro watch	REPROBUILD_MEASURE
 env	repro watch	REPROBUILD_SHOW
+env	repro watch	REPROBUILD_WORK_ROOT
 env	repro watch	REPRO_DAEMON
 env	repro watch	REPRO_RESTORE_CACHED_OUTPUTS
 env	repro watch	REPRO_TOOL_PROVISIONING
