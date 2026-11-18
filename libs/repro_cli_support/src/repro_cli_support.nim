@@ -36163,10 +36163,10 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
       let candidate = resolveProjectPath(projectRoot, resolvedConfig.socketPath)
       when defined(posix):
         if candidate.len >= 80:
-          var h: uint32 = 2166136261'u32
-          for ch in candidate:
-            h = (h xor uint32(ord(ch))) * 16777619'u32
-          resolvedConfig.socketPath = "/tmp/repro-hcr-" & toHex(h, 8) & ".sock"
+          # Into this user's private ``/tmp/repro-hcr-<uid>``, never
+          # directly into ``/tmp`` where anyone can bind the name first
+          # (reprobuild-pm spec/HCR/CLI-Integration.md §"Agent Socket Path").
+          resolvedConfig.socketPath = hcrAgentDerivedSocketPath(candidate)
         else:
           resolvedConfig.socketPath = candidate
       else:
@@ -36175,7 +36175,7 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
       resolvedConfig.artifacts = resolveProjectPath(projectRoot, resolvedConfig.artifacts)
   resolvedConfig.validateHcrWatchConfig()
   when defined(posix):
-    # A RELATIVE socket that resolves long is hashed into ``/tmp`` above,
+    # A RELATIVE socket that resolves long is hashed into ``/tmp/repro-hcr-<uid>/`` above,
     # but a path the user spelled ABSOLUTE is theirs and is not moved. It
     # still has to fit what ``std/net`` binds -- 107 bytes on Linux, 91 on
     # macOS (``repro_core/paths.unixSocketPathMaxLen``) -- and past that
@@ -36201,8 +36201,14 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
   if result.enabled:
     createDir(extendedPath(result.config.artifacts))
     let sockDir = parentDir(result.config.socketPath)
-    if sockDir.len > 0:
-      createDir(extendedPath(sockDir))
+    when defined(posix):
+      if sockDir == hcrAgentPrivateSocketDir():
+        admitHcrAgentPrivateSocketDir()
+      elif sockDir.len > 0:
+        createDir(extendedPath(sockDir))
+    else:
+      if sockDir.len > 0:
+        createDir(extendedPath(sockDir))
     result.listener = listenHcrAgentUnixSocket(result.config.socketPath)
     result.client = initHcrCoordinatorClient(CodetracerHcrSupportProfile)
 

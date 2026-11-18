@@ -1328,6 +1328,15 @@ integration_hcr_linux_hardened_host_refuses_at_negotiation:
         tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim \
         2>&1 | tee test-logs/integration_hcr_linux_hardened_host_refuses_at_negotiation.log
 
+integration_hcr_patch_channel_admits_only_this_users_peer:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_patch_channel_admits_only_this_users_peer \
+        --out:build/test-bin/integration_hcr_patch_channel_admits_only_this_users_peer \
+        tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim \
+        2>&1 | tee test-logs/integration_hcr_patch_channel_admits_only_this_users_peer.log
+
 # HLX-M9 -- provider-owned code pages (patch bodies, island pages) are a
 # memfd_create dual mapping: the exec view is MAP_PRIVATE|PROT_READ|PROT_EXEC
 # and never writable, and a page that takes no more writes gets F_SEAL_WRITE.

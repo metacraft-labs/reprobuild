@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2989,
+    "nimTestBinaries": 2990,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 804,
-    "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3038
+    "staticallyDetectedRuntimeCompilerFlowTests": 149,
+    "testEntries": 3039
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1722,7 +1722,7 @@
     "classificationCounts": {
       "graph-fixture": 24,
       "integration": 1647,
-      "platform/destructive": 197,
+      "platform/destructive": 198,
       "pure unit": 804,
       "unclassified": 366
     },
@@ -1938,9 +1938,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2989,
+    "nimTestBinaryCount": 2990,
     "pythonTestFileCount": 49,
-    "testEntryCount": 3038
+    "testEntryCount": 3039
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3635,6 +3635,29 @@
         }
       ],
       "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim"
+    },
+    {
+      "class": "platform/destructive",
+      "matches": [
+        {
+          "assignedCommandVariable": "build",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "agentDir",
+            "bin",
+            "nsArgs",
+            "unshareExe"
+          ],
+          "line": 283,
+          "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "let build = execCmdEx(quoteShellCommand([\"gcc\", \"-O1\","
+        }
+      ],
+      "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim"
     },
     {
       "class": "integration",
@@ -35819,6 +35842,25 @@
       "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_patch_channel_admits_only_this_users_peer",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_hcr_agent",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

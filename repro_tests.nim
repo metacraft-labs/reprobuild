@@ -17713,6 +17713,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_hcr_linux_hardening_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim",
+    binary: "build/test-bin/t_integration_hcr_patch_channel_admits_only_this_users_peer",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_hcr_linux_hardening_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/hcr-linux-prepare/t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections.nim",
     binary: "build/test-bin/t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections",
     defines: @[],
