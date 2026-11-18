@@ -233,7 +233,9 @@ proc parseOutcome*(line, unitResult: string): Outcome =
   if w.len == 4 and w[0] == "A9PROBE":
     try: return (true, parseInt(w[2]), parseInt(w[3]), false)
     except ValueError: discard
-  (false, 0, 0, unitResult.strip() == "signal")
+  # systemd reports a seccomp kill as "signal", or "core-dump" where the
+  # base dumps cores on SIGSYS (Ubuntu 24.04).
+  (false, 0, 0, unitResult.strip() in ["signal", "core-dump"])
 
 proc heldOk*(e: Expect; o: Outcome): bool =
   case e

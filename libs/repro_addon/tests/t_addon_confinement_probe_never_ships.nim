@@ -65,6 +65,8 @@ suite "a copy keeps the unit's confinement":
     check removedOk(exBlocked, parseOutcome("A9PROBE mdwe 0 0", "success"))
     check heldOk(exBlocked, parseOutcome("", "signal"))
     check removedOk(exErrnoNumber, parseOutcome("", "signal"))
+    check removedOk(exErrnoNumber, parseOutcome("", "core-dump"))
+    check heldOk(exBlocked, parseOutcome("", "core-dump"))
     check not removedOk(exErrnoNumber, parseOutcome("A9PROBE filter -1 1", "success"))
     check removedOk(exFilter, parseOutcome("A9PROBE filter -1 2", "success"))
     check not heldOk(exFilter, parseOutcome("A9PROBE filter -1 2", "success"))
