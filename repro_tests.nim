@@ -26881,6 +26881,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "program-wide pragma {.define"),
   TestSpec(
+    source: "tests/integration/t_nix_rust_binary_finds_the_store_libraries_it_linked.nim",
+    binary: "build/test-bin/t_nix_rust_binary_finds_the_store_libraries_it_linked",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let enabled = defined(linux) and defined(amd64) and"),
+  TestSpec(
     source: "tests/integration/t_nix_tool_realizations_are_gc_rooted.nim",
     binary: "build/test-bin/t_nix_tool_realizations_are_gc_rooted",
     defines: @[],

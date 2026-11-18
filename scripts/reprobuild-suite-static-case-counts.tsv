@@ -523,7 +523,7 @@ libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_prefix_sources_tools.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_repeated_variant_assignment_last_wins.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim	nim	5
-libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	6
+libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_rust_windows_arm64_tarball_arms.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
@@ -2247,6 +2247,7 @@ tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
 tests/integration/t_nix_daemon_ipc.nim	nim	9
 tests/integration/t_nix_daemon_provisioner.nim	nim	12
 tests/integration/t_nix_expression_closure_keys.nim	nim	7
+tests/integration/t_nix_rust_binary_finds_the_store_libraries_it_linked.nim	nim	4
 tests/integration/t_nix_tool_realizations_are_gc_rooted.nim	nim	1
 tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim	nim	5
 tests/integration/t_no_project_set_errors_name_the_remedy.nim	nim	1
