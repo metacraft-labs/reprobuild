@@ -134,7 +134,11 @@ const EgressStateHeader* = "repro-egress-state 2"
   ## The first line of the observer check's state file. A file without it
   ## (empty, truncated, foreign) is unreadable, never a first run; a file in
   ## the format before it (its first line ``table ...``) is read once and
-  ## rewritten.
+  ## rewritten. The line ``unattributed <n>`` was added under the same
+  ## header (2026-11-18): a file without it is read as having reported the
+  ## shortfall its counter and sets show, and an older reader takes the
+  ## line for a destination that is never listed, which its next write
+  ## drops.
 
 type
   EgressStateError* = object of CatchableError
@@ -145,6 +149,9 @@ type
     check: int64                     ## checks made so far
     control: int64                   ## the control address's count (of
                                      ## THIS table instance)
+    reported: int64                  ## unattributed packets already
+                                     ## reported (of THIS table instance);
+                                     ## -1: the state predates the line
 
 proc readState(path: string; table: string): EgressState =
   ## The counts the previous check saw -- of THIS table instance: a table
@@ -156,6 +163,7 @@ proc readState(path: string; table: string): EgressState =
   ## is the first check. A file that cannot be read, or is not this
   ## format, raises ``EgressStateError``: it is never read as empty.
   result.counts = initTable[string, int64]()
+  result.reported = -1
   if not fileExists(path) and not symlinkExists(path): return
   var text = ""
   try: text = readFile(path)
@@ -180,6 +188,8 @@ proc readState(path: string; table: string): EgressState =
       elif p.len == 2 and p[0] == "check": result.check = parseBiggestInt(p[1])
       elif p.len == 2 and p[0] == "control":
         result.control = parseBiggestInt(p[1])
+      elif p.len == 2 and p[0] == "unattributed":
+        result.reported = parseBiggestInt(p[1])
       elif p.len == 3 and p[0] == "counter":
         result.counts[" counter"] = parseBiggestInt(p[2])
       elif p.len == 4 and p[0] == "owed":
@@ -195,6 +205,7 @@ proc readState(path: string; table: string): EgressState =
     if instance != table:
       result.counts.clear()
       result.control = 0
+      result.reported = 0
       when mutated("egress-owed-dropped-at-reload"):
         result.owed.setLen(0)
 
@@ -246,8 +257,22 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
   ## a reload).
   ##
   ## With ``counted`` (the named counter), ``unattributed`` is set to the
-  ## refused packets since the last check that no set element's growth
-  ## accounts for.
+  ## refused packets since the last check that no set element accounts
+  ## for. It is judged on this table instance's totals, never on the
+  ## growth of each since the last check, and ``counted`` must be read
+  ## BEFORE the sets, both of one table instance (``checkEgress``): the
+  ## counter's rule runs before the set update, so the sets then hold every
+  ## packet the counter counted, and perhaps some after it. The packets
+  ## they lack -- ``counted`` less the sum of the elements' counts -- are
+  ## never more than those a full set did not add, and a check reports only
+  ## what that shortfall exceeds the most already reported. So a packet
+  ## that arrived between the two reads is attributed whichever read saw it
+  ## first, and none a full set did not add is reported twice. The
+  ## shortfall errs low only by packets sent between a check's two reads,
+  ## so a check of a quiet table reports every one not yet reported
+  ## (reprobuild-pm issue
+  ## ``2026-11-17-addon-egress-check-reports-set-full-for-one-unattributed-packet.md``:
+  ## the difference of the two growths read such a packet as unattributed).
   ##
   ## ``controlPackets`` (the control address's count now, when known) is
   ## kept in the state as its own line, and ``controlBefore`` is set to the
@@ -273,11 +298,11 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
         if o.address == d.address: listed.add(o)
     owed = listed
   var fresh0, grown0: seq[RefusedDestination]
-  var grown = 0'i64
+  var held = 0'i64
   for d in refused:
+    held += d.packets
     let was = before.counts.getOrDefault(d.address, 0)
     if was < d.packets:
-      grown += d.packets - was
       if d.address in owedSet: continue
       if was == 0: fresh0.add(d) else: grown0.add(d)
   for o in owed: result.add((o.address, o.packets))
@@ -294,11 +319,28 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
     text.add("control " & $controlPackets & "\n")
   for d in refused:
     text.add(d.address & " " & $d.packets & "\n")
-  if counted >= 0 and not mutated("egress-ignores-counter"):
-    let wasCounted = before.counts.getOrDefault(" counter", 0)
-    if unattributed != nil:
-      unattributed[] = max(0'i64, (counted - wasCounted) - grown)
-    text.add("counter refused " & $counted & "\n")
+  if not mutated("egress-ignores-counter"):
+    var reported = before.reported
+    if reported < 0:
+      # A state written before this line (reprobuild before the issue
+      # above): it had reported the shortfall its own check saw, so that is
+      # not reported again. That check read the sets first, so this can
+      # credit a packet or two of its read race too: an approximation made
+      # once, at the upgrade.
+      var wasHeld = 0'i64
+      for a, n in before.counts:
+        if a != " counter": wasHeld += n
+      reported = max(0'i64,
+                     before.counts.getOrDefault(" counter", 0) - wasHeld)
+    if counted >= 0:
+      let lacking = counted - held
+      if unattributed != nil:
+        unattributed[] = max(0'i64, lacking - reported)
+      reported = max(reported, lacking)
+      text.add("counter refused " & $counted & "\n")
+    # Kept when the counter could not be read this time, so a later check
+    # does not report again what was reported already.
+    text.add("unattributed " & $reported & "\n")
   for o in stillOwed:
     text.add("owed " & o.address & " " & $o.since & " " & $o.packets & "\n")
   try:
@@ -319,24 +361,42 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
     return EgressCheck(present: false, control: "not-run")
   result.present = true
   result.control = "not-run"
-  for setName in ["refused4", "refused6"]:
-    let r = runHostTool([nft, "-j", "list", "set", EgressTableFamily,
-                         EgressTableName, setName], mergeStderr = false,
+  # The named counter first, the sets after it (``freshSince``): a packet
+  # sent between the reads is then in the sets, never only in the counter.
+  # The table's instance is read before and after both: a reload between
+  # them pairs one instance's counter with another's sets, so the reads are
+  # taken again, and a check that keeps meeting reloads judges no
+  # unattributed packets (the next check does).
+  var instance = ""
+  var attempt = 0
+  while true:
+    inc attempt
+    instance = tableInstance(nft)
+    let c = runHostTool([nft, "-j", "list", "counter", EgressTableFamily,
+                         EgressTableName, "refused"], mergeStderr = false,
                         timeoutSec = 30)
-    if r.exitCode != 0:
-      result.error = "nft list set " & setName & " exited " & $r.exitCode
-      return
-    try: result.refused.add(parseRefusedSet(r.output))
-    except CatchableError as e:
-      result.error = "nft list set " & setName & ": " & e.msg
-      return
-  let c = runHostTool([nft, "-j", "list", "counter", EgressTableFamily,
-                       EgressTableName, "refused"], mergeStderr = false,
-                      timeoutSec = 30)
-  result.counted = -1
-  if c.exitCode == 0:
-    try: result.counted = parseCounterPackets(c.output)
-    except CatchableError: discard
+    result.counted = -1
+    if c.exitCode == 0:
+      try: result.counted = parseCounterPackets(c.output)
+      except CatchableError: discard
+    result.refused.setLen(0)
+    for setName in ["refused4", "refused6"]:
+      let r = runHostTool([nft, "-j", "list", "set", EgressTableFamily,
+                           EgressTableName, setName], mergeStderr = false,
+                          timeoutSec = 30)
+      if r.exitCode != 0:
+        result.error = "nft list set " & setName & " exited " & $r.exitCode
+        return
+      try: result.refused.add(parseRefusedSet(r.output))
+      except CatchableError as e:
+        result.error = "nft list set " & setName & ": " & e.msg
+        return
+    let after = tableInstance(nft)
+    if after == instance: break
+    instance = after
+    if attempt >= 3:
+      result.counted = -1
+      break
   # The control address is the fetch unit's positive control, never a
   # refused destination: kept apart, and its packets taken off the named
   # counter so the counter and the sets still agree.
@@ -354,7 +414,6 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
   result.refused = others
   if result.counted >= 0:
     result.counted = max(0'i64, result.counted - result.controlPackets)
-  let instance = tableInstance(nft)
   var un = 0'i64
   var controlBefore = 0'i64
   try:
