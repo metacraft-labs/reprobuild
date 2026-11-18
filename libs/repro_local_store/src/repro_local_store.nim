@@ -3381,13 +3381,59 @@ proc recordComputationDir*(record: ActionResultRecord): string =
     elif result != found:
       return ""
 
-proc removeRecordComputationDir*(record: ActionResultRecord): string
+const RecipeCompilesDirName* = "recipe-compiles"
+
+proc recipeCompilesRootOf*(cache: ActionCache): string =
+  ## `<R>/recipe-compiles` for the cache opened at `<R>/action-cache`: the one
+  ## directory computation directories may live in
+  ## (Hermetic-Builds-And-Path-Independence.md §"Ownership and cleanup").
+  os.normalizedPath(absolutePath(cache.root.parentDir / RecipeCompilesDirName))
+
+proc ownedComputationDir*(record: ActionResultRecord;
+                          recipeCompilesRoot: string): string =
+  ## `recordComputationDir`, confined to where a computation directory can
+  ## be: a direct child of `<recipeCompilesRoot>/<kind>/<identity>/` other than
+  ## `staging/`. "" for anything else.
+  ##
+  ## A record's output paths are whatever its writer put there, and a record
+  ## can arrive from elsewhere (a store bundle carries `.rec` files that import
+  ## does not validate, Store-Bundles.md §5.1). The cleanup paths delete the
+  ## directory this returns recursively, so without the confinement a crafted
+  ## record naming `/any/where/<32 hex of its strong fingerprint>/x` had that
+  ## directory deleted when the record was evicted or collected
+  ## (reprobuild-pm issue
+  ## 2026-11-17-carried-action-records-may-name-output-paths-outside-the-bundle-roots.md).
+  let dir = recordComputationDir(record)
+  if dir.len == 0 or recipeCompilesRoot.len == 0:
+    return ""
+  # `normalizedPath` writes `\` on Windows: compare on either separator.
+  let root = os.normalizedPath(recipeCompilesRoot)
+  if dir.len <= root.len + 1 or not dir.startsWith(root) or
+      dir[root.len] notin {DirSep, AltSep}:
+    return ""
+  let parts = dir[root.len + 1 .. ^1].split({DirSep, AltSep})
+  if parts.len != 3 or parts[2] == ComputationStagingDirName:
+    return ""
+  for part in parts:
+    if part.len == 0 or part == "." or part == "..":
+      return ""
+  # A symlink at any level would make the recursive removal act on its target.
+  var walk = root
+  for part in parts:
+    walk = walk / part
+    if symlinkExists(extendedPath(walk)):
+      return ""
+  dir
+
+proc removeRecordComputationDir*(record: ActionResultRecord;
+                                 recipeCompilesRoot: string): string
     {.discardable.} =
   ## Remove the computation directory `record` owns, if any, and return it.
+  ## Only a directory `ownedComputationDir` admits is ever removed.
   ## Best-effort: a directory that survives is garbage for the orphan sweep
   ## (`sweepOrphanComputationDirs`), and a record whose directory is gone
   ## fails its in-place check and re-runs, so neither outcome is unsound.
-  result = recordComputationDir(record)
+  result = ownedComputationDir(record, recipeCompilesRoot)
   if result.len > 0 and dirExists(extendedPath(result)):
     try:
       removeDir(extendedPath(result))
@@ -5133,7 +5179,7 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
         discard
       if unlinked:
         for record in evictedRecords:
-          removeRecordComputationDir(record)
+          removeRecordComputationDir(record, cache.recipeCompilesRootOf)
       # Drop the evicted record's sidecars too, or they leak.
       for sidecar in [entries[i].path.parentDir /
                         witnessFileName(entries[i].strongHex),
@@ -6890,6 +6936,7 @@ proc scanCacheEntries*(cache: ActionCache;
   if not dirExists(extendedPath(root)):
     return
   let now = if policy.nowUnix != 0: policy.nowUnix else: toUnix(getTime())
+  let recipeRoot = cache.recipeCompilesRootOf
   for edgeKind, edgeDir in walkDir(extendedPath(root)):
     if edgeKind != pcDir:
       continue
@@ -6924,7 +6971,7 @@ proc scanCacheEntries*(cache: ActionCache;
       try:
         let decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
         for record in decoded.records:
-          let owned = recordComputationDir(record)
+          let owned = ownedComputationDir(record, recipeRoot)
           if owned.len > 0:
             entry.computationDirs.add(owned)
           if record.outputPayloadKind != opkCasBlobs:
@@ -7075,8 +7122,6 @@ proc runRetentionGc*(cache: ActionCache;
 # record write, a record removed by an older binary, the directories of the
 # earlier single-directory layout).
 # ===========================================================================
-
-const RecipeCompilesDirName* = "recipe-compiles"
 
 when defined(posix):
   proc cRenamePath(src, dst: cstring): cint

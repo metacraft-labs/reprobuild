@@ -284,6 +284,7 @@ else:
             "reinsertedPrefixes": report.reinsertedPrefixes,
             "quarantinedPrefixes": %report.quarantinedPrefixes,
             "rewitnessedRecords": report.rewitnessedRecords,
+            "unwitnessedRecords": report.unwitnessedRecords,
             "restamped": report.restamped,
             "restampMismatches": report.restampMismatches,
             "frozenDevEnvs": envs,
@@ -295,7 +296,11 @@ else:
           echo "  verified entries:     " & $report.verifiedEntries
           echo "  prefixes reinserted:  " & $report.reinsertedPrefixes &
             " (" & $report.excludedPrefixes.len & " already present)"
-          echo "  records re-witnessed: " & $report.rewitnessedRecords
+          echo "  records re-witnessed: " & $report.rewitnessedRecords &
+            (if report.unwitnessedRecords > 0:
+              " (" & $report.unwitnessedRecords & " left alone: an output " &
+                "is not carried by the bundle)"
+             else: "")
           echo "  inputs restamped:     " & $report.restamped &
             (if report.restampMismatches > 0:
                " (" & $report.restampMismatches & " differ and were left alone)"

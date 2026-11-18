@@ -5,7 +5,7 @@
 # The document is Reprobuild's: `repro home export` compiles the profile,
 # expands its data files and probes every target platform (reprobuild-pm spec
 # Gradual-Nix-To-Reprobuild-Migration.md §Exporting evaluated intent to Nix,
-# schema in §Export schema (version 5 since ReproOS add-on mode); public reference
+# schema in §Export schema (version 6 since catalog imports); public reference
 # docs/user-guide/home-export.md). Nix only reads it. Two consumption modes
 # (§Consumption modes), one consumer code path:
 #
@@ -112,7 +112,7 @@ let
     ;
 
   format = "repro.home.export";
-  knownSchemaVersions = [ 5 ];
+  knownSchemaVersions = [ 6 ];
 
   # Every condition under which a consumer must not use the document for
   # `system`, as a message, or null. Shared by both modes.
@@ -151,7 +151,7 @@ let
   holdsFor = facts: guard: predicate.holds facts guard;
 
   # Who manages `host`'s system scope and how, from a validated document's
-  # intent (`hostSystems`, export schema 5; `repro_profile/host_system`
+  # intent (`hostSystems`, export schema 6; `repro_profile/host_system`
   # `systemManagementFor` + `enabledSystemActivities` on the Reprobuild
   # side, `evaluateHomeExport` for the shape). Callers check the host first
   # (`hostRefusalReason`). The result is
@@ -424,7 +424,22 @@ let
     }:
     let
       safeHost = builtins.replaceStrings [ " " "/" ] [ "-" "-" ] host;
+      # A profile that imports catalogs (`repro-catalogs.toml`) reads each
+      # import from the shared bare clone of its remote at the pinned commit;
+      # the build sandbox has none. Refused here, naming the imports, until
+      # the catalog can be supplied to the sandbox as a fixed-output input
+      # (Federated-Catalog-Imports.md § Home profiles, "IFD mode"). Snapshot
+      # mode is unaffected: a committed export carries the resolution.
+      catalogsFile = profileDir + "/repro-catalogs.toml";
+      importedRepos =
+        if builtins.pathExists catalogsFile then
+          map (i: i.repo or "?") ((builtins.fromTOML (builtins.readFile catalogsFile)).import or [ ])
+        else
+          [ ];
     in
+    if importedRepos != [ ] then
+      throw "reprobuild.lib.readIntent: IFD mode cannot export a profile that imports catalogs (${builtins.concatStringsSep ", " importedRepos}, from ${toString catalogsFile}): the build sandbox has no shared clone to read them from. Pass `snapshot` (a committed `repro home export`) instead"
+    else
     pkgs.runCommand "repro-home-export-${safeHost}.json"
       (
         {

@@ -783,3 +783,48 @@ suite "store bundle import keeps its own writes inside the roots":
         listBundleMembers(f.outDir, parts, listing)
       listBundleMembers(f.outDir, parts, listing, zstd)
       check "contents" in readFile(listing)
+
+suite "store bundle import re-witnesses only outputs it carried":
+  test "a vouched record whose output the bundle does not carry is left alone":
+    # reprobuild-pm issue
+    # 2026-11-17-carried-action-records-may-name-output-paths-outside-the-bundle-roots.md,
+    # Store-Bundles.md §5.1. Re-witnessing adopts whatever file sits at a
+    # record's output path. A hostile exporter adds a `record` line for a
+    # record whose output lies outside the roots, so the bundle carries no
+    # entry for it and step 4 verified none of its bytes. Before the fix the
+    # importer stamped the planted bytes as the record's output, and the next
+    # in-place lookup served them as a hit.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let elsewhere = f.top / "elsewhere.txt"
+      writeFile(elsewhere, "outside\n")
+      block:
+        var cache = openActionCache(f.ac / "action-cache", attachShm = false)
+        var cas = openStore(f.ac)
+        discard cache.recordActionResult(cas, weakOf("outside"), ffpTimestamp,
+          [f.ws / "src" / "in.txt"], [elsewhere], storeOutputBlobs = false)
+        cas.close()
+        cache.closeShmTier()
+      let edge = f.ac / "action-cache" / "hot-records" /
+        perEdgeRecordFileName(weakOf("outside"))
+      var strongHex = ""
+      for kind, path in walkDir(edge):
+        if path.endsWith(".rec"):
+          strongHex = path.splitFile.name
+      check strongHex.len > 0
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.records.add(BundleRecordRef(edgeDir: edge, strongHex: strongHex,
+          outputRoot: "")))
+      f.wipe()
+      # Bytes no digest vouches for, the size the record names.
+      writeFile(elsewhere, "OUTSIDE\n")
+      let report = importBundle(ImportOptions(bundleDir: f.outDir), f.roots)
+      check report.rewitnessedRecords == 2
+      check report.unwitnessedRecords == 1
+      check f.lookup("producer").status == aclHit
+      let planted = f.lookup("outside")
+      checkpoint planted.message
+      check planted.status != aclHit

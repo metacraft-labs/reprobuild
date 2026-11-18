@@ -176,7 +176,7 @@ when defined(linux) or defined(macosx):
       checkpoint exported.stderr
       require exported.exitCode == 0
       let doc = parseJson(exported.stdout)
-      check doc["schemaVersion"].getInt == 5
+      check doc["schemaVersion"].getInt == 6
       check not doc["intent"].hasKey("systemManagedElsewhere")
       check doc["intent"]["hostSystems"] == parseJson(ExpectedHostSystems)
       var evaluations = newJObject()
