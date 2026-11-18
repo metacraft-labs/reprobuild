@@ -550,7 +550,7 @@ else:
         check fileExists(managedFile)
         let managedBefore = readFile(managedFile)
         check managedBefore.contains(managedBlockBody)
-        check managedBefore.contains("repro-managed:" & managedBlockId)
+        check managedBefore.contains("repro:home:" & managedBlockId)
 
         # Stash the about-to-be-made user edit, then drift the file
         # out-of-band (edit the managed block's content directly).

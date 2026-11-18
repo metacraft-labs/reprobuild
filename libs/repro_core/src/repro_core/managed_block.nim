@@ -22,7 +22,13 @@
 ## Releases before the shared writer wrote project blocks with a
 ## `:v<digits>` suffix after the block id; such a block is recognised as the
 ## same block and replaced by the current form (fs-file-utilities.md §3,
-## "Earlier format").
+## "Earlier format"). Likewise the home-layer resource writers wrote the
+## elided home form as `repro-managed:<blockId>`
+## (`# >>> repro-managed:<blockId> >>>`); that block IS `repro:home:<blockId>`
+## and is replaced by the current form on the next write, so a live rc file
+## migrates in place instead of growing a second block
+## (Generated-Configuration-Files.md §"Sentinel uniqueness", "Earlier home
+## form").
 ##
 ## Every byte outside the block is kept: the splice replaces only the span
 ## from the start of the opening sentinel line to the end of the closing
@@ -63,7 +69,8 @@ type
     ## Byte offsets of a located block. `found` is false when the file does
     ## not hold it; the offsets are then meaningless.
     found*: bool
-    legacy*: bool          ## An opening or closing sentinel had `:v<n>`.
+    legacy*: bool          ## An opening or closing sentinel was an earlier
+                           ## form (`:v<n>`, or `repro-managed:`).
     openLineStart*: int    ## Start of the opening sentinel line.
     contentStart*: int     ## Just past the opening line's terminator.
     contentEnd*: int       ## Start of the closing sentinel line.
@@ -132,6 +139,15 @@ proc isLegacySentinel(line, leader, tag, trailer: string): bool =
   let digits = line[prefix.len ..< line.len - trailer.len]
   digits.len > 0 and digits.allCharsInSet(Digits)
 
+proc legacyHomeTag(key: ManagedBlockKey): string =
+  ## The tag the home-layer resource writers used for the elided home form
+  ## before they were routed through this module, or "" when `key` has no
+  ## earlier home form.
+  if key.scope == HomeBlockScope and key.packageName.len == 0:
+    "repro-managed:" & key.blockId
+  else:
+    ""
+
 proc locateManagedBlock*(content: string; key: ManagedBlockKey;
                          fileName = ""): ManagedBlockSpan =
   ## Find `key`'s block in `content`. Lines are split as `splitLines` does
@@ -145,6 +161,9 @@ proc locateManagedBlock*(content: string; key: ManagedBlockKey;
   let close = closeSentinel(key)
   let tag = $key
   let legacyAllowed = key.scope == ProjectBlockScope
+  let homeTag = legacyHomeTag(key)
+  let legacyHomeOpen = if homeTag.len > 0: "# >>> " & homeTag & " >>>" else: ""
+  let legacyHomeClose = if homeTag.len > 0: "# <<< " & homeTag & " <<<" else: ""
   var openPending = false
   var openLineNo = 0
   var foundLineNo = 0
@@ -163,10 +182,12 @@ proc locateManagedBlock*(content: string; key: ManagedBlockKey;
       else:
         inc nextStart
     let line = content[lineStart ..< lineEnd].strip()
-    let legacyOpen = legacyAllowed and
-      isLegacySentinel(line, "# >>> ", tag, " >>>")
-    let legacyClose = legacyAllowed and
-      isLegacySentinel(line, "# <<< ", tag, " <<<")
+    let legacyOpen = (legacyAllowed and
+      isLegacySentinel(line, "# >>> ", tag, " >>>")) or
+      (homeTag.len > 0 and line == legacyHomeOpen)
+    let legacyClose = (legacyAllowed and
+      isLegacySentinel(line, "# <<< ", tag, " <<<")) or
+      (homeTag.len > 0 and line == legacyHomeClose)
     if line == open or legacyOpen:
       if openPending:
         raise newException(ManagedBlockError, where & ": managed block '" &
@@ -213,10 +234,11 @@ proc renderManagedBlock*(key: ManagedBlockKey; body: string;
                          eol = "\n"): string =
   ## The block's bytes, from the opening sentinel to the end of the closing
   ## sentinel's text: no terminator after it, because the splice keeps the
-  ## one the file already has. `body` is terminated when it is not already,
-  ## and every line uses `eol`.
+  ## one the file already has. A non-empty `body` is terminated when it is
+  ## not already, and every line uses `eol`; an empty body puts the closing
+  ## sentinel directly under the opening one, adding no line between them.
   var text = body.replace("\r\n", "\n")
-  if not text.endsWith("\n"):
+  if text.len > 0 and not text.endsWith("\n"):
     text.add('\n')
   result = openSentinel(key) & "\n" & text & closeSentinel(key)
   if eol != "\n":

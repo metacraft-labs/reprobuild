@@ -294,7 +294,7 @@ libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim	n
 libs/repro_cli_support/tests/t_build_source_trees_follow_a_membership_edit.nim	nim	2
 libs/repro_cli_support/tests/t_build_worker_holds_no_daemon_key.nim	nim	1
 libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim	nim	8
-libs/repro_cli_support/tests/t_catalog_publication.nim	nim	9
+libs/repro_cli_support/tests/t_catalog_publication.nim	nim	10
 libs/repro_cli_support/tests/t_cli_parse_reads_only_declared_env.nim	nim	4
 libs/repro_cli_support/tests/t_connection_ends_with_its_leaf.nim	nim	3
 libs/repro_cli_support/tests/t_cross_target_flag.nim	nim	8
@@ -401,7 +401,7 @@ libs/repro_core/tests/t_zig_target_vendored_hash.nim	nim	6
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
 libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	28
-libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim	nim	10
+libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim	nim	12
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_dev_bin_retention.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
@@ -598,6 +598,7 @@ libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	21
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	176
+libs/repro_home_rollback/tests/t_home_managed_blocks_share_the_one_writer.nim	nim	11
 libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim	nim	9
@@ -615,7 +616,7 @@ libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_clispec.nim	nim	2
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
-libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	18
+libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	20
 libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim	nim	8
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
@@ -700,6 +701,7 @@ libs/repro_lock/tests/t_provenance_reports_shared_names.nim	nim	5
 libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim	nim	4
 libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim	nim	4
 libs/repro_lock_files/tests/t_declarations_are_emitted_eagerly.nim	nim	5
+libs/repro_lock_files/tests/t_one_version_per_name_runtimes_inherit_forbidden.nim	nim	14
 libs/repro_lock_gen/tests/t_a_pinned_nim_resolves_to_its_upstream_archive.nim	nim	10
 libs/repro_lock_gen/tests/t_designation_propagates_to_closure.nim	nim	4
 libs/repro_lock_gen/tests/t_develop_checkout_once_products_per_lock_file.nim	nim	5
@@ -2717,6 +2719,7 @@ tests/unit/t_capabilities.nim	nim	3
 tests/unit/t_cargo_deinherit.nim	nim	21
 tests/unit/t_cargo_lock_vendor_plan.nim	nim	23
 tests/unit/t_cargo_vendor_action.nim	nim	11
+tests/unit/t_closure_entries_in_the_record.nim	nim	5
 tests/unit/t_closure_manifest.nim	nim	8
 tests/unit/t_cmake_develop_tools_accept_any_reported_version.nim	nim	3
 tests/unit/t_cmake_direct_tool_identity.nim	nim	6
@@ -2927,7 +2930,7 @@ tests/unit/t_sibling_source_paths_are_spelled_relative.nim	nim	5
 tests/unit/t_source_fetch_tool_metadata.nim	nim	8
 tests/unit/t_stale_artifact_names_what_changed.nim	nim	5
 tests/unit/t_stats_store_status_names_why_capture_is_off.nim	nim	8
-tests/unit/t_store_daemon_tarball_archive_detail_frame.nim	nim	9
+tests/unit/t_store_daemon_tarball_archive_detail_frame.nim	nim	10
 tests/unit/t_store_path_farm.nim	nim	4
 tests/unit/t_substituted_edge_does_not_go_stale.nim	nim	4
 tests/unit/t_substituted_provider_compile_is_verified.nim	nim	7

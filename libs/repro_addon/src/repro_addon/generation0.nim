@@ -1478,12 +1478,12 @@ proc evidenceShipConfinement*(e: EvidenceUnitsInputs): seq[string] =
   ##   socket can be made, so neither the system bus nor PID 1's private
   ##   socket is reachable (its stdout and stderr are descriptors systemd
   ##   passes, not sockets it opens); IP egress to the sink's address only.
-  let user = when mutated("evidence-ship-runs-as-root"): @[]
+  let user = when mutated("evidence-ship-runs-as-root"): newSeq[string]()
              else: @["DynamicUser=yes", "User=" & EvidenceShipUser]
   let families = when mutated("evidence-ship-unix-sockets"):
                    "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX"
                  else: "RestrictAddressFamilies=AF_INET AF_INET6"
-  let egress = when mutated("evidence-ship-unrestricted-egress"): @[]
+  let egress = when mutated("evidence-ship-unrestricted-egress"): newSeq[string]()
                else: @["IPAddressDeny=any", "IPAddressAllow=" & e.sinkAddress]
   let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro"
                else: "-/var/lib/repro -/run/repro"
