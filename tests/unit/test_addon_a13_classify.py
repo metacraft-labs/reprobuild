@@ -249,6 +249,10 @@ def green(kind, base="debian-13"):
             rec["essentialHostTrigger"] = {"exit": 2, "refused": True,
                                            "dropInWritten": False, "held": "",
                                            "ok": True}
+            rec["lateEssentialTrigger"] = {"sshdSocketBefore": "not-found",
+                                           "exit": 1, "named": True,
+                                           "held": "", "active": "inactive",
+                                           "ok": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -489,6 +493,17 @@ def red_record(kind, base="debian-13"):
                         red("M2: a full apply whose generation resolves a "
                             "recorded trigger starts it before its commit, "
                             "and clears the record")]
+    elif kind == "mutlateess":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="late-essential-report-dropped")
+        rec["lateEssentialTrigger"] = {"sshdSocketBefore": "not-found",
+                                       "exit": 0, "named": False, "held": "",
+                                       "active": "inactive", "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 177(c): an essential trigger systemd "
+                            "links to a judged unit only at the apply's reload "
+                            "fails the apply, named, and is neither stopped "
+                            "nor held")]
     elif kind == "mutdeadactive":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="dead-judged-was-active-lost")
@@ -640,7 +655,7 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutdependants", "mutswitchrecord", "mutunjudgedreq",
              "mutfixstart", "mutdepblock", "mutstaleorder", "mutessential",
              "mutrevertstarts", "mutdeadhold", "mutfullfix", "mutbootblock",
-             "mutdeadactive"]
+             "mutdeadactive", "mutlateess"]
 
 
 class Accepts(unittest.TestCase):
@@ -1197,6 +1212,7 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
                                   ("deadApplyAdopted", "ok", False),
                                   ("decision153Unjudged", "targetHeld", True),
                                   ("deadJudgedActive", "ok", False),
+                                  ("lateEssentialTrigger", "ok", False),
                                   ("essentialHostTrigger", "ok", False),
                                   ("fullApplyFixing", "ok", False)):
             rec = green("conv")
@@ -1236,6 +1252,12 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutfullfix")
         rec["fullApplyFixing"]["exit"] = 1
         self.assertRejected("mutfullfix-debian-13", rec)
+        rec = red_record("mutlateess")
+        rec["lateEssentialTrigger"]["sshdSocketBefore"] = "loaded"
+        self.assertRejected("mutlateess-debian-13", rec)
+        rec = red_record("mutlateess")
+        rec["lateEssentialTrigger"]["exit"] = 1
+        self.assertRejected("mutlateess-debian-13", rec)
         rec = red_record("mutdeadactive")
         rec["deadJudgedActive"]["exit"] = 1
         self.assertRejected("mutdeadactive-debian-13", rec)

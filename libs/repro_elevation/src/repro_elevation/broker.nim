@@ -20,7 +20,7 @@
 ## `applyPrivilegedSetInProcess` is the already-elevated fast path:
 ## the SAME dispatch, no broker, no channel.
 
-import std/[random, strutils]
+import std/[strutils, sysrand]
 
 import repro_core/file_lock
 import repro_core/host_apply_lock
@@ -37,6 +37,8 @@ const
   BrokerModeFlag* = "--privileged-broker"
   BrokerChannelFlag* = "--channel"
   BrokerTokenFlag* = "--token"
+  BrokerParentPidFlag* = "--parent-pid"
+  BrokerParentStartFlag* = "--parent-start"
   BrokerProtocolVersion*: uint16 = 1
   BrokerFilePrefixFlag* = "--file-prefix"
     ## Test-only flag: the gate passes the broker the sandbox prefix
@@ -59,18 +61,39 @@ proc resetBrokerLaunchCount*() =
   brokerLaunchCounter = 0
 
 # ---------------------------------------------------------------------------
-# Nonce generation. A cryptographically-random hex token; it is on
-# the broker's command line and echoed in the Hello frame.
+# Nonce generation. A random hex token; it is on the broker's command
+# line and echoed in the Hello frame. It binds the session to the
+# parent that launched the broker. It is NOT a secret from the
+# launching user's own processes (they can read the parent's memory
+# and, on POSIX, anyone can read a process's argv), and it is never
+# part of the pipe name, which every process can list.
 # ---------------------------------------------------------------------------
 
 proc generateNonce*(): string =
-  ## 128-bit random hex nonce. Seeded from `urandom` where available
-  ## via `randomize()`; this is a local-IPC auth token, not a
-  ## long-lived key, so a 128-bit value is ample.
-  var r = initRand()
+  ## 128-bit hex nonce from the OS random source.
+  var bytes: array[16, byte]
+  if not urandom(bytes):
+    raiseBrokerLaunch("the OS random source is unavailable")
   result = newStringOfCap(32)
-  for _ in 0 ..< 32:
-    result.add("0123456789abcdef"[r.rand(15)])
+  for b in bytes:
+    result.add(toHex(int(b), 2).toLowerAscii())
+
+proc brokerCommandArgs*(channelId, nonce: string; parentPid: int;
+                        parentStart: uint64;
+                        extraArgs: openArray[string] = []): seq[string] =
+  ## The broker's arguments: `--privileged-broker --channel <id>
+  ## --token <nonce> --parent-pid <pid> --parent-start <creation time>
+  ## [extra...]`. The channel id names the pipe; the nonce is passed
+  ## beside it and never inside it. The parent's pid and creation time
+  ## let the broker hold the parent and refuse a pipe reached after the
+  ## parent died.
+  if not isChannelId(channelId):
+    raiseBrokerLaunch("not an elevation channel id: '" & channelId & "'")
+  result = @[BrokerModeFlag, BrokerChannelFlag, channelId,
+    BrokerTokenFlag, nonce, BrokerParentPidFlag, $parentPid,
+    BrokerParentStartFlag, $parentStart]
+  for a in extraArgs:
+    result.add(a)
 
 # ---------------------------------------------------------------------------
 # Apply-log + result aggregation, returned to the parent's caller so
@@ -226,23 +249,23 @@ when defined(windows):
     else:
       "\"" & s & "\""
 
-  proc brokerParams(nonce: string;
+  proc brokerParams(channelId, nonce: string;
                     extraArgs: openArray[string]): string =
-    result = BrokerModeFlag & " " & BrokerChannelFlag & " " &
-      quoteArg(pipeNameForNonce(nonce)) & " " & BrokerTokenFlag &
-      " " & nonce
-    for a in extraArgs:
-      result.add(" ")
+    let me = currentProcessIdentity()
+    for a in brokerCommandArgs(channelId, nonce, me.pid, me.start,
+        extraArgs):
+      if result.len > 0:
+        result.add(" ")
       result.add(quoteArg(a))
 
-  proc launchBrokerElevated(reproExe, nonce: string;
+  proc launchBrokerElevated(reproExe, channelId, nonce: string;
                             extraArgs: openArray[string]):
       WindowsBrokerProcess =
     ## Launch the ONE broker via `ShellExecuteEx` + the `runas` verb
     ## — the spec's baseline. This raises exactly one UAC prompt on
     ## the secure desktop for a non-elevated parent; a user-declined
     ## prompt surfaces as `ERROR_CANCELLED` -> `EElevationDeclined`.
-    let params = brokerParams(nonce, extraArgs)
+    let params = brokerParams(channelId, nonce, extraArgs)
     var verbW = utf16z("runas")
     var fileW = utf16z(reproExe)
     var paramsW = utf16z(params)
@@ -265,7 +288,7 @@ when defined(windows):
     result.hProcess = info.hProcess
     result.pid = int(GetProcessId(info.hProcess))
 
-  proc launchBrokerInheritingToken(reproExe, nonce: string;
+  proc launchBrokerInheritingToken(reproExe, channelId, nonce: string;
                                    extraArgs: openArray[string]):
       WindowsBrokerProcess =
     ## Launch the broker via `CreateProcess` — the child inherits the
@@ -276,7 +299,8 @@ when defined(windows):
     ## `ERROR_ACCESS_DENIED`; token inheritance is both correct and
     ## prompt-free here. (For a non-elevated parent the
     ## `ShellExecuteEx`+`runas` path above is the one that elevates.)
-    var cmdLine = quoteArg(reproExe) & " " & brokerParams(nonce, extraArgs)
+    var cmdLine = quoteArg(reproExe) & " " &
+      brokerParams(channelId, nonce, extraArgs)
     var cmdW = utf16z(cmdLine)
     var si: STARTUPINFOW
     si.cb = DWORD(sizeof(STARTUPINFOW))
@@ -289,7 +313,7 @@ when defined(windows):
     result.hProcess = pi.hProcess
     result.pid = int(pi.dwProcessId)
 
-  proc launchBrokerWindows(reproExe, nonce: string;
+  proc launchBrokerWindows(reproExe, channelId, nonce: string;
                            extraArgs: openArray[string]):
       WindowsBrokerProcess =
     ## Launch EXACTLY ONE broker. The launch primitive depends on the
@@ -307,9 +331,9 @@ when defined(windows):
     ## `CreateProcess` branch is reached only by a forced broker
     ## (the M81 gate's already-elevated topology test).
     if isProcessElevated():
-      launchBrokerInheritingToken(reproExe, nonce, extraArgs)
+      launchBrokerInheritingToken(reproExe, channelId, nonce, extraArgs)
     else:
-      launchBrokerElevated(reproExe, nonce, extraArgs)
+      launchBrokerElevated(reproExe, channelId, nonce, extraArgs)
 
   proc waitForExit*(p: var WindowsBrokerProcess): int =
     ## Block until the broker exits; return its exit code. The
@@ -322,6 +346,8 @@ when defined(windows):
     int(code)
 
   proc brokerProcessId*(p: WindowsBrokerProcess): int = p.pid
+
+  proc brokerProcessHandle*(p: WindowsBrokerProcess): pointer = p.hProcess
 
   proc OpenProcess(desiredAccess: DWORD; inheritHandle: BOOL;
                    processId: DWORD): HANDLE
@@ -345,7 +371,7 @@ when defined(windows):
       return false
     code == STILL_ACTIVE
 
-  proc launchBrokerForGate*(reproExe, nonce: string;
+  proc launchBrokerForGate*(reproExe, channelId, nonce: string;
                             filePrefix = ""): WindowsBrokerProcess =
     ## Launch ONE broker WITHOUT driving the channel — used by the
     ## M81 gate's auth / closed-set scenarios, which drive the RBEB
@@ -354,7 +380,7 @@ when defined(windows):
     if filePrefix.len > 0:
       extra.add(BrokerFilePrefixFlag)
       extra.add(filePrefix)
-    result = launchBrokerWindows(reproExe, nonce, extra)
+    result = launchBrokerWindows(reproExe, channelId, nonce, extra)
     inc brokerLaunchCounter
 
 else:
@@ -362,7 +388,7 @@ else:
     WindowsBrokerProcess* = object
       pid: int
 
-  proc launchBrokerWindows(reproExe, nonce: string;
+  proc launchBrokerWindows(reproExe, channelId, nonce: string;
                            extraArgs: openArray[string]):
       WindowsBrokerProcess =
     raiseNotImplementedPlatform("ShellExecuteEx(runas) broker launch")
@@ -372,10 +398,12 @@ else:
 
   proc brokerProcessId*(p: WindowsBrokerProcess): int = p.pid
 
+  proc brokerProcessHandle*(p: WindowsBrokerProcess): pointer = nil
+
   proc processStillAlive*(pid: int): bool =
     raiseNotImplementedPlatform("processStillAlive")
 
-  proc launchBrokerForGate*(reproExe, nonce: string;
+  proc launchBrokerForGate*(reproExe, channelId, nonce: string;
                             filePrefix = ""): WindowsBrokerProcess =
     raiseNotImplementedPlatform("launchBrokerForGate")
 
@@ -493,9 +521,10 @@ proc launchAndDriveBroker*(reproExe: string;
     BrokerApplyResult =
   ## PARENT: the complete one-broker apply.
   ##
-  ##   1. mint a nonce and create the authenticated named pipe
+  ##   1. mint a channel id and a nonce; create the pipe as the first
+  ##      and only instance of its name
   ##   2. launch EXACTLY ONE broker (`ShellExecuteEx`+`runas`)
-  ##   3. accept the broker's connect-back, verifying its peer SID
+  ##   3. accept the broker's connect-back, requiring an elevated client
   ##   4. drive the RBEB conversation (handshake, operations, Done)
   ##   5. wait for the one-shot broker to exit
   ##
@@ -510,8 +539,9 @@ proc launchAndDriveBroker*(reproExe: string;
   if reproExe.len == 0:
     raiseBrokerLaunch("no `repro` image to launch it with (an embedded " &
       "caller must name one; its own image is never used as the broker)")
+  let channelId = generateChannelId()
   let nonce = generateNonce()
-  var ch = createListeningChannel(nonce)
+  var ch = createListeningChannel(channelId)
   var channelClosed = false
   defer:
     if not channelClosed:
@@ -520,10 +550,20 @@ proc launchAndDriveBroker*(reproExe: string;
   if filePrefix.len > 0:
     extraArgs.add(BrokerFilePrefixFlag)
     extraArgs.add(filePrefix)
-  var proc0 = launchBrokerWindows(reproExe, nonce, extraArgs)
+  var proc0 = launchBrokerWindows(reproExe, channelId, nonce, extraArgs)
   inc brokerLaunchCounter
   result.brokerPid = brokerProcessId(proc0)
-  acceptAuthenticatedClient(ch)
+  try:
+    acceptAuthenticatedClient(ch, brokerProcessHandle(proc0))
+  except CatchableError:
+    # The accept failed — most likely something other than an
+    # elevated process took the pipe's one instance. Keep holding the
+    # name until the broker has exited —
+    # it cannot connect while the instance is not listening and gives
+    # up after its connect timeout. Releasing the name first would let
+    # a squatter create it for the elevated broker to connect to.
+    discard waitForExit(proc0)
+    raise
   result.outcome = driveBrokerApply(ch, nonce, planned, onProgress)
   ch.close()
   channelClosed = true
@@ -533,7 +573,8 @@ proc launchAndDriveBroker*(reproExe: string;
 # Broker: the --privileged-broker session loop.
 # ===========================================================================
 
-proc runBrokerSession*(nonce: string; ctx: FixtureContext): int =
+proc runBrokerSession*(channelId, nonce: string; parentPid: int;
+                       parentStart: uint64; ctx: FixtureContext): int =
   ## BROKER side. Connects back to the parent, authenticates the
   ## nonce, then services `Operation` frames until `Done`. Each
   ## operation is dispatched through `dispatch.dispatchOperation`
@@ -543,8 +584,15 @@ proc runBrokerSession*(nonce: string; ctx: FixtureContext): int =
   ## channel drop.
   ##
   ## Returns the broker process exit code: 0 = clean.
-  var ch = connectToParent(nonce)
+  # Hold the parent BEFORE connecting, and require it alive AFTER: the
+  # parent keeps its pipe's only instance until the broker exits, so a
+  # parent alive across the connect means the pipe was never released
+  # to a squatter. (Killing the parent frees the name.)
+  var parent = watchParent(parentPid, parentStart)
+  defer: parent.close()
+  var ch = connectToParent(channelId)
   defer: ch.close()
+  requireParentAlive(parent)
 
   # Handshake: the parent's Hello must echo the nonce the broker was
   # launched with. A mismatch means an unrelated process connected —
@@ -773,6 +821,8 @@ type
     isBrokerMode*: bool
     channel*: string
     token*: string
+    parentPid*: int
+    parentStart*: uint64
     filePrefix*: string
 
 proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
@@ -796,6 +846,19 @@ proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
         raiseProtocol("--token requires a value")
       result.token = args[i + 1]
       i += 2
+    of BrokerParentPidFlag, BrokerParentStartFlag:
+      if i + 1 >= args.len:
+        raiseProtocol(args[i] & " requires a value")
+      try:
+        if args[i] == BrokerParentPidFlag:
+          result.parentPid = parseInt(args[i + 1])
+          if result.parentPid > int(high(uint32)):
+            raise newException(ValueError, "out of range")
+        else:
+          result.parentStart = parseBiggestUInt(args[i + 1]).uint64
+      except ValueError:
+        raiseProtocol(args[i] & " is not a number: '" & args[i + 1] & "'")
+      i += 2
     of BrokerFilePrefixFlag:
       if i + 1 >= args.len:
         raiseProtocol("--file-prefix requires a value")
@@ -805,3 +868,9 @@ proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
       raiseProtocol("unknown privileged-broker argument '" & args[i] & "'")
   if result.token.len == 0:
     raiseProtocol("--privileged-broker requires a --token nonce")
+  if not isChannelId(result.channel):
+    raiseProtocol("--privileged-broker requires a --channel id " &
+      "(32 lower-case hex digits), got '" & result.channel & "'")
+  if result.parentPid <= 0 or result.parentStart == 0:
+    raiseProtocol("--privileged-broker requires --parent-pid and " &
+      "--parent-start")

@@ -312,6 +312,9 @@ typedef struct repro_hcr_lx_quiesce_state {
   uint64_t adjust_count;          /* lifetime count of IP adjustments made */
   uint64_t nested_adjust_count;   /* of those, ones in an OUTER signal frame */
   uint64_t nested_frames_seen;    /* outer signal frames located while parking */
+  uint64_t trampoline_frames_seen; /* of those, frames a thread was already
+                                    * returning from (see
+                                    * `repro_hcr_lx_collect_signal_frames`) */
   uint64_t begin_count;
   uint64_t timeout_count;
   int32_t last_status;
@@ -486,6 +489,18 @@ static int repro_hcr_lx_nested_scan_enabled = 1;
 static uint64_t repro_hcr_lx_sigreturn_trampoline = 0;
 static int repro_hcr_lx_trampoline_verified = 0;
 static int repro_hcr_lx_trampoline_mismatch = 0;
+/*
+ * How many bytes of the trampoline a thread can be interrupted in BEFORE its
+ * `rt_sigreturn` executes: `pc - trampoline < span` means the thread has
+ * already popped `pretcode` and is on its way back into the frame whose
+ * `ucontext_t` now starts AT its stack pointer. Measured from the trampoline's
+ * own bytes when it is verified (`repro_hcr_lx_measure_trampoline_span`);
+ * `repro_hcr_lx_trampoline_shape_unknown` records that they were not a shape
+ * it recognises, in which case only the trampoline's first byte — the state
+ * right after the handler's `ret`, whatever the body is — is covered.
+ */
+static uint64_t repro_hcr_lx_trampoline_span = 0;
+static int repro_hcr_lx_trampoline_shape_unknown = 0;
 
 #define REPRO_HCR_LX_NR_READ 0
 #define REPRO_HCR_LX_NESTED_SCAN_BYTES 32768u
@@ -711,6 +726,92 @@ static uint32_t repro_hcr_lx_collect_nested_frames(
   return produced;
 }
 
+/*
+ * The interrupted thread may be RETURNING from an outer signal frame, and then
+ * the scan above cannot see that frame. Found by the HLX-M4 gate under host
+ * load (HCR lane run 43405746813, 2026-11-13: tier 2 faulted 1 run in 72 with
+ * SIGILL at window+3, in both attempts).
+ *
+ * The scan locates an outer frame by its `pretcode` word, which sits 8 bytes
+ * BELOW that frame's `ucontext_t`, and it scans upward from the interrupted
+ * stack pointer. While the application's handler is running, `pretcode` is
+ * at or above that stack pointer and the scan finds it. The handler's `ret`
+ * pops it: the thread is then executing the sigreturn trampoline itself
+ * (glibc's `__restore_rt` is `mov $15,%rax; syscall`, two instructions), its
+ * stack pointer is exactly the outer `ucontext_t`, and `pretcode` is the word
+ * just below the stack pointer — below where the scan starts. The quiescence
+ * signal can be delivered at either instruction (an interrupt, or a thread
+ * preempted there, which under load stays preempted for a whole timeslice).
+ * The outer frame then goes unreported, its saved PC inside the window is
+ * never adjusted, and the `rt_sigreturn` that follows the release resumes the
+ * thread at window+3, inside the freshly published `rel32`: `SIGILL`.
+ *
+ * So when the interrupted PC is inside the trampoline before its `syscall`,
+ * the frame being returned from is taken from the stack pointer directly.
+ * Nothing about it is guessed: the PC proves the thread is in the trampoline,
+ * and the trampoline is only ever entered by a `ret` from the frame's
+ * `pretcode`. A frame known to be there whose saved PC cannot be read fails
+ * the quiescence (`stack_read_error`) rather than letting it pass unadjusted.
+ */
+static uint64_t repro_hcr_lx_measure_trampoline_span(uint64_t trampoline) {
+  /* `mov $15,%rax; syscall` (glibc) and `mov $15,%eax; syscall`: the PCs a
+   * thread can be interrupted at are the trampoline itself and the `syscall`;
+   * once `rt_sigreturn` has run, the frame is gone. */
+  static const unsigned char mov_rax[9] = {0x48, 0xc7, 0xc0, 0x0f, 0x00,
+                                           0x00, 0x00, 0x0f, 0x05};
+  static const unsigned char mov_eax[7] = {0xb8, 0x0f, 0x00, 0x00,
+                                           0x00, 0x0f, 0x05};
+  unsigned char code[9];
+  long got = repro_hcr_lx_read_stack(code, trampoline, sizeof(code));
+  if (got < (long)sizeof(code)) {
+    /* The trampoline may end a mapping; retry for the shorter shape. */
+    got = repro_hcr_lx_read_stack(code, trampoline, sizeof(mov_eax));
+  }
+  if (got >= (long)sizeof(mov_rax) &&
+      memcmp(code, mov_rax, sizeof(mov_rax)) == 0) {
+    return sizeof(mov_rax) - 1;
+  }
+  if (got >= (long)sizeof(mov_eax) &&
+      memcmp(code, mov_eax, sizeof(mov_eax)) == 0) {
+    return sizeof(mov_eax) - 1;
+  }
+  repro_hcr_lx_trampoline_shape_unknown = 1;
+  return 1;
+}
+
+static uint32_t repro_hcr_lx_collect_signal_frames(
+    uint64_t interrupted_pc, uint64_t interrupted_sp, volatile uint64_t *out_pc,
+    volatile uint64_t *out_slot, uint32_t capacity) {
+  uint32_t produced = 0;
+  if (!repro_hcr_lx_nested_scan_enabled ||
+      !repro_hcr_lx_trampoline_verified) {
+    return 0;
+  }
+  if (capacity > 0 &&
+      interrupted_pc - repro_hcr_lx_sigreturn_trampoline <
+          repro_hcr_lx_trampoline_span) {
+    uint64_t rip_slot = interrupted_sp +
+        offsetof(ucontext_t, uc_mcontext.gregs[REG_RIP]);
+    uint64_t readable_end = repro_hcr_lx_readable_end_of(interrupted_sp);
+    uint64_t rip;
+    if (readable_end == 0 || rip_slot > readable_end ||
+        readable_end - rip_slot < 8 ||
+        repro_hcr_lx_read_stack(&rip, rip_slot, sizeof(rip)) !=
+            (long)sizeof(rip)) {
+      __atomic_store_n(&repro_hcr_lx_stack_read_error, 1, __ATOMIC_RELEASE);
+    } else {
+      out_pc[0] = rip;
+      out_slot[0] = rip_slot;
+      produced = 1;
+      __atomic_fetch_add(&repro_hcr_lx_quiesce.trampoline_frames_seen, 1,
+                         __ATOMIC_ACQ_REL);
+    }
+  }
+  return produced + repro_hcr_lx_collect_nested_frames(
+      interrupted_sp, out_pc + produced, out_slot + produced,
+      capacity - produced);
+}
+
 static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
                                          void *ucontext) {
   ucontext_t *uc = (ucontext_t *)ucontext;
@@ -747,7 +848,10 @@ static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
            sizeof(from_layout));
     if (from_builtin != 0 && from_builtin == from_layout) {
       repro_hcr_lx_sigreturn_trampoline = from_builtin;
-      repro_hcr_lx_trampoline_verified = 1;
+      repro_hcr_lx_trampoline_span =
+          repro_hcr_lx_measure_trampoline_span(from_builtin);
+      /* After the span: a thread that sees `verified` must see the span. */
+      __atomic_store_n(&repro_hcr_lx_trampoline_verified, 1, __ATOMIC_RELEASE);
     } else {
       repro_hcr_lx_trampoline_mismatch = 1;
     }
@@ -765,7 +869,8 @@ static void repro_hcr_lx_quiesce_handler(int signo, siginfo_t *info,
       (uint64_t)uc->uc_mcontext.gregs[REG_RSP], slot->frames,
       REPRO_HCR_LX_MAX_QUIESCE_FRAMES, &slot->frames_complete);
   repro_hcr_lx_quiesce_handler_stage = 3;
-  slot->nested_count = repro_hcr_lx_collect_nested_frames(
+  slot->nested_count = repro_hcr_lx_collect_signal_frames(
+      (uint64_t)uc->uc_mcontext.gregs[REG_RIP],
       (uint64_t)uc->uc_mcontext.gregs[REG_RSP], slot->nested_pc,
       slot->nested_pc_slot, REPRO_HCR_LX_MAX_NESTED_SIGNAL_FRAMES);
   __atomic_fetch_add(&repro_hcr_lx_quiesce.nested_frames_seen,

@@ -60,11 +60,14 @@ proc parseBuildType*(name: string): BuildType =
 proc buildTypeFromEnv(): string =
   ## Parse ``buildType=<value>`` out of ``REPRO_VARIANTS`` (the env var the
   ## ``--variant`` / ``--release`` CLI flags write). Returns "" when absent.
+  ## The last assignment wins (``--release --debug`` is a debug build), as
+  ## for every other reader of ``REPRO_VARIANTS`` and for the solver's
+  ## ``prSet`` contributions (``variants.addPendingCliOverride``).
+  result = ""
   for assignment in getEnv("REPRO_VARIANTS").split(','):
     let kv = assignment.split('=', 1)
     if kv.len == 2 and kv[0].strip() == VariantName:
-      return kv[1].strip()
-  ""
+      result = kv[1].strip()
 
 proc currentBuildType*(): BuildType =
   ## Resolve the active build type. Lookup order:

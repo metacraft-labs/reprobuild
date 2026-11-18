@@ -45,6 +45,8 @@
 
 import std/[algorithm, os, strutils, times]
 
+import ./variant_assignments
+
 type
   TargetOsFamily* = enum
     tofLinux, tofDarwin, tofWindows, tofOther
@@ -654,11 +656,10 @@ proc objectCheckTripleFromVariants*(raw: string): string =
   ## channel ``repro build --target`` writes and the stdlib reads), or ""
   ## for a native build: no ``targetTriple``, ``native``, or the build
   ## host's own triple. The last assignment wins, as it does for the
-  ## stdlib's reader.
-  for item in raw.split(','):
-    let kv = item.split('=', 1)
-    if kv.len == 2 and kv[0].strip() == "targetTriple":
-      result = kv[1].strip()
+  ## stdlib's reader (``toolchain_policy.targetTripleFromEnv``) and the
+  ## solver's ``prSet`` contributions, so the outputs are held to the triple
+  ## the build compiled for (CLI/build.md §"Cross Targets: `--target`").
+  result = lastVariantAssignment(raw, "targetTriple")
   if result.len == 0 or result.toLowerAscii() == "native" or
       isHostTriple(result):
     result = ""

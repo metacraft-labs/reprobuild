@@ -149,3 +149,22 @@ suite "rustc / cargo: the Nix channel is rust-lang's release archive":
       check "--set-rpath" notin text
       # Stripping would make it a different compiler from the tarball arm's.
       check "dontStrip = true" in text
+
+  test "on Linux rustc links x86_64-unknown-linux-gnu through cc's own " &
+      "linker, not the bundled rust-lld":
+    # rust-lang's release links that target with ``-fuse-ld=lld``, which
+    # skips the Nix bintools wrapper and so the RUNPATH it writes for store
+    # libraries (reprobuild-pm issue 2026-11-16, provisioned Rust links with
+    # rust-lld). The behaviour is checked end to end, with a real
+    # realization, by tests/integration/
+    # t_nix_rust_binary_finds_the_store_libraries_it_linked.nim; this case
+    # only keeps the wrapper in the shared builder on hosts without Nix.
+    for nix in packageNamed("rustc").nixProvisioning:
+      let text = builderText(nix)
+      check "exec \"@real@\" -C linker-features=-lld \"$@\"" in text
+      check "[ -z \"$unknown_target\" ] && [ \"$target\" = x86_64-unknown-linux-gnu ]; then" in text
+      check "mv \"$out/bin/rustc\" \"$out/bin/.rustc-wrapped\"" in text
+      # An argfile it cannot read may name any target: no flag then.
+      check "unknown_target=1" in text
+      # rustdoc links doctests through the sysroot's bin/rustc, the wrapper.
+      check ".rustdoc-wrapped" notin text

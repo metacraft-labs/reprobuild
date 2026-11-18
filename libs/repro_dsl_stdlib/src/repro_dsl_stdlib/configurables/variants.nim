@@ -301,6 +301,30 @@ var hasUnifiedSolution {.threadvar.}: bool
   ## participated, so we cannot use emptiness as the "not yet solved"
   ## flag.
 
+proc addPendingCliOverride(name, value: string) =
+  ## Queue a ``prSet`` contribution from the command line, replacing any
+  ## earlier one for the same variant: the last assignment of a name wins.
+  ##
+  ## That is the equal-priority rule for a scalar (Configurable-System.md
+  ## §"Priorities And Contributions": "scalars: last write wins"), and it is
+  ## what every other reader of ``REPRO_VARIANTS`` does -- the stdlib's
+  ## fallbacks (``toolchain_policy.targetTripleFromEnv``,
+  ## ``operations/buildtype``), ``repro configs`` and the engine's object
+  ## check (``target_object_check.objectCheckTripleFromVariants``). Keeping
+  ## both would hand the solver two ``set`` contributions of equal weight
+  ## for different values, and which one it picked would be the solver's
+  ## choice, not the command line's: ``repro build --variant
+  ## targetTriple=A --target=B`` could build for ``A`` while the object
+  ## check held the outputs to ``B`` (reprobuild-pm issue
+  ## ``2026-11-17-two-readers-of-repro-variants-disagree-on-a-repeated-target-triple``).
+  var i = 0
+  while i < pendingCliOverrides.len:
+    if pendingCliOverrides[i].name == name:
+      pendingCliOverrides.delete(i)
+    else:
+      inc i
+  pendingCliOverrides.add(VariantCliContribution(name: name, value: value))
+
 proc parseEnvOverrides() =
   if loadedEnvOverrides:
     return
@@ -316,7 +340,7 @@ proc parseEnvOverrides() =
     let name = stripped[0 ..< eqIdx].strip()
     let value = stripped[eqIdx + 1 .. ^1]
     if name.len == 0: continue
-    pendingCliOverrides.add(VariantCliContribution(name: name, value: value))
+    addPendingCliOverride(name, value)
 
 proc ensureAmbientVariantContext*(): ConfigContext =
   ## Return the ambient (auto-managed) variant context, creating a
@@ -397,8 +421,12 @@ proc addVariantCliOverride*(name, value: string) =
   ## Register a pending ``--variant name=value`` contribution. Applied
   ## as a ``prSet`` against the variant when ``declareVariant`` runs.
   ## The CLI dispatches this from ``runBuildCommand`` /
-  ## ``runReproTestCommand`` before invoking the user's build proc.
-  pendingCliOverrides.add(VariantCliContribution(name: name, value: value))
+  ## ``runReproTestCommand`` before invoking the user's build proc. A later
+  ## override of the same variant replaces an earlier one (last wins).
+  ## ``REPRO_VARIANTS`` is folded in first, so it is the earlier layer and an
+  ## explicit call made before the lazy env parse is not replaced by it.
+  parseEnvOverrides()
+  addPendingCliOverride(name, value)
 
 proc pendingVariantCliOverrides*(): seq[VariantCliContribution] =
   pendingCliOverrides

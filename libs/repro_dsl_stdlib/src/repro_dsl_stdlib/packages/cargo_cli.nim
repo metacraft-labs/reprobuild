@@ -104,6 +104,22 @@ package cargo:
       os = "windows",
       lockIdentity = "tarball:rust@1.94.0:sha256:2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5",
       version = "1.94.0"
+    # Windows aarch64: the same release's archive for ARM64 Windows. Arm
+    # selection has no emulation tier (an x86_64 arm does not apply to an
+    # aarch64 host), so without it an ARM64 host has no tarball rustc at
+    # all. Same rust-installer layout as the x86_64 arm.
+    # Digests: upstream's ``<archive>.sha256``, read 2026-11-18, equal to
+    # the ``xz_hash`` rows of channel-rust-<ver>.toml.
+    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-aarch64-pc-windows-msvc.tar.xz",
+      sha256 = "5dced6c4150806b0f845be99146d6a7eb8f583efc3aecda2fb2164b8dfb5690e",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/cargo.exe",
+      packageId = "rust@1.94.0",
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:rust@1.94.0:windows-aarch64:sha256:5dced6c4150806b0f845be99146d6a7eb8f583efc3aecda2fb2164b8dfb5690e",
+      version = "1.94.0"
     # Linux x86_64: same rust standalone-distribution tarball as the
     # Windows entry — different triple. The rust-installer auto-merge
     # in the realize loop flattens cargo / rustc / rust-std into a
@@ -163,6 +179,16 @@ package cargo:
       cpu = "x86_64",
       os = "windows",
       lockIdentity = "tarball:rust@1.97.1:sha256:a1cdfcfd1e351ba21823d6bd454a297fa95190abca2f432a372e3c47bef8b863",
+      version = "1.97.1"
+    tarball url = "https://static.rust-lang.org/dist/rust-1.97.1-aarch64-pc-windows-msvc.tar.xz",
+      sha256 = "839418454d75ac05ce0db02da2081a763d1f386274d279db68861d880d41695f",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/cargo.exe",
+      packageId = "rust@1.97.1",
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:rust@1.97.1:windows-aarch64:sha256:839418454d75ac05ce0db02da2081a763d1f386274d279db68861d880d41695f",
       version = "1.97.1"
     tarball url = "https://static.rust-lang.org/dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz",
       sha256 = "88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f",

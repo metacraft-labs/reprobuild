@@ -63,6 +63,7 @@ import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
+import repro_core/variant_assignments
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -8335,17 +8336,14 @@ proc canonicalVariantAssignments(): string =
   ## ``providerArtifactId`` and the engine reuses the stale lowered graph
   ## (``providerInvocations: 0``). Folding the assignments in forces a
   ## re-lowering when a variant changes. Sorted so assignment order does
-  ## not perturb the key.
+  ## not perturb the key. A name assigned more than once counts once, with
+  ## its LAST value -- the value the solver and every reader use
+  ## (``repro_core/variant_assignments``) -- so ``--release --debug`` and
+  ## ``--debug --release`` do not share a lowered graph.
   let raw = getEnv("REPRO_VARIANTS")
   if raw.len == 0:
     return ""
-  var parts: seq[string] = @[]
-  for item in raw.split(','):
-    let s = item.strip()
-    if s.len > 0:
-      parts.add(s)
-  parts.sort()
-  parts.join(",")
+  canonicalVariantAssignmentsOf(raw)
 
 proc canonicalEnvironmentSignature(): string =
   ## Shared-Development-Services L5 (§6.4): the SELECTED ENVIRONMENT, in
@@ -31242,15 +31240,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         " produces none; drop one of them")
       return 2
     if buildTargetTriple.len == 0:
-      for rawAssignment in getEnv("REPRO_VARIANTS").split(','):
-        let assignment = rawAssignment.strip()
-        if assignment.startsWith(TargetTripleVariantName & "="):
-          stderr.writeLine("repro build: --publish takes the consuming " &
-            "platform from --target; the target here is assigned by " &
-            "--variant " & assignment & ", which --publish cannot see. " &
-            "Spell it --target=" &
-            assignment[TargetTripleVariantName.len + 1 .. ^1])
-          return 2
+      # The last assignment wins for every reader (variant_assignments), so
+      # it is the one the build would use and the one to name.
+      let assigned = lastVariantAssignment(getEnv("REPRO_VARIANTS"),
+        TargetTripleVariantName)
+      if assigned.len > 0:
+        stderr.writeLine("repro build: --publish takes the consuming " &
+          "platform from --target; the target here is assigned by " &
+          "--variant " & TargetTripleVariantName & "=" & assigned &
+          ", which --publish cannot see. Spell it --target=" & assigned)
+        return 2
 
   # Edge-Determinism-And-Soft-Rebuild.md §4.5: `--only` is a selector ON a
   # rebuild verb, and on its own it selects nothing to do. Refusing it is
@@ -41174,7 +41173,8 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     let parsed = parseBrokerModeArgs(args)
     doAssert parsed.isBrokerMode
     let ctx = FixtureContext(filePrefix: parsed.filePrefix)
-    return runBrokerSession(parsed.token, ctx)
+    return runBrokerSession(parsed.channel, parsed.token, parsed.parentPid,
+      parsed.parentStart, ctx)
   except EElevation as err:
     stderr.writeLine("repro --privileged-broker: " & err.msg)
     return 7
