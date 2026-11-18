@@ -23,6 +23,19 @@
 ##   commit_gate = "advisory"
 ##   requires = [{ certificate = "pre-commit", platforms = ["*"] }]
 ##
+##   [[certificate_policy.certificate]]
+##   name = "pre-commit"
+##   commands = ["pre-commit-checks=blake3:3be4…"]
+##
+## The ``[[certificate_policy.certificate]]`` tables record what each
+## certificate name MEANS: the command set of the node it marks, for every
+## name the evaluated graph marks, required or not (Test-Certificates.md
+## §"What a required name means: its command set"). The DSL's policy value
+## carries none; the two lock writers fill them in from the evaluated provider
+## graph (``repro_cli_support.certificateCommandSets``), which this module
+## cannot see. A snapshot that records none at all was written before that
+## section existed and still reads (see ``validateCommandSets``).
+##
 ## This module is deliberately pure (``std`` only, no I/O, no git): the DSL
 ## builds the model at compile time, the lock writer renders it, and the gates
 ## parse and match it. Keeping all four in one file is what stops them from
@@ -33,7 +46,7 @@
 ## raises ``CertificatePolicySnapshotError``. None of them ever resolves to
 ## ``off``.
 
-import std/[os, strutils]
+import std/[algorithm, os, strutils]
 
 const
   CertificatePolicySchemaV1* = "reprobuild.certificate-policy.v1"
@@ -42,6 +55,12 @@ const
     ## The snapshot's table name in ``repro.lock``.
   CertificatePolicyRuleTable* = "certificate_policy.rule"
     ## The array-of-tables name of the snapshot's rules.
+  CertificatePolicyCertificateTable* = "certificate_policy.certificate"
+    ## The array-of-tables name of the snapshot's command sets, one per
+    ## required certificate name.
+  CommandEntryDigestMarker* = "=blake3:"
+    ## What separates a command-set entry's action id from its digest:
+    ## ``<action id>=blake3:<64 lowercase hex>``.
   DetachedHeadPattern* = "(detached)"
     ## How a ``rule detachedHead:`` is spelled in ``branches``. Not a valid
     ## git branch name (git refuses names containing ``(``), so it cannot
@@ -89,6 +108,15 @@ type
     commitGate*: PolicyMode
     requires*: seq[PolicyRequirement]
 
+  CertificateCommandSet* = object
+    ## ``[[certificate_policy.certificate]]``: what a certificate name means
+    ## (Test-Certificates.md §"What a required name means: its command
+    ## set"). ``commands`` holds one ``<action id>=blake3:<hex>`` entry per
+    ## test command of the node ``name`` marks (the edges it names
+    ## directly), sorted and unique.
+    name*: string
+    commands*: seq[string]
+
   BranchCertificatePolicy* = object
     ## A test-certificate branch policy. The DSL's ``certificatePolicy``
     ## builder produces one at compile time (``repro_certificates`` exposes it
@@ -111,6 +139,10 @@ type
       ## can tell which locked package holds it. Absolute as the builder
       ## records it; relative to the enacting recipe's directory once enacted
       ## (``withDeclaredInRelativeTo``). Never rendered.
+    commandSets*: seq[CertificateCommandSet]
+      ## What each certificate name the graph marks means, filled in by the
+      ## lock writers from the evaluated graph. Empty in a policy value the DSL built and in an
+      ## emission; empty in a snapshot written before command sets existed.
 
   BranchRefKind* = enum
     ## What a gate is judging.
@@ -200,6 +232,102 @@ proc validatePolicy*(policy: BranchCertificatePolicy) =
       validatePlatforms(req.platforms, where & ", requires '" &
         req.certificate & "'")
 
+proc requiredCertificateNames*(policy: BranchCertificatePolicy): seq[string] =
+  ## Every certificate name some rule requires, whatever the rule's modes, in
+  ## first-requirement order. A snapshot that records any command set must
+  ## record one for each of these (``validateCommandSets``).
+  for rule in policy.rules:
+    for req in rule.requires:
+      if req.certificate notin result:
+        result.add(req.certificate)
+
+proc isLowerHex(s: string): bool =
+  for ch in s:
+    if ch notin {'0'..'9', 'a'..'f'}: return false
+  true
+
+proc commandEntryParts*(entry: string):
+    tuple[ok: bool; actionId, digest: string] =
+  ## Split ``<action id>=blake3:<hex>``. ``ok`` is false unless the action id
+  ## is non-empty and free of whitespace, quotes and backslashes, and the
+  ## digest is 64 lowercase hex digits. The digest holds no ``=``, so the
+  ## LAST marker is the separator.
+  let at = entry.rfind(CommandEntryDigestMarker)
+  if at <= 0:
+    return
+  let actionId = entry[0 ..< at]
+  let digest = entry[at + CommandEntryDigestMarker.len .. ^1]
+  for ch in actionId:
+    if ch in Whitespace or ch in {'"', '\\'} or ord(ch) < 0x20:
+      return
+  if digest.len != 64 or not isLowerHex(digest):
+    return
+  (ok: true, actionId: actionId, digest: digest)
+
+proc validateCommandSets*(policy: BranchCertificatePolicy) =
+  ## Raise ``CertificatePolicySnapshotError`` on the first structural error
+  ## in ``policy.commandSets`` (Test-Certificates.md §"What a required name
+  ## means: its command set", "The format is checked loudly"): a table names
+  ## a certificate at most once; its ``commands`` are non-empty, well-formed,
+  ## sorted and duplicate-free.
+  ##
+  ## A table may name a certificate no rule requires: the writers record
+  ## every name the evaluated graph marks, so that a push which stops
+  ## requiring a name still says what the name means and the ratchet can
+  ## tell an unchanged name from a narrowed one. The reader cannot know the
+  ## graph, so it does not judge which names are marked.
+  ##
+  ## Completeness is all-or-none. A snapshot that records a command set
+  ## records one for every name a rule requires; one that records none was
+  ## written before command sets existed and still reads, so the ratchet can
+  ## judge an anchor written by an older writer by name alone (the spec's
+  ## "A base that records no command set" bullet) instead of refusing on it
+  ## and wedging the branch.
+  if policy.commandSets.len == 0:
+    return
+  let required = requiredCertificateNames(policy)
+  var seen: seq[string] = @[]
+  for set in policy.commandSets:
+    let where = "certificate policy '" & policy.name & "', command set '" &
+      set.name & "'"
+    if set.name.len == 0:
+      policyError("certificate policy '" & policy.name &
+        "': a command set needs a name")
+    if set.name in seen:
+      policyError(where & ": the name has two command sets")
+    seen.add(set.name)
+    if set.commands.len == 0:
+      policyError(where & ": commands must not be empty")
+    for i, entry in set.commands:
+      if not commandEntryParts(entry).ok:
+        policyError(where & ": entry '" & entry & "' is not " &
+          "<action id>=blake3:<64 lowercase hex>")
+      if i > 0 and not (set.commands[i - 1] < entry):
+        policyError(where & ": commands must be sorted and unique ('" &
+          set.commands[i - 1] & "' then '" & entry & "')")
+  for name in required:
+    if name notin seen:
+      policyError("certificate policy '" & policy.name & "': certificate '" &
+        name & "' is required but has no command set (a snapshot records " &
+        "one for every required name, or none at all)")
+
+proc commandSetOf*(policy: BranchCertificatePolicy; name: string):
+    tuple[recorded: bool; commands: seq[string]] =
+  ## The command set the snapshot records for ``name``, if any.
+  for set in policy.commandSets:
+    if set.name == name:
+      return (recorded: true, commands: set.commands)
+
+proc omittedCommands*(base, candidate: openArray[string]): seq[string] =
+  ## The entries of ``base`` that ``candidate`` lacks: empty exactly when the
+  ## candidate's command set contains the base's, i.e. when the candidate
+  ## does not NARROW the name (Test-Certificates.md §"What a required name
+  ## means: its command set", "A command set is anchored, not
+  ## self-asserted").
+  for entry in base:
+    if entry notin candidate:
+      result.add(entry)
+
 proc withDeclaredInRelativeTo*(policy: BranchCertificatePolicy;
                                recipeDir: string): BranchCertificatePolicy =
   ## ``policy`` with ``declaredIn`` made relative to the enacting recipe's
@@ -286,8 +414,10 @@ proc renderCertificatePolicySnapshot*(policy: BranchCertificatePolicy): string =
   ## order, so an unchanged policy renders byte-identically and the lock
   ## writer writes nothing. ``commit_gate`` is written only when it differs
   ## from ``gate_mode`` (D7: it defaults to ``gate_mode``), so the reader's
-  ## default and the writer's omission are the same rule.
+  ## default and the writer's omission are the same rule. The command sets
+  ## follow the rules, one table per recorded name, sorted by name.
   validatePolicy(policy)
+  validateCommandSets(policy)
   result = "[" & CertificatePolicyTable & "]\n"
   result.add("schema = " & quoted(CertificatePolicySchemaV1) & "\n")
   result.add("name = " & quoted(policy.name) & "\n")
@@ -306,6 +436,15 @@ proc renderCertificatePolicySnapshot*(policy: BranchCertificatePolicy): string =
         parts.add("{ certificate = " & quoted(req.certificate) &
           ", platforms = " & stringArray(req.platforms) & " }")
       result.add("requires = [" & parts.join(", ") & "]\n")
+  var named: seq[string] = @[]
+  for set in policy.commandSets:
+    named.add(set.name)
+  named.sort(system.cmp[string])
+  for name in named:
+    result.add("\n[[" & CertificatePolicyCertificateTable & "]]\n")
+    result.add("name = " & quoted(name) & "\n")
+    result.add("commands = " & stringArray(commandSetOf(policy, name).commands) &
+      "\n")
 
 # ---------------------------------------------------------------------------
 # Locating the snapshot inside a lock document
@@ -313,7 +452,8 @@ proc renderCertificatePolicySnapshot*(policy: BranchCertificatePolicy): string =
 
 proc isPolicyHeader*(line: string): bool =
   ## Whether a (stripped) line opens a table that belongs to the snapshot:
-  ## ``[certificate_policy]``, ``[[certificate_policy.rule]]``, or any other
+  ## ``[certificate_policy]``, ``[[certificate_policy.rule]]``,
+  ## ``[[certificate_policy.certificate]]``, or any other
   ## ``certificate_policy`` table, which the strict reader then rejects as
   ## unknown rather than letting a lock reader take its keys.
   var s = line.strip()
@@ -483,7 +623,8 @@ proc parseMode(value, key: string; line: int): PolicyMode =
   policyError("[certificate_policy] line " & $line & ": unknown " & key &
     " '" & value & "' (expected off, advisory, required)")
 
-proc parseCertificatePolicySnapshot*(section: string; requirePackage = true):
+proc parseCertificatePolicySnapshot*(section: string; requirePackage = true;
+                                     allowCommandSets = true):
     BranchCertificatePolicy =
   ## Parse a ``[certificate_policy]`` snapshot (as
   ## ``splitCertificatePolicySection`` returns it) strictly. Raises
@@ -495,16 +636,31 @@ proc parseCertificatePolicySnapshot*(section: string; requirePackage = true):
   ## ``advisory``, ``untracked_inputs`` is ``read-set``, a rule's
   ## ``gate_mode`` is ``off``, its ``commit_gate`` is its ``gate_mode``, and
   ## ``requires`` is empty.
-  type Context = enum cxNone, cxPolicy, cxRule
+  ##
+  ## ``[[certificate_policy.certificate]]`` tables are read into
+  ## ``commandSets`` and checked by ``validateCommandSets``. An emission
+  ## (``allowCommandSets = false``) must carry none: the provider does not
+  ## know what its names mean in graph terms, the lock writers do.
+  type Context = enum cxNone, cxPolicy, cxRule, cxCertificate
   var ctx = cxNone
   var sawPolicyTable = false
   var schema = ""
   var seenKeys: seq[string] = @[]
   var ruleCommitGateSet = false
   var lineNo = 0
+  var sawCertName, sawCertCommands = false
   template finishRule() =
     if ctx == cxRule and not ruleCommitGateSet:
       result.rules[^1].commitGate = result.rules[^1].gateMode
+  template finishCertificate() =
+    if not sawCertName:
+      policyError("[certificate_policy] line " & $lineNo &
+        ": a [[" & CertificatePolicyCertificateTable & "]] table needs " &
+        "'name'")
+    if not sawCertCommands:
+      policyError("[certificate_policy] line " & $lineNo &
+        ": a [[" & CertificatePolicyCertificateTable & "]] table needs " &
+        "'commands'")
   for raw in section.splitLines():
     inc lineNo
     let line = raw.strip()
@@ -512,6 +668,9 @@ proc parseCertificatePolicySnapshot*(section: string; requirePackage = true):
       continue
     if line.startsWith("["):
       finishRule()
+      if ctx == cxCertificate and
+          line != "[[" & CertificatePolicyCertificateTable & "]]":
+        finishCertificate()
       if line == "[" & CertificatePolicyTable & "]":
         if sawPolicyTable:
           policyError("[certificate_policy] line " & $lineNo &
@@ -528,6 +687,20 @@ proc parseCertificatePolicySnapshot*(section: string; requirePackage = true):
         result.rules.add(PolicyRule(gateMode: pmOff))
         ruleCommitGateSet = false
         ctx = cxRule
+      elif line == "[[" & CertificatePolicyCertificateTable & "]]":
+        if not sawPolicyTable:
+          policyError("[certificate_policy] line " & $lineNo &
+            ": a command set appears before the [certificate_policy] table")
+        if not allowCommandSets:
+          policyError("[certificate_policy] line " & $lineNo &
+            ": a certificate policy emission carries no command sets " &
+            "(the lock writers record them from the evaluated graph)")
+        if ctx == cxCertificate:
+          finishCertificate()
+        result.commandSets.add(CertificateCommandSet())
+        sawCertName = false
+        sawCertCommands = false
+        ctx = cxCertificate
       else:
         policyError("[certificate_policy] line " & $lineNo &
           ": unknown table " & line)
@@ -569,6 +742,15 @@ proc parseCertificatePolicySnapshot*(section: string; requirePackage = true):
         policyError("[certificate_policy] line " & $lineNo &
           ": unknown rule key '" & key & "' (expected branches, gate_mode, " &
           "commit_gate, requires)")
+    of cxCertificate:
+      case key
+      of "name":
+        value = ParsedValue(kind: vkString, str: c.parseBasicString())
+      of "commands":
+        value = ParsedValue(kind: vkStringArray, strs: c.parseStringArray())
+      else:
+        policyError("[certificate_policy] line " & $lineNo &
+          ": unknown command-set key '" & key & "' (expected name, commands)")
     of cxNone: discard
     c.skipSpaces()
     if c.i < c.s.len and c.s[c.i] != '#':
@@ -609,8 +791,19 @@ proc parseCertificatePolicySnapshot*(section: string; requirePackage = true):
         ruleCommitGateSet = true
       of "requires": result.rules[^1].requires = value.reqs
       else: discard
+    of cxCertificate:
+      case key
+      of "name":
+        result.commandSets[^1].name = value.str
+        sawCertName = true
+      of "commands":
+        result.commandSets[^1].commands = value.strs
+        sawCertCommands = true
+      else: discard
     of cxNone: discard
   finishRule()
+  if ctx == cxCertificate:
+    finishCertificate()
   if not sawPolicyTable:
     policyError("no [certificate_policy] table")
   if schema != CertificatePolicySchemaV1:
@@ -620,6 +813,7 @@ proc parseCertificatePolicySnapshot*(section: string; requirePackage = true):
     policyError("[certificate_policy] needs 'package', the locked package " &
       "that exports the policy")
   validatePolicy(result)
+  validateCommandSets(result)
 
 proc replaceCertificatePolicySection*(lockText, section: string): string =
   ## ``lockText`` with its snapshot replaced by ``section`` (removed when
@@ -982,9 +1176,11 @@ proc renderCertificatePolicyEmission*(policy: BranchCertificatePolicy;
                                       enactedBy: string): string =
   ## The emission text: the header, the two provenance keys, and the
   ## snapshot rendered with an empty ``package`` (the provider does not know
-  ## the lock's dependency names; the lock writer fills it in).
+  ## the lock's dependency names; the lock writer fills it in) and no command
+  ## sets (the lock writers compute them from the evaluated graph).
   var p = policy
   p.package = ""
+  p.commandSets = @[]
   result = CertificatePolicyEmissionHeader & "\n"
   result.add("enacted_by = " & quoted(enactedBy) & "\n")
   result.add("declared_in = " & quoted(policy.declaredIn) & "\n")
@@ -1018,6 +1214,6 @@ proc parseCertificatePolicyEmission*(text: string): CertificatePolicyEmission =
       CertificatePolicyEmissionHeader & "' header")
   # The emission's snapshot carries no package yet: the lock writer names it.
   result.policy = parseCertificatePolicySnapshot(split.policySection,
-    requirePackage = false)
+    requirePackage = false, allowCommandSets = false)
   result.policy.package = ""
   result.policy.declaredIn = result.declaredIn

@@ -60,8 +60,12 @@ proc ciReproPush(fx: StoreFixture): tuple[code: int; output: string] =
 suite "a CI job publishes its certificate with repro push":
   test "a detached CI checkout of a published commit publishes its certificate":
     let host = currentPlatformTag()
+    # The snapshot records what t-unit means (its command set), so the base
+    # anchors it and a skip is decided by ci_trust and the certificate alone
+    # (Test-Certificates.md §"What a required name means: its command set").
     let fx = setupStoreFixture(
-      requiredPolicy(@["t-unit"], @[host], mode = "advisory", ciTrust = "skip"),
+      requiredPolicy(@["t-unit"], @[host], mode = "advisory", ciTrust = "skip",
+        commandSets = true),
       "ci-job-carry")
     defer: removeDir(fx.scratch)
 

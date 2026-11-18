@@ -1091,7 +1091,7 @@ proc emitVariantDeclarations(variants: seq[VariantDecl];
 #   macro-expansion time and emit ``recordConfigDefault`` /
 #   ``registerVersion`` calls at the END of the macro's lowered output,
 #   AFTER the preserved Nim statements. The M2 surface is name-keyed
-#   (read by ``readConfigurable[T]("<pkg>.<name>")``), so the eager
+#   (read by ``readConfigurable[T]("package.<pkg>.<name>")``), so the eager
 #   extraction never depends on a lexical predecessor's runtime value.
 #   The Path (A) in-place rewrite is documented as future M3+ work; it
 #   becomes load-bearing only when a section lowerer needs to *read* a
@@ -4422,8 +4422,8 @@ proc emitM5Services*(packageName: string;
   # exactly as it does in an activity's. Collected here rather than
   # inside `m5ServiceEmission` because the emitter is shared with L2's
   # dev-env walker, which has a DIFFERENT key shape
-  # (`<pkg>.<activity>.<name>` against `<pkg>.<name>`) -- one emitter,
-  # two callers, each supplying its own key.
+  # (`package.<pkg>.<activity>.<name>` against `package.<pkg>.<name>`) --
+  # one emitter, two callers, each supplying its own key.
   var packagePoints: seq[tuple[bareName, key: string]] = @[]
   for entry in classified:
     if entry.ownership != soM2Config:
@@ -4433,7 +4433,7 @@ proc emitM5Services*(packageName: string;
     for cfg in collectM2ConfigEntries(entry.stmt[entry.stmt.len - 1]):
       if m2TypeReprIsOrderedCollection(cfg.typeNode.repr):
         packagePoints.add((bareName: cfg.name,
-          key: packageName & "." & cfg.name))
+          key: packageConfigKey(packageName, cfg.name)))
   for entry in classified:
     if entry.ownership != soM5Service:
       continue
@@ -5153,21 +5153,21 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
       if c.defaultNode == nil and
          m2TypeReprIsOrderedCollection(c.typeNode.repr):
         newCall(bindSym"environmentBoundValue",
-          newLit(packageName & "." & parsed.activityName & "." & c.name),
+          newLit(packageConfigKey(packageName, parsed.activityName, c.name)),
           parseExpr("newSeq[string]()"))
       elif c.defaultNode == nil:
         if m2TypeReprIsSupportedScalar(c.typeNode.repr):
           parseExpr("requiredConfigurableValue[" & c.typeNode.repr & "](" &
             escForCode(packageName) & ", " &
-            escForCode(packageName & "." & parsed.activityName & "." &
-              c.name) & ", " &
+            escForCode(packageConfigKey(packageName, parsed.activityName,
+              c.name)) & ", " &
             escForCode(parsed.activityName) & ", " &
             escForCode(c.name) & ")")
         else:
           newEmptyNode()
       else:
-        let keyLit = newLit(packageName & "." & parsed.activityName & "." &
-          c.name)
+        let keyLit = newLit(packageConfigKey(packageName,
+          parsed.activityName, c.name))
         let declared = c.defaultNode.copyNimTree()
         newCall(bindSym"environmentBoundValue", keyLit, declared)
     formal.add(nnkIdentDefs.newTree(ident(c.name), c.typeNode.copyNimTree(),
@@ -5182,7 +5182,7 @@ proc l2ActivityEmission(packageName: string; stmt: NimNode): NimNode =
   for c in config:
     if m2TypeReprIsOrderedCollection(c.typeNode.repr):
       activityPoints.add((bareName: c.name,
-        key: packageName & "." & parsed.activityName & "." & c.name))
+        key: packageConfigKey(packageName, parsed.activityName, c.name)))
 
   let procBody = newStmtList()
   # Argument evaluation records a resolver before the activity body runs.
@@ -5977,8 +5977,9 @@ proc l5ParseEnvironmentBody(packageName, environmentName: string;
         "no configurable slot, so a binding to it could never be in " &
         "force. " & l5NoSilentDropRule, l2StmtAnchor(stmt))
     let key =
-      if qualifier.len == 0: packageName & "." & decls[idx].name
-      else: packageName & "." & decls[idx].qualifier & "." & decls[idx].name
+      if qualifier.len == 0: packageConfigKey(packageName, decls[idx].name)
+      else: packageConfigKey(packageName, decls[idx].qualifier,
+        decls[idx].name)
     if key in seen:
       error("environment `" & environmentName & "`: `" & parts.join(".") &
         "` is bound twice. One environment binds one configurable once " &
@@ -6375,7 +6376,7 @@ proc l5RefuseUnsatisfiableRequiredKeys(packageName: string;
       # route §6 does not enumerate, because §6 is about bindings and
       # this is a contribution -- is how members reach it.
       continue
-    let key = packageName & "." & decl.qualifier & "." & decl.name
+    let key = packageConfigKey(packageName, decl.qualifier, decl.name)
     if l5ContainsNormalized(boundKeys, key):
       continue
     var envText = "no `environment` block in package `" & packageName &
@@ -6414,7 +6415,7 @@ proc l5RefuseUnsatisfiableRequiredKeys(packageName: string;
 proc emitL5ActivityConfigDefaults(packageName: string;
                                   sectionStmts: NimNode): NimNode =
   ## Register each activity `config:` key as a CONFIGURABLE, under
-  ## `<package>.<activity>.<name>`, at module-init time.
+  ## `package.<package>.<activity>.<name>`, at module-init time.
   ##
   ## WHY THIS EXISTS. L2 lowers an activity's `config:` keys to
   ## PARAMETERS of the generated entry point, with the author's default
@@ -6632,9 +6633,9 @@ proc emitL5Environments(packageName: string;
 # join". A contribution is the opposite case -- §5 exists so a consumer
 # can add to a collection another package declared -- so the first
 # segment is the OWNING package and two- or three-segment keys are both
-# accepted (`<pkg>.<name>` and `<pkg>.<activity>.<name>`, byte-identical
-# to the keys `recordConfigDefault` and `emitL5ActivityConfigDefaults`
-# register).
+# accepted (`<pkg>.<name>` and `<pkg>.<activity>.<name>`; prefixed with the
+# kind segment `package.`, they are byte-identical to the keys
+# `recordConfigDefault` and `emitL5ActivityConfigDefaults` register).
 #
 # WHAT IS NOT CHECKED AT COMPILE TIME, said plainly: whether the key
 # exists. It cannot be -- the owning package is a different module and
@@ -6769,6 +6770,19 @@ proc l8ParseContributeBody(body: NimNode): seq[L8Contribution] =
           "configurable key made of bare identifiers, e.g. " &
           "`infra.sso.relyingParties`.", inner)
         continue
+      if path.len > 0 and path[0] == "package":
+        # The scope-derived key (Configurable-System.md §"2.
+        # Scope-derived name") begins with the kind `package`, but a
+        # contribution names its slot RELATIVE to the package kind, as an
+        # `environment` binding does. Read literally, `package.infra.x`
+        # would name an activity `infra` of a package called `package`,
+        # and the refusal at module init would not say why.
+        error("`" & path.join(".") & "`: a contribution names its slot " &
+          "without the kind segment -- write `" &
+          path[1 .. ^1].join(".") & "`. The slot it names is registered " &
+          "as `" & path.join(".") & "`; the `package.` is implied here, " &
+          "because only a package declares contribution points.", inner)
+        continue
       if path.len < 2 or path.len > 3:
         error("`" & path.join(".") & "` is not a contribution key. A " &
           "key is `<package>.<name>` or " &
@@ -6779,7 +6793,9 @@ proc l8ParseContributeBody(body: NimNode): seq[L8Contribution] =
           "configurable lane registers.", inner)
         continue
       inc seen
-      result.add(L8Contribution(key: path.join("."),
+      # The author writes `<package>.<key>`; the slot it names is
+      # registered under the scope-derived key, kind segment first.
+      result.add(L8Contribution(key: PackageConfigKeyPrefix & path.join("."),
         operation: resolved.op, precedence: resolved.prec,
         valueNode: inner[1].copyNimTree(), anchor: inner))
     if seen == 0:

@@ -117,14 +117,14 @@ proc resetRecipeState(storeRoot: string) =
   resetDslPortFsExtState()
   resetDslPortMaterialiseState()
   resetDslPortBuildState()
-  resetConfigurable("reproosKernel.enableDrm")
-  resetConfigurable("reproosKernel.enableHypervDrm")
-  resetConfigurable("reproosKernel.enableFramebuffer")
-  resetConfigurable("reproosKernel.enableUserNs")
-  resetConfigurable("reproosKernel.enableOverlayFs")
-  resetConfigurable("reproosKernel.enableVirtioGpu")
-  resetConfigurable("reproosKernel.kernelVersion")
-  resetConfigurable("reproosKernel.baseConfigVariant")
+  resetConfigurable("package.reproosKernel.enableDrm")
+  resetConfigurable("package.reproosKernel.enableHypervDrm")
+  resetConfigurable("package.reproosKernel.enableFramebuffer")
+  resetConfigurable("package.reproosKernel.enableUserNs")
+  resetConfigurable("package.reproosKernel.enableOverlayFs")
+  resetConfigurable("package.reproosKernel.enableVirtioGpu")
+  resetConfigurable("package.reproosKernel.kernelVersion")
+  resetConfigurable("package.reproosKernel.baseConfigVariant")
   registerStoreRoot("reproosKernel", storeRoot, dhaSha256)
   recipe.registerKernelFiles()
 
@@ -171,17 +171,17 @@ type
 
 const KnobMutations: array[6, KnobMutation] = [
   (label: "enableDrm",         configLine: "CONFIG_DRM",
-   cellKey: "reproosKernel.enableDrm"),
+   cellKey: "package.reproosKernel.enableDrm"),
   (label: "enableHypervDrm",   configLine: "CONFIG_DRM_HYPERV",
-   cellKey: "reproosKernel.enableHypervDrm"),
+   cellKey: "package.reproosKernel.enableHypervDrm"),
   (label: "enableFramebuffer", configLine: "CONFIG_FB",
-   cellKey: "reproosKernel.enableFramebuffer"),
+   cellKey: "package.reproosKernel.enableFramebuffer"),
   (label: "enableUserNs",      configLine: "CONFIG_USER_NS",
-   cellKey: "reproosKernel.enableUserNs"),
+   cellKey: "package.reproosKernel.enableUserNs"),
   (label: "enableOverlayFs",   configLine: "CONFIG_OVERLAY_FS",
-   cellKey: "reproosKernel.enableOverlayFs"),
+   cellKey: "package.reproosKernel.enableOverlayFs"),
   (label: "enableVirtioGpu",   configLine: "CONFIG_VIRTIO_GPU",
-   cellKey: "reproosKernel.enableVirtioGpu")]
+   cellKey: "package.reproosKernel.enableVirtioGpu")]
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -251,7 +251,7 @@ suite "NDE0-K kernel package":
 
     # Pass B — bump kernelVersion via setConfigurable.
     resetRecipeState(rootB)
-    setConfigurable[string]("reproosKernel.kernelVersion", "6.6.150")
+    setConfigurable[string]("package.reproosKernel.kernelVersion", "6.6.150")
     reregisterWithCurrentConfigurables(rootB)
     let cfB = consumeConfigFileArt()
     let bzB = consumeBzImage()
@@ -329,7 +329,7 @@ suite "NDE0-K kernel package":
 
     # Pass B — flip enableHypervDrm to false.
     resetRecipeState(rootB)
-    setConfigurable[bool]("reproosKernel.enableHypervDrm", false)
+    setConfigurable[bool]("package.reproosKernel.enableHypervDrm", false)
     reregisterWithCurrentConfigurables(rootB)
     let cfB = consumeConfigFileArt()
     let bzB = consumeBzImage()

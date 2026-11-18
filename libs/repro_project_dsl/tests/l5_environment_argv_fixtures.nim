@@ -33,7 +33,7 @@ package l5ArgvPkg:
 
   build:
     argvSsoConfig = renderConfigFile(ArgvConfigPath,
-      "issuer = \"" & readConfigurable[string]("l5ArgvPkg.issuer") & "\"\n")
+      "issuer = \"" & readConfigurable[string]("package.l5ArgvPkg.issuer") & "\"\n")
 
   devEnv:
     activity sso():

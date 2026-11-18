@@ -149,9 +149,9 @@ proc currentGraphicsStackCfg*(): gfxImpl.GraphicsStackConfig =
   let defaults = gfxImpl.defaultGraphicsStackConfig()
   result = gfxImpl.GraphicsStackConfig(
     aptSnapshot: readConfigurable[string](
-      "graphicsStack.aptSnapshot", defaults.aptSnapshot),
+      "package.graphicsStack.aptSnapshot", defaults.aptSnapshot),
     enableHardwareGl: readConfigurable[bool](
-      "graphicsStack.enableHardwareGl", defaults.enableHardwareGl),
+      "package.graphicsStack.enableHardwareGl", defaults.enableHardwareGl),
     fontPackages: defaults.fontPackages,
     storeRoot: defaults.storeRoot)
 

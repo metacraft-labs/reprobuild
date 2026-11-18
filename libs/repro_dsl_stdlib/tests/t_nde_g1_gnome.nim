@@ -116,11 +116,11 @@ proc resetRecipeState(storeRoot: string) =
   resetDslPortFsState()
   resetDslPortFsExtState()
   resetDslPortMaterialiseState()
-  resetConfigurable("gnomeDesktop.aptSnapshot")
-  resetConfigurable("gnomeDesktop.autoLogin")
-  resetConfigurable("gnomeDesktop.autoLoginUser")
-  resetConfigurable("gnomeDesktop.waylandSession")
-  resetConfigurable("gnomeDesktop.disableInitialSetup")
+  resetConfigurable("package.gnomeDesktop.aptSnapshot")
+  resetConfigurable("package.gnomeDesktop.autoLogin")
+  resetConfigurable("package.gnomeDesktop.autoLoginUser")
+  resetConfigurable("package.gnomeDesktop.waylandSession")
+  resetConfigurable("package.gnomeDesktop.disableInitialSetup")
   registerStoreRoot("gnomeDesktop", storeRoot, dhaSha256)
   registerStoreRoot(NdeG1PackageName, storeRoot, dhaSha256)
   recipe.registerGnomeFiles()
@@ -635,7 +635,7 @@ suite "NDE-G1 GNOME compositor DSL surface":
 
     # Pass B — flip autoLoginUser to "alice" via setConfigurable.
     setConfigurable[string](
-      "gnomeDesktop.autoLoginUser", "alice")
+      "package.gnomeDesktop.autoLoginUser", "alice")
     reregisterWithCurrentConfigurables(root)
     let cfgB = consumeGdmConfigDsl()
     let bytesB = readDslStoreFile(cfgB)
@@ -646,7 +646,7 @@ suite "NDE-G1 GNOME compositor DSL surface":
     # stay cached.
     check cfgA.storePath != cfgB.storePath
     # Reset autoLoginUser for hygiene.
-    resetConfigurable("gnomeDesktop.autoLoginUser")
+    resetConfigurable("package.gnomeDesktop.autoLoginUser")
 
   test "anchor constants: NDE-G1 libpaths identifiers match shim exports":
     # The cohort-wide identifiers for the libpaths overlay are sourced

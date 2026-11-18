@@ -124,11 +124,11 @@ proc currentDbusBrokerCfg*(): brokerImpl.DbusBrokerConfig =
   ## NDE recipe to exercise it.
   result = brokerImpl.DbusBrokerConfig(
     aptSnapshot: readConfigurable[string](
-      "dbusBroker.aptSnapshot", "ubuntu/jammy/20260615T000000Z"),
+      "package.dbusBroker.aptSnapshot", "ubuntu/jammy/20260615T000000Z"),
     busActivationStrategy: readConfigurable[brokerImpl.BusActivationStrategy](
-      "dbusBroker.busActivationStrategy", brokerImpl.basBroker),
-    messagebusUid: readConfigurable[int]("dbusBroker.messagebusUid", 101),
-    messagebusGid: readConfigurable[int]("dbusBroker.messagebusGid", 101),
+      "package.dbusBroker.busActivationStrategy", brokerImpl.basBroker),
+    messagebusUid: readConfigurable[int]("package.dbusBroker.messagebusUid", 101),
+    messagebusGid: readConfigurable[int]("package.dbusBroker.messagebusGid", 101),
     storeRoot: brokerImpl.DefaultStoreRoot)
 
 # ---------------------------------------------------------------------------

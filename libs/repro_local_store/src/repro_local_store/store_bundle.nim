@@ -593,6 +593,47 @@ proc stateAreas(store, ac: string): seq[string] =
   @[store / "compiler-probes", store / "tool-store" / "compiler-probes",
     store / FrozenDevEnvDirName, ac / "cas", ac / RecipeCompilesDirName]
 
+proc frozenScriptPath*(storeRoot, projectRoot: string): string =
+  ## §6: `<store>/frozen-dev-env/<key>/activate.bash`, where `<key>` is the
+  ## first 32 hex digits of the BLAKE3 digest of the project root.
+  storeRoot / FrozenDevEnvDirName /
+    blake3.digest(projectRoot).toHex()[0 ..< 32] / "activate.bash"
+
+proc devEnvProblem(c: BundleClosure; env: FrozenDevEnv): string =
+  ## "" when a `devenv` line names what export writes (§6); otherwise why
+  ## not. `repro bundle restore --activate` writes `. <script>` into a
+  ## root-level profile file, and `repro store import --allow-dev-env`
+  ## allow-lists the project root, so neither may be any path the bundle
+  ## likes: the project must be in the bundle's selection, and the script
+  ## must be that project's frozen script, carried as a regular-file entry
+  ## (so the member check holds it to the bytes the bundle declares).
+  let root = env.projectRoot
+  if not root.isAbsolute or normalizedPath(root) != root or
+      not root.inSelection(c.roots.workspaceRoots, c.selection):
+    return "bundle declares the frozen dev-env project " & root.escape &
+      ", which is not in its workspace roots or its selection"
+  let expected = frozenScriptPath(c.roots.storeRoot, root)
+  if env.scriptPath != expected:
+    return "bundle declares " & env.scriptPath.escape & " as the frozen " &
+      "dev-env script of " & root.escape & ", which must be " &
+      expected.escape
+  if not c.entries.anyIt(it.kind == bekFile and it.path == expected):
+    return "bundle declares the frozen dev-env script " & expected.escape &
+      " without carrying it as a file entry"
+  # A world-writable script, or any world-writable directory the bundle
+  # carries above it (export carries every directory up to and including
+  # the store root, and above it when the store lies in a workspace root),
+  # would let anyone rename a directory aside and plant what every login
+  # shell sources; tar applies the declared mode to a directory that already
+  # exists. (Ownership and the other mode bits are the unpack's business:
+  # reprobuild-pm issues/
+  # 2026-11-17-bundle-extraction-keeps-the-archive-s-setuid-bits-and-owners.md.)
+  for e in c.entries:
+    if expected.isWithin(e.path) and (e.mode and 0o002) != 0:
+      return "bundle declares the frozen dev-env path " & e.path.escape &
+        " world-writable (mode " & toOct(e.mode, 4) & ")"
+  ""
+
 proc carriedClassProblem(c: BundleClosure; e: BundleEntry;
                          contentsPath: string): string =
   ## "" when entry `e` is something a closure carries (§2), as far as the
@@ -851,6 +892,10 @@ proc computeClosure*(roots: BundleRoots;
   # (`checkEntryPlacement`); a bundle it would refuse is not worth writing.
   for e in result.entries:
     let problem = carriedClassProblem(result, e, "")
+    if problem.len > 0:
+      fail("cannot export: " & problem)
+  for env in result.devEnvs:
+    let problem = devEnvProblem(result, env)
     if problem.len > 0:
       fail("cannot export: " & problem)
 
@@ -1472,6 +1517,10 @@ proc checkEntryPlacement*(c: BundleClosure; contentsPath: string) =
         if dir in links:
           fail("bundle path " & path & " lies below the symlink entry " & dir)
         dir = dir.parentDir
+  for env in c.devEnvs:
+    let problem = devEnvProblem(c, env)
+    if problem.len > 0:
+      fail(problem)
   for r in c.records:
     if r.outputRoot.len > 0 and not r.outputRoot.inSelection(ws,
         c.selection):
@@ -1578,6 +1627,13 @@ proc checkMembers*(c: BundleClosure; contentsPath, listingPath: string) =
       of bekFile: DeclaredMember(kind: dkFile)
       of bekDir: DeclaredMember(kind: dkDir)
       of bekLink: DeclaredMember(kind: dkLink, target: e.digest)
+  # A frozen dev-env script is sourced from a root-level profile file, so it
+  # must be its own inode: carried as a hard link to (or from) another
+  # member, it would share that member's bytes with whoever can write there.
+  for env in c.devEnvs:
+    let name = relToSlash(env.scriptPath)
+    if name in declared and declared[name].kind == dkFile:
+      declared[name] = DeclaredMember(kind: dkPlainFile)
   var members = initMemberSet()
   try:
     for (_, m) in listingMembers(listingPath):

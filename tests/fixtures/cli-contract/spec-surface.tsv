@@ -339,6 +339,7 @@ flag	repro bundle restore	--after-bootstrap
 flag	repro bundle restore	--allow-dev-env
 flag	repro bundle restore	--bashrc-file
 flag	repro bundle restore	--json
+flag	repro bundle restore	--latest-sha256
 flag	repro bundle restore	--nix-root
 flag	repro bundle restore	--parallel
 flag	repro bundle restore	--staging
@@ -1058,6 +1059,7 @@ command	repro workspace shared-clones
 flag	repro workspace shared-clones	--force
 flag	repro workspace shared-clones	--json
 flag	repro workspace shared-clones	--no-write-report
+flag	repro workspace shared-clones	--reset-refs
 flag	repro workspace shared-clones	--workspace-root
 flag	repro workspace shared-clones	--write-report
 command	repro workspace sync

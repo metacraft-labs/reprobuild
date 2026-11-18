@@ -107,11 +107,11 @@ proc resetRecipeState(storeRoot: string) =
   resetDslPortFsState()
   resetDslPortFsExtState()
   resetDslPortMaterialiseState()
-  resetConfigurable("plasmaDesktop.aptSnapshot")
-  resetConfigurable("plasmaDesktop.sddmAutoLogin")
-  resetConfigurable("plasmaDesktop.sddmAutoLoginUser")
-  resetConfigurable("plasmaDesktop.waylandSession")
-  resetConfigurable("plasmaDesktop.pipewireEnabled")
+  resetConfigurable("package.plasmaDesktop.aptSnapshot")
+  resetConfigurable("package.plasmaDesktop.sddmAutoLogin")
+  resetConfigurable("package.plasmaDesktop.sddmAutoLoginUser")
+  resetConfigurable("package.plasmaDesktop.waylandSession")
+  resetConfigurable("package.plasmaDesktop.pipewireEnabled")
   registerStoreRoot("plasmaDesktop", storeRoot, dhaSha256)
   registerStoreRoot(NdeK1PackageName, storeRoot, dhaSha256)
   recipe.registerPlasmaFiles()
@@ -651,7 +651,7 @@ suite "NDE-K1 KDE Plasma compositor DSL surface":
 
     # Pass B — flip sddmAutoLoginUser to "alice" via setConfigurable.
     setConfigurable[string](
-      "plasmaDesktop.sddmAutoLoginUser", "alice")
+      "package.plasmaDesktop.sddmAutoLoginUser", "alice")
     reregisterWithCurrentConfigurables(root)
     let cfgB = consumeSddmConfigDsl()
     let bytesB = readDslStoreFile(cfgB)
@@ -662,7 +662,7 @@ suite "NDE-K1 KDE Plasma compositor DSL surface":
     # stay cached.
     check cfgA.storePath != cfgB.storePath
     # Reset sddmAutoLoginUser for hygiene.
-    resetConfigurable("plasmaDesktop.sddmAutoLoginUser")
+    resetConfigurable("package.plasmaDesktop.sddmAutoLoginUser")
 
   test "DSL surface: /etc/pipewire/pipewire.conf propagates pipewireEnabled toggle":
     # The extra fifth artifact's propagation test. pipewireEnabled
@@ -682,7 +682,7 @@ suite "NDE-K1 KDE Plasma compositor DSL surface":
 
     # Pass B — flip pipewireEnabled to false via setConfigurable.
     setConfigurable[bool](
-      "plasmaDesktop.pipewireEnabled", false)
+      "package.plasmaDesktop.pipewireEnabled", false)
     reregisterWithCurrentConfigurables(root)
     let cfgB = consumePipewireConfigDsl()
     let bytesB = readDslStoreFile(cfgB)
@@ -693,7 +693,7 @@ suite "NDE-K1 KDE Plasma compositor DSL surface":
     # Store paths differ.
     check cfgA.storePath != cfgB.storePath
     # Reset pipewireEnabled for hygiene.
-    resetConfigurable("plasmaDesktop.pipewireEnabled")
+    resetConfigurable("package.plasmaDesktop.pipewireEnabled")
 
   test "anchor constants: NDE-K1 libpaths identifiers match shim exports":
     # The cohort-wide identifiers for the libpaths overlay are sourced

@@ -193,12 +193,15 @@ def dependency_cache_key(dependencies: list[dict]) -> tuple[tuple[str, str], ...
     )
 
 
-def run_command(argv, cwd: Path, nix_env: dict[str, str] | None = None) -> list[str]:
+def run_command(argv, cwd: Path, nix_env: dict[str, str] | None = None,
+                extra_env: dict[str, str] | None = None) -> list[str]:
     nix_env = nix_env or {}
+    env = host_tool_environment(nix_env)
+    env.update(extra_env or {})
     proc = subprocess.run(
         argv,
         cwd=str(cwd),
-        env=host_tool_environment(nix_env),
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -268,19 +271,49 @@ def resolve_selector(
             nix_env,
         )
     else:
-        paths = run_command(
-            [
-                "nix",
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "build",
-                "--no-link",
-                "--print-out-paths",
-                selector,
-            ],
-            workspace_root,
-            nix_env,
-        )
+        # NO SAVED FLAKE SETTINGS. Nix keeps the flake ``nixConfig`` settings
+        # a user once answered "always" to in ``trusted-settings.json`` under
+        # its data directory, and applies them even with
+        # ``accept-flake-config`` false: a saved ``pure-eval = false`` would
+        # make a flake that asks for it evaluate impurely. Each selector
+        # command gets a fresh, empty data directory instead of the helper
+        # user's.
+        with tempfile.TemporaryDirectory(prefix="nix-data-") as data_home:
+            paths = run_command(
+                [
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    # PURE EVALUATION IS PINNED, NOT INHERITED (Foreign-
+                    # Provisioning-And-Nix-Evaluation-Daemon.md §2.2). The request
+                    # brings its own Nix configuration (``nix_env``), and three of
+                    # its settings could otherwise undo pure evaluation, after the
+                    # command line or around it: ``accept-flake-config`` lets the
+                    # flake's own ``nixConfig`` set ``pure-eval = false``;
+                    # ``allow-unsafe-native-code-during-evaluation`` gives the
+                    # expression ``builtins.exec``, which runs with this helper's
+                    # environment; ``plugin-files`` loads native code into the
+                    # evaluator. A setting on the command line overrides the same
+                    # setting in the configuration. ``pure-eval`` itself is the
+                    # ``nix`` command's default, set after it loads its
+                    # configuration, so the pin only keeps that for later Nix
+                    # versions. ``--`` ends the options, so the selector is never
+                    # parsed as one (``response_for`` also refuses a leading
+                    # ``-``).
+                    "--option", "pure-eval", "true",
+                    "--option", "accept-flake-config", "false",
+                    "--option", "allow-unsafe-native-code-during-evaluation", "false",
+                    "--option", "plugin-files", "",
+                    "build",
+                    "--no-link",
+                    "--print-out-paths",
+                    "--",
+                    selector,
+                ],
+                workspace_root,
+                nix_env,
+                {"NIX_DATA_HOME": data_home},
+            )
     paths = put_executable_output_first(selector, paths)
     return {
         "status": "success",
@@ -303,6 +336,16 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
     selector = str(req.get("selector") or "")
     if not selector:
         return {"status": "error", "error": "missing selector"}
+    # A SELECTOR IS NEVER AN OPTION. It goes on ``nix build``'s command line,
+    # where Nix reads a leading ``-`` as a flag: a selector of ``--impure``
+    # evaluated the workspace flake impurely, against the environment of the
+    # client that started this shared helper, and was cached as if remote.
+    # Refused before anything runs; ``resolve_selector`` also ends Nix's
+    # options before the selector (Foreign-Provisioning-And-Nix-Evaluation-
+    # Daemon.md §2.2).
+    if selector.startswith("-"):
+        return {"status": "error",
+                "error": f"selector must not begin with '-': {selector!r}"}
 
     # THE CLIENT NAMES THE ROOT; THE HELPER NEVER GUESSES IT. The helper is
     # shared and runs from ``/`` (see ``main``), so its own working directory

@@ -7,11 +7,10 @@
 ## Home Profile Bin Dirs":
 ##
 ##   * Linux / macOS: `<state-dir>/current` is a symlink to
-##     `<state-dir>/generations/<gen-id>`. Rotation is `remove +
-##     createSymlink` (atomic from the user's perspective because
-##     `current` always exists either with the old target or the
-##     new one — the brief window between remove and create is the
-##     standard POSIX symlink-rotation race, accepted by the spec).
+##     `<state-dir>/generations/<gen-id>`. Rotation renames a new
+##     symlink over the old one, durably (`writeCurrentGenerationId`),
+##     so `current` always names either the old generation or the new
+##     one.
 ##   * Windows: there is no symlink. Instead the pipeline keeps a
 ##     stable bin dir at `<state-dir>/bin/` (referenced once by the
 ##     user's PATH) and mirrors the new generation's per-generation
@@ -153,6 +152,29 @@ proc rotateCurrent*(stateDir, generationId: string) =
     writeCurrentGenerationId(stateDir, generationId)
   else:
     writeCurrentGenerationId(stateDir, generationId)
+
+proc resyncStableBin*(stateDir: string) =
+  ## Windows: rebuild the stable `<state-dir>\bin\` from the generation
+  ## `current` names. `rotateCurrent` empties the stable directory and
+  ## copies the new generation's launchers into it before it rewrites
+  ## `current.txt`; a crash in between leaves launchers of two
+  ## generations, or none, while `current.txt` still names the previous
+  ## one. The stable directory is derived state -- `current` is the
+  ## authority -- so partial-apply recovery restores it from there. With
+  ## no current generation it is emptied. A no-op on POSIX, where the
+  ## PATH entry follows the `current` symlink. Raises when a launcher
+  ## cannot be replaced (Windows refuses to overwrite a running `.exe`);
+  ## recovery treats that as a warning, not a failure.
+  when defined(windows):
+    let stable = stableBinDir(stateDir)
+    let active = readCurrentGenerationId(stateDir)
+    clearDirEntries(stable)
+    if active.len > 0:
+      let srcBin = generationBinDir(stateDir, active)
+      if dirExists(extendedPath(srcBin)):
+        mirrorBinDir(srcBin, stable)
+  else:
+    discard stateDir
 
 proc demoteCurrent*(stateDir: string) =
   ## Reset `current` to "no active generation". Used by the partial-

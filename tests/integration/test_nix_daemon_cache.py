@@ -132,5 +132,126 @@ class NixDaemonCache(unittest.TestCase):
                     process.wait(timeout=5)
 
 
+@unittest.skipUnless(os.name == "posix", "the Nix helper serves only on POSIX hosts")
+class NixDaemonSelectorStaysPure(unittest.TestCase):
+    """A selector is evaluated in pure mode, and a request cannot turn that off.
+
+    Foreign-Provisioning-And-Nix-Evaluation-Daemon.md §2.2. The helper puts a
+    request's selector on ``nix build``'s command line, and Nix reads a
+    leading ``-`` there as a flag. A request whose selector was ``--impure``
+    therefore made the helper evaluate the workspace flake (``nix build``'s
+    default installable) impurely, against the environment of whichever
+    client started the shared helper, and cached the answer under a key that
+    looked remote. The request also brings its own Nix configuration, and
+    three settings in it could undo pure evaluation: ``accept-flake-config``
+    (the flake's ``nixConfig`` then sets ``pure-eval = false``),
+    ``allow-unsafe-native-code-during-evaluation`` (``builtins.exec`` runs
+    with the helper's environment) and ``plugin-files``. The helper pins all
+    of them, and ``pure-eval`` itself, on the command line, which overrides
+    the configuration. A flake setting the user once saved as trusted
+    (``trusted-settings.json``) applies despite ``accept-flake-config``, so
+    each command also gets an empty ``NIX_DATA_HOME``.
+
+    Mock justification: as for ``NixDaemonCache`` above, the host ``nix`` is
+    a script that records its argv. What is under test is which command the
+    helper runs, or that it runs none; a real ``nix`` would show the impure
+    answer too, but needs a store and a builder this case does not.
+
+    Regression test for reprobuild-pm issue
+    ``2026-11-16-nix-evaluation-daemon-does-not-pin-pure-evaluation-for-a-selector.md``.
+    """
+
+    def test_an_option_shaped_selector_is_refused_and_selectors_are_pinned_pure(self):
+        with tempfile.TemporaryDirectory(prefix="rnp-", dir="/tmp") as directory:
+            directory = Path(directory)
+            root = directory / "workspace"
+            root.mkdir()
+            (root / "flake.nix").write_text("{ outputs = _: {}; }\n")
+            out = directory / "store" / "out"
+            invocations = directory / "nix-invocations"
+            data_homes = directory / "nix-data-homes"
+            fake_bin = directory / "bin"
+            fake_bin.mkdir()
+            fake_nix = fake_bin / "nix"
+            fake_nix.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                f"with open({str(invocations)!r}, 'a') as log:\n"
+                "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                f"with open({str(data_homes)!r}, 'a') as log:\n"
+                "    home = os.environ.get('NIX_DATA_HOME')\n"
+                "    log.write(json.dumps([home, home is not None and os.path.isdir(home)\n"
+                "                          and not os.listdir(home)]) + '\\n')\n"
+                f"os.makedirs({str(out)!r}, exist_ok=True)\n"
+                f"print({str(out)!r})\n")
+            fake_nix.chmod(0o755)
+
+            def argvs():
+                if not invocations.exists():
+                    return []
+                return [json.loads(line) for line in invocations.read_text().splitlines()]
+
+            env = dict(os.environ)
+            env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+            endpoint = directory / "d.sock"
+            with (directory / "daemon.log").open("w+") as log:
+                process = subprocess.Popen(
+                    [sys.executable, str(DAEMON), "--socket-path", str(endpoint),
+                     "--idle-exit-ms=120000"], stdout=log, stderr=log, env=env)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not endpoint.exists():
+                        self.assertIsNone(process.poll(), "helper exited before readiness")
+                        self.assertLess(time.monotonic(), deadline, "helper did not bind")
+                        time.sleep(0.01)
+
+                    def request(selector):
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                            client.settimeout(30)
+                            client.connect(str(endpoint))
+                            payload = dict(action="resolve", selector=selector,
+                                           workspaceRoot=str(root))
+                            client.sendall((json.dumps(payload) + "\n").encode())
+                            with client.makefile("rb") as response:
+                                return json.loads(response.readline())
+
+                    for hostile in ("--impure", "-L", "--option"):
+                        result = request(hostile)
+                        self.assertEqual(result["status"], "error",
+                                         f"selector {hostile!r} reached nix: {result}")
+                        self.assertEqual(argvs(), [],
+                                         f"selector {hostile!r} ran nix as {argvs()}")
+
+                    # Control: an ordinary selector is resolved, so the
+                    # refusals above are not a helper that resolves nothing.
+                    result = request(SELECTOR)
+                    self.assertEqual(result["status"], "success", result)
+                    [argv] = argvs()
+                    self.assertNotIn("--impure", argv)
+                    self.assertEqual(argv[-2:], ["--", SELECTOR],
+                                     f"selector not after an end-of-options marker: {argv}")
+                    pins = {argv[i + 1]: argv[i + 2] for i, arg in enumerate(argv[:-2])
+                            if arg == "--option"}
+                    self.assertEqual(pins, {
+                        "pure-eval": "true",
+                        "accept-flake-config": "false",
+                        "allow-unsafe-native-code-during-evaluation": "false",
+                        "plugin-files": "",
+                    }, f"pure evaluation is not pinned: {argv}")
+                    # Saved flake settings (``trusted-settings.json`` in
+                    # Nix's data directory) apply even with
+                    # ``accept-flake-config`` false, so the command gets a
+                    # fresh, empty data directory of its own.
+                    [[home, empty]] = [json.loads(line) for line in
+                                       data_homes.read_text().splitlines()]
+                    self.assertIsNotNone(home, "NIX_DATA_HOME is not set")
+                    self.assertTrue(empty, f"NIX_DATA_HOME {home} is not a fresh empty directory")
+                    self.assertFalse(Path(home).exists(), "the data directory outlived the command")
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                    process.wait(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

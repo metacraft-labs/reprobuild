@@ -76,8 +76,12 @@ suite "the CI plan skips only on a key store the job owns":
     # CI job owns; empty it, so only the stores below can vouch for it.
     writeRegistry(fx.workspaceRoot, [])
     let unitRule = policyRule(["main"], pmRequired, [req("t-unit", host)])
+    # The snapshot records what t-unit means, so the base anchors it and the
+    # only thing deciding a skip below is the key store (Test-Certificates.md
+    # §"What a required name means: its command set").
     let skipBase = fx.commitPolicy(
-      snapshotOf([unitRule], ciTrust = pctSkip), "base: skip")
+      snapshotOf([unitRule], ciTrust = pctSkip, commandSets = true),
+      "base: skip")
     # The candidate: it tracks a registered-key store that names the signer.
     let tracked = registeredKeyStorePath(fx.libAPath)
     storeWith(tracked, [signer])

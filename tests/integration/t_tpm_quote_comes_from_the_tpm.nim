@@ -112,10 +112,16 @@ const
   SwtpmStartAttempts = 200
   SwtpmStartIntervalMs = 50
 
-  QuotedRegisters = @[0, 1, 2, 3, 4, 5, 6, 7]
-    ## The registers this gate measures into and quotes. The same set
-    ## the driver quotes by default, so the driver's own
-    ## selection check is exercised rather than configured around.
+  QuotedRegisters = @[0, 1, 2, 3, 4, 5, 6, 7,
+                      8, 9, 10, 11, 12, 13, 14, 15]
+    ## The registers this gate measures into and quotes: PCRs 0-15 of
+    ## the SHA-256 bank, spelled out here rather than read from
+    ## `DefaultQuotedPcrs`, because the set is the specification's and
+    ## not the driver's. ReproOS-Remote-Attestation §4.3 (TPM, check 1)
+    ## has the verifier require the quote to cover every PCR it
+    ## examines and replay the log for PCRs 0-15 against it, so this is
+    ## the set the driver must quote by default — and this gate holds the
+    ## default to it rather than configuring around it.
 
 type
   LiveTpm = ref object
@@ -710,6 +716,36 @@ suite "the agent's own command line reaches a TPM":
         check qualifyingData(tpm2EvidenceQuote(ev)) ==
           hexToBytes("reportData", reportDataHexFor(bindings, challenge))
         check logExplainsQuote(ev)
+
+        # THE AGENT'S DEFAULT IS ONE THE VERIFIER ACCEPTS. `--tier=tpm`
+        # has no flag that sets a register selection, so what the daemon
+        # quotes is the library default, and that default must cover
+        # every PCR the verifier examines (Remote-Attestation §4.3, TPM,
+        # check 1). Read twice: off the driver's configuration, and off
+        # the wire — the selection inside the structure the TPM signed.
+        # Recorded by reprobuild-pm issue
+        # 2026-11-17-tpm-agent-default-quote-selection-omits-pcr-11.md:
+        # the default was PCRs 0-7, and the shipped verifier refused the
+        # shipped agent's evidence for not covering sha256:11.
+        var configured, signed: seq[int]
+        for s in selectedPcrs(Tpm2Driver(driver).quotedSelection()):
+          check s.bank == TpmAlgSha256
+          configured.add s.index
+        for s in selectedPcrs(tpm2EvidenceQuote(ev).attest.quote.pcrSelect):
+          check s.bank == TpmAlgSha256
+          signed.add s.index
+        check configured == QuotedRegisters
+        check signed == QuotedRegisters
+
+        # And the verifier's own measured-boot reader, given the report
+        # exactly as the daemon built it, reads it rather than refusing
+        # it. Its coverage refusal names the register that is missing,
+        # so the second line pins the reason should the first go red.
+        let reading = readAuthoritativeEvidence(report)
+        checkpoint "verifier reading: " & reading.finding.detail
+        check reading.finding.kind == fkSatisfied
+        check ("and not " & $TpmAlgSha256 & ":11") notin
+          reading.finding.detail
       finally:
         driver.driverClose()
 

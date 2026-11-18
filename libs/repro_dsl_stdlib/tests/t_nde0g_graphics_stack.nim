@@ -111,8 +111,8 @@ proc resetRecipeState(storeRoot: string) =
   resetDslPortFsState()
   resetDslPortFsExtState()
   resetDslPortMaterialiseState()
-  resetConfigurable("graphicsStack.aptSnapshot")
-  resetConfigurable("graphicsStack.enableHardwareGl")
+  resetConfigurable("package.graphicsStack.aptSnapshot")
+  resetConfigurable("package.graphicsStack.enableHardwareGl")
   registerStoreRoot("graphicsStack", storeRoot, dhaSha256)
   registerStoreRoot(Nde0gPackageName, storeRoot, dhaSha256)
   recipe.registerGraphicsStackFiles()
@@ -293,7 +293,7 @@ suite "NDE0-G graphics-stack package":
 
     # Pass B — flip enableHardwareGl to false.
     resetRecipeState(rootSw)
-    setConfigurable[bool]("graphicsStack.enableHardwareGl", false)
+    setConfigurable[bool]("package.graphicsStack.enableHardwareGl", false)
     reregisterWithCurrentConfigurables(rootSw)
     let swBytes = readStoreFile(consumeLdConf())
     let swHandle = consumeLdConf()
@@ -403,7 +403,7 @@ suite "NDE0-G graphics-stack package":
 
     # Pass B — bump the snapshot pin.
     setConfigurable[string](
-      "graphicsStack.aptSnapshot", "ubuntu/jammy/20271231T000000Z")
+      "package.graphicsStack.aptSnapshot", "ubuntu/jammy/20271231T000000Z")
     reregisterWithCurrentConfigurables(root)
     let lcB = consumeLdConf()
     let svcB = consumeLdconfigService()

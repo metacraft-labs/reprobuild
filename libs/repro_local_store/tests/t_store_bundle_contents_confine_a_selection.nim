@@ -120,6 +120,58 @@ suite "a bundle's contents confine import to its roots and selection":
       BundleSelection(included: @["/x/m"])))
     check "include directory outside" in msg
 
+  test "a devenv line names only its project's frozen script, in the selection":
+    # `repro bundle restore --activate` writes `. <script>` into
+    # /etc/profile.d, and `repro store import --allow-dev-env` allow-lists the
+    # project, so a `devenv` line must name what export writes (§6): a
+    # project in the selection and that project's own frozen script, carried
+    # as a file. Driven through `parseContents`, as import reads it.
+    # (issues/2026-11-17-bundle-devenv-lines-name-any-script-and-any-project-to-activate-and-allow.md)
+    proc devenvRefusal(project, script: string;
+                       carried: seq[string]): string =
+      var text = "reprobuild.store-bundle.contents.v2\n" &
+        "producer\t1.2.3\tabc\n" &
+        "root\tstore\t/s\nroot\taction-cache\t/c\nroot\tworkspace\t/w\n" &
+        "exclude\t/w/gamma\n" &
+        "devenv\t" & escapeField(project) & "\t" & escapeField(script) & "\n"
+      for path in carried:
+        text.add("entry\tf\t644\t1\t1\t00\t" & escapeField(path) & "\n")
+      refusal(parseContents(text))
+    proc withMode(script, dir: string; mode: int): string =
+      let text = "reprobuild.store-bundle.contents.v2\n" &
+        "producer\t1.2.3\tabc\n" &
+        "root\tstore\t/s\nroot\taction-cache\t/c\nroot\tworkspace\t/w\n" &
+        "devenv\t/w/alpha\t" & escapeField(script) & "\n" &
+        "entry\td\t" & toOct(mode, 3) & "\t0\t1\t-\t" &
+        escapeField(dir) & "\n" &
+        "entry\tf\t644\t1\t1\t00\t" & escapeField(script) & "\n"
+      refusal(parseContents(text))
+    let script = frozenScriptPath(Store, "/w/alpha")
+    check script.startsWith("/s/frozen-dev-env/")
+    check script.endsWith("/activate.bash")
+    # What export writes is accepted.
+    check devenvRefusal("/w/alpha", script, @[script]).len == 0
+    # A script anywhere else -- a world-writable file a login shell would
+    # then source -- is refused, carried or not.
+    check "must be" in devenvRefusal("/w/alpha", "/tmp/x.sh", @[])
+    check "must be" in devenvRefusal("/w/alpha", "/w/alpha/x.sh",
+      @["/w/alpha/x.sh"])
+    # Another project's frozen script is not this project's.
+    let other = frozenScriptPath(Store, "/w/beta")
+    check "must be" in devenvRefusal("/w/alpha", other, @[other])
+    # A world-writable directory above the script lets anyone replace it.
+    # Every carried directory above it counts, up to the store root itself:
+    # a world-writable <store> lets anyone rename frozen-dev-env aside.
+    for dir in [script.parentDir, script.parentDir.parentDir, Store]:
+      check withMode(script, dir, 0o755).len == 0
+      check "world-writable" in withMode(script, dir, 0o777)
+    # The right path, but not carried: nothing holds it to the bundle's bytes.
+    check "without carrying" in devenvRefusal("/w/alpha", script, @[])
+    # A project outside the roots or the selection is not allow-listed.
+    for project in ["/etc", "/wx/p", "/w/gamma/p", "/w/alpha/../../etc"]:
+      let s2 = frozenScriptPath(Store, project)
+      check "not in its workspace roots" in devenvRefusal(project, s2, @[s2])
+
   test "contents round-trip the producer and the selection, and v1 is refused":
     let c = closureWith("/w/alpha/out")
     let parsed = parseContents(renderContents(c))

@@ -160,15 +160,15 @@ proc currentPlasmaCfg*(): plasmaImpl.PlasmaConfig =
   let defaults = plasmaImpl.defaultConfig()
   result = plasmaImpl.PlasmaConfig(
     aptSnapshot: readConfigurable[string](
-      "plasmaDesktop.aptSnapshot", defaults.aptSnapshot),
+      "package.plasmaDesktop.aptSnapshot", defaults.aptSnapshot),
     sddmAutoLogin: readConfigurable[bool](
-      "plasmaDesktop.sddmAutoLogin", defaults.sddmAutoLogin),
+      "package.plasmaDesktop.sddmAutoLogin", defaults.sddmAutoLogin),
     sddmAutoLoginUser: readConfigurable[string](
-      "plasmaDesktop.sddmAutoLoginUser", defaults.sddmAutoLoginUser),
+      "package.plasmaDesktop.sddmAutoLoginUser", defaults.sddmAutoLoginUser),
     waylandSession: readConfigurable[bool](
-      "plasmaDesktop.waylandSession", defaults.waylandSession),
+      "package.plasmaDesktop.waylandSession", defaults.waylandSession),
     pipewireEnabled: readConfigurable[bool](
-      "plasmaDesktop.pipewireEnabled", defaults.pipewireEnabled),
+      "package.plasmaDesktop.pipewireEnabled", defaults.pipewireEnabled),
     storeRoot: defaults.storeRoot)
 
 # ---------------------------------------------------------------------------
