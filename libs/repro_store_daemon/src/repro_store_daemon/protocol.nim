@@ -14,11 +14,17 @@ when defined(windows):
   import blake3
 
 const
-  StoreDaemonProtocolVersion* = 8'u16
+  StoreDaemonProtocolVersion* = 9'u16
     ## v8: the external-realize body carries ``nixRequesterDir``, the
     ## client's working directory, which a relative ``expressionFile`` and a
     ## ``.#`` selector are resolved against. A v7 peer reading a v8 body
     ## would read the directory's length as the next field.
+    ##
+    ## v9: the external-realize body also carries ``closureEntries``, the
+    ## closure manifest's canonical lines inlined by the client. A record
+    ## from a published artifact has no manifest FILE for the daemon to open,
+    ## so a v8 peer would realize it without its closure. A v8 peer reading
+    ## a v9 body would read the entry count as ``stripComponents``.
     ##
     ## v7: the external-realize body carries the record's whole
     ## ``archiveDetail`` (``TarballArchiveDetail``, version-tagged) where v6
@@ -130,6 +136,10 @@ type
       ## When true the daemon must realize but never publish this prefix.
     launcher*: string
       ## Interpreter a script payload is run through; empty for a program.
+    closureEntries*: seq[string]
+      ## v9: the closure manifest's canonical lines, inlined from a published
+      ## artifact's record; empty when the closure is the file in
+      ## ``closureManifest`` or there is none.
     closureManifest*: string
       ## Recipe-relative manifest of additional archives to unpack; empty
       ## when the prefix is exactly one archive.
@@ -346,6 +356,7 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeU32Le(if req.nonRedistributable: 1'u32 else: 0'u32)
   result.writeString(req.launcher)
   result.writeString(req.closureManifest)
+  result.writeStringSeq(req.closureEntries)
   result.writeTaggedTarballArchiveDetail(req.archiveDetail)
   result.writeU32Le(uint32(max(req.stripComponents, 0)))
 
@@ -376,6 +387,7 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.nonRedistributable = body.readU32Le(pos) != 0'u32
   result.launcher = body.readString(pos)
   result.closureManifest = body.readString(pos)
+  result.closureEntries = body.readStringSeq(pos)
   result.archiveDetail = body.readTaggedTarballArchiveDetail(pos)
   result.stripComponents = int(body.readU32Le(pos))
 

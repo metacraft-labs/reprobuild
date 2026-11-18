@@ -335,6 +335,8 @@ proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse 
     nonRedistributable: req.nonRedistributable,
     launcher: req.launcher,
     closureManifest: req.closureManifest,
+    closureEntries: parseClosureManifestText(req.closureEntries.join("\n"),
+      "closure entries of " & req.packageSelector),
     stripComponents: req.stripComponents,
     packageId: req.packageId,
     lockIdentity: req.lockIdentity,

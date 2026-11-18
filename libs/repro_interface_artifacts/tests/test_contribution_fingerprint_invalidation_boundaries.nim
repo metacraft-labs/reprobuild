@@ -296,6 +296,23 @@ suite "contribution fingerprint invalidation boundaries":
     check after != before
     check targetFingerprint() == fp
 
+  test "a closure entry's archive URL moves the contribution fingerprint":
+    # A closure entry is an archive the record realizes, so its URL is an
+    # archive URL (Provisioning-Contributions.md § Identities). Mutation:
+    # leave ``closureEntries`` out of ``tarballFieldView`` -> red.
+    let fp = targetFingerprint()
+    let entry = "node_modules/a " & repeat('d', 64) & " https://example.invalid/a.tgz"
+    var withClosure = tarballDef()
+    withClosure.closureEntries = @[entry]
+    var moved = tarballDef()
+    moved.closureEntries = @[entry.replace("example.invalid", "mirror.invalid")]
+    let base = hexOf(identityOf(contributionDef(fp, tarball = @[tarballDef()])))
+    let a = hexOf(identityOf(contributionDef(fp, tarball = @[withClosure])))
+    let b = hexOf(identityOf(contributionDef(fp, tarball = @[moved])))
+    check a != base
+    check b != a
+    check targetFingerprint() == fp
+
   test "a scoop manifest field moves the contribution fingerprint only":
     let fp = targetFingerprint()
     let before = hexOf(identityOf(contributionDef(fp,

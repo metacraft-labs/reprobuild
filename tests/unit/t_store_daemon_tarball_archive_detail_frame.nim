@@ -167,3 +167,20 @@ suite "the store daemon tarball frame carries the archive detail":
       "root").closureManifest == "/elsewhere/closure.manifest"
     check requestFromTarballUse(toolUse(plainRecord()), "/store", "holder",
       "root").closureManifest == ""
+
+  test "inlined closure entries cross the frame and drop the file path":
+    # A record from a published artifact has no manifest file the daemon
+    # could open, and the daemon rebuilds the record from this message
+    # alone: the entries must cross or the realize silently loses its
+    # closure. Mutation: omit the entries from the frame body -> red.
+    var record = plainRecord()
+    record.closureManifest = "closures/x.manifest"
+    record.closureEntries = @[ClosureEntry(path: "node_modules/a",
+      sha256: repeat("ab", 32), url: "https://example.invalid/a.tgz",
+      archiveType: "tar.gz", stripComponents: 1)]
+    let request = requestFromTarballUse(toolUse(record), "/store", "holder",
+      "root")
+    check request.closureManifest == ""
+    let restored = parseExternalRealizeBody(externalRealizeBody(request))
+    check restored.closureEntries == request.closureEntries
+    check restored.closureEntries.len == 1
