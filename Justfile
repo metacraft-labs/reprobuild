@@ -337,8 +337,10 @@ list-standalone-gates:
 # pre-commit hook here, and writes nothing into any other repository; a
 # commit runs `just lint` in the dev shell and is refused when it fails.
 # Enters the dev shell repeatedly and lints twice, so it is not part of
-# `just test`.
+# `just test`. The commit hook's shell holds a permanent GC root for its
+# closure (a local probe shell; `just lint` runs only its wiring check).
 dev-shell-hooks:
+    bash ./tests/test_dev_shell_entry_roots_its_closure.sh
     bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
     bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
 
@@ -742,6 +744,11 @@ lint:
     # Windows runner. A few minutes for both targets, nearly all of it Nim's
     # codegen; the C stage is seconds. See the script header.
     bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
+    # The commit hook enters its dev shell through a profile, so the closure
+    # this lint runs from -- the MinGW compiler above among it -- has a
+    # permanent GC root and an automatic Nix GC cannot collect it mid-commit.
+    # Wiring only (greps, no Nix): the behaviour test is in dev-shell-hooks.
+    bash ./tests/test_dev_shell_entry_roots_its_closure.sh --wiring-only 2>&1 | tee -a test-logs/lint.log
     # The other closure a green sweep says nothing about: what an INSTALLED
     # reprobuild compiles against. The sweep reads the checkout; a release
     # archive carries only what stage_release_sources.sh copies, and v0.2.19

@@ -31,6 +31,13 @@
 #   * a merge whose conflicts were only in those paths and whose staged tree
 #     differs from git's own merge result only in those paths.
 # Anything else -- one authored line anywhere else -- runs the full lint.
+#
+# The shell is entered through a profile in the checkout's git directory
+# (scripts/lib/rooted_dev_shell.sh), so its whole closure -- the MinGW
+# compiler of the Windows C stage among it -- holds a permanent GC root while
+# the lint runs. A plain `nix develop --command` leaves only a temporary root
+# that is dropped when nix execs the command, and on a host below Nix's
+# `min-free` the automatic GC then collects the lint's own tools under it.
 set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -97,6 +104,9 @@ regeneration_only() {
 	fi
 }
 
+# shellcheck source=scripts/lib/rooted_dev_shell.sh
+source "$repo_root/scripts/lib/rooted_dev_shell.sh"
+profile="$(rooted_dev_shell_profile "$repo_root")"
 cd "$repo_root/scripts"
 if (regeneration_only); then
 	echo "pre_commit_lint: only generated suite artifacts are authored here; running the gates that grade them, not the full lint"
@@ -104,7 +114,7 @@ if (regeneration_only); then
 	# commit if that changes the tree, which is the check that the committed
 	# edge table is the generator's.
 	# shellcheck disable=SC2016 # expanded by the inner bash, from "$1"
-	exec nix develop "$repo_root" --no-write-lock-file --command bash -euo pipefail -c '
+	rooted_dev_shell_exec "$profile" "$repo_root" --no-write-lock-file --command bash -euo pipefail -c '
 		cd "$1"
 		nim r --hints:off scripts/generate_test_edges.nim
 		python3 ./scripts/reprobuild_suite_inventory.py --check-static-case-counts
@@ -113,5 +123,5 @@ if (regeneration_only); then
 		python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity
 	' _ "$repo_root"
 fi
-exec nix develop "$repo_root" --no-write-lock-file --command \
+rooted_dev_shell_exec "$profile" "$repo_root" --no-write-lock-file --command \
 	just --justfile "$repo_root/Justfile" lint
