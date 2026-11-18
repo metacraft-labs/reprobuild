@@ -14632,7 +14632,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_infra_cache_keys.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 13,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -16502,7 +16502,8 @@
       "localDependencyShape": [
         "repro_deploy_agent",
         "repro_peer_cache",
-        "repro_profile"
+        "repro_profile",
+        "repro_profile_compile"
       ],
       "owner": "libs/repro_deploy_agent",
       "requiresReproBinary": true,
@@ -23673,8 +23674,8 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 13,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
