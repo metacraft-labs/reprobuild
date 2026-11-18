@@ -1239,7 +1239,9 @@ const
     ##                decided 2026-11-17, option 1). v33 and older
     ##                payloads decode them empty. They bind into every
     ##                fingerprint that binds the record, so a changed
-    ##                closure moves every pin; the fingerprint projection
+    ##                closure moves the interface fingerprint and the realization
+    ##                digest (the contribution field view of
+    ##                ``contribution_fingerprint`` does not bind it); the fingerprint projection
     ##                writes the block only when entries exist, so no
     ##                fingerprint hashed from a record without a closure
     ##                moves.
@@ -3067,8 +3069,8 @@ proc inlinedClosureEntries(provisioning: TarballProvisioningDef):
   ## published artifact) is parsed from them and the file is never opened. A
   ## def with a manifest path reads the file, resolved the way realization
   ## resolves it: absolute as written, else beside the declaring file, else
-  ## against the working directory. A missing file refuses here, at the lift,
-  ## not at some later realize on another host.
+  ## against the working directory. A missing file yields no entries here; the
+  ## publisher refuses such a record.
   if provisioning.closureEntries.len > 0:
     return parseClosureManifestText(provisioning.closureEntries.join("\n"),
       "inlined closure entries of " & provisioning.url)
@@ -3080,9 +3082,13 @@ proc inlinedClosureEntries(provisioning: TarballProvisioningDef):
     elif provisioning.sourceFile.len > 0:
       parentDir(provisioning.sourceFile) / declared
     else: declared
+  # A lift that cannot see the file (a prebuilt provider read away from its
+  # checkout) leaves the entries empty and keeps the realize-time error it
+  # always had; the PUBLISHER refuses such a record instead, because a
+  # published record without its entries cannot be realized by a consumer
+  # (``catalog_publication``).
   if not fileExists(extendedPath(path)):
-    raise newException(OSError,
-      "tool-resolution failed: closure manifest not found: " & path)
+    return @[]
   parseClosureManifestText(readFile(extendedPath(path)), path)
 
 proc toInterfaceTarballProvisioning(packageName: string;

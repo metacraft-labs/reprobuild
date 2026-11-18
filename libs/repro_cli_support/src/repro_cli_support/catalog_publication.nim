@@ -225,6 +225,16 @@ proc publishableArtifact*(extracted: ProjectInterfaceArtifact;
   # ``decodePublishedArtifact`` below checks as a consumer will. Locations
   # are no input of it, so this is the extracted fingerprint; not asserted
   # separately, because no input can make such a check fail.
+  # A record naming a closure manifest must carry its entries: the consumer
+  # has no manifest file (envelope v34). The lift leaves them empty when it
+  # could not open the file, which is exactly the record to refuse here.
+  for contribution in pi.provisioningContributions:
+    for record in contribution.tarballProvisioning:
+      if record.closureManifest.len > 0 and record.closureEntries.len == 0:
+        problems.add("package " & contribution.targetPackage &
+          " names closure manifest " & record.closureManifest &
+          " but the extraction could not read it, so the published record " &
+          "would carry no closure entries")
   let published = artifactFor(pi)
   let fileName = pi.projectName & PublishedArtifactSuffix
   let nameDefect = fileNameDefect(pi.projectName)

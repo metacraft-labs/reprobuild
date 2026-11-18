@@ -151,6 +151,9 @@ suite "closure entries in the record":
     rec.url = fileUrl(rootTgz)
     rec.sha256 = "sha256:" & sha256Hex(readFile(rootTgz))
     rec.lockIdentity = "tarball:closurefixture@1:sha256:" & rec.sha256
-    expect ValueError:
+    try:
       discard resolveTarballTool(useWith(rec), root / "store")
+      check false
+    except ValueError as err:
+      check "must be relative and inside the prefix" in err.msg
     check not dirExists(root / "outside")
