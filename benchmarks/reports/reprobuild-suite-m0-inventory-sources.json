@@ -14967,7 +14967,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_path_mode_dev_env_provides_realized_tools.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -28504,8 +28504,8 @@
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": true,
       "source": "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 33,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -7756,9 +7756,10 @@ proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
   ## uses. v5 bound the expression by its PATH only (through the codec
   ## bytes), so bumping the nixpkgs pin or editing a lock file the
   ## expression reads served the stale identity. Bound in EVERY mode: Nix is
-  ## reached from path mode (the Linux/macOS fallback) and from-source mode
-  ## (the stdlib fall-through) as well as nix mode. Every v5 key changes
-  ## once (a one-time miss, approved).
+  ## reached from from-source mode (the stdlib fall-through) as well as nix
+  ## mode, and was reached from path mode until path mode became strictly
+  ## PATH-only (2026-11-17). Every v5 key changes once (a one-time miss,
+  ## approved).
   ##
   ## v7 (owner decision, 2026-10-14; Edge-Derived-Identities.md §7 rider):
   ## the expression-closure scanner behind v6 PREDICTED what the Nix
@@ -16556,16 +16557,15 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   ## Path-mode contributes only what the caller's PATH could NOT supply. Its
   ## contract is "resolve against the caller's PATH", so a tool found there is
   ## left where it is -- prepending the resolver's own search list would merely
-  ## re-order the host's PATH against itself. But the path-mode resolver does
-  ## not stop at the caller's PATH: a tool missing from it whose package
-  ## declares a release archive is realized from that archive, which is how
-  ## `repro build` obtains it. An activation that skipped path mode outright
-  ## therefore provided less than the build it is the environment for:
-  ## reprobuild's own Windows shell, entered from a minimal PATH, had neither
-  ## `just` nor anything else its `uses:` declares, and `just lint` could not
-  ## start. So path mode now runs the same resolution and contributes the
-  ## directories of every tool it REALIZED (any install method other than
-  ## `path`), and nothing for a tool the caller's PATH already had.
+  ## re-order the host's PATH against itself. Path mode still runs the same
+  ## resolution `repro build` does and contributes what that resolution
+  ## realizes by other means (an environment-prefix library, a cross-repo
+  ## producer's bin dirs: any install method other than `path`), so the
+  ## shell is the environment of the build. Path mode no longer realizes a
+  ## tool missing from PATH from its archive or Nix (operator decision of
+  ## 2026-11-17, reprobuild-pm issue
+  ## 2026-11-12-per-mode-fallback-semantics-disagree): such a tool is
+  ## reported absent here, exactly as the build refuses it.
   ##
   ## Never fatal. A recipe that names a package with no realization for this
   ## platform must leave the developer with a WORKING shell that says what it
@@ -16702,11 +16702,14 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       except CatchableError as toolErr:
         unresolved.add(%*{"packageSelector": useDef.packageSelector,
           "rawConstraint": useDef.rawConstraint, "reason": toolErr.msg})
-        # In path mode a tool that is neither on the caller's PATH nor
-        # realizable is merely absent -- that mode's ordinary state, and what
-        # it reported before it provided anything at all. Only a tool the
-        # resolver COULD have realized and did not is worth a warning.
-        if mode == tpmPathOnly and not pathModeCanRealize(useDef):
+        # In path mode a tool that is not on the caller's PATH is merely
+        # absent -- that mode's ordinary state: path mode is strictly
+        # PATH-only and realizes nothing else (operator decision of
+        # 2026-11-17, reprobuild-pm issue
+        # 2026-11-12-per-mode-fallback-semantics-disagree). A tool that IS
+        # on PATH but outside its declared range is refused, and that is
+        # worth a warning: the shell would otherwise run it unannounced.
+        if mode == tpmPathOnly and not (toolErr of UsesVersionOutOfRange):
           inc absentInPathMode
           continue
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")

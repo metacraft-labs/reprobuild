@@ -11,6 +11,7 @@ verifies:
   tests:
     - tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim
     - libs/repro_cli_support/tests/t_path_mode_dev_env_provides_realized_tools.nim
+    - libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim
     - libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim
     - libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_surface_is_typed.nim
 unverified:
@@ -20,8 +21,8 @@ unverified:
   - claim: "The command line overrides REPRO_TOOL_PROVISIONING, which overrides defaultToolProvisioning."
     reason: "Read from the CLI's provisioning resolution, and the variable overriding the project default was observed on Linux with repro 0.2.24 built from reprobuild 84b459adda; no test checks the order."
     owner: unassigned
-  - claim: "Under path, the development environment takes a tool from PATH when it is there and obtains the ones PATH lacks."
-    reason: "Observed on Linux with repro 0.2.24 built from reprobuild 84b459adda (gcc from /usr/bin, cowsay from the Nix store); t_path_mode_dev_env_provides_realized_tools.nim covers it for archive realizations, not Nix ones."
+  - claim: "Under path, a Nix-only package missing from PATH is not obtained from Nix by the development environment."
+    reason: "The tests cited above cover a package with an archive; a Nix-only package was not run through repro exec or the shell hook."
     owner: unassigned
   - claim: "A package with no build: block runs no action under nix."
     reason: "Observed on Linux with repro 0.2.24 built from reprobuild 84b459adda (the build resolves the tools and exits 0); no test pins the behaviour per mode."
@@ -31,9 +32,6 @@ unverified:
     owner: unassigned
   - claim: "repro shell and the shell hook use the project's default, as repro build and repro exec do."
     reason: "repro build and repro exec were run; repro shell and the hook were not, and no test is cited for them."
-    owner: unassigned
-  - claim: "Under path, repro build of a tool that is absent from PATH fails rather than obtaining it."
-    reason: "Not run; the page does not state either outcome."
     owner: unassigned
   - claim: "macOS behaves as Linux for every step."
     reason: "The steps were run on Linux only."
@@ -163,9 +161,14 @@ Allowed repro dev-env for: ~/tools
 ```
 <!-- generated:end -->
 
-With `REPRO_TOOL_PROVISIONING=path` set, the environment takes a tool from
-your `PATH` when the tool is there, and still obtains the ones your `PATH`
-lacks.
+With `REPRO_TOOL_PROVISIONING=path` set, tools come from your `PATH` and
+from nowhere else. A tool your `PATH` lacks, or one whose version is outside
+the range the project declares, is refused: a build fails with a message
+naming the tool and the remedy (`--tool-provisioning=nix` or
+`--tool-provisioning=tarball`, or a per-tool override where your workspace
+declares one), and the development environment reports it as unresolved.
+Path mode never quietly downloads an archive or builds from Nix in its
+place.
 
 ## Related
 

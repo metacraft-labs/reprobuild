@@ -997,11 +997,12 @@ package reprobuild:
     # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
     # actionlint over ``.github/workflows``. The flake shell carries it on
     # Linux and macOS (so path mode finds it there); on Windows there is no
-    # flake shell, and the path-mode resolver realizes it from the release
-    # archives reprobuild-packages' ``packages/interfaces/actionlint``
-    # declares -- as it does ``just`` from the stdlib's. Without it the
-    # repository's local gate, the only gate ``agents`` has, could not pass
-    # in a Windows dev shell.
+    # flake shell. Path mode takes tools from PATH only (2026-11-17), so a
+    # Windows dev shell needs ``actionlint`` and ``just`` on PATH, or tarball
+    # mode / a per-tool override to realize them from the release archives
+    # reprobuild-packages' ``packages/interfaces/actionlint`` and the stdlib
+    # declare. Without it the repository's local gate, the only gate
+    # ``agents`` has, could not pass in a Windows dev shell.
     "actionlint"
     "sh"
     "bash"
@@ -4536,8 +4537,9 @@ package reprobuild:
             # Decision N (amended 2026-11-03): the prefix ships the catalog
             # fork under nim/, so the images must have been compiled by that
             # fork -- refused, naming the compiler, when the `nim` the edges
-            # resolve is not it (path mode falls back to the stock tarball
-            # Nim when the fork is not on PATH).
+            # resolve is not it (a stock Nim on PATH, or, before path mode
+            # became PATH-only on 2026-11-17, the stock tarball Nim it fell
+            # back to when the fork was not on PATH).
             nimForkGuardScript(catalogMirror("nim-fork") / "nim",
               projectRoot / "flake.lock")])
         let prefix = installedPrefix(spec, projectRoot)

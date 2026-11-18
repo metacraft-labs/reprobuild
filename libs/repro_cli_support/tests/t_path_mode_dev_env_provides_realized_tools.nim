@@ -1,31 +1,34 @@
-## A path-mode dev environment provides the tools the path-mode resolver
-## realizes, and leaves alone the ones the caller's PATH already supplies.
+## A path-mode dev environment is the environment of a path-mode build: it
+## takes from the caller's PATH what the build takes from it, and realizes
+## nothing the build would not.
 ##
-## THE DEFECT. Under ``defaultToolProvisioning "path"`` the resolver looks a
-## declared tool up on the caller's PATH and, when it is not there and its
-## package declares a release archive, realizes it from that archive -- which
-## is how ``repro build`` obtains it. The activation surfaces (``repro exec``,
-## ``repro shell``, the shell hook) skipped path mode outright and contributed
-## no PATH entry at all, so they provided less than the build they are the
-## environment for. reprobuild's own Windows shell, entered from a minimal
-## PATH, had neither ``just`` nor anything else its ``uses:`` declares, and
-## ``just lint`` could not start.
+## HISTORY. Under ``defaultToolProvisioning "path"`` the resolver used to look
+## a declared tool up on the caller's PATH and, when it was not there and its
+## package declared a release archive, realize it from that archive. The
+## activation surfaces (``repro exec``, ``repro shell``, the shell hook) were
+## taught to contribute those realized directories. On 2026-11-17 the
+## operator made path mode strictly PATH-only (reprobuild-pm issue
+## 2026-11-12-per-mode-fallback-semantics-disagree, option (b)): a tool absent
+## from PATH fails the build, naming the remedy, and is never realized from
+## an archive or Nix. The activation follows the build.
 ##
-## THE TWO CASES, and why both are needed:
+## THE CASES:
 ##
-##   1. A tool ABSENT from the caller's PATH, with an archive, is realized and
-##      its directory is prepended. Before the fix there was no op at all.
+##   1. A tool ABSENT from the caller's PATH, although its package declares an
+##      archive, is NOT realized: no directory providing it is prepended, and
+##      the diagnostic records it as unresolved with the path-mode remedy.
 ##   2. A tool PRESENT on the caller's PATH contributes nothing, although it
-##      has an archive too. This is the half of path mode's contract that must
-##      not move: "resolve against the caller's PATH" -- a fix that simply
-##      realized every declared tool would pass case 1 and fail here.
+##      has an archive too: "resolve against the caller's PATH".
+##   3. In tarball mode the same recipe's archive IS realized and prepended,
+##      and a tool that cannot be realized does not cost the shell the ones
+##      that were (the per-tool retry), even when the diagnostic file cannot
+##      be written.
 ##
 ## The recipe also declares a third tool that is on no PATH and has nothing to
 ## be realized from -- reprobuild's own recipe has several (`runquotad`, the
-## source-library producers). That makes the batch resolution fail and the
-## activation fall back to resolving tool by tool, which is the path a real
-## Windows shell takes; case 1 then also holds that one absent tool does not
-## cost the shell the tools that WERE realized.
+## source-library producers). Together with the absent tool that makes the
+## batch resolution fail and the activation fall back to resolving tool by
+## tool, which is the path a real Windows shell takes.
 ##
 ## The mixed-resolution case also checks the diagnostic's actual path/hash
 ## and probe output/status, including a nonzero probe, while the incomplete
@@ -125,9 +128,11 @@ suite "path-mode dev environment":
     # No shared cache: a fixture prefix must never be published anywhere.
     putEnv("REPRO_CACHE_DISABLE", "1")
     delEnv("REPRO_TOOL_PROVISIONING")
-    # The caller's PATH holds exactly one of the two tools.
+    # The caller's PATH holds exactly one of the two archived tools, and the
+    # tool whose version probe fails.
     let ambient = root / "ambient"
     writeExecutable(ambient / ("present" & ExeSuffix))
+    writeExecutable(ambient / ("probe-fails" & ExeSuffix))
     putEnv("PATH", ambient)
     let outDir = root / "out"
     createDir(outDir)
@@ -146,6 +151,7 @@ suite "path-mode dev environment":
     if savedStore.len > 0: putEnv(StoreRootEnvVar, savedStore)
     else: delEnv(StoreRootEnvVar)
     if savedMode.len > 0: putEnv("REPRO_TOOL_PROVISIONING", savedMode)
+    else: delEnv("REPRO_TOOL_PROVISIONING")
     if savedCacheDisable.len > 0: putEnv("REPRO_CACHE_DISABLE", savedCacheDisable)
     else: delEnv("REPRO_CACHE_DISABLE")
     if savedProbeCounter.len > 0:
@@ -153,7 +159,24 @@ suite "path-mode dev environment":
     else: delEnv("REPRO_TEST_TOOL_PROBE_COUNTER")
     removeTree(root)
 
-  test "a tool missing from PATH is realized and prepended":
+  test "a tool missing from PATH is not realized from its archive":
+    let prepended = prependedPaths(devEnvToolShellOpsAt(interfacePath, outDir))
+    checkpoint("prepended: " & $prepended)
+    for dir in prepended:
+      checkpoint(dir & ": " & $listing(dir))
+      check not fileExists(dir / ("absent" & ExeSuffix))
+    let doc = parseFile(outDir / "path-only-tool-identities.inspect.json")
+    let absent = doc["unresolvedToolUses"].getElems.filterIt(
+      it{"packageSelector"}.getStr() == "absent")
+    require absent.len == 1
+    let reason = absent[0]{"reason"}.getStr()
+    checkpoint("reason: " & reason)
+    check "was not found in PATH" in reason
+    check "--tool-provisioning=tarball" in reason
+    check "per-tool provisioning override" in reason
+
+  test "in tarball mode the same archive is realized and prepended":
+    putEnv("REPRO_TOOL_PROVISIONING", "tarball")
     let prepended = prependedPaths(devEnvToolShellOpsAt(interfacePath, outDir))
     checkpoint("prepended: " & $prepended)
     var providing: seq[string] = @[]
@@ -172,7 +195,9 @@ suite "path-mode dev environment":
 
   test "mixed fallback replaces stale inspection with actual partial observations":
     var mixed = readInterfaceArtifact(interfacePath).projectInterface
-    mixed.toolUses.add(rawTarballUse(root, "probe-fails"))
+    # On PATH (setup), so path mode takes it there and probes it.
+    mixed.toolUses.add(InterfaceToolUse(rawConstraint: "probe-fails",
+      packageSelector: "probe-fails", executableName: "probe-fails"))
     var complete = mixed
     complete.toolUses = complete.toolUses.filterIt(it.packageSelector == "present")
     let inspection = outDir / "path-only-tool-identities.inspect.json"
@@ -200,13 +225,14 @@ suite "path-mode dev environment":
     let unresolved = doc{"unresolvedToolUses"}
     let hasUnresolved = not unresolved.isNil
     require hasUnresolved
-    require unresolved.len == 1
-    check unresolved[0]{"packageSelector"}.getStr() == "unprovisioned"
-    check unresolved[0]{"reason"}.getStr().len > 0
+    check unresolved.getElems.mapIt(it{"packageSelector"}.getStr()).sorted ==
+      @["absent", "unprovisioned"]
+    for entry in unresolved.getElems:
+      check entry{"reason"}.getStr().len > 0
     check doc{"batchFailure"}.getStr().len > 0
     let profiles = doc["profiles"].getElems
-    require profiles.len == 3
-    for selector in ["absent", "present", "probe-fails"]:
+    require profiles.len == 2
+    for selector in ["present", "probe-fails"]:
       let matches = profiles.filterIt(it{"packageSelector"}.getStr() == selector)
       require matches.len == 1
       let profile = matches[0]
@@ -221,13 +247,14 @@ suite "path-mode dev environment":
       check probes[0]{"exitCode"}.getInt() ==
         (if selector == "probe-fails": 7 else: 0)
       check not probes[0]{"timedOut"}.getBool()
-      if selector == "present":
-        check profile{"installMethod"}.getStr() == "path"
+      check profile{"installMethod"}.getStr() == "path"
     for path in walkDirRec(outDir):
       check not path.endsWith(".rbtp")
       check not path.endsWith(".current-key")
 
   test "an inspection write failure does not take away resolved tools":
+    # Tarball mode, the mode that realizes `absent` here.
+    putEnv("REPRO_TOOL_PROVISIONING", "tarball")
     # A real directory where the diagnostic file belongs makes the atomic
     # replacement fail without depending on root-sensitive permission bits.
     createDir(outDir / "path-only-tool-identities.inspect.json")
