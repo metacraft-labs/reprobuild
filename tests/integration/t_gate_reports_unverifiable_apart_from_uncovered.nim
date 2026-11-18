@@ -83,8 +83,10 @@ suite "TC-8c — unverifiable is reported apart from uncovered":
     let cert = issuedCertificate(fx.userRoot, content, host).cert
     check seedCertificateNote("git", fx.libAPath, cert).ok
     # Sanity: with a readable key store all three consumers are covered.
+    # The CI plan runs without --registered-keys: the workspace store is the
+    # one it then reads, for the verdict fields this test is about.
     check checkPrePush(fx, b).code == 0
-    check planPlatform(ciPlan(fx, host), host)["verdict"].getStr() == "covered"
+    check planPlatform(ciPlan(fx, host, jobOwnedKeys = false), host)["verdict"].getStr() == "covered"
 
     # ---- 1. an unreadable key store ---------------------------------------
     writeFile(keysPath, "this is [not a registered-keys store\n")
@@ -97,7 +99,7 @@ suite "TC-8c — unverifiable is reported apart from uncovered":
       check evidence.startsWith("unverifiable: ")
       check "registered-key store could not be read" in evidence
     block ciPlanConsumer:
-      let host1 = planPlatform(ciPlan(fx, host), host)
+      let host1 = planPlatform(ciPlan(fx, host, jobOwnedKeys = false), host)
       check host1["verdict"].getStr() == "unverifiable"
       check strings(host1, "run") == @["t-unit"]
       check strings(host1, "unevaluated").anyIt(
@@ -143,7 +145,7 @@ suite "TC-8c — unverifiable is reported apart from uncovered":
       check "test-certificate.v2" in
         evidenceOf(gate.report, "certificate-unverifiable")
     block ciPlan2:
-      let host2 = planPlatform(ciPlan(fx, host), host)
+      let host2 = planPlatform(ciPlan(fx, host, jobOwnedKeys = false), host)
       check host2["verdict"].getStr() == "unverifiable"
       check strings(host2, "run") == @["t-unit"]
     block gateway2:
@@ -208,7 +210,7 @@ suite "TC-8c — unverifiable is reported apart from uncovered":
         let evidence = evidenceOf(gate.report, "certificate-unverifiable")
         check "search INCOMPLETE" in evidence
         check "no certificate found in the local store" notin evidence
-        let planned4 = planPlatform(ciPlan(fx, host), host)
+        let planned4 = planPlatform(ciPlan(fx, host, jobOwnedKeys = false), host)
         check planned4["verdict"].getStr() == "unverifiable"
         check strings(planned4, "run") == @["t-unit"]
         check strings(planned4, "unevaluated").anyIt(

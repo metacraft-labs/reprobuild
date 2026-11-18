@@ -84,7 +84,9 @@ suite "a CI job publishes its certificate with repro push":
     proc plan(): JsonNode =
       let res = runArgv(@[fx.reproBin, "ci", "plan", "--platform=" & host,
         "--workspace-root=" & fx.workspaceRoot,
-        "--current-repo=" & fx.libAPath, "--json"] & base)
+        "--current-repo=" & fx.libAPath,
+        "--registered-keys=" & jobOwnedKeyStore(fx.workspaceRoot, fx.scratch),
+        "--json"] & base)
       checkpoint("ci plan:\n" & res.output)
       doAssert res.code == 0, res.output
       parseJson(res.output[res.output.find("{\n") .. ^1])

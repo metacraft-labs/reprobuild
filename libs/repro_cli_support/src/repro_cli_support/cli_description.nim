@@ -2039,6 +2039,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag currentRepo is string, format = equals,
           help = "The repository whose certificates are read (default: the " &
             "workspace root)"
+        flag registeredKeys is Option[string], format = equals,
+          help = "The registered-key store a skip verifies signers " &
+            "against: a file the CI job owns, outside the checkout and the " &
+            "workspace root (without it, nothing is skipped)"
     subcmd "watch",
         help = "Watch for changes and rebuild or rerun continuously":
       `watchCommand`

@@ -44,11 +44,11 @@ let sandboxMode =
 
 suite "fs.managedBlock: pure sentinel splice":
 
-  test "spliceManagedBlock inserts a new block at end of file":
-    let openS = "# >>> repro-managed:m6 <<<"
-    let closeS = "# <<< repro-managed:m6 >>>"
-    let after = spliceManagedBlock("existing content\n",
-      "managed body\n", openS, closeS)
+  test "spliceHomeManagedBlock inserts a new block at end of file":
+    let openS = homeManagedBlockOpenSentinel("m6")
+    let closeS = homeManagedBlockCloseSentinel("m6")
+    let after = spliceHomeManagedBlock("existing content\n", "m6",
+      "managed body\n")
     check after.contains("existing content")
     check after.contains(openS)
     check after.contains("managed body")
@@ -56,13 +56,12 @@ suite "fs.managedBlock: pure sentinel splice":
     # Existing content is preserved verbatim ahead of the block.
     check after.startsWith("existing content\n")
 
-  test "spliceManagedBlock updates an existing block in place":
-    let openS = "# >>> repro-managed:m6 <<<"
-    let closeS = "# <<< repro-managed:m6 >>>"
+  test "spliceHomeManagedBlock updates an existing block in place":
+    let openS = homeManagedBlockOpenSentinel("m6")
+    let closeS = homeManagedBlockCloseSentinel("m6")
     let original = "preamble\n" & openS & "\nold body\n" & closeS &
       "\ntrailing\n"
-    let updated = spliceManagedBlock(original, "new body\n",
-      openS, closeS)
+    let updated = spliceHomeManagedBlock(original, "m6", "new body\n")
     check updated.contains("preamble")
     check updated.contains("new body")
     check not updated.contains("old body")
@@ -153,8 +152,8 @@ suite "fs.managedBlock: REAL apply / update / destroy (sandbox-only)":
         doAssert fileExists(target)
         let after1 = readFile(target)
         # Sentinel comments are present.
-        let openS = "# >>> repro-managed:" & blockId & " >>>"
-        let closeS = "# <<< repro-managed:" & blockId & " <<<"
+        let openS = "# >>> repro:home:" & blockId & " >>>"
+        let closeS = "# <<< repro:home:" & blockId & " <<<"
         doAssert after1.contains(openS),
           "open sentinel missing after apply"
         doAssert after1.contains(closeS),

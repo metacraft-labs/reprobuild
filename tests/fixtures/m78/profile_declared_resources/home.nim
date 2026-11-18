@@ -33,7 +33,7 @@ profile "m78-profile-declared-resources":
       address = "launcherDir")
 
     # A managed block in a partially-owned home file, written with
-    # repro-managed sentinels.
+    # repro:home: sentinels.
     fsManagedBlock(hostFile = "~/.m78-profile-rc",
       blockId = "m78-profile-block",
       content = "export REPRO_M78_PROFILE=1",

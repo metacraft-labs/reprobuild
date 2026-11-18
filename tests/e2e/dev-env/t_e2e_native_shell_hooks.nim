@@ -228,11 +228,11 @@ proc installNativeHooks(c: M6Case) =
   discard requireRepro(c, @["hooks", "ensure", "--shell", "zsh"])
   discard requireRepro(c, @["hooks", "ensure", "--shell", "fish"])
   check readFile(c.homeDir / ".bashrc").contains(
-    "repro-managed:repro-dev-env-native-bash")
+    "repro:home:repro-dev-env-native-bash")
   check readFile(c.homeDir / ".zshrc").contains(
-    "repro-managed:repro-dev-env-native-zsh")
+    "repro:home:repro-dev-env-native-zsh")
   check readFile(c.xdgConfig / "fish" / "config.fish").contains(
-    "repro-managed:repro-dev-env-native-fish")
+    "repro:home:repro-dev-env-native-fish")
   check "__repro-native-shell-activate" in readFile(c.homeDir / ".bashrc")
   check "__repro-native-shell-activate" in readFile(c.homeDir / ".zshrc")
   check "__repro-native-shell-activate" in

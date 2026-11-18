@@ -155,9 +155,9 @@ else:
       # not the host file's whole bytes equal the content.
       check fileExists(homeDir / GitConfigPath)
       check readFile(homeDir / GitConfigPath).contains(GitConfigContent.strip)
-      check readFile(homeDir / GitConfigPath).contains("repro-managed:gitcfg")
+      check readFile(homeDir / GitConfigPath).contains("repro:home:gitcfg")
       check fileExists(shellHostFile)
-      check readFile(shellHostFile).contains("repro-managed:" & ShellBlockId)
+      check readFile(shellHostFile).contains("repro:home:" & ShellBlockId)
       check readFile(shellHostFile).contains(ShellBlockContent)
       let markerRead = readRegistryValue(testSubkey, "Marker")
       check markerRead.present
@@ -177,8 +177,8 @@ else:
       # drift detection fires on the block content (surrounding edits
       # would NOT trigger drift per the managed-block contract).
       let gitcfgOrig = readFile(homeDir / GitConfigPath)
-      let gitOpenS = "# >>> repro-managed:gitcfg >>>"
-      let gitCloseS = "# <<< repro-managed:gitcfg <<<"
+      let gitOpenS = "# >>> repro:home:gitcfg >>>"
+      let gitCloseS = "# <<< repro:home:gitcfg <<<"
       let gitOpenIdx = gitcfgOrig.find(gitOpenS)
       let gitCloseIdx = gitcfgOrig.find(gitCloseS)
       let gitLineEnd = gitcfgOrig.find('\n', gitOpenIdx)
@@ -191,8 +191,8 @@ else:
         encodeString("user-edited"))
       # Edit the managed block: replace the body but leave sentinels.
       let shellContent = readFile(shellHostFile)
-      let openS = "# >>> repro-managed:" & ShellBlockId & " >>>"
-      let closeS = "# <<< repro-managed:" & ShellBlockId & " <<<"
+      let openS = "# >>> repro:home:" & ShellBlockId & " >>>"
+      let closeS = "# <<< repro:home:" & ShellBlockId & " <<<"
       let editedShell = block:
         let openIdx = shellContent.find(openS)
         let closeIdx = shellContent.find(closeS)
@@ -245,7 +245,7 @@ else:
       # The adopt did NOT modify the underlying file — the managed
       # block content is byte-identical to the pre-adopt state.
       check readFile(homeDir / GitConfigPath).contains(GitConfigContent.strip)
-      check readFile(homeDir / GitConfigPath).contains("repro-managed:gitcfg")
+      check readFile(homeDir / GitConfigPath).contains("repro:home:gitcfg")
       discard genBeforeAdopt
 
       # Adopting an UNDECLARED address fails with EAdoptUndeclared.

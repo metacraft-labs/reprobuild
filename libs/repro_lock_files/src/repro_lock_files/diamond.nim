@@ -34,12 +34,22 @@
 ##
 ## ## Why the policy default is per-language and not universal
 ##
-## Q-11, settled 2026-08-18. The reason a second version of a C library in one
-## binary is dangerous is that C links a flat native symbol table; the reason a
-## second version of a Rust crate is safe is that Rust mangles per version.
-## That is a property of the language, so the default is the language's. §9.3's
-## naming rule still holds inside each convention: **silence means safe**, and
-## a language nobody has written a convention for inherits `forbidden`.
+## Q-11, settled 2026-08-18 and corrected 2026-11-16. The reason a second
+## version of a C library in one binary is dangerous is that C links a flat
+## native symbol table; the reason a second version of a Rust crate is safe is
+## that Rust mangles per version. That is a property of the language, so the
+## default is the language's. §9.3's naming rule still holds inside each
+## convention: **silence means safe**, and a language nobody has written a
+## convention for inherits `forbidden`.
+##
+## The 2026-11-16 correction: Python, the JVM languages and the BEAM
+## languages are `forbidden`, not `allowed`. Each holds ONE version per name
+## in what loads together (`sys.modules` and one installed distribution per
+## environment; a classloader on a flat classpath; a node's one current module
+## and a release's one version per application), so a second version is
+## shadowed rather than isolated. And a Rust crate declaring a Cargo `links`
+## key is `forbidden`: it binds a native library, which is a flat symbol table
+## whatever Rust mangles. NLF-DIA-9 holds all of it.
 ##
 ## Q-11 also attaches a requirement rather than dismissing the objection to it:
 ## "the §9.4 diagnostic MUST state **where an inherited default came from** —
@@ -102,6 +112,11 @@ type
     sourceFile*: string
     sourceLine*: int
       ## §9.4 requires the error to cite "the declaration's file:line".
+    cargoLinks*: string
+      ## The value of a Rust crate's Cargo `links` key, `""` when it has none.
+      ## Meaningful only for `rust`: such a crate binds a native library, so
+      ## it inherits `forbidden` where every other Rust crate inherits
+      ## `allowed` (§9.3's table, NLF-DIA-9).
 
 const
   MultiVersionConventionSource* =
@@ -113,11 +128,26 @@ const
     "links a flat native symbol table, so two versions in one binary is a " &
     "duplicate-symbol failure at best and an ODR violation at worst"
 
+  PythonRationale* =
+    "Python holds one module per name in `sys.modules` and one installed " &
+    "distribution per name per environment, so a second version is " &
+    "replaced or shadowed, not isolated"
+
+  JvmRationale* =
+    "a classloader defines a class name once, so on a flat classpath the " &
+    "first JAR wins silently; isolation needs shading, JPMS layers or OSGi, " &
+    "which the author then claims with `multiVersion allowed`"
+
+  BeamRationale* =
+    "a BEAM node runs one current version of each module, and a release " &
+    "holds one version of each application"
+
 proc languageMultiVersionConventions*(): seq[LanguageMultiVersionConvention] =
-  ## Q-11's table. `forbidden` for anything linking a flat native symbol
-  ## table; `allowed` only where the runtime keeps versions apart **by
-  ## construction**, which is a claim about the language and not about a
-  ## particular library's care.
+  ## Q-11's table (`Named-Lock-Files.md` §9.3). `forbidden` for anything
+  ## linking a flat native symbol table, and for any runtime that holds one
+  ## version per name in what loads together; `allowed` only where the
+  ## runtime keeps versions apart **by construction**, which is a claim about
+  ## the language and not about a particular library's care.
   ##
   ## The list is deliberately short. A language that is not on it inherits
   ## `forbidden` (see `languageConventionFor`), which is §9.3's naming rule
@@ -160,34 +190,64 @@ proc languageMultiVersionConventions*(): seq[LanguageMultiVersionConvention] =
       rationale: "Rust mangles symbols per version, so two versions " &
         "coexist in one binary by construction",
       source: MultiVersionConventionSource),
-    LanguageMultiVersionConvention(language: "python",
-      policy: mvAllowed,
-      rationale: "Python keeps versions apart at the module level",
-      source: MultiVersionConventionSource),
+    # A crate declaring a Cargo `links` key is the Rust exception; it is
+    # resolved in `resolveMultiVersion` (see `rustLinksConvention`), because
+    # the key is a property of the crate and this table is keyed by language.
     LanguageMultiVersionConvention(language: "javascript",
       policy: mvAllowed,
-      rationale: "JavaScript keeps versions apart at the module level",
+      rationale: "JavaScript's node-style resolution gives each version its " &
+        "own module instance in nested `node_modules`",
       source: MultiVersionConventionSource),
     LanguageMultiVersionConvention(language: "typescript",
       policy: mvAllowed,
-      rationale: "TypeScript keeps versions apart at the module level",
+      rationale: "TypeScript's node-style resolution gives each version its " &
+        "own module instance in nested `node_modules`",
+      source: MultiVersionConventionSource),
+    # One version per name in what loads together: one Python environment,
+    # one JVM classpath, one BEAM release. These LOOK isolated and are not;
+    # an author who has set up isolation (shading, JPMS layers, OSGi) claims
+    # it with `multiVersion allowed`.
+    LanguageMultiVersionConvention(language: "python",
+      policy: mvForbidden, rationale: PythonRationale,
       source: MultiVersionConventionSource),
     LanguageMultiVersionConvention(language: "java",
-      policy: mvAllowed,
-      rationale: "the JVM keeps versions apart at classloader boundaries",
+      policy: mvForbidden, rationale: "Java: " & JvmRationale,
       source: MultiVersionConventionSource),
     LanguageMultiVersionConvention(language: "kotlin",
-      policy: mvAllowed,
-      rationale: "the JVM keeps versions apart at classloader boundaries",
+      policy: mvForbidden, rationale: "Kotlin: " & JvmRationale,
       source: MultiVersionConventionSource),
-    LanguageMultiVersionConvention(language: "elixir",
-      policy: mvAllowed,
-      rationale: "BEAM keeps versions apart at application boundaries",
+    LanguageMultiVersionConvention(language: "scala",
+      policy: mvForbidden, rationale: "Scala: " & JvmRationale,
+      source: MultiVersionConventionSource),
+    LanguageMultiVersionConvention(language: "clojure",
+      policy: mvForbidden, rationale: "Clojure: " & JvmRationale,
+      source: MultiVersionConventionSource),
+    LanguageMultiVersionConvention(language: "groovy",
+      policy: mvForbidden, rationale: "Groovy: " & JvmRationale,
       source: MultiVersionConventionSource),
     LanguageMultiVersionConvention(language: "erlang",
-      policy: mvAllowed,
-      rationale: "BEAM keeps versions apart at application boundaries",
+      policy: mvForbidden, rationale: "Erlang: " & BeamRationale,
+      source: MultiVersionConventionSource),
+    LanguageMultiVersionConvention(language: "elixir",
+      policy: mvForbidden, rationale: "Elixir: " & BeamRationale,
+      source: MultiVersionConventionSource),
+    LanguageMultiVersionConvention(language: "gleam",
+      policy: mvForbidden, rationale: "Gleam: " & BeamRationale,
       source: MultiVersionConventionSource)]
+
+proc rustLinksConvention*(links: string): LanguageMultiVersionConvention =
+  ## §9.3's Rust exception. Mangling keeps two versions of a crate's OWN
+  ## symbols apart, but a crate declaring `links` binds a native library, and
+  ## that library is a flat symbol table. Cargo itself refuses two packages
+  ## with one `links` value; where Reprobuild's solver selects the versions,
+  ## this convention is what refuses instead.
+  LanguageMultiVersionConvention(language: "rust",
+    policy: mvForbidden,
+    rationale: "a Rust crate declaring the Cargo key `links = \"" & links &
+      "\"` binds a native library, and the binary links that library's " &
+      "flat native symbol table once; per-version mangling does not reach " &
+      "it, and Cargo itself refuses two packages with one `links` value",
+    source: MultiVersionConventionSource)
 
 proc normalizedLanguage(language: string): string =
   ## Fold the spellings a recipe may reasonably use onto the convention keys.
@@ -198,7 +258,11 @@ proc normalizedLanguage(language: string): string =
   of "objc", "objectivec": "objective-c"
   of "js", "node", "nodejs": "javascript"
   of "ts": "typescript"
-  of "py": "python"
+  of "py", "python3", "cpython": "python"
+  of "kt", "kts": "kotlin"
+  of "erl": "erlang"
+  of "ex", "exs": "elixir"
+  of "rs": "rust"
   else: l
 
 proc languageConventionFor*(language: string):
@@ -228,7 +292,12 @@ proc resolveMultiVersion*(lib: LibraryMultiVersion): MultiVersionResolution =
   ## the language convention; and the terminus is `forbidden`.
   if lib.declared != mvUnset:
     return MultiVersionResolution(policy: lib.declared, inherited: false)
-  let convention = languageConventionFor(lib.language)
+  let convention =
+    if normalizedLanguage(lib.language) == "rust" and
+        lib.cargoLinks.strip().len > 0:
+      rustLinksConvention(lib.cargoLinks.strip())
+    else:
+      languageConventionFor(lib.language)
   MultiVersionResolution(
     policy: (if convention.policy == mvUnset: mvForbidden
              else: convention.policy),
@@ -257,6 +326,8 @@ type
     sourceFile*: string
     sourceLine*: int
     deps*: seq[LinkDep]
+    cargoLinks*: string
+      ## A Rust crate's Cargo `links` value; see `LibraryMultiVersion`.
 
   ReachedInstance* = object
     ## One library instance reached from one binary through link edges only.
@@ -292,10 +363,11 @@ type
 proc linkPackage*(name: string; deps: openArray[LinkDep] = @[];
                   pinnedLockFile = ""; language = "c";
                   multiVersion = mvUnset;
-                  sourceFile = ""; sourceLine = 0): LinkPackage =
+                  sourceFile = ""; sourceLine = 0;
+                  cargoLinks = ""): LinkPackage =
   LinkPackage(name: name, pinnedLockFile: pinnedLockFile, language: language,
     multiVersion: multiVersion, sourceFile: sourceFile,
-    sourceLine: sourceLine, deps: @deps)
+    sourceLine: sourceLine, deps: @deps, cargoLinks: cargoLinks)
 
 proc linkDep*(name: string; constraint = ""; platform = dpTarget): LinkDep =
   LinkDep(name: name, platform: platform, constraint: constraint)
@@ -502,7 +574,7 @@ proc findColinkingConflicts*(closures: openArray[LinkClosure];
       let resolution = resolveMultiVersion(LibraryMultiVersion(
         library: library, declared: decl.multiVersion,
         language: decl.language, sourceFile: decl.sourceFile,
-        sourceLine: decl.sourceLine))
+        sourceLine: decl.sourceLine, cargoLinks: decl.cargoLinks))
       if resolution.policy == mvAllowed: continue
       # One representative instance per distinct version, keeping the FIRST
       # path that reached it: the first is the shortest by construction of

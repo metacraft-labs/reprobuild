@@ -401,7 +401,7 @@ libs/repro_core/tests/t_zig_target_vendored_hash.nim	nim	6
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
 libs/repro_daemon_core/tests/t_daemon_active_session_tally.nim	nim	28
-libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim	nim	10
+libs/repro_daemon_core/tests/t_daemon_declines_a_foreign_engines_request.nim	nim	12
 libs/repro_daemon_core/tests/t_daemon_deferral_log_is_bounded.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_dev_bin_retention.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_image_digest_cache.nim	nim	10
@@ -598,6 +598,7 @@ libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim	nim	19
 libs/repro_home_resources/tests/t_registry_root_override.nim	nim	21
 libs/repro_home_resources/tests/t_resource_type_registry.nim	nim	6
 libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	176
+libs/repro_home_rollback/tests/t_home_managed_blocks_share_the_one_writer.nim	nim	11
 libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
 libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim	nim	9
@@ -700,6 +701,7 @@ libs/repro_lock/tests/t_provenance_reports_shared_names.nim	nim	5
 libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim	nim	4
 libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim	nim	4
 libs/repro_lock_files/tests/t_declarations_are_emitted_eagerly.nim	nim	5
+libs/repro_lock_files/tests/t_one_version_per_name_runtimes_inherit_forbidden.nim	nim	14
 libs/repro_lock_gen/tests/t_a_pinned_nim_resolves_to_its_upstream_archive.nim	nim	10
 libs/repro_lock_gen/tests/t_designation_propagates_to_closure.nim	nim	4
 libs/repro_lock_gen/tests/t_develop_checkout_once_products_per_lock_file.nim	nim	5
@@ -1801,6 +1803,7 @@ tests/integration/t_chained_hook_that_cannot_start_names_its_cause.nim	nim	1
 tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim	nim	16
 tests/integration/t_ci_job_publishes_its_certificate_with_repro_push.nim	nim	1
 tests/integration/t_ci_plan_reads_ci_trust_from_the_base_not_the_candidate.nim	nim	1
+tests/integration/t_ci_plan_skips_only_on_a_key_store_the_job_owns.nim	nim	1
 tests/integration/t_ci_plan_v2_binds_the_checked_out_content.nim	nim	1
 tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim	nim	1
 tests/integration/t_clean_probe_reads_stdout_not_git_diagnostics.nim	nim	4

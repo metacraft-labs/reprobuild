@@ -671,7 +671,7 @@ The test driver:
    disposable sandbox per the M6 brief).
 6. Verifies on-disk materialization: marker file, hello.sh
    executable + output, PATH contribution managed block, shell-
-   integration managed block (with `repro-managed:` sentinels).
+   integration managed block (with `repro:home:` sentinels).
 7. Re-runs `repro home apply --plan` and asserts the plan reports
    `plan status: no-op (matches the active generation)` + `0 drift`.
 

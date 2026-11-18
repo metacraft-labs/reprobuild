@@ -51,10 +51,10 @@ const
 """)
     ## The marker keeps `Without` a generation with a resource of its own;
     ## its content differs so the two generation ids differ too.
-  PreBlock = "# >>> repro-managed:pre >>>\nexport PRE=1\n" &
-    "# <<< repro-managed:pre <<<\n"
-  NewBlock = "# >>> repro-managed:new >>>\nexport NEW=1\n" &
-    "# <<< repro-managed:new <<<\n"
+  PreBlock = "# >>> repro:home:pre >>>\nexport PRE=1\n" &
+    "# <<< repro:home:pre <<<\n"
+  NewBlock = "# >>> repro:home:new >>>\nexport NEW=1\n" &
+    "# <<< repro:home:new <<<\n"
 
 proc show(label: string; r: ReproRun) =
   checkpoint(label & " -> exit " & $r.exitCode & "\n--- stdout\n" &
