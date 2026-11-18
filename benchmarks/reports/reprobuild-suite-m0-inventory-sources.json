@@ -6964,7 +6964,7 @@
             "parts",
             "upstream"
           ],
-          "line": 137,
+          "line": 144,
           "path": "tests/integration/t_lock_pinned_catalog_is_not_overridden_by_an_ambient_checkout.nim",
           "patterns": [
             "nim-argv"
@@ -48016,7 +48016,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_lock_pinned_catalog_is_not_overridden_by_an_ambient_checkout.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
