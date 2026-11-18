@@ -6,7 +6,7 @@
 # expands its data files and probes every target platform (reprobuild-pm spec
 # Gradual-Nix-To-Reprobuild-Migration.md §Exporting evaluated intent to Nix,
 # schema in §Export schema (version 6 since catalog imports); public reference
-# docs/user-guide/home-export.md). Nix only reads it. Two consumption modes
+# docs/users/content/reference/files/home-export.md). Nix only reads it. Two consumption modes
 # (§Consumption modes), one consumer code path:
 #
 #   * snapshot -- `builtins.fromJSON` of a committed export. No Reprobuild

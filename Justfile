@@ -750,6 +750,10 @@ lint:
     # alone -- the release job's gate, without the build in front of it.
     bash ./scripts/release/check_staged_release_sources.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
+    # A comment naming a superseded docs/user-guide/ page sends the next
+    # contributor to edit a copy nobody reads; the published page under
+    # docs/users/content/ goes stale. Pure grep, no build needed.
+    bash ./scripts/check_superseded_doc_pointers.sh 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
     # omission argued in the unit), its syscall additions are the derived
