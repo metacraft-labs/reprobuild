@@ -658,6 +658,46 @@ suite "the environment key rendering is canonical and host-independent":
     checkpoint("hand-rolled PATH entries: " & $handRolled)
     check handRolled.len == 0
 
+    # (g) — the recipe compiles. The interface extraction is built in this
+    # file but is not a lowered action: it is one of the two compiles the
+    # engine runs on its own behalf, and its `PATH` is always the directories
+    # of the compilers it runs. That entry is composed in exactly one place,
+    # `recipeCompilePathEnv` in `repro_interface_artifacts`, which the
+    # provider compile uses too. Without this half, (a) could be satisfied by
+    # moving a hand-written entry into any helper outside this file.
+    var extractionUsesRecipePath = false
+    for line in lines:
+      let stripped = line.strip()
+      if stripped.startsWith("#"):
+        continue
+      if stripped.contains("extractEnv.add(recipeCompilePathEnvForModule("):
+        extractionUsesRecipePath = true
+    check extractionUsesRecipePath
+    let artifactsSource = currentSourcePath().parentDir.parentDir.parentDir /
+      "repro_interface_artifacts" / "src" / "repro_interface_artifacts.nim"
+    check fileExists(artifactsSource)
+    let artifactsLines = readFile(artifactsSource).splitLines()
+    var artifactsPathSites: seq[string] = @[]
+    for i, line in artifactsLines:
+      let stripped = line.strip()
+      if stripped.startsWith("#"):
+        continue
+      if stripped.contains("\"PATH=\" &"):
+        var owner = ""
+        var j = i
+        while j >= 0:
+          if artifactsLines[j].startsWith("proc "):
+            owner = artifactsLines[j][5 .. ^1]
+            let cut = owner.find('*')
+            if cut >= 0: owner = owner[0 ..< cut]
+            break
+          dec j
+        artifactsPathSites.add($(i + 1) & " in " & owner)
+    checkpoint("recipe-compile PATH entries: " & $artifactsPathSites)
+    check artifactsPathSites.len == 1
+    for site in artifactsPathSites:
+      check site.endsWith(" in recipeCompilePathEnv")
+
     # (c) — and the scan must have found call sites at all, or (a) and
     # (c) would both pass vacuously.
     checkpoint("actionPathEntry callers: " & $entryCallers)

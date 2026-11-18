@@ -11891,13 +11891,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # the lock (and depend on all of it); see `LockedCatalogEnv`.
   var extractEnv = @[LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath)]
   # `PATH` declared from the compilers the extraction runs, as the provider
-  # compile declares it (`recipeCompileToolPath`): the C compiler driver
+  # compile declares it (`recipeCompilePathEnv`): the C compiler driver
   # reads `PATH`, so an inherited one keyed the record on the caller's shell,
   # and a bundle restored on a machine with another default `PATH` missed
-  # with `environment: PATH`.
-  let extractToolPath = recipeCompileToolPath(modulePath)
-  if extractToolPath.len > 0:
-    extractEnv.add("PATH=" & extractToolPath)
+  # with `environment: PATH`. A recipe compile is not a lowered action, so
+  # this does not go through `actionPathDecision`; the entry is composed in
+  # the one place both recipe compiles share.
+  extractEnv.add(recipeCompilePathEnvForModule(modulePath))
   # The temporary directory, declared inside the extraction's own scratch
   # (an ignored input prefix below), as the provider compile declares one in
   # its home: the C compiler writes its temporaries there and the compile
