@@ -638,6 +638,14 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``interrupted-apply-unrecorded``
+##     an apply that raises between its hold and its release records nothing (round 14, the known gap closed)
+## ``trigger-targets-by-name``
+##     a profile trigger's Service=/Unit= target is matched as written, not by its Id= (round 14, N2)
+## ``prefix-trigger-dropins-allowed``
+##     a prefix, template or type-wide drop-in setting Service=, Unit= or Sockets= is let through (decision 177, 2026-11-18)
+## ``late-essential-report-dropped``
+##     a late essential trigger's failure is dropped and the apply passes (decision 177(c), 2026-11-18)
 ## ``restart-digest-counts-requirement``
 ##     the restart record's digest counts the carried-state requirement's drop-ins (round 13, M-A)
 ## ``dead-template-instances-unrecorded``
@@ -2163,6 +2171,11 @@ const
                           "post-reload-requirers-released",
                           # A13 review round 11.
                           "restart-success-by-exit-code",
+                          # A13 review round 14.
+                          "interrupted-apply-unrecorded",
+                          "trigger-targets-by-name",
+                          "prefix-trigger-dropins-allowed",
+                          "late-essential-report-dropped",
                           # A13 review round 13.
                           "restart-digest-counts-requirement",
                           "dead-template-instances-unrecorded",

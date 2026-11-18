@@ -2,8 +2,8 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
     "nimTestBinaries": 2978,
-    "pureUnitConsolidationGroups": 87,
-    "pureUnitTests": 798,
+    "pureUnitConsolidationGroups": 86,
+    "pureUnitTests": 797,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
     "testEntries": 3026
   },
@@ -467,19 +467,6 @@
       "sources": [
         "libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim",
         "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_infra"
-      ],
-      "owner": "libs/repro_infra",
-      "sources": [
-        "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
-        "libs/repro_infra/tests/t_system_profile_addon_fields.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1707,8 +1694,8 @@
     "classificationCounts": {
       "graph-fixture": 24,
       "integration": 1645,
-      "platform/destructive": 196,
-      "pure unit": 798,
+      "platform/destructive": 197,
+      "pure unit": 797,
       "unclassified": 363
     },
     "graphOwnedTestArtifacts": [
@@ -9256,7 +9243,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 33,
-      "staticCaseCount": 177,
+      "staticCaseCount": 183,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20069,8 +20056,8 @@
     },
     {
       "binary": "build/test-bin/t_every_apply_waits_for_carried_state",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -20079,8 +20066,8 @@
       "owner": "libs/repro_infra",
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
