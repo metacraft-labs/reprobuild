@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2946,
+    "nimTestBinaries": 2948,
     "pureUnitConsolidationGroups": 83,
-    "pureUnitTests": 786,
-    "staticallyDetectedRuntimeCompilerFlowTests": 146,
-    "testEntries": 2994
+    "pureUnitTests": 787,
+    "staticallyDetectedRuntimeCompilerFlowTests": 147,
+    "testEntries": 2996
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -60,13 +60,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 7,
+      "count": 8,
       "defines": [],
       "dependencyShape": [
         "repro_addon"
       ],
       "owner": "libs/repro_addon",
       "sources": [
+        "libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim",
         "libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim",
         "libs/repro_addon/tests/t_addon_evidence_docs_commands_parse.nim",
         "libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim",
@@ -1644,9 +1645,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1633,
+      "integration": 1634,
       "platform/destructive": 193,
-      "pure unit": 786,
+      "pure unit": 787,
       "unclassified": 358
     },
     "graphOwnedTestArtifacts": [
@@ -1861,9 +1862,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2946,
+    "nimTestBinaryCount": 2948,
     "pythonTestFileCount": 48,
-    "testEntryCount": 2994
+    "testEntryCount": 2996
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2941,6 +2942,28 @@
         }
       ],
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "dir",
+            "src",
+            "tmp"
+          ],
+          "line": 59,
+          "path": "tests/e2e/addon/t_e2e_addon_confinement_settings_each_hold.nim",
+          "patterns": [
+            "static-c-compiler"
+          ],
+          "snippet": "let (o, c) = execCmdEx(quoteShellCommand([staticCc(debArch), \"-static\","
+        }
+      ],
+      "source": "tests/e2e/addon/t_e2e_addon_confinement_settings_each_hold.nim"
     },
     {
       "class": "integration",
@@ -9148,6 +9171,23 @@
       "source": "libs/repro_addon/tests/t_addon_collision.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 38,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_confinement_probe_never_ships",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32631,6 +32671,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_confinement_settings_each_hold",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_confinement_settings_each_hold.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

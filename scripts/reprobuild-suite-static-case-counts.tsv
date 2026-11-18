@@ -40,6 +40,7 @@ libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
 libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	177
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
+libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
 libs/repro_addon/tests/t_addon_detector_controls_run_on_the_host.nim	nim	9
@@ -1317,6 +1318,7 @@ tests/e2e/addon/t_e2e_addon_collision_matrix.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compiled_pin_carries_activity_selection.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compromised_compiler_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compromised_fetch_cannot_write_etc.nim	nim	1
+tests/e2e/addon/t_e2e_addon_confinement_settings_each_hold.nim	nim	1
 tests/e2e/addon/t_e2e_addon_confirm_or_revert.nim	nim	1
 tests/e2e/addon/t_e2e_addon_custody_crash_points.nim	nim	1
 tests/e2e/addon/t_e2e_addon_debian_12_to_13_release_upgrade.nim	nim	1
