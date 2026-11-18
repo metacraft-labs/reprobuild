@@ -132,27 +132,12 @@ when defined(posix):
     result.exitCode = drainPipesUntilChildExits(p, [fd], sinks).exitCode
     result.raw = move sinks[0]
 
-proc execCmdExCloseOnce*(command: string;
-                         options: set[ProcessOption] = {poStdErrToStdOut,
-                                                        poUsePath};
-                         env: StringTableRef = nil;
-                         workingDir = ""; input = ""):
+proc captureUntilExitCloseOnce(p: Process; input: string):
     tuple[output: string, exitCode: int] {.raises: [OSError, IOError].} =
-  ## ``osproc.execCmdEx`` with the same signature, defaults and result, whose
-  ## child is released by ``closeProcessOnce`` instead of ``osproc.close``.
-  ## The body mirrors the stdlib's line for line (``poEvalCommand`` added,
-  ## ``input`` written then stdin closed, lines read until EOF and the exit
-  ## code is known); the only differences are the release, and that the
-  ## release also runs when reading raises (the stdlib leaks the pipes then).
-  ##
-  ## On POSIX it also returns once the child has EXITED, without waiting for
-  ## the output pipe to reach EOF: a grandchild the child left running in
-  ## the background (git's detached automatic maintenance) inherits the pipe
-  ## and would otherwise hold the caller until it finishes. Whatever the
-  ## child wrote before exiting is still returned; what a grandchild writes
-  ## afterwards is not.
-  var p = startProcess(command, options = options + {poEvalCommand},
-    workingDir = workingDir, env = env)
+  ## The capture half of ``execCmdExCloseOnce`` and ``execArgvExCloseOnce``:
+  ## ``input`` written then stdin closed, output read until the child exits,
+  ## and the child released once (``closeProcessOnce``), also when reading
+  ## raises.
   try:
     if input.len > 0:
       inputStream(p).write(input)
@@ -188,3 +173,45 @@ proc execCmdExCloseOnce*(command: string;
           if result[1] != -1: break
   finally:
     closeProcessOnce(p)
+
+proc execCmdExCloseOnce*(command: string;
+                         options: set[ProcessOption] = {poStdErrToStdOut,
+                                                        poUsePath};
+                         env: StringTableRef = nil;
+                         workingDir = ""; input = ""):
+    tuple[output: string, exitCode: int] {.raises: [OSError, IOError].} =
+  ## ``osproc.execCmdEx`` with the same signature, defaults and result, whose
+  ## child is released by ``closeProcessOnce`` instead of ``osproc.close``.
+  ## The body mirrors the stdlib's line for line (``poEvalCommand`` added,
+  ## ``input`` written then stdin closed, lines read until EOF and the exit
+  ## code is known); the only differences are the release, and that the
+  ## release also runs when reading raises (the stdlib leaks the pipes then).
+  ##
+  ## On POSIX it also returns once the child has EXITED, without waiting for
+  ## the output pipe to reach EOF: a grandchild the child left running in
+  ## the background (git's detached automatic maintenance) inherits the pipe
+  ## and would otherwise hold the caller until it finishes. Whatever the
+  ## child wrote before exiting is still returned; what a grandchild writes
+  ## afterwards is not.
+  captureUntilExitCloseOnce(startProcess(command,
+    options = options + {poEvalCommand}, workingDir = workingDir, env = env),
+    input)
+
+proc execArgvExCloseOnce*(argv: openArray[string];
+                          options: set[ProcessOption] = {poStdErrToStdOut,
+                                                         poUsePath};
+                          env: StringTableRef = nil;
+                          workingDir = ""; input = ""):
+    tuple[output: string, exitCode: int] {.raises: [OSError, IOError,
+    ValueError].} =
+  ## ``execCmdExCloseOnce`` for an argv, started WITHOUT a shell: ``argv[0]``
+  ## is the program and the rest are its arguments, passed as they are
+  ## (``poEvalCommand`` is never added). A probe that only runs a program has
+  ## no use for ``/bin/sh``, and inside a monitored action the shell would
+  ## make the host's ``/bin/sh`` and its libraries inputs of the action.
+  if argv.len == 0:
+    raise newException(ValueError, "execArgvExCloseOnce: an empty argv")
+  captureUntilExitCloseOnce(startProcess(argv[0],
+    args = argv.toOpenArray(1, argv.high),
+    options = options - {poEvalCommand}, workingDir = workingDir, env = env),
+    input)

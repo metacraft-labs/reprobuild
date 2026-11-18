@@ -45,14 +45,19 @@
 ## the exporter's (SHA-256). gamma, which the selection left out, has no
 ## checkout there. The engine's own edges for each project, the provider
 ## compile and the interface extraction, whose records the bundle carries as
-## well, must find those records (the same key on both machines); each is a
-## hit or, the one recorded limit, a miss that names a file of the
-## exporter's own `/bin/sh` closure, which the bundle does not carry: the
-## Nim compiler starts the C compiler through `/bin/sh`, the edge records
-## what that reads, and a Debian `/bin/sh` is not a NixOS one. That limit is
-## a known defect, not the intended behaviour: once those compiles no longer
-## depend on the host's `/bin/sh`, this gate requires every one of them to
-## hit as well.
+## well, are held to the same rule: each is a hit that did not launch. The
+## two machines' `/bin/sh` differ (NixOS's is an interactive bash with its
+## own C library, Debian's is dash), so this also requires that those
+## compiles record nothing of the host's shell: the Nim compiler starts the
+## C compiler without one (`t_recipe_compiles_do_not_record_the_host_shell`
+## measures that on one machine).
+##
+## THE ENVIRONMENT. Every build starts from `env -i` with HOME, TMPDIR, the
+## roots and the compiler selection, and sources the root shell's captured
+## environment. PATH is not set: each machine's bash supplies its own
+## default, and the captured environment then holds the exporter's
+## (`nix print-dev-env` appends the invoking PATH). A session image's PATH
+## is not the publisher's either, so the gate does not equalise it.
 ##
 ## `REPRO_BUNDLE_E2E_KEEP=1` keeps the scratch directory (bundles, the
 ## published repository, the reports and each container's `.repro` state)
@@ -133,11 +138,9 @@ type Machine = object
   cc: string            ## the wrapped C compiler the recipes compile with
 
 proc cleanEnv(m: Machine): string =
-  ## The environment every build runs in, on both machines.
-  # PATH is set, to the same value on both machines: the captured shell
-  # environment appends the invoking PATH to its own, and an unset one is
-  # bash's compiled-in default, which differs between distributions.
-  "env -i PATH=/usr/bin:/bin HOME=" & quoteShell(m.home) & " TMPDIR=" &
+  ## The environment every build runs in, on both machines. PATH is left to
+  ## each machine (see THE ENVIRONMENT in the header).
+  "env -i HOME=" & quoteShell(m.home) & " TMPDIR=" &
     quoteShell(m.tmp) &
     " USER=root LANG=C.UTF-8 REPRO_STORE_ROOT=" & quoteShell(m.store) &
     " REPROBUILD_ACTION_CACHE_ROOT=" & quoteShell(m.ac) &
@@ -321,10 +324,6 @@ suite "a bundle restores on a plain machine without rebuilding":
         discard sh(cleanEnv(m) & " PATH=" & quoteShell(getEnv("PATH")) & " " &
           r & " bundle create pair --out=" & quoteShell(base / "out") & roots &
           extra, m.ws)
-      var nixHalfPaths: seq[string]
-      for p in parseJson(readFile(base / "out" / "pair" / "x86_64-linux" /
-          "latest.json"))["halves"]["nix"]["paths"]:
-        nixHalfPaths.add(p.getStr())
       let inspected = parseJson(sh(r & " bundle inspect " &
         quoteShell(base / "out" / "pair") & " --json"))
       checkpoint("inspect: " & $inspected)
@@ -389,32 +388,18 @@ suite "a bundle restores on a plain machine without rebuilding":
           check a{"cacheDecision"}.getStr() == "cdHit"
         check sawProduce
         # The engine's own edges for the project (the provider compile and
-        # the interface extraction). The bundle carries their records too,
-        # and they must be FOUND (same key on both machines). They are hits,
-        # except for the one recorded limit: the compiler they run starts the
-        # C compiler through the machine's `/bin/sh`, whose files the edge
-        # records as inputs, and a plain Debian machine's `/bin/sh` is not
-        # the exporter's (a known defect; see the header).
-        # Such a miss must name a file of the exporter that the bundle does
-        # not carry, and nothing else.
+        # the interface extraction): the bundle carries their records too,
+        # and they are hits that did not launch, like every other action.
         check restored{"providerCompileActions"}.getElems().len > 0
         check restored{"interfaceExtractActions"}.getElems().len > 0
         for key in ["providerCompileActions", "interfaceExtractActions"]:
           for a in restored{key}.getElems():
-            let reason = a{"cacheMissReason"}.getStr()
             checkpoint("restored " & repo & ": " & a["id"].getStr() &
               " launched=" & $a{"launched"}.getBool() & " cache=" &
-              a{"cacheDecision"}.getStr() & " miss=" & reason)
-            if a{"cacheDecision"}.getStr() == "cdHit":
-              check not a{"launched"}.getBool()
-              continue
-            # Found, and refused only for a host file outside the bundle.
-            check "candidate record considered" in reason
-            check reason.startsWith("input changed: /nix/store/")
-            let changed = reason["input changed: ".len .. ^1].split(' ')[0]
-            let storePath = "/nix/store/" &
-              changed["/nix/store/".len .. ^1].split('/')[0]
-            check storePath notin nixHalfPaths
+              a{"cacheDecision"}.getStr() & " miss=" &
+              a{"cacheMissReason"}.getStr())
+            check not a{"launched"}.getBool()
+            check a{"cacheDecision"}.getStr() == "cdHit"
         check readFile(results / ("sum-pair-" & repo)).strip() ==
           hostSums[repo]
         # Negative control: without the native half, the producer runs.

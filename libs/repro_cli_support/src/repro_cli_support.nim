@@ -11844,6 +11844,34 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # The shared, configuration-keyed nimcache outside the action-cache root
   # (`interfaceExtractionNimcacheRoot`) is the same kind of derived state, and
   # other extractions rewrite it.
+  # The lock-pinned catalog, resolved here so the extraction does not read
+  # the lock (and depend on all of it); see `LockedCatalogEnv`.
+  var extractEnv = @[LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath)]
+  # `PATH` declared from the compilers the extraction runs, as the provider
+  # compile declares it (`recipeCompileToolPath`): the C compiler driver
+  # reads `PATH`, so an inherited one keyed the record on the caller's shell,
+  # and a bundle restored on a machine with another default `PATH` missed
+  # with `environment: PATH`.
+  let extractToolPath = recipeCompileToolPath(modulePath)
+  if extractToolPath.len > 0:
+    extractEnv.add("PATH=" & extractToolPath)
+  # The temporary directory, declared inside the extraction's own scratch
+  # (an ignored input prefix below), as the provider compile declares one in
+  # its home: the C compiler writes its temporaries there and the compile
+  # probes it, so an inherited `TMPDIR` -- a fresh `mktemp -d` in every Nix
+  # dev shell -- named a directory no other shell or machine has.
+  let extractScratch =
+    if relocatable: parentDir(edgeArtifact) / "work"
+    elif scratchDir.len > 0: absolutePath(scratchDir)
+    else: ""
+  if extractScratch.len > 0:
+    let extractTmp = extractScratch / "tmp"
+    createDir(extendedPath(extractTmp))
+    for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
+      extractEnv.add(name & "=" & extractTmp)
+  # The shared nimcache's root exists before the lookup, for the reason
+  # `providerCompileLaunchEnv` creates the provider's.
+  createDir(extendedPath(interfaceExtractionNimcacheRoot()))
   var ignoredInputPrefixes = interfaceExtractionIgnoredInputPrefixes()
   if relocatable:
     ignoredInputPrefixes.add(parentDir(edgeArtifact) / "work")
@@ -11865,9 +11893,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     # when the metadata moved, which is what lets that copy be served.
     actionCachePolicy = (if relocatable: ffpHybrid else: ffpTimestamp),
     envPassthrough = ProviderCompileEnvironmentPassthrough,
-    # The lock-pinned catalog, resolved here so the extraction does not read
-    # the lock (and depend on all of it); see `LockedCatalogEnv`.
-    env = @[LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath)],
+    env = extractEnv,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy =
