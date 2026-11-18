@@ -482,10 +482,10 @@ suite "M26 — pre-push lock visibility check":
       checkpoint("lockUpdate: " & $report["lockUpdate"])
       check report["recordStoreRoot"].getStr() == ""
       # Before the fix the gate read the root's lock back as the workspace's
-      # own record ("already-current"); with no store it no longer does.
+      # own record ("already-current"); with no store it names no lock file
+      # outside the committed repro.lock.
       check report["lockUpdate"]["kind"].getStr() != "already-current"
-      check not report["lockUpdate"]["lockFilePath"].getStr().startsWith(
-        fx.publicLayerPath / "locks")
+      check report["lockUpdate"]["lockFilePath"].getStr() == ""
       var rootRecords: seq[string]
       for path in walkDirRec(fx.publicLayerPath / "locks"):
         rootRecords.add(path)

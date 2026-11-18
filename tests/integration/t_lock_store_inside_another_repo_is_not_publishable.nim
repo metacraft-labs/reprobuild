@@ -43,8 +43,9 @@
 ## skipped or failed, and no `locks/` is written into the metadata directory.
 ## The publishability guard itself (a nested plain directory is not its own
 ## worktree) keeps its direct cover in
-## `t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks`
-## cases (a) and (b).
+## `t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim`,
+## test `t_lock_publish_skips_manifest_layer_nested_in_unrelated_checkout`
+## (`lpoNotPublishable`, at library level).
 ##
 ## The fixture OPTS IN to central publication (`[records] publish_locks =
 ## true` in `repro-workspace.toml`). That is not incidental: since MO-13/

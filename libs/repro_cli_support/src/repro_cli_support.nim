@@ -42087,7 +42087,8 @@ type
       ## RA-8 — set when ``--manifest-url`` was passed on the command line.
       ## The resolution order treats an explicit flag as the highest
       ## precedence source; without it the manifest URL/branch are resolved
-      ## from the host bootstrap config and then the host repo's ``origin``.
+      ## from the host bootstrap config, and never from the host repo's
+      ## ``origin``.
     defaultProjects: seq[string]
       ## RA-8 — the host bootstrap config's ``[projects] default`` set. Used
       ## to fill the project-to-init when the user did not pass an explicit
@@ -46708,12 +46709,16 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
   # the encoded project component. Probing the raw name made a workspace whose
   # project name is not filename-shaped contribute no DB claim at all.
   let segment = encodeLockPathSegment(project)
-  # Never the workspace root: the root is metadata, never the record store
-  # (Workspace-Settings-Files.md §3), so a ``locks/`` there is no record the
-  # writer made and nothing to compare against.
-  for candidate in recordStoreCandidates(workspaceRoot):
-    if dirExists(extendedPath(candidate / "locks" / segment)):
-      return candidate
+  # Read exactly where the writer writes (``pickRecordStoreRoot``): the store
+  # checkout at its conventional location (``existingRecordStoreRoot``, which
+  # a declared ``[records] url`` resolves to as well). Never the workspace
+  # root, which is metadata (Workspace-Settings-Files.md §3), and never a
+  # plain directory at a conventional location: the writer no longer writes
+  # either, so a ``locks/`` there is a record it will never refresh, and as a
+  # coherence claim it would grow staler with every commit.
+  let store = existingRecordStoreRoot(workspaceRoot)
+  if store.len > 0 and dirExists(extendedPath(store / "locks" / segment)):
+    return store
   ""
 
 proc lockCoherenceFor*(identity: GitToolIdentity;

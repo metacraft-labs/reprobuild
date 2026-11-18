@@ -678,7 +678,7 @@ libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	22
 libs/repro_local_store/tests/t_observed_execution_mark_is_local_only.nim	nim	1
 libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim	nim	4
 libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim	nim	7
-libs/repro_local_store/tests/t_per_computation_output_dirs.nim	nim	5
+libs/repro_local_store/tests/t_per_computation_output_dirs.nim	nim	8
 libs/repro_local_store/tests/t_portable_fingerprint.nim	nim	19
 libs/repro_local_store/tests/t_portable_memo.nim	nim	8
 libs/repro_local_store/tests/t_portable_output_store.nim	nim	6
@@ -689,7 +689,7 @@ libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
 libs/repro_local_store/tests/t_store_budget_gc.nim	nim	12
 libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim	nim	9
-libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	21
+libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	22
 libs/repro_local_store/tests/t_store_concurrent_first_open_waits.nim	nim	2
 libs/repro_local_store/tests/t_store_copy.nim	nim	22
 libs/repro_local_store/tests/t_store_index_gains_additive_schema_on_every_open.nim	nim	2
@@ -2359,7 +2359,7 @@ tests/integration/t_recipe_compile_per_computation_dirs.nim	nim	1
 tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim	nim	1
 tests/integration/t_recipe_lock_consistency_refuses.nim	nim	4
 tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim	nim	4
-tests/integration/t_records_url_locates_the_lock_record_store.nim	nim	3
+tests/integration/t_records_url_locates_the_lock_record_store.nim	nim	6
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
 tests/integration/t_remote_unseal_boot.nim	nim	7
 tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim	nim	6
