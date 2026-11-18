@@ -3417,6 +3417,12 @@ proc ownedComputationDir*(record: ActionResultRecord;
   for part in parts:
     if part.len == 0 or part == "." or part == "..":
       return ""
+  # A symlink at any level would make the recursive removal act on its target.
+  var walk = root
+  for part in parts:
+    walk = walk / part
+    if symlinkExists(extendedPath(walk)):
+      return ""
   dir
 
 proc removeRecordComputationDir*(record: ActionResultRecord;

@@ -1900,12 +1900,17 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
       carried.incl(e.path)
     proc outputsCarried(record: ActionResultRecord; outputRoot: string): bool =
       for output in record.outputs:
-        if output.metadata.kind == ffkMissing:
-          continue
         let path =
           if output.path.isAbsolute: normalizedPath(output.path)
           elif outputRoot.len > 0: normalizedPath(outputRoot / output.path)
           else: ""
+        # The record's own claim that an output is missing is not trusted: it
+        # is skipped only when nothing exists at the path, which is what
+        # refreshRestoredOutputs decides on.
+        if output.metadata.kind == ffkMissing and
+            (path.len == 0 or not (fileExists(path) or dirExists(path) or
+                                   symlinkExists(path))):
+          continue
         if path.len == 0 or path notin carried:
           return false
       true
