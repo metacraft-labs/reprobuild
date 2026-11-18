@@ -550,6 +550,11 @@ for libName in [
   # catalog generator and develop mode can read a `.nimble` without loading
   # the solver.
   "repro_nimble_reader",
+  # Nimble package catalog NPC-M3: reading a Nimble index by hash (root, then
+  # only the shards a closure touches), the solver-facing candidates with
+  # their per-version requirements, and the deterministic index writer. The
+  # objects' codec is `repro_domain_types/nimble_index`.
+  "repro_nimble_index",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import

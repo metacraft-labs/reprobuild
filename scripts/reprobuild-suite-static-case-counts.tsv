@@ -345,6 +345,7 @@ libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	4
 libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	19
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
 libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim	nim	4
+libs/repro_cli_support/tests/t_nimble_index_catalog_import.nim	nim	5
 libs/repro_cli_support/tests/t_partition_history_key_ignores_windows_exe_suffix.nim	nim	2
 libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim	nim	3
 libs/repro_cli_support/tests/t_partition_planner_degrades_gracefully_on_cold_cache.nim	nim	1
@@ -662,6 +663,7 @@ libs/repro_interface_artifacts/tests/test_catalog_import_declaration.nim	nim	7
 libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim	nim	47
 libs/repro_interface_artifacts/tests/test_imported_contribution_typecheck_identity.nim	nim	7
 libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim	nim	6
+libs/repro_interface_artifacts/tests/test_npc_m3_unknown_kind_refused.nim	nim	6
 libs/repro_interface_artifacts/tests/test_provisioning_lock_diff.nim	nim	40
 libs/repro_interface_artifacts/tests/test_provisioning_realization_lock_record.nim	nim	13
 libs/repro_interface_artifacts/tests/test_provisioning_selection_from_lock.nim	nim	14
@@ -742,6 +744,11 @@ libs/repro_lock_gen/tests/t_strategy_lowest_vs_lowest_direct.nim	nim	6
 libs/repro_lock_gen/tests/t_strategy_without_candidates_is_reported.nim	nim	7
 libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim	nim	7
 libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim	nim	10
+libs/repro_nimble_index/tests/t_nimble_index_codec_and_view.nim	nim	13
+libs/repro_nimble_index/tests/test_npc_every_tag_has_its_own_requires.nim	nim	4
+libs/repro_nimble_index/tests/test_npc_m3_reads_only_needed_shards.nim	nim	4
+libs/repro_nimble_index/tests/test_npc_m3_shard_decoder_is_bounded_and_fail_closed.nim	nim	9
+libs/repro_nimble_index/tests/test_npc_m3_shard_hash_mismatch_refused.nim	nim	6
 libs/repro_nimble_reader/tests/t_nimble_reader_subset.nim	nim	22
 libs/repro_nimble_reader/tests/t_nimble_requirement_forms.nim	nim	11
 libs/repro_nimble_reader/tests/test_npc_m2_documented_range_examples.nim	nim	4
@@ -2035,7 +2042,7 @@ tests/integration/t_health_vcs_hooks_digest_output.nim	nim	1
 tests/integration/t_helper_list_edge_runs_only_build_host_tools.nim	nim	1
 tests/integration/t_hermetic_published_catalog_fixture.nim	nim	7
 tests/integration/t_highest_satisfied_floor_wins.nim	nim	1
-tests/integration/t_home_profile_catalog_imports.nim	nim	9
+tests/integration/t_home_profile_catalog_imports.nim	nim	10
 tests/integration/t_hook_protocol_v2_mixed_version_fails_closed.nim	nim	6
 tests/integration/t_hooks_consult_only_the_repos_own_dependencies.nim	nim	4
 tests/integration/t_hooks_ensure_coexists_with_pre_commit_shim.nim	nim	1

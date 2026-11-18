@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2982,
-    "pureUnitConsolidationGroups": 86,
-    "pureUnitTests": 798,
+    "nimTestBinaries": 2989,
+    "pureUnitConsolidationGroups": 88,
+    "pureUnitTests": 804,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3030
+    "testEntries": 3037
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -537,6 +537,20 @@
       "targetOs": "soAny"
     },
     {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_interface_artifacts",
+        "repro_lock"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "sources": [
+        "libs/repro_interface_artifacts/tests/test_npc_m3_unknown_kind_refused.nim",
+        "libs/repro_interface_artifacts/tests/test_provisioning_lock_diff.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 3,
       "defines": [],
       "dependencyShape": [
@@ -662,6 +676,19 @@
       "sources": [
         "libs/repro_lock/tests/t_selection_is_not_the_same_as_absence.nim",
         "libs/repro_lock/tests/t_selection_status_survives_the_lock_round_trip.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_nimble_index"
+      ],
+      "owner": "libs/repro_nimble_index",
+      "sources": [
+        "libs/repro_nimble_index/tests/test_npc_m3_reads_only_needed_shards.nim",
+        "libs/repro_nimble_index/tests/test_npc_m3_shard_hash_mismatch_refused.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1696,8 +1723,8 @@
       "graph-fixture": 24,
       "integration": 1647,
       "platform/destructive": 197,
-      "pure unit": 798,
-      "unclassified": 364
+      "pure unit": 804,
+      "unclassified": 365
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1911,9 +1938,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2982,
+    "nimTestBinaryCount": 2989,
     "pythonTestFileCount": 48,
-    "testEntryCount": 3030
+    "testEntryCount": 3037
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15066,6 +15093,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_nimble_index_catalog_import",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_lock",
+        "repro_nimble_index"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_nimble_index_catalog_import.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_partition_history_key_ignores_windows_exe_suffix",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -20925,6 +20971,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_npc_m3_unknown_kind_refused",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_lock"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/test_npc_m3_unknown_kind_refused.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/test_provisioning_lock_diff",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -22376,6 +22440,95 @@
       "source": "libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nimble_index_codec_and_view",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_nimble_index",
+        "repro_nimble_reader"
+      ],
+      "owner": "libs/repro_nimble_index",
+      "requiresReproBinary": false,
+      "source": "libs/repro_nimble_index/tests/t_nimble_index_codec_and_view.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_npc_every_tag_has_its_own_requires",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_nimble_index",
+        "repro_nimble_reader",
+        "repro_solver"
+      ],
+      "owner": "libs/repro_nimble_index",
+      "requiresReproBinary": false,
+      "source": "libs/repro_nimble_index/tests/test_npc_every_tag_has_its_own_requires.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_npc_m3_reads_only_needed_shards",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_nimble_index"
+      ],
+      "owner": "libs/repro_nimble_index",
+      "requiresReproBinary": false,
+      "source": "libs/repro_nimble_index/tests/test_npc_m3_reads_only_needed_shards.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_npc_m3_shard_decoder_is_bounded_and_fail_closed",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_domain_types",
+        "repro_nimble_index"
+      ],
+      "owner": "libs/repro_nimble_index",
+      "requiresReproBinary": false,
+      "source": "libs/repro_nimble_index/tests/test_npc_m3_shard_decoder_is_bounded_and_fail_closed.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_npc_m3_shard_hash_mismatch_refused",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_nimble_index"
+      ],
+      "owner": "libs/repro_nimble_index",
+      "requiresReproBinary": false,
+      "source": "libs/repro_nimble_index/tests/test_npc_m3_shard_hash_mismatch_refused.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -45661,7 +45814,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_home_profile_catalog_imports.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -230,6 +230,7 @@ from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
 import repro_cli_support/home_catalog_imports
+import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
 # `repro.nim` `uses:` entry state about a dependency's revision, and the
 # canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
@@ -35542,7 +35543,16 @@ proc runDebugArtifactCommand(c: ReproCommandLineDebugArtifact): int =
   ## `graph` and `why`, `--format` wins over `--json`.
   let path = c.path
   let format = inspectionFormat(c.format, c.json, allowDot = false)
-  let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
+  let bytes = toBytes(readFile(extendedPath(path)))
+  if isNimbleIndexObject(bytes):
+    # A Nimble index object (root, shard, name map, events): decoded by the
+    # bounded, canonical codec, which refuses a damaged or non-canonical
+    # object rather than render part of it.
+    case format
+    of gofJson: echo renderIndexObjectJson(bytes)
+    else: echo renderIndexObject(bytes)
+    return 0
+  let record = decodeLoweredGraphCache(bytes)
   case format
   of gofText:
     echo renderLoweredGraphRecordText(record)
