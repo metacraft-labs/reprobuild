@@ -151,8 +151,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "acd5bb0bf4bf3ebf24dc4975e8b922f2498a4926";
-    hash = "sha256-lKEV7zEyL4Dg2EQZbUDvAiupho7OmAP/VClHlFEdBIg=";
+    rev = "f6065a9c6f3b56ab7c1d7e24750f7b9cb27c5661";
+    hash = "sha256-yYLlj8ZDdesOSzLynFpouy+r9xYSjvAgR/Xw97esa+8=";
   },
   # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
   # package (the declarative description of a program's entry points); the

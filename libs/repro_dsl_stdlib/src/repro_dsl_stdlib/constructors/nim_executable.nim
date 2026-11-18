@@ -22,7 +22,7 @@ proc nim_executable*(into: string;
     cross = zigNimCross(zigTarget, "nim_executable")
   else:
     requireCrossTargetConsulted("nim_executable")
-  var action = nim.c(
+  let action = nim.c(
     source = source,
     output = targetKeyedPath(into),
     defines = defines,
@@ -34,11 +34,5 @@ proc nim_executable*(into: string;
     clangExe = cross.ccExe,
     clangLinkerExe = cross.ccExe,
     after = (if zigTarget != nil: @[cross.wrappers] else: @[]))
-  # This calls the typed `nim.c(..., output = ...)` form, which declares
-  # no passthrough of its own; only the `binary =` alias adds it. Name the
-  # temp-directory variables here as that alias does, for the reason
-  # `NimCompileScratchEnvNames` states: keyed by value, the first build in
-  # every new `nix develop` shell would recompile this edge.
-  appendRegisteredActionEnvPassthrough(action, NimCompileScratchEnvNames)
   newExecutable(install = action, executableName = into,
                 installPrefix = "usr/bin")

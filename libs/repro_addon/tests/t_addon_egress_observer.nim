@@ -184,7 +184,9 @@ suite "the egress observer's table":
   test "the observer unit loads the table and deletes it when stopped":
     let u = egressUnit("/usr/sbin/nft")
     check "ExecStart=/usr/sbin/nft -f " & EgressNftPath & "\n" in u
-    check "ExecStop=/usr/sbin/nft delete table inet " & EgressTableName in u
+    # ``-``: a stop or restart after a flush nothing repaired finds the
+    # table gone and must not leave the unit failed.
+    check "ExecStop=-/usr/sbin/nft delete table inet " & EgressTableName in u
     check "CapabilityBoundingSet=CAP_NET_ADMIN\n" in u
     let f = agentFetchUnit("/repro/store/x/bin/repro", AgentUnitsInputs(
       target: "t", allowedAddresses: @["10.0.2.2"]), observed = true)
@@ -193,5 +195,127 @@ suite "the egress observer's table":
     check "OnFailure=" & EgressCheckUnit & "\n" in f
     check observeFetchUnit(agentFetchUnit("/repro/store/x/bin/repro",
       AgentUnitsInputs(target: "t", allowedAddresses: @["10.0.2.2"]))) == f
+
+  test "the observer unit follows the host's nftables.service":
+    # Reprobuild-pm issue
+    # 2026-11-16-addon-egress-table-stays-deleted-after-nftables-service-flushes-the-ruleset.md:
+    # Debian's and Ubuntu's nftables.service flushes the whole ruleset at
+    # start, reload and stop (and an upgrade try-restarts it), deleting the
+    # table while this RemainAfterExit= unit stays active. Tied by reference
+    # (within spec §13 decision 43), the unit loads after it, restarts and stops
+    # with it, and reloads the table when it reloads. Red under
+    # ``egress-unit-ignores-host-ruleset``.
+    let ls = egressUnit("/usr/sbin/nft", "ab").splitLines()
+    checkpoint ls.join("\n")
+    let unitEnd = ls.find("[Service]")
+    check unitEnd > 0
+    for want in ["After=" & HostNftablesUnit, "PartOf=" & HostNftablesUnit,
+                 "ReloadPropagatedFrom=" & HostNftablesUnit]:
+      check ls.find(want) in 0 ..< unitEnd
+    check ls.find("ExecReload=/usr/sbin/nft -f " & EgressNftPath) > unitEnd
+    # No [Install] link reaches the management-path unit: the tie is this
+    # unit's own [Unit] section only.
+    check not ls.anyIt(it.startsWith("WantedBy=" & HostNftablesUnit) or
+                       it.startsWith("RequiredBy=" & HostNftablesUnit))
+
+  # ``egress-set-full`` means a full set, never a read race (reprobuild-pm
+  # issue
+  # ``2026-11-17-addon-egress-check-reports-set-full-for-one-unattributed-packet.md``):
+  # the counter and the sets are separate ``nft`` reads, and packets keep
+  # arriving between them.
+  test "a packet the sets hold is attributed whichever read saw it first":
+    let st = root / "state-race"
+    var un = -1'i64
+    # The counter, read first, saw 1 packet; the sets, read after it, already
+    # hold a second one that arrived in between.
+    discard freshSince(@[("192.0.2.20", 2'i64)], st, "t", 1, addr un)
+    check un == 0
+    # The next check's counter catches up with what the sets already showed:
+    # nothing is unattributed (a per-check difference of growths read 1).
+    discard freshSince(@[("192.0.2.20", 2'i64)], st, "t", 2, addr un)
+    check un == 0
+    # A full set: 5 packets counted that no element grew by -- reported once.
+    discard freshSince(@[("192.0.2.20", 2'i64)], st, "t", 7, addr un)
+    check un == 5
+    discard freshSince(@[("192.0.2.20", 2'i64)], st, "t", 7, addr un)
+    check un == 0
+    # One more unattributed packet, while a known element also grows.
+    discard freshSince(@[("192.0.2.20", 3'i64)], st, "t", 9, addr un)
+    check un == 1
+    # A check whose counter read failed keeps what was reported.
+    un = -1
+    discard freshSince(@[("192.0.2.20", 3'i64)], st, "t", -1, addr un)
+    check un == -1
+    discard freshSince(@[("192.0.2.20", 3'i64)], st, "t", 9, addr un)
+    check un == 0
+    # A reload starts the table's counters, and the count reported, at zero.
+    discard freshSince(@[("192.0.2.20", 1'i64)], st, "u", 4, addr un)
+    check un == 3
+
+  test "the control datagram between the check's reads is no egress-set-full":
+    # Mock: a stand-in ``nft`` answering from a file. The race is between
+    # the check's separate reads of the kernel's counters and a packet sent
+    # in between; a real table cannot be made to interleave on demand (and
+    # needs ``CAP_NET_ADMIN``), so the stand-in sends "a control datagram"
+    # -- the named counter and the control element both grow by one --
+    # before every answer: the interleaving the drill met at a fetch.
+    let dir = root / "fake-nft"
+    createDir(dir)
+    let fake = dir / "nft"
+    let pk = dir / "packets"
+    writeFile(pk, "0")
+    let reload = dir / "reload"
+    # ``$v`` is the count since the table's load: a reload (from the call
+    # numbered in ``reload`` on) starts the counter and the set's elements
+    # at zero again, and gives the table a new handle.
+    # Shell builtins only: ``runHostTool`` runs it with ``HostToolPath``,
+    # which holds no ``cat`` on a NixOS host -- a stand-in that shelled out
+    # to one read ``n`` as empty, never counted a packet, and passed
+    # without the fix.
+    writeFile(fake, "#!/bin/sh\n" &
+      "read n < " & quoteShell(pk) & "; n=$((n + 1)); echo $n > " &
+        quoteShell(pk) & "\n" &
+      "h=3; v=$n\n" &
+      "if [ -e " & quoteShell(reload) & " ]; then\n" &
+      "  read r < " & quoteShell(reload) & "\n" &
+      "  if [ $n -ge $r ]; then h=4; v=$((n - r + 1)); fi\nfi\n" &
+      "case \"$*\" in\n" &
+      "  'list tables') echo 'table " & EgressTableFamily & " " &
+        EgressTableName & "' ;;\n" &
+      "  *'list set'*refused4) echo '{\"nftables\": [{\"set\": {\"elem\": " &
+        "[{\"elem\": {\"val\": \"" & EgressControlAddress & "\", " &
+        "\"counter\": {\"packets\": '$v'}}}]}}]}' ;;\n" &
+      "  *'list set'*refused6) echo '{\"nftables\": [{\"set\": {}}]}' ;;\n" &
+      "  *'list counter'*) echo '{\"nftables\": [{\"counter\": " &
+        "{\"packets\": '$v'}}]}' ;;\n" &
+      "  *'list table'*) echo '{\"nftables\": [{\"table\": " &
+        "{\"handle\": '$h'}}]}' ;;\n" &
+      "  *) exit 1 ;;\n" &
+      "esac\n")
+    setFilePermissions(fake, {fpUserRead, fpUserWrite, fpUserExec})
+    let st = root / "state-control"
+    var lastControl = 0'i64
+    for i in 1 .. 3:
+      let c = checkEgress(fake, st)
+      check c.error.len == 0
+      check c.present
+      # Positive control: the stand-in did send datagrams during the check.
+      check c.controlPackets > lastControl
+      lastControl = c.controlPackets
+      check not c.setFull
+      check c.unattributed == 0
+      check c.fresh.len == 0
+    # The table reloaded between the check's reads of the counter and of
+    # the sets: the old instance's counter (large) against the new
+    # instance's sets (near empty) would read as unattributed packets. The
+    # reads are taken again, within one instance, and nothing is.
+    let n = parseInt(readFile(pk).strip())
+    # This check's calls: tables, table, counter, set refused4, ... -- the
+    # reload lands on the set read.
+    writeFile(reload, $(n + 4))
+    let r = checkEgress(fake, st)
+    check r.error.len == 0
+    check r.unattributed == 0
+    check r.counted >= 0
 
 removeDir(root)

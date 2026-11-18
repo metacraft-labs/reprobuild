@@ -173,7 +173,9 @@ suite "CS-M6: the project-introspection command lines":
     let res = s.run(["biuld"])
     check res.code == 2
     check "unknown subcommand 'biuld' for 'repro'" in res.output
-    check "expected one of: build," in res.output
+    # The tip names the close command; the full list is the help's (the
+    # `--help` hint), not the error line's.
+    check "tip: a similar subcommand exists: 'build'" in res.output
     check "unexpected argument" notin res.output
     # A flag after the mistyped word does not hide it.
     let withFlag = s.run(["biuld", "--once"])

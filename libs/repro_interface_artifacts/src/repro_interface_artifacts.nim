@@ -84,6 +84,7 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+import repro_core/variant_assignments
 from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_core/installed_prefix_nim
 export file_lock.ReproFileLock
@@ -6877,8 +6878,28 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   ## package is added or its candidate list changes there, update it here too.
   ## (reprobuild's OWN ``libs/*/src`` tree is replayed separately by
   ## ``reproLibPathFlags``; this helper covers only the out-of-tree packages.)
+  ##
+  ## The candidate lists below are relative to a REPROBUILD root, as they are
+  ## in ``config.nims``. When ``workDir`` is a consumer that compiles against
+  ## an external reprobuild SDK, they are resolved at that SDK's root instead
+  ## (``bootstrapSiblingPackagePathFlags``, the set ``protectSdkCompilePaths``
+  ## already treats as the SDK's bootstrap closure). Resolving them at the
+  ## consumer read ``libs/<family>/src`` and ``../codetracer/libs/<family>``
+  ## inside the consumer, and each family's marker decided on its own which
+  ## copy it took: codetracer's older ``nim-serialization`` lacks
+  ## ``serialization/case_objects.nim``, so ``serialization`` came from the
+  ## SDK while ``json_serialization``, ``faststreams`` and ``stew`` came from
+  ## codetracer. These flags are reasserted ahead of everything, so the
+  ## recipe compile paired two releases of one library family and failed
+  ## (reprobuild-pm issue 2026-11-18-codetracer-recipe-extraction-mixes-
+  ## reprobuild-serialization-with-codetracer-json-serialization).
   if workDir.len == 0:
     return
+  if not workDirIsReprobuildTree(workDir):
+    let sdkLibs = reprobuildExternalLibsRoot(workDir)
+    if sdkLibs.len > 0:
+      return bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
+        workDir.parentDir)
   let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(workDir)
   if ctRunnerAdapter.len > 0:
     result.add("--path:" & ctRunnerAdapter)
@@ -7524,17 +7545,13 @@ proc activeVariantSignature*(): string =
   ## overwrite a ``buildType=debug`` one in the same position slot. The
   ## precedent is ``providerGraphStoreRoot``'s ``variants-<slug>``
   ## directories, which isolate the provider-graph snapshot store on the
-  ## same value for the same reason.
+  ## same value for the same reason. A name assigned more than once counts
+  ## once, with its LAST value (``repro_core/variant_assignments``), so
+  ## ``--release --debug`` and ``--debug --release`` key different builds.
   let raw = getEnv(ProviderVariantEnv)
   if raw.len == 0:
     return ""
-  var parts: seq[string] = @[]
-  for item in raw.split(','):
-    let s = item.strip()
-    if s.len > 0 and s notin parts:
-      parts.add(s)
-  parts.sort()
-  parts.join(",")
+  canonicalVariantAssignmentsOf(raw)
 
 const
   ProviderCacheName* = "nim.c/nimcache@provider"

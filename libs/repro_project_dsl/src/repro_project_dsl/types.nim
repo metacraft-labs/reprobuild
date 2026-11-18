@@ -165,6 +165,25 @@ type
       ## it; an edge that names the tool only in ``toolIdentityRefs`` takes it
       ## through ``repro_core/tool_input_check_policies``, whose entries
       ## ``t_tool_input_check_policies`` checks against these declarations.
+    envPassthrough*: seq[string]
+      ## The environment variables every edge of this command passes through
+      ## by NAME (``BuildActionDef.envPassthrough``; reprobuild-pm
+      ## ``spec/Filesystem-Policy-And-Observed-Inputs.md`` §"Declared And
+      ## Passthrough Variables"), declared as string literals with
+      ## ``envPassthrough "TMPDIR", ...`` in the ``cli:`` block. Inherited by
+      ## nested scopes, which add their own names; each name once. A claim
+      ## about the TOOL -- its process reads the variable only in a way that
+      ## cannot change what it produces -- so the generated typed wrapper
+      ## stamps it on every edge it records and exposes no formal parameter
+      ## through which a call site could drop or replace it. Never empty and
+      ## never ``PATH`` (``envPassthroughNameProblem``).
+    envPassthroughRefs*: seq[string]
+      ## The same declaration written as a reference to a ``const`` list of
+      ## names (``envPassthrough ScratchLocationEnvNames``), kept as the
+      ## identifier's source spelling: the macro cannot evaluate it, so the
+      ## wrapper is generated to pass it on, resolved where the tool's
+      ## ``cli:`` block is compiled, and to check its names there. Inherited
+      ## and deduplicated (by spelling) like ``envPassthrough``.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -1975,7 +1994,10 @@ type
       ## place its scratch files (``nim.c`` in ``packages/nim.nim``). Every
       ## other variable an edge is observed to read stays keyed by value, so
       ## naming one here is a claim about the TOOL, made where the edge is
-      ## constructed, never a way to silence a miss. Set through
+      ## constructed, never a way to silence a miss. A tool declares it once
+      ## with ``envPassthrough`` in its ``cli:`` block
+      ## (``ReproCliCommandExt.envPassthrough``) and its typed wrapper stamps
+      ## it on every edge; an edge adds its own names through
       ## ``appendRegisteredActionEnvPassthrough``. Payload codec v36+; an
       ## older payload decodes with the list empty.
     sourceFile*: string

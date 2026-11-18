@@ -73,6 +73,7 @@ import repro_test_support/process_fixtures
 import repro_attest
 import repro_attest/cloud_lease
 import repro_cli_support/attest
+import repro_cli_support/cli_program
 
 import ./cloud_lease_fake_provider
 
@@ -2085,19 +2086,20 @@ suite "the sweep is SCHEDULED, not merely runnable":
       # a real directory stands in for it here.
       args.add (if token.startsWith("${"): scratch else: token)
     check seenSubcommand
-    let parsed = parseAttestArgs(args)
+    # repro's own parser, the one `repro attest` runs.
+    var conf: ReproCommandLine
+    check loadReproCommandLine(@["attest"] & args, conf) == -1
+    let parsed = attestOptionsOf(conf.attest)
     check parsed.sub == ascReap
     check parsed.reapDestroy
     check parsed.reapSweeps == "1"
     check parsed.leaseStore == scratch
     # The control: a flag this build does not have is refused by the
-    # same parser, so the acceptance above is a reading.
-    var refusedUnknown = false
-    try:
-      discard parseAttestArgs(args & @["--sweep-everything"])
-    except ValueError:
-      refusedUnknown = true
-    check refusedUnknown
+    # same parser (a usage error, exit 2), so the acceptance above is a
+    # reading.
+    var refused: ReproCommandLine
+    check loadReproCommandLine(@["attest"] & args & @["--sweep-everything"],
+      refused) == 2
 
 suite "how long a leaked instance can keep billing, as a number":
 

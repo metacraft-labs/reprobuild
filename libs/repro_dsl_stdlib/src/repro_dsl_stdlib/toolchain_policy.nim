@@ -102,11 +102,21 @@ proc targetTripleFromEnv*(): string =
   ## Read HERE and nowhere else in the stdlib: this module is the one place
   ## a toolchain decision reads variant state (see the module header), and
   ## the env is variant state in a different envelope.
+  ##
+  ## When the env assigns `targetTriple` more than once (`repro build
+  ## --variant targetTriple=A --target=B`, which the CLI writes as
+  ## `targetTriple=A,targetTriple=B`), the LAST assignment wins: the rule for
+  ## a scalar at equal priority (Configurable-System.md §"Priorities And
+  ## Contributions"), the one the solver's `prSet` contributions follow
+  ## (`variants.addPendingCliOverride`), and the one the engine's object
+  ## check reads (`target_object_check.objectCheckTripleFromVariants`), so
+  ## the build and the check of its outputs agree (CLI/build.md §"Cross
+  ## Targets: `--target`").
+  result = ""
   for assignment in getEnv(VariantEnvVar).split(','):
     let kv = assignment.split('=', 1)
     if kv.len == 2 and kv[0].strip() == "targetTriple":
-      return kv[1].strip()
-  ""
+      result = kv[1].strip()
 
 proc activeSolvedVariants*(): ToolchainSelection =
   ## The variant assignments governing the ACTIVE build region.

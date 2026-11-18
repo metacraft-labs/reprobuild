@@ -533,7 +533,9 @@ suite "the command line cannot ask for a launch":
                  "--yes", "--force", "--run", "--create"]:
       let outcome = runCapturing(launchArgs() & @[flag])
       check outcome.code == AttestExitUsage
-      check ("unknown `repro attest` flag: " & flag) in outcome.err
+      # repro's parser refuses it as a usage error naming the command.
+      check ("error: unknown flag '" & flag & "' for 'repro attest launch'") in
+        outcome.err
       inc refusedFlags
     check refusedFlags == 8
     # And the same invocation WITHOUT any of them is accepted, so the

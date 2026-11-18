@@ -13,6 +13,7 @@ import repro_platform
 # runtime's SQLite binding and shm-index/shm-queue dependencies.
 import repro_local_store/prefix_paths
 import repro_core/target_object_check
+import repro_core/variant_assignments
 
 const TargetObjectExemptionSidecarKey* = "target-object-exemption"
   ## Sidecar key under which each declared object-check exemption is
@@ -58,17 +59,16 @@ proc activeTargetTripleTag*(): string =
   ## the assignment itself rather than ask ``toolchain_policy``; the two read
   ## one env entry with one spelling, and the stdlib's solver-assigned value
   ## can only ever agree with it (the solver consumed the same contribution
-  ## at ``prSet``). Read here and in ``toolchain_policy`` only.
-  for assignment in getEnv("REPRO_VARIANTS").split(','):
-    let kv = assignment.split('=', 1)
-    if kv.len == 2 and kv[0].strip() == "targetTriple":
-      let value = kv[1].strip()
-      # A triple naming the build host itself is a native build
-      # (CLI/build.md §"Cross Targets: `--target`").
-      if value.len > 0 and value.toLowerAscii() != "native" and
-          not isHostTriple(value):
-        return value
-      return ""
+  ## at ``prSet``). Read here and in ``toolchain_policy`` only. A repeated
+  ## assignment takes the LAST, as the solver, ``toolchain_policy`` and the
+  ## object check do (``repro_core/variant_assignments``): the mirror and the
+  ## cache identity built on it must name the triple the build compiled for.
+  let value = lastVariantAssignment(getEnv("REPRO_VARIANTS"), "targetTriple")
+  # A triple naming the build host itself is a native build
+  # (CLI/build.md §"Cross Targets: `--target`").
+  if value.len > 0 and value.toLowerAscii() != "native" and
+      not isHostTriple(value):
+    return value
   ""
 
 var installMirrorTargetOverride {.threadvar.}: tuple[active: bool,

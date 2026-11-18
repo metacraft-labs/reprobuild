@@ -63,10 +63,14 @@ proc replaceFileSource*(own, path, source: string): string =
   own.replace("  sourceLocal = \"" & old & "\"", "  sourceLocal = \"" & source & "\"")
 
 proc egressNftBinaryOf*(unit: string): string =
-  ## The ``nft`` the egress observer unit runs (its ``ExecStop=`` line).
+  ## The ``nft`` the egress observer unit runs (its ``ExecStop=`` line,
+  ## with or without the ``-`` that tolerates a table already gone, which
+  ## units rendered before the host-ruleset tie lack).
   for l in unit.splitLines():
     if l.startsWith("ExecStop=") and l.endsWith(" delete table inet repro_addon_egress"):
-      return l["ExecStop=".len ..< l.len - " delete table inet repro_addon_egress".len]
+      var start = "ExecStop=".len
+      if l.len > start and l[start] == '-': inc start
+      return l[start ..< l.len - " delete table inet repro_addon_egress".len]
   ""
 
 proc refreshEgressUnit*(own: string): string =

@@ -57,9 +57,13 @@ const
     # 221, and its `test`, `certify`, `certificates`, `ci` and `watch` from
     # 221 to 43. What `infra.nim` and `infra_image.nim` still hold is no argv
     # parsing (a `git describe` suffix, a table of the flags a bootstrap
-    # names), but it has the shape the scan counts.
+    # names), but it has the shape the scan counts. The eighth group's
+    # `attest` took `attest.nim` from 96 to 12: what is left pairs a flag's
+    # name with the parsed value it names in a refusal (`--vcpus` given
+    # without `--firmware`, a flag `cross-check` refuses), and maps a launch
+    # input's flag name to the field it fills, reading no argv.
     ("libs/repro_cli_support/src/repro_cli_support.nim", 43),
-    ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
+    ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 12),
     ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/project_pins.nim", 4),
