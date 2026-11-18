@@ -1,38 +1,46 @@
-## Workspace-Manifest-Optional MO-12 — SIBLING develop-mode deps (the RA-22
-## develop-override set, one level up) are folded into the committed-lock-
-## derived participating set AND the committed lock's ``deps``, and the
-## pre-push gate ENFORCES them — exactly as MO-7 did for NESTED deps.
+## Workspace-Manifest-Optional MO-12, as amended 2026-11-16 — a SIBLING
+## develop override (the RA-22 develop-override set, one level up) is a
+## workspace MEMBER of a committed-lock-only workspace, but it is not a
+## dependency: `repro lock refresh` does not record it, and the pre-push gate of
+## the pushed repo does not check it, unless it substitutes a dependency the
+## recipe derives.
+##
+## Spec: Unified-Locking-And-Hooks.md §14.2 item 2 ("an override contributes
+## only when it substitutes a dependency items 1 and 3 derive");
+## Workspace-And-Develop-Mode.md §"Which develop overrides the push gate
+## checks". Issue: reprobuild-pm `issues/2026-11-16-the-pre-push-gate-refuses-
+## over-develop-overrides-outside-the-pushed-repo-closure.md` — before the fix
+## every override was written into the committed lock and became a root
+## `depends` edge, so an override made for an unrelated repo was a closure
+## member and blocked the push whatever stage 3 did.
 ##
 ## Fixture (built ``./build/bin/repro``, black-box):
 ##
 ##   <scratch>/
 ##     work/                       the workspace repo (committed lock, no manifest)
-##       repro.solver              the solver inputs the lock pins
+##       repro.solver              the solver inputs the lock pins (no `uses:`)
 ##       repro.lock                the committed solved-graph lock (refreshed)
 ##       .repro/develop-overrides.toml   RA-22 override: package "sib" -> "../sib"
-##     sib/                        a SIBLING develop-mode dep — its OWN git repo
-##       repro.nim                 a reprobuild project (the discovery discriminator)
+##     sib/                        a SIBLING develop-mode checkout — its OWN git
+##       repro.nim                 repo, a reprobuild project nothing uses
 ##   (NO root `projects/`, NO `.repro/workspace.toml`, NO org-root repo)
 ##
 ## Asserts:
-##   1. After ``repro lock refresh``, the committed lock carries the sibling as
-##      a first-class ``deps`` entry: ``path = "../sib"`` with VCS coordinates
-##      (``coord_kind = "vcs"`` + a ``revision``) AND a self-describing
-##      ``integrity`` multihash — i.e. coordinates+integrity per the MO-8/MO-11
-##      model — and the root repo gains a ``depends`` edge onto ``sib``.
-##   2. ``repro workspace sync --dry-run`` folds the sibling into the plan
-##      (``[update] ../sib`` alongside ``[update] .``) — it is in the
-##      participating set, not just the workspace repo.
+##   1. After ``repro lock refresh``, the committed lock does NOT carry the
+##      sibling: no ``sib`` entry, and the root has no ``depends`` edge onto it.
+##   2. ``repro workspace sync --dry-run`` still folds the sibling into the plan
+##      (``[update] ../sib`` alongside ``[update] .``): it is a member.
 ##   3. ``repro check --mode=pre-push`` PASSES (exit 0) on the clean tree.
-##   4. The sibling is in the GATE's enforcement scope: dirtying it makes the
-##      gate REFUSE (exit 2) naming ``../sib`` with property ``dirty`` — only
-##      possible because the sibling was folded into the participating set.
+##   4. Dirtying the sibling and giving it an unpublished commit does NOT block
+##      the push of the workspace repo (``--current-repo`` names it, as the
+##      managed hook does): the sibling is outside its closure.
+##   5. Without a pushed repo the gate falls back to the whole workspace and
+##      still refuses the dirty sibling, so (4) passes for the closure rule and
+##      not because the sibling went unobserved.
 ##
-## Falsifiability: if the sibling fold were reverted (``discoverSiblingDevelop
-## Deps`` returning empty / ``committedLockDerivedProject`` +
-## ``lockedDepsForWorkspace`` not consuming it), (1)'s ``../sib`` dep vanishes
-## from the lock, (2)'s ``[update] ../sib`` plan line disappears, and (4) flips
-## to exit 0 (the dirty sibling is no longer enforced) — each assertion fails.
+## Falsifiability: with the pre-fix fold (``lockedDepsForWorkspace`` recording
+## every override, ``committedLockDerivedProject`` adding a root edge onto it),
+## (1) finds ``sib`` in the lock and (4) refuses with ``dirty`` on ``../sib``.
 ##
 ## Hermetic: every git repo lives in a fresh tempdir; nothing touches $HOME.
 ## Skip rule: ``git`` missing on PATH, or repro unbuilt.
@@ -87,7 +95,7 @@ proc initPublishedRepo(gitBin, scratch, name: string): tuple[origin, work: strin
   check git(gitBin, work, "config user.name Tester").code == 0
   (origin: origin, work: work)
 
-suite "MO-12: committed lock folds sibling develop deps":
+suite "MO-12: a sibling develop override is a member, not a dependency":
 
   test "t_committed_lock_folds_sibling_develop_deps":
     let gitBin = findExe("git")
@@ -128,25 +136,20 @@ state = "editable"
 created_at = "2026-06-27T00:00:00Z"
 """)
 
-      # ---- refresh the lock: it must fold the sibling into `deps`. ----
+      # ---- refresh the lock: the override is not a dependency. ----
       let refresh = run(reproBinary & " lock refresh " & q(repo))
       check refresh.code == 0
       check fileExists(repo / "repro.lock")
       let lockBody = readFile(repo / "repro.lock")
 
-      # (1) The sibling is a first-class locked dep, recorded by NAME (a lock
-      # records no checkout path), with VCS coordinates (kind + revision) + a
-      # self-describing integrity.
-      check "{ name = \"sib\", coord_kind = \"vcs\"" in lockBody
-      check "path =" notin lockBody
-      check "coord_kind = \"vcs\"" in lockBody
-      # The sibling's locked entry carries the sibling's HEAD as the revision.
+      # (1) Nothing the recipe derives is substituted by the override, so the
+      # lock records neither the sibling nor an edge onto it.
+      checkpoint("repro.lock:\n" & lockBody)
+      check "name = \"sib\"" notin lockBody
       let sibSha = git(gitBin, sib.work, "rev-parse HEAD").output.strip()
-      check sibSha in lockBody                       # the sibling revision is pinned
-      check "integrity = \"git-" in lockBody         # self-describing integrity
-      # The root repo depends on the sibling.
-      check "depends = \"sib\"" in lockBody or "depends = \"sib," in lockBody or
-            ",sib\"" in lockBody or ",sib," in lockBody
+      check sibSha notin lockBody
+      check "\"sib\"" notin lockBody and "sib," notin lockBody and
+        ",sib" notin lockBody
 
       # Commit + publish the lock so the workspace tree is clean for the gate.
       writeFile(repo / ".gitignore", ".repro/\n")
@@ -158,12 +161,12 @@ created_at = "2026-06-27T00:00:00Z"
       check not dirExists(repo / ".repro" / "manifests")
       check not dirExists(scratch / "repro-workspace")
 
-      # (2) sync --dry-run folds the sibling into the participating set.
+      # (2) sync --dry-run still folds the sibling into the participating set.
       let sync = run(reproBinary & " workspace sync --workspace-root=" & repo &
         " --dry-run")
       check sync.code == 0
       check "[update] ." in sync.output            # the workspace repo itself
-      check "[update] ../sib" in sync.output       # the SIBLING dep, folded in
+      check "[update] ../sib" in sync.output       # the SIBLING, a member
       check "not a workspace" notin sync.output
       check "requires" notin sync.output
 
@@ -173,26 +176,36 @@ created_at = "2026-06-27T00:00:00Z"
       let zero = "0000000000000000000000000000000000000000"
       writeFile(refs, "refs/heads/main " & headSha & " refs/heads/main " &
         zero & "\n")
-      let chk = run(reproBinary & " check --mode=pre-push --write-report --workspace-root=" &
-        repo & " --pushed-refs=" & refs)
+      let gate = reproBinary &
+        " check --mode=pre-push --write-report --workspace-root=" & repo &
+        " --pushed-refs=" & refs
+      let chk = run(gate & " --current-repo=" & repo)
       check chk.code == 0
       check "not a workspace" notin chk.output
 
-      # (4) the sibling is in the GATE's enforcement scope: dirtying it REFUSES
-      # the push (exit 2) naming ``../sib`` — only possible because the sibling
-      # was folded into the committed-lock-derived participating set.
+      # (4) An unpublished commit and uncommitted work in the sibling do not
+      # block the push of the workspace repo: the override substitutes nothing
+      # in its closure.
+      writeFile(sib.work / "work.txt", "unpublished\n")
+      check git(gitBin, sib.work, "add work.txt").code == 0
+      check git(gitBin, sib.work, "commit -m unpublished").code == 0
       writeFile(sib.work / "scratch.txt", "uncommitted\n")
-      let dirtyChk = run(reproBinary &
-        " check --mode=pre-push --write-report --workspace-root=" & repo &
-        " --pushed-refs=" & refs)
-      check dirtyChk.code == 2
+      let scoped = run(gate & " --current-repo=" & repo)
+      checkpoint("scoped gate:\n" & scoped.output)
+      check scoped.code == 0
+      check "../sib" notin scoped.output
+      check "develop_override" notin scoped.output
+
+      # (5) The whole-workspace fallback (no pushed repo) still observes it.
+      let whole = run(gate)
+      checkpoint("whole-workspace gate:\n" & whole.output)
+      check whole.code == 2
       let reportPath = repo / ".repro" / "build" / "reports" / "check-report.json"
       check fileExists(reportPath)
       let report = parseJson(readFile(reportPath))
       var sawSiblingDirty = false
       for failure in report{"failures"}:
-        if failure{"property"}.getStr() == "dirty" and
-            failure{"repo"}.getStr() == "../sib":
+        if failure{"property"}.getStr() in ["dirty", "develop_override_dirty"] and
+            "sib" in failure{"repo"}.getStr():
           sawSiblingDirty = true
       check sawSiblingDirty
-      removeFile(sib.work / "scratch.txt")   # revert the induced dirt

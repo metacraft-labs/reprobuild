@@ -55,6 +55,7 @@ export ct_test_interface
 
 import repro_project_dsl
 export repro_project_dsl
+from repro_core/scratch_env import ScratchLocationEnvNames
 
 const NimUnittestToolId* = "ct_test_nim_unittest.buildNimUnittest"
   ## Stable identity string preserved from the pre-M4 shim shape so the
@@ -318,6 +319,15 @@ proc build*(tool: BuildNimUnittest;
     when defined(macosx): "clang"
     else: "gcc"
   appendRegisteredActionToolIdentityRefs(result.action.id, [backendCompiler])
+
+  # The same temp-directory passthrough as ``nim.c``
+  # (``NimCompileScratchEnvNames`` in ``repro_dsl_stdlib/packages/nim``,
+  # which states the reason and the cost): this is a ``nim c`` compile, and
+  # ``nix develop`` gives every shell a fresh ``TMPDIR``/``TMP``/``TEMP``/
+  # ``TEMPDIR``. Keyed by value, the first build in each new shell recompiled
+  # every test binary of an unchanged tree. Not applied to the execute edges
+  # below: what a test does with its temp directory is the test's business.
+  appendRegisteredActionEnvPassthrough(result.action, ScratchLocationEnvNames)
 
   # Typed-Outputs M1 binding: populate ``edge.testBinary`` with a
   # ``NimUnittestBinary`` whose ``path`` is the resolved binary path so

@@ -532,9 +532,41 @@ suite "envelope lanes -- a tarball record's ELF relocation begins at v33":
     let relocated = withElfRelocation(plain)
     check interfaceFingerprint(relocated) != interfaceFingerprint(plain)
 
-  test "v33 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v33, so this matrix is extended
-    check interfaceEnvelopeVersion() == 33'u16
+  test "v34 carries the closure entries; v21..v33 decode them empty with " &
+      "every other field intact":
+    var pi = bothLanesInterface()
+    let entries = @[ClosureEntry(path: "node_modules/a",
+      sha256: repeat("ab", 32), url: "https://example.invalid/a.tgz",
+      archiveType: "tar.gz", stripComponents: 1)]
+    pi.provisioningContributions[0].tarballProvisioning[0].closureEntries =
+      entries
+    for v in 21'u16 .. 33'u16:
+      checkpoint "v" & $v
+      let row = tarballOf(atVersion(pi, v))
+      check row.closureEntries.len == 0
+      check row.detail.version == DetailVersion
+      check row.closureManifest == ClosureManifest
+    for v in [34'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let row = tarballOf(atVersion(pi, v))
+      check row.closureEntries == entries
+      check row.detail.version == DetailVersion
+      check row.closureManifest == ClosureManifest
+
+  test "a record without a closure keeps its v33 fingerprint":
+    let plain = bothLanesInterface()
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 33'u16)
+    var closed = plain
+    closed.provisioningContributions[0].tarballProvisioning[0]
+      .closureEntries = @[ClosureEntry(path: "node_modules/a",
+        sha256: repeat("ab", 32), url: "https://example.invalid/a.tgz",
+        archiveType: "tar.gz", stripComponents: 1)]
+    check interfaceFingerprint(closed) != interfaceFingerprint(plain)
+
+  test "v34 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v34, so this matrix is extended
+    check interfaceEnvelopeVersion() == 34'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

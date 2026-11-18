@@ -1,4 +1,4 @@
-import std/[os, strutils]
+import std/[os, sequtils, strutils]
 
 import repro_interface_artifacts
 import repro_local_store
@@ -188,7 +188,10 @@ proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
     launcher: plan.declaredLauncher,
     # Resolved here, where the declaring file is known: the daemon rebuilds
     # the record without it and runs in a working directory of its own.
-    closureManifest: resolvedClosureManifest(plan),
+    closureManifest:
+      if plan.record.closureEntries.len > 0: ""
+      else: resolvedClosureManifest(plan),
+    closureEntries: plan.record.closureEntries.mapIt(canonicalClosureLine(it)),
     archiveDetail: plan.record.detail,
     stripComponents: plan.stripComponents)
 

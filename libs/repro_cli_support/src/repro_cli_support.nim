@@ -1886,6 +1886,41 @@ proc splitDeclaredPathEnv(env: openArray[(string, string)]):
     else:
       result.rest.add(entry[0] & "=" & entry[1])
 
+proc withEdgeEnvPassthrough*(decided: seq[string];
+                             declared: openArray[string];
+                             actionId: string): seq[string] =
+  ## An action's engine-side ``envPassthrough``: the names the `PATH`
+  ## decision chose (``ActionPathDecision.passthrough``) followed by the
+  ## names the edge itself declared (``BuildActionDef.envPassthrough``,
+  ## e.g. the temp-directory names ``nim.c`` names), deduplicated in that
+  ## order. Every process lowering site in ``lowerGraphAction`` builds its
+  ## list here -- after the `PATH` decision where it makes one; the built-in
+  ## HCR site makes none and passes ``decided = @[]`` -- so no site can drop
+  ## the edge's declaration: a site that did would key those reads by value
+  ## again and miss on the first build in every new shell.
+  ##
+  ## Passed to ``repro_build_engine.action`` rather than set on the result,
+  ## because ``action()`` folds the names into the weak fingerprint
+  ## (``keyedOnActionEnvironment``): a passthrough NAME is part of what the
+  ## action is, its value is not.
+  ##
+  ## ``PATH`` is refused. Its class -- hermetic and keyed by value, or the
+  ## host's and keyed by name -- is decided by ``actionPathDecision`` alone,
+  ## and an edge-declared ``PATH`` passthrough on a hermetic edge would
+  ## drop the composed toolchain directories from its key while
+  ## ``classifyActionPath`` reported it as inherited.
+  result = decided
+  for name in declared:
+    if name.len == 0:
+      continue
+    if cmpIgnoreCase(name, "PATH") == 0:
+      raise newException(ValueError,
+        "action " & actionId & " declares `" & name & "` as environment " &
+          "passthrough; an action's PATH class is decided by its tool " &
+          "references, not declared by the edge")
+    if name notin result:
+      result.add(name)
+
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
   # CMake may invoke ``repro build --prepare-only`` while regenerating.
@@ -3442,7 +3477,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     let inlinePath = actionPathDecision(actionPathPrefix,
       declaredPath = inlineDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-    var inlineEnvPassthrough = inlinePath.passthrough
+    var inlineEnvPassthrough = withEdgeEnvPassthrough(inlinePath.passthrough,
+      payload.envPassthrough, payload.id)
     for entry in inlinePath.env:
       inlineEnv.add(entry)
     for entry in inlineDeclaredEnv.rest:
@@ -3601,6 +3637,11 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       # ``nim.c`` does (see ``compileDependencyPolicy``).
       nonDeterminism = payload.nonDeterminism,
       nonDeterminismJustification = payload.nonDeterminismJustification,
+      # This site makes no `PATH` decision (it runs this image by absolute
+      # path), so the edge's own names are the whole list; carried so a
+      # declaration is never dropped silently. Empty for every edge today.
+      envPassthrough = withEdgeEnvPassthrough(@[], payload.envPassthrough,
+        payload.id),
       commandStatsId = commandStatsId)
 
   let executableName = payload.call.executableName
@@ -3734,7 +3775,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     let unittestPath = actionPathDecision(actionPathPrefix,
       declaredPath = unittestDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-    var mergedEnvPassthrough = unittestPath.passthrough
+    var mergedEnvPassthrough = withEdgeEnvPassthrough(
+      unittestPath.passthrough, payload.envPassthrough, payload.id)
     for entry in unittestPath.env:
       mergedEnv.add(entry)
     # MR10: per-edge env-var injections from the typed-tool wrapper's
@@ -3851,7 +3893,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   let typedToolPath = actionPathDecision(actionPathPrefix,
     declaredPath = typedDeclaredEnv.path,
     edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-  var mergedEnvPassthrough = typedToolPath.passthrough
+  var mergedEnvPassthrough = withEdgeEnvPassthrough(
+    typedToolPath.passthrough, payload.envPassthrough, payload.id)
   for entry in typedToolPath.env:
     mergedEnv.add(entry)
   # MR10: per-edge env-var injections from the typed-tool wrapper's
@@ -25702,7 +25745,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       c.cachePush.workspaceName)
   of ReproCommandLineHooksCommand.help:
     # `repro hooks help [<word>...]` is `repro help hooks [<word>...]`.
-    stdout.write(ReproCommandLine.helpText(@["hooks"] & c.help.topic))
+    printReproHelp(@["hooks"] & c.help.topic)
     return 0
   of ReproCommandLineHooksCommand.ensure:
     parsed = hooksCommandOf(c.ensure, hakEnsure)
@@ -30425,12 +30468,19 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
   ## url/ref/revision) and a genuinely-computed INTEGRITY multihash. The root
-  ## repo (the self entry, ``SelfLockedDepPath``) is always recorded; any
-  ## develop-mode deps (``discoverDevelopDeps`` — NESTED deps under ``deps/…``
-  ## AND SIBLING develop-override deps one level up) follow. ``repro lock
-  ## refresh`` serializes these into the v3 committed lock so a lock-file-only
-  ## workspace — including its sibling develop deps — is fully
-  ## self-describing.
+  ## repo (the self entry, ``SelfLockedDepPath``) is always recorded; the
+  ## NESTED develop-mode deps under ``deps/…`` (``discoverNestedDevelopDeps``)
+  ## follow. ``repro lock refresh`` serializes these into the v3 committed lock
+  ## so a lock-file-only workspace is fully self-describing.
+  ##
+  ## A SIBLING develop override is not a source of entries
+  ## (Unified-Locking-And-Hooks.md §14.2 item 2, amended 2026-11-16): it says
+  ## WHERE a dependency's source is, and contributes only when it substitutes
+  ## one the recipe derives — which the ``uses:`` fold below already finds at
+  ## the override's checkout (``discoverProducerSourceRoot`` consults the
+  ## override set first). Recording every override made an override created
+  ## for an unrelated repo a closure member through a lock edge, so the
+  ## pre-push gate refused over it whatever stage 3 did.
   ##
   ## Each returned ``path`` is where THIS run observed the checkout, for the
   ## caller's own use; the serializer does not write it (a lock pins identity
@@ -30466,7 +30516,7 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   # ``committedLockPathBase``.
   let pathBase = committedLockPathBase(root)
   let rootFacts = committedLockRepoFacts(root)
-  let nested = discoverDevelopDeps(root)
+  let nested = discoverNestedDevelopDeps(root)
   let bare = extractFilename(root.strip(
     leading = false, trailing = true, chars = {'/', '\\'}))
   let originName = repositoryNameFromUrl(rootFacts.originUrl)
@@ -30750,12 +30800,20 @@ proc committedLockDerivedProject(workspaceRoot: string):
         rootIdx = repos.high
         rootName = d.name
     # Fold in on-disk develop deps the lock does not (yet) carry — NESTED deps
-    # (MO-7) and SIBLING develop-override deps one level up (MO-12).
+    # (MO-7) and SIBLING develop-override deps one level up (MO-12). Both are
+    # workspace members; only a nested dep becomes a root ``depends`` edge. A
+    # sibling override the lock does not carry substitutes nothing the recipe
+    # derives (Unified-Locking-And-Hooks.md §14.2 item 2), so an edge onto it
+    # would put it in the pushed repo's closure, which workspace state never
+    # adds to (Workspace-And-Develop-Mode.md §"Which develop overrides the
+    # push gate checks").
     var extraDepends: seq[string] = @[]
+    var nestedPaths: seq[string] = @[]
+    for nd in discoverNestedDevelopDeps(root): nestedPaths.add(nd.path)
     for nd in discoverDevelopDeps(root):
       if nd.name in lockedNames or nd.path in lockedPaths: continue
       repos.add(nd)
-      extraDepends.add(nd.name)
+      if nd.path in nestedPaths: extraDepends.add(nd.name)
     if rootIdx >= 0:
       for n in extraDepends:
         if n notin repos[rootIdx].depends:
@@ -30784,9 +30842,13 @@ proc committedLockDerivedProject(workspaceRoot: string):
     elif facts.branch.len > 0: facts.branch
     else: "HEAD"
   let nestedDeps = discoverDevelopDeps(root)
+  # Only a NESTED dep is a dependency edge; a sibling override is a member the
+  # root does not depend on (see the committed-lock branch above).
+  var nestedPaths: seq[string] = @[]
+  for nd in discoverNestedDevelopDeps(root): nestedPaths.add(nd.path)
   var dependsOn: seq[string] = @[]
   for dep in nestedDeps:
-    dependsOn.add(dep.name)
+    if dep.path in nestedPaths: dependsOn.add(dep.name)
   let repo = ResolvedRepo(
     name: repoName,
     path: ".",
@@ -31675,6 +31737,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       rawArgs: originalArgs,
       environment: daemonBuildEnvironment(),
       environmentIsComplete: true,
+      # The digest ``startUserDaemon`` compared above; the daemon serves
+      # only a request whose stated engine is the one it runs.
+      engineDigest: expectedUserDaemonDigest(publicCliPath, config),
       attached: true,
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
@@ -33226,8 +33291,7 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
   var selectors: seq[string] = @[]
   case conf.command
   of Cmd.help:
-    stdout.write(ReproCommandLine.helpText(@["certificates"] &
-      conf.help.topic))
+    printReproHelp(@["certificates"] & conf.help.topic)
     return 0
   of Cmd.policy:
     let c = conf.policy
@@ -36552,6 +36616,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       rawArgs: originalArgs,
       environment: daemonWatchEnvironment(),
       environmentIsComplete: true,
+      # The digest ``startUserDaemon`` compared above; the daemon serves
+      # only a request whose stated engine is the one it runs.
+      engineDigest: expectedUserDaemonDigest(publicCliPath, config),
       attached: not detach,
       detached: detach,
       cancelOnDisconnect: not detach,
@@ -61713,35 +61780,6 @@ proc flakeLockPinnedRevisions*(lockText: string):
           unpinned: Table[string, tuple[node, reason: string]]]
   ## Forward declaration; defined with the NF-3 flake.lock reader.
 
-proc committedLockRevisions(repoRoot: string):
-    tuple[ok: bool; revs: HashSet[string]] =
-  ## Every revision the in-tree locks committed in ``repoRoot`` name: the
-  ## ``rev`` of each root input of ``flake.lock`` and the ``revision`` of each
-  ## VCS dependency of ``repro.lock``, lower-cased. ``ok`` is false when a lock
-  ## that exists cannot be read; the caller must then assume it names any
-  ## revision, because "no pin found" in an unread file proves nothing.
-  result.ok = true
-  result.revs = initHashSet[string]()
-  let root = absolutePath(repoRoot)
-  let flakeLock = root / "flake.lock"
-  if fileExists(extendedPath(flakeLock)):
-    try:
-      let pinned = flakeLockPinnedRevisions(readFile(extendedPath(flakeLock)))
-      if not pinned.ok:
-        result.ok = false
-      for _, pin in pinned.pins:
-        result.revs.incl(pin.rev.toLowerAscii())
-    except CatchableError:
-      result.ok = false
-  let lockPath = root / CommittedLockFileName
-  if fileExists(extendedPath(lockPath)):
-    try:
-      for d in parseLockedDependencies(readFile(extendedPath(lockPath))).deps:
-        if d.coordinates.kind == ckVcs and d.coordinates.revision.len > 0:
-          result.revs.incl(d.coordinates.revision.toLowerAscii())
-    except CatchableError:
-      result.ok = false
-
 proc committedLockRevisionsOf(repoRoot, workspaceRoot: string;
     repos: seq[ResolvedRepo]; sibling: string):
     tuple[ok: bool; revs: HashSet[string]] =
@@ -61811,48 +61849,6 @@ proc committedLockRevisionsOf(repoRoot, workspaceRoot: string;
           result.revs.incl(pinned.pins[input].rev.toLowerAscii())
     except CatchableError:
       result.ok = false
-
-proc overrideAwaitsThisPush(view: PushCycleView; override: string;
-    overrideHeadUnpublished, overrideHeadPinnedHere, selfIsOverride: bool):
-    bool =
-  ## Stage 3's form of the same rule (Workspace-And-Develop-Mode.md
-  ## §"Develop overrides that wait on the push"): may an unpublished develop
-  ## override that names the declared repo ``override`` be DEFERRED by this
-  ## push instead of refusing it?
-  ##
-  ## Stage 3 reads the WHOLE override file, so every gate refuses over every
-  ## unpublished override — including the gate of the override itself, which
-  ## refuses over this repo whenever this repo can be shown to block it. Then
-  ## no order of pushes passes. Two shapes prove the override cannot go first
-  ## under that refusal:
-  ##
-  ##   * its develop closure contains this repo (its stage 2 refuses over this
-  ##     repo's unpublished HEAD) — the `siblingAwaitsThisPush` shape;
-  ##   * this repo is itself an unpublished develop override (its stage 3
-  ##     refuses over this repo).
-  ##
-  ## Deferring it is sound only when what this push publishes names none of
-  ## the override's unpublished content:
-  ##
-  ##   * the override is OUTSIDE this repo's develop closure, so this push does
-  ##     not vouch for it. The gate's workspace lock record still observes its
-  ##     HEAD, as it observes every repo outside the closure (RA-21). Inside the
-  ##     closure stage 2 has already refused, and that refusal stands;
-  ##   * this repo's committed ``flake.lock`` / ``repro.lock`` do not name the
-  ##     override's HEAD (``overrideHeadPinnedHere`` is false). Stages 3b and
-  ##     3c read a pin EQUAL to the sibling's HEAD as agreeing, so this is the
-  ##     one pin of an unpublished revision they would let through; a pin that
-  ##     differs from HEAD is theirs to refuse or defer.
-  ##
-  ## And this repo's own HEAD must be unpublished — once it is published the
-  ## override CAN go first, and pushing it is the remedy.
-  if not (view.known and view.selfHeadUnpublished and
-      overrideHeadUnpublished and not overrideHeadPinnedHere and
-      override.len > 0 and override != view.selfName):
-    return false
-  if override in developSetClosure(view.repos, view.selfName):
-    return false
-  selfIsOverride or view.selfName in developSetClosure(view.repos, override)
 
 proc pinDefersToMutualPin(view: PushCycleView; identity: GitToolIdentity;
     sibling, siblingDir, pinnedRev: string;
@@ -63862,6 +63858,12 @@ type
     remediation*: string    ## the command, runnable from where this prints
     summary*: string        ## one human line, for a notice
     notices*: seq[string]
+    boundCheckouts*: seq[string]
+      ## The checkouts that substitute one of the pushed repo's `flake.lock`
+      ## inputs: the bindings this stage compared, whether or not they agree.
+      ## A develop override at one of them is inside the pushed repo's closure
+      ## for stage 3 (Workspace-And-Develop-Mode.md §"Which develop overrides
+      ## the push gate checks"), even when no `repro.lock` edge reaches it.
 
 proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   identity: GitToolIdentity;
@@ -72266,30 +72268,60 @@ proc executeCheckPrePush(parsed: CheckArgs;
         source: developOverridesPath(parsed.workspaceRoot)))
       result.exitCode = 2
       none(DevelopOverrides)
-  # The declared repo an override's source path names, and whether THIS repo is
-  # itself one of the overrides: the inputs to ``overrideAwaitsThisPush``.
-  # Asked of the declared checkout paths, which is what ``repro develop``
-  # records.
+  # The `flake.lock` stage (3b) is RESOLVED here, before this stage, and
+  # reported in its own place below: which checkouts substitute the pushed
+  # repo's flake inputs is one of the two ways an override enters the closure.
+  var flakeVerdict: FlakeGateVerdict
+  if parsed.currentRepo.len > 0:
+    try:
+      flakeVerdict = verifyFlakeLockAgainstSiblings(parsed.currentRepo,
+        parsed.workspaceRoot, identity, parsed.toolProvisioning)
+    except CatchableError as err:
+      # Not swallowed into "the lock is fine": a verification that could not
+      # run is reported as a verification that could not run.
+      flakeVerdict = FlakeGateVerdict(examined: true, stale: true,
+        evidence: "flake-verify-failed: " & err.msg,
+        remediation: "investigate the flake.lock verification failure (" &
+          err.msg & "), then re-push",
+        summary: "flake.lock could not be verified against the workspace " &
+          "siblings: " & err.msg)
+  # The declared repo an override's source path names. Asked of the declared
+  # checkout paths, which is what ``repro develop`` records.
   proc declaredRepoAt(path: string): string =
     for repo in resolved.repos:
       if sameFilesystemPath(parsed.workspaceRoot / repo.path, path):
         return repo.name
     ""
-  var selfIsOverride = false
-  if overridesOpt.isSome and parsed.currentRepo.len > 0:
-    for entry in listOverrides(overridesOpt.get()):
-      let p =
-        if isAbsolute(entry.local_path): entry.local_path
-        else: absolutePath(parsed.workspaceRoot / entry.local_path)
-      if sameFilesystemPath(p, parsed.currentRepo): selfIsOverride = true
-  var overrideCycle: PushCycleView
-  var overrideCycleResolved = false
-  var pinnedHere: tuple[ok: bool; revs: HashSet[string]]
+  # Only an override that substitutes a member of the pushed repo's develop
+  # closure is checked (Workspace-And-Develop-Mode.md §"Which develop
+  # overrides the push gate checks", amended 2026-11-16): one whose package or
+  # declared repo is a closure member, one at a checkout this gate observes as
+  # a closure member (stage 1, including a lock-placed one), or one that binds
+  # a `flake.lock` input stage 3b compares. Any other entry substitutes nothing
+  # the pushed repo builds, so it cannot change what a teammate builds of it:
+  # it is not checked and does not block the push. A dirty override made for
+  # an unrelated repo used to refuse every push in the workspace, and two
+  # unpublished overrides refused each other in every order (the retired
+  # 2026-10-16 deferral). The whole-workspace fallback keeps every entry.
+  proc overrideInClosure(package, sourcePath: string): bool =
+    if scopeIsWholeWorkspace or repoInScope(package): return true
+    let declared = declaredRepoAt(sourcePath)
+    if declared.len > 0 and repoInScope(declared): return true
+    if parsed.currentRepo.len > 0 and
+        sameFilesystemPath(sourcePath, parsed.currentRepo):
+      return true
+    for obs in observations:
+      if sameFilesystemPath(obs.absPath, sourcePath): return true
+    for bound in flakeVerdict.boundCheckouts:
+      if sameFilesystemPath(bound, sourcePath): return true
+    false
   if overridesOpt.isSome:
     for entry in listOverrides(overridesOpt.get()):
       let sourcePath =
         if isAbsolute(entry.local_path): entry.local_path
         else: absolutePath(parsed.workspaceRoot / entry.local_path)
+      if not overrideInClosure(entry.package, sourcePath):
+        continue
       if not dirExists(sourcePath):
         result.failures.add(CheckFailure(
           repo: entry.package,
@@ -72373,44 +72405,6 @@ proc executeCheckPrePush(parsed: CheckArgs;
             headSha == outgoing.headOid and
             sameFilesystemPath(sourcePath, parsed.currentRepo):
           continue
-        # An override that provably cannot be published before THIS push, and
-        # whose unpublished content this push does not pin, is deferred rather
-        # than refused — the only way two such pushes can both land
-        # (``overrideAwaitsThisPush``).
-        let overrideRepo = declaredRepoAt(sourcePath)
-        if overrideRepo.len > 0 and currentRepoName.len > 0:
-          if not overrideCycleResolved:
-            overrideCycle = pushCycleViewOf(parsed.currentRepo,
-              parsed.workspaceRoot, identity)
-            pinnedHere = committedLockRevisions(parsed.currentRepo)
-            overrideCycleResolved = true
-          # An unreadable HEAD or lock cannot prove the pin absent.
-          let headPinnedHere = headSha.len == 0 or not pinnedHere.ok or
-            headSha.toLowerAscii() in pinnedHere.revs
-          if overrideAwaitsThisPush(overrideCycle, overrideRepo, true,
-              headPinnedHere, selfIsOverride):
-            let why =
-              if overrideCycle.selfName in developSetClosure(
-                  overrideCycle.repos, overrideRepo):
-                "'" & overrideRepo & "' depends on '" & overrideCycle.selfName &
-                  "' (its develop closure contains it)"
-              else:
-                "'" & overrideCycle.selfName & "' is itself an unpublished " &
-                  "develop override, which '" & overrideRepo &
-                  "''s own gate refuses over"
-            result.notices.add("develop override DEFERRED, not refused: '" &
-              overrideRepo & "' (" & sourcePath & ") is unpublished, but " &
-              why & ", so it cannot be published before this push. It is " &
-              "outside this repo's develop closure, and this repo's " &
-              "committed flake.lock / repro.lock do not name its HEAD, so " &
-              "this push does not vouch for its unpublished content. The " &
-              "order that terminates: " &
-              "publish this repo now; then publish '" & overrideRepo &
-              "' (`repro push --current-repo=" & remedyPathWord(sourcePath) &
-              "`). [override=" &
-              overrideRepo & " head=" & headSha &
-              " unpublished=true deferred=override-awaits-push]")
-            continue
         # A develop-override deliberately asks the ANY-remote question (it is
         # an arbitrary local path with no manifest-declared remote), so the
         # requested name is empty and the wording is the plain one.
@@ -72455,19 +72449,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # boundary and a rare operation, so it pays the exact query's cost rather than
   # trading the guarantee for it.
   if parsed.currentRepo.len > 0:
-    var verdict: FlakeGateVerdict
-    try:
-      verdict = verifyFlakeLockAgainstSiblings(parsed.currentRepo,
-        parsed.workspaceRoot, identity, parsed.toolProvisioning)
-    except CatchableError as err:
-      # Not swallowed into "the lock is fine": a verification that could not
-      # run is reported as a verification that could not run.
-      verdict = FlakeGateVerdict(examined: true, stale: true,
-        evidence: "flake-verify-failed: " & err.msg,
-        remediation: "investigate the flake.lock verification failure (" &
-          err.msg & "), then re-push",
-        summary: "flake.lock could not be verified against the workspace " &
-          "siblings: " & err.msg)
+    # Resolved before stage 3 (``flakeVerdict``), which needs its bindings.
+    let verdict = flakeVerdict
     for n in verdict.notices: result.notices.add(n)
     if verdict.stale:
       result.failures.add(CheckFailure(
@@ -74056,42 +74039,6 @@ proc pushArgsOf(c: ReproCommandLinePush): PushArgs =
       result.workspaceRoot = result.currentRepo
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc developOverrideRepoNames(workspaceRoot: string;
-    repos: seq[ResolvedRepo]): seq[string] =
-  ## The declared workspace repos that ``.repro/develop-overrides.toml`` points
-  ## at, in override order and de-duplicated.
-  ##
-  ## The pre-push gate's stage 3 refuses over EVERY override entry that is
-  ## dirty or unpublished — the whole file, not only the entries inside the
-  ## pushed repo's ``depends`` closure — so `repro push` has to publish those
-  ## too, or the command whose job is to satisfy the gate cannot (CLI/push.md
-  ## §"The closure is what the gate requires published"). An override is matched
-  ## to a repo by its SOURCE PATH, because that is the checkout the gate
-  ## inspects; the ``package`` name of an override need not be a repo name.
-  ##
-  ## An override that is not a declared repo is NOT returned: it has no
-  ## manifest remote to publish to, so this command cannot discharge it and
-  ## the gate's refusal (which names the path) stays the remedy. An unreadable
-  ## override file contributes nothing here for the same reason — the gate
-  ## itself refuses over the parse error and names it, which is the better
-  ## place for that diagnostic than a second copy of it from this command.
-  var overrides: Option[DevelopOverrides]
-  try:
-    overrides = readDevelopOverridesFile(workspaceRoot)
-  except CatchableError:
-    return
-  if overrides.isNone:
-    return
-  for entry in listOverrides(overrides.get()):
-    let sourcePath =
-      if isAbsolute(entry.local_path): entry.local_path
-      else: absolutePath(workspaceRoot / entry.local_path)
-    for repo in repos:
-      if sameFilesystemPath(workspaceRoot / repo.path, sourcePath):
-        if repo.name notin result:
-          result.add(repo.name)
-        break
-
 proc pushComponents(repos: seq[ResolvedRepo]; closure: HashSet[string];
     extraDepends: Table[string, seq[string]] =
       initTable[string, seq[string]]()): seq[seq[string]] =
@@ -74145,6 +74092,58 @@ proc pushComponents(repos: seq[ResolvedRepo]; closure: HashSet[string];
       if index in waiting[dependent]:
         waiting[dependent].excl(index)
         if waiting[dependent].len == 0: ready.add(dependent)
+
+proc flakeBoundOverrideRepos(identity: GitToolIdentity; workspaceRoot: string;
+    toolProvisioning: ToolProvisioningMode; repos: seq[ResolvedRepo];
+    member: string; memberCheckout = ""): seq[string] =
+  ## The declared repos whose checkout is a develop-override entry AND
+  ## substitutes one of ``member``'s `flake.lock` inputs: the overrides
+  ## ``member``'s own pre-push gate checks through the flake stage's bindings
+  ## (``FlakeGateVerdict.boundCheckouts``) although no `repro.lock` edge
+  ## reaches them. Asked only when the override file names a declared repo and
+  ## ``member`` carries a flake, because resolving the bindings resolves the
+  ## develop set. An override that is not a declared repo has no manifest
+  ## remote to publish to, so it is not returned; the gate's refusal names it.
+  ## ``memberCheckout`` is where ``member`` is pushed from when that is not its
+  ## declared path (a linked worktree): its gate reads the flake there.
+  var overrides: Option[DevelopOverrides]
+  try:
+    overrides = readDevelopOverridesFile(workspaceRoot)
+  except CatchableError:
+    return
+  if overrides.isNone:
+    return
+  var candidates: seq[tuple[name, path: string]]
+  for entry in listOverrides(overrides.get()):
+    let sourcePath =
+      if isAbsolute(entry.local_path): entry.local_path
+      else: absolutePath(workspaceRoot / entry.local_path)
+    for repo in repos:
+      if sameFilesystemPath(workspaceRoot / repo.path, sourcePath):
+        candidates.add((name: repo.name, path: sourcePath))
+        break
+  if candidates.len == 0:
+    return
+  var memberDir = memberCheckout
+  if memberDir.len == 0:
+    for repo in repos:
+      if repo.name == member: memberDir = workspaceRoot / repo.path
+  if memberDir.len == 0 or not fileExists(memberDir / "flake.nix") or
+      not fileExists(memberDir / "flake.lock"):
+    return
+  var verdict: FlakeGateVerdict
+  try:
+    verdict = verifyFlakeLockAgainstSiblings(memberDir, workspaceRoot,
+      identity, toolProvisioning)
+  except CatchableError:
+    # The member's gate refuses over a verification that cannot run, and
+    # says why; nothing here can make that push succeed.
+    return
+  for c in candidates:
+    for bound in verdict.boundCheckouts:
+      if sameFilesystemPath(bound, c.path):
+        if c.name notin result: result.add(c.name)
+        break
 
 proc topoSortClosure(repos: seq[ResolvedRepo]; closure: HashSet[string];
     extraDepends: Table[string, seq[string]] =
@@ -75773,31 +75772,44 @@ proc executePush(args: PushArgs): PushReport =
 
   # The closure is everything this push's own gate will require to be
   # published ALREADY (CLI/push.md §"The closure is what the gate requires
-  # published"): the gate's stage-2 scope (the ``depends`` closure, computed by
-  # the same ``developSetClosure``) plus every develop override that is a
-  # declared repo (stage 3 checks the whole override file). An override comes
-  # in with its own ``depends`` closure, because its gate checks that closure
-  # when it is pushed.
-  #
-  # It is ordered before EVERY member of the pushed repo's closure, not only
-  # before the pushed repo: stage 3 is workspace-wide, so each member's own
-  # pre-push gate refuses while the override is unpublished. (Members the
-  # override itself depends on are the exception — they must go first, and
-  # ``developSetClosure`` already puts them in the override's own closure.)
+  # published"): the gate's stage-2 scope, computed by the same
+  # ``developSetClosure``, plus every develop override a member's gate checks
+  # that the lock edges do not already reach (``flakeBoundOverrideRepos``).
+  # Stage 3 checks only an override that substitutes a closure member
+  # (Workspace-And-Develop-Mode.md §"Which develop overrides the push gate
+  # checks", amended 2026-11-16); any other override is not checked, so this
+  # command neither publishes nor orders it. It used to bring in EVERY
+  # override and order it before every member, because stage 3 checked the
+  # whole file.
   var closure: HashSet[string]
   var extraDepends = initTable[string, seq[string]]()
   if pushedRepoName.len > 0:
     closure = developSetClosure(resolved.repos, pushedRepoName)
-    let dependsClosure = closure
-    for name in developOverrideRepoNames(args.workspaceRoot, resolved.repos):
-      if name in dependsClosure:
-        continue
-      let overrideClosure = developSetClosure(resolved.repos, name)
-      for member in overrideClosure:
-        closure.incl(member)
-      for member in dependsClosure:
-        if member notin overrideClosure:
-          extraDepends.mgetOrPut(member, @[]).add(name)
+    # An override at a checkout that substitutes a member's `flake.lock`
+    # input is checked by that member's gate (stage 3, through the flake
+    # stage's bindings) although no `repro.lock` edge reaches it. It comes in
+    # with its own closure, which its gate checks, and goes before the member.
+    # Iterated, because a repo brought in may bind further overrides.
+    var examined = initHashSet[string]()
+    var grew = true
+    while grew:
+      grew = false
+      for member in toSeq(closure):
+        if member in examined: continue
+        examined.incl(member)
+        # ``byName`` is redirected to the worktree only below, so the pushed
+        # repo's checkout is passed explicitly.
+        let checkout =
+          if member == pushedRepoName: pushedCheckout else: ""
+        for name in flakeBoundOverrideRepos(identity, args.workspaceRoot,
+            args.toolProvisioning, resolved.repos, member, checkout):
+          if name == member: continue
+          for m in developSetClosure(resolved.repos, name):
+            if m notin closure:
+              closure.incl(m)
+              grew = true
+          if member notin developSetClosure(resolved.repos, name):
+            extraDepends.mgetOrPut(member, @[]).add(name)
   else:
     # No single trunk repo resolves (a ``repro push <project>`` whose project
     # name is not also a repo name, or a cwd outside any declared repo): the
@@ -86673,7 +86685,8 @@ type
     reportPath: string
     buildFlags: seq[string]
       ## The build's command line: every `repro build` flag given on this
-      ## command line (``buildWordsOf``), for the build the verb-alias and
+      ## command line (``argvOf`` of its origins, ``reproBuildFlagNames``),
+      ## for the build the verb-alias and
       ## certifying paths run. Selectors and the words after ``--`` are not
       ## in it.
     lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
@@ -89145,7 +89158,12 @@ proc testOptionsOf[C, O](c: C; origin: O): ReproTestShardOpts =
     c.listTargetsJson or c.printSolvedGraph)
   result.selectors = c.selectors
   result.actionArgs = c.actionArgs
-  result.buildFlags = buildWordsOf(c, origin)
+  # The build flags this command line gave, written back by confutils as
+  # the build's words (`--<long>[=<value>]`, in the order given, a switch
+  # that stands for another flag's value as itself); what a variable gave
+  # is left out, because the build reads the same variable.
+  result.buildFlags = argvOf(origin, only = reproBuildFlagNames(),
+    commandWords = false)
 
 proc testBuildArgs(opts: ReproTestShardOpts;
                    selectors: seq[string]): seq[string] =
@@ -91069,8 +91087,8 @@ proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
     # multi-machine CI path; the alias is the inner-loop "run my
     # tests" path.
     # The build's command line is every build flag this command line gave
-    # (``buildWordsOf``); the build reads the variables those flags declare
-    # itself.
+    # (``argvOf`` of its origins); the build reads the variables those flags
+    # declare itself.
     #
     # TC-8e: a run that executes tests issues a certificate for each
     # certificate-producing node it materializes. ``--no-certify`` opts out,
@@ -91272,6 +91290,17 @@ proc reproTestRunVariants*(args: openArray[string]):
       putEnv("REPRO_VARIANTS", opts.callerVariants.get)
     else:
       delEnv("REPRO_VARIANTS")
+
+proc reproTestBuildWords*(args: openArray[string]):
+    tuple[buildFlags, variants: seq[string]] =
+  ## What ``repro test <args>`` hands the builds it runs (``buildFlags``:
+  ## the build flags its command line gave, as words) and the variant
+  ## assignments it evaluates the recipe with itself (``variants``: the
+  ## certificate plan, the lock refresh, the sharded path). Runs nothing;
+  ## for the tests of the build's command line.
+  let (c, origin) = loadTestCommandLine(args)
+  let opts = testOptionsOf(c, origin)
+  (opts.buildFlags, opts.variants)
 
 const checkSetTarget* = "pre-commit"
   ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
@@ -95977,7 +96006,7 @@ proc runPromptInitCommand*(shell: string): int =
   ## the live prompt. ``repro prompt init help`` is its help, as it always
   ## was.
   if shell == "help":
-    stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
+    printReproHelp(["prompt", "init"])
     return 0
   let snippet = renderPromptInitSnippet(shell.toLowerAscii())
   if snippet.len == 0:
@@ -103037,6 +103066,10 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
   let exact = flakeBindInputsToCheckouts(declared.names, selection,
     defaultFlakeInputStripSuffixes, identity, selection.workspaceRoot, skipped,
     selection.onlyNames, selection.exceptNames, flakeRoot)
+  for b in exact:
+    if b.path.len > 0:
+      result.boundCheckouts.add(
+        if isAbsolute(b.path): b.path else: selection.workspaceRoot / b.path)
   var state = flakeOverrideStateReport(flakeRoot, exact, identity)
   if not state.ok:
     result.examined = true
@@ -104615,8 +104648,7 @@ proc runWorkspaceSetsCommand*(c: ReproCommandLineWorkspaceSets): int =
   ## ``repro workspace sets …`` from its configuration.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "sets"] &
-      req.names))
+    printReproHelp(@["workspace", "sets"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "sets")
 
@@ -104629,8 +104661,7 @@ proc runWorkspaceProjectsCommand*(c: ReproCommandLineWorkspaceProjects): int =
   ## is removed with the third migration step rather than the second.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "projects"] &
-      req.names))
+    printReproHelp(@["workspace", "projects"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "projects")
 
@@ -104705,8 +104736,7 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
   ## repeatable flag here rather than a positional implying exactly one.
   let req = reposRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "repos"] &
-      req.sets))
+    printReproHelp(@["workspace", "repos"] & req.sets)
     return 0
   let sub = req.sub
   let workspaceRoot = projectsWorkspaceRoot(req.workspaceRoot)
@@ -105394,14 +105424,14 @@ proc runLegacyCommand(programName: string; args: seq[string];
     "line `repro " & args[0] & "` accepts; run `repro help " & args[0] & "`")
   2
 
-proc namespaceHelpText(namespace: string; topic: seq[string]): string =
+proc printNamespaceHelp(namespace: string; topic: seq[string]) =
   ## The help `repro <namespace> help [<word>...]` prints: the subcommand's
   ## when the words name one, else the namespace's (whose own parser always
   ## answered `help` with its usage, whatever followed).
   try:
-    ReproCommandLine.helpText(@[namespace] & topic)
+    printReproHelp(@[namespace] & topic)
   except CliUsageError:
-    ReproCommandLine.helpText([namespace])
+    printReproHelp([namespace])
 
 proc cacheIdentityValuesOf[T](c: T): bcCliDispatch.CacheIdentityValues =
   ## The identity flags of `repro cache publish|derive-key|gen-key`.
@@ -105428,10 +105458,10 @@ proc runCacheCommand(conf: ReproCommandLineCache): int =
     case conf.command
     of ReproCommandLineCacheCommand.call:
       # `repro cache` alone prints its help.
-      stdout.write(ReproCommandLine.helpText(["cache"]))
+      printReproHelp(["cache"])
       return 0
     of ReproCommandLineCacheCommand.help:
-      stdout.write(namespaceHelpText("cache", conf.help.topic))
+      printNamespaceHelp("cache", conf.help.topic)
       return 0
     of ReproCommandLineCacheCommand.lookup:
       return bcCliDispatch.cacheLookup(conf.lookup.entryKey)
@@ -105514,7 +105544,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       enclosingWorkspaceRoot(startPath))
   case conf.command
   of ReproCommandLineBundleCommand.help:
-    stdout.write(namespaceHelpText("bundle", conf.help.topic))
+    printNamespaceHelp("bundle", conf.help.topic)
     return 0
   of ReproCommandLineBundleCommand.create:
     let c = conf.create
@@ -105724,9 +105754,12 @@ proc runReproHelp(programName: string; topic: seq[string];
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
     if next < 0:
-      stderr.writeLine("repro help: unknown command '" &
-        topic[0 .. i].join(" ") & "'")
-      stderr.writeLine("Run `repro --help` for the list of commands.")
+      # Words that name no command: clispec's unknown-subcommand error for
+      # them (its error block, with the similar subcommands as the tip).
+      try:
+        discard ReproCommandLine.helpText(topic[0 .. i])
+      except CliUsageError as e:
+        return reportReproUsageError(e)
       return 2
     command = next
     if reproCommandIsPassThrough(command):
@@ -105736,9 +105769,10 @@ proc runReproHelp(programName: string; topic: seq[string];
         stdout.write(synopsis)
         return 0
       break
+  # Printed as every help page is (``printReproHelp``: styled for stdout by
+  # clispec's printer).
   try:
-    stdout.write(ReproCommandLine.helpText(reproCommandPath(command),
-      long = all, all = all))
+    printReproHelp(reproCommandPath(command), all = all)
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
@@ -105785,8 +105819,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace bootstrap"
       case c.bootstrap.command
       of ReproCommandLineWorkspaceBootstrapCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "bootstrap"] &
-          c.bootstrap.help.topic))
+        printReproHelp(@["workspace", "bootstrap"] & c.bootstrap.help.topic)
         return 0
       of ReproCommandLineWorkspaceBootstrapCommand.call:
         return runWorkspaceBootstrapCommand(c.bootstrap.call.dir,
@@ -105850,8 +105883,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace provision"
       case c.provision.command
       of ReproCommandLineWorkspaceProvisionCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "provision"] &
-          c.provision.help.topic))
+        printReproHelp(@["workspace", "provision"] & c.provision.help.topic)
         return 0
       of ReproCommandLineWorkspaceProvisionCommand.call:
         return runWorkspaceProvisionCommand(c.provision.call.installRoot,
@@ -105890,7 +105922,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
       echo renderVersion(programName)
       return 0
     # Bare `repro`: no command was given, which is a usage error.
-    stderr.write(ReproCommandLine.helpText())
+    printReproHelp(stream = stderr)
     return 2
   of ReproCommandLineCommand.help:
     return runReproHelp(programName, conf.help.topic, publicCliPath,

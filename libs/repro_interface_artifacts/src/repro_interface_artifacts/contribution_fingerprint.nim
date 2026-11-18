@@ -591,7 +591,7 @@ proc nixFieldView*(p: InterfaceNixProvisioning): RealizationFieldView =
 
 proc tarballFieldView*(p: InterfaceTarballProvisioning):
     RealizationFieldView =
-  RealizationFieldView(family: "tarball", lockIdentity: p.lockIdentity,
+  result = RealizationFieldView(family: "tarball", lockIdentity: p.lockIdentity,
     fields: @[
       ("packageName", p.packageName),
       ("contributor", p.contributor),
@@ -606,6 +606,16 @@ proc tarballFieldView*(p: InterfaceTarballProvisioning):
       ("cpu", p.cpu),
       ("os", p.os)],
     sets: @[("mirrors", p.mirrors), ("prunePaths", p.prunePaths)])
+  # A closure entry is an archive URL and digest the record realizes, so
+  # changing one MUST change the contribution fingerprint
+  # (Provisioning-Contributions.md § Identities). Named only when present: a
+  # record without a closure keeps the fingerprint it had. A set, because
+  # destinations are unique and the order of the lines realizes nothing.
+  if p.closureEntries.len > 0:
+    var lines: seq[string] = @[]
+    for entry in p.closureEntries:
+      lines.add(canonicalClosureLine(entry))
+    result.sets.add(("closureEntries", lines))
 
 proc scoopFieldView*(p: InterfaceScoopProvisioning): RealizationFieldView =
   RealizationFieldView(family: "scoop", lockIdentity: p.lockIdentity,

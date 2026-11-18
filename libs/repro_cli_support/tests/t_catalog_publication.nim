@@ -205,6 +205,25 @@ suite "catalog publication":
     # one on purpose.
     check refusal(good()) == ""
 
+  test "a closure record without its entries is refused, with them published":
+    # A consumer has no manifest file (envelope v34), so a record naming one
+    # but carrying no entries would publish an unrealizable closure.
+    # Mutation: drop the publisher's check -> the first assertion is red.
+    var named = catalogArtifact(catalogRoot / "repro.nim")
+    var record = named.projectInterface.provisioningContributions[0]
+      .tarballProvisioning[0]
+    record.closureManifest = "closures/x.manifest"
+    named.projectInterface.provisioningContributions[0]
+      .tarballProvisioning[0] = record
+    check "carry no closure entries" in
+      refusal(artifactFor(named.projectInterface))
+    named.projectInterface.provisioningContributions[0]
+      .tarballProvisioning[0].closureEntries = @[ClosureEntry(
+        path: "node_modules/a", sha256: repeat('b', 64),
+        url: "https://example.invalid/a.tgz", archiveType: "tar.gz",
+        stripComponents: 1)]
+    check refusal(artifactFor(named.projectInterface)) == ""
+
   test "a project name that cannot name a file refuses":
     var named = catalogArtifact(catalogRoot / "repro.nim")
     named.projectInterface.projectName = "a/b"

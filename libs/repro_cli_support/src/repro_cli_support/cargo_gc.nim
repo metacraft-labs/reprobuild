@@ -134,7 +134,7 @@ proc runCargoCommand*(conf: ReproCommandLineCargo): int =
   of ReproCommandLineCargoCommand.help:
     # `repro cargo help [<word>...]` is `repro help cargo [<word>...]`.
     try:
-      stdout.write(ReproCommandLine.helpText(@["cargo"] & conf.help.topic))
+      printReproHelp(@["cargo"] & conf.help.topic)
     except CliUsageError:
-      stdout.write(ReproCommandLine.helpText(["cargo"]))
+      printReproHelp(["cargo"])
     0

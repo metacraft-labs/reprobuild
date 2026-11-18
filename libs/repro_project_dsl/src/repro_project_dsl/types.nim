@@ -1130,10 +1130,16 @@ type
       ## path and not bytes: like ``expressionFile``, the manifest is read
       ## from the recipe's own directory at realize time, so a consumer that
       ## receives this provisioning as a CONTRIBUTION through an interface
-      ## artifact does not get the file with it. A federated catalog
-      ## publishing a closure package must be checked out, not merely
-      ## pinned. Lifting that means moving the entries into the artifact,
-      ## which is a larger change to the provisioning schema than this field.
+      ## artifact does not get the file with it. The lift therefore inlines
+      ## the parsed entries into the artifact record (envelope v34,
+      ## ``InterfaceTarballProvisioning.closureEntries``), and a consumer
+      ## realizes from those.
+    closureEntries*: seq[string]
+      ## The closure manifest INLINED, one canonical manifest line per entry.
+      ## Empty on a recipe (which names the file in ``closureManifest``);
+      ## set when the def is rebuilt from a published artifact, whose
+      ## consumer has no such file (envelope v34). Realization prefers these
+      ## to the file.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -1951,6 +1957,27 @@ type
       ## the cache from the key (the dependency policy's ignored roots do).
       ## Passed to ``buildAction``. Empty (the default) changes nothing.
       ## Payload codec v35+; an older payload decodes with the list empty.
+    envPassthrough*: seq[string]
+      ## Names of environment variables whose HOST value this action reads:
+      ## the passthrough class of reprobuild-pm
+      ## ``spec/Filesystem-Policy-And-Observed-Inputs.md`` §"Declared And
+      ## Passthrough Variables". Lowered onto the engine's
+      ## ``BuildAction.envPassthrough`` (BuildXL's
+      ## ``passThroughEnvironmentVariables``): each NAME enters the weak
+      ## fingerprint, the VALUE never does, and an observed read of the
+      ## variable is dropped from the observed-environment key
+      ## (``cacheEnvInputs``). A name may also be declared in ``env``; the
+      ## action is then launched with the declared value and keyed by the
+      ## name alone, as the engine already does for ``PATH``.
+      ##
+      ## For a variable whose value varies per shell without changing what
+      ## the action produces -- the temp-directory names a compile reads to
+      ## place its scratch files (``nim.c`` in ``packages/nim.nim``). Every
+      ## other variable an edge is observed to read stays keyed by value, so
+      ## naming one here is a claim about the TOOL, made where the edge is
+      ## constructed, never a way to silence a miss. Set through
+      ## ``appendRegisteredActionEnvPassthrough``. Payload codec v36+; an
+      ## older payload decodes with the list empty.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]
