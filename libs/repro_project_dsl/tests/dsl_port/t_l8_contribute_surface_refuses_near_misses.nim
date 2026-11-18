@@ -145,6 +145,18 @@ const AllProbes* = [
 """,
     mentions: @["four-segment", "names no slot"]),
 
+  # The registered slot is `package.l8ProbeOwner.relyingParties`, but a
+  # contribution names it without the kind segment. Read literally the
+  # spec's spelling would name an activity of a package called
+  # `package`; the refusal says which spelling to write instead.
+  Probe(tag: "kind-segment-in-a-contribution-key", honoured: false,
+    replacement: """  contribute:
+    append:
+      package.l8ProbeOwner.relyingParties = "consumer-member"
+""",
+    mentions: @["without the kind segment",
+                "write `l8ProbeOwner.relyingParties`"]),
+
   Probe(tag: "non-assignment-inside-an-operation", honoured: false,
     replacement: """  contribute:
     append:
@@ -204,12 +216,12 @@ suite "L8 `contribute:` surface — the control":
     check probe.ok
 
   test "the probe set's size is read from the set, not from prose":
-    check AllProbes.len == 18
+    check AllProbes.len == 19
     var refusals = 0
     var honoured = 0
     for p in AllProbes:
       if p.honoured: inc honoured else: inc refusals
-    check refusals == 14
+    check refusals == 15
     check honoured == 4
 
 suite "L8 `contribute:` surface — every near-miss is honoured or named":

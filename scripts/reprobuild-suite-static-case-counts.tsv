@@ -844,7 +844,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_flag.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_cli_params_pos.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_composition_for_loop.nim	nim	6
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_enum.nim	nim	7
-libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim	nim	5
+libs/repro_project_dsl/tests/dsl_port/t_dsl_config_override.nim	nim	8
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_scalar.nim	nim	4
 libs/repro_project_dsl/tests/dsl_port/t_dsl_config_seq_enum.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_environment_binds_configurables.nim	nim	28

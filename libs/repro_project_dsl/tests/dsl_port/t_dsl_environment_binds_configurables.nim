@@ -68,8 +68,8 @@ import ./l5_environment_fixtures
 proc resetOwnerConfigurables() =
   ## Put every configurable this file touches back on its DECLARED
   ## default, so a test never reads a value an earlier test bound.
-  for key in ["l5Owner.issuer", "l5Owner.retries",
-              "l5Owner.sso.externalDomain", "l5Owner.sso.externalSecure"]:
+  for key in ["package.l5Owner.issuer", "package.l5Owner.retries",
+              "package.l5Owner.sso.externalDomain", "package.l5Owner.sso.externalSecure"]:
     resetConfigurable(key)
 
 suite "L5 — the environment's declared position in the existing ladder":
@@ -115,7 +115,7 @@ suite "L5 — the lowered record is a name and a binding set":
     check environmentOwnedConfigKeys("l5EmptyEnvironment").len == 0
     # And applying it changes nothing.
     applyEnvironment("l5EmptyEnvironment", "bare")
-    check readConfigurable[string]("l5EmptyEnvironment.issuer") ==
+    check readConfigurable[string]("package.l5EmptyEnvironment.issuer") ==
       "http://localhost:8080"
 
   test "`dev` binds four configurables, keyed as the config: lane keys them":
@@ -129,11 +129,11 @@ suite "L5 — the lowered record is a name and a binding set":
     # `recordConfigDefault` registered, which is what makes an
     # environment a contributor into the existing table rather than a
     # second one.
-    check keys == @["l5Owner.issuer", "l5Owner.retries",
-                    "l5Owner.sso.externalDomain",
-                    "l5Owner.sso.externalSecure"]
-    for key in ["l5Owner.issuer", "l5Owner.retries",
-                "l5Owner.sso.externalDomain", "l5Owner.sso.externalSecure"]:
+    check keys == @["package.l5Owner.issuer", "package.l5Owner.retries",
+                    "package.l5Owner.sso.externalDomain",
+                    "package.l5Owner.sso.externalSecure"]
+    for key in ["package.l5Owner.issuer", "package.l5Owner.retries",
+                "package.l5Owner.sso.externalDomain", "package.l5Owner.sso.externalSecure"]:
       check key in registeredConfigKeys()
 
   test "`production` binds a STRICT SUBSET, and that is recorded as such":
@@ -141,7 +141,7 @@ suite "L5 — the lowered record is a name and a binding set":
     var keys: seq[string] = @[]
     for b in prod.bindings:
       keys.add(b.key)
-    check keys == @["l5Owner.issuer", "l5Owner.sso.externalDomain"]
+    check keys == @["package.l5Owner.issuer", "package.l5Owner.sso.externalDomain"]
 
   test "a binding carries the author's expression, verbatim, and its site":
     let dev = registeredEnvironment("l5Owner", "dev")
@@ -162,15 +162,15 @@ suite "L5 — the lowered record is a name and a binding set":
     # Derived rather than declared, so ownership cannot disagree with
     # the bindings. The union of both environments, de-duplicated.
     check environmentOwnedConfigKeys("l5Owner") ==
-      @["l5Owner.issuer", "l5Owner.retries", "l5Owner.sso.externalDomain",
-        "l5Owner.sso.externalSecure"]
+      @["package.l5Owner.issuer", "package.l5Owner.retries", "package.l5Owner.sso.externalDomain",
+        "package.l5Owner.sso.externalSecure"]
     check environmentOwnedConfigKeys("l5NoEnvironment").len == 0
 
   test "the owning site is reportable, for the refusal to quote":
-    let site = environmentBindingSite("l5Owner", "l5Owner.issuer")
+    let site = environmentBindingSite("l5Owner", "package.l5Owner.issuer")
     check site.startsWith("dev (")
     check site.contains("l5_environment_fixtures.nim")
-    check environmentBindingSite("l5Owner", "l5Owner.nosuchkey") == ""
+    check environmentBindingSite("l5Owner", "package.l5Owner.nosuchkey") == ""
 
 suite "L5 — the bindings reach the configurables, through the existing lane":
 
@@ -184,21 +184,21 @@ suite "L5 — the bindings reach the configurables, through the existing lane":
     # The control that makes the next two tests mean something. Without
     # it, a test that read `login.metacraft-labs.test` could be reading
     # a default somebody wrote into the recipe.
-    check readConfigurable[string]("l5Owner.issuer") ==
+    check readConfigurable[string]("package.l5Owner.issuer") ==
       "http://localhost:8080"
-    check readConfigurable[int]("l5Owner.retries") == 3
-    check readConfigurable[string]("l5Owner.sso.externalDomain") ==
+    check readConfigurable[int]("package.l5Owner.retries") == 3
+    check readConfigurable[string]("package.l5Owner.sso.externalDomain") ==
       "localhost"
-    check readConfigurable[bool]("l5Owner.sso.externalSecure") == false
+    check readConfigurable[bool]("package.l5Owner.sso.externalSecure") == false
 
   test "`dev` applied: all four keys move":
     applyEnvironment("l5Owner", "dev")
-    check readConfigurable[string]("l5Owner.issuer") ==
+    check readConfigurable[string]("package.l5Owner.issuer") ==
       "https://login.metacraft-labs.test"
-    check readConfigurable[int]("l5Owner.retries") == 9
-    check readConfigurable[string]("l5Owner.sso.externalDomain") ==
+    check readConfigurable[int]("package.l5Owner.retries") == 9
+    check readConfigurable[string]("package.l5Owner.sso.externalDomain") ==
       "login.metacraft-labs.test"
-    check readConfigurable[bool]("l5Owner.sso.externalSecure") == true
+    check readConfigurable[bool]("package.l5Owner.sso.externalSecure") == true
 
   test "`production` applied: the two it binds move, the others do NOT":
     # THE DISCRIMINATOR AGAINST A MERGED BINDING SET. A design that
@@ -207,12 +207,12 @@ suite "L5 — the bindings reach the configurables, through the existing lane":
     # for it. Both are asserted to be the DECLARED defaults, not `dev`'s
     # values.
     applyEnvironment("l5Owner", "production")
-    check readConfigurable[string]("l5Owner.issuer") ==
+    check readConfigurable[string]("package.l5Owner.issuer") ==
       "https://login.metacraft-labs.com"
-    check readConfigurable[string]("l5Owner.sso.externalDomain") ==
+    check readConfigurable[string]("package.l5Owner.sso.externalDomain") ==
       "login.metacraft-labs.com"
-    check readConfigurable[int]("l5Owner.retries") == 3
-    check readConfigurable[bool]("l5Owner.sso.externalSecure") == false
+    check readConfigurable[int]("package.l5Owner.retries") == 3
+    check readConfigurable[bool]("package.l5Owner.sso.externalSecure") == false
 
   test "two environments in one process do not blend: the second wins whole":
     # L7 resolves per consuming edge and will apply an environment more
@@ -222,12 +222,12 @@ suite "L5 — the bindings reach the configurables, through the existing lane":
     # than keeping `dev`'s 9 — because `production` is a different
     # resolved configuration and not a patch on `dev`.
     applyEnvironment("l5Owner", "dev")
-    check readConfigurable[int]("l5Owner.retries") == 9
+    check readConfigurable[int]("package.l5Owner.retries") == 9
     resetOwnerConfigurables()
     applyEnvironment("l5Owner", "production")
-    check readConfigurable[string]("l5Owner.issuer") ==
+    check readConfigurable[string]("package.l5Owner.issuer") ==
       "https://login.metacraft-labs.com"
-    check readConfigurable[int]("l5Owner.retries") == 3
+    check readConfigurable[int]("package.l5Owner.retries") == 3
 
   test "an unknown environment is refused, naming the ones that exist":
     var msg = ""
@@ -262,12 +262,12 @@ suite "L5 — the selection is read in ONE place, and canonicalised":
     resetOwnerConfigurables()
     putEnv(ReproEnvironmentEnvVar, "production")
     check applySelectedEnvironment("l5Owner") == "production"
-    check readConfigurable[string]("l5Owner.issuer") ==
+    check readConfigurable[string]("package.l5Owner.issuer") ==
       "https://login.metacraft-labs.com"
     delEnv(ReproEnvironmentEnvVar)
     resetOwnerConfigurables()
     check applySelectedEnvironment("l5Owner") == ""
-    check readConfigurable[string]("l5Owner.issuer") ==
+    check readConfigurable[string]("package.l5Owner.issuer") ==
       "http://localhost:8080"
     resetOwnerConfigurables()
 
@@ -310,20 +310,20 @@ suite "L5 — an environment applies ALL-OR-NOTHING":
   setup:
     recordConfigDefault[string]("l5Txn", "alpha", "declared-alpha")
     recordConfigDefault[string]("l5Txn", "beta", "declared-beta")
-    resetConfigurable("l5Txn.alpha")
-    resetConfigurable("l5Txn.beta")
+    resetConfigurable("package.l5Txn.alpha")
+    resetConfigurable("package.l5Txn.beta")
 
   teardown:
-    resetConfigurable("l5Txn.alpha")
-    resetConfigurable("l5Txn.beta")
+    resetConfigurable("package.l5Txn.alpha")
+    resetConfigurable("package.l5Txn.beta")
 
   test "a binding that raises leaves NO earlier binding of the same set in force":
     registerEnvironment(DslEnvironmentDef(packageName: "l5Txn",
       name: "partial", sourceFile: "l5-txn", sourceLine: 1))
     registerEnvironmentApplier("l5Txn", "partial", proc () =
-      bindEnvironmentConfigurable("l5Txn", "partial", "l5Txn.alpha",
+      bindEnvironmentConfigurable("l5Txn", "partial", "package.l5Txn.alpha",
         "bound-alpha")
-      bindEnvironmentConfigurable("l5Txn", "partial", "l5Txn.nosuchkey",
+      bindEnvironmentConfigurable("l5Txn", "partial", "package.l5Txn.nosuchkey",
         "bound-nothing"))
     var msg = ""
     try:
@@ -334,7 +334,7 @@ suite "L5 — an environment applies ALL-OR-NOTHING":
     check msg.contains("which no `config:` block registered")
     # And `alpha` -- applied BEFORE the failure -- is back on its
     # declared default rather than carrying a half-applied environment.
-    check readConfigurable[string]("l5Txn.alpha") == "declared-alpha"
+    check readConfigurable[string]("package.l5Txn.alpha") == "declared-alpha"
 
   test "THE CONTROL: the same two-binding shape with both keys registered applies BOTH":
     # Without it, the assertion above is satisfied by an
@@ -342,32 +342,32 @@ suite "L5 — an environment applies ALL-OR-NOTHING":
     registerEnvironment(DslEnvironmentDef(packageName: "l5Txn",
       name: "whole", sourceFile: "l5-txn", sourceLine: 2))
     registerEnvironmentApplier("l5Txn", "whole", proc () =
-      bindEnvironmentConfigurable("l5Txn", "whole", "l5Txn.alpha",
+      bindEnvironmentConfigurable("l5Txn", "whole", "package.l5Txn.alpha",
         "bound-alpha")
-      bindEnvironmentConfigurable("l5Txn", "whole", "l5Txn.beta",
+      bindEnvironmentConfigurable("l5Txn", "whole", "package.l5Txn.beta",
         "bound-beta"))
     applyEnvironment("l5Txn", "whole")
-    check readConfigurable[string]("l5Txn.alpha") == "bound-alpha"
-    check readConfigurable[string]("l5Txn.beta") == "bound-beta"
+    check readConfigurable[string]("package.l5Txn.alpha") == "bound-alpha"
+    check readConfigurable[string]("package.l5Txn.beta") == "bound-beta"
 
   test "an override a FAILING environment did not write is left alone":
     # The restore puts back the table that was there, not an empty one:
     # a value some other lane had already overridden must survive a
     # failed environment application.
-    setConfigurable("l5Txn.beta", "set-by-somebody-else")
+    setConfigurable("package.l5Txn.beta", "set-by-somebody-else")
     registerEnvironment(DslEnvironmentDef(packageName: "l5Txn",
       name: "partialtwo", sourceFile: "l5-txn", sourceLine: 3))
     registerEnvironmentApplier("l5Txn", "partialtwo", proc () =
-      bindEnvironmentConfigurable("l5Txn", "partialtwo", "l5Txn.alpha",
+      bindEnvironmentConfigurable("l5Txn", "partialtwo", "package.l5Txn.alpha",
         "bound-alpha")
-      bindEnvironmentConfigurable("l5Txn", "partialtwo", "l5Txn.nosuchkey",
+      bindEnvironmentConfigurable("l5Txn", "partialtwo", "package.l5Txn.nosuchkey",
         "bound-nothing"))
     try:
       applyEnvironment("l5Txn", "partialtwo")
     except EDslPortMissingKey:
       discard
-    check readConfigurable[string]("l5Txn.alpha") == "declared-alpha"
-    check readConfigurable[string]("l5Txn.beta") == "set-by-somebody-else"
+    check readConfigurable[string]("package.l5Txn.alpha") == "declared-alpha"
+    check readConfigurable[string]("package.l5Txn.beta") == "set-by-somebody-else"
 
 suite "L5 — the selection resolves under NIM IDENTIFIER EQUALITY, like the key":
   ## `canonicalEnvironmentSelection` normalizes, and
@@ -391,7 +391,7 @@ suite "L5 — the selection resolves under NIM IDENTIFIER EQUALITY, like the key
     for spelling in ["dev", "Dev", "DEV", "d_ev"]:
       resetOwnerConfigurables()
       applyEnvironment("l5Owner", spelling)
-      check readConfigurable[string]("l5Owner.issuer") ==
+      check readConfigurable[string]("package.l5Owner.issuer") ==
         "https://login.metacraft-labs.test"
 
   test "and a name that is NOT the declared one under that rule is still refused":
@@ -410,7 +410,7 @@ suite "L5 — the selection resolves under NIM IDENTIFIER EQUALITY, like the key
     # from -- a selection's casing must not reach the filesystem.
     putEnv(ReproEnvironmentEnvVar, "Dev")
     check applySelectedEnvironment("l5Owner") == "dev"
-    check readConfigurable[string]("l5Owner.issuer") ==
+    check readConfigurable[string]("package.l5Owner.issuer") ==
       "https://login.metacraft-labs.test"
     check canonicalEnvironmentSelection() == "dev"
 

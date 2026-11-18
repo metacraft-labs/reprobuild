@@ -2,7 +2,7 @@
 ##
 ## Pins the contract for M2's v8-style ``config:`` block. The block
 ## declares named scalar configurables with a default value; reading
-## them via ``readConfigurable[T]("<package-id>.<name>")`` from the host
+## them via ``readConfigurable[T]("package.<package-id>.<name>")`` from the host
 ## program returns the default when nothing has overridden the slot.
 ##
 ## Public surface introduced by M2 (see
@@ -47,13 +47,13 @@ package configPkg:
 suite "DSL-port M2 — config: scalar configurables":
 
   test "config: scalar reads int default value":
-    check readConfigurable[int]("configPkg.databasePort") == 5432
+    check readConfigurable[int]("package.configPkg.databasePort") == 5432
 
   test "config: scalar reads string default value":
-    check readConfigurable[string]("configPkg.databaseHost") == "localhost"
+    check readConfigurable[string]("package.configPkg.databaseHost") == "localhost"
 
   test "config: scalar reads bool default value":
-    check readConfigurable[bool]("configPkg.enableTls") == true
+    check readConfigurable[bool]("package.configPkg.enableTls") == true
 
   test "registered keys enumerate via registeredConfigKeys":
     # ``registeredConfigKeys`` is M2's diagnostic accessor: returns the
@@ -62,6 +62,6 @@ suite "DSL-port M2 — config: scalar configurables":
     # exist. The order is insertion order; tests guard against accidental
     # name drift.
     let keys = registeredConfigKeys()
-    check "configPkg.databasePort" in keys
-    check "configPkg.databaseHost" in keys
-    check "configPkg.enableTls" in keys
+    check "package.configPkg.databasePort" in keys
+    check "package.configPkg.databaseHost" in keys
+    check "package.configPkg.enableTls" in keys
