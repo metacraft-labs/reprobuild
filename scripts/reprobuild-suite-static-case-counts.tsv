@@ -547,6 +547,7 @@ libs/repro_dsl_stdlib/tests/t_zig_cross_shared_library_exports.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_zstd_dev_windows_link_channel.nim	nim	2
 libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim	nim	4
 libs/repro_elevation/tests/t_addon_apt_closure_ro_store_view.nim	nim	3
+libs/repro_elevation/tests/t_elevation_channel_identity.nim	nim	6
 libs/repro_elevation/tests/t_inline_exec_deadline_and_output.nim	nim	9
 libs/repro_elevation/tests/t_m2_nixos_darwin_modules.nim	nim	21
 libs/repro_elevation/tests/t_passwd_user_driver_group_collision.nim	nim	5

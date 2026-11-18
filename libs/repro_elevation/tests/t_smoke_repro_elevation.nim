@@ -325,8 +325,9 @@ suite "repro_elevation: --no-elevate skip path":
 suite "repro_elevation: broker-mode arg parsing":
   test "parses --privileged-broker --channel --token":
     let parsed = parseBrokerModeArgs(@["--privileged-broker",
-      "--channel", "\\\\.\\pipe\\repro-elev-xyz", "--token", "xyz"])
+      "--channel", "0123456789abcdef0123456789abcdef", "--token", "xyz"])
     check parsed.isBrokerMode
+    check parsed.channel == "0123456789abcdef0123456789abcdef"
     check parsed.token == "xyz"
 
   test "non-broker args are reported as not-broker-mode":

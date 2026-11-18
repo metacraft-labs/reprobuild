@@ -3,13 +3,23 @@
 ## Per Elevation-And-Privileged-Operations.md "The IPC Channel And
 ## Authentication":
 ##
-##   Windows — a named pipe `\\.\pipe\repro-elev-<nonce>` created by
-##   the parent before the broker launch. The broker connects back.
-##   The parent verifies the connecting client via the pipe's
-##   authenticated peer SID (the broker must be the same human user).
-##   The broker verifies the parent passed the matching `<nonce>` so
-##   an unrelated local process cannot connect and drive an elevated
-##   executor.
+##   Windows — a named pipe `\\.\pipe\repro-elev-<channel-id>` created
+##   by the parent before the broker launch. The channel id is random
+##   and is NOT the nonce: every pipe name on the machine can be
+##   listed, so the name is public and nothing secret may be in it.
+##   The parent creates the pipe's FIRST and ONLY instance
+##   (`FILE_FLAG_FIRST_PIPE_INSTANCE`, `nMaxInstances = 1`) with a
+##   protected DACL that admits Administrators and SYSTEM alone. A
+##   process that created the name first makes the parent's creation
+##   fail; a process that tries to add a second instance is refused.
+##   So the broker, connecting by name, reaches the parent's instance.
+##   The parent then requires the connecting client's token to be
+##   ELEVATED. It does not compare SIDs: under Administrator
+##   Protection, or an over-the-shoulder elevation by a standard user,
+##   the broker's user SID is not the parent's.
+##   The nonce rides on the broker's command line and in `Hello`; it
+##   binds the session, and is not secret from the launching user's
+##   own processes.
 ##
 ##   POSIX — a Unix domain socket + `SO_PEERCRED` / `LOCAL_PEERCRED`.
 ##   Per the M68 Phase A/B precedent, the POSIX transport is a
@@ -24,6 +34,8 @@
 ## transport never interprets the body — it owns only delimitation
 ## and authentication.
 
+import std/[strutils, sysrand]
+
 import ./errors
 import ./protocol
 
@@ -32,10 +44,51 @@ import ./protocol
 # the broker (connector) agree without a second argument.
 # ---------------------------------------------------------------------------
 
-proc pipeNameForNonce*(nonce: string): string =
-  ## The Windows named-pipe path for a given nonce. The nonce is a
-  ## cryptographically random hex token; it is safe in a pipe name.
-  "\\\\.\\pipe\\repro-elev-" & nonce
+const ElevationPipePrefix* = "\\\\.\\pipe\\repro-elev-"
+
+proc isChannelId*(channelId: string): bool =
+  ## A channel id is 32 lower-case hex digits, as `generateChannelId`
+  ## makes them. The broker refuses any other `--channel` value, so it
+  ## can only ever open a `repro-elev-` pipe.
+  if channelId.len != 32:
+    return false
+  for c in channelId:
+    if c notin {'0'..'9', 'a'..'f'}:
+      return false
+  true
+
+proc generateChannelId*(): string =
+  ## A fresh random channel id. It names the pipe, so it is public as
+  ## soon as the pipe exists; its job is to keep two applies apart and
+  ## to make the name unguessable BEFORE the parent creates it.
+  var bytes: array[16, byte]
+  if not urandom(bytes):
+    raiseBrokerLaunch("the OS random source is unavailable")
+  result = newStringOfCap(32)
+  for b in bytes:
+    result.add(toHex(int(b), 2).toLowerAscii())
+
+proc pipeNameForChannel*(channelId: string): string =
+  ## The Windows named-pipe path for a channel id. It carries no
+  ## secret: the nonce is never part of it.
+  if not isChannelId(channelId):
+    raiseProtocol("not an elevation channel id: '" & channelId & "'")
+  ElevationPipePrefix & channelId
+
+const ElevationPipeSddl* = "D:P(A;;GA;;;BA)(A;;GA;;;SY)(A;;RC;;;OW)"
+  ## The pipe's protected DACL: Administrators and SYSTEM, nobody else.
+  ## The `OWNER RIGHTS` entry (`OW`, read-control only) takes away the
+  ## implicit WRITE_DAC the pipe's owner -- the launching user -- would
+  ## otherwise keep, so a non-elevated process of that user cannot
+  ## rewrite the DACL to let itself in.
+  ## An elevated broker holds an enabled Administrators group under
+  ## every elevation Windows offers (Admin Approval Mode, Administrator
+  ## Protection's system-managed account, over-the-shoulder credentials
+  ## of another administrator). The launching user's non-elevated
+  ## processes hold Administrators deny-only, or not at all, so they
+  ## cannot open the pipe as a client. The elevated-client check in
+  ## `acceptAuthenticatedClient` checks the same property again on the
+  ## token bound to the connection.
 
 when defined(windows):
   type
@@ -53,7 +106,8 @@ when defined(windows):
     PIPE_READMODE_BYTE: DWORD = 0x00000000
     PIPE_WAIT: DWORD = 0x00000000
     PIPE_REJECT_REMOTE_CLIENTS: DWORD = 0x00000008
-    PIPE_UNLIMITED_INSTANCES: DWORD = 255
+    FILE_FLAG_FIRST_PIPE_INSTANCE: DWORD = 0x00080000
+    SDDL_REVISION_1: DWORD = 1
     GENERIC_READ: DWORD = 0x80000000'u32
     GENERIC_WRITE: DWORD = 0x40000000'u32
     OPEN_EXISTING: DWORD = 3
@@ -61,12 +115,15 @@ when defined(windows):
     ERROR_PIPE_BUSY: DWORD = 231
     SECURITY_SQOS_PRESENT: DWORD = 0x00100000
     SECURITY_IDENTIFICATION: DWORD = 0x00010000
-    TokenUser = 1'u32
+    TokenElevation = 20'u32
     TOKEN_QUERY: DWORD = 0x0008
 
   type
     OVERLAPPED = object
-    SidNameUse = int32
+    SECURITY_ATTRIBUTES = object
+      nLength: DWORD
+      lpSecurityDescriptor: pointer
+      bInheritHandle: BOOL
 
   proc invalidHandle(): HANDLE =
     ## `INVALID_HANDLE_VALUE` — the all-ones pointer the Win32 file /
@@ -119,13 +176,6 @@ when defined(windows):
     {.importc, stdcall, dynlib: "kernel32".}
 
   # Peer-identity surface.
-  proc GetCurrentProcess(): HANDLE
-    {.importc, stdcall, dynlib: "kernel32".}
-
-  proc OpenProcessToken(processHandle: HANDLE; desiredAccess: DWORD;
-                        tokenHandle: PHANDLE): BOOL
-    {.importc, stdcall, dynlib: "advapi32".}
-
   proc GetTokenInformation(tokenHandle: HANDLE; tokenInformationClass: uint32;
                            tokenInformation: pointer;
                            tokenInformationLength: DWORD;
@@ -145,8 +195,8 @@ when defined(windows):
   proc GetCurrentThread(): HANDLE
     {.importc, stdcall, dynlib: "kernel32".}
 
-  proc ConvertSidToStringSidW(sid: pointer;
-                              stringSid: ptr LPCWSTR): BOOL
+  proc ConvertStringSecurityDescriptorToSecurityDescriptorW(
+    sddl: LPCWSTR; revision: DWORD; sd: ptr pointer; size: ptr DWORD): BOOL
     {.importc, stdcall, dynlib: "advapi32".}
 
   proc LocalFree(p: pointer): pointer
@@ -160,75 +210,36 @@ when defined(windows):
       result.add(uint16(byte(ch)))    # pipe names / nonces are ASCII
     result.add(0'u16)
 
-  proc fromWideZ(p: LPCWSTR): string =
-    var i = 0
-    while p[i] != 0'u16:
-      result.add(char(p[i] and 0xff))
-      inc i
+  # ---- peer elevation -----------------------------------------------------
 
-  # ---- peer SID extraction -------------------------------------------------
-
-  proc currentProcessUserSidString(): string =
-    ## SID string of the user the CURRENT process runs as.
-    var token: HANDLE
-    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, addr token) == 0:
-      raiseChannelAuth("OpenProcessToken failed")
-    defer: discard CloseHandle(token)
+  proc tokenIsElevated(token: HANDLE): bool =
+    var elevation: DWORD = 0           # TOKEN_ELEVATION { DWORD TokenIsElevated }
     var needed: DWORD = 0
-    discard GetTokenInformation(token, TokenUser, nil, 0, addr needed)
-    if needed == 0:
-      raiseChannelAuth("GetTokenInformation(TokenUser) sizing failed")
-    var buf = newSeq[byte](int(needed))
-    if GetTokenInformation(token, TokenUser, addr buf[0], needed,
-        addr needed) == 0:
-      raiseChannelAuth("GetTokenInformation(TokenUser) failed")
-    # TOKEN_USER { SID_AND_ATTRIBUTES { PSID Sid; DWORD Attributes } }
-    # The first pointer-sized field is the PSID.
-    let sidPtr = cast[pointer](cast[ptr int](addr buf[0])[])
-    var sidStrW: LPCWSTR
-    if ConvertSidToStringSidW(sidPtr, addr sidStrW) == 0:
-      raiseChannelAuth("ConvertSidToStringSidW failed")
-    result = fromWideZ(sidStrW)
-    discard LocalFree(sidStrW)
+    if GetTokenInformation(token, TokenElevation, addr elevation,
+        DWORD(sizeof(elevation)), addr needed) == 0:
+      raiseChannelAuth("GetTokenInformation(TokenElevation) failed " &
+        "(status " & $GetLastError() & ")")
+    elevation != 0
 
-  proc connectedPipeClientSidString(pipe: HANDLE): string =
-    ## SID string of the client currently connected to `pipe`,
-    ## obtained by impersonating the client and reading the
-    ## impersonation token's user. Restores the thread token before
-    ## returning.
+  proc connectedPipeClientIsElevated(pipe: HANDLE): bool =
+    ## Whether the client connected to `pipe` runs with an elevated
+    ## token, read from the token the kernel bound to the connection:
+    ## impersonate the client (it opened at identification level),
+    ## read the thread token, revert before anything else. The
+    ## client's pid is not used; a client can spoof it.
     if ImpersonateNamedPipeClient(pipe) == 0:
       raiseChannelAuth("ImpersonateNamedPipeClient failed (status " &
         $GetLastError() & ")")
-    var failed = false
-    var sidStr = ""
-    try:
-      var token: HANDLE
-      if OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, addr token) == 0:
-        failed = true
-      else:
-        defer: discard CloseHandle(token)
-        var needed: DWORD = 0
-        discard GetTokenInformation(token, TokenUser, nil, 0, addr needed)
-        if needed == 0:
-          failed = true
-        else:
-          var buf = newSeq[byte](int(needed))
-          if GetTokenInformation(token, TokenUser, addr buf[0], needed,
-              addr needed) == 0:
-            failed = true
-          else:
-            let sidPtr = cast[pointer](cast[ptr int](addr buf[0])[])
-            var sidStrW: LPCWSTR
-            if ConvertSidToStringSidW(sidPtr, addr sidStrW) == 0:
-              failed = true
-            else:
-              sidStr = fromWideZ(sidStrW)
-              discard LocalFree(sidStrW)
-    finally:
-      discard RevertToSelf()
-    if failed:
-      raiseChannelAuth("could not read the connecting client's SID")
-    return sidStr
+    var token: HANDLE
+    let opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1,
+      addr token) != 0
+    let openStatus = GetLastError()
+    discard RevertToSelf()
+    if not opened:
+      raiseChannelAuth("could not open the connecting client's token " &
+        "(status " & $openStatus & ")")
+    defer: discard CloseHandle(token)
+    tokenIsElevated(token)
 
   # ---- the channel object --------------------------------------------------
 
@@ -301,55 +312,77 @@ when defined(windows):
 
   # ---- parent side: create the pipe, accept the broker -------------------
 
-  proc createListeningChannel*(nonce: string): ElevationChannel =
-    ## PARENT: create the named pipe BEFORE launching the broker.
-    ## `PIPE_REJECT_REMOTE_CLIENTS` confines the pipe to the local
-    ## machine. The default security descriptor grants access only
-    ## to the creating user + SYSTEM + Administrators, so a different
-    ## interactive user cannot open it; the explicit peer-SID check
-    ## in `acceptAuthenticatedClient` is the belt-and-braces
-    ## confirmation the spec mandates.
-    let name = pipeNameForNonce(nonce)
+  proc createListeningChannel*(channelId: string): ElevationChannel =
+    ## PARENT: create the named pipe BEFORE launching the broker, as
+    ## the FIRST and ONLY instance of its name:
+    ##
+    ##   * `FILE_FLAG_FIRST_PIPE_INSTANCE` — if any process already
+    ##     created this name, creation fails (`ERROR_ACCESS_DENIED`)
+    ##     instead of joining the squatter's pipe, where the broker
+    ##     could connect to the squatter's instance.
+    ##   * `nMaxInstances = 1` — nobody can add a second instance
+    ##     beside this one while the parent holds it.
+    ##   * `ElevationPipeSddl` — only Administrators and SYSTEM may
+    ##     open it as a client.
+    ##   * `PIPE_REJECT_REMOTE_CLIENTS` — local clients only.
+    let name = pipeNameForChannel(channelId)
     var wide = toWideZ(name)
+    var sddlW = toWideZ(ElevationPipeSddl)
+    var sd: pointer
+    if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        cast[LPCWSTR](addr sddlW[0]), SDDL_REVISION_1, addr sd, nil) == 0:
+      raiseBrokerLaunch("could not build the pipe's security descriptor " &
+        "(status " & $GetLastError() & ")")
+    defer: discard LocalFree(sd)
+    var sa = SECURITY_ATTRIBUTES(nLength: DWORD(sizeof(SECURITY_ATTRIBUTES)),
+      lpSecurityDescriptor: sd, bInheritHandle: 0)
     let h = CreateNamedPipeW(cast[LPCWSTR](addr wide[0]),
-      PIPE_ACCESS_DUPLEX,
+      PIPE_ACCESS_DUPLEX or FILE_FLAG_FIRST_PIPE_INSTANCE,
       PIPE_TYPE_BYTE or PIPE_READMODE_BYTE or PIPE_WAIT or
         PIPE_REJECT_REMOTE_CLIENTS,
-      PIPE_UNLIMITED_INSTANCES, 64 * 1024, 64 * 1024, 0, nil)
+      1, 64 * 1024, 64 * 1024, 0, addr sa)
     if h == invalidHandle():
-      raiseBrokerLaunch("CreateNamedPipeW failed (status " &
-        $GetLastError() & ")")
+      raiseBrokerLaunch("CreateNamedPipeW failed for " & name &
+        " (status " & $GetLastError() & "); a process that already " &
+        "holds this name is refused, never joined")
     result.handle = h
     result.isServer = true
     result.open = true
 
   proc acceptAuthenticatedClient*(ch: var ElevationChannel) =
-    ## PARENT: block until a client connects, then verify the
-    ## connecting peer's SID equals the parent's own user SID. A
-    ## mismatch is `EChannelAuth` and the connection is dropped — an
-    ## unrelated user's process cannot drive the elevated broker.
-    ## (The broker runs under an elevated token of the SAME human
-    ## user, so its user SID matches the parent's.)
+    ## PARENT: block until a client connects, then require the
+    ## connecting client's token to be ELEVATED. A non-elevated client
+    ## is `EChannelAuth` and is disconnected.
+    ##
+    ## The check is elevation, not SID equality with the parent: under
+    ## Administrator Protection the broker runs as a separate,
+    ## system-managed identity, and under an over-the-shoulder
+    ## elevation by a standard user it runs as the administrator who
+    ## typed the credentials. Neither SID is the parent's, and a
+    ## same-SID check would refuse the legitimate broker. A process
+    ## that is already elevated gains nothing by connecting.
+    ##
+    ## On a refusal the caller must keep the pipe (do not `close`)
+    ## until the broker has exited: closing releases the name, and a
+    ## squatter could then create it for the broker to connect to.
     if ConnectNamedPipe(ch.handle, nil) == 0:
       let err = GetLastError()
       if err != ERROR_PIPE_CONNECTED:
         raiseBrokerLost("ConnectNamedPipe failed (status " & $err & ")")
-    let expectedSid = currentProcessUserSidString()
-    let peerSid = connectedPipeClientSidString(ch.handle)
-    if peerSid != expectedSid:
+    if not connectedPipeClientIsElevated(ch.handle):
       discard DisconnectNamedPipe(ch.handle)
-      raiseChannelAuth("the connecting client's SID (" & peerSid &
-        ") is not the launching user (" & expectedSid &
-        "); refusing to serve a foreign peer")
+      raiseChannelAuth("the connecting client is not elevated; " &
+        "refusing to serve it as the broker")
 
   # ---- broker side: connect back to the parent ---------------------------
 
-  proc connectToParent*(nonce: string;
+  proc connectToParent*(channelId: string;
                         timeoutMs: int = 20_000): ElevationChannel =
     ## BROKER: connect back to the parent's pipe. Retries while the
-    ## pipe is momentarily busy (all instances in use), up to the
-    ## timeout.
-    let name = pipeNameForNonce(nonce)
+    ## pipe is momentarily busy (its one instance in use), up to the
+    ## timeout. The pipe has one instance, created first by the
+    ## parent, so opening the name reaches the parent's instance.
+    let name = pipeNameForChannel(channelId)
     var wide = toWideZ(name)
     var waited = 0
     while true:
@@ -382,13 +415,13 @@ else:
     ElevationChannel* = object
       open: bool
 
-  proc createListeningChannel*(nonce: string): ElevationChannel =
+  proc createListeningChannel*(channelId: string): ElevationChannel =
     raiseNotImplementedPlatform("Unix-domain-socket elevation channel")
 
   proc acceptAuthenticatedClient*(ch: var ElevationChannel) =
     raiseNotImplementedPlatform("Unix-domain-socket peer-cred accept")
 
-  proc connectToParent*(nonce: string;
+  proc connectToParent*(channelId: string;
                         timeoutMs: int = 20_000): ElevationChannel =
     raiseNotImplementedPlatform("Unix-domain-socket connect-back")
 

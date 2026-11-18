@@ -275,9 +275,10 @@ suite "integration_privileged_broker_single_prompt":
       # the handshake, then send a frame whose kind tag is NOT in the
       # closed typed operation set. The broker must reject it — it
       # never executes anything outside the closed set.
+      let channelId = generateChannelId()
       let nonce = generateNonce()
-      var ch = createListeningChannel(nonce)
-      var proc0 = launchBrokerForGate(reproBinary(), nonce)
+      var ch = createListeningChannel(channelId)
+      var proc0 = launchBrokerForGate(reproBinary(), channelId, nonce)
       acceptAuthenticatedClient(ch)
 
       ch.sendFrame(encodeHello(HelloFrame(
@@ -324,8 +325,9 @@ suite "integration_privileged_broker_single_prompt":
       let realNonce = generateNonce()
       let wrongNonce = generateNonce()
       check realNonce != wrongNonce
-      var ch = createListeningChannel(realNonce)
-      var proc0 = launchBrokerForGate(reproBinary(), realNonce)
+      let channelId = generateChannelId()
+      var ch = createListeningChannel(channelId)
+      var proc0 = launchBrokerForGate(reproBinary(), channelId, realNonce)
       acceptAuthenticatedClient(ch)
 
       # An impostor parent presents a nonce that does not match the
