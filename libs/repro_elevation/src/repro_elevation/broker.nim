@@ -851,9 +851,15 @@ proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
         raiseProtocol(args[i] & " requires a value")
       try:
         if args[i] == BrokerParentPidFlag:
-          result.parentPid = parseInt(args[i + 1])
-          if result.parentPid > int(high(uint32)):
+          # Compared as BiggestInt (64-bit on every target): a process id is
+          # a 32-bit DWORD, and on a 32-bit target `int(high(uint32))` does
+          # not fit `int`, which made this a compile error for armhf. The
+          # value must also fit `int`, the field's type, which on such a
+          # target is the tighter bound.
+          let pid = parseBiggestInt(args[i + 1])
+          if pid > BiggestInt(high(uint32)) or pid > BiggestInt(high(int)):
             raise newException(ValueError, "out of range")
+          result.parentPid = int(pid)
         else:
           result.parentStart = parseBiggestUInt(args[i + 1]).uint64
       except ValueError:

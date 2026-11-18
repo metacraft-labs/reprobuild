@@ -529,6 +529,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-engine-tick-\" & $getCurren..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_entry_type_checks_on_every_release_architecture.nim",
+    binary: "build/test-bin/t_addon_entry_type_checks_on_every_release_architecture",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_addon_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim",
     binary: "build/test-bin/t_addon_etc_write_never_follows_symlinks",
     defines: @[],
