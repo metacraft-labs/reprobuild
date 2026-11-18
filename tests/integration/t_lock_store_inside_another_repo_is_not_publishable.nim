@@ -63,11 +63,14 @@
 ## store; the gate then took the benign "lock publish skipped … is a plain
 ## directory inside the Git worktree" route and wrote `locks/` into it.
 ##
-## Falsifiability: confirmed against the packaged pre-fix binary
-## (reprobuild 92dc648d) on this exact fixture — it reports
+## Falsifiability: the original defect was confirmed against the packaged
+## pre-fix binary (reprobuild 92dc648d) on this exact fixture — it reported
 ## `lock-publish-failure` with git's "paths are ignored by one of your
 ## .gitignore files" text, which is the state that blocked every push in the
-## metacraft workspace.
+## metacraft workspace. Against reprobuild d957b394f (before the record-store
+## fix) the fixture still made the nested directory the store, and the
+## `locks/` assertions at the end fail there: the gate wrote its record into
+## `.repro/manifests/locks`.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
@@ -90,7 +93,7 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-suite "a nested lock store is not publishable":
+suite "a nested metadata directory is neither a lock store nor publishable":
 
   test "t_lock_store_inside_another_repo_is_not_publishable":
     let gitBin = findExe("git")

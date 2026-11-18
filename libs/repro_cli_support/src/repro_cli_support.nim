@@ -43805,13 +43805,24 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # "no manifest configured" guard (added by the host-bootstrap-config
   # change AFTER M25) must not fire for it, or compositional init aborts
   # before the composer ever runs.
-  if not dirExists(manifestsDir) and args.manifestUrl.len == 0 and
+  # "No metadata of its own" (Workspace-Manifests.md §"`repro-workspace.toml`"):
+  # no `projects/` or `repos/` where membership resolves, and no
+  # `[[manifest]]` layer declared by the state or the settings files. Layers
+  # are counted whether or not a project is named yet, so a root that has them
+  # but names no project reaches the "requires a <project-or-variant>" error
+  # below rather than this one.
+  let membershipDir = manifestsRoot(args.workspaceRoot)
+  let hasMetadata = dirExists(manifestsDir) or
+    dirExists(membershipDir / "repos") or
+    effectiveWorkspaceLocalWithNotes(args.workspaceRoot).local.manifest.len > 0
+  if not hasMetadata and args.manifestUrl.len == 0 and
       not isCompositionalWorkspaceToml(args.workspaceRoot, args.projectName):
     raise newException(ValueError,
       "no manifest configured for `repro workspace init`: pass " &
         "`--manifest-url=…`, commit a `" & settingsFileName &
         "` with a `[records] url` (or set `REPRO_WORKSPACE_CONFIG`), or run " &
-        "in a workspace root that holds its own `projects/`. The host " &
+        "in a workspace root that holds its own metadata (`projects/` or " &
+        "`repos/`, or `[[manifest]]` layers in the settings files). The host " &
         "repository's remote is never used in their place, and `repro` " &
         "ships no built-in manifest URL.")
   if args.projectName.len == 0:
@@ -54723,10 +54734,11 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
       announceMissingRecordStoreCheckout(parsed.workspaceRoot, declared)
     return declared.checkout
   discard workspaceLocal
-  # Native default git-checkout lock store: the `.repro/manifests` store DB,
-  # NOT the membership root. Membership (projects/repos) lives at the workspace
-  # root (or a `.repro/manifests` checkout); the lock store is always the
-  # `.repro/manifests` DB, separate from where membership resolves.
+  # Native default git-checkout lock store: the store checkout at its
+  # conventional location (`.repro/records`, legacy `.repro/manifests`), NOT
+  # the membership root and never a composed layer. Membership (projects/repos)
+  # lives at the workspace root or in the layers; the record store is a
+  # separate repository, apart from where membership resolves.
   #
   # ...but ONLY when that store actually exists as a git checkout. Returning the
   # path unconditionally infers a team route from a path that may never have been
@@ -71246,13 +71258,18 @@ proc workspaceLockRoots(workspaceRoot: string;
     layerLocations: openArray[ManifestLayerLocation]): seq[string] =
   ## Every on-disk root that can own a ``locks/`` subtree for this workspace.
   ##
-  ## This deliberately mirrors every arm of ``pickRecordStoreRoot`` rather
-  ## than calling it: that proc answers "where does THIS operation write", and
-  ## a rewrite must be checked against every record the workspace can still
-  ## READ. The arms are the native ``.repro/manifests`` git-checkout store, the
-  ## composer's materialised ``.repro/manifests-<i>-<slug>`` layers, an
-  ## explicitly declared ``[[manifest]]`` layer, the membership root, and the
-  ## workspace root itself. Roots with no ``locks/`` subtree cost nothing.
+  ## This is deliberately WIDER than ``pickRecordStoreRoot``: that proc
+  ## answers "where does THIS operation write", and a rewrite must be checked
+  ## against every record the workspace can still READ — including records an
+  ## earlier release wrote into a location the writer no longer uses. Until
+  ## the record-store fix (reprobuild-pm issues/2026-11-16-repro-falls-back-
+  ## to-the-root-or-origin-as-the-lock-record-store-when-records-names-no-
+  ## url.md) the writer took the first composed layer, usually the root, so
+  ## records may still sit there. The roots are the store checkouts
+  ## (``.repro/records``, legacy ``.repro/manifests``), the composer's
+  ## materialised ``.repro/manifests-<i>-<slug>`` layers, an explicitly
+  ## declared ``[[manifest]]`` layer, the membership root, and the workspace
+  ## root itself. Roots with no ``locks/`` subtree cost nothing.
   var candidates = @[
     workspaceRoot / ".repro" / RecordStoreDirName,
     workspaceRoot / ".repro" / LegacyRecordStoreDirName,
