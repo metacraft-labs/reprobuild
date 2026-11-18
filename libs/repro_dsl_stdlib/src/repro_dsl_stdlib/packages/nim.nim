@@ -681,6 +681,16 @@ proc maybeTagPublicInterface(action: BuildActionDef;
   ## artifact frame with a declared public-interface member.
   if publish.isSome and not publish.get():
     return   # explicit opt-out.
+  if providerStartupBodyActive():
+    # The provider's speculative startup pass runs every ``build:`` body
+    # with no project root, and the publish identity is derived from that
+    # root (``sourceCacheEntryIdentity`` refuses an empty one). Nothing
+    # registered in the pass survives: ``buildPackageFragment`` resets the
+    # action registry before the real invocation runs this body again with
+    # a real root and tags the edge then. Asking the pass positively, not
+    # inferring it from an empty root, keeps an empty root during a REAL
+    # invocation a refused planning fault.
+    return
   let explicit = publish.isSome and publish.get()
   let frame = currentBuildContextFrame()
   let pkg = frame.packageName

@@ -6747,6 +6747,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "provider",
             "root"
           ],
           "line": 14,
@@ -6755,6 +6756,21 @@
             "nim-argv"
           ],
           "snippet": "let compiled = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--verbosity:0\", \"--hints:off\","
+        },
+        {
+          "assignedCommandVariable": "compiled",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "provider",
+            "root"
+          ],
+          "line": 98,
+          "path": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let compiled = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--verbosity:0\","
         }
       ],
       "source": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim"
@@ -47180,7 +47196,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -51493,7 +51509,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_records_url_locates_the_lock_record_store.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
