@@ -1,8 +1,8 @@
 ## `repro certify` and `repro test` on a project whose root is `/dev/shm`
 ## itself refuse it, say why, run nothing and issue no certificate. On a
-## workspace member seen at a second path, which the build accepts, issuance
-## withholds the certificate and says that the checkout is not one the
-## workspace declares.
+## workspace member seen at a second path inside the workspace tree, which
+## the build accepts, issuance withholds the certificate and says that the
+## checkout is not one the workspace declares.
 ##
 ## Such a root cannot be fingerprinted: in `/dev/shm` a project file and a
 ## POSIX shared-memory object are the same shape of path, so the
@@ -22,10 +22,16 @@
 ##
 ## NO MOCKS: the certifying workspace (`certify_workspace_mode_fixture`): real
 ## repositories, a registered daemon signing key, the built `repro`, the real
-## provider and engine. `app` is seen at `/dev/shm`, or at `/run/lock/<name>`,
-## through a bind mount in a user and mount namespace of its own
-## (`unshare -rm`, then a nested user namespace mapping back to the real uid
-## so `repro` does not run as root). POSITIVE CONTROL: `repro certify` on the
+## provider and engine. `app` is seen at `/dev/shm`, or at
+## `<workspace>/app-second-path`, through a bind mount in a user and mount
+## namespace of its own (`unshare -rm`, then a nested user namespace mapping
+## back to the real uid so `repro` does not run as root). The second path lies inside the
+## workspace tree because the recipe's workspace siblings (`uses: "lib-b"`)
+## are found by walking up from the recipe's own directory
+## (`workspaceProducerLocation`): a second path outside the tree finds none,
+## the recipe compile fails on the sibling import, and the run never reaches
+## issuance. The workspace directory is not a git repository, so the mount
+## point dirties no checkout. POSITIVE CONTROL: `repro certify` on the
 ## same `app` at its real path issues its certificate. Skip rule: Linux with
 ## unprivileged user and mount namespaces, `git` and `ssh-keygen`.
 ##
@@ -35,7 +41,7 @@
 ## above. Mapping `current-repo-identity` back to the off-lock kind fails the
 ## second case's message checks.
 
-import std/[os, osproc, strutils, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 when defined(posix):
   import std/posix
@@ -72,6 +78,8 @@ proc reproSeenAt(fx: WorkspaceCertifyFixture; mounts, seen: string;
   when defined(posix):
     var env = daemonKeyEnv(fx.cf.daemonKey, certifyKeyId)
     env.add((name: "PATH", value: fx.binDir & $PathSep & getEnv("PATH")))
+    let cacheRoot = createTempDir("rp", "", getTempDir())
+    defer: removeDir(cacheRoot)
     var command = "cd " & quoteShell(seen) & " &&"
     # The recipe compile's C and Nim compilers, named explicitly. Otherwise
     # they are provisioned through the per-user Nix daemon, which runs
@@ -80,6 +88,16 @@ proc reproSeenAt(fx: WorkspaceCertifyFixture; mounts, seen: string;
                         ("REPRO_NIM_COMPILER", "nim")]:
       if findExe(exe).len > 0:
         command.add(" " & name & "=" & quoteShell(findExe(exe)))
+    # The build itself stays in this process: a daemon outside the namespace
+    # cannot open the second path either.
+    command.add(" REPRO_DAEMON=off")
+    # A short action-cache root of its own. The recipe compile names the
+    # workspace siblings' shim modules under the cache, and Nim mangles each
+    # shim's whole path into one file name: under the default root
+    # (`~/.cache/repro/action-cache/...`) a sibling that itself uses a
+    # sibling overflows the 255-byte limit, and the compile dies with
+    # "cannot open ...nim.c" before issuance.
+    command.add(" REPROBUILD_ACTION_CACHE_ROOT=" & quoteShell(cacheRoot))
     for item in env:
       command.add(" " & item.name & "=" & quoteShell(item.value))
     command.add(" " & quoteShell(fx.cf.sib.repro))
@@ -135,8 +153,6 @@ suite "a refused volatile root is never certified":
     let reason = namespaceReason()
     if reason.len > 0:
       skip(reason)
-    elif not dirExists("/run/lock"):
-      skip("needs an existing /run/lock to mount a tmpfs on")
     elif findExe("git").len == 0 or findExe("ssh-keygen").len == 0:
       skip("needs git and ssh-keygen; this test signs certificates in real " &
         "repositories")
@@ -144,11 +160,14 @@ suite "a refused volatile root is never certified":
       var fx = setupWorkspaceCertifyFixture("second-path", ["side"],
         buildLines)
       defer: removeDir(fx.cf.sib.scratch)
-      # A directory of its own under `/run`, so the build accepts the root;
-      # only the path differs from the checkout the workspace declares.
-      let seen = "/run/lock/repro-second-path-app"
-      let mounts = "mount -t tmpfs tmpfs /run/lock && mkdir " &
-        quoteShell(seen) & " && mount --bind " & quoteShell(fx.app) & " " &
+      # A directory of its own beside `app`, inside the workspace tree, so
+      # the build accepts the root and finds the workspace siblings; only the
+      # path differs from the checkout the workspace declares. Created here,
+      # before the namespace: a `mkdir` inside it would also leave a real
+      # directory behind.
+      let seen = fx.cf.sib.ws / "app-second-path"
+      createDir(seen)
+      let mounts = "mount --bind " & quoteShell(fx.app) & " " &
         quoteShell(seen)
       let res = fx.reproSeenAt(mounts, seen, ["certify",
         "--tool-provisioning=path", "--workspace-root=" & fx.cf.sib.ws,
