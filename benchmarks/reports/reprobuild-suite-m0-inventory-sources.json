@@ -28571,7 +28571,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_rust_convention_lib_bin_and_path_deps.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
