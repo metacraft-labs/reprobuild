@@ -10,8 +10,9 @@
 ##   Step  7.  Realize packages (M55/M56)
 ##   Step  8.  Stage generated files + managed blocks (M59)
 ##   Step  9.  Materialize launch plans (M57)
-##   Step 10.  Atomic switch of `current`
-##   Step 11.  Commit manifest + register store roots + eager GC
+##   Step 10.  Commit the generation (manifest into CAS, `pointer.bin`,
+##             store roots), then switch `current` to it
+##   Step 11.  Clear the partial-apply marker, eager GC
 ##
 ## Test injection: setting `REPRO_TEST_APPLY_KILL_AFTER_STEP=<N>`
 ## causes the pipeline to write the partial-apply marker and raise
@@ -2947,14 +2948,18 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
   ## happened so the CLI layer can render a single status line.
   let opts = resolveOptions(rawOpts)
 
-  # ---- Pre-step: partial-apply recovery ----------------------------------
   ensureStateDir(opts.stateDir)
-  let recovered = recoverPartialApply(opts.stateDir)
-  result.abortedRecovered = recovered
 
   # ---- Step 1: acquire apply lock ---------------------------------------
   var lock = acquireApplyLock(opts.stateDir, timeoutSeconds = 30)
   try:
+    # ---- Partial-apply recovery, under the lock -------------------------
+    # Never before it: a second apply started while a first one runs would
+    # read the first apply's marker and quarantine its generation (and on
+    # Windows rewrite the stable bin dir) before failing with EApplyBusy.
+    let recovered = recoverPartialApply(opts.stateDir)
+    result.abortedRecovered = recovered
+
     if shouldKillAfter(1):
       writeMarker(opts.stateDir, "", "killed-after-step-1")
       raiseKilledByTestHook(1)
@@ -3193,20 +3198,26 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
           return
 
+      # Whether the generation's directory predates this apply
+      # (re-applying an earlier profile reproduces its content-addressed
+      # id): recovery keeps a committed generation retention already held.
+      let earlyGenDir = generationDir(opts.stateDir,
+        generationIdHex(candidateId))
+      let genDirPreexisting = dirExists(extendedPath(earlyGenDir))
+
       if shouldKillAfter(6):
         writeMarker(opts.stateDir, generationIdHex(candidateId),
-          "killed-after-step-6")
+          "killed-after-step-6", preexisting = genDirPreexisting)
         raiseKilledByTestHook(6)
 
       # ---- Commit: write marker before any destructive step. ------------
-      writeMarker(opts.stateDir, generationIdHex(candidateId), "in-progress")
+      writeMarker(opts.stateDir, generationIdHex(candidateId), "in-progress",
+        preexisting = genDirPreexisting)
       # Create the per-generation directory eagerly so partial-apply
       # recovery has a target to quarantine even when the kill happens
       # before the launcher / manifest writes that would otherwise
       # populate it. The directory ALONE does not advance `current` —
       # rotation in step 10 is the point of no return.
-      let earlyGenDir = generationDir(opts.stateDir,
-        generationIdHex(candidateId))
       createDir(extendedPath(earlyGenDir))
 
       # ---- Step 7: realize packages -------------------------------------
@@ -4122,7 +4133,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         envelope.realizedPrefixIds.add(digestFromKey(r.prefixId))
       envelope.generationId = candidateId
 
-      # Step 11 (commit): seal manifest + intent snapshot + RBCG into
+      # Step 10 (commit): seal manifest + intent snapshot + RBCG into
       # CAS, write pointer.bin, register store root, attach holds.
       # The pipeline runs the commit BEFORE rotation so a crash
       # during CAS sealing leaves the partial-recovery marker in
@@ -4143,11 +4154,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # generation is reachable from `current`. ---------------------
       rotateCurrent(opts.stateDir, generationIdHex(candidateId))
 
+      # Clear the partial-apply marker — the generation is committed and
+      # current. Cleared before GC so a crash during GC leaves no marker
+      # naming the active generation (recovery keeps such a generation
+      # anyway: `recoverPartialApply`).
+      clearMarker(opts.stateDir)
+
       # ---- Step 11 (eager GC) -------------------------------------
       result.gcResult = gc(store)
-
-      # Clear the partial-apply marker — success.
-      clearMarker(opts.stateDir)
 
       # GM4b: the generation is committed and current; serialise what it
       # selected into the home-profile lock. A remote bundle built here is

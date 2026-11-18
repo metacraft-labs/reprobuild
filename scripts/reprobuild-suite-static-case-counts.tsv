@@ -572,6 +572,7 @@ libs/repro_home_apply/tests/t_homebrew_bridge_records.nim	nim	7
 libs/repro_home_apply/tests/t_junction_aware_remove.nim	nim	7
 libs/repro_home_apply/tests/t_macos_archives.nim	nim	11
 libs/repro_home_apply/tests/t_macos_installer_app_realize.nim	nim	15
+libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim	nim	6
 libs/repro_home_apply/tests/t_plan_topological_sort.nim	nim	7
 libs/repro_home_apply/tests/t_preview_chain.nim	nim	7
 libs/repro_home_apply/tests/t_realize_honors_adapter_preference.nim	nim	4
@@ -2706,7 +2707,7 @@ tests/integration/t_workspace_vcs_hybrid_workspace_clone.nim	nim	1
 tests/integration/t_workspace_vcs_switch_preserves_dirty_state.nim	nim	3
 tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/integration/test_dev_env_local_flake_root.py	python	3
-tests/integration/test_nix_daemon_cache.py	python	1
+tests/integration/test_nix_daemon_cache.py	python	2
 tests/test_dev_env_m9_policy.py	python	11
 tests/unit/t_action_compatibility_key.nim	nim	4
 tests/unit/t_action_depfile_policy.nim	nim	7

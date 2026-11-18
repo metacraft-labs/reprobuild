@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2963,
+    "nimTestBinaries": 2964,
     "pureUnitConsolidationGroups": 86,
-    "pureUnitTests": 795,
+    "pureUnitTests": 796,
     "staticallyDetectedRuntimeCompilerFlowTests": 147,
-    "testEntries": 3011
+    "testEntries": 3012
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1693,7 +1693,7 @@
       "graph-fixture": 24,
       "integration": 1640,
       "platform/destructive": 193,
-      "pure unit": 795,
+      "pure unit": 796,
       "unclassified": 359
     },
     "graphOwnedTestArtifacts": [
@@ -1908,9 +1908,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2963,
+    "nimTestBinaryCount": 2964,
     "pythonTestFileCount": 48,
-    "testEntryCount": 3011
+    "testEntryCount": 3012
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19210,6 +19210,25 @@
       "source": "libs/repro_home_apply/tests/t_macos_installer_app_realize.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_partial_recovery_keeps_committed_generations",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_apply",
+        "repro_home_generations"
+      ],
+      "owner": "libs/repro_home_apply",
+      "requiresReproBinary": false,
+      "source": "libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57542,7 +57561,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/test_nix_daemon_cache.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
