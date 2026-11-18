@@ -5365,6 +5365,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let complete = withSets(["),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_cli_env_passthrough_directive.nim",
+    binary: "build/test-bin/t_cli_env_passthrough_directive",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim",
     binary: "build/test-bin/t_committed_lock_pins_versions",
     defines: @[],
@@ -5902,7 +5914,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim",

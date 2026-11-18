@@ -320,13 +320,14 @@ proc build*(tool: BuildNimUnittest;
     else: "gcc"
   appendRegisteredActionToolIdentityRefs(result.action.id, [backendCompiler])
 
-  # The same temp-directory passthrough as ``nim.c``
-  # (``NimCompileScratchEnvNames`` in ``repro_dsl_stdlib/packages/nim``,
-  # which states the reason and the cost): this is a ``nim c`` compile, and
-  # ``nix develop`` gives every shell a fresh ``TMPDIR``/``TMP``/``TEMP``/
-  # ``TEMPDIR``. Keyed by value, the first build in each new shell recompiled
-  # every test binary of an unchanged tree. Not applied to the execute edges
-  # below: what a test does with its temp directory is the test's business.
+  # The same temp-directory passthrough the ``nim`` tool declares on its
+  # ``c`` subcommand (``envPassthrough`` in the ``cli:`` block of
+  # ``repro_dsl_stdlib/packages/nim``, which states the reason and the cost).
+  # This edge is a ``nim c`` compile but is recorded here, through
+  # ``recordToolInvocation``, not through the typed ``nim.c`` wrapper, so the
+  # tool's declaration does not reach it and it names the list itself. Not
+  # applied to the execute edges below: what a test does with its temp
+  # directory is the test's business.
   appendRegisteredActionEnvPassthrough(result.action, ScratchLocationEnvNames)
 
   # Typed-Outputs M1 binding: populate ``edge.testBinary`` with a

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2970,
+    "nimTestBinaries": 2971,
     "pureUnitConsolidationGroups": 86,
     "pureUnitTests": 797,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3018
+    "testEntries": 3019
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1695,7 +1695,7 @@
       "integration": 1644,
       "platform/destructive": 193,
       "pure unit": 797,
-      "unclassified": 360
+      "unclassified": 361
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1909,9 +1909,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2970,
+    "nimTestBinaryCount": 2971,
     "pythonTestFileCount": 48,
-    "testEntryCount": 3018
+    "testEntryCount": 3019
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17029,6 +17029,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cli_env_passthrough_directive",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_dsl_stdlib/tests/lock_file_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_cli_env_passthrough_directive.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_committed_lock_pins_versions",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -17680,7 +17697,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_nim_c_scratch_env_passthrough.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -49173,7 +49190,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nim_compile_key_ignores_the_shells_temp_dir.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

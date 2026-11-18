@@ -278,6 +278,52 @@ package nim:
           "a path that does not affect the output."
 
       subcmd "c":
+        # THE SCRATCH-LOCATION PASSTHROUGH, declared HERE, on the tool, once.
+        # Every edge the typed ``nim.c`` wrapper records names the four
+        # temp-directory variables (``ScratchLocationEnvNames``,
+        # ``repro_core/scratch_env``: TMPDIR, TMP, TEMP, TEMPDIR) as
+        # environment PASSTHROUGH (``BuildActionDef.envPassthrough``): keyed by
+        # NAME, never by value. That covers the typed form a recipe calls
+        # directly (``nim.c(source = ..., output = ..., <typed flags>)``, as
+        # codetracer's ``ct`` / ``ct-test`` edges do), the ``binary =``
+        # shorthand below, and through it ``nim_executable``, ``nim_library``
+        # and ``isonim_ssg``. The provider compile
+        # (``ProviderCompileEnvironmentPassthrough``) and the profile compile
+        # (``ProfileCompileScratchEnvNames``) pass the same list through.
+        #
+        # WHY. ``nix develop`` exports a fresh ``/tmp/nix-shell.XXXXXX`` as all
+        # four in every shell it starts. The compile reads them (GCC places its
+        # intermediate files by ``TMPDIR``/``TMP``/``TEMP``), io-mon records
+        # the reads, and an observed read is keyed on its VALUE
+        # (``cacheEnvInputs``). So the first build in each new shell missed
+        # every Nim compile edge -- "input changed: environment: TEMP" -- on an
+        # unchanged tree (reprobuild-pm issue
+        # ``2026-10-18-compile-edges-record-the-shells-temp-so-every-new-nix-
+        # develop-shell-misses``). The values only place disposable files; the
+        # generated C, the objects and the binary are named from the argv.
+        #
+        # THE COST OF THE RULE, the same one the profile compile accepts: a
+        # compile whose OUTPUT embeds its temp directory would be served the
+        # output of the shell that published the record. A product that bakes
+        # a per-shell scratch path into itself is not reproducible in the
+        # first place, and the alternative is a full recompile of every Nim
+        # edge in every new shell. Every other variable these edges are
+        # observed to read (``NIM_*``, ``HOME``, ``XDG_CACHE_HOME``, ...) stays
+        # keyed by value.
+        #
+        # ``NIX_BUILD_TOP``, the fifth per-shell name ``nix develop`` exports,
+        # is NOT here: varying it alone left a ``nim.c`` edge a cache hit
+        # (measured at reprobuild ``55b26abd0``, 2026-11-17), so the compile
+        # does not read it and naming it would only widen the rule.
+        #
+        # Declared on ``c`` only, not on ``js``: ``nim js`` runs no C backend,
+        # and a ``nim.js`` edge whose four variables moved to another
+        # directory was a cache hit without the declaration (measured at
+        # reprobuild ``d957b394f``, 2026-11-18: cold build in one scratch dir,
+        # warm build in another ``cache=cdHit``, then an edited source
+        # ``cache=cdMiss``), so it does not read them. ``cpp`` / ``objc`` are
+        # not modelled by this tool.
+        envPassthrough ScratchLocationEnvNames
         flag defines is seq[string],
           alias = "-d:",
           format = concat,
@@ -657,37 +703,6 @@ proc maybeTagPublicInterface(action: BuildActionDef;
   setRegisteredActionPublish(action.id, true,
     some(nimPublicInterfaceIdentity(pkg, member)))
 
-const NimCompileScratchEnvNames* = ScratchLocationEnvNames
-  ## The temp-directory variables a Nim compile edge passes through by NAME
-  ## (``BuildActionDef.envPassthrough``): the one list
-  ## (``repro_core/scratch_env``) the provider compile
-  ## (``ProviderCompileEnvironmentPassthrough``) and the profile compile
-  ## (``ProfileCompileScratchEnvNames``) already pass through.
-  ##
-  ## WHY. ``nix develop`` exports a fresh ``/tmp/nix-shell.XXXXXX`` as all
-  ## four in every shell it starts. The compile reads them (GCC places its
-  ## intermediate files by ``TMPDIR``/``TMP``/``TEMP``), io-mon records the
-  ## reads, and an observed read is keyed on its VALUE
-  ## (``cacheEnvInputs``). So the first build in each new shell missed every
-  ## Nim compile edge -- "input changed: environment: TEMP" -- on an
-  ## unchanged tree (reprobuild-pm issue
-  ## ``2026-10-18-compile-edges-record-the-shells-temp-so-every-new-nix-
-  ## develop-shell-misses``). The values only place disposable files; the
-  ## generated C, the objects and the binary are named from the argv.
-  ##
-  ## THE COST OF THE RULE, the same one the profile compile accepts: a
-  ## compile whose OUTPUT embeds its temp directory would be served the
-  ## output of the shell that published the record. A product that bakes a
-  ## per-shell scratch path into itself is not reproducible in the first
-  ## place, and the alternative is a full recompile of every Nim edge in
-  ## every new shell. Every other variable these edges are observed to read
-  ## (``NIM_*``, ``HOME``, ``XDG_CACHE_HOME``, ...) stays keyed by value.
-  ##
-  ## ``NIX_BUILD_TOP``, the fifth per-shell name ``nix develop`` exports, is
-  ## NOT here: varying it alone left a ``nim.c`` edge a cache hit (measured
-  ## at reprobuild ``55b26abd0``, 2026-11-17), so the compile does not read
-  ## it and naming it would only widen the rule.
-
 proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
@@ -933,7 +948,9 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     appendRegisteredActionToolIdentityRefs(result.id, ["zig", "sh"])
   else:
     appendRegisteredActionToolIdentityRefs(result.id, [backendCompiler])
-  appendRegisteredActionEnvPassthrough(result, NimCompileScratchEnvNames)
+  # No passthrough to add here: the typed ``c`` called above already named
+  # the temp-directory variables, by the tool's own ``envPassthrough``
+  # declaration on ``subcmd "c"``.
   maybeTagPublicInterface(result, publish, publishAs)
 
 
