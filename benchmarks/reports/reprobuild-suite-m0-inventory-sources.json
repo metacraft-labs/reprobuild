@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2978,
+    "nimTestBinaries": 2980,
     "pureUnitConsolidationGroups": 86,
     "pureUnitTests": 797,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3026
+    "testEntries": 3028
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1693,7 +1693,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1645,
+      "integration": 1647,
       "platform/destructive": 197,
       "pure unit": 797,
       "unclassified": 363
@@ -1910,9 +1910,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2978,
+    "nimTestBinaryCount": 2980,
     "pythonTestFileCount": 48,
-    "testEntryCount": 3026
+    "testEntryCount": 3028
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6746,6 +6746,7 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
+            "provider",
             "root"
           ],
           "line": 14,
@@ -6754,6 +6755,21 @@
             "nim-argv"
           ],
           "snippet": "let compiled = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--verbosity:0\", \"--hints:off\","
+        },
+        {
+          "assignedCommandVariable": "compiled",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "provider",
+            "root"
+          ],
+          "line": 98,
+          "path": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let compiled = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--verbosity:0\","
         }
       ],
       "source": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim"
@@ -41548,6 +41564,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_catalog_publish_verb_deterministic",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_catalog_publish_verb_deterministic.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cbor_rfc8949_malformed",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -45576,6 +45610,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_home_profile_catalog_imports",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_home_apply",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_home_profile_catalog_imports.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_hook_protocol_v2_mixed_version_fails_closed",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47109,7 +47163,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
