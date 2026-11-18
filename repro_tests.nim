@@ -6793,6 +6793,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: var store = openStore(root / \"store\")"),
   TestSpec(
+    source: "libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim",
+    binary: "build/test-bin/t_partial_recovery_keeps_committed_generations",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_home_apply_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_home_apply/tests/t_plan_topological_sort.nim",
     binary: "build/test-bin/t_plan_topological_sort",
     defines: @[],
