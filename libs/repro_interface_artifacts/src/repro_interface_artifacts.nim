@@ -84,6 +84,7 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+import repro_core/variant_assignments
 from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_core/installed_prefix_nim
 export file_lock.ReproFileLock
@@ -7524,17 +7525,13 @@ proc activeVariantSignature*(): string =
   ## overwrite a ``buildType=debug`` one in the same position slot. The
   ## precedent is ``providerGraphStoreRoot``'s ``variants-<slug>``
   ## directories, which isolate the provider-graph snapshot store on the
-  ## same value for the same reason.
+  ## same value for the same reason. A name assigned more than once counts
+  ## once, with its LAST value (``repro_core/variant_assignments``), so
+  ## ``--release --debug`` and ``--debug --release`` key different builds.
   let raw = getEnv(ProviderVariantEnv)
   if raw.len == 0:
     return ""
-  var parts: seq[string] = @[]
-  for item in raw.split(','):
-    let s = item.strip()
-    if s.len > 0 and s notin parts:
-      parts.add(s)
-  parts.sort()
-  parts.join(",")
+  canonicalVariantAssignmentsOf(raw)
 
 const
   ProviderCacheName* = "nim.c/nimcache@provider"

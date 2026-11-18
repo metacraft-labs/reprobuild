@@ -5914,7 +5914,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim",
@@ -6159,6 +6159,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_prefix_sources_tools.nim",
     binary: "build/test-bin/t_prefix_sources_tools",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_repeated_variant_assignment_last_wins.nim",
+    binary: "build/test-bin/t_repeated_variant_assignment_last_wins",
     defines: @[],
     requiresReproBinary: false,
     requiresMonitorShim: false,
