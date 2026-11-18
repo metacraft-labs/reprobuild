@@ -3892,11 +3892,18 @@ proc dirLooksWritable(dir: string): bool =
   ## bare ``Traceback from system`` this module used to produce. So the check
   ## must happen BEFORE anything is created.
   ##
-  ## The composition names no executable that must be found on ``PATH``:
-  ## ``test`` / ``[`` and ``echo`` are POSIX shell builtins, and ``echo`` is
-  ## internal to ``cmd.exe``. That matters because a macro shelling out at
-  ## compile time runs inside a Nim compile action whose ``PATH`` is only
-  ## ``<nim>/bin:<gcc-wrapper>/bin`` — see ``compile_time_shell.nim``.
+  ## The probe names no executable that must be found on ``PATH``, because a
+  ## macro shelling out at compile time runs inside a Nim compile action
+  ## whose ``PATH`` is only ``<nim>/bin:<gcc-wrapper>/bin`` (see
+  ## ``compile_time_shell.nim``). On POSIX it is the running compiler itself,
+  ## by absolute path, evaluating three NimScript statements
+  ## (`compilerWritabilityProbe`): no shell runs, so the host's ``/bin/sh``
+  ## and its libraries are not inputs of the recipe compile that makes it.
+  ## A ``test -w <dir> && echo`` through ``/bin/sh`` was, and a bundle
+  ## restored on a machine whose ``/bin/sh`` is another program recompiled
+  ## every recipe that declares a resource contract. On Windows ``echo``,
+  ## ``mkdir`` and ``rd`` are internal to ``cmd.exe``, which has no other
+  ## shell to bring in.
   ##
   ## ``false`` does NOT by itself mean "not writable". The probe's answer is
   ## read from ``staticExec`` output, and a compile that does not execute
@@ -3916,7 +3923,8 @@ proc dirLooksWritable(dir: string): bool =
       " && rd " & probe & " && echo REPRO_RW"))
     result = out0.contains("REPRO_RW")
   else:
-    let out0 = staticExec("test -w " & quoteShell(dir) & " && echo REPRO_RW")
+    let out0 = staticExec(compilerWritabilityProbe(getCurrentCompilerExe(),
+      dir))
     result = out0.contains("REPRO_RW")
 
 proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
@@ -4822,9 +4830,22 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
               writeFile(stagedConfig, stagedContent)
           for searchPath in querySettingSeq(searchPaths):
             extraPathFlags.add(" --path:" & quoteShell(searchPath))
+        # The generator imports `repro_cli_support`, whose `repro_core/
+        # c_compiler` asks `/bin/sh -c 'command -v cc …'` at compile time for
+        # the C compiler an image is built with, unless the compile names it
+        # (`-d:reproBuiltCCompiler`). Every recipe compile the engine runs
+        # names it (`nimCCompilerFlags`), this one included; hand the same
+        # answer on, so the generator compile starts no shell either and
+        # names the compiler the recipe compile was given.
+        var builtCCompilerFlag = ""
+        when defined(reproBuiltCCompiler):
+          const handedBuiltCCompiler {.strdefine: "reproBuiltCCompiler".} = ""
+          builtCCompilerFlag = " " & quoteShell("--define:reproBuiltCCompiler=" &
+            handedBuiltCCompiler)
         let nimCmd =
           quoteShell(compilerExe) &
-          " c -r --hints:off --warnings:off" & extraPathFlags & " " &
+          " c -r --hints:off --warnings:off" & builtCCompilerFlag &
+          extraPathFlags & " " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
         # The working directory has to be WRITABLE as well as config-bearing:

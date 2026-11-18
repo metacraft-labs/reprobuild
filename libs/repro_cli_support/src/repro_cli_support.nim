@@ -90,6 +90,22 @@ proc runIoMonitorCli(programName: string; args: seq[string]): int =
   # io-mon still exports the CLI entrypoint under its historical proc name.
   runFsSnoopCli(programName, args)
 
+proc runInternalIoMonitorCli(programName: string; args: seq[string]): int =
+  ## ``repro internal io monitor``: the monitor the engine wraps an action
+  ## in. Before io-mon's parser sees the arguments, the engine's own
+  ## ``--payload-env=NAME=VALUE`` assignments (``takeMonitorPayloadEnv``)
+  ## are taken off and set in this process's environment, which the command
+  ## the monitor starts inherits. This process has already started, so the
+  ## dynamic loader read its own ``LD_LIBRARY_PATH`` / ``DYLD_LIBRARY_PATH``
+  ## before they were set and never reads them again: the monitor keeps its
+  ## own libraries, and the command gets the loader paths the action
+  ## declared, with no shell between the two
+  ## (``repro_build_engine.deferRuntimeLibraryEnvForShell``).
+  let taken = takeMonitorPayloadEnv(args)
+  for (name, value) in taken.env:
+    putEnv(name, value)
+  runIoMonitorCli(programName, taken.rest)
+
 import repro_provider_runtime
 import repro_project_dsl
 # Deliberately NOT re-exported through the ``repro_project_dsl`` umbrella:
@@ -105669,7 +105685,8 @@ proc runLegacyCommand(programName: string; args: seq[string];
         args[3 .. ^1]
       else:
         @[]
-    return runIoMonitorCli(programName & " internal io monitor", monitorArgs)
+    return runInternalIoMonitorCli(programName & " internal io monitor",
+      monitorArgs)
   if args.len >= 2 and args[0] == "internal" and
       args[1] == "shared-pool-upload-pack":
     # Git invokes this transport through remote.repro-pool.uploadpack.
@@ -106849,7 +106866,8 @@ proc runThinAppDispatch(programName: string): int =
         args[3 .. ^1]
       else:
         @[]
-    return runIoMonitorCli(programName & " internal io monitor", monitorArgs)
+    return runInternalIoMonitorCli(programName & " internal io monitor",
+      monitorArgs)
   if programName == "reprostored":
     return runReprostoredCommand(args)
   if programName == "repro-daemon":

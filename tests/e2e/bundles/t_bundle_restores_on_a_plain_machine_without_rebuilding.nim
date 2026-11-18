@@ -20,7 +20,10 @@
 ##
 ## THE FLOW.
 ## 1. A workspace with three repositories (`bundle_selection_fixture`) and a
-##    root flake whose dev shell carries the C toolchain and git. The root
+##    root flake whose dev shell carries the C toolchain and git; beta's
+##    recipe imports a module of the root's checkout with `dslDeps:`, which
+##    its interface extraction resolves through the engine at compile time
+##    (a `staticExec`, which must start no shell either). The root
 ##    shell's environment is captured once with `repro bundle create`
 ##    (Nix half only), and every build on both machines runs in it with the
 ##    same minimal environment (`env -i`, the same HOME, TMPDIR and roots).
@@ -286,7 +289,7 @@ suite "a bundle restores on a plain machine without rebuilding":
       let nixpkgs = sh("nix eval --raw --inputs-from " &
         quoteShell(ReprobuildRoot) & " nixpkgs#path").strip()
 
-      writeWorkspace(m.ws)
+      writeWorkspace(m.ws, dslExport = true)
       writeRootFlake(m.ws, nixpkgs)
       let r = quoteShell(m.repro / "bin" / "repro")
       let roots = " --workspace-root=" & quoteShell(m.ws) & " --store-root=" &

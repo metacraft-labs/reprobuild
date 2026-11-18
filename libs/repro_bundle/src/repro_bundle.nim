@@ -52,6 +52,9 @@ type
     halves*: seq[HalfReport]
     members*: seq[BundleMember]
     unpackedBytes*: int64
+    nativeProjectDirs*: seq[string]
+      ## The project directories the native-store half's closure found
+      ## (`BundleClosure.projectDirs`); empty without that half.
 
   RestoreOptions* = object
     source*: string        ## bundle directory or URL, or a latest.json
@@ -170,6 +173,7 @@ proc createBundle*(opts: CreateOptions): CreateReport =
       [normalizedPath(absolutePath(roots.storeRoot)),
        normalizedPath(absolutePath(roots.actionCacheRoot))])
     let closure = computeClosure(roots, opts.devEnvs, selection)
+    result.nativeProjectDirs = closure.projectDirs
     provision["storeRoot"] = %closure.roots.storeRoot
     provision["actionCacheRoot"] = %closure.roots.actionCacheRoot
     provision["workspaceRoots"] = %closure.roots.workspaceRoots

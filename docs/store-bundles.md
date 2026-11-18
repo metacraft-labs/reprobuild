@@ -382,6 +382,11 @@ record was written), `output-outside-roots` (an output outside the roots,
 or below the store or action-cache root outside everything a bundle carries
 there), `output-outside-selection` or `unplaceable`.
 
+`closure` and `export` (and `repro bundle create`) warn, on stderr, about
+every project they carry whose lock pins an upstream Nim release to compile
+its recipe: those recipe compiles depend on the exporting machine's
+`/bin/sh` (§10).
+
 `repro bundle inspect` reads a native-store half (or a whole workspace
 bundle, see [workspace-bundles.md](./workspace-bundles.md)) and prints the
 roots to provision, the producer and the selection from the verified
@@ -508,6 +513,19 @@ Things the measurement depended on:
   `REPRO_BOOTSTRAP_CC`, both pointing into `/nix/store`). Without those
   variables `repro` provisions the pinned compilers from `github:` flake
   references, and a cloud session refuses those GitHub archive downloads.
+* **No pinned upstream Nim, or the same `/bin/sh`.** The Nim that `repro`
+  ships starts the C compiler, the linker and compile-time commands without
+  a shell, so recipe compiles do not read the machine's `/bin/sh`. A project
+  whose lock pins an upstream Nim release to compile its recipe
+  (`packageSource "nim", "store"` with an exact `uses: "nim ==V"`) gets that
+  release instead, and it starts every one of those commands through
+  `/bin/sh -c`. Its recipe-compile records then name the exporting
+  machine's shell and the libraries it loads, and on a machine whose
+  `/bin/sh` is another program (dash rather than bash, say) that recipe is
+  compiled again after import. This is a limit of the pin, not of the
+  bundle: `repro bundle create`, `repro store closure` and `repro store
+  export` print a warning naming each such project and its lock, and
+  carry the bundle as usual.
 * **The same `repro` binary.** Provider-compile records fingerprint the
   engine binary, so publisher and session must run the same build (in
   practice, the same Nix-half closure).

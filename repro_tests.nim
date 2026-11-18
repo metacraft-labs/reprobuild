@@ -20041,6 +20041,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_a_bundle_says_when_a_project_pins_an_upstream_nim.nim",
+    binary: "build/test-bin/t_a_bundle_says_when_a_project_pins_an_upstream_nim",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_a_changed_library_source_or_flag_is_never_a_hit.nim",
     binary: "build/test-bin/t_a_changed_library_source_or_flag_is_never_a_hit",
     defines: @[],
@@ -20698,7 +20710,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g01",
+    group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_an_unfetchable_flake_revision_is_withheld.nim",

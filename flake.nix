@@ -938,8 +938,17 @@
     # (bb0e8943..93793d47): `std/osproc` closes the child's pipes and reaps
     # it when a start fails, frees the clone child's stack by its base
     # pointer, and retries the error-pipe read and `waitpid` on EINTR.
+    #
+    # Advanced from c47c55d1 to 4a8c0b82: `staticExec` and `gorgeEx` start a
+    # command made of plain and quoted words, or `cd <absolute dir> &&
+    # [exec] <plain command>`, without `/bin/sh -c`, so a recipe compile
+    # whose macros run a command at compile time no longer reads the host's
+    # shell either. A program that cannot be started now reports the shell's
+    # exit code (127 or 126) for the compiler's own commands too. One
+    # commit, in compiler/gorgeimpl.nim and compiler/shellfreeexec.nim plus
+    # their tests.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c47c55d166224bcffe485045378c766a0f5e67a2";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=4a8c0b82122b50d9924f62062a1093b5df104ca1";
       flake = false;
     };
     nim-csources-src = {

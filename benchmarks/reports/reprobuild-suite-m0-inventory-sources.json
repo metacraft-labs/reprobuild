@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2968,
+    "nimTestBinaries": 2969,
     "pureUnitConsolidationGroups": 86,
     "pureUnitTests": 797,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3016
+    "testEntries": 3017
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1692,7 +1692,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1643,
+      "integration": 1644,
       "platform/destructive": 193,
       "pure unit": 797,
       "unclassified": 359
@@ -1909,9 +1909,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2968,
+    "nimTestBinaryCount": 2969,
     "pythonTestFileCount": 48,
-    "testEntryCount": 3016
+    "testEntryCount": 3017
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -39283,6 +39283,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_bundle_says_when_a_project_pins_an_upstream_nim",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_bundle_says_when_a_project_pins_an_upstream_nim.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_changed_library_source_or_flag_is_never_a_hit",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -51198,13 +51216,14 @@
         "repro_interface_artifacts",
         "repro_local_store",
         "repro_project_dsl",
+        "repro_selfhost",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59957,7 +59976,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r14e_3_action_env_threading.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 31,
+      "staticCaseCount": 33,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
