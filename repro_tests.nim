@@ -32413,6 +32413,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable.nim",
+    binary: "build/test-bin/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/unit/t_action_compatibility_key.nim",
     binary: "build/test-bin/t_action_compatibility_key",
     defines: @[],
