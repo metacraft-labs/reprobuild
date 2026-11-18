@@ -453,7 +453,7 @@ libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	31
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_catalog_nim_fork_pin_matches_flake.nim	nim	1
-libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	10
+libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	17
 libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_create_dmg_removes_its_image_before_running.nim	nim	3
@@ -1692,6 +1692,7 @@ tests/integration/t_a_managed_hook_resolves_the_build_that_installed_it.nim	nim	
 tests/integration/t_a_mixed_direction_refusal_clears_in_one_pass.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim	nim	1
+tests/integration/t_a_narrowed_required_name_is_not_trusted_by_the_ratchet_or_ci_skip.nim	nim	1
 tests/integration/t_a_pinned_nim_is_provisioned_from_a_cold_store.nim	nim	3
 tests/integration/t_a_project_under_a_volatile_prefix_keeps_its_reads.nim	nim	7
 tests/integration/t_a_pushed_sibling_is_still_recorded.nim	nim	1
