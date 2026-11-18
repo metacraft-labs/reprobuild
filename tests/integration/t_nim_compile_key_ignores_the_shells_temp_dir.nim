@@ -24,6 +24,14 @@
 ## Positive control: editing the compiled source DOES rebuild in that same
 ## "new shell". Without it, a probe that could not observe a rebuild at all
 ## would pass vacuously.
+##
+## Two spellings of the compile are driven, because they reached the
+## passthrough by different routes: the `nim.c(..., binary = ...)` shorthand,
+## and the typed-tool form `nim.c(source = ..., output = ..., <typed flags>)`
+## that the `cli:` block of the `nim` tool generates (what codetracer's `ct`
+## and `ct-test` edges use, since the shorthand lacks their typed flags). The
+## typed form missed in every new shell until the `nim` tool declared the
+## passthrough itself (`envPassthrough` in its `cli:` block).
 
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 
@@ -32,7 +40,9 @@ const BackendCompilerUse = when defined(macosx): "clang >=1" else: "gcc >=1"
   ## recipe must declare so the edge's PATH can resolve it (the same rule as
   ## `t_measurement_flags_cli.nim`'s recipes).
 
-const RecipeSource = """
+proc recipeSource(compileCall: string): string =
+  ## A one-edge recipe whose only edge is `compileCall`.
+  """
 import repro_project_dsl
 
 package shelltempprobe:
@@ -42,8 +52,15 @@ package shelltempprobe:
 
   executable hello:
     build:
-      discard nim.c(source = "src/hello.nim", binary = "hello")
-"""
+      discard """ & compileCall & "\n"
+
+const AliasCompileCall = "nim.c(source = \"src/hello.nim\", binary = \"hello\")"
+  ## The `binary =` shorthand (`proc c*(pkg: NimPackage; source, binary...)`).
+
+const TypedCompileCall =
+  "nim.c(source = \"src/hello.nim\", output = \"hello\", hintsOff = true)"
+  ## The typed-tool form, with a typed flag the shorthand does not take --
+  ## the shape of codetracer's `ct` / `ct-test` compile edges.
 
 const HelloSource = "echo \"hello from the shell-temp probe\"\n"
 
@@ -82,70 +99,129 @@ proc runBuildCli(reproBin, projectRoot, actionCacheRoot: string;
   let output = p.outputStream.readAll()
   (output: output, exitCode: p.waitForExit())
 
+type
+  BuildObservation = object
+    ## One `repro build` run: its exit code, its `nim-c-` action line (the
+    ## consultation and launch verdict), and its full output for diagnostics.
+    exitCode: int
+    line: string
+    output: string
+
+  ShellTempObservations = object
+    ## What the three builds of one probe saw. The probe only OBSERVES; each
+    ## test body asserts on these fields, so every requirement is visible
+    ## where the case is declared.
+    reproBin: string
+    reproFound: bool
+      ## False when `build/bin/repro` is missing: nothing else was run.
+    cold: BuildObservation
+      ## Shell A, empty cache.
+    coldProducedBinary: bool
+    ranWarm: bool
+      ## False when the cold build failed or produced no binary: the warm
+      ## and edited builds were not run, and their fields are empty.
+    warm: BuildObservation
+      ## Shell B, unchanged tree.
+    binaryUntouchedByWarm: bool
+      ## Out-of-band: the binary's mtime before and after the warm build.
+    edited: BuildObservation
+      ## Shell B, the compiled source edited (the positive control).
+
+proc observeBuild(reproBin, projectRoot, actionCacheRoot, label: string;
+                  env: StringTableRef): BuildObservation =
+  let run = runBuildCli(reproBin, projectRoot, actionCacheRoot, env)
+  result = BuildObservation(exitCode: run.exitCode,
+    line: actionLine(run.output), output: run.output)
+  checkpoint(label & ": " & result.line)
+  if result.exitCode != 0:
+    checkpoint(result.output)
+
+proc observeBuildsFromTwoShells(compileCall: string): ShellTempObservations =
+  ## Cold build in shell A, warm build in shell B, then an edited source in
+  ## shell B: see the module header. Records what each saw and asserts
+  ## nothing; the callers' `test` bodies do.
+  let repoRoot = getCurrentDir()
+  result.reproBin = reproBinary(repoRoot)
+  result.reproFound = fileExists(result.reproBin)
+  if not result.reproFound:
+    checkpoint("missing " & result.reproBin & "; run `just build` first")
+    return
+
+  # A short root: the compile's argv is in its action key, and a deep root
+  # makes the fixture needlessly fragile.
+  let tempRoot = "/tmp/rb-nimtemp-" & $getCurrentProcessId()
+  removeDir(tempRoot)
+  createDir(tempRoot)
+  defer: removeDir(tempRoot)
+
+  let projectRoot = tempRoot / "project"
+  createDir(projectRoot / "src")
+  writeFile(projectRoot / "repro.nim", recipeSource(compileCall))
+  writeFile(projectRoot / "src" / "hello.nim", HelloSource)
+  let actionCacheRoot = tempRoot / "action-cache"
+  createDir(actionCacheRoot)
+  # Two existing directories, as two shells' `/tmp/nix-shell.XXXXXX`.
+  let shellA = tempRoot / "nix-shell.A"
+  let shellB = tempRoot / "nix-shell.B"
+  createDir(shellA)
+  createDir(shellB)
+  let binary = projectRoot / addFileExt("hello", ExeExt)
+
+  result.cold = observeBuild(result.reproBin, projectRoot, actionCacheRoot,
+    "cold (shell A)", shellEnv(shellA))
+  result.coldProducedBinary = fileExists(binary)
+  if result.cold.exitCode != 0 or not result.coldProducedBinary:
+    return
+  result.ranWarm = true
+
+  let before = getLastModificationTime(binary)
+  result.warm = observeBuild(result.reproBin, projectRoot, actionCacheRoot,
+    "warm (shell B)", shellEnv(shellB))
+  result.binaryUntouchedByWarm =
+    fileExists(binary) and getLastModificationTime(binary) == before
+
+  # Positive control: a change to what the edge compiles DOES rebuild, from
+  # the same "new shell", so a hit is not a probe that cannot see a compile.
+  writeFile(projectRoot / "src" / "hello.nim",
+    HelloSource & "echo \"control\"\n")
+  result.edited = observeBuild(result.reproBin, projectRoot, actionCacheRoot,
+    "source edited (shell B)", shellEnv(shellB))
+
 suite "a nim compile edge's key ignores the shell's temp directory":
 
+  # Each body below states the same requirements in full rather than
+  # through a shared asserting helper, so each case's assertions are visible
+  # in the case itself.
+
   test "a build from a shell with another TMPDIR/TMP/TEMP/TEMPDIR hits":
-    let repoRoot = getCurrentDir()
-    let reproBin = reproBinary(repoRoot)
-    if not fileExists(reproBin):
-      # Never a silent pass: without the real CLI this test says nothing.
-      checkpoint("missing " & reproBin & "; run `just build` first")
-      fail()
-    else:
-      # A short root: the compile's argv is in its action key, and a deep
-      # root makes the fixture needlessly fragile.
-      let tempRoot = "/tmp/rb-nimtemp-" & $getCurrentProcessId()
-      removeDir(tempRoot)
-      createDir(tempRoot)
-      defer: removeDir(tempRoot)
+    let seen = observeBuildsFromTwoShells(AliasCompileCall)
+    # Never a silent pass: without the real CLI this test says nothing.
+    require seen.reproFound
+    require seen.cold.exitCode == 0
+    require seen.coldProducedBinary
+    require seen.ranWarm
+    check "launched=true" in seen.cold.line
+    check seen.warm.exitCode == 0
+    check seen.warm.line.len > 0
+    check "cache=cdHit" in seen.warm.line
+    check "launched=false" in seen.warm.line
+    check seen.binaryUntouchedByWarm
+    check seen.edited.exitCode == 0
+    check "cache=cdMiss" in seen.edited.line
+    check "launched=true" in seen.edited.line
 
-      let projectRoot = tempRoot / "project"
-      createDir(projectRoot / "src")
-      writeFile(projectRoot / "repro.nim", RecipeSource)
-      writeFile(projectRoot / "src" / "hello.nim", HelloSource)
-      let actionCacheRoot = tempRoot / "action-cache"
-      createDir(actionCacheRoot)
-      # Two existing directories, as two shells' `/tmp/nix-shell.XXXXXX`.
-      let shellA = tempRoot / "nix-shell.A"
-      let shellB = tempRoot / "nix-shell.B"
-      createDir(shellA)
-      createDir(shellB)
-      let binary = projectRoot / addFileExt("hello", ExeExt)
-
-      let cold = runBuildCli(reproBin, projectRoot, actionCacheRoot,
-        shellEnv(shellA))
-      checkpoint("cold (shell A): " & actionLine(cold.output))
-      if cold.exitCode != 0:
-        checkpoint(cold.output)
-      require cold.exitCode == 0
-      require fileExists(binary)
-      check "launched=true" in actionLine(cold.output)
-
-      let before = getLastModificationTime(binary)
-      let warm = runBuildCli(reproBin, projectRoot, actionCacheRoot,
-        shellEnv(shellB))
-      let warmLine = actionLine(warm.output)
-      checkpoint("warm (shell B): " & warmLine)
-      if warm.exitCode != 0:
-        checkpoint(warm.output)
-      check warm.exitCode == 0
-      check warmLine.len > 0
-      check "cache=cdHit" in warmLine
-      check "launched=false" in warmLine
-      # Out-of-band: the binary on disk was not re-produced.
-      check getLastModificationTime(binary) == before
-
-      # Positive control: a change to what the edge compiles DOES rebuild,
-      # from the same "new shell", so the hit above is not a probe that
-      # cannot see a compile.
-      writeFile(projectRoot / "src" / "hello.nim",
-        HelloSource & "echo \"control\"\n")
-      let edited = runBuildCli(reproBin, projectRoot, actionCacheRoot,
-        shellEnv(shellB))
-      let editedLine = actionLine(edited.output)
-      checkpoint("source edited (shell B): " & editedLine)
-      if edited.exitCode != 0:
-        checkpoint(edited.output)
-      check edited.exitCode == 0
-      check "cache=cdMiss" in editedLine
-      check "launched=true" in editedLine
+  test "the typed nim.c(output = ...) form hits from another shell too":
+    let seen = observeBuildsFromTwoShells(TypedCompileCall)
+    require seen.reproFound
+    require seen.cold.exitCode == 0
+    require seen.coldProducedBinary
+    require seen.ranWarm
+    check "launched=true" in seen.cold.line
+    check seen.warm.exitCode == 0
+    check seen.warm.line.len > 0
+    check "cache=cdHit" in seen.warm.line
+    check "launched=false" in seen.warm.line
+    check seen.binaryUntouchedByWarm
+    check seen.edited.exitCode == 0
+    check "cache=cdMiss" in seen.edited.line
+    check "launched=true" in seen.edited.line

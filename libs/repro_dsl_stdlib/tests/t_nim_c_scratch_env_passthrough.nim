@@ -10,12 +10,16 @@
 ## Passthrough keys them by name only. The end-to-end property -- a warm build
 ## from a "new shell" hits -- is
 ## `tests/integration/t_nim_compile_key_ignores_the_shells_temp_dir.nim`;
-## this file pins the declaration on the edges themselves, for the
-## `binary =` shorthand, the `nim_executable` / `nim_library` constructors
-## (which call the typed `output =` form and add the names themselves), and
-## the `ct_test_nim_unittest` compile, pins that the typed `output =` form
-## alone declares none, and pins that the list is the one the
-## provider and profile compiles use, so the classes cannot drift apart.
+## this file pins the declaration on the edges themselves: the typed
+## `nim.c(..., output = ...)` form (the `nim` tool declares the names with
+## `envPassthrough` on its `c` subcommand, so the generated wrapper stamps
+## them), the `binary =` shorthand and the `nim_executable` / `nim_library`
+## constructors (which all record their edge through that typed form), and
+## the `ct_test_nim_unittest` compile (recorded outside the wrapper, so it
+## names them itself). It pins that `nim.js` names none, and that the list is
+## the one the provider and profile compiles use, so the classes cannot
+## drift apart. The directive's own surface is pinned by
+## `t_cli_env_passthrough_directive`.
 ##
 ## No mocks: the real typed wrappers and the real registry.
 
@@ -48,8 +52,7 @@ suite "Nim compile edges pass the temp-directory variables through by name":
     resetTargetExportRegistry()
 
   test "the list is the one the provider and profile compiles use":
-    check @NimCompileScratchEnvNames == @["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
-    check @NimCompileScratchEnvNames == @ScratchLocationEnvNames
+    check @ScratchLocationEnvNames == @["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
     for name in ScratchLocationEnvNames:
       check name in ProviderCompileEnvironmentPassthrough
 
@@ -73,7 +76,7 @@ suite "Nim compile edges pass the temp-directory variables through by name":
     let act = nimTool.c(source = "src/main.nim", binary = "build/bin/other",
       extraEnv = @[("NIM_FLAGS", "x")], runInSourceDir = true)
     let edge = registeredEdge(act.id)
-    check edge.envPassthrough == @NimCompileScratchEnvNames
+    check edge.envPassthrough == @ScratchLocationEnvNames
     check ("NIM_FLAGS", "x") in edge.env
 
   test "a repeated identical call: the last registration carries them":
@@ -81,29 +84,50 @@ suite "Nim compile edges pass the temp-directory variables through by name":
     let second = nimTool.c(source = "src/main.nim", binary = "build/bin/twice")
     check first.id == second.id
     check registeredEdge(second.id).envPassthrough ==
-      @NimCompileScratchEnvNames
+      @ScratchLocationEnvNames
 
   test "nim_executable and nim_library compile edges carry them":
-    # Both call the typed `output =` form, not the alias, so each names the
-    # four itself; without that their compile would key them by value.
+    # Both call the typed `output =` form, not the alias; the tool's own
+    # declaration reaches them through it, with nothing added here.
     let state = beginBuildBlock("scratchprobe")
     try:
       let exe = nim_executable("hello", "src/hello.nim")
       check registeredEdge(exe.install.id).envPassthrough ==
-        @NimCompileScratchEnvNames
-      check exe.install.envPassthrough == @NimCompileScratchEnvNames
+        @ScratchLocationEnvNames
+      check exe.install.envPassthrough == @ScratchLocationEnvNames
       let lib = nim_library("hello", "src/hello.nim")
       check registeredEdge(lib.install.id).envPassthrough ==
-        @NimCompileScratchEnvNames
-      check lib.install.envPassthrough == @NimCompileScratchEnvNames
+        @ScratchLocationEnvNames
+      check lib.install.envPassthrough == @ScratchLocationEnvNames
     finally:
       endBuildBlock(state)
 
-  test "the typed output= form alone declares no passthrough":
-    # There is no tool-level passthrough declaration: a recipe calling the
-    # typed form directly keeps keying these reads by value. Pinned so that
-    # changing it is a visible decision rather than a side effect.
-    let act = nimTool.c(source = "src/main.nim", output = "build/bin/typed")
+  test "the typed output= form carries them, by the tool's declaration":
+    # FLIPPED DELIBERATELY. This case used to assert the opposite -- "the
+    # typed output= form alone declares no passthrough" -- because the names
+    # were added per call site and the typed form had none. The `nim` tool now
+    # declares them once, with `envPassthrough ScratchLocationEnvNames` on its
+    # `c` subcommand, so every edge its generated wrapper records carries
+    # them; the typed form was the residual that still missed in every new
+    # `nix develop` shell (codetracer's `ct` / `ct-test` edges use it).
+    let act = nimTool.c(source = "src/main.nim", output = "build/bin/typed",
+      hintsOff = true)
+    let edge = registeredEdge(act.id)
+    check edge.envPassthrough == @ScratchLocationEnvNames
+    check act.envPassthrough == edge.envPassthrough
+    # Passthrough, not a declared value.
+    for (name, _) in edge.env:
+      check name notin ScratchLocationEnvNames
+    # No call site can drop or replace the tool's declaration.
+    check not compiles(nimTool.c(source = "src/main.nim",
+      output = "build/bin/typed", envPassthrough = newSeq[string]()))
+
+  test "nim.js names none: it was measured not to read them":
+    # `nim js` runs no C backend; a `nim.js` edge whose four variables moved
+    # to another directory was a cache hit without any declaration (measured
+    # at reprobuild `d957b394f`, recorded beside the `c` declaration in
+    # `packages/nim`). Pinned so that adding it is a measured decision.
+    let act = nimTool.js(source = "src/main.nim", output = "build/main.js")
     check registeredEdge(act.id).envPassthrough.len == 0
 
   test "the ct_test_nim_unittest compile carries them; its execute edge does not":

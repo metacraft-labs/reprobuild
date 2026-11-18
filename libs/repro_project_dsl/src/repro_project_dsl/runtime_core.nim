@@ -3221,14 +3221,58 @@ proc appendRegisteredActionSubToolRefs*(actionId: string;
           buildActionRegistry[i].subToolRefs.add(refName)
       return
 
+proc envPassthroughNameProblem*(name: string): string =
+  ## Why ``name`` cannot be declared environment passthrough by a tool's
+  ## ``cli:`` block (``envPassthrough``), or "" when it can. One rule for the
+  ## three places that check a declared name: the directive's string literals
+  ## (refused while the macro expands), the names of a ``const`` list the
+  ## directive references (refused by the check the typed wrapper generates,
+  ## ``envPassthroughNamesProblem``), and nowhere else -- an edge-level
+  ## ``appendRegisteredActionEnvPassthrough`` keeps its own runtime refusal.
+  ##
+  ## Deliberately NOT ``{.dynOrStatic.}``: the generated check evaluates it at
+  ## compile time, which a proc whose body is replaced by an import cannot do.
+  ##
+  ## ``PATH`` is refused in any letter case (Windows treats environment names
+  ## case-insensitively): an action's PATH class is decided by its tool
+  ## references, and a declared passthrough would take a hermetic ``PATH`` out
+  ## of the edge's key while the edge is still counted as hermetic (the same
+  ## rule ``withEdgeEnvPassthrough`` enforces where the edge is lowered).
+  if name.len == 0:
+    "envPassthrough cannot name an empty variable: a passthrough entry " &
+      "is keyed by its NAME, and an empty name keys nothing"
+  elif cmpIgnoreCase(name, "PATH") == 0:
+    "envPassthrough cannot name `" & name & "`: an action's PATH class is " &
+      "decided by its tool references, and a passthrough PATH would take " &
+      "a hermetic PATH out of the edge's key"
+  else:
+    ""
+
+proc envPassthroughNamesProblem*(names: openArray[string];
+                                 site: string): string =
+  ## The first ``envPassthroughNameProblem`` among ``names``, prefixed with
+  ## ``site`` (which declaration it came from), or "" when every name is
+  ## acceptable. The typed wrapper generated for a ``cli:`` scope that
+  ## references a const list by name evaluates this at compile time and turns
+  ## a non-empty answer into a compile error.
+  for name in names:
+    let problem = envPassthroughNameProblem(name)
+    if problem.len > 0:
+      return site & ": " & problem
+  ""
+
 proc appendRegisteredActionEnvPassthrough*(actionId: string;
                                            names: openArray[string]) {.dynOrStatic.} =
   ## Name, on an already-registered action, environment variables whose HOST
   ## value it reads (``BuildActionDef.envPassthrough``): keyed by name only,
   ## never by value. Appended in the given order, deduplicated, empty names
-  ## skipped. For a constructor that knows its tool reads such a variable --
-  ## ``nim.c`` and the temp-directory names -- and calls this right after the
-  ## typed wrapper registered the edge. No-op when the id is absent.
+  ## skipped. A TOOL that reads such a variable declares it once, with
+  ## ``envPassthrough`` in its ``cli:`` block, and the typed wrapper the block
+  ## generates calls this on every edge it records (the ``nim`` tool's ``c``
+  ## subcommand and the temp-directory names). Call it directly for an
+  ## edge-specific name, or for an edge that is not recorded through a typed
+  ## wrapper (the ``ct_test_nim_unittest`` compile). No-op when the id is
+  ## absent.
   ##
   ## Searches from the END, like ``markRegisteredActionOptionalOutputs``: a
   ## typed call repeated with the same arguments registers a second entry

@@ -15,7 +15,11 @@
 ## (``ProviderCompileEnvironmentPassthrough`` in ``repro_interface_artifacts``),
 ## the profile compile and run (``ProfileCompileScratchEnvNames`` in
 ## ``repro_profile_compile``) and the standard library's Nim compile edges
-## (``nim.c`` and the ``ct_test_nim_unittest`` compile). A passthrough name is
+## (the ``nim`` tool declares them with ``envPassthrough`` on its ``c``
+## subcommand in ``repro_dsl_stdlib/packages/nim``, so every edge its typed
+## ``nim.c`` wrapper records carries them, and the ``ct_test_nim_unittest``
+## compile, which is not recorded through that wrapper, names them itself).
+## A passthrough name is
 ## keyed by NAME only, so an edge whose compiler reads one of them no longer
 ## misses on the first build in every new shell. Each of those sites states
 ## the cost of that rule for its own edge; this module only holds the list,

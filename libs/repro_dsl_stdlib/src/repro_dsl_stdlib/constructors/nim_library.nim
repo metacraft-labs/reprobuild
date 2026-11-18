@@ -48,7 +48,7 @@ proc nim_library*(into: string;
   # loader opens a file of exactly that name.
   let layout = sharedLibraryLayout(api, into)
   let output = targetKeyedPath(layout.target)
-  var action = nim.c(
+  let action = nim.c(
     source = source,
     output = output,
     defines = defines,
@@ -63,12 +63,6 @@ proc nim_library*(into: string;
              else: @[]),
     after = (if zigTarget != nil: @[cross.wrappers] else: @[]),
     appLib = true)
-  # This calls the typed `nim.c(..., output = ...)` form, which declares
-  # no passthrough of its own; only the `binary =` alias adds it. Name the
-  # temp-directory variables here as that alias does, for the reason
-  # `NimCompileScratchEnvNames` states: keyed by value, the first build in
-  # every new `nix develop` shell would recompile this edge.
-  appendRegisteredActionEnvPassthrough(action, NimCompileScratchEnvNames)
   result = newLibrary(install = action, api = api,
                       installPrefix = "usr/lib")
   result.linkTimeName = linkTimeNameAction("nim-library-link-time-name-",
