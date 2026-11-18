@@ -415,6 +415,14 @@ const
     "690c31806609fe7fbc1c783175b3b7ab71cfbaa3d48e019162db57336f9acf83" &
     "690c31806609fe7fbc1c783175b3b7ab71cfbaa3d48e019162db57336f9acf83"
 
+  AgileQuotePcrs* = [0, 1, 2, 3, 4, 5, 6, 7]
+    ## The SHA-256 registers the pinned quote was captured over — the
+    ## `000b 03 ff0000` selection inside ``AgileQuoteAttestHex``. Named
+    ## here because it is a property of these recorded bytes and NOT the
+    ## driver's default: the default is PCRs 0-15
+    ## (``DefaultQuotedPcrs``), so a driver that is to accept this
+    ## recording has to be configured for it explicitly.
+
   AgilePcrsSha1* = [
     "c75181b2e2a694ecef46a13f1dca35f8a668cb85",   # PCR 0
     "a358f180d3935e6dcdec5cf9ceb26d2fd3dcf566",   # PCR 1

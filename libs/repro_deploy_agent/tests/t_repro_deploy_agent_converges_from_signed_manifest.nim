@@ -28,14 +28,20 @@
 ## The cache case also checks the trust anchors at the agent level: the
 ## publisher is the only host with a keypair, a consumer generates none, and
 ## a consumer whose ``caches.conf`` anchors a different key builds locally
-## instead of substituting (``substituted-from-cache 0``).
+## instead of substituting (``substituted-from-cache 0``). Its manifest
+## carries the v3 attestation block pinning the edge's output digest: an
+## apply substitutes only an edge that pins one, and a publishing apply
+## publishes only such an edge (Binary-Caches.md §"Publishing for a host
+## that cannot build", "The entry key is an address"). The digest is not
+## part of the entry key, so the trust checks are unchanged by it.
 
-import std/[os, osproc, net, random, strutils, tempfiles, unittest]
+import std/[os, osproc, net, random, strutils, tempfiles, times, unittest]
 
 import repro_deploy_agent
 import repro_deploy_agent/apply_hook
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_profile
+from repro_profile_compile/binary_cache_build_actions import localOutputsDigest
 
 const Target = "windows-runner-001"
 
@@ -279,12 +285,26 @@ suite "M5 — deploy agent converges from a signed manifest":
         commandStatsId: "m5.cache.write",
         requiresElevation: true, cacheable: true)
       const Expected = "M5\x00\x01cache"
+      # The producer's pin: the archive digest of the output, hashed the way
+      # the apply hashes it, over the same bytes in a scratch tree.
+      let digestScratch = tmpRoot / "expected-output"
+      createDir(digestScratch / "bin")
+      writeFile(digestScratch / OutRel, Expected)
+      let outDigest = localOutputsDigest(ProfileBuildAction(
+        cwd: digestScratch, outputs: @[OutRel]))
+      require outDigest.startsWith("blake3:")
 
       proc cacheManifest(seqNo: int; depId, cwd: string): DeployManifest =
         var a = action
         a.cwd = cwd
+        # The v3 attestation block binds the edge to its output digest
+        # (`pinActionsToClosureDigests`): only a digested edge is
+        # substituted or published by an apply.
         result = DeployManifest(target: Target, sequence: uint64(seqNo),
-          deploymentId: depId, profileText: "", buildActions: @[a])
+          deploymentId: depId, profileText: "", buildActions: @[a],
+          issuedAt: uint64(getTime().toUnix()), maxAgeSeconds: 3600'u64,
+          closureDigests: @[ClosureDigest(actionId: action.id,
+                                          digest: outDigest)])
         signManifest(signer, result)
 
       # --- apply 1: fresh cache → build locally + publish-on-miss --------
@@ -309,7 +329,7 @@ suite "M5 — deploy agent converges from a signed manifest":
       # --- apply 2: FRESH state/cwd/cacheRoot, cache now populated -------
       # A fresh agent state (last-applied floor = 0) + fresh engine cache
       # root means the ONLY way the output appears is a cache SUBSTITUTE of
-      # the content-addressable key run 1 published. This host is a consumer:
+      # the entry key run 1 published. This host is a consumer:
       # no keypair, and its caches.conf anchors the publisher's key.
       delEnv("REPRO_BINARY_CACHE_KEY_PATH")
       delEnv("REPRO_BINARY_CACHE_CERT_PATH")

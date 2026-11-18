@@ -54,16 +54,23 @@ suite "TC-9c — the CI plan reads ci_trust from the base":
     defer: removeDir(fx.scratch)
     let seed = fx.head   # carries no snapshot
     let unitRule = policyRule(["main"], pmRequired, [req("t-unit", host)])
+    # Every snapshot records a command set for what it requires, so a skip
+    # is decided by ci_trust alone here (the command-set anchoring has its
+    # own test, t_a_narrowed_required_name_is_not_trusted_by_the_ratchet_or_ci_skip).
     let advisoryBase = fx.commitPolicy(
-      snapshotOf([unitRule], ciTrust = pctAdvisory), "base: advisory")
+      snapshotOf([unitRule], ciTrust = pctAdvisory, commandSets = true),
+      "base: advisory")
     let skipBase = fx.commitPolicy(
-      snapshotOf([unitRule], ciTrust = pctSkip), "base: skip")
+      snapshotOf([unitRule], ciTrust = pctSkip, commandSets = true),
+      "base: skip")
     let intBase = fx.commitPolicy(snapshotOf([
       policyRule(["main"], pmRequired, [req("t-int", host)])],
-      ciTrust = pctSkip), "base: requires t-int")
-    # The candidate: its own snapshot raises ci_trust to skip.
-    discard fx.commitPolicy(snapshotOf([unitRule], ciTrust = pctSkip),
-      "candidate: trust me")
+      ciTrust = pctSkip, commandSets = true), "base: requires t-int")
+    # The candidate: its own snapshot raises ci_trust to skip. It requires
+    # t-unit and t-int (on two rules), so it records what both mean.
+    discard fx.commitPolicy(snapshotOf([unitRule,
+      policyRule(["never-matched"], pmOff, [req("t-int", host)])],
+      ciTrust = pctSkip, commandSets = true), "candidate: trust me")
     writeFile(fx.libAPath / "change.txt", "the change under review\n")
     discard fx.mustGit("add", "change.txt")
     discard fx.mustGit("commit", "-q", "--no-verify", "-m", "the change")

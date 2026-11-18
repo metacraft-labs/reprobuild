@@ -1034,7 +1034,8 @@ proc findSiblingProjectFile*(packageName: string;
   ""
 
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
-                               command: string): ResolvedPositionalSelectors =
+                               command: string;
+                               currentDir = ""): ResolvedPositionalSelectors =
   ## Named-Targets M3: shared path-vs-name resolver for ``repro build``
   ## and ``repro watch``. Mirrors the rules in
   ## [CLI/build.md §"Target Selection"] and
@@ -1057,6 +1058,13 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ## ``command`` is the user-visible verb (``"repro build"`` /
   ## ``"repro watch"``) so the duplicate-path-anchor diagnostic blames
   ## the right command.
+  ##
+  ## ``currentDir`` is the directory a ``<package>:<name>`` selector's
+  ## sibling checkout is looked up from; empty means the process's current
+  ## directory, which is the request's own for every caller but the daemon
+  ## parent. The daemon parent passes the request's ``workingDir``
+  ## (``daemonRequestBuildAnchor``), because its own directory belongs to
+  ## no request.
   result.targetWasOmitted = positionalSelectors.len == 0
   if positionalSelectors.len == 0:
     result.target = ""
@@ -1096,7 +1104,8 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
       # disambiguator below — the disambiguator is for cross-package
       # collisions inside ONE project, so it never legitimately matches
       # a sibling-checkout package name. The sibling-found branch wins.
-      let siblingProjectFile = findSiblingProjectFile(classified.package)
+      let siblingProjectFile = findSiblingProjectFile(classified.package,
+        currentDir)
       if siblingProjectFile.len > 0:
         if not anchorSet:
           result.target = siblingProjectFile & "#" & classified.name
@@ -33113,6 +33122,23 @@ proc certificateRepositoryRoot*(projectRoot: string): string =
     dir = parent
   start
 
+proc declaredCertificateGraph(snapshot: ProviderGraphSnapshot):
+    tuple[actions: seq[BuildActionDef];
+          targets: Table[string, BuildTargetDef]] =
+  ## Every action the stored graph declares, and every build target, decoded
+  ## once. What ``certificatePlanPart`` plans from and what
+  ## ``certificateCommandSets`` digests, so the two read one graph the same
+  ## way.
+  result.targets = initTable[string, BuildTargetDef]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        result.actions.add(decodeBuildActionPayload(toBytes(node.payload)))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        result.targets[target.name] = target
+
 proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
                           projectRoot: string;
                           selectors: openArray[string]):
@@ -33130,16 +33156,9 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
   ## so a caller can say which selector certifies nothing.
   result.repository = certificateRepositoryRoot(projectRoot)
   result.certificates = aggregateCertificateExportTable(snapshot)
-  result.targets = initTable[string, BuildTargetDef]()
-  var declared: seq[BuildActionDef] = @[]
-  for fragment in snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkAction:
-        declared.add(decodeBuildActionPayload(toBytes(node.payload)))
-      elif node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-target.v1":
-        let target = decodeBuildTargetPayload(toBytes(node.payload))
-        result.targets[target.name] = target
+  let graph = declaredCertificateGraph(snapshot)
+  let declared = graph.actions
+  result.targets = graph.targets
   let inferred = inferDeclaredActionDeps(declared, projectRoot)
   result.materialized = selectProviderActions(snapshot, inferred,
     result.targets, selectors)
@@ -33179,6 +33198,171 @@ proc certificateNodeMembers*(part: CertificatePlanPart;
       for actionId in part.targets[name].actions:
         if result.find(actionId) < 0:
           result.add(actionId)
+
+const CertificateCommandEncodingV1 = "reprobuild.certificate-command.v1"
+  ## The first field of the encoding ``certificateCommandDigest`` hashes, so
+  ## a later change of the encoding can never collide with this one.
+
+const CertificateCommandWorkspaceRoot = "${workspace}"
+  ## What ``certificateCommandDigest`` writes in place of the workspace root
+  ## (the parent of the project root) wherever a declared value names it.
+
+proc withoutWorkspaceRoot(value, workspaceRoot: string): string =
+  ## ``value`` with every occurrence of ``workspaceRoot`` that is a whole
+  ## path prefix (followed by ``/`` or the end of a path) replaced by
+  ## ``CertificateCommandWorkspaceRoot``. A root of ``/`` (or none) is left
+  ## alone: it would match every absolute path.
+  if workspaceRoot.len <= 1:
+    return value
+  var i = 0
+  while i < value.len:
+    if value.continuesWith(workspaceRoot, i) and
+        (i + workspaceRoot.len == value.len or
+         value[i + workspaceRoot.len] in {'/', '\\', '\x1f', ':', ' '}):
+      result.add(CertificateCommandWorkspaceRoot)
+      i += workspaceRoot.len
+    else:
+      result.add(value[i])
+      inc i
+
+proc certificateCommandDigest*(action: BuildActionDef;
+                               workspaceRoot = ""): string =
+  ## ``blake3:<hex>`` over the command ``action`` DECLARES (Test-Certificates.md
+  ## §"What a required name means: its command set"): its package,
+  ## executable, subcommand and provider entrypoint, every argument in
+  ## declaration order with every field that decides how it is passed, and
+  ## the edge's declared environment: its variables and the names of the
+  ## host variables it passes through.
+  ##
+  ## It is taken before tool resolution, never over the argv the engine
+  ## executes, which names host paths (the resolved tool, the workspace
+  ## root): the digest is part of the certified content and must be the same
+  ## on every platform and every host. ``PublicCliArg.nimType`` is left out:
+  ## it is the Nim type the DSL checked the value against, and the value
+  ## itself (``encodedValue``) is what reaches the command.
+  ##
+  ## The encoding is length-prefixed (``<decimal length>:<bytes>``) field by
+  ## field, so no two different commands encode alike whatever their text
+  ## holds. The digest is ``blake3DomainDigest`` under
+  ## ``hdMetadataEnvelope`` (a domain-framed BLAKE3-256).
+  ##
+  ## The provider stamps some host paths into what an edge declares: every
+  ## action of a package carries the package-root environment
+  ## (``OUT_MIRROR``, the ``DEP_*`` roots), which are absolute paths under
+  ## the workspace root. ``workspaceRoot`` (the parent of the project root)
+  ## is therefore written as ``${workspace}`` in every argument value and
+  ## every environment value, so a copy of the same content elsewhere has
+  ## the same digest.
+  var buf = ""
+  proc field(value: string) =
+    buf.add($value.len)
+    buf.add(':')
+    buf.add(value)
+  field(CertificateCommandEncodingV1)
+  let call = action.call
+  field(call.packageName)
+  field(call.executableName)
+  field(call.subcommand)
+  field(call.providerEntrypointId)
+  field($call.arguments.len)
+  for arg in call.arguments:
+    field(arg.name)
+    field($arg.kind)
+    field($arg.role)
+    field($arg.format)
+    field($arg.placement)
+    field($arg.repeated)
+    field($arg.position)
+    field(arg.alias)
+    field(withoutWorkspaceRoot(arg.encodedValue, workspaceRoot))
+  field($action.env.len)
+  for (name, value) in action.env:
+    field(name)
+    field(withoutWorkspaceRoot(value, workspaceRoot))
+  # The names whose host value the edge reads (passthrough variables) are part
+  # of its environment as declared: passing one more through can change what
+  # the test does. Only the names are declared; the values never are.
+  field($action.envPassthrough.len)
+  for name in action.envPassthrough:
+    field(name)
+  "blake3:" & digestHex(blake3DomainDigest(buf.bytesOf(),
+    hdMetadataEnvelope)).toLowerAscii()
+
+proc certificateCommandSets*(snapshot: ProviderGraphSnapshot;
+                             projectRoot: string;
+                             required: openArray[string]):
+    seq[CertificateCommandSet] =
+  ## The command set of every certificate name the graph marks, sorted by
+  ## name (Test-Certificates.md §"What a required name means: its command
+  ## set"): for each, one ``<action id>=blake3:<hex>`` entry per edge the
+  ## marked node names directly (``certificateNodeMembers``: the node's test
+  ## commands, the same members whose argv the certificate records), sorted
+  ## and unique.
+  ##
+  ## Every marked name is recorded, not only the ``required`` ones, so that a
+  ## commit which stops requiring a name still says what the name means: the
+  ## gateway's ratchet can then accept the relaxing push (the meaning is
+  ## unchanged) and refuse one that narrows the name in the same push.
+  ##
+  ## Both lock writers call this on the graph they evaluated, ``repro lock
+  ## refresh`` and the certifying run's lock-update node, so one graph
+  ## renders one snapshot. A marked name whose node has no test command gets
+  ## no set; raises when such a name, or one no node marks at all, is in
+  ## ``required``: that requirement can never be certified, and a snapshot
+  ## that recorded no meaning for it would be anchored to nothing.
+  ## ``projectRoot`` is the root the provider was evaluated in; its parent is
+  ## the workspace root ``certificateCommandDigest`` takes out.
+  let workspaceRoot = os.normalizedPath(absolutePath(projectRoot)).parentDir
+  let graph = declaredCertificateGraph(snapshot)
+  var byId = initTable[string, BuildActionDef]()
+  for action in graph.actions:
+    byId[action.id] = action
+  let part = CertificatePlanPart(
+    certificates: aggregateCertificateExportTable(snapshot),
+    targets: graph.targets)
+  var names: seq[string]
+  for entry in part.certificates.entries:
+    if entry.name notin names:
+      names.add(entry.name)
+  for name in required:
+    if name notin names:
+      raise newException(ValueError, "the certificate policy requires '" &
+        name & "', which no node of the evaluated graph is marked as")
+  names.sort(system.cmp[string])
+  for name in names:
+    var entries: seq[string]
+    for entry in part.certificates.entries:
+      if entry.name != name:
+        continue
+      for actionId in certificateNodeMembers(part, entry.nodeKind,
+          entry.node):
+        if not byId.hasKey(actionId):
+          raise newException(ValueError, "certificate '" & name &
+            "' names the edge '" & actionId & "', which the evaluated " &
+            "graph does not declare")
+        let line = actionId & CommandEntryDigestMarker &
+          certificateCommandDigest(byId[actionId],
+            workspaceRoot)["blake3:".len .. ^1]
+        if line notin entries:
+          entries.add(line)
+    if entries.len == 0:
+      if name in required:
+        raise newException(ValueError, "certificate '" & name & "' marks a " &
+          "node with no test command, so it can never be certified")
+      continue
+    entries.sort(system.cmp[string])
+    result.add(CertificateCommandSet(name: name, commands: entries))
+
+proc withCertificateCommandSets*(policy: BranchCertificatePolicy;
+                                 snapshot: ProviderGraphSnapshot;
+                                 projectRoot: string):
+    BranchCertificatePolicy =
+  ## ``policy`` with the command set of every name ``snapshot`` marks,
+  ## evaluated in ``projectRoot`` (``certificateCommandSets``); refuses one
+  ## whose required names cannot be given one.
+  result = policy
+  result.commandSets = certificateCommandSets(snapshot, projectRoot,
+    requiredCertificateNames(policy))
 
 proc certificateNodeClosure*(part: CertificatePlanPart;
                              members: openArray[string]): seq[string] =
@@ -41109,33 +41293,87 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+proc daemonRequestBuildAnchor*(selectors: openArray[string];
+                               workingDir: string): string =
+  ## The project anchor a daemon-hosted ``repro build`` request's worker will
+  ## build, as an ABSOLUTE ``<path>[#<fragment>]`` — derived by the rule the
+  ## worker applies ([CLI/build.md §"Target Selection"],
+  ## ``parseAndResolveSelectors``), not by a copy of it. The anchor is the
+  ## first PATH-SHAPED selector, not the first positional: ``repro build
+  ## test`` selects the current project's ``test`` (``.#test``) even beside a
+  ## ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
+  ## ``repro build runquota:runquotad`` anchors on the sibling checkout
+  ## (reprobuild-pm issue
+  ## 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor:
+  ## both daemon-parent readers took the first positional, so they recorded
+  ## and warmed a project the build never used).
+  ##
+  ## Nothing here reads the daemon's own current directory: every
+  ## path-shaped selector is absolutized against ``workingDir`` before the
+  ## shared resolver sees it, and the sibling lookup runs from ``workingDir``.
+  ## "" when ``workingDir`` is empty or relative and the anchor is relative,
+  ## when the anchor is a fragment with no path (``#name``, which names no
+  ## project), or when the selectors are ones the build itself refuses.
+  ## Never raises.
+  let workingDir =
+    if workingDir.len > 0 and workingDir.isAbsolute: workingDir else: ""
+  var absolutized: seq[string] = @[]
+  for sel in selectors:
+    if classifyBuildSelector(sel).kind == bskPath:
+      let parts = splitTarget(sel)
+      if parts.base.len == 0 and parts.fragment.len > 0:
+        return ""
+      var base = if parts.base.len == 0: "." else: parts.base
+      if not base.isAbsolute:
+        if workingDir.len == 0:
+          return ""
+        base = absolutePath(base, workingDir)
+      absolutized.add(
+        if parts.fragment.len > 0: base & "#" & parts.fragment else: base)
+    else:
+      absolutized.add(sel)
+  if workingDir.len == 0:
+    # No directory to look a sibling up from, and a name-only request
+    # anchors on it; only an absolute path anchor can still be read.
+    for sel in absolutized:
+      if classifyBuildSelector(sel).kind == bskPath:
+        return sel
+    return ""
+  let resolved =
+    try:
+      parseAndResolveSelectors(absolutized, "repro build", workingDir)
+    except CatchableError:
+      return ""
+  let parts = splitTarget(if resolved.target.len == 0: "." else: resolved.target)
+  var base = if parts.base.len == 0: "." else: parts.base
+  if not base.isAbsolute:
+    base = absolutePath(base, workingDir)
+  if parts.fragment.len > 0: base & "#" & parts.fragment else: base
+
 proc daemonRequestProjectRoot*(rawArgs: openArray[string];
                                workingDir: string): string =
   ## The project a daemon-hosted ``repro build`` request is for, derived from
-  ## the request alone — the same target the worker will build: the first
-  ## positional of ``rawArgs`` (``.`` when there is none), resolved against the
-  ## request's ``workingDir``, never the daemon's own. "" when the target does
-  ## not resolve to a project file; the session record then keeps its
-  ## working-directory fallback. Read-only, so it is safe in the daemon parent
-  ## (see ``UserDaemonProjectRootResolver``). The arguments are read by the
-  ## parser generated from repro's description (``buildRequestOf``), the one
-  ## the worker reads them with.
+  ## the request alone — the project the worker's build anchors on
+  ## (``daemonRequestBuildAnchor``, the build's own selector rule), resolved
+  ## against the request's ``workingDir``, never the daemon's own: the
+  ## directory of the module the anchor selects. "" when that module does not
+  ## exist; the session record then keeps its working-directory fallback.
+  ## Read-only, so it is safe in the daemon parent (see
+  ## ``UserDaemonProjectRootResolver``). The arguments are read by the parser
+  ## generated from repro's description (``buildRequestOf``), the one the
+  ## worker reads them with.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   if target.len == 0:
-    target = "."
-  var base = splitTarget(target).base
-  if base.len == 0:
-    base = "."
-  if not base.isAbsolute:
-    if workingDir.len == 0:
-      return ""
-    base = absolutePath(base, workingDir)
+    return ""
+  # Parsed WITH its fragment, as the worker parses it when it names the
+  # project its stats session belongs to (``runDirectBuild``): ``./sub#mod``
+  # selects the module ``sub/mod.nim`` even where ``sub/`` holds no project
+  # file, and dropping the fragment named no project at all.
   try:
-    let parsed = parseBuildTarget(base)
+    let parsed = parseBuildTarget(target)
     if not parsed.modulePath.isAbsolute or
         not fileExists(extendedPath(parsed.modulePath)):
       return ""
@@ -41162,18 +41400,17 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
   ## a build decide differently — every warm-table key embeds the full path, so
   ## entries under the wrong directory are never looked up — but it would make
   ## the pass useless, so it is derived rather than guessed.
-  # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
+  # THE SELECTORS ARE THE BUILD'S, with no `build` verb to skip.
   # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every route
   # into it strips the verb first -- the dispatcher passes the words after
   # it, and the internal callers compose their own argument vectors without
-  # one. Skipping a literal "build" here would therefore skip a real target:
-  # ``repro build build``, in a directory holding a ``build/`` project, would
-  # warm the caches of ``.`` instead.
+  # one. Skipping a literal "build" here would therefore skip a real
+  # selector. The anchor is chosen by the build's own rule
+  # (``daemonRequestBuildAnchor``), not by taking the first positional.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   var workRoot = request.get.workRoot
   let forceRefresh = request.get.forceRebuild or request.get.dryRun
   if forceRefresh:
@@ -41181,7 +41418,7 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
     # work with no consumer.
     return ""
   if target.len == 0:
-    target = "."
+    return ""
   if workRoot.len == 0:
     for entry in requestEnvironment:
       let eq = entry.find('=')
@@ -62230,6 +62467,8 @@ type
     enacted*: bool
       ## The recipe enacts a policy; false means the snapshot is removed.
     emission*: CertificatePolicyEmission
+      ## The enacted policy, its ``commandSets`` filled in from the graph
+      ## the run evaluated (``withCertificateCommandSets``).
     failure*: string
       ## Why the enacted policy could not be read from the graph.
 
@@ -67121,6 +67360,10 @@ type
     requires*: seq[PolicyRequirement]
     ciTrust*: CertificateCiTrust
     untrackedInputs*: PolicyUntrackedInputs
+    commandSets*: seq[CertificateCommandSet]
+      ## What the snapshot says each required name means (Test-Certificates.md
+      ## §"What a required name means: its command set"): every table it
+      ## records, whichever rule matched. Empty when it records none.
     label*: string
       ## What decided, for diagnostics: the rule and the policy.
     noRule*: string
@@ -67153,6 +67396,7 @@ proc snapshotGateRequirement*(policy: BranchCertificatePolicy;
     of pctAdvisory: cctAdvisory
     of pctSkip: cctSkip
   result.untrackedInputs = policy.untrackedInputs
+  result.commandSets = policy.commandSets
   let match = matchPolicy(policy, target)
   if not match.matched:
     result.mode = cgmOff
@@ -68896,6 +69140,10 @@ type
       ## when the anchor carries no snapshot or no rule matches, and when
       ## its snapshot is malformed: the names cannot be read then, and only
       ## the mode is raised (to ``required``).
+    policy*: BranchCertificatePolicy
+      ## The anchor's snapshot, when it carries one that parses: its
+      ## ``commandSets`` say what each name the anchor requires means
+      ## (``commandSetOf``).
     detail*: string
 
 proc localRepositoryPath(url: string): string =
@@ -68976,6 +69224,7 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     if not snap.present:
       result.detail = "the anchor's lock records no certificate policy"
       return
+    result.policy = snap.policy
     let match = matchPolicy(snap.policy, target)
     if match.matched:
       result.mode = match.rule.gateMode
@@ -68989,6 +69238,38 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     result.mode = pmRequired
     result.detail = "the anchor's [certificate_policy] is malformed (" &
       err.msg & "); counted as required"
+
+type
+  NarrowedCertificate* = object
+    ## A required name whose candidate command set omits entries of the
+    ## base's (Test-Certificates.md §"What a required name means: its
+    ## command set"): what the candidate claims the name means is less than
+    ## what it meant when the base landed.
+    certificate*: string
+    missing*: seq[string]
+      ## The base's entries the candidate lacks, in the base's order.
+
+proc narrowedAgainstBase*(names: openArray[string];
+                          base: BranchCertificatePolicy;
+                          candidate: openArray[CertificateCommandSet]):
+    tuple[narrowed: seq[NarrowedCertificate]; unanchored: seq[string]] =
+  ## For each of ``names``: ``unanchored`` when the base records no command
+  ## set for it (a snapshot written before command sets), otherwise
+  ## ``narrowed`` when the candidate's command set for it does not contain
+  ## every entry of the base's. A candidate that records none for the name
+  ## (no snapshot, or no table) omits every entry. Shared by the gateway's
+  ## ratchet and ``repro ci plan``, so the two judge a name the same way.
+  var candidatePolicy = BranchCertificatePolicy(commandSets: @candidate)
+  for name in names:
+    let anchored = commandSetOf(base, name)
+    if not anchored.recorded:
+      if name notin result.unanchored: result.unanchored.add(name)
+      continue
+    let claimed = commandSetOf(candidatePolicy, name)
+    let missing = omittedCommands(anchored.commands, claimed.commands)
+    if missing.len > 0:
+      result.narrowed.add(NarrowedCertificate(certificate: name,
+        missing: missing))
 
 const GatewayTestedContentRemedy =
   ". The pushed commit's content must be the content that was tested: re-run " &
@@ -69122,6 +69403,42 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
       # Nothing to attest: neither the pushed rule nor the anchor's names a
       # certificate.
       continue
+    # What a name the anchor requires MEANS is anchored too
+    # (Test-Certificates.md §"What a required name means: its command set"):
+    # the pushed commit's command set for it must contain the anchor's. A
+    # narrowed name is unmet on every platform the joined rule requires it
+    # on, whatever certificate covers it, because that certificate attests
+    # the pushed commit's own (narrower) meaning of the name. An anchor that
+    # records no command set for a name is judged by name alone, and said so.
+    var anchorNames: seq[string]
+    for req in anchorRequires:
+      if req.certificate notin anchorNames: anchorNames.add(req.certificate)
+    let anchoring = narrowedAgainstBase(anchorNames, anchor.policy,
+      requirement.commandSets)
+    for name in anchoring.unanchored:
+      result.policyNotes.add(u.refName & ": the anchor records no command " &
+        "set for '" & name & "' (its snapshot predates command sets): " &
+        "judged by name alone; the first accepted push whose lock was " &
+        "refreshed anchors it")
+    if anchoring.narrowed.len > 0:
+      var parts: seq[string]
+      for n in anchoring.narrowed:
+        var platforms: seq[string]
+        for req in requires:
+          if req.certificate == n.certificate: platforms = req.platforms
+        parts.add("'" & n.certificate & "' on " & platformsLabel(platforms) &
+          ": the pushed commit's command set omits " & n.missing.join(", ") &
+          " that the anchor's records")
+      let detail = u.refName & ": narrowed: " & parts.join("; ") &
+        ". A commit cannot redefine what a name the anchor requires runs: " &
+        "keep every test command the anchor's command set lists (adding " &
+        "commands is allowed), or change the policy first"
+      if effective == cgmRequired:
+        result.accepted = false
+        result.outcome = voNotCovered
+        result.diagnostic = detail
+        return
+      result.policyNotes.add("advisory: " & detail)
     # TC-8c (Transport §3): the certificates for the pushed commit are the
     # notes on its TREE, ``<new>^{tree}``, resolved inside the receive
     # quarantine — read from the INCOMING notes commit and from the settled
@@ -88987,6 +89304,14 @@ type
       ## The base commit whose snapshot was read ("" when none resolved).
     policyDetail*: string
       ## The rule, or why none applied, in words.
+    narrowed*: seq[NarrowedCertificate]
+      ## Required names whose candidate command set omits entries of the
+      ## base's (Test-Certificates.md §"What a required name means: its
+      ## command set"). Never skipped, on any platform, whatever
+      ## ``ci_trust`` says.
+    unanchored*: seq[string]
+      ## Required names the base records no command set for (a snapshot
+      ## written before command sets). Never skipped: CI is fail-safe.
 
 proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
                             state: CertificateState;
@@ -88995,7 +89320,8 @@ proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
                             requiredTargets: seq[string];
                             ciTrust: CertificateCiTrust;
                             keys: RegisteredKeyStoreLoad;
-                            couldNotLook: openArray[string] = []):
+                            couldNotLook: openArray[string] = [];
+                            neverSkip: openArray[string] = []):
     CiPlatformPlan =
   ## The CORE per-platform decision. Given the certificates found for the
   ## state under evaluation (the content CI checked out) and the project's
@@ -89008,7 +89334,10 @@ proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
   ## evaluator, with the same three-valued outcome, as the push gate and the
   ## gateway (``evaluateReprobuildCoverage``). A forged / unsigned / wrong-key
   ## / revoked / other-content / wrong-platform / foreign-framework cert
-  ## CANNOT move a target into ``skip``.
+  ## CANNOT move a target into ``skip``. Nor can a covered target in
+  ## ``neverSkip``: a name the candidate narrowed, or one the base does not
+  ## anchor (Test-Certificates.md §"What a required name means: its command
+  ## set").
   result.platform = platform
   let verdict = evaluateReprobuildCoverage(found, state, @[platform],
     requiredTargets, keys, lockSource, couldNotLook)
@@ -89023,7 +89352,7 @@ proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
     for t in c.targets:
       if t notin covered: covered.add(t)
   for t in requiredTargets:
-    if ciTrust == cctSkip and t in covered:
+    if ciTrust == cctSkip and t in covered and t notin neverSkip:
       result.skip.add(t)
     else:
       result.run.add(t)
@@ -89068,6 +89397,11 @@ proc renderCiPlanJson*(plan: CiPlan): JsonNode =
       "detail": plan.policyDetail}
   if plan.problems.len > 0:
     result["problems"] = %plan.problems
+  var narrowed = newJArray()
+  for n in plan.narrowed:
+    narrowed.add(%*{"certificate": n.certificate, "missing": n.missing})
+  result["narrowed"] = narrowed
+  result["unanchored"] = %plan.unanchored
 
 type
   TestRunOutcome* = object
@@ -90812,7 +91146,13 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
       os.normalizedPath(currentRepo)) == 0:
     lockUpdate.certificatePolicy.active = true
     try:
-      let found = certificatePolicyFromGraph(info.snapshot)
+      var found = certificatePolicyFromGraph(info.snapshot)
+      # What each required name means, from the same evaluated graph
+      # (Test-Certificates.md §"What a required name means: its command
+      # set", "Who writes it").
+      if found.enacted:
+        found.emission.policy = withCertificateCommandSets(
+          found.emission.policy, info.snapshot, info.projectRoot)
       lockUpdate.certificatePolicy.enacted = found.enacted
       lockUpdate.certificatePolicy.emission = found.emission
     except CatchableError as err:
@@ -91867,6 +92207,40 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
     requirement.ciTrust = cctAdvisory
     policyDetail.add("; " & reason)
     stderr.writeLine("repro ci plan: " & reason)
+  # What each base-required name MEANS is anchored by the base as well
+  # (Test-Certificates.md §"What a required name means: its command set"):
+  # a name is skipped only when the base records its command set and the
+  # candidate's contains it. A narrowed name and an unanchored one run on
+  # every platform. With no base snapshot nothing is trusted anyway
+  # (``ci_trust`` stays ``advisory``), so there is nothing to anchor.
+  var anchoring: tuple[narrowed: seq[NarrowedCertificate];
+                       unanchored: seq[string]]
+  var candidateProblem = ""
+  if baseHasSnapshot:
+    var candidateSets: seq[CertificateCommandSet]
+    let candidateLock = readContentFile(certRepoPath, CommittedLockFileName,
+      workingTreeState())
+    case candidateLock.status
+    of cfsPresent:
+      try:
+        let read = readCertificatePolicySnapshot(candidateLock.bytes)
+        if read.present:
+          candidateSets = read.policy.commandSets
+      except CertificatePolicySnapshotError as err:
+        candidateProblem = "the checked-out " & CommittedLockFileName &
+          " [certificate_policy] does not parse (" & err.msg & "); it " &
+          "records no command set, so every name the base anchors is narrowed"
+    of cfsAbsent: discard
+    of cfsFailed:
+      candidateProblem = "the checked-out " & CommittedLockFileName &
+        " could not be read (" & candidateLock.reason & "); every name the " &
+        "base anchors is treated as narrowed"
+    anchoring = narrowedAgainstBase(requiredNames,
+      BranchCertificatePolicy(commandSets: requirement.commandSets),
+      candidateSets)
+  var neverSkip = anchoring.unanchored
+  for n in anchoring.narrowed:
+    neverSkip.add(n.certificate)
   let policy = (ciTrust: requirement.ciTrust,
     requiredTargets: requiredNames)
   # TC-8c: the binding is the CONTENT CI checked out, not a commit. A
@@ -91892,7 +92266,10 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
        of brkBranch: target.name
        of brkDetached: "(detached)"
        of brkOther: target.name),
-    policyBase: baseCommit, policyDetail: policyDetail)
+    policyBase: baseCommit, policyDetail: policyDetail,
+    narrowed: anchoring.narrowed, unanchored: anchoring.unanchored)
+  if candidateProblem.len > 0:
+    plan.problems.add(candidateProblem)
   let headRes = queryGitState(headShaQuery(certRepoPath), identity)
   if headRes.status == gqsOk:
     plan.commit = headRes.headSha
@@ -91974,7 +92351,7 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
           run: owed)
       else:
         computeCiPlatformPlan(found, evaluated, lockSource, platform,
-          owed, policy.ciTrust, keys, couldNotLook)
+          owed, policy.ciTrust, keys, couldNotLook, neverSkip)
     if bindingNote.len > 0 and pp.advisoryNote.len == 0:
       pp.advisoryNote = bindingNote
     plan.platforms.add(pp)
@@ -91987,6 +92364,12 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
        else: "") &
       "  ci_trust=" & $policy.ciTrust
     echo "  policy (" & policySource & "): " & policyDetail
+    for n in plan.narrowed:
+      echo "  narrowed: " & n.certificate & " (the candidate's command set " &
+        "omits " & n.missing.join(", ") & "): run on every platform"
+    for name in plan.unanchored:
+      echo "  unanchored: " & name & " (the base records no command set " &
+        "for it): run on every platform"
     for pp in plan.platforms:
       echo "  " & pp.platform & ":  " & $pp.verdict & "  skip=[" &
         pp.skip.join(", ") & "]  run=[" & pp.run.join(", ") & "]" &
@@ -94143,13 +94526,35 @@ proc evaluatedCertificatePolicy*(projectDir: string):
     try: removeFile(extendedPath(emitPath))
     except CatchableError: discard
 
+proc evaluatedCertificatePolicyGraph(projectDir: string): BuildGraphInspection =
+  ## The project's evaluated provider graph, read the way ``repro
+  ## certificates list`` and the certifying run read it
+  ## (``prepareBuildGraphInspection``, nothing lowered, nothing built), for
+  ## the command sets ``repro lock refresh`` records. Its scratch lives under
+  ## the lock probe's own cache tree, so a refresh still writes nothing into
+  ## the project.
+  let match = resolveProjectFile(projectDir)
+  if match.path.len == 0:
+    raise newException(IOError, "no recipe in " & projectDir)
+  let modulePath = absolutePath(match.path)
+  let workRoot = lockProviderArtifactDir(modulePath,
+    reprobuildLibraryWorkDir()) / "certificate-graph"
+  prepareBuildGraphInspection(absolutePath(projectDir), tpmPathOnly,
+    stablePublicCliPath(),
+    selectDefaultAction = false, workRoot = workRoot,
+    lowerGraph = false)
+
 proc evaluatedCertificatePolicySection*(projectDir: string;
                                         deps: openArray[LockedDep]): string =
   ## The ``[certificate_policy]`` text the project's lock should carry, with
-  ## the package named from ``deps``; "" when the recipe enacts no policy.
-  let evaluated = evaluatedCertificatePolicy(projectDir)
+  ## the package named from ``deps`` and the command set of every name the
+  ## evaluated graph marks; "" when the recipe enacts no policy.
+  var evaluated = evaluatedCertificatePolicy(projectDir)
   if not evaluated.enacted:
     return ""
+  let inspected = evaluatedCertificatePolicyGraph(projectDir)
+  evaluated.emission.policy = withCertificateCommandSets(
+    evaluated.emission.policy, inspected.snapshot, inspected.projectRoot)
   renderCertificatePolicySectionFor(evaluated.emission, projectDir, deps)
 
 proc certificatePolicyStaleness*(projectDir: string): CertificatePolicyStaleness =

@@ -33,10 +33,17 @@ proc policyRule(branches: openArray[string]; gateMode: PolicyMode;
     requires: @requires)
 
 proc snapshotOf(rules: openArray[PolicyRule];
-                ciTrust = pctAdvisory): string =
-  renderCertificatePolicySnapshot(BranchCertificatePolicy(
+                ciTrust = pctAdvisory; commandSets = false): string =
+  ## The snapshot of ``rules``. With ``commandSets`` every required name
+  ## records ``fixtureCommandSet``; without it the snapshot is one written
+  ## before command sets existed (judged by name alone at the gateway, never
+  ## skipped by CI).
+  var policy = BranchCertificatePolicy(
     name: "team-default", package: "certpolicy", ciTrust: ciTrust,
-    untrackedInputs: puiReadSet, rules: @rules))
+    untrackedInputs: puiReadSet, rules: @rules)
+  if commandSets:
+    policy = withFixtureCommandSets(policy)
+  renderCertificatePolicySnapshot(policy)
 
 proc commitPolicy(fx: StoreFixture; snapshot: string;
                   message = "certificate policy"): string =

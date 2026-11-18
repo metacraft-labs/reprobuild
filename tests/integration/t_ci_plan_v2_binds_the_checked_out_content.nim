@@ -38,7 +38,8 @@ suite "TC-8c — the CI plan binds the checked-out content":
   test "t_ci_plan_v2_binds_the_checked_out_content":
     let host = currentPlatformTag()
     let fx = setupStoreFixture(requiredPolicy(@["t-unit", "t-int"], @[host],
-      ciTrust = "skip"), "ciplan", recordStore = false, committedLock = true)
+      ciTrust = "skip", commandSets = true), "ciplan", recordStore = false,
+      committedLock = true)
     defer: removeDir(fx.scratch)
     # The candidate: a commit on top of the published base. A checkout that
     # IS the base would have no base to read ci_trust from (TC-9c).

@@ -11,11 +11,16 @@
 ##   1. ``repro lock refresh`` writes ``[certificate_policy]`` exactly as the
 ##      declaration says (the canonical text, byte for byte), names the
 ##      package, and pins that package's revision as an ordinary ``deps``
-##      entry;
+##      entry. After the rules it records what each required name means
+##      (§"What a required name means: its command set"): one
+##      ``[[certificate_policy.certificate]]`` table per required name, in
+##      first-requirement order, listing the one edge each name's aggregate
+##      holds;
 ##   2. a second refresh writes nothing (bytes and modification time), and a
 ##      copy of the whole workspace elsewhere, whose compiled provider is
 ##      reused from the cache, records the same snapshot naming the COPY's
-##      package;
+##      package — command-set digests included, which therefore name no path
+##      of the checkout;
 ##   3. the consumer checkout carries no copy of the policy source;
 ##   4. a new revision of the policy package that changes a rule is picked up
 ##      by the next refresh: the snapshot says the new rule and the pin moves
@@ -28,6 +33,7 @@
 import std/[os, strutils, tempfiles, times, unittest]
 import repro_test_support/reasoned_skip
 
+import repro_lock/certificate_policy
 import ./certificate_policy_fixture
 
 const teamPolicy = """
@@ -76,6 +82,34 @@ gate_mode = "advisory"
 requires = [{ certificate = "unit-suite", platforms = ["*"] }]
 """
 
+proc rulesAndSets(lock: string): tuple[rules: string;
+                                       sets: seq[CertificateCommandSet]] =
+  ## The snapshot ``lock`` ends with, split into the text of everything but
+  ## its command sets (rendered by the production renderer) and the command
+  ## sets. Fails the case when the lock does not END with that snapshot,
+  ## byte for byte, as the renderer writes it.
+  let section = splitCertificatePolicySection(lock).policySection
+  check section.len > 0
+  check lock.endsWith("\n\n" & section)
+  let policy = parseCertificatePolicySnapshot(section)
+  check renderCertificatePolicySnapshot(policy) == section
+  var withoutSets = policy
+  withoutSets.commandSets = @[]
+  (renderCertificatePolicySnapshot(withoutSets), policy.commandSets)
+
+proc checkMeaning(sets: seq[CertificateCommandSet]) =
+  ## One command set per required name, sorted by name, each
+  ## naming the one edge the consumer's aggregate for it holds.
+  check sets.len == 2
+  if sets.len == 2:
+    for (set, name) in [(sets[0], "pre-commit"), (sets[1], "unit-suite")]:
+      check set.name == name
+      check set.commands.len == 1
+      if set.commands.len == 1:
+        let parts = commandEntryParts(set.commands[0])
+        check parts.ok
+        check parts.actionId == name & "-check"
+
 suite "TC-9b — the shared policy is snapshotted into the lock":
 
   test "t_policy_imported_from_a_shared_package_is_snapshotted_into_the_lock":
@@ -91,7 +125,9 @@ suite "TC-9b — the shared policy is snapshotted into the lock":
       checkpoint("first refresh:\n" & first.output)
       check first.code == 0
       let lock1 = lockOf(ws.consumer)
-      check lock1.endsWith("\n\n" & expectedSnapshot)
+      let snap1 = rulesAndSets(lock1)
+      check snap1.rules == expectedSnapshot
+      checkMeaning(snap1.sets)
       let pin1 = ws.headOf(ws.policyPkg)
       let entry1 = depLine(lock1, "certpolicy")
       checkpoint("certpolicy entry: " & entry1)
@@ -126,7 +162,9 @@ suite "TC-9b — the shared policy is snapshotted into the lock":
       let relocated = copy.refresh()
       checkpoint("refresh of the relocated copy:\n" & relocated.output)
       check relocated.code == 0
-      check lockOf(copy.consumer).endsWith("\n\n" & expectedSnapshot)
+      let copied = rulesAndSets(lockOf(copy.consumer))
+      check copied.rules == expectedSnapshot
+      check copied.sets == snap1.sets
       check ws.root notin lockOf(copy.consumer)
 
       # (3) The consumer carries no copy of the policy source: no file in its
@@ -156,8 +194,10 @@ suite "TC-9b — the shared policy is snapshotted into the lock":
       check third.code == 0
       let lock2 = lockOf(ws.consumer)
       check ("revision = \"" & pin2 & "\"") in depLine(lock2, "certpolicy")
-      check lock2.endsWith("\n\n" & expectedSnapshot.replace(
-        "commit_gate = \"advisory\"\n", ""))
+      let snap2 = rulesAndSets(lock2)
+      check snap2.rules == expectedSnapshot.replace(
+        "commit_gate = \"advisory\"\n", "")
+      check snap2.sets == snap1.sets
 
       # (5) Enacting nothing removes the snapshot.
       ws.writeConsumer(consumerRecipe("", ["pre-commit", "unit-suite"]),
