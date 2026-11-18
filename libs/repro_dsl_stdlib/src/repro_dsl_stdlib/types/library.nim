@@ -68,6 +68,24 @@ proc sharedLibrarySoname*(soname, sover: string): string =
   if sover.len > 0:
     result.add("." & sover)
 
+proc linkPrerequisites*(deps: openArray[Library]): seq[BuildActionDef] =
+  ## The edges a link that names ``deps`` must run after: each library's
+  ## producing ``install`` edge and, when it has one, its ``linkTimeName``
+  ## edge. For a versioned SONAME the name ``-l`` looks for at link time is
+  ## the symlink ``linkTimeName`` writes, not the file ``install`` writes,
+  ## so ordering after only one of them still lets the link start before
+  ## that name exists. Every link that passes ``-l`` for its deps (gcc,
+  ## clang, ``zig cc``; not the ``zig ar`` archive path, which takes no
+  ## deps) passes these as ``after``, so the ordering no longer depends on
+  ## something else happening to schedule the library first. A default
+  ## edge (empty ``id``) is skipped. Ordering is all this gives: whether
+  ## ``-L`` points at the directory the library is written to is separate.
+  for dep in deps:
+    if dep.install.id.len > 0:
+      result.add(dep.install)
+    if dep.linkTimeName.id.len > 0:
+      result.add(dep.linkTimeName)
+
 proc newLibrary*(install: BuildActionDef;
                  api: LibraryApi = LibraryApi(declared: false);
                  installPrefix = ""): Library =

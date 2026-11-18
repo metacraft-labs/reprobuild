@@ -5593,6 +5593,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_link_orders_after_the_libraries_it_links.nim",
+    binary: "build/test-bin/t_link_orders_after_the_libraries_it_links",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim",
     binary: "build/test-bin/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin",
     defines: @[],
