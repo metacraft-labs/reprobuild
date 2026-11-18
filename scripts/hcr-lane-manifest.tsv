@@ -59,6 +59,7 @@
 source	just_target	linux-x86_64	macos-arm64	windows-x86_64	note
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	e2e_hcr_direct_patch_debug_unwind_replay	unsupported	run:unmeasured	unsupported	macOS arm64 direct-patch debug-unwind replay; no Linux or Windows arm.
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	e2e_hcr_in_target_link_and_trampoline	unsupported	run:unmeasured	unsupported	macOS arm64 in-target link and trampoline; no Linux or Windows arm.
+tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word.nim	e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	e2e_hcr_linux_x86_64_single_threaded_direct_patch	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
 tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim	e2e_hcr_linux_text_left_writable_reaches_the_wire	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-M9); the fault lever is a Linux mprotect/procfs pair with no macOS or Windows arm.
 tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	e2e_hcr_linux_far_target_island_patch	run:1	unsupported	unsupported	Linux ELF provider gate (HLX-*); no macOS or Windows arm.
