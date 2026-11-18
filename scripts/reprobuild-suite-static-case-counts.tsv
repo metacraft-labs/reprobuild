@@ -299,7 +299,7 @@ libs/repro_cli_support/tests/t_cli_parse_reads_only_declared_env.nim	nim	4
 libs/repro_cli_support/tests/t_connection_ends_with_its_leaf.nim	nim	3
 libs/repro_cli_support/tests/t_cross_target_flag.nim	nim	8
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	18
-libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	8
+libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	9
 libs/repro_cli_support/tests/t_data_file_row_selection_fixtures.nim	nim	3
 libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim	nim	4
 libs/repro_cli_support/tests/t_deploy_agent_keygen_cli.nim	nim	4
@@ -692,6 +692,7 @@ libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.
 libs/repro_local_store/tests/t_tar_member_listing.nim	nim	15
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
+libs/repro_local_store/tests/t_write_sequence_never_falls_behind_a_surviving_record.nim	nim	5
 libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim	nim	7
 libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim	nim	5
 libs/repro_lock/tests/t_catalog_import_pins.nim	nim	5

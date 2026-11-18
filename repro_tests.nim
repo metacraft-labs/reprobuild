@@ -8221,6 +8221,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_write_sequence_never_falls_behind_a_surviving_record.nim",
+    binary: "build/test-bin/t_write_sequence_never_falls_behind_a_surviving_record",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim",
     binary: "build/test-bin/t_a_lock_value_spread_over_lines_reads_whole",
     defines: @[],
