@@ -11689,6 +11689,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let logKey = generateKeypair()"),
   TestSpec(
+    source: "libs/repro_resources/tests/t_an_in_use_hold_is_per_descriptor_and_never_inherited.nim",
+    binary: "build/test-bin/t_an_in_use_hold_is_per_descriptor_and_never_inherited",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_resources_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_resources/tests/t_attr_missing_interface_diagnostic.nim",
     binary: "build/test-bin/t_attr_missing_interface_diagnostic",
     defines: @[],
