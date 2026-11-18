@@ -1006,3 +1006,120 @@ suite "nim convention M35 cross-language reverse (Rust -> Nim)":
         checkpoint "reverse fixture spuriously emitted forward Rust action: " &
           action.id
         fail()
+
+# --- Phase 1 output ownership: a {.compile.} pragma's C source ----------
+
+proc writeCompilePragmaProject(scratch, packageName, member: string;
+                               isLibrary: bool) =
+  ## A scratch project whose entry module pulls in ``src/helper.c``
+  ## through a ``{.compile("helper.c", "<flags>").}`` pragma. Nim lists
+  ## that file as a ``compile`` entry of its manifest even though it is a
+  ## user source outside the nimcache.
+  if dirExists(scratch):
+    removeDir(scratch)
+  createDir(scratch / "src")
+  writeFile(scratch / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package " & packageName & ":\n" &
+    "  uses:\n" &
+    "    \"nim >=2.2 <3.0\"\n" &
+    "\n" &
+    (if isLibrary: "  library " & member & "\n"
+     else: "  executable " & member & ":\n    discard\n"))
+  writeFile(scratch / (member & ".nimble"),
+    "version = \"0.1.0\"\nauthor = \"t\"\ndescription = \"t\"\n" &
+    "license = \"MIT\"\nsrcDir = \"src\"\n" &
+    (if isLibrary: "" else: "bin = @[\"" & member & "\"]\n") &
+    "requires \"nim >= 2.2.0\"\n")
+  writeFile(scratch / "src" / "helper.c",
+    "int helper_value(void) { return HELPER_VALUE; }\n")
+  writeFile(scratch / "src" / (member & ".nim"),
+    "{.compile(\"helper.c\", \"-DHELPER_VALUE=42\").}\n" &
+    "proc helperValue(): cint {.importc: \"helper_value\".}\n" &
+    (if isLibrary: "proc answer*(): int = int(helperValue())\n"
+     else: "echo helperValue()\n"))
+
+proc slashPath(path: string): string =
+  ## ``path`` with ``.``/``..`` folded and ``/`` separators, so the
+  ## comparisons below hold on Windows too.
+  os.normalizedPath(path).replace('\\', '/')
+
+template checkCompilePragmaSourceIsNotAPhase1Output(scratch, member: string) =
+  let conv = nim_convention.nimConvention()
+  let request = dummyRequest(scratch)
+  require conv.recognize(scratch, request)
+  let fragment = conv.emitFragment(scratch, request)
+  let helper = slashPath(scratch / "src" / "helper.c")
+  var phase1: seq[BuildActionDef] = @[]
+  var helperCompile: seq[BuildActionDef] = @[]
+  for node in fragment.nodes:
+    if node.kind != gnkAction:
+      continue
+    let action = decodeBuildActionPayload(toBytes(node.payload))
+    if action.id.startsWith("nim-c-compileonly-"):
+      phase1.add(action)
+    elif action.id.startsWith("gcc-compile-") and
+        slashPath(action.inputs[0]) == helper:
+      helperCompile.add(action)
+  require phase1.len == 1
+  # The pragma's source reached Phase 2 as a compile entry of its own.
+  require helperCompile.len == 1
+  let nimcacheRoot = slashPath(scratch / ".repro" / "build" / member /
+    "nimcache")
+  for output in phase1[0].outputs:
+    let o = slashPath(output)
+    checkpoint("Phase 1 output: " & o)
+    # Every Phase 1 output is the nimcache or lies under it. A user source
+    # declared as an output would be owned by the action, so restoring
+    # Phase 1 from cache could overwrite an edit to it.
+    check o != helper
+    check o == nimcacheRoot or o.startsWith(nimcacheRoot & "/")
+  # The pragma's source is an input of Phase 1 (Nim reads it) and of its
+  # own Phase 2 compile.
+  var phase1Inputs: seq[string] = @[]
+  for input in phase1[0].inputs:
+    phase1Inputs.add(slashPath(input))
+  check helper in phase1Inputs
+  check helperCompile[0].outputs.len == 1
+  check slashPath(helperCompile[0].outputs[0]) != helper
+
+suite "nim convention Phase 1 output ownership":
+  ## Regression test for reprobuild-pm
+  ## ``issues/2026-11-16-nim-phase-1-declares-compile-pragma-c-sources-as-outputs.md``:
+  ## Phase 1 declared the ``cFile`` of EVERY manifest ``compile`` entry as
+  ## its output, including a ``{.compile.}`` pragma's source under ``src/``.
+  ## Governing text: ``Nim.md`` §"Phase 1 — Nim → C transpile". Runs the
+  ## production ``emitFragment`` (the eager ``nim c --compileOnly`` included);
+  ## nothing is mocked.
+
+  test "executable: a {.compile.} pragma's C source is a Phase 1 input, not an output":
+    if findExe("nim").len == 0:
+      # ``skip`` only marks the test; the ``else`` keeps the body from
+      # running and failing on the missing compiler.
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Symlinks resolved: Nim names the pragma's source by the real path
+      # of the module holding the pragma (macOS ``$TMPDIR`` is a symlink).
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_compile_pragma_exe"
+      writeCompilePragmaProject(scratch, "compilePragmaExe",
+        "pragma_exe", isLibrary = false)
+      defer:
+        removeDir(scratch)
+      checkCompilePragmaSourceIsNotAPhase1Output(scratch, "pragma_exe")
+
+  test "library: a {.compile.} pragma's C source is a Phase 1 input, not an output":
+    if findExe("nim").len == 0:
+      # ``skip`` only marks the test; the ``else`` keeps the body from
+      # running and failing on the missing compiler.
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Symlinks resolved: Nim names the pragma's source by the real path
+      # of the module holding the pragma (macOS ``$TMPDIR`` is a symlink).
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_compile_pragma_lib"
+      writeCompilePragmaProject(scratch, "compilePragmaLib",
+        "pragma_lib", isLibrary = true)
+      defer:
+        removeDir(scratch)
+      checkCompilePragmaSourceIsNotAPhase1Output(scratch, "pragma_lib")

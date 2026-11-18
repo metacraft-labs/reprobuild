@@ -28022,8 +28022,8 @@
       "owner": "libs/repro_standard_provider",
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_nim_convention.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 23,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

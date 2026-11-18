@@ -858,6 +858,43 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
         " for " & entrySource & ":\n" & output)
   writeEmitCacheFingerprint(nimcacheDir, NimEmitCacheBaseName, fingerprint)
 
+proc isUnderNimcache(path, nimcacheDir: string): bool =
+  ## Whether ``path`` is ``nimcacheDir`` or lies beneath it. Compared
+  ## lexically on folded, ``/``-separated spellings (case-insensitively on
+  ## Windows); Nim names every file it writes by the ``--nimcache:`` path it
+  ## was given, so no filesystem lookup is needed.
+  proc key(p: string): string =
+    result = os.normalizedPath(absolutePath(p)).replace('\\', '/')
+    while result.len > 1 and result.endsWith("/"):
+      result.setLen(result.len - 1)
+    when defined(windows):
+      result = result.toLowerAscii
+  let p = key(path)
+  let root = key(nimcacheDir)
+  p == root or p.startsWith(root & "/")
+
+proc phase1InputsAndOutputs(nimcacheDir, manifestPath: string;
+                            nimSources: openArray[string];
+                            manifest: NimcacheManifest):
+    tuple[inputs, outputs: seq[string]] =
+  ## The declared inputs and outputs of a Phase 1 ``nim c --compileOnly``
+  ## action (``Nim.md`` §"Phase 1 — Nim → C transpile"). Its outputs are
+  ## the nimcache, the manifest and the ``.c`` files Nim wrote there. A
+  ## manifest ``compile`` entry outside the nimcache — the source of a
+  ## ``{.compile("x.c").}`` pragma, or a C file shipped with the Nim
+  ## installation — is a source Nim only reads: it is an input of Phase 1
+  ## and of its own Phase 2 compile, never an output. Declaring it an
+  ## output would make the engine treat a user source as produced by
+  ## Phase 1, so a cache restore of Phase 1 could overwrite an edit to it.
+  result.inputs = @nimSources
+  result.outputs = @[nimcacheDir, manifestPath]
+  for step in manifest.compile:
+    if isUnderNimcache(step.cFile, nimcacheDir):
+      if step.cFile notin result.outputs:
+        result.outputs.add(step.cFile)
+    elif step.cFile notin result.inputs:
+      result.inputs.add(step.cFile)
+
 proc parseNimcacheManifest(manifestPath: string): NimcacheManifest =
   ## Decode the nimcache ``<entry>.json`` Nim writes alongside the
   ## ``.c`` files. We pull just the fields Phase 2/3 need; any future
@@ -1070,11 +1107,8 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
       "nim convention: nimcache manifest carries no compile steps for " &
         entry.name)
 
-  let phase1Outputs = block:
-    var outs = @[nimcacheDir, manifestPath]
-    for step in manifest.compile:
-      outs.add(step.cFile)
-    outs
+  let (phase1Inputs, phase1Outputs) = phase1InputsAndOutputs(nimcacheDir,
+    manifestPath, nimSources, manifest)
 
   let phase1Id = actionIdFor("nim-c-compileonly", entry.name, "umbrella")
   let phase1Argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entry.sourceFile,
@@ -1082,7 +1116,7 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   let phase1Action = buildAction(
     id = phase1Id,
     call = inlineExecCall(phase1Argv, projectRoot),
-    inputs = nimSources,
+    inputs = phase1Inputs,
     outputs = phase1Outputs,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
@@ -1281,11 +1315,8 @@ proc emitForLibrary(projectRoot, nimExe: string;
       "nim convention: nimcache manifest carries no compile steps for " &
         lib.name)
 
-  let phase1Outputs = block:
-    var outs = @[nimcacheDir, manifestPath]
-    for step in manifest.compile:
-      outs.add(step.cFile)
-    outs
+  let (phase1Inputs, phase1Outputs) = phase1InputsAndOutputs(nimcacheDir,
+    manifestPath, nimSources, manifest)
 
   let phase1Id = actionIdFor("nim-c-compileonly", lib.name, "umbrella")
   let phase1Argv = nimCompileOnlyArgv(nimExe, nimcacheDir, lib.sourceFile,
@@ -1293,7 +1324,7 @@ proc emitForLibrary(projectRoot, nimExe: string;
   let phase1Action = buildAction(
     id = phase1Id,
     call = inlineExecCall(phase1Argv, projectRoot),
-    inputs = nimSources,
+    inputs = phase1Inputs,
     outputs = phase1Outputs,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
