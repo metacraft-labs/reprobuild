@@ -7705,6 +7705,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_sdk_package_roots_come_from_the_sdk.nim",
+    binary: "build/test-bin/t_sdk_package_roots_come_from_the_sdk",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var workspace: string"),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_seeded_source_root_ranks_below_sibling_checkout.nim",
     binary: "build/test-bin/t_seeded_source_root_ranks_below_sibling_checkout",
     defines: @[],

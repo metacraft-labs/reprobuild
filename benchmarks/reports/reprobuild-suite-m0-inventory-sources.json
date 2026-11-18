@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2974,
+    "nimTestBinaries": 2975,
     "pureUnitConsolidationGroups": 86,
     "pureUnitTests": 797,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3022
+    "testEntries": 3023
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1695,7 +1695,7 @@
       "integration": 1644,
       "platform/destructive": 195,
       "pure unit": 797,
-      "unclassified": 362
+      "unclassified": 363
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1909,9 +1909,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2974,
+    "nimTestBinaryCount": 2975,
     "pythonTestFileCount": 48,
-    "testEntryCount": 3022
+    "testEntryCount": 3023
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20665,6 +20665,23 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sdk_package_roots_come_from_the_sdk",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_sdk_package_roots_come_from_the_sdk.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
