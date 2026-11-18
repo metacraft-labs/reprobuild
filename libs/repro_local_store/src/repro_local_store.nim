@@ -282,6 +282,23 @@ type
       ## hit itself cannot say. `eskUnstated` for a sidecar written before the
       ## field (versions 1 and 2), which therefore derives a record that stays
       ## on this host.
+    hostBoundReason*: string
+      ## A runtime object under `/run` (a daemon's socket, a FIFO, a device
+      ## node) the execution read and the build engine's volatile-runtime
+      ## fold dropped, or "" (`PathSetEvidence.hostBoundInput`). Stored for
+      ## the same reason as the level: such a record must not be published
+      ## off this host, and a portable record derived from a later local hit
+      ## could not otherwise know. "" for a sidecar written before the field
+      ## (versions 1 to 3), whose producer dropped such reads without
+      ## recording them -- see `hostBoundUnknown`.
+    hostBoundUnknown*: bool
+      ## True for a sidecar written before `hostBoundReason` (versions 1 to
+      ## 3). Its producer's fold dropped EVERY input under `/run` by prefix,
+      ## unrecorded and uncounted, so whether the run read host state there
+      ## is not known, and an empty `hostBoundReason` must not be read as
+      ## "it did not". The build engine keeps such a record on this host:
+      ## no portable record is derived from it and no publisher is offered
+      ## it. Not stored; derived from the version when decoded.
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -2898,10 +2915,10 @@ proc observedExecutionNames(raw: openArray[byte];
 
 const
   InputAccessMagic = "RBIA"
-  InputAccessVersion = 3'u16
+  InputAccessVersion = 4'u16
     ## v2 (campaign M17 chunk 1) appends the evidence level; v3 (chunk 2) the
-    ## evidence source after it. Versions 1 and 2 still decode, with what they
-    ## lack unstated.
+    ## evidence source after it; v4 the host-bound reason after that.
+    ## Versions 1 to 3 still decode, with what they lack unstated.
     ## v2 (campaign M17) appends the execution's evidence level. A v1
     ## sidecar still decodes, with `elUnstated`.
   InputAccessFileExt* = ".acc"
@@ -2965,6 +2982,7 @@ proc encodeInputAccesses*(strongHex: string;
   result.writeFrontCoded(accesses.enumerations)
   result.add(evidenceLevelByte(accesses.evidenceLevel))
   result.writeString($accesses.evidenceSource)
+  result.writeString(accesses.hostBoundReason)
 
 proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
     Option[InputAccesses] =
@@ -2979,7 +2997,7 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
   try:
     var pos = 4
     let version = readU16Le(raw, pos)
-    if version notin [1'u16, 2'u16, InputAccessVersion]:
+    if version notin [1'u16, 2'u16, 3'u16, InputAccessVersion]:
       return none(InputAccesses)
     if readString(raw, pos) != strongHex:
       return none(InputAccesses)
@@ -2996,6 +3014,10 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
       if not parseEvidenceSource(readString(raw, pos),
           accesses.evidenceSource):
         return none(InputAccesses)
+    if version >= 4'u16:
+      accesses.hostBoundReason = readString(raw, pos)
+    else:
+      accesses.hostBoundUnknown = true
     if pos != raw.len:
       return none(InputAccesses)
     some(accesses)
@@ -6116,9 +6138,21 @@ proc sameContentIdentity(recorded, current: FileFingerprint): bool =
   ## changing it would re-key every content-keyed record in every existing
   ## cache. The kind is already recorded beside it (`writeMetadata`), so
   ## comparing it costs nothing and leaves the record format untouched.
+  ##
+  ## A DIRECTORY hashes the empty payload whatever it is, so for one the
+  ## size word is compared too: it is 0 for a real directory and the digest
+  ## of the `readlink` text for a link to one (`linkedDirectoryIdentity`).
+  ## Without it a link retargeted at another directory -- NixOS's
+  ## `/run/current-system` after `nixos-rebuild switch`, recorded as a probe
+  ## on the way to a tool (`linkHopsUnderRun` in `repro_core/paths`) --
+  ## moved the metadata, fell through to this comparison under `ffpHybrid`,
+  ## and compared equal, serving the old generation's outputs. Compared here
+  ## rather than hashed, for the reason above: no existing key moves.
   recorded.hasLocalHash and current.hasLocalHash and
     recorded.metadata.kind == current.metadata.kind and
-    recorded.localHash == current.localHash
+    recorded.localHash == current.localHash and
+    (recorded.metadata.kind != ffkDirectory or
+      recorded.metadata.sizeBytes == current.metadata.sizeBytes)
 
 proc inputContentStillRecorded*(record: ActionResultRecord;
                                 inputRoot = ""): tuple[ok: bool;

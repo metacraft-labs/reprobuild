@@ -20,12 +20,26 @@
 ## control with the same action and inputs is offered to both, and the peer
 ## publisher is told it is Level 0. A hit on a record whose access sidecar
 ## predates the level field (version 1) publishes nothing either: what it
-## does not say cannot be assumed to be Level 0.
+## does not say cannot be assumed to be Level 0. Since version 4 a sidecar
+## older than the host-bound reason (versions 1 to 3) derives no portable
+## record at all, which subsumes the level and source refusals for a hit: its
+## producer dropped every input under `/run` unrecorded.
+##
+## The same two publishers refuse a HOST-BOUND record: one whose execution
+## read a runtime object under `/run` (a socket, a FIFO, a device node) that
+## the volatile-runtime fold dropped (Filesystem-Policy-And-Observed-Inputs.md
+## §"Volatile Runtime Prefixes"). That case needs a real socket under `/run`,
+## which a test cannot create, so it uses one of the host's daemon endpoints
+## and skips on a host that has none. The binary-cache publisher
+## (`binaryCachePublisher`, intermediate scope so the builtin qualifies)
+## refuses it too, live and from a later local hit, and a control with no
+## such input is published to it both ways.
 ##
 ## MOCK POLICY. Two seams, both justified by what is under test -- what the
 ## ENGINE offers each publisher:
 ##   * the publishers are recording closures in the engine's own hook slots
-##     (`portableMemoPublisher`, `peerCacheActionPublisher`). The real
+##     (`portableMemoPublisher`, `peerCacheActionPublisher`,
+##     `binaryCachePublisher`). The real
 ##     publishers behind those slots apply the same rule again and are
 ##     exercised against real stores by
 ##     `libs/repro_peer_cache/tests/t_peer_cache_refuses_timestamp_records_across_hosts.nim`
@@ -40,6 +54,7 @@
 import std/[options, os, strutils, unittest]
 
 from repro_test_support import testCaseScratchSlug
+import repro_test_support/reasoned_skip
 
 import repro_build_engine
 import repro_core/paths
@@ -82,14 +97,17 @@ type
     trace: string
     portable: seq[PortableMemoRecord]
     peer: seq[PeerOffer]
+    binary: seq[string]
+      ## The action ids offered to the binary-cache publisher.
 
 proc build(project, cacheRoot, capture: string;
-           publishers = true): Built =
+           publishers = true; binaryCache = false;
+           extraInputs: seq[string] = @[]): Built =
   ## One build of a builtin whose monitor evidence is `capture`, with a
   ## recording publisher in each cross-host hook slot.
   var action = builtinAction(bakWriteText, "t-level1-publication",
     cwd = project,
-    inputs = [project / "src" / "main.c"],
+    inputs = @[project / "src" / "main.c"] & extraInputs,
     outputs = [project / "out" / "result.txt"],
     cacheable = true,
     actionCachePolicy = ffpChecksum,
@@ -104,6 +122,18 @@ proc build(project, cacheRoot, capture: string;
   new(portable)
   var peer: ref seq[PeerOffer]
   new(peer)
+  var binary: ref seq[string]
+  new(binary)
+  if binaryCache:
+    # Intermediate scope, so the builtin qualifies without a recipe-declared
+    # identity; `publishCachedResults`, so a local hit is offered too.
+    config.binaryCacheIntermediateScope = true
+    config.publishCachedResults = true
+    config.binaryCachePublisher = proc (req: BinaryCachePublishRequest):
+        BinaryCachePublishResult {.gcsafe, closure.} =
+      {.cast(gcsafe).}:
+        binary[].add(req.actionId)
+      BinaryCachePublishResult(ok: true)
   if publishers:
     config.portableMemoPublisher = proc (roots: seq[LogicalRoot];
         record: PortableMemoRecord; withOutputs: bool): string {.gcsafe.} =
@@ -124,6 +154,7 @@ proc build(project, cacheRoot, capture: string;
     result.trace.add(event.event & ": " & event.detail & "\n")
   result.portable = portable[]
   result.peer = peer[]
+  result.binary = binary[]
 
 proc newProject(name: string): string =
   result = TmpDir / name / "proj"
@@ -221,25 +252,27 @@ suite "M17: neither publisher offers a Level-1 record":
     require sidecars.len == 1
     # Rewrite it as the version-1 sidecar the previous build wrote: the
     # same bytes without the trailing level byte (and, since version 3, the
-    # evidence source after it).
+    # evidence source after it; since version 4, the host-bound reason after
+    # that).
     var raw = readFile(extendedPath(sidecars[0]))
     require raw.len > 6
-    require raw[4] == char(3) and raw[5] == char(0)
+    require raw[4] == char(4) and raw[5] == char(0)
     let stated = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
       extractFilename(sidecars[0]).changeFileExt("")).get()
     raw[4] = char(1)
-    raw.setLen(raw.len - 1 - 4 - ($stated.evidenceSource).len)
+    raw.setLen(raw.len - 1 - 4 - ($stated.evidenceSource).len -
+      4 - stated.hostBoundReason.len)
     writeFile(extendedPath(sidecars[0]), raw)
     let warm = build(project, cacheRoot, capture)
     checkpoint(warm.trace)
     check not warm.result.launched
-    # The v1 sidecar still derives the portable record...
-    check warm.result.portable
-    # ...which stays on this host.
+    # A pre-version-4 sidecar derives no portable record at all (its
+    # producer dropped every `/run` input unrecorded), which is stricter
+    # than the level refusal it used to reach: nothing is published.
+    check not warm.result.portable
+    check "predates version 4" in warm.result.portableReason
     check warm.portable.len == 0
-    let refused = refusals(warm.trace, "portable-memo-publish-refused")
-    check refused.len == 1
-    check refused.len == 1 and "unstated" in refused[0]
+    check refusals(warm.trace, "portable-fingerprint-unavailable").len == 1
 
   test "a hit on a record whose sidecar does not state an evidence source publishes nothing":
     # M17 chunk 2: a version-2 sidecar states the level but not where the
@@ -256,20 +289,190 @@ suite "M17: neither publisher offers a Level-1 record":
     require sidecars.len == 1
     var raw = readFile(extendedPath(sidecars[0]))
     require raw.len > 6
-    require raw[4] == char(3) and raw[5] == char(0)
+    require raw[4] == char(4) and raw[5] == char(0)
     let stated = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
       extractFilename(sidecars[0]).changeFileExt("")).get()
     check stated.evidenceLevel == elComplete
     check stated.evidenceSource == MonitoredEvidence
-    # The version-2 sidecar: level stated, no source after it.
+    # The version-2 sidecar: level stated, no source (and no version-4
+    # host-bound reason) after it.
     raw[4] = char(2)
-    raw.setLen(raw.len - 4 - ($stated.evidenceSource).len)
+    raw.setLen(raw.len - 4 - ($stated.evidenceSource).len -
+      4 - stated.hostBoundReason.len)
     writeFile(extendedPath(sidecars[0]), raw)
     let warm = build(project, cacheRoot, capture)
     checkpoint(warm.trace)
     check not warm.result.launched
-    check warm.result.portable
+    # As for version 1: the pre-version-4 refusal comes first.
+    check not warm.result.portable
+    check "predates version 4" in warm.result.portableReason
     check warm.portable.len == 0
-    let refused = refusals(warm.trace, "portable-memo-publish-refused")
-    check refused.len == 1
-    check refused.len == 1 and "evidence source" in refused[0]
+    check refusals(warm.trace, "portable-fingerprint-unavailable").len == 1
+
+  test "a hit on a record whose sidecar predates the host-bound reason derives and publishes nothing":
+    # A version-3 sidecar states the level and the source, so every check
+    # before version 4 passed and a hit on it published a portable record.
+    # Its producer's fold dropped every input under `/run` by prefix,
+    # unrecorded -- NixOS's system tools and GPU drivers included -- so the
+    # record may depend on host state no key carries. It stays here, and the
+    # binary cache is not offered it from the hit either. Falsifier: reading
+    # an empty `hostBoundReason` as "nothing was read there" publishes it.
+    let project = newProject("pre-v4")
+    let capture = TmpDir / "pre-v4" / "capture.iomon"
+    writeCapture(capture, fileRead(project / "src" / "main.c"))
+    let cacheRoot = TmpDir / "pre-v4" / "cache"
+    let live = build(project, cacheRoot, capture, publishers = false)
+    require live.result.launched
+    let sidecars = accessSidecars(cacheRoot)
+    require sidecars.len == 1
+    var raw = readFile(extendedPath(sidecars[0]))
+    require raw.len > 6
+    require raw[4] == char(4) and raw[5] == char(0)
+    let stated = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
+      extractFilename(sidecars[0]).changeFileExt("")).get()
+    check not stated.hostBoundUnknown
+    check stated.hostBoundReason == ""
+    # The version-3 sidecar: everything but the trailing host-bound reason.
+    raw[4] = char(3)
+    raw.setLen(raw.len - 4 - stated.hostBoundReason.len)
+    writeFile(extendedPath(sidecars[0]), raw)
+    let decoded = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
+      extractFilename(sidecars[0]).changeFileExt(""))
+    require decoded.isSome
+    check decoded.get().hostBoundUnknown
+    check decoded.get().evidenceSource == MonitoredEvidence
+    let warm = build(project, cacheRoot, capture, binaryCache = true)
+    checkpoint(warm.trace)
+    check not warm.result.launched
+    check not warm.result.portable
+    check "predates version 4" in warm.result.portableReason
+    check warm.portable.len == 0
+    check warm.binary.len == 0
+    let binaryRefused = refusals(warm.trace, "binary-cache-publish-refused")
+    check binaryRefused.len == 1
+    check binaryRefused.len == 1 and "predates version 4" in binaryRefused[0]
+
+proc hostRuntimeSocket(): string =
+  ## A socket of this host under `/run` (outside `/run/user/<uid>` and
+  ## `/run/media`, which the fold keeps by place), or "" when there is none.
+  ## A test cannot create one there, so it uses whatever daemon endpoint the
+  ## host has (`/run/nscd/socket`, `/run/dbus/system_bus_socket`, ...).
+  if not dirExists("/run"):
+    return ""
+  var dirs = @["/run"]
+  for kind, path in walkDir("/run"):
+    if kind == pcDir and path notin ["/run/user", "/run/media"]:
+      dirs.add(path)
+  for dir in dirs:
+    for kind, path in walkDir(dir):
+      if kind == pcFile and runtimeEntryKind(path) == rekSocket and
+          dropsAsVolatileRuntimeState(path, volatileScope([])):
+        return path
+  ""
+
+suite "a host-bound execution is offered to neither publisher":
+
+  setup:
+    if dirExists(TmpDir):
+      removeDir(extendedPath(TmpDir))
+    createDir(TmpDir)
+
+  test "an execution that read a runtime object under /run serves locally and is offered to neither publisher":
+    # The volatile-runtime fold drops a socket, FIFO or device node under
+    # `/run` (it has no content to fingerprint), and the record that read
+    # one read state of THIS host. It serves this host, and neither
+    # cross-host publisher is offered it, live or from a later local hit
+    # (the reason travels in the access sidecar). Falsifier: dropping the
+    # host-bound check from `finishPortableRecord` or from
+    # `publishPeerCacheBundle` offers it.
+    let socket = hostRuntimeSocket()
+    if socket.len == 0:
+      skip("this host has no socket under /run to read")
+    else:
+      let project = newProject("host-bound")
+      let capture = TmpDir / "host-bound" / "capture.iomon"
+      writeCapture(capture, fileRead(project / "src" / "main.c"),
+        MonitorRecord(kind: mrPathProbe, observationKind: moPathProbe,
+          osPid: 4242, threadId: 4242, path: socket, detail: ""))
+      let cacheRoot = TmpDir / "host-bound" / "cache"
+      let live = build(project, cacheRoot, capture, binaryCache = true)
+      checkpoint(live.trace)
+      require live.result.launched
+      check live.result.evidence.hostBoundInput == socket
+      check live.result.evidence.runtimeStateDrops == 1
+      check socket notin live.result.evidence.monitorProbes
+      check not live.result.portable
+      check socket in live.result.portableReason
+      check live.portable.len == 0
+      check live.peer.len == 0
+      let peerRefused = refusals(live.trace, "peer-cache-publish-refused")
+      check peerRefused.len == 1
+      check peerRefused.len == 1 and socket in peerRefused[0]
+      check live.binary.len == 0
+      let binaryRefused = refusals(live.trace, "binary-cache-publish-refused")
+      check binaryRefused.len == 1
+      check binaryRefused.len == 1 and socket in binaryRefused[0]
+
+      # Local reuse is unaffected, and the portable record a hit derives is
+      # host-bound too: the hit ran no monitor, and the reason came from the
+      # sidecar the producing run stored.
+      let warm = build(project, cacheRoot, capture, binaryCache = true)
+      checkpoint(warm.trace)
+      check not warm.result.launched
+      check warm.result.status in {asCacheHit, asUpToDate}
+      check not warm.result.portable
+      check socket in warm.result.portableReason
+      check warm.portable.len == 0
+      check warm.peer.len == 0
+      # The binary cache is offered the hit only by its sidecar's say-so.
+      check warm.binary.len == 0
+      let warmBinaryRefused =
+        refusals(warm.trace, "binary-cache-publish-refused")
+      check warmBinaryRefused.len == 1
+      check warmBinaryRefused.len == 1 and socket in warmBinaryRefused[0]
+
+  test "a DECLARED runtime object under /run is counted and makes the record host-bound":
+    # The declared and tool-reported channels never pass through the monitor
+    # fold; the cache record drops a socket there all the same, so the drop
+    # is counted and the record kept to this host exactly as for an observed
+    # read (Dependency-Observation-Attribution.md "Every elision is
+    # counted"). Falsifier: removing `countDeclaredVolatileDrops` from
+    # `collectEvidence` publishes the record and counts nothing.
+    let socket = hostRuntimeSocket()
+    if socket.len == 0:
+      skip("this host has no socket under /run to declare")
+    else:
+      let project = newProject("declared-host-bound")
+      let capture = TmpDir / "declared-host-bound" / "capture.iomon"
+      writeCapture(capture, fileRead(project / "src" / "main.c"))
+      let cacheRoot = TmpDir / "declared-host-bound" / "cache"
+      let live = build(project, cacheRoot, capture, binaryCache = true,
+        extraInputs = @[socket])
+      checkpoint(live.trace)
+      require live.result.launched
+      check live.result.evidence.hostBoundInput == socket
+      check live.result.evidence.runtimeStateDrops == 1
+      check not live.result.portable
+      check live.portable.len == 0
+      check live.peer.len == 0
+      check live.binary.len == 0
+      check refusals(live.trace, "volatile-runtime-dropped").len == 1
+
+  test "a control with no runtime object under /run is published to the binary cache, live and from a hit":
+    # Without this, the binary-cache refusals above could pass because the
+    # hook never fires for this builtin at all.
+    let project = newProject("binary-control")
+    let capture = TmpDir / "binary-control" / "capture.iomon"
+    writeCapture(capture, fileRead(project / "src" / "main.c"))
+    let cacheRoot = TmpDir / "binary-control" / "cache"
+    let live = build(project, cacheRoot, capture, binaryCache = true)
+    checkpoint(live.trace)
+    require live.result.launched
+    check live.result.evidence.hostBoundInput == ""
+    check live.binary.len == 1
+    check refusals(live.trace, "binary-cache-publish-refused").len == 0
+    let warm = build(project, cacheRoot, capture, binaryCache = true)
+    checkpoint(warm.trace)
+    check not warm.result.launched
+    check warm.binary.len == 1
+    check refusals(warm.trace, "binary-cache-publish-refused").len == 0

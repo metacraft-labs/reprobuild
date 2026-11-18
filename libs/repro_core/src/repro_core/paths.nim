@@ -324,11 +324,13 @@ func isVolatileRuntimeStatePath*(path: string): bool =
   ##
   ## THIS IS A CLASSIFICATION BY PREFIX, NOT THE DECISION. The same prefixes
   ## also hold ordinary files: a build tree on `/dev/shm/<dir>`, a disk an
-  ## administrator mounted under `/run/<dir>`. The path alone cannot tell
-  ## those apart, so nothing drops a read on this answer alone:
-  ## `dropsAsVolatileRuntimeState` asks it together with the invocation's
-  ## `VolatileScope`, and a read inside the invocation's own trees is never
-  ## dropped.
+  ## administrator mounted under `/run/<dir>`, NixOS's system profile under
+  ## `/run/current-system`. The path alone cannot tell those apart, so
+  ## nothing drops a read on this answer alone: `dropsAsVolatileRuntimeState`
+  ## asks it together with the invocation's `VolatileScope` (a read inside
+  ## the invocation's own trees is never dropped), and `volatileInputVerdict`
+  ## then asks the disk what a path under `/run` is (only a socket, a FIFO or
+  ## a device node is dropped there).
   let normalized = path.replace('\\', '/')
   if normalized == "/dev" or normalized.startsWith("/dev/") or
      normalized == "/proc" or normalized.startsWith("/proc/") or
@@ -395,33 +397,36 @@ func exemptRoots*(scope: VolatileScope): seq[string] =
   scope.exempt
 
 func dropsAsVolatileRuntimeState*(path: string; scope: VolatileScope): bool =
-  ## THE decision: whether a recorded read, write, probe or enumeration of
-  ## `path` is left out of an action's evidence and cache record as runtime
-  ## state. True exactly when the path is under a volatile prefix
-  ## (`isVolatileRuntimeStatePath`), is not in a place that holds only
-  ## ordinary files (`isOrdinaryFileUnderRuntimeMount`), and is at or under
-  ## none of the invocation's own trees (`scope`: its roots and the trees it
-  ## reads as source).
+  ## THE PREFIX HALF of the decision: whether `path` is in a place the fold
+  ## cannot keep on its location alone. True exactly when the path is under a
+  ## volatile prefix (`isVolatileRuntimeStatePath`), is not in a place that
+  ## holds only ordinary files (`isOrdinaryFileUnderRuntimeMount`), and is at
+  ## or under none of the invocation's own trees (`scope`: its roots and the
+  ## trees it reads as source).
   ##
-  ## THIS IS A SILENT DROP, and a wrong one is a stale SERVE: the action is
-  ## fingerprinted as though it had never read the file. The decision used
-  ## to be the prefix less those places alone. Every layout they did not
-  ## name still lost its reads: the listing of a project at
-  ## `/dev/shm/<name>`, a project on a mount at `/run/<dir>`. The
-  ## invocation's own roots close those: whatever the prefix, a path inside
-  ## them is the project's and is kept, and a root that cannot be told apart
-  ## from the runtime state around it is refused (`volatileRootRefusal`).
+  ## PURE, and not the whole decision for a recorded INPUT. Under `/dev`,
+  ## `/proc` and `/sys` its answer is final. Under `/run` it only says that
+  ## the path has to be looked at: `volatileInputVerdict` keeps it unless it
+  ## is a socket, a FIFO or a device node. A caller deciding whether an input
+  ## enters an action's evidence or cache record must use that, never this
+  ## alone; the build engine still uses this for the observations that are
+  ## not inputs (an action's writes and removals), where what a path is after
+  ## the action says nothing about what it read.
   ##
-  ## The scope also holds the trees the build reads as source outside its
-  ## roots (the build engine's `BuildEngineConfig.sourceTrees`: the
-  ## workspace and its member repositories, the checkouts the lock pins, the
-  ## develop overrides), so a sibling repository on a mount at `/run/<dir>`
-  ## is kept as the project is. The places stay kept OUTSIDE the scope: they
-  ## are known by what they are, and a build reads files there that no tree
-  ## of it contains (an input named by absolute path). What is left dropped
-  ## is what neither the path nor the build can tell from runtime state: a
-  ## flat entry of `/dev/shm`, the rest of `/dev`, `/proc`, `/sys`, and
-  ## `/run` less `/run/user/<uid>`, `/run/media` and the build's trees.
+  ## THE HISTORY, because each step was a silent stale serve. The decision
+  ## used to be the prefix less `/run/user/<uid>` and `/run/media`. That lost
+  ## the listing of a project at `/dev/shm/<name>` and a project on a mount at
+  ## `/run/<dir>`; the invocation's own roots close those, and a root that
+  ## cannot be told apart from the runtime state around it is refused
+  ## (`volatileRootRefusal`). The scope also holds the trees the build reads
+  ## as source outside its roots (the build engine's
+  ## `BuildEngineConfig.sourceTrees`), so a sibling repository on a mount at
+  ## `/run/<dir>` is kept as the project is. It still lost NixOS's system
+  ## profile: `/run/current-system/sw/bin` (the system `PATH`),
+  ## `/run/wrappers/bin` and `/run/opengl-driver/lib` are symbolic links into
+  ## the store, so after a `nixos-rebuild switch` an edge that ran one of
+  ## those tools or loaded one of those drivers kept hitting with the old
+  ## outputs. That is what `volatileInputVerdict` closes.
   let normalized = path.replace('\\', '/')
   if not normalized.isVolatileRuntimeStatePath():
     return false
@@ -431,6 +436,200 @@ func dropsAsVolatileRuntimeState*(path: string; scope: VolatileScope): bool =
     if normalized.isAtOrUnder(root):
       return false
   true
+
+type
+  RuntimeEntryKind* = enum
+    ## What a path under `/run` IS on disk, as far as deciding whether a
+    ## recorded input of it can be re-checked later (`runtimeEntryKind`).
+    rekAbsent
+      ## Nothing there (`ENOENT`, `ENOTDIR`): the record was an absence
+      ## probe, such as a `PATH` walk missing in `/run/wrappers/bin`.
+    rekRegular
+      ## A regular file, directly or through a symbolic link.
+    rekDirectory
+      ## A directory, directly or through a symbolic link.
+    rekSymlink
+      ## A DANGLING symbolic link. The link itself is an entry whose target
+      ## `readlink` can re-check.
+    rekSocket
+      ## A unix-domain socket: a daemon's endpoint.
+    rekFifo
+      ## A named pipe.
+    rekDevice
+      ## A character or block device node.
+    rekUnknown
+      ## The type could not be read (`EACCES`, `ELOOP`, a non-POSIX host).
+
+  VolatileVerdict* = enum
+    ## The volatile-runtime fold's answer for one recorded INPUT: a read, an
+    ## executed image, a loaded library, a probe or an enumeration
+    ## (`volatileInputVerdict`).
+    vvKeep
+      ## An ordinary input, fingerprinted like any other.
+    vvDropKernelState
+      ## Under `/dev`, `/proc` or `/sys`, outside the places and trees the
+      ## prefix rule keeps: the running kernel's or a device's state, dropped
+      ## by prefix as before. Never makes a record host-bound: nearly every
+      ## action reads `/dev/null`.
+    vvDropRuntimeObject
+      ## A socket, a FIFO or a device node under `/run`: a runtime object of
+      ## THIS host, with no content to fingerprint. Dropped, and the record
+      ## that read it read host state no other host has, so the build engine
+      ## keeps it off every other host (not portable).
+
+func isDrop*(verdict: VolatileVerdict): bool =
+  verdict != vvKeep
+
+func isRuntimeObjectKind*(kind: RuntimeEntryKind): bool =
+  ## The kinds a recorded input under `/run` is dropped for.
+  kind in {rekSocket, rekFifo, rekDevice}
+
+proc runtimeEntryKind*(path: string): RuntimeEntryKind =
+  ## What `path` is on disk NOW. `lstat` first; a symbolic link is followed
+  ## with `stat`, so a link into the store (`/run/current-system`,
+  ## `/run/opengl-driver`) answers with what it points at, and a link to a
+  ## socket answers `rekSocket` (opening it opens the socket). A link whose
+  ## target is gone answers `rekSymlink`, not `rekAbsent`.
+  ##
+  ## Intermediate components are resolved by the kernel either way, so
+  ## `/run/current-system/sw/bin/sh` answers for the store file it reaches.
+  ##
+  ## `rekUnknown` on any error other than "not there", and on a non-POSIX
+  ## host (where no path is under `/run` anyway). `volatileVerdictFor` keeps
+  ## such a path: the wrong answer then costs a spurious re-run, never a
+  ## stale result.
+  ##
+  ## https://man7.org/linux/man-pages/man2/lstat.2.html and
+  ## https://man7.org/linux/man-pages/man7/inode.7.html (the `S_IS*` tests).
+  when defined(posix):
+    var st: Stat
+    if lstat(cstring(path), st) != 0:
+      let err = errno
+      return
+        if err == ENOENT or err == ENOTDIR: rekAbsent
+        else: rekUnknown
+    if S_ISLNK(st.st_mode):
+      var target: Stat
+      if stat(cstring(path), target) != 0:
+        let err = errno
+        return
+          if err == ENOENT or err == ENOTDIR: rekSymlink
+          else: rekUnknown
+      st = target
+    if S_ISREG(st.st_mode): rekRegular
+    elif S_ISDIR(st.st_mode): rekDirectory
+    elif S_ISSOCK(st.st_mode): rekSocket
+    elif S_ISFIFO(st.st_mode): rekFifo
+    elif S_ISCHR(st.st_mode) or S_ISBLK(st.st_mode): rekDevice
+    else: rekUnknown
+  else:
+    rekUnknown
+
+func isUnderRunPrefix(normalized: string): bool =
+  normalized == "/run" or normalized.startsWith("/run/")
+
+func volatileVerdictFor*(path: string; scope: VolatileScope;
+                         kind: RuntimeEntryKind): VolatileVerdict =
+  ## The decision for a recorded input of `path`, given what it is on disk
+  ## (`kind`, from `runtimeEntryKind`). PURE, so it can be tested for every
+  ## kind under `/run`, where a test cannot create entries.
+  ##
+  ## * The prefix rule keeps it (`dropsAsVolatileRuntimeState` false):
+  ##   outside every volatile prefix, `/run/user/<uid>`, `/run/media`, a
+  ##   directory under `/dev/shm`, the invocation's own trees. Kept, whatever
+  ##   `kind` says.
+  ## * Under `/dev`, `/proc` or `/sys`: dropped by prefix, as before
+  ##   (`vvDropKernelState`). Their entries describe the running kernel and
+  ##   devices; what a file there "contains" is not a fact a later lookup can
+  ##   re-check.
+  ## * Under `/run`, BY FILE TYPE. A regular file, a directory, a symbolic
+  ##   link or an absent path is KEPT: on NixOS `/run/current-system`,
+  ##   `/run/wrappers` and `/run/opengl-driver` are links into the store, and
+  ##   an absence (a `PATH` walk miss there) is as re-checkable as a file and
+  ##   dropping it would hide a tool that later shadows the one that ran. A
+  ##   file a daemon rewrites (a pid file) is kept too; the cost is a re-run
+  ##   when it changes, which is the honest answer for an action that read it.
+  ##   A socket, a FIFO or a device node is DROPPED (`vvDropRuntimeObject`):
+  ##   there is nothing to fingerprint, and keeping it would make the action
+  ##   miss on every run.
+  let normalized = path.replace('\\', '/')
+  if not normalized.dropsAsVolatileRuntimeState(scope):
+    return vvKeep
+  if not normalized.isUnderRunPrefix():
+    return vvDropKernelState
+  if kind.isRuntimeObjectKind(): vvDropRuntimeObject
+  else: vvKeep
+
+proc volatileInputVerdict*(path: string; scope: VolatileScope):
+    VolatileVerdict =
+  ## THE decision for a recorded INPUT of `path` (a read, an executed image,
+  ## a loaded library, a probe, an enumeration, a declared or tool-reported
+  ## input): whether it is left out of an action's evidence and cache record
+  ## as runtime state, and why. `volatileVerdictFor` with the kind read from
+  ## disk, and the disk is read only for a path the prefix rule would drop
+  ## under `/run`, so every other path costs no system call.
+  ##
+  ## A WRONG DROP IS A STALE SERVE: the action is fingerprinted as though it
+  ## had never read the file. Every caller that decides what enters an
+  ## action's evidence, cache record or portable record goes through this
+  ## one proc, so they cannot disagree.
+  ##
+  ## The kind is read when the action has FINISHED (the fold) or later (the
+  ## cache record), not when the action read the path. A socket the action
+  ## saw and that is gone by then reads as absent and is kept as an absence,
+  ## which costs at most a re-run when it reappears.
+  let normalized = path.replace('\\', '/')
+  if not normalized.dropsAsVolatileRuntimeState(scope):
+    return vvKeep
+  if not normalized.isUnderRunPrefix():
+    return vvDropKernelState
+  volatileVerdictFor(normalized, scope, runtimeEntryKind(path))
+
+proc linkHopsUnderRun*(path: string): seq[string] =
+  ## The proper prefixes of `path` under `/run` that are symbolic links
+  ## (`lstat`), shortest first: `/run/current-system` and
+  ## `/run/current-system/sw` for `/run/current-system/sw/bin/gcc` on NixOS.
+  ## Empty for a path outside `/run` and on a non-POSIX host.
+  ##
+  ## WHY THE BUILD ENGINE RECORDS THEM. A tool, library or data file reached
+  ## through a link under `/run` is kept as an input (`volatileInputVerdict`)
+  ## and recorded at the path as spelled, but a metadata comparison of that
+  ## path (`ffpHybrid`, `ffpTimestamp`) sees only the file the link reaches
+  ## NOW: after `nixos-rebuild switch` retargets `/run/current-system`, the
+  ## new generation's file of the same size has the same mtime, because every
+  ## file in the Nix store has mtime 1, and the edge is served stale. The
+  ## monitor records the components of a resolution only for `realpath` and
+  ## the `readlink` family, not for an `open` or an `execve` through the
+  ## link. The links themselves can be re-checked: a link to a directory is
+  ## fingerprinted by its `readlink` text (`linkedDirectoryIdentity` in
+  ## `repro_local_store`), so a retarget moves a recorded input whatever the
+  ## two targets hold.
+  ##
+  ## The final component is not included: it is the input itself, already
+  ## recorded. A component that cannot be read is skipped: the input it
+  ## leads to is still recorded, and its own fingerprint decides.
+  ##
+  ## https://man7.org/linux/man-pages/man7/path_resolution.7.html
+  let normalized = path.replace('\\', '/')
+  if not normalized.isUnderRunPrefix():
+    return
+  when defined(posix):
+    var prefix = ""
+    let parts = normalized.split('/')
+    for i in 0 ..< parts.high:
+      if parts[i].len == 0:
+        continue
+      prefix.add('/')
+      prefix.add(parts[i])
+      if prefix == "/run":
+        continue
+      var st: Stat
+      if lstat(cstring(prefix), st) == 0 and S_ISLNK(st.st_mode):
+        result.add(prefix)
+
+proc dropsAsVolatileInput*(path: string; scope: VolatileScope): bool =
+  ## Whether a recorded input of `path` is dropped (`volatileInputVerdict`).
+  volatileInputVerdict(path, scope).isDrop
 
 func tarOperand*(path: string): string =
   ## W16/N48: a path about to be handed to ``tar`` as a COMMAND-LINE OPERAND.
