@@ -631,6 +631,9 @@ proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
     # The directory's own user (the shipping unit writing its own records,
     # reaching its state through the link systemd made): no privilege to
     # guard here, so the state directory is opened as named.
+    if not dirExists(state):
+      createDir(state)
+      discard posix.chmod(state.cstring, Mode(0o700))
     sfd = posix.open(state.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
     if sfd < 0: raiseOSError(osLastError(), "open " & state)
   defer: discard posix.close(sfd)

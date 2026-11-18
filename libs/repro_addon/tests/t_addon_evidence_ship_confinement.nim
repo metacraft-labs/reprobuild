@@ -208,6 +208,12 @@ suite "a root writer follows no link into the outbox (§13 decision 181)":
     for _ in walkDir(elsewhere): inc inElsewhere
     check inElsewhere == 0
 
+  test "an outbox whose state directory does not exist yet is made":
+    let st = root / "w5" / "state"
+    writeDelegatedEntry(st / "outbox", "e.evr", "bytes",
+                        staging = st / ".outbox-staging")
+    check readFile(st / "outbox" / "e.evr") == "bytes"
+
   test "the record writer goes through it":
     let st = root / "w4" / "state"
     createDir(st / "outbox")
