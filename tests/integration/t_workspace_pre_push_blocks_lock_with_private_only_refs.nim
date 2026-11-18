@@ -24,10 +24,13 @@
 ##     ``projects/`` + ``repos/``, its committed ``repro-workspace.toml``, and
 ##     a ``.gitignore`` keeping the sibling clones, ``.repro/`` and the
 ##     personal settings file out of it. The root is always the base layer
-##     (Workspace-Settings-Files.md §3), and so — no ``[records]`` being
-##     declared — the lock record store, which is what makes the lock the
-##     tests commit there the workspace's own lock (case 1 reads it back as
-##     current). The root is the ``--current-repo`` every case pushes from;
+##     (Workspace-Settings-Files.md §3), but it is metadata and never the
+##     lock record store: no ``[records] url`` and no store checkout being
+##     declared, the workspace is committed-lock-only, and case 1 checks that
+##     the gate writes no record into the root. The lock files the tests
+##     commit under the root's ``locks/`` are pushed content for stage 6 to
+##     judge, not records the gate reads back. The root is the
+##     ``--current-repo`` every case pushes from;
 ##   - the PRIVATE layer is one person's, a ``local_path`` layer in
 ##     ``repro-workspace.local.toml`` (§4) pointing into the test scratch
 ##     directory. Declaring it is also what composes the root as a layer.
@@ -473,10 +476,17 @@ suite "M26 — pre-push lock visibility check":
       let report = readReport(fx)
       check report["exitCode"].getInt() == 0
       check report["failures"].len == 0
-      # The lock is already current: RA-1 stage 5 resolves it via Git
-      # history over the per-repo lock subtree (no index), and its
-      # public-repo pins match the observed HEADs.
-      check report["lockUpdate"]["kind"].getStr() == "already-current"
+      # The root is metadata, never the record store (Workspace-Settings-
+      # Files.md §3): no store is synthesized, and the gate writes nothing
+      # into the root's `locks/` beside the lock this push carries.
+      checkpoint("lockUpdate: " & $report["lockUpdate"])
+      check report["recordStoreRoot"].getStr() == ""
+      check not report["lockUpdate"]["lockFilePath"].getStr().startsWith(
+        fx.publicLayerPath / "locks")
+      var rootRecords: seq[string]
+      for path in walkDirRec(fx.publicLayerPath / "locks"):
+        rootRecords.add(path)
+      check rootRecords == @[lockAbs]
 
   test "test_m26_pre_push_blocks_when_public_lock_references_private_only_repo":
     let gitBin = findExe("git")

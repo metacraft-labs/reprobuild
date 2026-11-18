@@ -151,10 +151,11 @@ suite "the state file carries no manifest layers":
     check "moved the state file" in fixed.stdout
     check "moved manifest layer local_path 'layer-a'" in fixed.stdout
     check "dropped manifest layer local_path '.'" in fixed.stdout
-    # The composition change is stated: the root is now the base layer and
-    # so the lock record store unless `[records]` says otherwise.
-    check "lock record store" in fixed.stdout
-    check "[records]" in fixed.stdout
+    # The composition change is stated: the root is now the base layer but
+    # NOT the lock record store (Workspace-Settings-Files.md §8), and
+    # `[records] url` is named as the way to keep a store.
+    check "not the lock record store" in fixed.stdout
+    check "`[records] url`" in fixed.stdout
     check not fileExists(oldPath)
     require fileExists(statePath)
     let state = readFile(statePath)

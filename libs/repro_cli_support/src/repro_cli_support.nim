@@ -42911,10 +42911,15 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ##   1. explicit ``--manifest-url`` / ``--manifest-branch`` (RA-11 flags);
   ##   2. the workspace settings file's record store (``repro-workspace.toml``
   ##      ``[records] url`` / ``branch``), found through
-  ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo;
-  ##   3. the host repo's own ``remote.origin.url``.
-  ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
-  ## NO built-in/hardcoded manifest URL fallback.
+  ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo.
+  ## There is NO further fallback. The host repo's own ``origin`` is never
+  ## taken: it is the repository at the root, which is metadata or a member
+  ## and never the record store (Workspace-Manifests.md §"Metadata and records
+  ## are separate repositories"; Unified-Locking-And-Hooks.md §14.1: a record
+  ## store is "never the default and never inferred"). If neither resolves,
+  ## ``init`` clones nothing, and fails loud only when the workspace also has
+  ## no metadata of its own — the ``repro`` binary ships NO built-in manifest
+  ## URL either.
   ##
   ## When the workspace root already holds the manifests (``projects/`` —
   ## the flat layout, where the root workspace repository IS the manifest
@@ -42960,16 +42965,9 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
             name notin args.additionalProjects:
           args.additionalProjects.add(name)
 
-  if flatLayout:
-    return
-
-  # (3) Host repo origin — only when neither an explicit flag nor the config
-  # supplied a manifest URL.
-  if args.manifestUrl.len == 0:
-    let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
-    let origin = gitRemoteOriginUrl(identity, args.workspaceRoot)
-    if origin.len > 0:
-      args.manifestUrl = origin
+  # No third step: the host repo's ``origin`` is never a fallback (see above,
+  # and reprobuild-pm issues/2026-11-16-repro-falls-back-to-the-root-or-origin-
+  # as-the-lock-record-store-when-records-names-no-url.md).
 
 const
   RecordStoreDirName* = "records"
@@ -43794,7 +43792,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## emits the structured report.
   var args = argsIn
   # RA-8: resolve the manifest URL/branch (+ default projects, project name)
-  # from the host bootstrap config / host repo origin BEFORE bootstrapping,
+  # from the flags / host bootstrap config BEFORE bootstrapping,
   # with NO hardcoded org default. The resolution is a no-op when a manifest
   # checkout already exists.
   resolveBootstrapConfig(args)
@@ -43813,7 +43811,8 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       "no manifest configured for `repro workspace init`: pass " &
         "`--manifest-url=…`, commit a `" & settingsFileName &
         "` with a `[records] url` (or set `REPRO_WORKSPACE_CONFIG`), or run " &
-        "inside a host repo whose `origin` is the manifest source. `repro` " &
+        "in a workspace root that holds its own `projects/`. The host " &
+        "repository's remote is never used in their place, and `repro` " &
         "ships no built-in manifest URL.")
   if args.projectName.len == 0:
     raise newException(ValueError,
@@ -46698,7 +46697,10 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
   # the encoded project component. Probing the raw name made a workspace whose
   # project name is not filename-shaped contribute no DB claim at all.
   let segment = encodeLockPathSegment(project)
-  for candidate in recordStoreCandidates(workspaceRoot) & @[workspaceRoot]:
+  # Never the workspace root: the root is metadata, never the record store
+  # (Workspace-Settings-Files.md §3), so a ``locks/`` there is no record the
+  # writer made and nothing to compare against.
+  for candidate in recordStoreCandidates(workspaceRoot):
     if dirExists(extendedPath(candidate / "locks" / segment)):
       return candidate
   ""
@@ -54699,15 +54701,20 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
   ##      §8 step 2), so neither the root base layer nor any other composed
   ##      layer may stand in for it. With no checkout the answer is "" (no
   ##      record is written) and a one-time notice names the clone.
-  ##   3. The first composed ``[[manifest]]`` layer (composer mode) — when
-  ##      the settings files declare any layer, the root repository as the
-  ##      base layer (§3: the store when ``[records]`` names none). For
-  ##      ``local_path`` layers the path is taken verbatim (relative to the
-  ##      workspace root); for ``url`` layers it's the on-disk
-  ##      checkout the composer materialised at
-  ##      ``<workspaceRoot>/.repro/manifests-<i>-<sanitized>``.
-  ##   4. The record-store checkout at its conventional location, or "" when
+  ##   3. The record-store checkout at its conventional location, or "" when
   ##      there is none (see the comment at the end).
+  ##
+  ## NEVER a composed ``[[manifest]]`` layer. With layers declared the root
+  ## repository is composed first as the base layer, and it, like every
+  ## other layer, is METADATA, which is never the record store
+  ## (Workspace-Settings-Files.md §3, "No ``[records] url`` means no store is
+  ## synthesized"; Unified-Locking-And-Hooks.md §5, §14.1). The former step
+  ## that took the first composed layer made the root the store whenever
+  ## ``[records]`` named no url — even over a real store checkout at
+  ## ``.repro/records`` (reprobuild-pm issues/2026-11-16-repro-falls-back-to-
+  ## the-root-or-origin-as-the-lock-record-store-when-records-names-no-url.md).
+  ## ``workspaceLocal`` is kept in the signature for the callers; it no longer
+  ## decides the destination.
   if parsed.recordStoreRoot.len > 0:
     return parsed.recordStoreRoot
   let declared = declaredRecordStore(parsed.workspaceRoot)
@@ -54715,43 +54722,7 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
     if declared.checkout.len == 0:
       announceMissingRecordStoreCheckout(parsed.workspaceRoot, declared)
     return declared.checkout
-  if workspaceLocal.isSome:
-    let local = workspaceLocal.get()
-    if local.manifest.len > 0:
-      let first = local.manifest[0]
-      if first.local_path.isSome and first.local_path.get().len > 0:
-        let raw = first.local_path.get()
-        if isAbsolute(raw):
-          return raw
-        return parsed.workspaceRoot / raw
-      if first.url.isSome and first.url.get().len > 0:
-        # Mirror the composer's directory-naming convention so the
-        # lock lands inside the same on-disk checkout the composer
-        # acquired the layer at.
-        let sanitizedSegments = block:
-          var raw1 = ""
-          for ch in first.url.get():
-            case ch
-            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
-            else: raw1.add('-')
-          var collapsed = ""
-          var prevDash = false
-          for ch in raw1:
-            if ch == '-':
-              if not prevDash: collapsed.add(ch)
-              prevDash = true
-            else:
-              collapsed.add(ch)
-              prevDash = false
-          if collapsed.len > 80:
-            collapsed.setLen(80)
-          collapsed.strip(chars = {'-'},
-            leading = true, trailing = true)
-        let suffix =
-          if sanitizedSegments.len > 0: sanitizedSegments
-          else: "layer"
-        return parsed.workspaceRoot / ".repro" /
-          ("manifests-0-" & suffix)
+  discard workspaceLocal
   # Native default git-checkout lock store: the `.repro/manifests` store DB,
   # NOT the membership root. Membership (projects/repos) lives at the workspace
   # root (or a `.repro/manifests` checkout); the lock store is always the
@@ -77386,7 +77357,8 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
   ## Resolve the manifest-layer root that OWNS the lock subtree for
   ## status's drift comparison. Mirrors M11's ``pickRecordStoreRoot``
   ## but without the ``--record-store-root`` override (status is
-  ## read-only and uses the same anchor M11 wrote to). A ``[records] url``
+  ## read-only and uses the same anchor M11 wrote to), and so never a
+  ## composed manifest layer. A ``[records] url``
   ## store is read from its checkout and never from a composed layer, as the
   ## writer writes it; with no checkout the conventional (absent) location
   ## reads as "no lock", and the writer's notice is not repeated here.
@@ -77395,43 +77367,15 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
     return
       if declared.checkout.len > 0: declared.checkout
       else: workspaceRoot / ".repro" / RecordStoreDirName
-  if workspaceLocal.isSome:
-    let local = workspaceLocal.get()
-    if local.manifest.len > 0:
-      let first = local.manifest[0]
-      if first.local_path.isSome and first.local_path.get().len > 0:
-        let raw = first.local_path.get()
-        if isAbsolute(raw):
-          return raw
-        return workspaceRoot / raw
-      if first.url.isSome and first.url.get().len > 0:
-        # Mirror the composer's directory-naming convention so the
-        # status reader finds the lock written by the M11 dispatcher
-        # at the same on-disk path.
-        let sanitizedSegments = block:
-          var raw1 = ""
-          for ch in first.url.get():
-            case ch
-            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
-            else: raw1.add('-')
-          var collapsed = ""
-          var prevDash = false
-          for ch in raw1:
-            if ch == '-':
-              if not prevDash: collapsed.add(ch)
-              prevDash = true
-            else:
-              collapsed.add(ch)
-              prevDash = false
-          if collapsed.len > 80:
-            collapsed.setLen(80)
-          collapsed.strip(chars = {'-'},
-            leading = true, trailing = true)
-        let suffix =
-          if sanitizedSegments.len > 0: sanitizedSegments
-          else: "layer"
-        return workspaceRoot / ".repro" / ("manifests-0-" & suffix)
-  workspaceRoot / ".repro" / "manifests"
+  # Never a composed layer, as the writer never writes one (see
+  # ``pickRecordStoreRoot``): the root base layer and every other layer are
+  # metadata, never the record store. The store checkout at its conventional
+  # location, or — when none exists — that (absent) location, which reads as
+  # "no lock".
+  discard workspaceLocal
+  let existing = existingRecordStoreRoot(workspaceRoot)
+  if existing.len > 0: existing
+  else: workspaceRoot / ".repro" / RecordStoreDirName
 
 proc deriveActiveBranch(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal];
