@@ -46,6 +46,9 @@
  *                  §6.1 point 4 is a real hazard and that the adjustment is
  *                  what prevents it.
  *   torn           non-atomic byte-by-byte publication. The positive control.
+ *   fault-bad-stack  no publication: fault at once with `rsp` = 0x1000. The
+ *                  detector's own control — a fault that wrecked the stack
+ *                  pointer must still be reported (see `install_fault_stack`).
  *
  * Everything below drives the PRODUCTION provider through
  * `repro_hcr_linux_x86_64_probe.c`, which re-exports the same `static`
@@ -196,6 +199,39 @@ static void fault_handler(int signo, siginfo_t *info, void *ucontext) {
   _exit(70);
 }
 
+/*
+ * Every thread reports its fault on an ALTERNATE signal stack.
+ *
+ * The arms that must crash (tier1, tier2-noadjust, torn) die by executing the
+ * tail of a `rel32`, or a wild branch, as code. Those bytes can move `rsp`
+ * anywhere before the fault, and a fault whose handler frame the kernel
+ * cannot push onto the thread's own stack is forced to SIG_DFL: the process
+ * dies with exit 139 and no HCR-M4-CRASH line, the harness cannot attribute
+ * it, and the whole gate aborts. Measured on a host at load/CPU 4-7: ten
+ * `tier1` processes in twelve gate runs died that way, so the gate never
+ * reached its tier-2 verdict. With the handler on a stack the faulting code
+ * cannot have touched, every such fault is reported, with its PC, exactly as
+ * before. Detection only: no fault is suppressed and none is reclassified.
+ */
+#define FAULT_STACK_BYTES 65536
+#define FAULT_STACK_SLOTS (MAX_WORKERS + 8 + 1)
+#define FAULT_STACK_MAIN (MAX_WORKERS + 8)
+static unsigned char g_fault_stacks[FAULT_STACK_SLOTS][FAULT_STACK_BYTES]
+    __attribute__((aligned(64)));
+
+static void install_fault_stack(int slot) {
+  stack_t stack;
+  memset(&stack, 0, sizeof(stack));
+  stack.ss_sp = g_fault_stacks[slot];
+  stack.ss_size = FAULT_STACK_BYTES;
+  stack.ss_flags = 0;
+  if (sigaltstack(&stack, NULL) != 0) {
+    static const char message[] = "HCR-M4-FATAL: sigaltstack failed\n";
+    (void)!write(2, message, sizeof(message) - 1);
+    _exit(69);
+  }
+}
+
 static void chaos_signal_handler(int signo) {
   (void)signo;
   /* Deliberately empty. The point is not what the handler does, it is that the
@@ -212,6 +248,7 @@ static uint64_t now_ns(void) {
 
 static void *worker_main(void *raw) {
   worker_state *w = (worker_state *)raw;
+  install_fault_stack(w->index);
   w->tid = (int)syscall(SYS_gettid);
   while (!g_stop) {
     int i;
@@ -246,7 +283,7 @@ static void *worker_main(void *raw) {
 
 static void *chaos_main(void *raw) {
   long pid = (long)getpid();
-  (void)raw;
+  install_fault_stack((int)(intptr_t)raw);
   while (!g_stop) {
     int i;
     for (i = 0; i < g_worker_count; ++i) {
@@ -465,7 +502,8 @@ int main(int argc, char **argv) {
 
   memset(&fault_action, 0, sizeof(fault_action));
   fault_action.sa_sigaction = fault_handler;
-  fault_action.sa_flags = SA_SIGINFO | SA_NODEFER;
+  install_fault_stack(FAULT_STACK_MAIN);
+  fault_action.sa_flags = SA_SIGINFO | SA_NODEFER | SA_ONSTACK;
   sigemptyset(&fault_action.sa_mask);
   sigaction(SIGSEGV, &fault_action, NULL);
   sigaction(SIGILL, &fault_action, NULL);
@@ -575,8 +613,16 @@ int main(int argc, char **argv) {
     (void)!write(2, line, n);
   }
 
+  if (strcmp(mode, "fault-bad-stack") == 0) {
+    /* The detector's own control: a fault taken with `rsp` pointing at
+     * nothing, as wild execution of a published window can leave it. It must
+     * be REPORTED (exit 70, HCR-M4-CRASH), never a bare SIG_DFL death. */
+    __asm__ volatile("mov $0x1000, %%rsp\n\tud2" ::: "memory");
+  }
+
   for (i = 0; i < chaos_count; ++i) {
-    pthread_create(&chaos[i], NULL, chaos_main, NULL);
+    pthread_create(&chaos[i], NULL, chaos_main,
+                   (void *)(intptr_t)(MAX_WORKERS + i));
   }
 
   started = now_ns();
