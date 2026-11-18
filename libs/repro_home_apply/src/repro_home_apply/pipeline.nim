@@ -1998,7 +1998,8 @@ proc packageResolutionCatalog(opts: ApplyOptions; plan: ApplyPlan):
   # A profile's `catalogs:` section imports contribution catalogs into the
   # same projection, as a recipe's `import` does.
   projectCatalogPackages(names, opts.profilePath,
-    opts.stateDir / "catalog-projection", plan.catalogImports)
+    opts.stateDir / "catalog-projection", plan.catalogImports,
+    importedCatalogsFor(opts.profilePath))
 
 proc packageResolutionContext(opts: ApplyOptions; plan: ApplyPlan;
                               catalog: ProfileCatalog):

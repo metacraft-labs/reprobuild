@@ -326,6 +326,8 @@ COVERED_COMMANDS = [
     "internal dev-session-supervisor",
     "internal dev-session-http",
     "internal cmake-regenerate",
+    "catalog",
+    "catalog publish",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}

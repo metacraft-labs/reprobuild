@@ -2248,3 +2248,7 @@ command	repro internal cmake-regenerate
 flag	repro internal cmake-regenerate	--depfile
 flag	repro internal cmake-regenerate	--metadata
 flag	repro internal cmake-regenerate	--public-cli
+command	repro catalog
+command	repro catalog publish
+flag	repro catalog publish	--check
+flag	repro catalog publish	--root

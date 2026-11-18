@@ -234,6 +234,7 @@ from test_certificates/note_framing as tcnotes import nil
 from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
+import repro_cli_support/home_catalog_imports
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
 # `repro.nim` `uses:` entry state about a dependency's revision, and the
 # canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
@@ -27470,6 +27471,47 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   except CatchableError:
     discard
   process = nil
+
+proc runCatalogPublishCommand*(rootFlag: string; modules: seq[string];
+                              checkOnly: bool): int =
+  ## ``repro catalog publish`` -- the publisher of Federated-Catalog-Imports.md
+  ## § Publishing, as a verb. Writes the catalog's ``published-interfaces/``
+  ## (deterministic in the provider source), or with ``--check`` compares the
+  ## committed directory with what publishing now writes and exits 1 when it
+  ## is stale, which is what a catalog's CI runs.
+  let root = absolutePath(if rootFlag.len > 0: rootFlag else: getCurrentDir())
+  if not dirExists(root):
+    raise newException(ValueError,
+      "catalog publish: the catalog root does not exist: " & root)
+  let reproRoot = resolveReprobuildSourceRoot()
+  if reproRoot.len == 0:
+    raise newException(ValueError,
+      "catalog publish: no reprobuild source tree to extract against:\n" &
+      describeReprobuildSourceRootSearch())
+  let named =
+    if modules.len > 0: modules else: catalogProviderModules(root)
+  if named.len == 0:
+    raise newException(ValueError, "catalog publish: " & root &
+      " has no provider module (packages/{interfaces,vendor,source}/<name>/repro.nim)")
+  try:
+    if checkOnly:
+      let files = buildCatalogPublication(root, named, reproRoot)
+      let drift = catalogPublicationDrift(root, files)
+      if drift.len == 0:
+        echo "published-interfaces/ is current (" & $files.len & " artifacts)"
+        return 0
+      stderr.writeLine("repro catalog publish --check: published-interfaces/ " &
+        "is stale; run `repro catalog publish` and commit the result:")
+      for line in drift:
+        stderr.writeLine("  " & line)
+      return 1
+    let files = publishCatalogInterfaces(root, named, reproRoot)
+    echo "wrote " & $files.len & " artifacts to " &
+      (root / PublishedInterfacesDir)
+    return 0
+  except CatalogPublicationError as err:
+    stderr.writeLine("repro catalog publish: " & err.msg)
+    return 1
 
 proc runDepsRefreshCommand(projectFlag, pathArg: string;
                            checkOnly, dryRun: bool): int =
@@ -106117,6 +106159,15 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro tasks: error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.catalog:
+    case conf.catalog.command
+    of ReproCommandLineCatalogCommand.publish:
+      try:
+        let r = conf.catalog.publish
+        return runCatalogPublishCommand(r.root, r.modules, r.check)
+      except CatchableError as err:
+        stderr.writeLine("repro catalog: error: " & err.msg)
+        return 1
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:

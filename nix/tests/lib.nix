@@ -241,7 +241,26 @@ let
     );
   refusalTests =
     expectTrue "readIntent refuses an unknown schemaVersion" (
-      refusedSnapshot "schema6" (neutral // { schemaVersion = 6; })
+      refusedSnapshot "schema7" (neutral // { schemaVersion = 7; })
+    )
+    # PN1b: a schema-5 document cannot carry the catalog imports a package
+    # name came from, so a reader that acts on them must not take its silence
+    # for "defined by the standard library".
+    ++ expectTrue "readIntent refuses the previous schemaVersion (5)" (
+      refusedSnapshot "schema5" (neutral // { schemaVersion = 5; })
+    )
+    # PN1b: an IFD export runs in the build sandbox, which has no shared
+    # clone to read a profile's catalog imports from. Refused, naming them,
+    # where snapshot mode (a committed export) is unaffected.
+    ++ expectTrue "readIntent in IFD mode refuses a profile that imports catalogs" (
+      fails (
+        reprobuildLib.readIntent {
+          profileDir = intentRoot + "/imports-refused";
+          host = "m1";
+          system = "x86_64-linux";
+          buildSystem = "x86_64-linux";
+        }
+      )
     )
     # ReproOS add-on mode: a schema-4 document cannot say a host is an
     # add-on host, so its add-on hosts would read as managed here in full.

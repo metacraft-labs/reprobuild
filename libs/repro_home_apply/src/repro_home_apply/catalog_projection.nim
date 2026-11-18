@@ -76,6 +76,37 @@ type
     root*: string
       ## The catalog checkout (``catalogRootOfInterfaceModule(module)``).
 
+  ImportCoordinate* = object
+    ## Where an imported catalog was read: the `[[import]]` of the profile's
+    ## `repro-catalogs.toml` and what discovery measured at its commit.
+    repo*: string
+    remote*: string
+    revision*: string
+      ## The pinned commit (a home profile pins by `commit` only).
+    interfaceArtifact*: string
+      ## Recomputed from the published artifacts read.
+
+  ImportedPackage* = object
+    ## A package an imported catalog defines: its canonical interface and
+    ## the realizations the catalogs' contribution sets give it, read from
+    ## the PUBLISHED artifacts alone (no provider is compiled).
+    name*: string
+    coordinate*: ImportCoordinate
+    artifact*: string
+      ## `published-interfaces/<file>` of the canonical interface.
+    use*: InterfaceToolUse
+      ## The `uses:` projection a recipe would make of the package.
+
+  ImportedCatalogs* = object
+    ## What the profile's `repro-catalogs.toml` imports, read once
+    ## (`repro_cli_support/home_catalog_imports`) and handed down: reading
+    ## needs git and the shared clones, which this library does not own.
+    declared*: bool
+      ## A `repro-catalogs.toml` exists beside the profile and was read.
+    coordinates*: seq[ImportCoordinate]
+      ## Every import, sorted by `repo`.
+    packages*: Table[string, ImportedPackage]
+
   ProfileCatalog* = object
     ## The catalog-defined profile references of one apply, projected.
     uses*: Table[string, InterfaceToolUse]
@@ -86,6 +117,9 @@ type
       ## Name -> why its catalog definition could not be projected (the
       ## extraction failed). Resolution reports this instead of
       ## "unknown package".
+    importedFrom*: Table[string, ImportCoordinate]
+      ## Name -> the `repro-catalogs.toml` import that defined it. Those names
+      ## are not in `modules` as a source file: they come from artifacts.
     importedModules*: seq[string]
       ## The contribution-catalog modules the profile's ``catalogs:``
       ## section imports, resolved against the profile directory (absolute
@@ -357,9 +391,52 @@ proc extractCatalogGroup(packages: seq[CatalogPackage]; root, scratchDir,
         (if plainGroup: "profile's references" else: "catalog definitions at " &
           root) & " has no use of '" & pkg.name & "'"
 
-proc projectCatalogPackages*(names: openArray[string];
+var catalogImportReader*: proc (profilePath: string): ImportedCatalogs
+    {.nimcall.} = nil
+  ## Reads the profile's `repro-catalogs.toml`. Registered by
+  ## `repro_cli_support/home_catalog_imports`, which owns git and the shared
+  ## clones; a binary that links this library without it cannot read imports
+  ## and says so (`importedCatalogsFor`).
+
+proc importedCatalogsFor*(profilePath: string): ImportedCatalogs =
+  ## What the profile at ``profilePath`` imports: nothing when no
+  ## `repro-catalogs.toml` sits beside it. A declaration this build cannot
+  ## read refuses, never resolves the profile without it
+  ## (Core-Invariants.md § Unrecognised Input Is Rejected, Not Skipped).
+  if not fileExists(extendedPath(profilePath.parentDir /
+      "repro-catalogs.toml")):
+    return
+  if catalogImportReader.isNil:
+    raise newException(ValueError, profilePath.parentDir /
+      "repro-catalogs.toml" & " declares catalog imports, which this " &
+      "program cannot read (it does not link the catalog discovery); run " &
+      "`repro home` from the repro CLI")
+  catalogImportReader(profilePath)
+
+proc importClashes*(imported: ImportedCatalogs; anchorFile: string):
+    seq[string] =
+  ## A package is defined once (Federated-Catalog-Imports.md § Home
+  ## profiles): every name an imported catalog defines that ANOTHER candidate
+  ## source also defines -- the stdlib, or a `reprobuild-packages` catalog
+  ## found from the profile -- as one line naming both.
+  var names: seq[string] = @[]
+  for name in imported.packages.keys:
+    names.add(name)
+  names.sort(cmp)
+  for name in names:
+    let source = imported.packages[name].coordinate
+    let here = "\"" & name & "\" is defined by the import \"" & source.repo &
+      "\" (" & source.remote & " at " & source.revision & ") and by "
+    if isBundledStdlibSelector(name) or isRegisteredPackage(name):
+      result.add(here & "the standard library")
+      continue
+    for pkg in catalogPackagesFor([name], anchorFile):
+      result.add(here & "the catalog definition " & pkg.module)
+
+proc projectCatalogPackages*(allNames: openArray[string];
                              anchorFile, scratchDir: string;
-                             catalogImports: openArray[string] = []):
+                             catalogImports: openArray[string] = [];
+                             imported: ImportedCatalogs = ImportedCatalogs()):
     ProfileCatalog =
   ## Project every reference in ``names`` that the catalog defines (see the
   ## module documentation) -- and, when the profile imports contribution
@@ -373,6 +450,24 @@ proc projectCatalogPackages*(names: openArray[string];
   ## name an existing module raises ``ValueError``
   ## (``resolveCatalogImports``).
   result.importedModules = resolveCatalogImports(anchorFile, catalogImports)
+  # Packages the profile's `repro-catalogs.toml` imports define resolve from
+  # their published artifacts: no search, no synthetic recipe, no compile.
+  # A name another source also defines refuses before anything resolves.
+  let clashes = importClashes(imported, anchorFile)
+  if clashes.len > 0:
+    raise newException(ValueError, "a package is defined once, but " &
+      clashes.join("; ") & ". Import only one of them, or remove the " &
+      "other definition")
+  var searched: seq[string] = @[]
+  for name in allNames:
+    if name in imported.packages:
+      let pkg = imported.packages[name]
+      result.uses[name] = pkg.use
+      result.modules[name] = pkg.artifact
+      result.importedFrom[name] = pkg.coordinate
+    else:
+      searched.add(name)
+  let names = searched
   let packages = catalogPackagesFor(names, anchorFile)
   var plain: seq[CatalogPackage] = @[]
   if result.importedModules.len > 0:

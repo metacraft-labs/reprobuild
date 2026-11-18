@@ -191,7 +191,9 @@ const
     "repro internal render-dev-env-shell", "repro internal direnv-activate",
     "repro internal native-shell-activate",
     "repro internal dev-session-supervisor",
-    "repro internal dev-session-http", "repro internal cmake-regenerate"]
+    "repro internal dev-session-http", "repro internal cmake-regenerate",
+    # Declared with its page after the round: `repro catalog publish`.
+    "repro catalog", "repro catalog publish"]
     ## The commands whose flags and environment variables are compared:
     ## every command repro declares.
   SpecifiedNotImplemented = [
@@ -238,8 +240,8 @@ const
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
-    "audit", "catalog", "info", "init", "list", "lsp", "mcp", "outdated",
-    "package", "search", "upgrade"]
+    "audit", "info", "init", "list", "lsp", "mcp", "outdated", "package",
+    "search", "upgrade"]
     ## Commands the specification describes that repro does not have yet.
   DeclaredNotSpecified: array[0, string] = []
     ## Commands repro has whose specification is not a command page (some
