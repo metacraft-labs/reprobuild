@@ -35,6 +35,8 @@
 ## and authentication.
 
 import std/[strutils, sysrand]
+when defined(windows):
+  import std/typedthreads
 
 import ./errors
 import ./protocol
@@ -175,6 +177,9 @@ when defined(windows):
   proc GetLastError(): DWORD
     {.importc, stdcall, dynlib: "kernel32".}
 
+  proc ExitProcess(code: uint32) {.importc, stdcall, dynlib: "kernel32",
+    noreturn.}
+
   # Peer-identity surface.
   proc GetTokenInformation(tokenHandle: HANDLE; tokenInformationClass: uint32;
                            tokenInformation: pointer;
@@ -236,8 +241,8 @@ when defined(windows):
     let openStatus = GetLastError()
     if RevertToSelf() == 0:
       # Still impersonating: nothing more may run on this thread.
-      quit("repro: RevertToSelf failed after identifying the elevation " &
-        "client; stopping", QuitFailure)
+      # Not `quit`: exit procs must not run under the client's identity.
+      ExitProcess(1)
     if not opened:
       raiseChannelAuth("could not open the connecting client's token " &
         "(status " & $openStatus & ")")
@@ -353,7 +358,75 @@ when defined(windows):
     result.isServer = true
     result.open = true
 
-  proc acceptAuthenticatedClient*(ch: var ElevationChannel) =
+  # ---- parent side: do not wait for a broker that has exited ------------
+
+  proc CreateEventW(attrs: pointer; manualReset, initialState: BOOL;
+                    name: pointer): HANDLE
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc SetEvent(h: HANDLE): BOOL {.importc, stdcall, dynlib: "kernel32".}
+
+  proc SetLastError(code: DWORD) {.importc, stdcall, dynlib: "kernel32".}
+
+
+  proc WaitForMultipleObjects(count: DWORD; handles: ptr HANDLE;
+                              waitAll: BOOL; ms: DWORD): DWORD
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc CancelSynchronousIo(thread: HANDLE): BOOL
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc DuplicateHandle(srcProcess, src, dstProcess: HANDLE; dst: PHANDLE;
+                       access: DWORD; inherit: BOOL; options: DWORD): BOOL
+    {.importc, stdcall, dynlib: "kernel32".}
+
+  proc GetCurrentProcessForDup(): HANDLE
+    {.importc: "GetCurrentProcess", stdcall, dynlib: "kernel32".}
+
+  const
+    ERROR_OPERATION_ABORTED: DWORD = 995
+    DUPLICATE_SAME_ACCESS: DWORD = 2
+    WAIT_OBJECT_0: DWORD = 0
+
+  type WatchArgs = tuple[broker, done, target: HANDLE]
+
+  proc brokerExitWatcher(a: WatchArgs) {.thread.} =
+    ## Until `done` is set: once the broker has exited, keep cancelling
+    ## the target thread's synchronous I/O. Repeating covers a broker
+    ## that exits before `ConnectNamedPipe` has started.
+    var hs = [a.done, a.broker]
+    while true:
+      let r = WaitForMultipleObjects(2, addr hs[0], 0, 0xFFFFFFFF'u32)
+      if r != WAIT_OBJECT_0 + 1:
+        return                           # done, or the wait failed
+      hs = [a.done, a.done]
+      while WaitForMultipleObjects(1, addr hs[0], 0, 100) != WAIT_OBJECT_0:
+        discard CancelSynchronousIo(a.target)
+      return
+
+  proc connectWatchingBroker(pipe, brokerProcess: HANDLE): BOOL =
+    var target: HANDLE
+    if DuplicateHandle(GetCurrentProcessForDup(), GetCurrentThread(),
+        GetCurrentProcessForDup(), addr target, 0, 0,
+        DUPLICATE_SAME_ACCESS) == 0:
+      raiseBrokerLaunch("DuplicateHandle(current thread) failed (status " &
+        $GetLastError() & ")")
+    let done = CreateEventW(nil, 1, 0, nil)
+    if done == nil:
+      discard CloseHandle(target)
+      raiseBrokerLaunch("CreateEvent failed (status " & $GetLastError() & ")")
+    var watcher: Thread[WatchArgs]
+    createThread(watcher, brokerExitWatcher, (brokerProcess, done, target))
+    result = ConnectNamedPipe(pipe, nil)
+    let err = GetLastError()
+    discard SetEvent(done)
+    joinThread(watcher)
+    discard CloseHandle(done)
+    discard CloseHandle(target)
+    SetLastError(err)
+
+  proc acceptAuthenticatedClient*(ch: var ElevationChannel;
+                                  brokerProcess: pointer = nil) =
     ## PARENT: block until a client connects, then require the
     ## connecting client's token to be ELEVATED. A non-elevated client
     ## is `EChannelAuth` and is disconnected.
@@ -369,8 +442,21 @@ when defined(windows):
     ## On a refusal the caller must keep the pipe (do not `close`)
     ## until the broker has exited: closing releases the name, and a
     ## squatter could then create it for the broker to connect to.
-    if ConnectNamedPipe(ch.handle, nil) == 0:
+    ##
+    ## `brokerProcess`, when given, is the launched broker's process
+    ## handle. If the broker exits before it connects (it refused to
+    ## start, could not open the parent, timed out), the wait is
+    ## cancelled and this raises `EBrokerLost` instead of blocking for
+    ## ever.
+    var ok: BOOL
+    if brokerProcess == nil:
+      ok = ConnectNamedPipe(ch.handle, nil)
+    else:
+      ok = connectWatchingBroker(ch.handle, brokerProcess)
+    if ok == 0:
       let err = GetLastError()
+      if err == ERROR_OPERATION_ABORTED:
+        raiseBrokerLost("the broker exited before it connected")
       if err != ERROR_PIPE_CONNECTED:
         raiseBrokerLost("ConnectNamedPipe failed (status " & $err & ")")
     if not connectedPipeClientIsElevated(ch.handle):
@@ -397,7 +483,27 @@ when defined(windows):
   proc GetCurrentProcess(): HANDLE
     {.importc, stdcall, dynlib: "kernel32".}
 
+  type
+    TokenPrivileges1 = object
+      count: DWORD
+      luid: int64
+      attributes: DWORD
+
+  proc OpenProcessToken(process: HANDLE; access: DWORD; token: PHANDLE): BOOL
+    {.importc, stdcall, dynlib: "advapi32".}
+
+  proc LookupPrivilegeValueW(system: LPCWSTR; name: LPCWSTR;
+                             luid: ptr int64): BOOL
+    {.importc, stdcall, dynlib: "advapi32".}
+
+  proc AdjustTokenPrivileges(token: HANDLE; disableAll: BOOL;
+                             newState: ptr TokenPrivileges1; len: DWORD;
+                             prev: pointer; retLen: LPDWORD): BOOL
+    {.importc, stdcall, dynlib: "advapi32".}
+
   const
+    TOKEN_ADJUST_PRIVILEGES: DWORD = 0x0020
+    SE_PRIVILEGE_ENABLED: DWORD = 0x00000002
     SYNCHRONIZE: DWORD = 0x00100000
     PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000
     WAIT_TIMEOUT: DWORD = 258
@@ -421,9 +527,40 @@ when defined(windows):
     ## the broker can hold the parent and know it is the same process.
     (int(GetCurrentProcessId()), processStartTime(GetCurrentProcess()))
 
+  proc enableDebugPrivilege() =
+    ## Under Administrator Protection, or an over-the-shoulder
+    ## elevation, the broker runs as another account, which the
+    ## parent's process DACL may not admit. An elevated administrator
+    ## holds SeDebugPrivilege (disabled); enable it so the parent can
+    ## be opened. Best effort: a failure surfaces as the open's error.
+    var token: HANDLE
+    if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES or
+        TOKEN_QUERY, addr token) == 0:
+      return
+    defer: discard CloseHandle(token)
+    var name = toWideZ("SeDebugPrivilege")
+    var tp: TokenPrivileges1
+    if LookupPrivilegeValueW(nil, cast[LPCWSTR](addr name[0]),
+        addr tp.luid) == 0:
+      return
+    tp.count = 1
+    tp.attributes = SE_PRIVILEGE_ENABLED
+    discard AdjustTokenPrivileges(token, 0, addr tp, 0, nil, nil)
+
+  proc processStartTimeOf*(pid: int): uint64 =
+    ## Creation time of a running process (test support and diagnostics).
+    let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, DWORD(pid))
+    if h == nil:
+      raiseChannelAuth("cannot open pid " & $pid)
+    defer: discard CloseHandle(h)
+    processStartTime(h)
+
   proc watchParent*(pid: int; start: uint64): ParentWatch =
     ## BROKER, before connecting: open the parent and check it is the
     ## process that launched this broker (pid AND creation time).
+    if pid <= 0 or pid > int(high(uint32)):
+      raiseChannelAuth("not a process id: " & $pid)
+    enableDebugPrivilege()
     let h = OpenProcess(SYNCHRONIZE or PROCESS_QUERY_LIMITED_INFORMATION,
       0, DWORD(pid))
     if h == nil:
@@ -438,10 +575,12 @@ when defined(windows):
   proc requireParentAlive*(w: ParentWatch) =
     ## BROKER, after connecting: the parent must still be running. The
     ## parent holds its pipe's only instance until the broker exits, so
-    ## a parent that was alive from before the connect until after it
-    ## means the name was never released, and the instance the broker
-    ## reached is the parent's. A parent that died (was killed) may
-    ## have released the name to a squatter: refuse.
+    ## a parent that was killed may have released the name to a
+    ## squatter: refuse. This stops a KILLED parent only. Code of the
+    ## same user can also close the parent's pipe handle from outside
+    ## (`DuplicateHandle` with `DUPLICATE_CLOSE_SOURCE`) while the
+    ## parent lives; that is tampering with the parent, the residual
+    ## the spec names.
     if WaitForSingleObject(w.handle, 0) != WAIT_TIMEOUT:
       raiseChannelAuth("the launching parent exited before the broker " &
         "connected; the pipe may not be the parent's")
@@ -495,7 +634,8 @@ else:
   proc createListeningChannel*(channelId: string): ElevationChannel =
     raiseNotImplementedPlatform("Unix-domain-socket elevation channel")
 
-  proc acceptAuthenticatedClient*(ch: var ElevationChannel) =
+  proc acceptAuthenticatedClient*(ch: var ElevationChannel;
+                                  brokerProcess: pointer = nil) =
     raiseNotImplementedPlatform("Unix-domain-socket peer-cred accept")
 
   type ParentWatch* = object

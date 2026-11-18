@@ -18734,8 +18734,8 @@
       "owner": "libs/repro_elevation",
       "requiresReproBinary": false,
       "source": "libs/repro_elevation/tests/t_elevation_channel_identity.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

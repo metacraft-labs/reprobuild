@@ -22,8 +22,9 @@
 ## default DACL, so a same-user process could read the nonce from the
 ## pipe list and create a second instance for the broker to reach.
 ##
-## This file holds the platform-pure half: the command line and its
-## parsing. The attack on the pipe itself is
+## This file holds the command line and its parsing, and (Windows) the
+## broker's hold on its parent: a parent killed so its pipe name could be
+## re-created is refused. The attack on the pipe itself is
 ## `t_elevation_pipe_squatting.nim`, kept apart so that it also compiles
 ## against the code before the fix and can be shown red there.
 ##
@@ -72,3 +73,34 @@ suite "elevation channel: the name carries no secret":
   test "channel ids are fresh":
     check generateChannelId() != generateChannelId()
     check isChannelId(generateChannelId())
+
+when defined(windows):
+  import std/osproc
+
+  suite "elevation channel: the broker holds its parent":
+    test "a process with the parent's pid but another creation time is refused":
+      let me = currentProcessIdentity()
+      expect EChannelAuth:
+        var w = watchParent(me.pid, me.start + 1)
+        w.close()
+
+    test "the launching parent is accepted while it lives":
+      let me = currentProcessIdentity()
+      var w = watchParent(me.pid, me.start)
+      requireParentAlive(w)
+      w.close()
+
+    test "a parent that died before the connect is refused":
+      # The attack: kill the parent so its pipe name is released, then
+      # re-create the name. The broker must notice the parent is gone.
+      var child = startProcess("cmd.exe", args = ["/c", "ping -n 30 127.0.0.1"],
+        options = {poUsePath})
+      let pid = child.processID
+      var w = watchParent(pid, processStartTimeOf(pid))
+      requireParentAlive(w)
+      child.terminate()
+      discard child.waitForExit()
+      child.close()
+      expect EChannelAuth:
+        requireParentAlive(w)
+      w.close()

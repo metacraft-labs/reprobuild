@@ -85,9 +85,9 @@ when defined(windows):
 
     test "a non-elevated process can neither open the pipe nor rewrite its DACL":
       if isProcessElevated():
+        echo "    SKIP reason: needs a non-elevated run; an elevated " &
+          "client is admitted by design"
         skip()
-        checkpoint "needs a non-elevated run: an elevated client is " &
-          "admitted by design"
       else:
         let id = freshId()
         var ch = createListeningChannel(id)
@@ -103,8 +103,8 @@ when defined(windows):
 
     test "an elevated client is accepted":
       if not isProcessElevated():
+        echo "    SKIP reason: needs an elevated run"
         skip()
-        checkpoint "needs an elevated run"
       else:
         let id = freshId()
         var ch = createListeningChannel(id)

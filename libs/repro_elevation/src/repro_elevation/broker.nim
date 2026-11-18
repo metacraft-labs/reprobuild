@@ -347,6 +347,8 @@ when defined(windows):
 
   proc brokerProcessId*(p: WindowsBrokerProcess): int = p.pid
 
+  proc brokerProcessHandle*(p: WindowsBrokerProcess): pointer = p.hProcess
+
   proc OpenProcess(desiredAccess: DWORD; inheritHandle: BOOL;
                    processId: DWORD): HANDLE
     {.importc, stdcall, dynlib: "kernel32".}
@@ -395,6 +397,8 @@ else:
     raiseNotImplementedPlatform("broker waitForExit")
 
   proc brokerProcessId*(p: WindowsBrokerProcess): int = p.pid
+
+  proc brokerProcessHandle*(p: WindowsBrokerProcess): pointer = nil
 
   proc processStillAlive*(pid: int): bool =
     raiseNotImplementedPlatform("processStillAlive")
@@ -550,7 +554,7 @@ proc launchAndDriveBroker*(reproExe: string;
   inc brokerLaunchCounter
   result.brokerPid = brokerProcessId(proc0)
   try:
-    acceptAuthenticatedClient(ch)
+    acceptAuthenticatedClient(ch, brokerProcessHandle(proc0))
   except CatchableError:
     # The accept failed — most likely something other than an
     # elevated process took the pipe's one instance. Keep holding the
@@ -848,6 +852,8 @@ proc parseBrokerModeArgs*(args: openArray[string]): BrokerModeArgs =
       try:
         if args[i] == BrokerParentPidFlag:
           result.parentPid = parseInt(args[i + 1])
+          if result.parentPid > int(high(uint32)):
+            raise newException(ValueError, "out of range")
         else:
           result.parentStart = parseBiggestUInt(args[i + 1]).uint64
       except ValueError:
