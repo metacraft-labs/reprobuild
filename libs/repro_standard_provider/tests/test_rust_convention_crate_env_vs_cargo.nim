@@ -511,7 +511,10 @@ suite "rust convention: features and crate environment match cargo":
         let argv = inlineArgvOf(action)
         let key = unitKeyOf(argv)
         seen.inc(key)
-        if key.isTest:
+        if key.isTest and ".test." in id:
+          # An integration test's compile; the test crates of libraries
+          # and binaries are checked against cargo's units here too, but
+          # step 2 runs the integration tests only.
           testCompileIds.add(id)
         checkpoint id & " argv: " & argv.join(" ")
         if key notin cargoUnits:
@@ -547,13 +550,19 @@ suite "rust convention: features and crate environment match cargo":
           else:
             check modeValue == cargoValue
       # Both passes of each library, each binary's link pass (a binary has
-      # no metadata pass), and the test's compile.
+      # no metadata pass), each test's compile, and the test crate of each
+      # library and binary (``cargo test`` builds one for every target
+      # whose ``test`` setting is on, the default).
       check seen[("probe_kit", "lib", false)] == 2
       check seen[("bare", "lib", false)] == 2
       check seen[("probe_bin", "bin", false)] == 1
       check seen[("bare_bin", "bin", false)] == 1
       check seen[("it_env", "", true)] == 1
       check seen[("bare_it", "", true)] == 1
+      check seen[("probe_kit", "", true)] == 1
+      check seen[("bare", "", true)] == 1
+      check seen[("probe_bin", "", true)] == 1
+      check seen[("bare_bin", "", true)] == 1
       require testCompileIds.len == 2
 
       # 2. Run Mode A's rustc actions with the real rustc, each with the

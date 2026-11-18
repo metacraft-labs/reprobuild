@@ -211,7 +211,14 @@ type
     byId: Table[string, BuildActionDef]
     actionIds: seq[string]   ## every action id, in fragment order
     nodeIds: seq[string]     ## every graph node id, in fragment order
-    rustcIds: seq[string]    ## the rustc actions' ids, sorted
+    rustcIds: seq[string]
+      ## the rustc actions' ids, sorted, without the test crates of the
+      ## ``test`` target (``rustc-test-compile-*``, compiled with
+      ## ``--test`` or, for ``harness = false``, ``--cfg test``):
+      ## ``cargo build`` builds none
+    allRustcIds: seq[string]
+      ## every rustc action's id, sorted, test crates included: what
+      ## ``cargo test`` builds
 
 proc modeAFragment(root: string): ModeAFragment =
   let conv = rust_convention.rustConvention()
@@ -228,8 +235,11 @@ proc modeAFragment(root: string): ModeAFragment =
     let argv = inlineArgvOf(action)
     if argv.len > 0 and argv[0].extractFilename.startsWith("rustc") and
         flagValue(argv, "--crate-name").len > 0:
-      result.rustcIds.add(action.id)
+      result.allRustcIds.add(action.id)
+      if not action.id.startsWith("rustc-test-compile-"):
+        result.rustcIds.add(action.id)
   result.rustcIds.sort()
+  result.allRustcIds.sort()
 
 proc duplicates(values: openArray[string]): seq[string] =
   var seen = initHashSet[string]()
@@ -589,14 +599,14 @@ suite "rust convention: library and binary targets, path dependencies":
         check flagValue(argv, "--cfg") == flagValue(units[target], "--cfg")
 
       # Build every rustc action with the real rustc, in dependency order.
-      var pending = modeA.rustcIds
+      var pending = modeA.allRustcIds
       var ran: seq[string] = @[]
       while pending.len > 0:
         var next: seq[string] = @[]
         for id in pending:
           var ready = true
           for dep in modeA.byId[id].deps:
-            if dep in modeA.rustcIds and dep notin ran:
+            if dep in modeA.allRustcIds and dep notin ran:
               ready = false
           if ready:
             let argv = inlineArgvOf(modeA.byId[id])
@@ -655,6 +665,34 @@ suite "rust convention: library and binary targets, path dependencies":
         "members = [\"member\"]\n")
       require "custom main ran" in cargoTestOutput(parent)
       checkDelegatedToCargo(parent)
+
+  test "harness = false on a [lib] or a [[bin]] sends the workspace to cargo":
+    # Mode A compiles a library's and a binary's test crate with
+    # ``--test`` and nothing else. On a ``harness = false`` target that
+    # would replace the target's own ``main`` with libtest's runner, which
+    # finds no ``#[test]``, prints "running 0 tests" and passes whatever
+    # the target does (Rust.md §"Test commands"). The scan does not
+    # attribute such a setting, so the workspace must go to Mode B.
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      for (label, manifestTail) in [
+          ("lib", "[lib]\nharness = false\n"),
+          ("bin", "[[bin]]\nname = \"tool\"\npath = \"src/main.rs\"\n" &
+            "harness = false\n")]:
+        checkpoint "harness = false on the " & label
+        let root = createTempDir("test_rust_convention_harness_" & label &
+          "_", "")
+        defer:
+          removeDir(root)
+        isolateFromAmbientCargo(root)
+        writeNoHarnessFixture(root, manifestTail)
+        writeFile(root / "src" / "main.rs",
+          "fn main() { assert_eq!(noharness::answer(), 42); }\n")
+        # Cargo accepts the manifest (and writes the ``Cargo.lock``
+        # recognition needs); ``custom`` keeps the harness here.
+        discard cargoTestOutput(root)
+        checkDelegatedToCargo(root)
 
   test "a quoted harness key spelled with an escape sends the workspace to cargo":
     if not rustToolchainAvailable():
