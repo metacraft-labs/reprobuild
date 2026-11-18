@@ -105947,6 +105947,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       activationFile: c.activationFile, bashrcFile: c.bashrcFile,
       allowDevEnv: c.allowDevEnv, parallel: c.parallel, staging: c.staging,
       nixRoot: c.nixRoot, afterBootstrap: c.afterBootstrap,
+      latestSha256: c.latestSha256,
       storeRoot: c.storeRoot, actionCacheRoot: c.actionCacheRoot,
       emitJson: c.json), hooks)
   of ReproCommandLineBundleCommand.inspect:

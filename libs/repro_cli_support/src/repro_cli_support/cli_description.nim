@@ -2831,6 +2831,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Restore the Nix half into another store root (for tests)"
         boolFlag afterBootstrap is bool, visibility = internal,
           help = "Run by the bundle's restore.sh once the Nix half is restored"
+        flag latestSha256 is string, format = equals, visibility = internal,
+          help = "The SHA-256 of the only latest.json to accept: the one " &
+            "restore.sh was made from"
         `bundleStoreRoots`
         boolFlag json is bool, help = "Print the report as JSON"
         pos source is string, help = "A bundle directory or URL, or " &
