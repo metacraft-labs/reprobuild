@@ -53,7 +53,7 @@ const
   HomeExportFormat* = "repro.home.export"
     ## Value of the document's `format` field. Identifies the document kind
     ## so a consumer handed some other JSON file fails loudly.
-  HomeExportSchemaVersion* = 5
+  HomeExportSchemaVersion* = 6
     ## Value of the document's `schemaVersion` field. Version 2 (GM3): the
     ## intent's resources and config overrides carry a `guard`, and the
     ## `platforms` map says which platforms the document describes. A
@@ -81,6 +81,13 @@ const
     ## "elsewhere" -- would read it as a host whose whole system it may
     ## switch (`nixos-rebuild` on a Debian host). A new version makes such a
     ## reader refuse the document instead.
+    ## Version 6 (PN1b, Federated-Catalog-Imports.md § Home profiles): a
+    ## profile whose `repro-catalogs.toml` imports catalogs carries
+    ## `catalogImports` (each import's `repo`, `remote`, `revision`,
+    ## `interfaceArtifact` and the `packages` it defined for this profile),
+    ## so a Nix consumer can tell where a canonical package name came from.
+    ## A version-5 reader would resolve those names as if the stdlib defined
+    ## them, so this is a new version, and a version-5 reader refuses.
     ## GM11 adds `intent.stowScopes` (the stow packages an activity's
     ## `stow:` block claims, present only when some activity has one)
     ## WITHOUT a new version: no export reader materializes the stow tree
@@ -88,7 +95,7 @@ const
     ## applies exactly what it applied before; `--check` sees a claim edit
     ## because the key is part of `intent`.
   HomeExportComparedFields* = ["format", "schemaVersion", "selection",
-    "intent", "concerns", "platforms"]
+    "intent", "concerns", "platforms", "catalogImports"]
     ## The top-level fields `--check` compares. `provenance` is deliberately
     ## absent: it records how the document was produced (which `repro`, from
     ## which files, on which platform), not what it tells a consumer, and
@@ -306,7 +313,8 @@ proc packageClassificationDocument*(intent: ProfileIntent;
     if r.packageId notin names:
       names.add r.packageId
   let catalog = projectCatalogPackages(names, profilePath,
-    stateDir / "catalog-projection", profile.catalogImports)
+    stateDir / "catalog-projection", profile.catalogImports,
+    importedCatalogsFor(profilePath))
   var unknown: seq[string]
   result = newJObject()
   for t in ProfileTargetPlatforms:
@@ -329,6 +337,25 @@ proc packageClassificationDocument*(intent: ProfileIntent;
       " an application cannot be known. Point $" &
       ReprobuildPackagesRootEnv & " at a reprobuild-packages checkout " &
       "(Nix IFD: readIntent's / the module's `packagesCatalog`)")
+
+proc catalogImportsDocument*(imported: ImportedCatalogs;
+                             references: seq[string]): JsonNode =
+  ## The export's `catalogImports`: each import's coordinate and the
+  ## ``references`` (package ids the profile names) it defined. Sorted by
+  ## repo, so the bytes do not depend on declaration order.
+  result = newJArray()
+  for coordinate in imported.coordinates:
+    var defined: seq[string] = @[]
+    for name in references:
+      if name in imported.packages and
+          imported.packages[name].coordinate.repo == coordinate.repo:
+        defined.add name
+    defined.sort(cmp)
+    result.add %*{
+      "repo": coordinate.repo, "remote": coordinate.remote,
+      "revision": coordinate.revision,
+      "interfaceArtifact": coordinate.interfaceArtifact,
+      "packages": stringArray(defined)}
 
 proc buildHomeExport*(intent: ProfileIntent;
                       artifact: ProfileCompileArtifact;
@@ -388,6 +415,17 @@ proc buildHomeExport*(intent: ProfileIntent;
     result["concerns"]["packages"] = packageClassificationDocument(
       expanded.intent, profilePath, stateDir)
   result["platforms"] = platformsNode
+  # The catalogs the profile imports and the packages each defined, read from
+  # the same declaration the planner resolves through. Present only when the
+  # profile declares imports; the schema version is 6 either way.
+  let imported = importedCatalogsFor(profilePath)
+  if imported.declared:
+    var references: seq[string] = @[]
+    for r in profilePackageReferences(profileIntentToHomeProfile(
+        expanded.intent, profilePath)):
+      if r.packageId notin references:
+        references.add r.packageId
+    result["catalogImports"] = catalogImportsDocument(imported, references)
   result["provenance"] = %*{
     "repro": {
       "version": versionString(),

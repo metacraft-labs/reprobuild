@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "selection": {
     "host": "m1",
     "hostDeclared": false,
