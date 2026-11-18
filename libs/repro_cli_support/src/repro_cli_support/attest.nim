@@ -5,21 +5,10 @@
 ##
 ## ## Surface
 ##
-##   repro attest expect --image <path> [--uki PATH] [--verity-image PATH]
-##       [--verity-image-digest sha256:<hex>] [--verity-root-hash <hex>]
-##       [--verity-root-hash-file PATH] [--config-fingerprint TOKEN]
-##       [--backend NAME]... [--out PATH] [--check PATH]
-##   repro attest cross-check --manifest PATH --policy PATH
-##       --attestations PATH [--signer-key PATH]...
-##       [--signer-admission <key-id>=<from>/<until>]...
-##       [--witnessed-root <log-id>:<size>:<root>]...
-##       --uki PATH --verity-image-digest sha256:<hex>
-##       --verity-root-hash <hex> --config-fingerprint TOKEN [--out PATH]
-##   repro attest challenge [--bytes N] [--hex] [--out PATH]
-##   repro attest verify (--report-file PATH | --report-url URL)
-##       --policy PATH [--manifest PATH]
-##       [--challenge HEX | --challenge-file PATH]
-##       [--challenge-issued-at RFC3339] [--json] [--out PATH]
+## The command line is declared in repro's description
+## (``repro_cli_support/cli_description``), which also generates its help,
+## its exit-code list included; ``attestOptionsOf`` reads the parsed
+## configuration into ``AttestCliOptions``.
 ##
 ## `expect` computes the ``reproos.attested-image.v1`` measurement
 ## manifest for an attested image and prints it, writes it, or compares it
@@ -84,6 +73,8 @@ import repro_attest/cloud_lease
 import repro_attest/cose
 import repro_attest_verify
 import repro_attest_verify/fetch
+
+import ./cli_program
 
 const
   ## Artifact names an attested image build writes. `--image <dir>` finds
@@ -241,256 +232,6 @@ proc attestExitCodeFor*(d: VerdictDecision): AttestExitCode =
   of vdAcceptedEvidenceBackedManifest: aecAcceptedEvidenceBackedManifest
   of vdRejected: aecRejected
 
-proc renderAttestUsage*(): string =
-  result = """usage: repro attest <subcommand> [options]
-
-Subcommands:
-  expect     compute the measurement manifest for an attested image
-  challenge  mint a verifier nonce and record when it was minted
-  verify     check a runtime report against a measurement policy
-  cross-check
-             judge one measurement manifest from both directions — the
-             document a quorum of admitted rebuilders signed, and one
-             computed here from the image — and compare them field by
-             field. Exit 1 on any divergence, naming every field that
-             moved. It compares the COMPUTATION: both sides are handed
-             the same image, so agreement says nothing about whether
-             that image is the right one.
-  reap       sweep a cloud-lease store. By default it REPORTS: every
-             lease it can see, whether its owner is alive, whether it
-             has expired, what it has cost so far, and the invocation
-             each one would be destroyed with, touching nothing. With
-             --destroy it runs those invocations, which is what bounds
-             how long a leaked instance can keep billing.
-  launch     describe a confidential-instance launch on a public cloud:
-             the provider invocation it would be made with and the
-             expected-measurement identity a policy would pin. It
-             launches nothing and this build carries nothing that could.
-
-repro attest expect --image <dir-or-uki> [options]
-      --image PATH                  the image build's output directory, or
-                                    the unified kernel image itself
-      --uki PATH                    the unified kernel image (overrides
-                                    the one found under --image)
-      --verity-image PATH           the integrity-protected root image
-      --verity-image-digest DIGEST  sha256:<hex>, instead of --verity-image
-      --verity-root-hash HEX        the dm-verity root hash
-      --verity-root-hash-file PATH  read the root hash from a file
-      --config-fingerprint TOKEN    the recipe's configuration fingerprint
-      --backend NAME                compute this backend only; repeatable
-                                    (""" & KnownBackends.join(", ") & """)
-      --firmware PATH               the confidential-launch firmware image;
-                                    supplying it computes the sev-snp
-                                    expectation, and requires the five flags
-                                    below
-      --vcpus N                     how many processors the guest is launched
-                                    with
-      --vcpu-type NAME              the machine model the hypervisor presents
-      --guest-policy 0xHEX          the launch policy the guest is started
-                                    under
-      --guest-features 0xHEX        the feature word each processor starts with
-      --vmm NAME                    the hypervisor that will start it (""" &
-    KnownVmms.join(", ") & """)
-      --launch-kernel PATH          measure a directly booted kernel
-      --launch-initrd PATH          the initial ramdisk beside it
-      --launch-cmdline TEXT         the command line beside it
-      --td-firmware PATH            the trust-domain firmware image;
-                                    supplying it computes the tdx expectation
-                                    and requires --td-register-log with it
-      --td-register-log PATH        the event log the domain wrote, replayed
-                                    into the three runtime registers the
-                                    document carries
-      --td-page-order NAME          the order the host folds a page's
-                                    contents in (""" & tdxHostOrderNames() & """);
-                                    both occur in the wild and they give
-                                    different measurements
-      --out PATH                    write the manifest instead of printing it
-      --check PATH                  compare against an existing manifest and
-                                    exit 1 if it differs
-
-repro attest cross-check --manifest PATH --policy PATH
-                         --attestations PATH [options]
-      --manifest PATH               the measurement manifest somebody
-                                    else published, which the
-                                    attestations are about
-      --attestations PATH           the reproos.edge-attestations.v1
-                                    bundle that vouches for it
-      --policy PATH                 the measurement policy whose
-                                    [measurements.evidence] clause says
-                                    how many rebuilder signatures are
-                                    needed and whose count
-      --signer-key PATH             a COSE_Key for one admitted
-                                    rebuilder; repeatable
-      --signer-admission SPEC       <key-id>=<from>/<until>; required for
-                                    every --signer-key
-      --revoked-signer SPEC         <key-id>=<instant>:<reason>
-      --witnessed-root SPEC         <log-id>:<tree-size>:<root-hash>
-      --uki PATH                    the unified kernel image the local
-                                    side measures (or --image, as for
-                                    `expect`)
-      --verity-image-digest DIGEST  sha256:<hex> of the integrity-
-                                    protected root image
-      --verity-root-hash HEX        the dm-verity root hash
-      --config-fingerprint TOKEN    the configuration the local side
-                                    computes for. NOT read out of the
-                                    document under test: a field taken
-                                    from there would be compared against
-                                    itself
-      --out PATH                    write the comparison report here
-                                    instead of to standard output
-
-      Every `expect` flag that names an image input is accepted here and
-      means the same thing.
-
-repro attest challenge [options]
-      --bytes N                     nonce size (default """ &
-    $ChallengeBytes & """, at least """ & $ChallengeMinBytes & """)
-      --hex                         print only the nonce, not the record
-      --out PATH                    write the record instead of printing it
-
-repro attest verify --report-file PATH | --report-url URL [options]
-      --report-file PATH            the report to verify
-      --report-url URL              fetch it from a running agent instead
-                                    (plain http:// only)
-      --policy PATH                 the measurement policy (required)
-      --manifest PATH               the measurement manifest to compare
-                                    against. Never fetched from the machine
-                                    under verification; see the CLI reference.
-      --challenge HEX               the nonce this verifier issued
-      --challenge-file PATH         a record from `repro attest challenge`,
-                                    which also says when it was issued
-      --challenge-issued-at TIME    that instant, as YYYY-MM-DDTHH:MM:SSZ
-      --trust-anchor PATH           a DER root certificate this verifier
-                                    trusts; repeatable. Never taken from
-                                    the report: a machine that could
-                                    contribute to the set it is checked
-                                    against would be vouching for itself.
-      --revocation-list PATH        a DER revocation list this verifier
-                                    holds; repeatable. Required for every
-                                    issuer in a bundled chain — an
-                                    unasked question is not an answer of
-                                    no.
-      --attestations PATH           the edge attestations published beside
-                                    the manifest: rebuilder signatures over
-                                    the claim that this configuration
-                                    produces it, and any transparency-log
-                                    inclusion proofs for that claim
-      --signer-key PATH             a COSE_Key holding one admitted
-                                    rebuilder's public key; repeatable. The
-                                    policy says which key identifiers may
-                                    count; this says what their keys are,
-                                    and the two sets must agree exactly.
-      --signer-admission KID=FROM/UNTIL
-                                    for how long that key counts, as two
-                                    instants written YYYY-MM-DDTHH:MM:SSZ;
-                                    repeatable and REQUIRED for every
-                                    --signer-key. There is no spelling for
-                                    a key admitted forever: a key that
-                                    outlives its holder's control is what
-                                    an operator ends up with by leaving a
-                                    field alone. Rotate by OVERLAP — open
-                                    the successor's window before the
-                                    predecessor's closes.
-      --revoked-signer KID=AT:WHY   that key stops counting from that
-                                    instant; repeatable. A revocation is
-                                    applied at verification time and a
-                                    quorum signature carries no signing
-                                    time, so this withdraws every bundle
-                                    the key contributed to.
-      --vendor-revocation-list PATH a DER revocation list from a
-                                    confidential-computing vendor's own
-                                    distribution service; repeatable. A
-                                    DIFFERENT document from
-                                    --revocation-list — signed by a vendor
-                                    root rather than by an operator anchor
-                                    — and without it every bundled vendor
-                                    chain is refused for having no
-                                    revocation data.
-      --witnessed-root LOG:SIZE:HEX a transparency-log root this verifier
-                                    has already witnessed; repeatable. An
-                                    inclusion proof for a log with no
-                                    witnessed root here is refused, because
-                                    a proof checked against a root the same
-                                    document supplied establishes nothing.
-      --json                        print the machine-readable verdict
-      --out PATH                    write the verdict instead of printing it
-
-repro attest launch --provider NAME --instance-shape NAME [options]
-      --provider NAME               the cloud (""" & cloudProviderNames() & """)
-      --region NAME                 the region or zone the instance sits in
-      --instance-name NAME          what the instance is called
-      --instance-shape NAME         the instance shape; it decides the
-                                    processor count and which root of trust
-                                    the instance attests with
-      --image-reference REF         the provider's reference to the disk
-                                    image. NOT covered by any launch
-                                    measurement here; see the CLI reference.
-      --subnet ID                   the network the instance is placed on
-      --ssh-key-reference REF       the provider's reference to the operator
-                                    public key
-      --firmware PATH               the confidential-launch firmware image
-      --vcpu-type NAME              the machine model, on a sev-snp shape
-      --guest-policy 0xHEX          the launch policy, on a sev-snp shape
-      --guest-features 0xHEX        the feature word, on a sev-snp shape
-      --td-page-order NAME          the host fold order, on a tdx shape
-      --td-register-log PATH        the measurement record, on a tdx shape
-      --config-fingerprint TOKEN    the recipe's configuration fingerprint
-      --uki PATH                    the unified kernel image
-      --verity-image-digest DIGEST  sha256:<hex> of the root image
-      --verity-root-hash HEX        the dm-verity root hash
-      --out PATH                    write the expected manifest as well as
-                                    printing the plan
-      --lease-store DIR             hold the launch under a lease whose
-                                    record is written in DIR BEFORE the
-                                    plan is rendered, and put the lease's
-                                    tags on the rendered invocation
-      --lease-ttl-seconds N         how long the hold lasts; a hold with
-                                    no deadline is refused
-      --lease-rate-micros-per-hour N  what an hour of this instance costs.
-                                    Omitted, the hold is reported as
-                                    unpriced rather than as free
-      --lease-out PATH              write the lease record itself
-      --plan-out PATH               write the rendered provider invocation,
-                                    one argument per line
-      --now UNIX                    the moment the lease is taken from,
-                                    for a caller that needs a stated one
-
-repro attest reap --lease-store DIR [options]
-      --lease-store DIR             the lease store to sweep
-      --now UNIX                    the moment to judge expiry against
-      --destroy                     really destroy what the sweep
-                                    selects, by running the provider's
-                                    own tool. Without it the sweep is
-                                    printed and nothing is touched.
-      --tag-sweep                   sweep by provider tag instead of by
-                                    the store, for a sweeper that has
-                                    lost the records or never had them.
-                                    Needs --provider and --region, reaps
-                                    on expiry only, and implies --destroy
-      --interval-seconds N          repeat the sweep every N seconds
-                                    (default """ & $DefaultReapIntervalSeconds &
-    """, at most """ & $MaxReapIntervalSeconds & """). A leaked
-                                    instance outlives its owner by at
-                                    most its remaining hold plus this.
-      --sweeps N                    stop after N sweeps. Omitted, the
-                                    sweep runs ONCE, unless
-                                    --interval-seconds asked for a
-                                    cadence, in which case it repeats
-                                    until it is stopped
-
-Exit codes:
-  0  success, or a verdict of `accepted`
-  1  a --check mismatch, a verdict of `rejected`, or a runtime failure
-  2  a usage error or a refusal
-  3  a verdict of `accepted-without-a-root-of-trust`
-  4  a verdict of `accepted-against-an-unauthenticated-manifest`: it
-     established an identity, out of a manifest your policy pins nothing
-     about
-  5  a verdict of `accepted-against-an-evidence-backed-manifest`: it
-     established an identity, out of a manifest your policy pins nothing
-     about and a quorum of the rebuilders it admits had signed
-"""
-
 proc fileBytes(path: string): seq[byte] =
   ## A file's bytes. The CBOR reader wants bytes and `readFile` gives a
   ## string; the conversion lives here so it has one spelling.
@@ -498,138 +239,100 @@ proc fileBytes(path: string): seq[byte] =
   result = newSeq[byte](text.len)
   for i in 0 ..< text.len: result[i] = byte(text[i])
 
-proc valueFor(args: openArray[string]; i: var int; flag: string): string =
-  ## Accepts both ``--flag VALUE`` and ``--flag=VALUE``.
-  let a = args[i]
-  if a.len > flag.len and a.startsWith(flag & "="):
-    inc i
-    return a[flag.len + 1 .. ^1]
-  if i + 1 >= args.len:
-    raise newException(ValueError, flag & " requires a value")
-  result = args[i + 1]
-  i += 2
-
-proc parseAttestArgs*(args: seq[string]): AttestCliOptions =
-  ## Hand-rolled so every unknown flag is a refusal rather than a default.
-  if args.len == 0:
-    result.sub = ascNone
-    return
-  case args[0]
-  of "expect": result.sub = ascExpect
-  of "verify": result.sub = ascVerify
-  of "challenge": result.sub = ascChallenge
-  of "launch": result.sub = ascLaunch
-  of "reap": result.sub = ascReap
-  of "cross-check": result.sub = ascCrossCheck
-  else:
-    raise newException(ValueError,
-      "unknown `repro attest` subcommand: " & args[0])
+proc attestOptionsOf[T](c: T; sub: AttestSubcommand): AttestCliOptions =
+  ## The options of one `repro attest` subcommand, from its configuration
+  ## object (parsed from repro's description,
+  ## ``repro_cli_support/cli_description``). Each subcommand declares only
+  ## the flags it reads, or refuses by name; a field it does not declare
+  ## keeps its empty value.
+  result.sub = sub
   result.challengeBytes = ChallengeBytes
-  var i = 1
-  while i < args.len:
-    let a = args[i]
-    let flag = (if '=' in a: a[0 ..< a.find('=')] else: a)
-    case flag
-    of "--image": result.image = valueFor(args, i, "--image")
-    of "--report-file": result.reportFile = valueFor(args, i, "--report-file")
-    of "--report-url": result.reportUrl = valueFor(args, i, "--report-url")
-    of "--policy": result.policyPath = valueFor(args, i, "--policy")
-    of "--manifest": result.manifestPath = valueFor(args, i, "--manifest")
-    of "--challenge": result.challengeHex = valueFor(args, i, "--challenge")
-    of "--challenge-file":
-      result.challengeFile = valueFor(args, i, "--challenge-file")
-    of "--challenge-issued-at":
-      result.challengeIssuedAt = valueFor(args, i, "--challenge-issued-at")
-    of "--trust-anchor":
-      result.trustAnchorPaths.add valueFor(args, i, "--trust-anchor")
-    of "--revocation-list":
-      result.revocationListPaths.add valueFor(args, i, "--revocation-list")
-    of "--attestations":
-      result.attestationsPath = valueFor(args, i, "--attestations")
-    of "--signer-key":
-      result.signerKeyPaths.add valueFor(args, i, "--signer-key")
-    of "--signer-admission":
-      result.signerAdmissions.add valueFor(args, i, "--signer-admission")
-    of "--revoked-signer":
-      result.revokedSigners.add valueFor(args, i, "--revoked-signer")
-    of "--vendor-revocation-list":
-      result.vendorRevocationListPaths.add(
-        valueFor(args, i, "--vendor-revocation-list"))
-    of "--witnessed-root":
-      result.witnessedRoots.add valueFor(args, i, "--witnessed-root")
-    of "--json":
-      result.asJson = true
-      inc i
-    of "--hex":
-      result.hexOnly = true
-      inc i
-    of "--bytes":
-      let raw = valueFor(args, i, "--bytes")
-      try:
-        result.challengeBytes = parseInt(raw)
-      except ValueError:
-        raise newException(ValueError, "--bytes is not a number: " & raw)
-    of "--uki": result.uki = valueFor(args, i, "--uki")
-    of "--verity-image": result.verityImage = valueFor(args, i, "--verity-image")
-    of "--verity-image-digest":
-      result.verityImageDigest = valueFor(args, i, "--verity-image-digest")
-    of "--verity-root-hash":
-      result.verityRootHash = valueFor(args, i, "--verity-root-hash")
-    of "--verity-root-hash-file":
-      result.verityRootHashFile = valueFor(args, i, "--verity-root-hash-file")
-    of "--config-fingerprint":
-      result.configFingerprint = valueFor(args, i, "--config-fingerprint")
-    of "--backend": result.backends.add valueFor(args, i, "--backend")
-    of "--firmware": result.firmware = valueFor(args, i, "--firmware")
-    of "--vcpus": result.vcpus = valueFor(args, i, "--vcpus")
-    of "--vcpu-type": result.vcpuType = valueFor(args, i, "--vcpu-type")
-    of "--guest-policy": result.guestPolicy = valueFor(args, i, "--guest-policy")
-    of "--guest-features":
-      result.guestFeatures = valueFor(args, i, "--guest-features")
-    of "--vmm": result.vmm = valueFor(args, i, "--vmm")
-    of "--launch-kernel": result.snpKernel = valueFor(args, i, "--launch-kernel")
-    of "--launch-initrd": result.snpInitrd = valueFor(args, i, "--launch-initrd")
-    of "--launch-cmdline":
-      result.snpCmdline = valueFor(args, i, "--launch-cmdline")
-      result.hasSnpCmdline = true
-    of "--td-firmware": result.tdxFirmware = valueFor(args, i, "--td-firmware")
-    of "--td-register-log":
-      result.tdxRegisterLog = valueFor(args, i, "--td-register-log")
-    of "--td-page-order":
-      result.tdxPageOrder = valueFor(args, i, "--td-page-order")
-    of "--provider": result.provider = valueFor(args, i, "--provider")
-    of "--region": result.region = valueFor(args, i, "--region")
-    of "--instance-name":
-      result.instanceName = valueFor(args, i, "--instance-name")
-    of "--instance-shape":
-      result.instanceShape = valueFor(args, i, "--instance-shape")
-    of "--image-reference":
-      result.imageReference = valueFor(args, i, "--image-reference")
-    of "--subnet": result.subnet = valueFor(args, i, "--subnet")
-    of "--ssh-key-reference":
-      result.sshKeyReference = valueFor(args, i, "--ssh-key-reference")
-    of "--lease-store": result.leaseStore = valueFor(args, i, "--lease-store")
-    of "--lease-ttl-seconds":
-      result.leaseTtlSeconds = valueFor(args, i, "--lease-ttl-seconds")
-    of "--lease-rate-micros-per-hour":
-      result.leaseRateMicros =
-        valueFor(args, i, "--lease-rate-micros-per-hour")
-    of "--lease-out": result.leaseOut = valueFor(args, i, "--lease-out")
-    of "--plan-out": result.planOut = valueFor(args, i, "--plan-out")
-    of "--now": result.leaseNow = valueFor(args, i, "--now")
-    of "--destroy":
-      result.reapDestroy = true
-      inc i
-    of "--tag-sweep":
-      result.reapTagSweep = true
-      inc i
-    of "--interval-seconds":
-      result.reapInterval = valueFor(args, i, "--interval-seconds")
-    of "--sweeps": result.reapSweeps = valueFor(args, i, "--sweeps")
-    of "--out": result.outPath = valueFor(args, i, "--out")
-    of "--check": result.checkPath = valueFor(args, i, "--check")
-    else:
-      raise newException(ValueError, "unknown `repro attest` flag: " & a)
+  when compiles(c.image): result.image = c.image
+  when compiles(c.uki): result.uki = c.uki
+  when compiles(c.verityImage): result.verityImage = c.verityImage
+  when compiles(c.verityImageDigest):
+    result.verityImageDigest = c.verityImageDigest
+  when compiles(c.verityRootHash): result.verityRootHash = c.verityRootHash
+  when compiles(c.verityRootHashFile):
+    result.verityRootHashFile = c.verityRootHashFile
+  when compiles(c.configFingerprint):
+    result.configFingerprint = c.configFingerprint
+  when compiles(c.backend): result.backends = c.backend
+  when compiles(c.`out`): result.outPath = c.`out`
+  when compiles(c.check): result.checkPath = c.check
+  when compiles(c.reportFile): result.reportFile = c.reportFile
+  when compiles(c.reportUrl): result.reportUrl = c.reportUrl
+  when compiles(c.policy): result.policyPath = c.policy
+  when compiles(c.manifest): result.manifestPath = c.manifest
+  when compiles(c.challenge): result.challengeHex = c.challenge
+  when compiles(c.challengeFile): result.challengeFile = c.challengeFile
+  when compiles(c.challengeIssuedAt):
+    result.challengeIssuedAt = c.challengeIssuedAt
+  when compiles(c.json): result.asJson = c.json
+  when compiles(c.bytes): result.challengeBytes = c.bytes
+  when compiles(c.hex): result.hexOnly = c.hex
+  when compiles(c.trustAnchor): result.trustAnchorPaths = c.trustAnchor
+  when compiles(c.revocationList):
+    result.revocationListPaths = c.revocationList
+  when compiles(c.attestations): result.attestationsPath = c.attestations
+  when compiles(c.signerKey): result.signerKeyPaths = c.signerKey
+  when compiles(c.signerAdmission):
+    result.signerAdmissions = c.signerAdmission
+  when compiles(c.revokedSigner): result.revokedSigners = c.revokedSigner
+  when compiles(c.vendorRevocationList):
+    result.vendorRevocationListPaths = c.vendorRevocationList
+  when compiles(c.witnessedRoot): result.witnessedRoots = c.witnessedRoot
+  when compiles(c.firmware): result.firmware = c.firmware
+  when compiles(c.vcpus): result.vcpus = c.vcpus
+  when compiles(c.vcpuType): result.vcpuType = c.vcpuType
+  when compiles(c.guestPolicy): result.guestPolicy = c.guestPolicy
+  when compiles(c.guestFeatures): result.guestFeatures = c.guestFeatures
+  when compiles(c.vmm): result.vmm = c.vmm
+  when compiles(c.launchKernel): result.snpKernel = c.launchKernel
+  when compiles(c.launchInitrd): result.snpInitrd = c.launchInitrd
+  when compiles(c.launchCmdline):
+    # Given, even empty, it is stated: an empty command line is measured.
+    result.hasSnpCmdline = c.launchCmdline.isSome
+    result.snpCmdline = c.launchCmdline.get("")
+  when compiles(c.tdFirmware): result.tdxFirmware = c.tdFirmware
+  when compiles(c.tdRegisterLog): result.tdxRegisterLog = c.tdRegisterLog
+  when compiles(c.tdPageOrder): result.tdxPageOrder = c.tdPageOrder
+  when compiles(c.provider): result.provider = c.provider
+  when compiles(c.region): result.region = c.region
+  when compiles(c.instanceName): result.instanceName = c.instanceName
+  when compiles(c.instanceShape): result.instanceShape = c.instanceShape
+  when compiles(c.imageReference): result.imageReference = c.imageReference
+  when compiles(c.subnet): result.subnet = c.subnet
+  when compiles(c.sshKeyReference):
+    result.sshKeyReference = c.sshKeyReference
+  when compiles(c.leaseStore): result.leaseStore = c.leaseStore
+  when compiles(c.leaseTtlSeconds): result.leaseTtlSeconds = c.leaseTtlSeconds
+  when compiles(c.leaseRateMicrosPerHour):
+    result.leaseRateMicros = c.leaseRateMicrosPerHour
+  when compiles(c.leaseOut): result.leaseOut = c.leaseOut
+  when compiles(c.planOut): result.planOut = c.planOut
+  when compiles(c.now): result.leaseNow = c.now
+  when compiles(c.destroy): result.reapDestroy = c.destroy
+  when compiles(c.tagSweep): result.reapTagSweep = c.tagSweep
+  when compiles(c.intervalSeconds): result.reapInterval = c.intervalSeconds
+  when compiles(c.sweeps): result.reapSweeps = c.sweeps
+
+proc attestOptionsOf*(conf: ReproCommandLineAttest): AttestCliOptions =
+  ## The options `repro attest <subcommand>` was given.
+  case conf.command
+  of ReproCommandLineAttestCommand.expect:
+    attestOptionsOf(conf.expect, ascExpect)
+  of ReproCommandLineAttestCommand.challenge:
+    attestOptionsOf(conf.challenge, ascChallenge)
+  of ReproCommandLineAttestCommand.verify:
+    attestOptionsOf(conf.verify, ascVerify)
+  of ReproCommandLineAttestCommand.crossCheck:
+    attestOptionsOf(conf.crossCheck, ascCrossCheck)
+  of ReproCommandLineAttestCommand.launch:
+    attestOptionsOf(conf.launch, ascLaunch)
+  of ReproCommandLineAttestCommand.reap:
+    attestOptionsOf(conf.reap, ascReap)
+
 
 proc firstDifference(a, b: string): string =
   ## Names WHERE two manifests differ. "they differ" diagnoses nothing
@@ -1784,6 +1487,24 @@ proc runAttestCrossCheck(opts: AttestCliOptions): int =
   (if agreed: AttestExitAccepted else: AttestExitRejected)
 
 
+proc runAttestCommand*(conf: ReproCommandLineAttest;
+                       env: CloudEnvLookup = nil): int =
+  ## `repro attest <subcommand>`, from its parsed command line. `env` is as
+  ## for the overload below.
+  let opts = attestOptionsOf(conf)
+  let lookup = (if env == nil: processEnvLookup() else: env)
+  case opts.sub
+  of ascExpect: runAttestExpect(opts)
+  of ascVerify: runAttestVerify(opts)
+  of ascChallenge: runAttestChallenge(opts)
+  of ascLaunch: runAttestLaunch(opts, lookup)
+  of ascReap: runAttestReap(opts, lookup)
+  of ascCrossCheck: runAttestCrossCheck(opts)
+  of ascNone:
+    # Not reachable: the parser refuses `repro attest` without a
+    # subcommand (it has no `call:`).
+    AttestExitUsage
+
 proc runAttestCommand*(args: seq[string];
                        env: CloudEnvLookup = nil): int =
   ## `env` is the environment the cloud subcommands READ, stated by the
@@ -1798,21 +1519,10 @@ proc runAttestCommand*(args: seq[string];
   ## that fails on somebody's laptop and not on somebody else's is not a
   ## gate. Omitted, this is the process environment, which is what an
   ## operator means.
-  var opts: AttestCliOptions
-  try:
-    opts = parseAttestArgs(args)
-  except ValueError as err:
-    stderr.writeLine("repro attest: " & err.msg)
-    stderr.write(renderAttestUsage())
-    return AttestExitUsage
-  let lookup = (if env == nil: processEnvLookup() else: env)
-  case opts.sub
-  of ascExpect: runAttestExpect(opts)
-  of ascVerify: runAttestVerify(opts)
-  of ascChallenge: runAttestChallenge(opts)
-  of ascLaunch: runAttestLaunch(opts, lookup)
-  of ascReap: runAttestReap(opts, lookup)
-  of ascCrossCheck: runAttestCrossCheck(opts)
-  of ascNone:
-    stderr.write(renderAttestUsage())
-    AttestExitUsage
+  ##
+  ## ``args`` are the words after `repro attest`, parsed by repro's own
+  ## parser (``runReproArgs``), so an in-process caller meets exactly the
+  ## command line `repro attest` accepts: a usage error is clispec's error
+  ## block on stderr and `AttestExitUsage` (2), help is printed and exits 0.
+  runReproArgs(@["attest"] & args, proc (c: ReproCommandLine): int =
+    runAttestCommand(c.attest, env))

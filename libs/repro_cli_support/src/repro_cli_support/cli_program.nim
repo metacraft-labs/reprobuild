@@ -172,6 +172,22 @@ proc reproCommandIsPassThrough*(command: int): bool =
   ## Whether the command is still parsed by its own code.
   command in ReproPassThroughCommands
 
+proc reproCommandTakesRest*(command: int): bool =
+  ## Whether the command's words after it are a clispec `rest` positional:
+  ## another program's command line it hands over verbatim (`repro system
+  ## addon`, `repro debug io monitor`). `repro help <command> <words>` then
+  ## prints the command's own help, whatever the words, as it does for a
+  ## command its own code still parses: the words are not repro's.
+  let g = ReproCommandLine.cliGrammar()
+  var holders = @[command]
+  if g.commands[command].callChild >= 0:
+    holders.add(g.commands[command].callChild)
+  for k in holders:
+    for id in g.commands[k].ownParams:
+      if g.params[id].rest:
+        return true
+  false
+
 proc reproCommandIsShown*(command: int): bool =
   ## Whether the command and every command holding it are ``shown`` (not
   ## ``internal`` or ``hidden``).
@@ -255,9 +271,10 @@ proc reproDeclaredEnv*(): Table[string, string] =
   ## dependency the parser has.
   ##
   ## The parse itself takes ``reproDeclaredEnvFor``, which narrows this to
-  ## the command being parsed. Only `repro build`, `repro bench` and `repro
-  ## lint` declare variables (`$REPRO_DAEMON` and the like), so any other
-  ## command line reads none.
+  ## the command being parsed: a command line reads only the variables its
+  ## own command (and the commands above and below it) declares, such as
+  ## `repro build`'s `$REPRO_DAEMON` or `repro gateway pre-receive`'s
+  ## `$GIT_DIR`, and none of any other command's.
   declaredEnvOf(ReproCommandLine.cliGrammar())
 
 proc reproDeclaredEnvFor*(argv: openArray[string]): Table[string, string] =
@@ -288,13 +305,21 @@ proc reproDeclaredEnvFor*(argv: openArray[string]): Table[string, string] =
       break
     chain.add(child)
     command = child
+  # A command's `call:` is a command of its own in the grammar (its
+  # ``callChild``), not one of its ``children``: the parameters a `call:`
+  # declares (`repro shell`'s `--shell`, beside its `hook` subcommand) count
+  # wherever their command does.
   var params: seq[int] = @[]
   for k in chain:
     params.add(g.commands[k].ownParams)
+    if g.commands[k].callChild >= 0:
+      params.add(g.commands[g.commands[k].callChild].ownParams)
   var below = g.commands[command].children
   while below.len > 0:
     let k = below.pop()
     params.add(g.commands[k].ownParams)
+    if g.commands[k].callChild >= 0:
+      params.add(g.commands[g.commands[k].callChild].ownParams)
     below.add(g.commands[k].children)
   declaredEnvOf(g, params)
 
@@ -354,6 +379,32 @@ proc reproBuildFlagNames*(): seq[string] =
   for id in g.commands[reproCommandAt(["build"])].params:
     if g.params[id].kind == cpkFlag:
       result.add(g.params[id].name)
+
+proc loadReproCommandLine*(argv: openArray[string];
+                           conf: var ReproCommandLine;
+                           origins: var ReproCommandLineOrigins): int =
+  ## ``loadReproCommandLine`` (below), also giving where each value came
+  ## from (``origins``, confutils' origin object): for a command that must
+  ## tell a flag the user typed from the variable the flag declares (a
+  ## variable set in nearly every environment, such as `$SHELL`, or one whose
+  ## bad value is a warning where the flag's is an error).
+  try:
+    (conf, origins) = ReproCommandLine.loadWithOrigins(
+      reproArgvForParser(argv), CliSources(env: reproDeclaredEnvFor(argv)))
+  except CliHelpRequest as e:
+    ReproCommandLine.printHelp(e)
+    return 0
+  except CliUsageError as e:
+    return reportReproUsageError(e)
+  except CliConfigError as e:
+    stderr.writeLine("repro: " & e.msg)
+    return 2
+  -1
+
+proc reproGivenOnCommandLine*(origin: CliOrigin): bool =
+  ## Whether a value came from the command line (not from the variable its
+  ## flag declares, nor its default).
+  origin.winner.kind == cokCli
 
 proc loadReproCommandLine*(argv: openArray[string];
                            conf: var ReproCommandLine): int =

@@ -22,7 +22,8 @@
 ## `run`, `shell`, `allow`, `deny`, `dev-env`, `up`, `down`, `dev`, `hcr`,
 ## `prompt` and their subcommands; the sixth: the workspace and publication
 ## commands; the seventh: the build family, `build`, `bench`, `lint`,
-## `clean`, `test`, `certify`, `certificates`, `ci`, `watch`). Each later
+## `clean`, `test`, `certify`, `certificates`, `ci`, `watch`; of the eighth,
+## `attest` and its subcommands). Each later
 ## group of commands is added by listing it here and in the generator's
 ## `COVERED_COMMANDS`; the last one replaces the list with every command. The
 ## top-level command list is compared in full already. Both comparisons run
@@ -144,7 +145,15 @@ const
     "repro build", "repro bench", "repro lint", "repro clean", "repro test",
     "repro certify", "repro certificates", "repro certificates list",
     "repro certificates plan", "repro certificates policy", "repro ci",
-    "repro ci plan", "repro watch"]
+    "repro ci plan", "repro watch",
+    # The eighth group, round 8a: `attest` (the rest of the fourth group,
+    # which waited for a command's long help). `system addon|state|secret|
+    # adopt` and `debug io monitor` are not compared: they declare only the
+    # rest of the command line, which the add-on's and io-mon's own command
+    # lines parse, so the flags their pages write are those programs'.
+    "repro attest", "repro attest expect", "repro attest challenge",
+    "repro attest verify", "repro attest cross-check", "repro attest launch",
+    "repro attest reap"]
     ## The commands whose flags and environment variables are compared.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
@@ -186,8 +195,8 @@ const
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
-    "audit", "info", "init", "list", "lsp", "mcp", "outdated", "package",
-    "search", "upgrade"]
+    "audit", "catalog", "info", "init", "list", "lsp", "mcp", "outdated",
+    "package", "search", "upgrade"]
     ## Commands the specification describes that repro does not have yet.
   DeclaredNotSpecified: array[0, string] = []
     ## Commands repro has whose specification is not a command page (some

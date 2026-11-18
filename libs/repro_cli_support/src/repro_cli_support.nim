@@ -396,8 +396,8 @@ export cli_disk.runDiskCommand,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
        cli_disk.DiskCliOptions,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
-export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
-       cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
+export cli_attest.runAttestCommand, cli_attest.attestOptionsOf,
+       cli_attest.AttestCliOptions,
        cli_attest.AttestSubcommand, cli_attest.AttestExitCode,
        cli_attest.attestExitCodeFor, cli_attest.ConventionalUkiName,
        cli_attest.ConventionalVerityImageName,
@@ -484,26 +484,6 @@ proc runVersionCommand*(programName: string; asJson: bool): int =
   else:
     echo renderVersion(programName)
   0
-
-# The usage synopsis of each command whose parsing has not moved onto repro's
-# command-line description yet, printed by ``repro help <command>``. A
-# command's entry goes when it moves: its help is then generated from its
-# declarations, like every migrated command's. The list of commands itself,
-# and the primary help, are generated already.
-const LegacyVerbSynopses = [
-  ("attest",
-    "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
-      "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
-
-]
-
-proc legacyVerbSynopsis*(verb: string): string =
-  ## The usage synopsis of the unmigrated command ``verb`` (its canonical
-  ## name), or "" when it has none.
-  for entry in LegacyVerbSynopses:
-    if entry[0] == verb:
-      return entry[1]
-  ""
 
 proc parseToolProvisioning*(value: string): ToolProvisioningMode =
   case value
@@ -9491,7 +9471,7 @@ proc standardProviderArtifactIdForBinary*(binaryPath: string): string =
   StandardProviderArtifactId & "." & fileContentDigest(binaryPath)
 
 type
-  BuildProgressMode = enum
+  BuildProgressMode* = enum
     bpmQuiet
     bpmLine
     bpmBarLine
@@ -9817,6 +9797,18 @@ proc parseBuildProgressMode(value: string): BuildProgressMode =
     raise newException(ValueError,
       "unsupported --progress=" & value &
         " (expected quiet, line, bar-line, lines, lines-bar, dots, simple-dots, simple-lines, or live-lines)")
+
+proc buildProgressModeFor*(progress: string;
+                           inAgentShell: bool): BuildProgressMode =
+  ## `repro build`'s progress mode from its parsed `--progress` (the flag,
+  ## else `$REPROBUILD_PROGRESS`, then `$REPRO_PROGRESS`, which the flag
+  ## declares) and whether the caller is in an agent's shell
+  ## (`$IN_AGENT_SHELL` set). A value, typed or from a variable, wins; only
+  ## without one is an agent's shell quiet. Raises `ValueError` for a value
+  ## that names no mode.
+  if progress.len > 0: parseBuildProgressMode(progress)
+  elif inAgentShell: bpmQuiet
+  else: bpmBarLine
 
 proc configuredBuildProgressMode(): BuildProgressMode =
   var configured = getEnv("REPROBUILD_PROGRESS", "")
@@ -17056,7 +17048,7 @@ type
 proc givenOnCommandLine(origin: CliOrigin): bool =
   ## Whether the value came from the command line (not from an environment
   ## variable the flag declares, nor its default).
-  origin.winner.kind == cokCli
+  reproGivenOnCommandLine(origin)
 
 proc loadBuildCommandLine*(args: openArray[string]):
     tuple[conf: ReproCommandLineBuild, origin: ReproCommandLineBuildOrigins] =
@@ -18008,7 +18000,7 @@ proc defaultInteractiveShell(): string =
     getEnv("SHELL", "/bin/sh")
 
 proc runReproShellCommand(conf: ReproCommandLineShellCall;
-                          publicCliPath: string): int =
+                          publicCliPath: string; shellGiven: bool): int =
   ## ``repro shell [<selector>]``: start a shell in the development
   ## environment, print it (``--print-env``), or run one command in it
   ## (``-c <command>`` through the shell, ``-- <command>`` directly). Its
@@ -18021,7 +18013,7 @@ proc runReproShellCommand(conf: ReproCommandLineShellCall;
   # `repro exec` with no command.
   let invocation = shellInvocationOf(printEnv = conf.printEnv.isSome,
     inlineCommand = conf.command.isSome, directCommand = conf.argv.len > 0,
-    shellGiven = conf.shell.len > 0)
+    shellGiven = shellGiven)
   if invocation.usageError.len > 0:
     stderr.writeLine("repro shell: error: " & invocation.usageError)
     return ShellUsageExitCode
@@ -31059,10 +31051,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     setActionCacheRootOverride(c.actionCacheRoot)
   # `--progress` over `$REPROBUILD_PROGRESS`, then `$REPRO_PROGRESS` (the
   # flag declares both); with none of them, quiet in an agent's shell.
-  progressMode =
-    if c.progress.len > 0: parseBuildProgressMode(c.progress)
-    elif getEnv("IN_AGENT_SHELL", "").len > 0: bpmQuiet
-    else: bpmBarLine
+  progressMode = buildProgressModeFor(c.progress,
+    inAgentShell = getEnv("IN_AGENT_SHELL", "").len > 0)
   # `--progress-bars` over `$REPROBUILD_PROGRESS_BARS`.
   if c.progressBars.len > 0:
     progressBarStyle = parseBuildProgressBarStyle(c.progressBars)
@@ -37174,8 +37164,11 @@ const
   DevelopTargetFormFlags = {dfCmake, dfListOverrides, dfInto,
     dfToolProvisioning, dfCmakeBinary, dfWorkRoot}
 
-proc developFlagsGiven(c: ReproCommandLineDevelop): set[DevelopFlag] =
-  ## The flags ``c``'s command line gave.
+proc developFlagsGiven(c: ReproCommandLineDevelop;
+                       workRootGiven: bool): set[DevelopFlag] =
+  ## The flags ``c``'s command line gave. ``workRootGiven``: whether
+  ## `--work-root` was typed (its value may come from
+  ## `$REPROBUILD_WORK_ROOT`, which names no form).
   if c.all: result.incl(dfAll)
   if c.direct: result.incl(dfDirect)
   if c.indirect: result.incl(dfIndirect)
@@ -37204,7 +37197,7 @@ proc developFlagsGiven(c: ReproCommandLineDevelop): set[DevelopFlag] =
   if c.noWriteReport: result.incl(dfNoWriteReport)
   if c.cmake: result.incl(dfCmake)
   if c.cmakeBinary.isSome: result.incl(dfCmakeBinary)
-  if c.workRoot.isSome: result.incl(dfWorkRoot)
+  if workRootGiven: result.incl(dfWorkRoot)
 
 proc firstOutside(given, allowed: set[DevelopFlag]): string =
   ## The first flag of ``given`` that ``allowed`` does not hold, or "".
@@ -39873,7 +39866,8 @@ proc developUnresolvedTargetDiagnostic(target, modulePath: string;
     result.add("tip: to develop an existing local checkout of `" & target &
       "`, run `repro develop " & target & " --source=<path>`")
 
-proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
+proc runDevelopCommand*(c: ReproCommandLineDevelop;
+                        workRootGiven = c.workRoot.isSome): int =
   ## `repro develop …`, from its configuration. Exported for the same reason
   ## `runReproLockCommand` is: a test that asserts on what the verb WRITES
   ## has to reach the verb, and reaching a private copy of its body instead
@@ -39898,7 +39892,12 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
   ##     or a command.
   ##   * Otherwise the target form: `--list-overrides`, `<dependency>
   ##     --into=PATH`, `<target> -- <command>`, `--cmake <source-dir>`.
-  let given = developFlagsGiven(c)
+  ##
+  ## ``workRootGiven`` says whether `--work-root` was typed on the command
+  ## line; its value may also come from `$REPROBUILD_WORK_ROOT`, which the
+  ## target form reads and which selects no form. A caller that built ``c``
+  ## from words alone may leave it to its default.
+  let given = developFlagsGiven(c, workRootGiven)
   if dfDrop in given:
     return runDevelopDropCommand(c, given)
   if c.command.len == 0 and
@@ -105381,16 +105380,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "attest":
-    # `repro attest` — expected launch measurements for attested images.
-    # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
-    # reference's `repro attest` page is the surface contract.
-    let attestArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runAttestCommand(attestArgs)
   # The parser accepted the command's words, so what reaches here is a
   # subcommand word or an argument shape the command's own parser does not
   # know.
@@ -105720,8 +105709,8 @@ proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string; all = false): int =
   ## ``repro help [--all] [<command>...]``: the help of repro or of one
   ## command, on stdout. A migrated command's help is generated from its
-  ## declarations. An unmigrated one prints its usage synopsis (whatever
-  ## words follow); one with no synopsis, the help its declaration gives.
+  ## declarations. A command that hands its words to another parser
+  ## unparsed prints the help its declaration gives, whatever words follow.
   ## With ``all`` it is the page ``--help-all`` prints, which also lists
   ## the ``secondary`` commands.
   var command = 0
@@ -105736,12 +105725,7 @@ proc runReproHelp(programName: string; topic: seq[string];
         return reportReproUsageError(e)
       return 2
     command = next
-    if reproCommandIsPassThrough(command):
-      let path = reproCommandPath(command)
-      let synopsis = legacyVerbSynopsis(path[0])
-      if synopsis.len > 0:
-        stdout.write(synopsis)
-        return 0
+    if reproCommandIsPassThrough(command) or reproCommandTakesRest(command):
       break
   # Printed as every help page is (``printReproHelp``: styled for stdout by
   # clispec's printer).
@@ -105887,7 +105871,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
   ## its typed configuration; any other is handed to ``runLegacyCommand``
   ## with its unparsed arguments.
   var conf: ReproCommandLine
-  let answered = loadReproCommandLine(args, conf)
+  var origins: ReproCommandLineOrigins
+  let answered = loadReproCommandLine(args, conf, origins)
   if answered >= 0:
     return answered
   case conf.command
@@ -106026,7 +106011,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
   of ReproCommandLineCommand.cargo:
     # `repro cargo gc|record-live|run`: the cargo target-directory janitor
     # and the thin cargo edge (`repro_cli_support/cargo_gc.nim`).
-    return cli_cargo_gc.runCargoCommand(conf.cargo)
+    return cli_cargo_gc.runCargoCommand(conf.cargo, origins.cargo)
   of ReproCommandLineCommand.pressure:
     # Build-wait pressure from the RunQuota daemon this build would use;
     # the command lives in `repro_runquota` beside the reports the engine
@@ -106066,7 +106051,10 @@ proc runReproCommandLine(programName: string; args: seq[string];
       return runShellHookCommand(conf.shell.hook)
     of ReproCommandLineShellCommand.call:
       try:
-        return runReproShellCommand(conf.shell.call, publicCliPath)
+        # `$SHELL` is set nearly everywhere; only a `--shell` typed on the
+        # command line conflicts with `-- <command>`.
+        return runReproShellCommand(conf.shell.call, publicCliPath,
+          shellGiven = reproGivenOnCommandLine(origins.shell.call.shell))
       except CatchableError as err:
         stderr.writeLine("repro shell: error: " & err.msg)
         return 1
@@ -106150,9 +106138,16 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.attest:
+    # `repro attest`: expected launch measurements for attested images
+    # (`repro_cli_support/attest`), from its configuration.
+    return runAttestCommand(conf.attest)
   of ReproCommandLineCommand.develop:
     try:
-      return runDevelopCommand(conf.develop)
+      # `$REPROBUILD_WORK_ROOT` gives `--work-root` a value, but only a
+      # `--work-root` typed on the command line names the target form.
+      return runDevelopCommand(conf.develop, workRootGiven =
+        reproGivenOnCommandLine(origins.develop.workRoot))
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1

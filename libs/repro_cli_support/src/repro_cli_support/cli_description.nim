@@ -162,20 +162,22 @@ proc graphInspectionFlags(): NimNode {.compileTime.} =
         "`defaultToolProvisioning`"
     flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
       help = "The work root the project's build state lives under " &
-        "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
+        "(default: the project's `.repro/`)"
     flag actionCacheRoot is string, env = "REPROBUILD_ACTION_CACHE_ROOT",
-      help = "The action-cache root (default: " &
-        "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
+      help = "The action-cache root (default: the store's)"
 
 proc devEnvSelectionFlags(): NimNode {.compileTime.} =
   ## The flags that select a project's development environment, shared by the
-  ## commands that compute it.
+  ## commands that compute it. `--work-root` wins over
+  ## `$REPROBUILD_WORK_ROOT`, as for `repro build`: the environment's output
+  ## lives under the work root the build would use.
   quote do:
     flag activity is seq[string],
       help = "Activate the named activity; repeat it or give a " &
         "comma-separated list for several (default: `default`)"
-    flag workRoot is string,
-      help = "The work root the development environment is computed under"
+    flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
+      help = "The work root the development environment is computed under " &
+        "(default: the project's `.repro/`)"
     # Internal (accepted, never shown in help): the engine names the lock
     # slice when it computes an environment on a caller's behalf.
     flag lockSlice is string, visibility = internal,
@@ -186,13 +188,15 @@ proc devEnvSelectionFlags(): NimNode {.compileTime.} =
 
 proc devSessionSelectionFlags(): NimNode {.compileTime.} =
   ## The flags that select the development session `up`, `dev` and `down`
-  ## act on: its activities and the work root it lives under.
+  ## act on: its activities and the work root it lives under (the flag wins
+  ## over `$REPROBUILD_WORK_ROOT`, as for `repro build`).
   quote do:
     flag activity is seq[string],
       help = "The session of the named activity; repeat it or give a " &
         "comma-separated list for several (default: `default`)"
-    flag workRoot is string,
-      help = "The work root the development environment is computed under"
+    flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
+      help = "The work root the development environment is computed under " &
+        "(default: the project's `.repro/`)"
     # Internal (accepted, never shown in help), as for `exec` and `tasks`.
     flag lockSlice is string, visibility = internal,
       help = "The lock slice the development environment must match"
@@ -221,16 +225,33 @@ proc devSessionStartFlags(): NimNode {.compileTime.} =
       help = "With --replace: take the shared instance over from its other " &
         "live holders"
 
+proc interactiveShellFlag(): NimNode {.compileTime.} =
+  ## `repro shell --shell`: the shell spawn mode starts, and `-c` runs its
+  ## command through. The flag wins over the variable the platform names
+  ## its interactive shell in (`$SHELL`; on Windows `$COMSPEC`), declared on
+  ## it; without either, `/bin/sh` (on Windows pwsh, else powershell).
+  ##
+  ## The variable is set in nearly every environment, so a reader that must
+  ## know whether `--shell` itself was given (`-- <command>` refuses it)
+  ## asks the value's origin, not whether the field is empty.
+  when defined(windows):
+    quote do:
+      flag shell is string, env = "COMSPEC",
+        help = "The shell to start (default: pwsh, else powershell)"
+  else:
+    quote do:
+      flag shell is string, env = "SHELL",
+        help = "The shell to start (default: /bin/sh)"
+
 proc storeRootFlags(): NimNode {.compileTime.} =
   ## The store root of the commands that open the local store (`store`'s
   ## subcommands, `cas`, `launch-plan`, `self`). Spelt `--store-root=PATH`
-  ## only: these commands never took the path as the next word. The
-  ## variable `REPRO_STORE_ROOT` is read where the root is resolved, after
-  ## the flag, as `repro build` resolves it.
+  ## only: these commands never took the path as the next word. The flag
+  ## wins over `$REPRO_STORE_ROOT`, declared on it; without either the
+  ## store's resolver (`resolveStoreRoot`) picks the per-user store.
   quote do:
-    flag storeRoot is string, format = equals,
-      help = "The store root (default: `$REPRO_STORE_ROOT`, else the " &
-        "per-user store)"
+    flag storeRoot is string, format = equals, env = "REPRO_STORE_ROOT",
+      help = "The store root (default: the per-user store)"
 
 proc storeAndActionCacheRootFlags(): NimNode {.compileTime.} =
   ## The two roots of the bundle commands (`store closure|export|import`,
@@ -239,13 +260,11 @@ proc storeAndActionCacheRootFlags(): NimNode {.compileTime.} =
   ## variable `resolveActionCacheRoot` reads (declared on the flag, as on
   ## `repro build`).
   quote do:
-    flag storeRoot is string, format = equals,
-      help = "The store root (default: `$REPRO_STORE_ROOT`, else the " &
-        "per-user store)"
+    flag storeRoot is string, format = equals, env = "REPRO_STORE_ROOT",
+      help = "The store root (default: the per-user store)"
     flag actionCacheRoot is string, format = equals,
       env = "REPROBUILD_ACTION_CACHE_ROOT",
-      help = "The action-cache root (default: " &
-        "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
+      help = "The action-cache root (default: the store's)"
 
 proc storeBundleSelectionFlags(): NimNode {.compileTime.} =
   ## What `store closure` and `store export` bundle: the workspace roots and
@@ -317,9 +336,8 @@ proc storeDaemonConfigFlags(): NimNode {.compileTime.} =
     flag storeRoot is string,
       help = "The development store root (default: the platform's " &
         "development store)"
-    flag endpoint is string,
-      help = "The development endpoint (default: `$REPROSTORED_ENDPOINT`, " &
-        "else the platform's)"
+    flag endpoint is string, env = "REPROSTORED_ENDPOINT",
+      help = "The development endpoint (default: the platform's)"
 
 proc cacheIdentityFlags(): NimNode {.compileTime.} =
   ## The cache-entry identity `repro cache publish` labels a manifest with
@@ -382,11 +400,19 @@ proc hostIdentityFlag(): NimNode {.compileTime.} =
   ## `--host`, the host identity a machine command acts as. An `Option`,
   ## because `--host=` (given, empty) is refused by the resolver rather
   ## than read as "no flag".
+  ##
+  ## `$REPRO_HOST` is declared on it: the variable alone gives the flag its
+  ## value. It is not a default the flag overrides, though: the variable
+  ## takes precedence and a `--host` it contradicts is refused, and that is
+  ## the one host resolver's rule (`host_identity.selectHost`), which reads
+  ## the variable itself and compares. The parser does not refuse the two
+  ## (`merge = errorOnConflict` would): the resolver's refusal is what the
+  ## commands report and, for `repro deploy-agent`, record as the tick's
+  ## outcome.
   quote do:
-    flag host is Option[string],
-      help = "The host identity to act as (default: `$REPRO_HOST`, else " &
-        "the lower-cased OS host name; `--host` that `$REPRO_HOST` " &
-        "contradicts is refused)"
+    flag host is Option[string], env = "REPRO_HOST",
+      help = "The host identity to act as (default: the lower-cased OS " &
+        "host name; a `--host` that `$REPRO_HOST` contradicts is refused)"
 
 proc homePackageEditFlags(): NimNode {.compileTime.} =
   ## What `repro home add` and `repro home remove` share: where the
@@ -551,13 +577,138 @@ proc cargoTargetDirFlags(): NimNode {.compileTime.} =
   ## The target directory and live-set count `repro cargo gc` and
   ## `record-live` share.
   quote do:
-    flag targetDir is string,
-      help = "The target directory (default: `$CARGO_TARGET_DIR`, else " &
-        "`./target`; with a split `build.build-dir`, the build directory)"
-    flag keepSets is string,
+    flag targetDir is string, env = "CARGO_TARGET_DIR",
+      help = "The target directory (default: `./target`; with a split " &
+        "`build.build-dir`, the build directory)"
+    # The variable sits between the flag and the configuration file. An
+    # unparsable value from it is a warning and ignored, from the flag an
+    # error (`repro_cargo_gc/config`), so the command reads where the
+    # value came from.
+    flag keepSets is string, env = "REPRO_CARGO_GC_KEEP_SETS",
       help = "How many recent live sets protect their units (N >= 1; " &
-        "default 3, also `$REPRO_CARGO_GC_KEEP_SETS` and `keep_sets` under " &
-        "`[cargo_gc]` in the configuration file)"
+        "default 3, also `keep_sets` under `[cargo_gc]` in the " &
+        "configuration file)"
+
+proc attestImageFlags(): NimNode {.compileTime.} =
+  ## The image inputs `repro attest expect` measures and `repro attest
+  ## cross-check` computes its local side from; each means the same in both.
+  quote do:
+    flag image is string, help = "The image build's output directory, or " &
+      "the unified kernel image itself"
+    flag uki is string, help = "The unified kernel image (overrides the " &
+      "one found under `--image`)"
+    flag verityImage is string,
+      help = "The integrity-protected root image; its digest is recorded"
+    flag verityImageDigest is string,
+      help = "`sha256:<hex>` of the root image, instead of `--verity-image`"
+    flag verityRootHash is string, help = "The dm-verity root hash"
+    flag verityRootHashFile is string,
+      help = "Read the dm-verity root hash from a file"
+    flag configFingerprint is string,
+      help = "The recipe's configuration fingerprint"
+    flag backend is seq[string],
+      help = "Compute this backend only, repeatable (`sev-snp`, `tdx`, " &
+        "`tpm`)"
+    flag firmware is string,
+      help = "The confidential-launch firmware image; supplying it " &
+        "computes the sev-snp expectation and requires `--vcpus`, " &
+        "`--vcpu-type`, `--guest-policy`, `--guest-features` and `--vmm`"
+    flag vcpus is string,
+      help = "How many processors the guest is launched with"
+    flag vcpuType is string,
+      help = "The machine model the hypervisor presents"
+    flag guestPolicy is string,
+      help = "The launch policy the guest is started under (`0x<hex>`)"
+    flag guestFeatures is string,
+      help = "The feature word each processor starts with (`0x<hex>`)"
+    flag vmm is string, help = "The hypervisor that will start the guest " &
+      "(`qemu`, `ec2`, `gce`)"
+    flag launchKernel is string, help = "Measure a directly booted kernel"
+    flag launchInitrd is string,
+      help = "The initial ramdisk beside the directly booted kernel"
+    flag launchCmdline is Option[string],
+      help = "The command line beside the directly booted kernel"
+    flag tdFirmware is string,
+      help = "The trust-domain firmware image; supplying it computes the " &
+        "tdx expectation and requires `--td-register-log`"
+    flag tdRegisterLog is string,
+      help = "The event log the domain wrote, replayed into the three " &
+        "runtime registers the document carries"
+    flag tdPageOrder is string,
+      help = "The order the host folds a page's contents in " &
+        "(`per-page`, `per-region`); both occur in the " &
+        "wild and give different measurements"
+
+proc attestEvidenceFlags(): NimNode {.compileTime.} =
+  ## The published-manifest evidence `repro attest verify` and `repro
+  ## attest cross-check` read: the edge attestations and who may sign them.
+  quote do:
+    flag attestations is string,
+      help = "The `reproos.edge-attestations.v1` bundle published beside " &
+        "the manifest: rebuilder signatures over the claim that this " &
+        "configuration produces it, and any transparency-log inclusion " &
+        "proofs for that claim"
+    flag signerKey is seq[string],
+      help = "A `COSE_Key` holding one admitted rebuilder's public key, " &
+        "repeatable; the policy says which key identifiers may count, and " &
+        "the two sets must agree exactly"
+    flag signerAdmission is seq[string],
+      help = "`<key-id>=<from>/<until>`: for how long that key counts, two " &
+        "instants written `YYYY-MM-DDTHH:MM:SSZ`; repeatable and required " &
+        "for every `--signer-key` (there is no spelling for a key admitted " &
+        "forever: rotate by overlapping windows)"
+    flag revokedSigner is seq[string],
+      help = "`<key-id>=<instant>:<reason>`: that key stops counting from " &
+        "that instant, repeatable; it withdraws every bundle the key " &
+        "contributed to"
+    flag vendorRevocationList is seq[string],
+      help = "A DER revocation list from a confidential-computing vendor's " &
+        "own distribution service, repeatable (a different document from " &
+        "`--revocation-list`; without it every bundled vendor chain is " &
+        "refused)"
+    flag witnessedRoot is seq[string],
+      help = "`<log>:<size>:<hex>`: a transparency-log root this verifier " &
+        "has already witnessed, repeatable; an inclusion proof for a log " &
+        "with no witnessed root here is refused"
+
+proc attestReportFlags(): NimNode {.compileTime.} =
+  ## What `repro attest verify` judges a runtime report with: the report,
+  ## the policy and manifest, the nonce, the certificate anchors and the
+  ## verdict's rendering. `repro attest cross-check` declares them too and
+  ## refuses each by name, so its refusal says why the flag does not apply.
+  quote do:
+    flag reportFile is string, help = "The report to verify"
+    flag reportUrl is string, help = "Fetch the report from a running " &
+      "agent instead (plain `http://` only)"
+    flag policy is string,
+      help = "The measurement policy (`reproos.attestation-policy.v1`; " &
+        "required)"
+    flag manifest is string,
+      help = "The measurement manifest to compare against; never fetched " &
+        "from the machine under verification"
+    flag challenge is string, help = "The nonce this verifier issued (hex)"
+    flag challengeFile is string,
+      help = "A record from `repro attest challenge`, which also says when " &
+        "it was issued"
+    flag challengeIssuedAt is string,
+      help = "When the nonce was issued, as `YYYY-MM-DDTHH:MM:SSZ`"
+    flag trustAnchor is seq[string],
+      help = "A DER root certificate this verifier trusts, repeatable; " &
+        "never taken from the report"
+    flag revocationList is seq[string],
+      help = "A DER revocation list this verifier holds, repeatable; " &
+        "required for every issuer in a bundled chain"
+    boolFlag json is bool,
+      help = "Print the machine-readable verdict " &
+        "(`reproos.attestation-verdict.v1`)"
+
+proc attestLaunchDescriptionFlags(): NimNode {.compileTime.} =
+  ## The cloud placement `repro attest launch` describes and `repro attest
+  ## reap` sweeps by tag.
+  quote do:
+    flag provider is string,
+      help = "The cloud (`aws-ec2`, `gcp-compute`, `azure-cvm`)"
+    flag region is string, help = "The region or zone the instance sits in"
 
 # ---- Group 6 (workspaces and publication) -----------------------------------
 
@@ -1308,7 +1459,7 @@ proc buildWorkRootFlag(): NimNode {.compileTime.} =
   quote do:
     flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
       help = "The work root the project's build state lives under " &
-        "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
+        "(default: the project's `.repro/`)"
 
 proc measurementFlags(): NimNode {.compileTime.} =
   ## The collect and present axes of the measurement flags, each over its
@@ -1405,8 +1556,7 @@ proc buildFlags(): NimNode {.compileTime.} =
       help = "The same as `--variant buildType=debug`"
     `workRoot`
     flag actionCacheRoot is string, env = "REPROBUILD_ACTION_CACHE_ROOT",
-      help = "The action-cache root (default: " &
-        "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
+      help = "The action-cache root (default: the store's)"
     flag lock is seq[string],
       help = "The committed lock: `PATH` binds `default`, `NAME=PATH` a " &
         "named lock file (repeatable; default: the project's `repro.lock`)"
@@ -1841,6 +1991,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   # Group 5 (development environments), one splice per command.
   let execSelection = devEnvSelectionFlags()
   let shellSelection = devEnvSelectionFlags()
+  let shellFlag = interactiveShellFlag()
   let runSelection = devEnvSelectionFlags()
   let upSession = devSessionSelectionFlags()
   let devSession = devSessionSelectionFlags()
@@ -1901,6 +2052,14 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let anywhereTarget = addonTargetFlags()
   let deployAgentHost = hostIdentityFlag()
   let compileProfileHost = hostIdentityFlag()
+  let attestExpectImage = attestImageFlags()
+  let attestCrossCheckImage = attestImageFlags()
+  let attestVerifyReport = attestReportFlags()
+  let attestCrossCheckReport = attestReportFlags()
+  let attestVerifyEvidence = attestEvidenceFlags()
+  let attestCrossCheckEvidence = attestEvidenceFlags()
+  let attestLaunchPlacement = attestLaunchDescriptionFlags()
+  let attestReapPlacement = attestLaunchDescriptionFlags()
   let cargoGcTargetDir = cargoTargetDirFlags()
   let cargoRecordLiveTargetDir = cargoTargetDirFlags()
   # Group 6 (workspaces and publication), one splice per command.
@@ -2051,7 +2210,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "The project (default: the current directory)"
       flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
         help = "The work root the project's build state lives under " &
-          "(default: `$REPROBUILD_WORK_ROOT`)"
+          "(default: the project's `.repro/`)"
       boolFlag dryRun is bool,
         help = "List the outputs that would be removed, and remove nothing"
     subcmd "run", help = "Run a task, a build output or a target once":
@@ -2195,9 +2354,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "Enter or print the development shell environment":
       call:
         `shellSelection`
-        flag shell is string,
-          help = "The shell to start (default: `$SHELL`; on Windows " &
-            "`$COMSPEC`, else pwsh)"
+        `shellFlag`
         flag printEnv is Option[string],
           help = "Print the environment instead of starting a shell: " &
             "`posix` (also `sh`, `bash`, `zsh`), `fish`, `powershell` " &
@@ -2313,7 +2470,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "Treat the target as a CMake source directory"
       flag cmakeBinary is Option[string],
         help = "With --cmake: the cmake to run"
-      flag workRoot is Option[string],
+      # The variable gives the target form its work root as `repro build`'s
+      # does; only a `--work-root` typed on the command line names that form
+      # (`runDevelopCommand`).
+      flag workRoot is Option[string], env = "REPROBUILD_WORK_ROOT",
         help = "The work root of the environment build (default: the " &
           "project's `.repro`)"
       pos target is string, required = false,
@@ -2559,14 +2719,12 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "gateway", help = "Run a push-gateway hook entry point":
       subcmd "pre-receive", help = "Verify the pushed refs' certificates " &
           "and forward them upstream (the gateway's pre-receive hook)":
-        flag gatewayDir is string,
-          help = "The gateway bare (default: `$GIT_DIR`, else the current " &
-            "directory)"
+        flag gatewayDir is string, env = "GIT_DIR",
+          help = "The gateway bare (default: the current directory)"
       subcmd "post-receive",
           help = "Nothing (the gateway's post-receive hook)":
-        flag gatewayDir is string,
-          help = "The gateway bare (default: `$GIT_DIR`, else the current " &
-            "directory)"
+        flag gatewayDir is string, env = "GIT_DIR",
+          help = "The gateway bare (default: the current directory)"
       subcmd "migrate", help = "Install or repair the gateways of a " &
           "workspace's repos":
         flag workspaceRoot is string, format = equals,
@@ -2943,9 +3101,8 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag activity is string, default = "default",
           help = "The activity the reference is added to"
         `homeAddEdit`
-        flag catalog is string,
-          help = "Package catalogs to load first, comma-separated (default: " &
-            "`$REPRO_HOME_PACKAGE_CATALOG`)"
+        flag catalog is string, env = "REPRO_HOME_PACKAGE_CATALOG",
+          help = "Package catalogs to load first, comma-separated"
         pos package is string,
           help = "`<package>`, `<package>@<version>`, or `<package>@latest` " &
             "to pin the version an unpinned reference resolves to"
@@ -3068,9 +3225,8 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag keepGenerations is Option[int],
           help = "Keep the N most recent generations' prefixes (N >= 1, " &
             "default 2; the active generation is always kept)"
-        flag store is string,
-          help = "The store root (default: `$REPRO_STORE_ROOT`, else the " &
-            "platform's)"
+        flag store is string, env = "REPRO_STORE_ROOT",
+          help = "The store root (default: the platform's)"
       subcmd "set", help = "Set a managed configurable in the profile's " &
           "`config:` section, then apply":
         flag whenPredicate is Option[string], perSource = [cli = "when"],
@@ -3206,17 +3362,24 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "reprobuild.system.audit.v1)"
         pos generation is string, required = false,
           help = "The generation"
-      # The add-on's own command line (repro_addon/cli), shared with the
-      # static add-on binary, which parses these.
+      # The add-on's own command line (`repro_addon/cli`), which the static
+      # add-on binary parses too. It is not a clispec description, so its
+      # words are this command's `rest`: every word after the subcommand,
+      # `--help` included, verbatim, and the add-on's parser answers them
+      # (its own usage text included).
       subcmd "addon", help = "Manage an add-on host (Linux)":
-        pos args is seq[string], required = false, passThrough = true
+        pos args is seq[string], rest = true, required = false,
+          help = "The add-on's command line"
       subcmd "state", help = "Save and restore the declared state set " &
           "(Linux)":
-        pos args is seq[string], required = false, passThrough = true
+        pos args is seq[string], rest = true, required = false,
+          help = "The add-on's `state` command line"
       subcmd "secret", help = "Seal and materialise system secrets (Linux)":
-        pos args is seq[string], required = false, passThrough = true
+        pos args is seq[string], rest = true, required = false,
+          help = "The add-on's `secret` command line, or `materialise`"
       subcmd "adopt", help = "Claim an object on an add-on host (Linux)":
-        pos args is seq[string], required = false, passThrough = true
+        pos args is seq[string], rest = true, required = false,
+          help = "The add-on's `adopt` command line"
     subcmd "infra", help = "Plan and apply infrastructure":
       subcmd "plan", help = "Compile the system profile and show what an " &
           "apply would change; writes nothing but the plan":
@@ -3370,21 +3533,149 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag output is string, help = "The image to write (required)"
         flag size is string, help = "The image size"
         pos source is string, help = "The layout (`disko.nim`)"
-    # Not parsed from this description yet: its `--help` documents its exit
-    # codes, which needs a command's long description (not in this clispec
-    # yet).
+    # The exit codes are the command's contract with the scripts that
+    # branch on them (`repro_cli_support/attest`, `AttestExitCode`): its
+    # long help lists every one, and a gate holds that list, the
+    # enumeration and the reference page equal.
     subcmd "attest",
-        help = "Compute and check launch measurements of attested images":
-      pos args is seq[string], required = false, passThrough = true
+        help = "Compute and check launch measurements of attested images",
+        longHelp = "Exit codes:\n" &
+          "0  success, or a verdict of `accepted`\n" &
+          "1  a `--check` mismatch, a verdict of `rejected`, or a runtime " &
+            "failure\n" &
+          "2  a usage error or a refusal\n" &
+          "3  a verdict of `accepted-without-a-root-of-trust`\n" &
+          "4  a verdict of `accepted-against-an-unauthenticated-manifest`: " &
+            "it established an identity, out of a manifest your policy " &
+            "pins nothing about\n" &
+          "5  a verdict of `accepted-against-an-evidence-backed-manifest`: " &
+            "it established an identity, out of a manifest your policy " &
+            "pins nothing about and a quorum of the rebuilders it admits " &
+            "had signed":
+      subcmd "expect", help = "Compute the measurement manifest for an " &
+          "attested image":
+        `attestExpectImage`
+        flag out is string, help = "Write the manifest instead of printing it"
+        flag check is string, help = "Compare against an existing manifest " &
+          "and exit 1 if it differs"
+      subcmd "challenge",
+          help = "Mint a verifier nonce and record when it was minted":
+        flag bytes is int, default = 32,
+          help = "The nonce size in bytes (at least 16)"
+        boolFlag hex is bool, help = "Print only the nonce, not the record"
+        flag out is string, help = "Write the record instead of printing it"
+      subcmd "verify",
+          help = "Check a runtime report against a measurement policy":
+        `attestVerifyReport`
+        `attestVerifyEvidence`
+        flag out is string, help = "Write the verdict instead of printing it"
+      subcmd "cross-check", help = "Compare a published measurement " &
+          "manifest with one computed here, field by field",
+          longHelp = "Judges one measurement manifest from both directions: " &
+            "the document a quorum of admitted rebuilders signed, and one " &
+            "computed here from the image. Exit 1 on any divergence, naming " &
+            "every field that moved. Both sides are handed the same image, " &
+            "so agreement says nothing about whether that image is the " &
+            "right one.":
+        # `verify`'s report, nonce and certificate flags are declared so
+        # that the command refuses each by name, saying why it does not
+        # apply here, rather than as an unknown flag.
+        `attestCrossCheckImage`
+        `attestCrossCheckReport`
+        `attestCrossCheckEvidence`
+        flag check is string, help = "Refused: `--check` belongs to " &
+          "`repro attest expect`"
+        flag out is string,
+          help = "Write the comparison report instead of printing it"
+      subcmd "launch", help = "Describe a confidential-instance launch on a " &
+          "public cloud; launches nothing",
+          longHelp = "Prints the provider invocation the launch would be " &
+            "made with and the expected-measurement identity a policy " &
+            "would pin. It launches nothing, and this build carries " &
+            "nothing that could.":
+        `attestLaunchPlacement`
+        flag instanceName is string, help = "What the instance is called"
+        flag instanceShape is string,
+          help = "The instance shape; it decides the processor count and " &
+            "which root of trust the instance attests with"
+        flag imageReference is string,
+          help = "The provider's reference to the disk image; not covered " &
+            "by any launch measurement"
+        flag subnet is string, help = "The network the instance is placed on"
+        flag sshKeyReference is string,
+          help = "The provider's reference to the operator public key"
+        flag firmware is string,
+          help = "The confidential-launch firmware image"
+        flag vcpuType is string, help = "The machine model, on a sev-snp shape"
+        flag guestPolicy is string,
+          help = "The launch policy, on a sev-snp shape (`0x<hex>`)"
+        flag guestFeatures is string,
+          help = "The feature word, on a sev-snp shape (`0x<hex>`)"
+        flag tdPageOrder is string,
+          help = "The host fold order, on a tdx shape (`per-page`, " &
+            "`per-region`)"
+        flag tdRegisterLog is string,
+          help = "The measurement record, on a tdx shape"
+        flag configFingerprint is string,
+          help = "The recipe's configuration fingerprint"
+        flag uki is string, help = "The unified kernel image"
+        flag verityImageDigest is string,
+          help = "`sha256:<hex>` of the root image"
+        flag verityRootHash is string, help = "The dm-verity root hash"
+        flag out is string,
+          help = "Also write the expected manifest beside printing the plan"
+        flag leaseStore is string,
+          help = "Hold the launch under a lease whose record is written in " &
+            "this directory before the plan is rendered, and put the " &
+            "lease's tags on the rendered invocation"
+        flag leaseTtlSeconds is string,
+          help = "How long the hold lasts, in seconds (default 1800; a hold " &
+            "with no deadline, or one longer than a day, is refused)"
+        flag leaseRateMicrosPerHour is string,
+          help = "What an hour of this instance costs, in millionths; " &
+            "omitted, the hold is reported as unpriced rather than as free"
+        flag leaseOut is string, help = "Also write the lease record itself"
+        flag planOut is string,
+          help = "Write the rendered provider invocation, one argument per " &
+            "line"
+        flag now is string,
+          help = "The moment the lease is taken from (Unix seconds), for a " &
+            "caller that needs a stated one"
+      subcmd "reap", help = "Sweep a cloud-lease store, reporting what it " &
+          "would destroy (with `--destroy`, destroying it)",
+          longHelp = "By default it reports every lease it can see, whether " &
+            "its owner is alive, whether it has expired, what it has cost " &
+            "so far and the invocation that would destroy it, touching " &
+            "nothing. With `--destroy` it runs those invocations, which is " &
+            "what bounds how long a leaked instance can keep billing.":
+        flag leaseStore is string, help = "The lease store to sweep"
+        flag now is string,
+          help = "The moment to judge expiry against (Unix seconds)"
+        boolFlag destroy is bool,
+          help = "Destroy what the sweep selects, by running the " &
+            "provider's own tool; without it nothing is touched"
+        boolFlag tagSweep is bool,
+          help = "Sweep by provider tag instead of by the store, for a " &
+            "sweeper that has lost the records; needs `--provider` and " &
+            "`--region`, reaps on expiry only, and implies `--destroy`"
+        `attestReapPlacement`
+        flag intervalSeconds is string,
+          help = "Repeat the sweep every N seconds (default 300, at most " &
+            "900); a leaked instance outlives its owner by at most its " &
+            "remaining hold plus this"
+        flag sweeps is string,
+          help = "Stop after N sweeps; omitted, the sweep runs once unless " &
+            "`--interval-seconds` asked for a cadence, then it repeats " &
+            "until stopped"
     subcmd "cargo", help = "Manage cargo target directories and run cargo " &
         "as a build edge":
       subcmd "gc", help = "Delete the cargo build units no recent cargo " &
           "invocation used (exit 75 while cargo holds the lock)":
         `cargoGcTargetDir`
-        flag minAge is string,
+        flag minAge is string, env = "REPRO_CARGO_GC_MIN_AGE",
           help = "Keep units written within this duration (`30m`, `36h`, " &
-            "`14d`, `2w`, `0`; default 14d, also `$REPRO_CARGO_GC_MIN_AGE` " &
-            "and `min_age` under `[cargo_gc]`)"
+            "`14d`, `2w`, `0`; default 14d, also `min_age` under " &
+            "`[cargo_gc]`)"
         boolFlag dryRun is bool,
           help = "Print what would be deleted, with byte counts"
         flag cargoHome is Option[string], optionalValue = some(""),
@@ -3430,10 +3721,13 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "debug", help = "Inspect the filesystem monitor and artifacts":
       subcmd "io", help = "Filesystem monitoring":
         # The monitor's own command line (the io-mon library's, shared
-        # with `repro internal io monitor`).
+        # with `repro internal io monitor`). io-mon does not describe it in
+        # clispec, so its words are this command's `rest`, verbatim, and
+        # io-mon's parser answers them.
         subcmd "monitor", help = "Run a command under the filesystem " &
             "monitor, or inspect a monitor dependency file":
-          pos args is seq[string], required = false, passThrough = true
+          pos args is seq[string], rest = true, required = false,
+            help = "The monitor's command line (io-mon's)"
       subcmd "artifact", help = "Decode an internal binary artifact":
         flag format is string,
           help = "The output format: `text` (the default) or `json`"
