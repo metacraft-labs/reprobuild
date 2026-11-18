@@ -84,6 +84,7 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_core/installed_prefix_nim
 export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
@@ -7459,25 +7460,23 @@ const
     ## tool-owned cache's identity.
   ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
   ProviderParallelBuildMax* = 64
-  ProviderCompileEnvironmentPassthrough* = [
+  ProviderCompileEnvironmentPassthrough* = @[
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",
     "REPRO_BOOTSTRAP_SDKROOT",
     "CC",
     "REPRO_PROVIDER_NIMCACHE_MODE",
-    ProviderParallelBuildEnv,
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "TEMPDIR",
-    LockedCatalogEnv
-  ]
+    ProviderParallelBuildEnv] &
+    @ScratchLocationEnvNames &
+    @[LockedCatalogEnv]
     ## Environment values already represented by the provider compile command
     ## or affecting scratch placement only. The command-derived action key
     ## carries the compiler, C toolchain, and parallelism; the remaining names
     ## only choose disposable nimcache/temp locations. Keying monitored cache
     ## evidence on their per-process values would make every new `repro`
     ## invocation miss an otherwise unchanged provider compile.
+    ## `ScratchLocationEnvNames` (`repro_core/scratch_env`) is the temp-
+    ## directory list the profile compile and `nim.c` share with this one.
     ## `LockedCatalogEnv`: its revision is in both edges' identity
     ## (`catalogSelectionIdentity`), its paths are the recipe's own location.
 

@@ -1957,6 +1957,27 @@ type
       ## the cache from the key (the dependency policy's ignored roots do).
       ## Passed to ``buildAction``. Empty (the default) changes nothing.
       ## Payload codec v35+; an older payload decodes with the list empty.
+    envPassthrough*: seq[string]
+      ## Names of environment variables whose HOST value this action reads:
+      ## the passthrough class of reprobuild-pm
+      ## ``spec/Filesystem-Policy-And-Observed-Inputs.md`` §"Declared And
+      ## Passthrough Variables". Lowered onto the engine's
+      ## ``BuildAction.envPassthrough`` (BuildXL's
+      ## ``passThroughEnvironmentVariables``): each NAME enters the weak
+      ## fingerprint, the VALUE never does, and an observed read of the
+      ## variable is dropped from the observed-environment key
+      ## (``cacheEnvInputs``). A name may also be declared in ``env``; the
+      ## action is then launched with the declared value and keyed by the
+      ## name alone, as the engine already does for ``PATH``.
+      ##
+      ## For a variable whose value varies per shell without changing what
+      ## the action produces -- the temp-directory names a compile reads to
+      ## place its scratch files (``nim.c`` in ``packages/nim.nim``). Every
+      ## other variable an edge is observed to read stays keyed by value, so
+      ## naming one here is a claim about the TOOL, made where the edge is
+      ## constructed, never a way to silence a miss. Set through
+      ## ``appendRegisteredActionEnvPassthrough``. Payload codec v36+; an
+      ## older payload decodes with the list empty.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]

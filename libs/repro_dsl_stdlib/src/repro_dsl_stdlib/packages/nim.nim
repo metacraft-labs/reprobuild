@@ -43,6 +43,7 @@ import repro_dsl_stdlib/openssl_layout
 import repro_project_dsl/source_cache_identity
 import repro_dsl_stdlib/active_context
 import repro_dsl_stdlib/operations/zig_c
+from repro_core/scratch_env import ScratchLocationEnvNames
 
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
@@ -656,6 +657,37 @@ proc maybeTagPublicInterface(action: BuildActionDef;
   setRegisteredActionPublish(action.id, true,
     some(nimPublicInterfaceIdentity(pkg, member)))
 
+const NimCompileScratchEnvNames* = ScratchLocationEnvNames
+  ## The temp-directory variables a Nim compile edge passes through by NAME
+  ## (``BuildActionDef.envPassthrough``): the one list
+  ## (``repro_core/scratch_env``) the provider compile
+  ## (``ProviderCompileEnvironmentPassthrough``) and the profile compile
+  ## (``ProfileCompileScratchEnvNames``) already pass through.
+  ##
+  ## WHY. ``nix develop`` exports a fresh ``/tmp/nix-shell.XXXXXX`` as all
+  ## four in every shell it starts. The compile reads them (GCC places its
+  ## intermediate files by ``TMPDIR``/``TMP``/``TEMP``), io-mon records the
+  ## reads, and an observed read is keyed on its VALUE
+  ## (``cacheEnvInputs``). So the first build in each new shell missed every
+  ## Nim compile edge -- "input changed: environment: TEMP" -- on an
+  ## unchanged tree (reprobuild-pm issue
+  ## ``2026-10-18-compile-edges-record-the-shells-temp-so-every-new-nix-
+  ## develop-shell-misses``). The values only place disposable files; the
+  ## generated C, the objects and the binary are named from the argv.
+  ##
+  ## THE COST OF THE RULE, the same one the profile compile accepts: a
+  ## compile whose OUTPUT embeds its temp directory would be served the
+  ## output of the shell that published the record. A product that bakes a
+  ## per-shell scratch path into itself is not reproducible in the first
+  ## place, and the alternative is a full recompile of every Nim edge in
+  ## every new shell. Every other variable these edges are observed to read
+  ## (``NIM_*``, ``HOME``, ``XDG_CACHE_HOME``, ...) stays keyed by value.
+  ##
+  ## ``NIX_BUILD_TOP``, the fifth per-shell name ``nix develop`` exports, is
+  ## NOT here: varying it alone left a ``nim.c`` edge a cache hit (measured
+  ## at reprobuild ``55b26abd0``, 2026-11-17), so the compile does not read
+  ## it and naming it would only widen the rule.
+
 proc c*(pkg: NimPackage; source: string; binary: string;
         defines: seq[string] = @[];
         paths: seq[string] = @[];
@@ -901,6 +933,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     appendRegisteredActionToolIdentityRefs(result.id, ["zig", "sh"])
   else:
     appendRegisteredActionToolIdentityRefs(result.id, [backendCompiler])
+  appendRegisteredActionEnvPassthrough(result, NimCompileScratchEnvNames)
   maybeTagPublicInterface(result, publish, publishAs)
 
 

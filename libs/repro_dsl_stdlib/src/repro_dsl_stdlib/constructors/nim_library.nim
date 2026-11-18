@@ -36,7 +36,7 @@ proc nim_library*(into: string;
   let target =
     if api.soname.len > 0: "lib" & api.soname & ".so"
     else: "lib" & into & ".so"
-  let action = nim.c(
+  var action = nim.c(
     source = source,
     output = targetKeyedPath(target),
     defines = defines,
@@ -49,5 +49,11 @@ proc nim_library*(into: string;
     clangLinkerExe = cross.ccExe,
     after = (if zigTarget != nil: @[cross.wrappers] else: @[]),
     appLib = true)
+  # This calls the typed `nim.c(..., output = ...)` form, which declares
+  # no passthrough of its own; only the `binary =` alias adds it. Name the
+  # temp-directory variables here as that alias does, for the reason
+  # `NimCompileScratchEnvNames` states: keyed by value, the first build in
+  # every new `nix develop` shell would recompile this edge.
+  appendRegisteredActionEnvPassthrough(action, NimCompileScratchEnvNames)
   newLibrary(install = action, api = api,
              installPrefix = "usr/lib")

@@ -1868,10 +1868,24 @@ unsigned long long repro_hcr_agent_gap_hit_count_for_tests(void) {
  * the bytes that actually changed — the published 8-byte window, before and
  * after the store — not over the whole `.text`, which under ASLR is neither
  * stable nor cheap (§10.3). They are computed from
- * `repro_hcr_lx_last_report.original_word` / `.published_word`, which are read
+ * `repro_hcr_lx_last_report.previous_word` / `.published_word`, which are read
  * out of live target memory by the publication path itself, and the same words
  * are carried in the event's per-site record so a consumer can recompute both
- * digests and check them. `repro_hcr_sha256_selftest` runs first: a hash
+ * digests and check them.
+ *
+ * "BEFORE" IS THE WORD THE STORE REPLACED (§10.3, stated 2026-11-16). That is
+ * `previous_word`, the window's pre-state that prepare reads and saves as the
+ * rollback target: the original window for a first publication, generation
+ * N's jump for a re-patch. It is NOT `original_word`, the generation-0 window
+ * the site table also keeps: for a re-patch the store did not replace it, and
+ * reporting it would describe a transition that never happened. With
+ * `previous_word`, each event's before-word at a site equals the previous
+ * event's after-word. Until 2026-11-17 this read `original_word`, and the two
+ * coincide for a first publication — the only case any recorded run had
+ * exercised — which is how it went unnoticed (reprobuild-pm issue
+ * 2026-11-15-hcr-code-patch-event-reports-generation-0-as-the-word-a-re-patch-
+ * replaced; gate
+ * `e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word`). `repro_hcr_sha256_selftest` runs first: a hash
  * function that silently computed the wrong thing would place a plausible
  * 32-byte value in a protocol field, which is the one failure mode nothing
  * downstream could detect.
@@ -1991,10 +2005,12 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
   /* The patched byte range, in the byte order it has in memory. The words are
    * hashed AS BYTES rather than as integers so the digest is over exactly the
    * bytes a reader would find at `windowAddress`, with no endianness step to
-   * get wrong on either side. */
+   * get wrong on either side. "Before" is `previous_word`, the word this
+   * store replaced (see the block comment above), never the generation-0
+   * `original_word`. */
   for (i = 0; i < 8; ++i) {
     word_before[i] =
-        (uint8_t)((repro_hcr_lx_last_report.original_word >> (8 * i)) & 0xFF);
+        (uint8_t)((repro_hcr_lx_last_report.previous_word >> (8 * i)) & 0xFF);
     word_after[i] =
         (uint8_t)((repro_hcr_lx_last_report.published_word >> (8 * i)) & 0xFF);
   }
@@ -2018,7 +2034,7 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
   site.sledAddress = repro_hcr_lx_last_report.sled_address;
   site.windowAddress = repro_hcr_lx_last_report.window_address;
   site.dispatchAddress = repro_hcr_lx_last_report.dispatch_address;
-  site.codeWordBefore = repro_hcr_lx_last_report.original_word;
+  site.codeWordBefore = repro_hcr_lx_last_report.previous_word;
   site.codeWordAfter = repro_hcr_lx_last_report.published_word;
   site.windowLength = REPRO_HCR_LX_WINDOW_BYTES;
   site.generation = (uint32_t)repro_hcr_lx_last_report.generation;

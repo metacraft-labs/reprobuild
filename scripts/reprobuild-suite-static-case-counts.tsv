@@ -336,6 +336,7 @@ libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim	nim	
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	8
 libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	nim	17
 libs/repro_cli_support/tests/t_loopback_node_admits_only_its_owner.nim	nim	2
+libs/repro_cli_support/tests/t_lowered_action_carries_edge_env_passthrough.nim	nim	6
 libs/repro_cli_support/tests/t_lowered_action_key_covers_its_argv.nim	nim	6
 libs/repro_cli_support/tests/t_lowering_marks_build_file_targets_and_monitors_content_checked_compiles.nim	nim	2
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	4
@@ -486,6 +487,7 @@ libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim	nim	26
 libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim	nim	21
 libs/repro_dsl_stdlib/tests/t_nim_c_backend_compiler_sub_tools.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_nim_c_cpu_flag.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_nim_c_scratch_env_passthrough.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_nim_c_ssl_link_path.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_nim_c_windows_exe_output.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	nim	11
@@ -928,6 +930,7 @@ libs/repro_project_dsl/tests/t_dssj2_two_resolvers_do_not_collide.nim	nim	14
 libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_field_populated_at_action_emission.nim	nim	1
 libs/repro_project_dsl/tests/t_engine_typed_output_payload_codec_round_trip.nim	nim	5
+libs/repro_project_dsl/tests/t_env_passthrough_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim	nim	4
 libs/repro_project_dsl/tests/t_fetch_token_path_independent.nim	nim	2
 libs/repro_project_dsl/tests/t_install_mirror_target_root.nim	nim	5
@@ -1446,6 +1449,7 @@ tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim	nim	4
 tests/e2e/gm7/t_e2e_hosts_applies_declaration_cli.nim	nim	1
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
+tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word.nim	nim	2
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	nim	2
@@ -2214,6 +2218,7 @@ tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1
 tests/integration/t_nested_lock_push_capability_security.nim	nim	15
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
 tests/integration/t_nf4_foreign_env_contract.nim	nim	18
+tests/integration/t_nim_compile_key_ignores_the_shells_temp_dir.nim	nim	1
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
