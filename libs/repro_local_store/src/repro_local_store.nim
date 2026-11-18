@@ -10,7 +10,7 @@ when defined(windows):
 when defined(posix):
   # Nim's `std/posix` does not expose `flock(2)` uniformly across macOS and
   # Linux, so bind the small `sys/file.h` surface directly (mirrors
-  # repro_home_generations/locks.nim). Used to serialize the durable
+  # repro_home_generations/locks.nim). Used to serialize the
   # per-cache-root write-sequence counter (AC-1b: deterministic newest-wins
   # record ordering) across concurrent build engine processes.
   const
@@ -18,6 +18,23 @@ when defined(posix):
 
   proc cFlockSeq(fd: cint; operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
+
+when defined(windows):
+  # The Windows half of the same serialization: an exclusive `LockFileEx`
+  # on one byte of the lock file, released by `UnlockFileEx` or, if the
+  # process dies, by the handle closing. Mirrors repro_daemon_core/runtime.
+  const
+    SeqLockFileExclusive = 0x00000002'i32
+
+  proc cLockFileExSeq(hFile: Handle; dwFlags: DWORD; dwReserved: DWORD;
+                      nNumberOfBytesToLockLow, nNumberOfBytesToLockHigh: DWORD;
+                      lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "LockFileEx", sideEffect.}
+  proc cUnlockFileExSeq(hFile: Handle; dwReserved: DWORD;
+                        nNumberOfBytesToUnlockLow,
+                        nNumberOfBytesToUnlockHigh: DWORD;
+                        lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "UnlockFileEx", sideEffect.}
 
 import repro_core
 import repro_core/evidence_level
@@ -732,19 +749,24 @@ const
   PerEdgeFileMagic = "RBPE"
   # v1: header {magic, version, recordCount} then the record frames.
   # v2 (AC-1b fix): inserts a durable u64 `writeSequence` immediately after
-  # the version, BEFORE the record count. The sequence is a strictly
-  # monotonic per-cache-root counter (see `nextWriteSequence`) stamped at
-  # write time, so the union read can order the split `.rec` files by TRUE
+  # the version, BEFORE the record count. The sequence comes from
+  # the per-cache-root counter, allocated above every container already in
+  # the edge directory (see `nextWriteSequence`), stamped at write time, so the union read can order the split `.rec` files by TRUE
   # write recency (newest-wins / newest-corrupt-rejects) rather than by racy
   # filesystem mtime. v1 files and legacy AC-1 single files decode fine and
   # are assigned sequence 0 (treated as oldest), then re-stamped on next write.
   PerEdgeFileVersion = 2'u16
   PerEdgeFileVersionLegacy = 1'u16
-  # Filename of the durable, flock-serialized write-sequence counter, kept at
-  # the `hot-records/` root (a SIBLING of the per-edge `<key>/` directories).
-  # It is never a `<key>/` directory and never a `.rec` file, so no per-edge
-  # dir listing or record read path ever mistakes it for an edge or a record.
+  # Filename of the write-sequence counter, kept at the `hot-records/` root
+  # (a SIBLING of the per-edge `<key>/` directories). It is never a `<key>/`
+  # directory and never a `.rec` file, so no per-edge dir listing or record
+  # read path ever mistakes it for an edge or a record. The counter is
+  # replaced by temp file + rename, so it is never locked itself: a lock held
+  # on an inode that a rename then unlinks excludes nobody.
   WriteSequenceFileName = ".seq"
+  # The file the counter's lock is held on. Separate from the counter for the
+  # reason above, and a root-level file for the same reason the counter is.
+  WriteSequenceLockFileName = ".seq.lock"
   RecordTailMask = 0xffff_ffff'u64
   MaxActionRecordFrameBytes = 64 * 1024 * 1024
   MaxRecordsPerWeakFingerprint = 2
@@ -4352,7 +4374,7 @@ type
     ## since either added or removed a `.rec` name (so `members` differs) or
     ## rewrote an existing one (so its container's `writeSequence` differs
     ## from `writeSequence` here, because every publish stamps a fresh value
-    ## from the durable `.seq` counter). Both are checked, and either one
+    ## above every container in the directory, `nextWriteSequence`). Both are checked, and either one
     ## failing sends the reader to the union read of §5.3 -- which is
     ## unconditionally correct, because Tier 1 is authoritative.
     ##
@@ -4468,7 +4490,7 @@ proc loadLegacyPerEdgeFile(cache: ActionCache; weak: ContentDigest):
     result = @[]
 
 proc writeSequenceFilePath(cache: ActionCache): string =
-  ## The durable write-sequence counter, a SIBLING of the per-edge directories
+  ## The write-sequence counter, a SIBLING of the per-edge directories
   ## at the `hot-records/` root (never a `<key>/` dir, never a `.rec`).
   cache.hotRoot / WriteSequenceFileName
 
@@ -4486,53 +4508,133 @@ proc readSequenceValue(path: string): uint64 =
   except CatchableError:
     result = 0'u64
 
-proc nextWriteSequence(cache: ActionCache): uint64 =
-  ## Allocate the next value of the durable, strictly-monotonic per-cache-root
-  ## write-sequence counter. The counter is serialized across concurrent build
-  ## engine processes by an exclusive `flock` (POSIX) / exclusive-open retry
-  ## (Windows) on the `hot-records/.seq` file, so two records written
-  ## microseconds apart — in one process OR across processes sharing one cache
-  ## root — always receive distinct, increasing sequences. This is the total,
-  ## race-free order the union read uses for newest-wins / newest-corrupt-
-  ## rejects, replacing the racy nanosecond-mtime tie-break.
-  createDir(extendedPath(cache.hotRoot))
+proc highestWriteSequenceIn(dirPath: string): uint64 =
+  ## The highest trailer sequence of any `.rec` container in one edge
+  ## directory, 0 when it holds none. Read with the ORDERING walk, so no
+  ## record is decoded. This is the floor `nextWriteSequence` allocates above:
+  ## a container that survived is evidence of a sequence already handed out,
+  ## whatever became of the counter that handed it out.
+  let ep = extendedPath(dirPath)
+  if not dirExists(ep):
+    return 0'u64
+  for kind, path in walkDir(ep):
+    if kind == pcFile and path.endsWith(PerEdgeRecFileExt):
+      try:
+        result = max(result, scanPerEdgeFileWriteSequence(bytes(readFile(path))))
+      except OSError, IOError:
+        discard
+
+proc writeSequenceValue(path: string; value: uint64) =
+  ## Replace the counter by temp file + atomic rename, so a crash leaves the
+  ## old value or the new one and never a truncated file. Not fsynced: a
+  ## counter value lost to power loss is recovered from the edge directory's
+  ## trailers (`highestWriteSequenceIn`). Raises if the value cannot be
+  ## committed, because a publish whose sequence the counter does not record
+  ## could share it with a concurrent publish to the same edge.
+  let tmpPath = path & ".tmp." & $getCurrentProcessId() & "." &
+    $getMonoTime().ticks
+  try:
+    writeFile(extendedPath(tmpPath), $value)
+    moveFile(extendedPath(tmpPath), extendedPath(path))
+  except OSError, IOError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+    raise
+
+proc allocateWriteSequenceLocked(cache: ActionCache; floor: uint64): uint64 =
+  ## The allocation itself; the caller holds the counter lock. `floor` is the
+  ## edge directory's highest trailer, read by the caller BEFORE it took the
+  ## lock: a container renamed in after that read had its sequence allocated
+  ## under this lock, so the counter already accounts for it.
   let path = cache.writeSequenceFilePath()
+  let base = max(readSequenceValue(path), floor)
+  if base == high(uint64):
+    raise newException(OSError,
+      "write-sequence space exhausted under " & cache.hotRoot &
+      "; refusing to wrap to 0, which would order the record oldest")
+  result = base + 1'u64
+  writeSequenceValue(path, result)
+
+proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
+  ## Allocate the write sequence for a container about to be published into
+  ## the edge directory `dirPath` (Action-Cache-Per-Edge-Store.md §5.2).
+  ##
+  ## The value is `max(counter, highest trailer in dirPath) + 1`, taken under
+  ## an exclusive lock on `hot-records/.seq.lock` — `flock` on POSIX,
+  ## `LockFileEx` on Windows — and the counter is then replaced by temp file +
+  ## rename. That gives the two properties the union read's total order needs:
+  ##
+  ## * NEVER BEHIND A SURVIVING RECORD. The counter is not fsynced, and before
+  ##   this it was rewritten by a truncating `writeFile`, so a crash could
+  ##   leave it empty, and a power loss could lose it. A counter that read 0
+  ##   then stamped the next record as the OLDEST in its edge: `capRecFiles`
+  ##   evicted the record just written, newest-wins chose a stale candidate,
+  ##   and a convergent rewrite could repeat its predecessor's sequence, which
+  ##   is what the newest alias and the sidecars use to detect staleness. A
+  ##   record imported from another cache root carries that root's sequence
+  ##   and is covered the same way. The floor is the edge directory because
+  ##   record order is only ever compared within one edge.
+  ## * DISTINCT ACROSS CONCURRENT WRITERS. Every allocation holds the lock.
+  ##   One that cannot take it RAISES, and the publish fails exactly as a
+  ##   failed rename does; it never falls back to an unlocked
+  ##   read-increment-write, which hands two processes the same value.
+  ##
+  ## The floor is read before the lock is taken, so the directory I/O does not
+  ## hold up every other publisher on the root. The lock is held for the
+  ## counter read and write only.
+  createDir(extendedPath(cache.hotRoot))
+  let floor = highestWriteSequenceIn(dirPath)
+  let lockPath = cache.hotRoot / WriteSequenceLockFileName
   when defined(posix):
-    # Serialize the read-modify-write across processes with an exclusive
-    # `flock` held on a dedicated lock fd for the duration of the bump. The
-    # value itself is (re)written with `writeFile` (truncating) while the lock
-    # is held, so a concurrent process blocks on the flock and observes the
-    # committed value on its next read.
-    let fd = posix.open(path.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    # Read-only is enough for `flock`, and 0666 (less the umask) lets every
+    # user who may publish into a shared cache root open the lock file that
+    # the first of them created.
+    let fd = posix.open(lockPath.cstring, O_RDONLY or O_CREAT or O_CLOEXEC,
+                        Mode(0o666))
     if fd < 0:
-      # Counter fd unavailable: fall back to a monotonic value from the
-      # persisted counter + 1. Never 0 for a real write, so it still outranks
-      # a legacy/seq-0 record.
-      return readSequenceValue(path) + 1'u64
+      raiseOSError(osLastError(),
+        "cannot open the write-sequence lock " & lockPath)
     var acquired = false
+    var lockErr: OSErrorCode
     while true:
       if cFlockSeq(fd, SeqLockExclusive) == 0:
         acquired = true
         break
-      if errno != EINTR:
+      lockErr = osLastError()
+      if lockErr.int32 != EINTR:
         break
     if not acquired:
       discard posix.close(fd)
-      return readSequenceValue(path) + 1'u64
-    result = readSequenceValue(path) + 1'u64
+      raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
     try:
-      writeFile(extendedPath(path), $result)
-    except CatchableError:
-      discard
-    # Closing the fd releases the exclusive flock.
-    discard posix.close(fd)
+      result = cache.allocateWriteSequenceLocked(floor)
+    finally:
+      # Closing the fd releases the exclusive flock.
+      discard posix.close(fd)
+  elif defined(windows):
+    let h = createFileW(newWideCString(extendedPath(lockPath)),
+      (GENERIC_READ or GENERIC_WRITE).DWORD,
+      (FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE).DWORD, nil,
+      OPEN_ALWAYS.DWORD, 0.DWORD, 0)
+    if h == INVALID_HANDLE_VALUE:
+      raiseOSError(osLastError(),
+        "cannot open the write-sequence lock " & lockPath)
+    var overlapped: OVERLAPPED
+    if cLockFileExSeq(h, SeqLockFileExclusive.DWORD, 0.DWORD, 1.DWORD,
+                      0.DWORD, addr overlapped) == 0:
+      let lockErr = osLastError()
+      discard closeHandle(h)
+      raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
+    try:
+      result = cache.allocateWriteSequenceLocked(floor)
+    finally:
+      var unlockOverlapped: OVERLAPPED
+      discard cUnlockFileExSeq(h, 0.DWORD, 1.DWORD, 0.DWORD,
+                               addr unlockOverlapped)
+      discard closeHandle(h)
   else:
-    # Windows / other: no flock. The build model has one engine process per
-    # build touching the cache serially; cross-build contention on one cache
-    # root is the concern, and a truncating rewrite keeps the counter strictly
-    # increasing for the common single-writer case.
-    result = readSequenceValue(path) + 1'u64
-    writeFile(extendedPath(path), $result)
+    {.error: "nextWriteSequence needs an exclusive file lock on this target".}
 
 type
   RecContainer = object
@@ -4665,7 +4767,7 @@ proc loadNewestPerEdgeRecordsViaAlias(cache: ActionCache;
   ##     set unchanged.
   ##
   ## Those two exhaust the ways the directory can move: every publish stamps
-  ## a fresh sequence from the durable `.seq` counter, so it either changes
+  ## a fresh sequence above every container in the directory, so it either changes
   ## the name set or changes a sequence. An alias that survives both checks
   ## therefore names the container the union read would have ordered last.
   let dirPath = cache.perEdgeDirPath(weak)
@@ -4705,7 +4807,7 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
   ## edge's directory, NEVER a whole-cache scan (the anti-wedge invariant).
   ## Records are deduped by strong fingerprint (a legacy file and a migrated
   ## `.rec` for the same path-set converge). Ordered OLDEST→NEWEST by each
-  ## `.rec` file's DURABLE write sequence (a `.seq`-backed monotonic counter),
+  ## `.rec` file's trailer write sequence (allocated by `nextWriteSequence`),
   ## with the strong-fingerprint hex as a total-order tie-break, so a caller
   ## iterating in reverse (as `lookupActionResult` does) considers the truly
   ## newest path-set first — preserving AC-1's "newest record wins /
@@ -4722,7 +4824,7 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
   var seenStrong = initHashSet[string]()
   if dirExists(extendedPath(dirPath)):
     # (writeSequence, strongHex) is a TOTAL, STABLE key: each `.rec` file gets a
-    # distinct durable sequence at write time, and the strong-fp hex is unique
+    # fresh sequence at write time, and the strong-fp hex is unique
     # per file, so no two distinct files ever compare equal.
     var recFiles: seq[tuple[seq: uint64; strongHex: string;
         recs: seq[ActionResultRecord]]] = @[]
@@ -4787,7 +4889,8 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
   ## atomically `rename()` it to `dirPath/finalName`. fsync-less: a cache needs
   ## consistency, not durability. Never clobbers a sibling `.rec` of a distinct
   ## path-set — only the same-named (same strong fp) file, which is convergence.
-  ## Stamps a FRESH durable write sequence so a convergent rewrite of the same
+  ## Stamps a FRESH write sequence, allocated above every container already in
+  ## `dirPath` (`nextWriteSequence`), so a convergent rewrite of the same
   ## path-set becomes strictly newest (higher sequence) than every sibling.
   createDir(extendedPath(dirPath))
   # Read the sequence of the record we are replacing BEFORE the rename, so a
@@ -4801,7 +4904,7 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
         decodePerEdgeFileWithSeq(bytes(readFile(priorRecPath))).writeSequence
     except OSError, IOError, EnvelopeError:
       priorWriteSequence = 0'u64
-  let writeSequence = cache.nextWriteSequence()
+  let writeSequence = cache.nextWriteSequence(dirPath)
   let now = getTime()
   let tmpPath = dirPath / (finalName & ".tmp." &
     $getCurrentProcessId() & "." & $now.toUnix & "." & $now.nanosecond)

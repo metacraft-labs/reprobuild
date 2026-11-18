@@ -544,6 +544,12 @@ for libName in [
   # types. M2b-M2e extend it with the ASP encoder; downstream libs
   # import it via ``import repro_solver`` once the encoder is alive.
   "repro_solver",
+  # Nimble package catalog NPC-M2: the static `.nimble` reader and the
+  # translation of Nimble requirements into the solver's constraint language.
+  # Depends on `repro_solver/version_constraints` only (no clingo), so the
+  # catalog generator and develop mode can read a `.nimble` without loading
+  # the solver.
+  "repro_nimble_reader",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import
