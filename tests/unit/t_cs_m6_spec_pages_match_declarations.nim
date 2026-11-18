@@ -199,7 +199,7 @@ const
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
-    "audit", "catalog", "info", "init", "list", "lsp", "mcp", "outdated",
+    "audit", "info", "init", "list", "lsp", "mcp", "outdated",
     "package", "search", "upgrade"]
     ## Commands the specification describes that repro does not have yet.
   DeclaredNotSpecified: array[0, string] = []
