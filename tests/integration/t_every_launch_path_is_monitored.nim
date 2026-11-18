@@ -1811,6 +1811,21 @@ proc evidenceShape(res: ActionResult;
     # coverage is `test_m9r73_narrow_invalidation` and
     # `t_a_project_under_a_volatile_prefix_keeps_its_reads`.
     render("volatileScope", ev.volatileScope.exemptRoots),
+    # The volatile-runtime fold's elision counters and its host-bound input
+    # (Dependency-Observation-Attribution.md "Every elision is counted"):
+    #
+    #   * `kernelStateDrops` — how many records under `/dev`, `/proc`, `/sys`
+    #     the fold dropped. NOT vacuous wherever the captured process touches
+    #     any of them (a shell's `/dev/null`, the loader's `/proc` reads), and
+    #     a launch path whose capture saw a different number of them is the
+    #     kind of difference this comparison exists to catch.
+    #   * `runtimeStateDrops` and `hostBoundInput` — VACUOUS here: the
+    #     fixture touches no socket, FIFO or device under `/run`. Rendered so
+    #     the fields cannot leave the comparison silently; their coverage is
+    #     `t_a_tool_reached_through_run_is_an_input`.
+    render("kernelStateDrops", @[$ev.kernelStateDrops]),
+    render("runtimeStateDrops", @[$ev.runtimeStateDrops]),
+    render("hostBoundInput", @[ev.hostBoundInput]),
     render("evidenceProvenance", (block:
       var contributors: seq[string] = @[]
       for contributor in ev.evidenceProvenance:

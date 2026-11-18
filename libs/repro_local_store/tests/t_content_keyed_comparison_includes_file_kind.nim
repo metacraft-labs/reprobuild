@@ -191,3 +191,38 @@ suite "t_content_keyed_comparison_includes_file_kind":
       initDuration(seconds = 5))
     # Served through the cutoff: the metadata moved, the content did not.
     check fx.lookup(weak, ffpHybrid).status == aclHybridCutoff
+
+  # POSIX only, for the symbolic links (as the dangling-link case above).
+  when defined(posix):
+    test "a link to a directory retargeted at another directory is a miss":
+      # A directory hashes the empty payload whatever it holds, and a link
+      # to one carries its target identity in the size word
+      # (`linkedDirectoryIdentity`). Under `ffpHybrid` the retarget moved the
+      # metadata, the lookup fell through to the content comparison, both
+      # sides hashed empty, and the record was served through the cutoff --
+      # NixOS's `/run/current-system` after `nixos-rebuild switch`, recorded
+      # as a link hop on the way to a tool. Falsifier: dropping the size-word
+      # comparison for directories from `sameContentIdentity` makes the
+      # hybrid lookup an `aclHybridCutoff`.
+      for policy in contentKeyed:
+        checkpoint("policy " & $policy)
+        var fx = newFixture("repro-kind-link-retarget-")
+        defer: removeDir(fx.root)
+        createDir(fx.work / "generation-1")
+        createDir(fx.work / "generation-2")
+        let link = fx.work / "current"
+        createSymlink(fx.work / "generation-1", link)
+        let weak = weakFor("kind.link-retarget." & $policy)
+
+        let recorded = fx.record(weak, policy, link)
+        require recorded.inputs[0].metadata.kind == ffkDirectory
+        check fx.lookup(weak, policy).status == aclHit
+
+        removeFile(link)
+        createSymlink(fx.work / "generation-2", link)
+        require observeFile(link, policy).localHash ==
+          recorded.inputs[0].localHash
+
+        let after = fx.lookup(weak, policy)
+        check after.status == aclMissInputChanged
+        check after.changedInputPath == link
