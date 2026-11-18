@@ -450,7 +450,7 @@ libs/repro_dsl_stdlib/tests/t_apt_install_store_identity_is_byte_keyed.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim	nim	16
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
-libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	31
+libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	32
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_catalog_nim_fork_pin_matches_flake.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	17
@@ -524,6 +524,7 @@ libs/repro_dsl_stdlib/tests/t_prefix_sources_tools.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_repeated_variant_assignment_last_wins.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	6
+libs/repro_dsl_stdlib/tests/t_rust_windows_arm64_tarball_arms.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	12

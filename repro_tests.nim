@@ -6205,6 +6205,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_dsl_stdlib_tests_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_rust_windows_arm64_tarball_arms.nim",
+    binary: "build/test-bin/t_rust_windows_arm64_tarball_arms",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim",
     binary: "build/test-bin/t_s7_nim_c_declares_its_nimcache_as_derived",
     defines: @[],
