@@ -33226,7 +33226,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_electron_builder_binaries.nim",
@@ -33587,6 +33587,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "t_group_tests_unit_o757f6dd4_g01",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/unit/t_install_mirror_prefix_reproduces_its_source_tree.nim",
+    binary: "build/test-bin/t_install_mirror_prefix_reproduces_its_source_tree",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_install_mirror_realization_id_covers_modes_and_links.nim",

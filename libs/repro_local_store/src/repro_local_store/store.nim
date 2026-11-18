@@ -25,10 +25,13 @@ import std/[algorithm, os, sets, strutils, tables, times]
 
 when defined(posix):
   from std/posix import nil
+when defined(windows):
+  from std/winlean import createSymbolicLinkW
 
 import blake3
 import repro_core
 
+from repro_core/link_target import readSymlinkTarget
 import ./portable_fingerprint
 import ./prefix_paths
 import ./realization_hash
@@ -1999,8 +2002,14 @@ type
     ## discovered by an overlay being fat, which is late and gives no
     ## cause.
     files*: int
+      ## Regular files. ``hardlinked + copied == files``.
     hardlinked*: int
     copied*: int
+    symlinks*: int
+      ## Symbolic links, to files or to directories, recreated with their
+      ## target text. Never linked or copied, so never in ``files``.
+    directories*: int
+      ## Directories created, empty ones included.
     perFileFallbacks*: int
       ## Files that fell back for a reason that is a property of the FILE.
       ## These must not be read as a defect in the pair.
@@ -2044,6 +2053,31 @@ proc reasonFor(attempt: LinkAttempt): MaterializeFallbackReason =
     of loUnsupported: mfrUnsupported
     else: mfrOther
 
+proc recreateSymlink(target, dst: string; toDirectory: bool) =
+  ## A symbolic link at ``dst`` whose target text is ``target``, exactly as
+  ## read from the source, relative or absolute. On Windows a link's kind
+  ## (file or directory) is fixed at creation; the caller passes the kind
+  ## ``treeEntries`` would record for the source entry, because
+  ## ``std/os.createSymlink`` guesses it by testing ``target`` against the
+  ## current directory, which is wrong for every relative target.
+  ##
+  ## A link already at ``dst`` is replaced, as ``copyFile`` replaces a
+  ## file, so materialising into a populated destination again succeeds.
+  if symlinkExists(extendedPath(dst)):
+    removeFile(extendedPath(dst))
+  when defined(windows):
+    const symbolicLinkFlagDirectory = 1'i32
+    const symbolicLinkFlagAllowUnprivilegedCreate = 2'i32
+    let flag = symbolicLinkFlagAllowUnprivilegedCreate or
+      (if toDirectory: symbolicLinkFlagDirectory else: 0'i32)
+    var wTarget = newWideCString(target.replace('/', '\\'))
+    var wDst = newWideCString(extendedPath(dst))
+    if winlean.createSymbolicLinkW(wDst, wTarget, flag) == 0:
+      raiseOSError(osLastError(), "cannot create symbolic link " & dst &
+        " -> " & target)
+  else:
+    createSymlink(target, dst)
+
 proc materializeDirectory*(srcDir, dstDir: string;
                            report: var MaterializeReport;
                            allowSharedInode =
@@ -2066,6 +2100,21 @@ proc materializeDirectory*(srcDir, dstDir: string;
   ## (``isPerFileFallback``): NTFS's 1023-link cap is a property of one
   ## blob, so treating it as a verdict on the filesystem would turn every
   ## subsequent file into a copy because one file was popular.
+  ##
+  ## **The destination is the source's tree, entry for entry**
+  ## (Local-Content-Addressed-Store §"Write Protocol" step 3): the same
+  ## entries ``storeTreeDigest`` covers. A directory is created even when
+  ## it is empty. A symbolic link, to a file or to a directory, is recreated
+  ## as a link with the same target text: it is never followed, never
+  ## copied (``copyFile`` would publish the bytes it resolves to, a frozen
+  ## copy of a runtime dependency's file) and never hardlinked (``link(2)``
+  ## follows it on macOS, so the hardlink arm would not even agree with
+  ## itself across platforms). A link to a directory is not descended into.
+  ## Without this, one source tree published as two different trees
+  ## depending on whether the store shared the source's filesystem, and the
+  ## prefix lacked directory links and empty directories its realization id
+  ## had been computed over (reprobuild-pm issue 2026-11-15, "store
+  ## materialization drops directory links and empty directories").
   report = MaterializeReport()
   if not dirExists(extendedPath(srcDir)):
     raise newException(StoreError, "materialize source missing: " & srcDir)
@@ -2091,11 +2140,27 @@ proc materializeDirectory*(srcDir, dstDir: string;
       else:
         "copy: the pair offers no hardlink arm [" & cap.describe() & "]"
 
-  for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile, pcLinkToFile},
+  for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile,
+      pcLinkToFile, pcDir, pcLinkToDir}, followFilter = {pcDir},
       relative = true):
     let src = srcDir / entry
     let dst = dstDir / entry
     createDir(extendedPath(parentDir(dst)))
+    let kind = getFileInfo(extendedPath(src), followSymlink = false).kind
+    case kind
+    of pcDir:
+      createDir(extendedPath(dst))
+      report.directories.inc
+      continue
+    of pcLinkToFile, pcLinkToDir:
+      # The same classification ``treeEntries`` makes, so the published
+      # link is the kind the digest recorded.
+      let toDirectory = kind == pcLinkToDir or dirExists(extendedPath(src))
+      recreateSymlink(readSymlinkTarget(extendedPath(src)), dst, toDirectory)
+      report.symlinks.inc
+      continue
+    of pcFile:
+      discard
     report.files.inc
 
     var linked = false
@@ -2125,7 +2190,12 @@ proc materializeDirectory*(srcDir, dstDir: string;
         else: mfrUnsupported].inc
 
     if not linked:
-      copyFile(extendedPath(src), extendedPath(dst))
+      # With the source's permissions: ``copyFile`` creates the file with
+      # the default mode, which drops the executable bit, and the tree
+      # digest (so the realization id) covers that bit. The hardlink arm
+      # shares the inode and so the mode; the copy arm must agree with it.
+      copyFileWithPermissions(extendedPath(src), extendedPath(dst),
+        ignorePermissionErrors = false)
       report.copied.inc
 
 proc describeMechanism*(report: MaterializeReport): string =
@@ -2169,6 +2239,8 @@ proc renderMaterializeReportText*(report: MaterializeReport;
   lines.add "hardlinked: " & $report.hardlinked
   lines.add "copied: " & $report.copied
   lines.add "per-file fallbacks: " & $report.perFileFallbacks
+  lines.add "symlinks: " & $report.symlinks
+  lines.add "directories: " & $report.directories
   for reason in MaterializeFallbackReason:
     if reason == mfrNone: continue
     if report.reasons[reason] > 0:
@@ -2195,6 +2267,8 @@ proc renderMaterializeReportJson*(report: MaterializeReport;
     ", \"hardlinked\": " & $report.hardlinked &
     ", \"copied\": " & $report.copied &
     ", \"per_file_fallbacks\": " & $report.perFileFallbacks &
+    ", \"symlinks\": " & $report.symlinks &
+    ", \"directories\": " & $report.directories &
     ", \"fallback_reasons\": {" & reasons.join(", ") & "}" &
     ", \"capability_probed\": " & (if report.capabilityProbed: "true" else: "false") &
     ", \"hardlink_available\": " & (if report.hardlinkAvailable: "true" else: "false") &
