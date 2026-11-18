@@ -600,6 +600,10 @@ unsigned long long repro_hcr_lx_probe_quiesce_nested_frames_seen(void) {
   return (unsigned long long)repro_hcr_lx_quiesce.nested_frames_seen;
 }
 
+unsigned long long repro_hcr_lx_probe_quiesce_trampoline_frames_seen(void) {
+  return (unsigned long long)repro_hcr_lx_quiesce.trampoline_frames_seen;
+}
+
 int repro_hcr_lx_probe_quiesce_handler_stage(void) {
   return repro_hcr_lx_quiesce_handler_stage;
 }
