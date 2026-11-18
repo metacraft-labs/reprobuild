@@ -31315,6 +31315,14 @@ proc resolveProjectDirFromTarget(target: string): string =
     return parentDir(abs)
   getCurrentDir()
 
+proc buildLockProjectDir*(target: string): string =
+  ## The directory whose committed lock (and ``repro.solver`` sidecar) a
+  ## ``repro build`` pins, from the engine anchor ``parseAndResolveSelectors``
+  ## returned (``target``, ``"."`` when no selector was given). Both the build
+  ## (``lockConsumption``) and ``--print-solved-graph`` read the lock through
+  ## this one rule, so the printed graph is the one the build pins.
+  resolveProjectDirFromTarget(splitTarget(target).base)
+
 # Forward declarations — bodies live after ``parseExplainFixture`` (which
 # they consume to turn the sidecar solver-inputs text into the solver's
 # ``VariantDecl`` / ``PackageDecl`` lists).
@@ -31825,18 +31833,42 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     putEnv("REPROBUILD_NO_RUNQUOTA", "1")
 
   # ----------------------------------------------------------------
-  # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE
-  # selector classification so it works against a committed-lock-only
-  # fixture directory that has no ``repro.nim``. Prints the solved graph
-  # the build would pin (from the committed lock when present, else a
+  # Named-Targets M2 positional resolution lives in the shared M3
+  # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
+  # ``runWatchCommand`` cannot drift. The helper classifies every
+  # selector via ``classifyBuildSelector``; the first path-shaped
+  # selector (or the current directory when there's none) becomes the
+  # engine's project anchor, and every name-shaped selector contributes
+  # its closure to ``extraNameSelectors`` so the build runs in one
+  # pass.
+  # ----------------------------------------------------------------
+  let resolved = parseAndResolveSelectors(positionalSelectors, "repro build")
+  target = resolved.target
+  var extraNameSelectors: seq[string] = resolved.extraNameSelectors
+  let targetWasOmitted = resolved.targetWasOmitted
+  if target.len == 0:
+    target = "."
+
+  # ----------------------------------------------------------------
+  # MO-1 — ``--print-solved-graph`` no-build inspection. Prints the solved
+  # graph the build would pin (from the committed lock when present, else a
   # fresh solve of the ``repro.solver`` sidecar) and exits without
   # building — exercising the exact lock-consumption loader the real build
-  # uses.
+  # uses. Answered AFTER selector classification, from the project the
+  # build's own anchor names (``buildLockProjectDir``, the rule
+  # ``lockConsumption`` below applies), not from the first positional:
+  # ``--print-solved-graph test`` beside a ``test/`` directory, ``lint
+  # ./sub`` and ``runquota:runquotad`` print the graph the build of the same
+  # command line pins (CLI/build.md §"Target Selection"; reprobuild-pm issue
+  # 2026-11-18-print-solved-graph-takes-the-first-positional-as-the-project-not-the-builds-anchor).
+  # A committed-lock-only fixture directory with no ``repro.nim`` still
+  # works when it is the one path selector: the resolver classifies it by
+  # spelling and needs no project file for it. A command line the resolver
+  # refuses (two path anchors in different projects) is refused here too,
+  # as the build refuses it.
   # ----------------------------------------------------------------
   if printSolvedGraph:
-    let rawTarget =
-      if positionalSelectors.len > 0: positionalSelectors[0] else: ""
-    let projDir = resolveProjectDirFromTarget(rawTarget)
+    let projDir = buildLockProjectDir(target)
     # NLF-M5 §5.5 — a strategy OVERRIDES the committed lock for THIS
     # invocation, and `--print-solved-graph` is an invocation. Printing the
     # committed graph under `--strategy highest` would report the opposite of
@@ -31866,23 +31898,6 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     stdout.write(serializeSolvedGraphLock(lk))
     stdout.write("# source: " & graph.source & "\n")
     return 0
-
-  # ----------------------------------------------------------------
-  # Named-Targets M2 positional resolution lives in the shared M3
-  # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
-  # ``runWatchCommand`` cannot drift. The helper classifies every
-  # selector via ``classifyBuildSelector``; the first path-shaped
-  # selector (or the current directory when there's none) becomes the
-  # engine's project anchor, and every name-shaped selector contributes
-  # its closure to ``extraNameSelectors`` so the build runs in one
-  # pass.
-  # ----------------------------------------------------------------
-  let resolved = parseAndResolveSelectors(positionalSelectors, "repro build")
-  target = resolved.target
-  var extraNameSelectors: seq[string] = resolved.extraNameSelectors
-  let targetWasOmitted = resolved.targetWasOmitted
-  if target.len == 0:
-    target = "."
 
   # ----------------------------------------------------------------
   # MO-1 / Named-Lock-Files NLF-M3 — consume the committed solved-graph lock,
@@ -31916,7 +31931,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # reaches the pinning path with no separate wiring.
   # ----------------------------------------------------------------
   block lockConsumption:
-    let projDir = resolveProjectDirFromTarget(splitTarget(target).base)
+    let projDir = buildLockProjectDir(target)
     let effectiveLock =
       if lockOverride.len > 0: absolutePath(lockOverride)
       else: committedLockPath(projDir)

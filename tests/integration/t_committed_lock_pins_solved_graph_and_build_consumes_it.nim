@@ -274,3 +274,64 @@ suite "MO-1: committed lock pins solved graph and build consumes it":
       check graphRc == 0
       check "version = \"7.7.7\"" in graphOut
       check "# source: lock" in graphOut
+
+  test "--print-solved-graph prints the project the build's anchor names":
+    # reprobuild-pm issue
+    # 2026-11-18-print-solved-graph-takes-the-first-positional-as-the-project-not-the-builds-anchor
+    # (CLI/build.md §"Target Selection"). The printed graph is the one "the
+    # build would pin", so its project is the one the build anchors on — the
+    # first PATH-SHAPED selector, else a sibling checkout's
+    # ``<package>:<name>``, else the current directory — classified by
+    # spelling, never by what the disk holds. It used to be the FIRST
+    # POSITIONAL, looked up on the disk: ``test`` beside a ``test/``
+    # directory printed ``./test``'s graph, while ``lint ./sub`` and
+    # ``sibpkg:tool`` printed the current directory's.
+    #
+    # Every project carries a ``repro.solver`` that pins ``nim`` to a
+    # different version, so the printed version names the project that was
+    # read. No mocks: the real binary, real directories, a real solve.
+    if not fileExists(reproBinary):
+      skip()
+    else:
+      let ws = getTempDir() / "mo1-anchor-" & $getCurrentProcessId()
+      removeDir(ws)
+      defer: removeDir(ws)
+      proc writeSolver(dir, nimVersion: string) =
+        createDir(dir)
+        writeFile(dir / "repro.solver", "package app\n" &
+          "versions: 0.1.0\ndepends: nim >=1.0.0 <10.0.0\n\n" &
+          "package nim\nversions: " & nimVersion & "\n")
+      let app = ws / "app"
+      writeSolver(app, "2.2.0")
+      writeSolver(app / "test", "9.9.9")   # same name as the selector `test`
+      writeSolver(app / "sub", "8.8.8")
+      writeSolver(ws / "sibpkg", "7.7.7")  # a sibling checkout
+      # The sibling is recognised by its project file; the print path never
+      # loads it.
+      writeFile(ws / "sibpkg" / "repro.nim", "discard\n")
+
+      proc printed(selectors: string): string =
+        let (output, rc) = execCmdEx(reproBinary &
+          " build --print-solved-graph " & selectors, workingDir = app)
+        checkpoint("repro build --print-solved-graph " & selectors &
+          " (rc " & $rc & "):\n" & output)
+        check rc == 0
+        output
+      proc nimAt(version: string): string =
+        "{ name = \"nim\", version = \"" & version & "\""
+
+      # A bare `test` is the current project's target, so the current
+      # project's graph — not `./test`'s.
+      let bare = printed("test")
+      check nimAt("2.2.0") in bare
+      check nimAt("9.9.9") notin bare
+      # The path spelling selects the directory (the control).
+      check nimAt("9.9.9") in printed("./test")
+      # A name before a path: the build anchors on the path.
+      let mixed = printed("lint ./sub")
+      check nimAt("8.8.8") in mixed
+      check nimAt("2.2.0") notin mixed
+      # A sibling checkout's `<package>:<name>`: the build anchors there.
+      let sibling = printed("sibpkg:tool")
+      check nimAt("7.7.7") in sibling
+      check nimAt("2.2.0") notin sibling
