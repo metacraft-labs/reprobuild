@@ -253,5 +253,110 @@ class NixDaemonSelectorStaysPure(unittest.TestCase):
                     process.wait(timeout=5)
 
 
+@unittest.skipUnless(os.name == "posix", "the Nix helper serves only on POSIX hosts")
+class NixDaemonFileTransportIsNeverCached(unittest.TestCase):
+    """A selector fetched over the ``file`` transport is evaluated every time.
+
+    Foreign-Provisioning-And-Nix-Evaluation-Daemon.md §3 item 4: a selector
+    that names the client's own files can change under the same selector, so
+    the helper never answers it from its cache. The helper used to decide
+    "local" from a list of prefixes (``path:``, ``file:``, ``git+file:``) and
+    took ``tarball+file:``, ``file+file:``, ``hg+file:`` and a bare relative
+    path such as ``sub.d#…`` (which Nix reads as a path) for remote ones:
+    after the tarball was rewritten, the same request was answered from the
+    cache with the old tarball's store path.
+
+    Mock justification: as for ``NixDaemonCache`` above, the host ``nix`` is a
+    script. It "realises" a store path named after the current bytes of the
+    tarball the selector names, so a stale cached answer is visible as the
+    old name; a real ``nix build`` would need a store and a builder. The
+    helper, its socket, its cache and the tarball on disk are real.
+
+    Regression test for reprobuild-pm issue
+    ``2026-11-18-nix-evaluation-daemon-caches-local-file-selectors-it-takes-for-remote.md``.
+    """
+
+    def test_a_rewritten_file_transport_source_is_never_served_stale(self):
+        with tempfile.TemporaryDirectory(prefix="rnf-", dir="/tmp") as directory:
+            directory = Path(directory)
+            root = directory / "workspace"
+            root.mkdir()
+            (root / "flake.nix").write_text("{ outputs = _: {}; }\n")
+            source = directory / "source"
+            source.mkdir()
+            store = directory / "store"
+            fake_bin = directory / "bin"
+            fake_bin.mkdir()
+            fake_nix = fake_bin / "nix"
+            # The output is named after the bytes of the file the selector's
+            # URL names, as a real evaluation of that source would differ.
+            fake_nix.write_text(
+                f"#!{sys.executable}\n"
+                "import hashlib, os, sys, urllib.parse\n"
+                "ref = next(a for a in sys.argv[1:] if '#packages.' in a)\n"
+                "base = ref.split('#')[0]\n"
+                "path = (urllib.parse.urlparse(base).path if '://' in base\n"
+                "        else os.path.join(os.getcwd(), base, 'flake.nix'))\n"
+                "digest = hashlib.sha256(open(path, 'rb').read()).hexdigest()[:12]\n"
+                f"out = os.path.join({str(store)!r}, digest)\n"
+                "os.makedirs(out, exist_ok=True)\n"
+                "print(out)\n")
+            fake_nix.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+            endpoint = directory / "d.sock"
+            with (directory / "daemon.log").open("w+") as log:
+                process = subprocess.Popen(
+                    [sys.executable, str(DAEMON), "--socket-path", str(endpoint),
+                     "--idle-exit-ms=120000"], stdout=log, stderr=log, env=env)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not endpoint.exists():
+                        self.assertIsNone(process.poll(), "helper exited before readiness")
+                        self.assertLess(time.monotonic(), deadline, "helper did not bind")
+                        time.sleep(0.01)
+
+                    def request(selector):
+                        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+                            client.settimeout(30)
+                            client.connect(str(endpoint))
+                            payload = dict(action="resolve", selector=selector,
+                                           workspaceRoot=str(root), evaluateOnly=True)
+                            client.sendall((json.dumps(payload) + "\n").encode())
+                            with client.makefile("rb") as response:
+                                result = json.loads(response.readline())
+                            self.assertEqual(result["status"], "success", result)
+                            return result["paths"]
+
+                    # A bare relative path that is not shaped like a registry
+                    # name is a path to Nix (relative to the workspace), too.
+                    (root / "sub.d").mkdir()
+                    for scheme, name in (("tarball+file", "f.tar.gz"),
+                                         ("file+file", "f.bin"),
+                                         ("hg+file", "repo"),
+                                         ("git+file", "checkout"),
+                                         ("", "sub.d")):
+                        with self.subTest(scheme=scheme or "bare relative path"):
+                            if scheme:
+                                target = source / name
+                                selector = f"{scheme}://{target}#packages.x86_64-linux.default"
+                            else:
+                                target = root / name / "flake.nix"
+                                selector = f"{name}#packages.x86_64-linux.default"
+                            target.write_bytes(b"one " + scheme.encode())
+                            first = request(selector)
+                            target.write_bytes(b"two " + scheme.encode())
+                            second = request(selector)
+                            self.assertNotEqual(
+                                second, first,
+                                f"{selector}: the rewritten source was served from the cache")
+                    self.assertIsNone(process.poll(), "the helper must survive the requests")
+                finally:
+                    if process.poll() is None:
+                        process.terminate()
+                    process.wait(timeout=5)
+
+
 if __name__ == "__main__":
     unittest.main()

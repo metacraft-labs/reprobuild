@@ -41,7 +41,7 @@
   },
   {
     "selector": ".registry#tool",
-    "local": false
+    "local": true
   },
   {
     "selector": "registry#tool",
@@ -62,5 +62,157 @@
   {
     "selector": " ./flake#tool ",
     "local": true
+  },
+  {
+    "selector": "tarball+file:///source/flake.tar.gz#tool",
+    "local": true
+  },
+  {
+    "selector": "file+file:///source/flake.tar.gz#tool",
+    "local": true
+  },
+  {
+    "selector": "hg+file:///source/flake#tool",
+    "local": true
+  },
+  {
+    "selector": "GIT+FILE:///source/flake#tool",
+    "local": true
+  },
+  {
+    "selector": "PATH:/source/flake#tool",
+    "local": true
+  },
+  {
+    "selector": "tarball+https://example.org/source.tar.gz#tool",
+    "local": false
+  },
+  {
+    "selector": "git+https://example.org/source.git?rev=addf7cf5f383a3101ecfba091b98d0a1263dc9b8#tool",
+    "local": false
+  },
+  {
+    "selector": "git+ssh://git@example.org/source.git?rev=addf7cf5f383a3101ecfba091b98d0a1263dc9b8#tool",
+    "local": false
+  },
+  {
+    "selector": "file-like#tool",
+    "local": false
+  },
+  {
+    "selector": "sub/#tool",
+    "local": true
+  },
+  {
+    "selector": "sub.d#tool",
+    "local": true
+  },
+  {
+    "selector": "sub/.#tool",
+    "local": true
+  },
+  {
+    "selector": "sub//#tool",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs/nixos-24.05#tool",
+    "local": false
+  },
+  {
+    "selector": "nixpkgs/nixos-24.05/addf7cf5f383a3101ecfba091b98d0a1263dc9b8#tool",
+    "local": false
+  },
+  {
+    "selector": "flake:nixpkgs#tool",
+    "local": false
+  },
+  {
+    "selector": "sourcehut:~user/repo#tool",
+    "local": false
+  },
+  {
+    "selector": "gitlab:owner/repo#tool",
+    "local": false
+  },
+  {
+    "selector": "\u00a0path:/x#tool",
+    "local": true
+  },
+  {
+    "selector": "_private#tool",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs?dir=.#tool",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs?#tool",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs#tool{",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs#tool[0]",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs#tool#extra",
+    "local": true
+  },
+  {
+    "selector": " nixpkgs#tool",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs ",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs#to|ol",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs#to%zzol",
+    "local": true
+  },
+  {
+    "selector": "nixpkgs#tool^out",
+    "local": false
+  },
+  {
+    "selector": "nixpkgs#to%20ol",
+    "local": false
+  },
+  {
+    "selector": "nixpkgs#\"quoted tool\"",
+    "local": false
+  },
+  {
+    "selector": "github:owner/repo x#tool",
+    "local": true
+  },
+  {
+    "selector": "https:{x}#tool",
+    "local": true
+  },
+  {
+    "selector": "github:owner/repo#tool#extra",
+    "local": true
+  },
+  {
+    "selector": "github:owner/repo#tool ",
+    "local": true
+  },
+  {
+    "selector": "github:owner/repo#packages.x86_64-linux.default",
+    "local": false
+  },
+  {
+    "selector": "github:owner/repo?dir=sub#tool^out",
+    "local": false
   }
 ]
