@@ -50,6 +50,8 @@ from repro_core/paths import extendedPath
 import repro_build_engine
 import repro_profile_intent
 import repro_profile_compile
+# The compile helper's command line, read by repro's generated parser.
+from repro_cli_support/profile_helper_cli import runProfileHelperArgs
 
 const ProfileBody = """
 import repro_profile
@@ -139,15 +141,16 @@ suite "profile-compile Nim path closure":
     # Build the argv through the production BuildAction constructor rather
     # than hand-rolling it, so the flag names/order under test are the ones
     # the build engine really emits. argv[0] is the `repro` binary and
-    # argv[1] the subcommand; the helper body parses everything after.
+    # argv[1] the subcommand; repro's generated parser reads the words after
+    # the image and hands the helper body their values.
     let action = profileCompileBuildAction(
       profileRoot, binaryPath, nimcacheDir,
       publicCliPath = "repro", workDir = profileDir,
       repoRoot = reprobuildRepoRoot(),
       weak = weakFingerprintFromText("nim-path-closure-gate"))
-    check action.argv[1] == "__repro-compile-profile"
+    check action.argv[1 .. 2] == @["internal", "compile-profile"]
 
-    let exitCode = runProfileCompileHelper(action.argv[2 .. ^1])
+    let exitCode = runProfileHelperArgs(action.argv[1 .. ^1])
     check exitCode == 0
     check fileExists(extendedPath(binaryPath))
 

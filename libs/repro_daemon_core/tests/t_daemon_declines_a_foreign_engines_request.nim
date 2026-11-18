@@ -55,9 +55,10 @@
 ## daemon digests the file it sees at `publicCliPath`, finds its own image,
 ## and accepts the request (a `bekAccepted` event is streamed).
 
-## MOCK POLICY: no mocks. Each daemon is a real `repro-daemon --foreground`:
-## this binary re-executes itself in fixture mode and hands its arguments to
-## `runUserDaemonCommand`, so the daemon's own image IS this test binary. The
+## MOCK POLICY: no mocks. Each daemon is a real `repro daemon serve
+## --foreground`: this binary re-executes itself in fixture mode, reads its
+## arguments through repro's generated parser (`userDaemonConfigOfArgs`) and
+## runs the daemon, so the daemon's own image IS this test binary. The
 ## "foreign engine" is a real file whose bytes differ from it. Requests travel
 ## over the real socket through the same client procs `repro` uses. No build
 ## executor is registered in the fixture daemon, which is what makes an
@@ -66,15 +67,17 @@
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_daemon_core
+from repro_cli_support/daemon_cli import userDaemonConfigOfArgs
 import repro_test_support/reasoned_skip
 
 const FixtureFlag = "--daemon-fixture"
 
 if paramCount() >= 1 and paramStr(1) == FixtureFlag:
-  var args = @["--foreground"]
-  for i in 2 .. paramCount():
-    args.add(paramStr(i))
-  quit(runUserDaemonCommand(args))
+  # `repro daemon serve --foreground <flags>`, in this process: the flags
+  # read by repro's generated parser into the configuration `repro daemon
+  # serve` runs (`userDaemonConfigOfArgs`).
+  quit(runUserDaemonForeground(userDaemonConfigOfArgs(
+    @["daemon", "serve", "--foreground"] & commandLineParams()[1 .. ^1])))
 
 when defined(posix):
   type Daemon = object

@@ -17,16 +17,20 @@
 ## description (`repro_cli_support/cli_description.nim`) is where flags are
 ## declared, so it is not scanned.
 ##
-## HOW IT SHRINKS. Commands move onto the description group by group, so for
-## now the files still holding hand-written parsing are listed in
-## `Remaining` with the exact number of such comparisons each holds. The
-## count is a ratchet in both directions: a file over its number has new
-## hand-written parsing; a file under it has lost some, and its number must
-## come down with it, so the list only ever shrinks. The final group empties
-## it.
+## THE END STATE. Every command, the role processes repro spawns of itself
+## included, is parsed from the description, so no scanned file holds a
+## single such comparison: `Remaining`, the ratchet the migration shrank
+## group by group, is empty and stays empty. Code that reads or writes
+## ANOTHER program's command line (the Nim compiler's `--path:`, Nix's
+## `--override-input`, `env -S`, `sh -c`) names that program's word with a
+## named constant that says whose it is, and a refusal that names one of
+## repro's own flags takes its spelling from the description
+## (`reproLongFlags`), so neither shape is a flag literal compared here.
 ##
-## The procs of the commands already parsed from the description must hold
-## none at all, whichever file they live in (`MigratedProcs`).
+## The procs of the commands parsed from the description hold none at all,
+## whichever file they live in (`MigratedProcs`); the scan finds a proc by
+## its non-generic header, so the generic readers that several
+## configurations share are covered by the file count alone.
 ##
 ## The positive control counts a fixture holding one instance of every shape
 ## above and the shapes that must not count, so the scan cannot pass by
@@ -41,33 +45,16 @@ const
     "apps" / "repro", "apps" / "repro-client",
     "libs" / "repro_cli_support" / "src"]
   Description = "libs/repro_cli_support/src/repro_cli_support/cli_description.nim"
-  Remaining = [
-    # (file, hand-written argv comparisons against flag literals it holds).
-    # `apps/repro-client/repro_client.nim` left this list in the first group:
-    # its flag tables are generated from the description. The third group
-    # emptied `bundle_cli.nim`, `selfhost.nim`, `store_bundle_cli.nim` and
-    # `store_copy_cli.nim`; the fourth `anywhere.nim`, `cargo_gc.nim`,
-    # `deploy_agent.nim`, `disk.nim`, `hardware.nim`, `home.nim` and
-    # `infra_install_root.nim`; the fifth `dev_env_fast_path.nim` (the thin
-    # client's `dev-env export` reader takes its flags from the
-    # description); the sixth `workspace_restore.nim` (`repro workspace
-    # restore` takes its values from the description), and the sixth's
-    # `develop` and `flake` took this file from 502 to 343, and the seventh
-    # group's `build` (with `bench` and `lint`) and `clean` from 343 to
-    # 221, and its `test`, `certify`, `certificates`, `ci` and `watch` from
-    # 221 to 43. What `infra.nim` and `infra_image.nim` still hold is no argv
-    # parsing (a `git describe` suffix, a table of the flags a bootstrap
-    # names), but it has the shape the scan counts. The eighth group's
-    # `attest` took `attest.nim` from 96 to 12: what is left pairs a flag's
-    # name with the parsed value it names in a refusal (`--vcpus` given
-    # without `--firmware`, a flag `cross-check` refuses), and maps a launch
-    # input's flag name to the field it fills, reading no argv.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 43),
-    ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 12),
-    ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 1),
-    ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
-    ("libs/repro_cli_support/src/repro_cli_support/project_pins.nim", 4),
-  ]
+  Remaining: array[0, (string, int)] = []
+    ## (file, hand-written argv comparisons against flag literals it holds):
+    ## none. The groups emptied it: the first took `apps/repro-client`, the
+    ## third `bundle_cli.nim`, `selfhost.nim`, `store_bundle_cli.nim` and
+    ## `store_copy_cli.nim`, the fourth the machine commands' modules, the
+    ## fifth `dev_env_fast_path.nim`, the sixth `workspace_restore.nim`, the
+    ## sixth to eighth `repro_cli_support.nim` (1218 at the start) and
+    ## `attest.nim`; the eighth's role processes took the last 43 of
+    ## `repro_cli_support.nim` with `project_pins.nim`'s 4, and named the
+    ## other programs' words `infra.nim` and `infra_image.nim` compared.
   MigratedProcs = [
     # The commands parsed from the description. The first group:
     # `version`, `capabilities`, `show-conventions`, `completion` (and
@@ -85,10 +72,10 @@ const
     # `launch-plan`, `cert-signer`, `self` (their submodules,
     # `store_bundle_cli`, `store_copy_cli`, `bundle_cli` and `selfhost`,
     # left `Remaining` with nothing to parse).
-    "runUserDaemonCliCommand", "userDaemonConfigOf", "runStoreCommand",
+    "runUserDaemonCliCommand", "runStoreCommand",
     "runStoreDaemonCommand", "runStoreServeCommand", "runCasCommand",
-    "parseCasDigest", "runCacheCommand",
-    "runBundleCliCommand", "printNamespaceHelp", "runReapCommand",
+    "parseCasDigest",
+    "runBundleCliCommand", "runReapCommand",
     "runLaunchPlanCommand", "runCertSignerCommand", "runSelfCommand",
     # The fourth group (machines) whose procs live here: `health`, `debug
     # artifact`. Its other commands' modules (`home`, `infra`, `disk`,
@@ -175,7 +162,14 @@ const
     "runCertifyCheckSet", "runCertificatesCommand",
     "runCertificatesPolicyCommand", "ciPlanArgsOf", "runCiPlanCommand",
     "runCiCommand", "runWatchVerbCommand", "loadWatchCommandLine",
-    "runWatchCommand"]
+    "runWatchCommand",
+    # The eighth group: the role processes (`repro internal <role>` and the
+    # hidden `__repro-<role>` spellings), whose typed readers are generic
+    # over the two spellings' configurations; and the procs their
+    # configurations reach.
+    "runInternalCommand", "runSharedPoolUploadPack", "runResolvePackage",
+    "runCmakeRegenerationHelper", "runReproDirenvActivationHelper",
+    "runReproNativeShellActivationHelper"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.
@@ -319,8 +313,7 @@ suite "CS-M6: no hand-written argv parsing outside the description":
         found.add((rel, count))
     var expected: seq[(string, int)] = @[]
     for entry in Remaining:
-      if entry[1] > 0:
-        expected.add(entry)
+      expected.add(entry)
     for entry in found:
       checkpoint("found " & entry[0] & ": " & $entry[1])
     check found == expected

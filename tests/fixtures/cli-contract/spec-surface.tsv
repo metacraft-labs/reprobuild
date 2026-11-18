@@ -242,9 +242,7 @@ flag	repro store copy	--store-root
 flag	repro store copy	--to
 env	repro store copy	REPRO_STORE_ROOT
 command	repro store daemon
-flag	repro store daemon	--dev
 flag	repro store daemon	--endpoint
-flag	repro store daemon	--store-root
 env	repro store daemon	REPROSTORED_ENDPOINT
 command	repro store serve
 flag	repro store serve	--dev
@@ -2055,3 +2053,198 @@ flag	repro attest reap	--provider
 flag	repro attest reap	--region
 flag	repro attest reap	--sweeps
 flag	repro attest reap	--tag-sweep
+command	repro daemon serve
+command	repro daemon start
+flag	repro daemon start	--dev
+flag	repro daemon start	--endpoint
+flag	repro daemon start	--foreground
+flag	repro daemon start	--log
+flag	repro daemon start	--state-dir
+command	repro daemon status
+flag	repro daemon status	--endpoint
+flag	repro daemon status	--log
+flag	repro daemon status	--state-dir
+command	repro daemon stop
+flag	repro daemon stop	--endpoint
+flag	repro daemon stop	--log
+flag	repro daemon stop	--state-dir
+command	repro daemon restart
+flag	repro daemon restart	--dev
+flag	repro daemon restart	--endpoint
+flag	repro daemon restart	--log
+flag	repro daemon restart	--state-dir
+command	repro daemon sessions
+command	repro daemon logs
+flag	repro daemon logs	--endpoint
+flag	repro daemon logs	--log
+flag	repro daemon logs	--state-dir
+command	repro store daemon start
+flag	repro store daemon start	--dev
+flag	repro store daemon start	--endpoint
+flag	repro store daemon start	--store-root
+command	repro store daemon status
+flag	repro store daemon status	--dev
+command	repro store daemon stop
+flag	repro store daemon stop	--dev
+command	repro home __build-bundle
+flag	repro home __build-bundle	--evaluate
+flag	repro home __build-bundle	--generation
+flag	repro home __build-bundle	--home-dir
+flag	repro home __build-bundle	--out
+flag	repro home __build-bundle	--state-dir
+flag	repro home __build-bundle	--store-root
+flag	repro home __build-bundle	--target-arch
+flag	repro home __build-bundle	--target-host
+flag	repro home __build-bundle	--target-platform
+flag	repro home __build-bundle	--target-wsl
+command	repro home __receive-bundle
+flag	repro home __receive-bundle	--bundle
+flag	repro home __receive-bundle	--expected-digest
+flag	repro home __receive-bundle	--query
+flag	repro home __receive-bundle	--query-prefix
+flag	repro home __receive-bundle	--store-root
+command	repro home __transfer-bundle
+flag	repro home __transfer-bundle	--bundle-digest
+flag	repro home __transfer-bundle	--port
+flag	repro home __transfer-bundle	--remote-repro
+flag	repro home __transfer-bundle	--ssh
+flag	repro home __transfer-bundle	--ssh-option
+flag	repro home __transfer-bundle	--store-root
+flag	repro home __transfer-bundle	--target
+flag	repro home __transfer-bundle	--target-store-root
+command	repro home __remote-activate
+flag	repro home __remote-activate	--bundle
+flag	repro home __remote-activate	--bundle-digest
+flag	repro home __remote-activate	--expected-digest
+flag	repro home __remote-activate	--state-dir
+flag	repro home __remote-activate	--store-root
+command	repro system addon
+command	repro system state
+command	repro system secret
+command	repro system adopt
+command	repro debug io
+command	repro debug io monitor
+command	repro hooks protocol
+flag	repro hooks protocol	--hook-contract
+flag	repro hooks protocol	--require
+flag	repro hooks protocol	--require-source-component
+command	repro hooks dispatch
+flag	repro hooks dispatch	--dispatcher-displaced
+flag	repro hooks dispatch	--phase
+flag	repro hooks dispatch	--protocol
+flag	repro hooks dispatch	--refs-file
+flag	repro hooks dispatch	--repo-root
+command	repro hooks cache-push
+flag	repro hooks cache-push	--repo-root
+flag	repro hooks cache-push	--workspace-name
+command	repro pressure
+flag	repro pressure	--group
+flag	repro pressure	--json
+command	repro internal
+command	repro internal shared-pool-upload-pack
+command	repro internal resolve-package
+command	repro internal io
+command	repro internal io monitor
+command	repro internal runquota-helper
+flag	repro internal runquota-helper	--cpu
+flag	repro internal runquota-helper	--cpu-min
+flag	repro internal runquota-helper	--cpu-pref
+flag	repro internal runquota-helper	--cwd
+flag	repro internal runquota-helper	--env
+flag	repro internal runquota-helper	--isolated-env
+flag	repro internal runquota-helper	--label
+flag	repro internal runquota-helper	--mem
+flag	repro internal runquota-helper	--pool
+flag	repro internal runquota-helper	--pool-capacity
+flag	repro internal runquota-helper	--pool-units
+flag	repro internal runquota-helper	--result
+flag	repro internal runquota-helper	--stats
+flag	repro internal runquota-helper	--stderr-limit
+flag	repro internal runquota-helper	--stdout-limit
+flag	repro internal runquota-helper	--width-flag
+command	repro internal compile-provider
+flag	repro internal compile-provider	--anchor
+flag	repro internal compile-provider	--artifact
+flag	repro internal compile-provider	--interface
+flag	repro internal compile-provider	--interface-fingerprint
+flag	repro internal compile-provider	--module
+flag	repro internal compile-provider	--out
+flag	repro internal compile-provider	--recipe-relative
+flag	repro internal compile-provider	--scratch-dir
+flag	repro internal compile-provider	--work-dir
+command	repro internal extract-interface
+flag	repro internal extract-interface	--anchor
+flag	repro internal extract-interface	--artifact
+flag	repro internal extract-interface	--consumer-root
+flag	repro internal extract-interface	--extra-path
+flag	repro internal extract-interface	--module
+flag	repro internal extract-interface	--recipe-relative
+flag	repro internal extract-interface	--require-stub
+flag	repro internal extract-interface	--resource-module
+flag	repro internal extract-interface	--scratch-dir
+flag	repro internal extract-interface	--stub
+flag	repro internal extract-interface	--work-dir
+command	repro internal compile-profile
+flag	repro internal compile-profile	--binary
+flag	repro internal compile-profile	--nimcache
+flag	repro internal compile-profile	--profile
+flag	repro internal compile-profile	--repo-root
+flag	repro internal compile-profile	--verbose
+command	repro internal probe-profile-platforms
+flag	repro internal probe-profile-platforms	--nimcache
+flag	repro internal probe-profile-platforms	--out
+flag	repro internal probe-profile-platforms	--profile
+flag	repro internal probe-profile-platforms	--repo-root
+command	repro internal dev-env-introspect
+flag	repro internal dev-env-introspect	--activity
+flag	repro internal dev-env-introspect	--develop-overrides
+flag	repro internal dev-env-introspect	--entry-point
+flag	repro internal dev-env-introspect	--lock-slice
+flag	repro internal dev-env-introspect	--out
+flag	repro internal dev-env-introspect	--project-root
+flag	repro internal dev-env-introspect	--protocol-root
+flag	repro internal dev-env-introspect	--provider-artifact-id
+flag	repro internal dev-env-introspect	--provider-binary
+command	repro internal render-dev-env-shell
+flag	repro internal render-dev-env-shell	--artifact
+flag	repro internal render-dev-env-shell	--navigator-stats
+flag	repro internal render-dev-env-shell	--out
+command	repro internal direnv-activate
+flag	repro internal direnv-activate	--activity
+flag	repro internal direnv-activate	--dev-env-stats
+flag	repro internal direnv-activate	--lock-slice
+flag	repro internal direnv-activate	--work-root
+command	repro internal native-shell-activate
+flag	repro internal native-shell-activate	--dev-env-stats
+flag	repro internal native-shell-activate	--previous-artifact
+flag	repro internal native-shell-activate	--previous-project-root
+flag	repro internal native-shell-activate	--shell
+command	repro internal dev-session-supervisor
+flag	repro internal dev-session-supervisor	--activity
+flag	repro internal dev-session-supervisor	--artifact
+flag	repro internal dev-session-supervisor	--debounce-ms
+flag	repro internal dev-session-supervisor	--develop-overrides
+flag	repro internal dev-session-supervisor	--foreground
+flag	repro internal dev-session-supervisor	--http
+flag	repro internal dev-session-supervisor	--http-allow-remote
+flag	repro internal dev-session-supervisor	--lock-slice
+flag	repro internal dev-session-supervisor	--mode
+flag	repro internal dev-session-supervisor	--module
+flag	repro internal dev-session-supervisor	--monitor-cli
+flag	repro internal dev-session-supervisor	--monitor-shim
+flag	repro internal dev-session-supervisor	--out-dir
+flag	repro internal dev-session-supervisor	--project-root
+flag	repro internal dev-session-supervisor	--session-id
+flag	repro internal dev-session-supervisor	--work-dir
+command	repro internal dev-session-http
+flag	repro internal dev-session-http	--host
+flag	repro internal dev-session-http	--http-allow-remote
+flag	repro internal dev-session-http	--parent-pid
+flag	repro internal dev-session-http	--port
+flag	repro internal dev-session-http	--session-dir
+flag	repro internal dev-session-http	--session-id
+flag	repro internal dev-session-http	--supervised
+command	repro internal cmake-regenerate
+flag	repro internal cmake-regenerate	--depfile
+flag	repro internal cmake-regenerate	--metadata
+flag	repro internal cmake-regenerate	--public-cli

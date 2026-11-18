@@ -867,8 +867,9 @@ proc prefixRecordDirtyLines*(prefix: string): seq[string] =
   let record = prefix / "share" / "repro" / "cross-build-info"
   if not fileExists(record):
     return
+  const DirtySuffix = "-dirty"   # what `git describe --dirty` appends
   for line in readFile(record).splitLines():
-    if "-dirty" in line:
+    if DirtySuffix in line:
       result.add(line)
 
 proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,

@@ -75,6 +75,17 @@ import repro_attest_verify
 import repro_attest_verify/fetch
 
 import ./cli_program
+from ./cli_description import reproLongFlags
+
+const
+  ExpectFlags = reproLongFlags(@["attest", "expect"])
+    ## The spellings of `repro attest expect`'s flags (`cross-check` takes
+    ## the same image flags), which the refusals below name.
+  LaunchFlags = reproLongFlags(@["attest", "launch"])
+    ## The spellings of `repro attest launch`'s flags.
+  CrossCheckFlags = reproLongFlags(@["attest", "cross-check"])
+    ## The spellings of `repro attest cross-check`'s flags, the refused ones
+    ## included.
 
 const
   ## Artifact names an attested image build writes. `--image <dir>` finds
@@ -447,11 +458,13 @@ proc computeManifestLocally(opts: AttestCliOptions;
   # visibly so.
   var launches: seq[SevSnpLaunchInputs] = @[]
   if opts.firmware.len == 0:
-    for flag in [("--vcpus", opts.vcpus), ("--vcpu-type", opts.vcpuType),
-                 ("--guest-policy", opts.guestPolicy),
-                 ("--guest-features", opts.guestFeatures),
-                 ("--vmm", opts.vmm), ("--launch-kernel", opts.snpKernel),
-                 ("--launch-initrd", opts.snpInitrd)]:
+    for flag in [(ExpectFlags.vcpus, opts.vcpus),
+                 (ExpectFlags.vcpuType, opts.vcpuType),
+                 (ExpectFlags.guestPolicy, opts.guestPolicy),
+                 (ExpectFlags.guestFeatures, opts.guestFeatures),
+                 (ExpectFlags.vmm, opts.vmm),
+                 (ExpectFlags.launchKernel, opts.snpKernel),
+                 (ExpectFlags.launchInitrd, opts.snpInitrd)]:
       if flag[1].len > 0:
         stderr.writeLine(verb & ": " & flag[0] & " describes a " &
           "confidential launch and no --firmware was given, so nothing " &
@@ -468,10 +481,11 @@ proc computeManifestLocally(opts: AttestCliOptions;
         opts.firmware)
       return LocalManifestOutcome(code: AttestExitUsage)
     var inputs = SevSnpLaunchInputs(firmware: readFile(opts.firmware))
-    for flag in [("--vcpus", opts.vcpus), ("--vcpu-type", opts.vcpuType),
-                 ("--guest-policy", opts.guestPolicy),
-                 ("--guest-features", opts.guestFeatures),
-                 ("--vmm", opts.vmm)]:
+    for flag in [(ExpectFlags.vcpus, opts.vcpus),
+                 (ExpectFlags.vcpuType, opts.vcpuType),
+                 (ExpectFlags.guestPolicy, opts.guestPolicy),
+                 (ExpectFlags.guestFeatures, opts.guestFeatures),
+                 (ExpectFlags.vmm, opts.vmm)]:
       if flag[1].len == 0:
         stderr.writeLine(verb & ": --firmware computes a " &
           "confidential-launch expectation and " & flag[0] & " is required " &
@@ -485,8 +499,8 @@ proc computeManifestLocally(opts: AttestCliOptions;
         opts.vcpus)
       return LocalManifestOutcome(code: AttestExitUsage)
     inputs.vcpuType = opts.vcpuType
-    for flag in [("--guest-policy", opts.guestPolicy),
-                 ("--guest-features", opts.guestFeatures)]:
+    for flag in [(ExpectFlags.guestPolicy, opts.guestPolicy),
+                 (ExpectFlags.guestFeatures, opts.guestFeatures)]:
       if not flag[1].startsWith("0x"):
         stderr.writeLine(verb & ": " & flag[0] &
           " must be written as 0x<hex>, got " & flag[1])
@@ -531,8 +545,8 @@ proc computeManifestLocally(opts: AttestCliOptions;
   # with every domain that never extended those registers.
   var tdxLaunches: seq[TdxLaunchInputs] = @[]
   if opts.tdxFirmware.len == 0:
-    for flag in [("--td-register-log", opts.tdxRegisterLog),
-                 ("--td-page-order", opts.tdxPageOrder)]:
+    for flag in [(ExpectFlags.tdRegisterLog, opts.tdxRegisterLog),
+                 (ExpectFlags.tdPageOrder, opts.tdxPageOrder)]:
       if flag[1].len > 0:
         stderr.writeLine(verb & ": " & flag[0] & " describes a " &
           "trust-domain launch and no --td-firmware was given, so nothing " &
@@ -705,17 +719,19 @@ proc runAttestLaunch(opts: AttestCliOptions; env: CloudEnvLookup): int =
   spec.verityImageDigest = opts.verityImageDigest
   spec.verityRootHash = opts.verityRootHash
 
-  for pair in [("--firmware", opts.firmware), ("--uki", opts.uki),
-               ("--td-register-log", opts.tdxRegisterLog)]:
-    var into = ""
-    let complaint = readLaunchFileArg(pair[0], pair[1], into)
+  proc readInto(flag, path: string; into: var string): bool =
+    ## The file ``path`` (the value of ``flag``) read into ``into``; false,
+    ## the complaint printed, when it cannot be.
+    let complaint = readLaunchFileArg(flag, path, into)
     if complaint.len > 0:
       stderr.writeLine(complaint)
-      return AttestExitUsage
-    case pair[0]
-    of "--firmware": spec.firmware = into
-    of "--uki": spec.ukiImage = into
-    else: spec.registerLog = into
+      return false
+    true
+  if not readInto(LaunchFlags.firmware, opts.firmware, spec.firmware) or
+      not readInto(LaunchFlags.uki, opts.uki, spec.ukiImage) or
+      not readInto(LaunchFlags.tdRegisterLog, opts.tdxRegisterLog,
+        spec.registerLog):
+    return AttestExitUsage
 
   # The lease, minted BEFORE the plan is rendered and written to disk
   # before anything else happens. Nothing is created by this command, so
@@ -1346,15 +1362,15 @@ proc runAttestCrossCheck(opts: AttestCliOptions): int =
       "and this command produces a field-by-field comparison, for which " &
       "there is no such rendering; a caller that passed the flag and " &
       "got text would have been told nothing went wrong")
-  for flag in [("--trust-anchor", opts.trustAnchorPaths.len),
-               ("--revocation-list", opts.revocationListPaths.len)]:
+  for flag in [(CrossCheckFlags.trustAnchor, opts.trustAnchorPaths.len),
+               (CrossCheckFlags.revocationList, opts.revocationListPaths.len)]:
     if flag[1] > 0:
       return crossCheckRefusal(flag[0] & " judges a runtime certificate " &
         "chain and this command judges none, so it would be read and " &
         "thrown away")
-  for flag in [("--challenge", opts.challengeHex),
-               ("--challenge-file", opts.challengeFile),
-               ("--challenge-issued-at", opts.challengeIssuedAt)]:
+  for flag in [(CrossCheckFlags.challenge, opts.challengeHex),
+               (CrossCheckFlags.challengeFile, opts.challengeFile),
+               (CrossCheckFlags.challengeIssuedAt, opts.challengeIssuedAt)]:
     if flag[1].len > 0:
       return crossCheckRefusal(flag[0] & " binds a runtime report to a " &
         "verifier nonce and this command judges no runtime report, so " &

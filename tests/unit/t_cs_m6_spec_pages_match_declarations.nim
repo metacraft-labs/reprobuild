@@ -10,9 +10,13 @@
 ## `reproCommandLineDescription` itself: the same tree the engine's parser
 ## and the thin client are generated from.
 ##
-## WHAT IS COMPARED, AND HOW IT GROWS. `CoveredCommands` lists the commands
-## whose flags and environment variables are compared: the commands parsed
-## from the description (the root; the first group: `help`, `version`,
+## WHAT IS COMPARED. `CoveredCommands` lists the commands whose flags and
+## environment variables are compared, and "every declared command is
+## compared" holds it equal to every command the description declares (its
+## hidden spellings aside: the top-level `__<name>` words and the namespaces'
+## `help` words, which spell commands listed under their own names). It grew
+## group by group as commands moved onto the description (the root; the first
+## group: `help`, `version`,
 ## `completion`, `capabilities`, `show-conventions`; the second: `configs`,
 ## `tasks`, `graph`, `why`, `deps` with `deps refresh`, `stats`; the third:
 ## `daemon`, `store`, `cas`, `cache`, `bundle`, `reap`, `launch-plan`,
@@ -23,10 +27,15 @@
 ## `prompt` and their subcommands; the sixth: the workspace and publication
 ## commands; the seventh: the build family, `build`, `bench`, `lint`,
 ## `clean`, `test`, `certify`, `certificates`, `ci`, `watch`; of the eighth,
-## `attest` and its subcommands). Each later
-## group of commands is added by listing it here and in the generator's
-## `COVERED_COMMANDS`; the last one replaces the list with every command. The
-## top-level command list is compared in full already. Both comparisons run
+## `attest` and its subcommands, then every other command: the role
+## processes under `internal`, the internal steps of `home` and `hooks`, the
+## daemons' subcommands, `pressure`, and the commands that hand their words to
+## another program's command line, which declare one `rest` positional). A
+## new command is added here and in the generator's `COVERED_COMMANDS`. A
+## namespace's flags are accepted by each of its subcommands, so a flag a page
+## documents at a subcommand matches the namespace's declaration, and the
+## other way round (`sameAtAncestor`). The top-level command list is compared
+## in full. Both comparisons run
 ## against explicit lists of known differences that may only shrink: a
 ## difference that is no longer there fails the test until its entry is
 ## removed. The only differences are flags and environment variables a page
@@ -153,8 +162,38 @@ const
     # lines parse, so the flags their pages write are those programs'.
     "repro attest", "repro attest expect", "repro attest challenge",
     "repro attest verify", "repro attest cross-check", "repro attest launch",
-    "repro attest reap"]
-    ## The commands whose flags and environment variables are compared.
+    "repro attest reap",
+    # The eighth group, round 8b: every other command, so the list is every
+    # command repro declares (hidden spellings aside; "every declared command
+    # is compared"): the daemon's and the store daemon's subcommands, the
+    # internal steps of a remote home apply and of the managed hooks, the
+    # role processes (`internal`), `pressure`, and the commands that hand
+    # their words to another program's command line (`system addon|state|
+    # secret|adopt`, `debug io monitor`, `internal io monitor`), which
+    # declare those words as one `rest` positional.
+    "repro daemon serve", "repro daemon start", "repro daemon status",
+    "repro daemon stop", "repro daemon restart", "repro daemon sessions",
+    "repro daemon logs", "repro store daemon start",
+    "repro store daemon status", "repro store daemon stop",
+    "repro home __build-bundle", "repro home __receive-bundle",
+    "repro home __transfer-bundle", "repro home __remote-activate",
+    "repro system addon", "repro system state", "repro system secret",
+    "repro system adopt", "repro debug io", "repro debug io monitor",
+    "repro hooks protocol", "repro hooks dispatch", "repro hooks cache-push",
+    "repro pressure", "repro internal",
+    "repro internal shared-pool-upload-pack",
+    "repro internal resolve-package", "repro internal io",
+    "repro internal io monitor", "repro internal runquota-helper",
+    "repro internal compile-provider", "repro internal extract-interface",
+    "repro internal compile-profile",
+    "repro internal probe-profile-platforms",
+    "repro internal dev-env-introspect",
+    "repro internal render-dev-env-shell", "repro internal direnv-activate",
+    "repro internal native-shell-activate",
+    "repro internal dev-session-supervisor",
+    "repro internal dev-session-http", "repro internal cmake-regenerate"]
+    ## The commands whose flags and environment variables are compared:
+    ## every command repro declares.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
     "flag\trepro stats\t--db", "flag\trepro stats\t--metric-group",
@@ -326,6 +365,37 @@ proc surfaceOf(body: NimNode): seq[string] =
         result.add("env\t" & path & "\t" & name)
   result.sort()
 
+macro declaredCommandPaths(): untyped =
+  ## Every command the description declares, as `repro <words>`: the
+  ## internal ones included (the role processes, the managed hooks' entry
+  ## points), the hidden SPELLINGS left out, since each spells a command
+  ## listed under its own name: the top-level `__<name>` words (`__repro-<name>`
+  ## is `internal <name>`, `__remote-activate` is `home __remote-activate`)
+  ## and the `help` word of a namespace (`repro <namespace> help` is `repro
+  ## help <namespace>`). A hidden command that spells nothing else
+  ## (`workspace projects`) is compared like any other.
+  let model = parseCliModel[NoCliExtension, ReproCommandLineParamExt](
+    reproCommandLineDescription(), NoCliExtension())
+  var hidden: seq[seq[string]] = @[]
+  for cmd in model.commands:
+    if not cmd.anonymous and cmd.visibility == cvHidden and cmd.path.len > 0 and
+        (cmd.path[^1] == "help" or
+         (cmd.path.len == 1 and cmd.path[0].startsWith("__"))):
+      hidden.add(cmd.path)
+  result = nnkBracket.newTree(newLit("repro"))
+  for cmd in model.commands:
+    if cmd.anonymous or cmd.path.len == 0:
+      continue
+    var underHidden = false
+    for h in hidden:
+      if cmd.path.len >= h.len and cmd.path[0 ..< h.len] == h:
+        underHidden = true
+    if not underHidden:
+      result.add(newLit(("repro " & cmd.path.join(" ")).strip()))
+
+const DeclaredCommands = declaredCommandPaths()
+  ## Every command repro declares, its hidden spellings left out.
+
 macro declaredSurface(command, name: static[string];
                       mutate: static[bool]): untyped =
   var body = reproCommandLineDescription()
@@ -391,12 +461,37 @@ proc rowsOf(rows: openArray[string]; kinds: openArray[string]): HashSet[
       if fields[0] == "verb" or fields[1] in CoveredCommands:
         result.incl(row)
 
+proc sameAtAncestor(row: string; other: HashSet[string];
+                    upwards: bool): bool =
+  ## Whether ``other`` holds the `flag`/`env` row ``row`` at another command
+  ## on the same line: an ancestor of its command when ``upwards``, else a
+  ## descendant. A namespace's flags are accepted by each of its
+  ## subcommands (`repro daemon --endpoint` is also `repro daemon start
+  ## --endpoint`), so a page may document one where it is used and the
+  ## description declare it on the namespace, or the other way round.
+  let fields = row.split('\t')
+  if fields.len != 3 or fields[0] notin ["flag", "env"]:
+    return false
+  for candidate in other:
+    let o = candidate.split('\t')
+    if o.len != 3 or o[0] != fields[0] or o[2] != fields[2] or
+        o[1] == fields[1]:
+      continue
+    let (inner, outer) = if upwards: (fields[1], o[1]) else: (o[1], fields[1])
+    if inner.startsWith(outer & " "):
+      return true
+  false
+
 proc differences(declared, specified: openArray[string]): seq[string] =
   ## Every row one side has and the other does not, with the known command
   ## differences accounted for; and every known difference that is gone.
+  ## A namespace's flag counts as the same row at each of its subcommands
+  ## (``sameAtAncestor``).
   let spec = rowsOf(specified, ["verb", "flag", "env"])
   let decl = rowsOf(declared, ["verb", "flag", "env"])
   for row in spec - decl:
+    if sameAtAncestor(row, decl, upwards = true):
+      continue
     let fields = row.split('\t')
     if fields[0] == "verb" and fields[1] in SpecifiedNotDeclared:
       continue
@@ -404,6 +499,8 @@ proc differences(declared, specified: openArray[string]): seq[string] =
       continue
     result.add(row & ": specified, not declared")
   for row in decl - spec:
+    if sameAtAncestor(row, spec, upwards = false):
+      continue
     let fields = row.split('\t')
     if fields[0] == "verb" and fields[1] in DeclaredNotSpecified:
       continue
@@ -423,6 +520,19 @@ proc differences(declared, specified: openArray[string]): seq[string] =
   result.sort()
 
 suite "CS-M6: the specification pages match the declarations":
+
+  test "every declared command is compared":
+    var covered = @CoveredCommands
+    covered.sort()
+    var declared = @DeclaredCommands
+    declared.sort()
+    for c in declared:
+      if c notin covered:
+        checkpoint("declared, not compared: " & c)
+    for c in covered:
+      if c notin declared:
+        checkpoint("compared, not declared: " & c)
+    check covered == declared
 
   test "the fixture covers the commands this test compares":
     var commands: seq[string] = @[]
@@ -496,8 +606,16 @@ suite "CS-M6: the specification pages match the declarations":
       @["flag\trepro why\t--tool-provisioning: specified, not declared"]
 
   test "removing a namespace's own flag fails the comparison":
+    # At the namespace and at each subcommand whose page writes it: the
+    # subcommands take the namespace's flags, and the pages document the
+    # flag where it is used.
     check differences(WithoutDaemonEndpoint, specified()) ==
-      @["flag\trepro daemon\t--endpoint: specified, not declared"]
+      @["flag\trepro daemon\t--endpoint: specified, not declared",
+        "flag\trepro daemon logs\t--endpoint: specified, not declared",
+        "flag\trepro daemon restart\t--endpoint: specified, not declared",
+        "flag\trepro daemon start\t--endpoint: specified, not declared",
+        "flag\trepro daemon status\t--endpoint: specified, not declared",
+        "flag\trepro daemon stop\t--endpoint: specified, not declared"]
 
   test "removing a fourth-group command's flag fails the comparison":
     check differences(WithoutHealthFix, specified()) ==

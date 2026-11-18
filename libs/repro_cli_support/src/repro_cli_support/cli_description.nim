@@ -18,21 +18,18 @@
 ## model and description parser, both used at compile time only, which is
 ## what keeps the thin client free of the parser and its tables.
 ##
-## Commands whose parsing has not moved onto the description yet are declared
-## with their name, aliases, visibility and help, and one positional marked
-## ``passThrough = true`` that collects the rest of the command line
-## unparsed; ``cli_program`` hands that list to the command's existing parser.
-## A command moves onto the description by replacing that positional with its
-## real declarations, and its hand-written parsing then goes.
+## Every command is declared with all of its parameters, the role processes
+## repro spawns of itself (``repro internal ...``) included. A command that
+## hands its words to another program's command line (``repro debug io
+## monitor``, ``repro system addon``) declares them as one clispec ``rest``
+## positional.
 ##
-## Two declarations are reprobuild's own, read through clispec's extension
-## hook (``parseCliParamExtension``) into ``ReproCommandLineParamExt``:
-##
-## * ``passThrough = true`` on a positional (see above);
-## * ``clientSide = true`` on a ``build`` flag the full CLI processes itself
-##   before or after the daemon answers, so the thin client must hand the
-##   invocation over rather than route it to the daemon (see the header of
-##   ``apps/repro-client/repro_client.nim`` for why each one is there).
+## One declaration is reprobuild's own, read through clispec's extension hook
+## (``parseCliParamExtension``) into ``ReproCommandLineParamExt``:
+## ``clientSide = true`` on a ``build`` flag the full CLI processes itself
+## before or after the daemon answers, so the thin client must hand the
+## invocation over rather than route it to the daemon (see the header of
+## ``apps/repro-client/repro_client.nim`` for why each one is there).
 
 import std/macros
 
@@ -42,9 +39,6 @@ type
   ReproCommandLineParamExt* = object
     ## What repro's own description says about a parameter beyond what
     ## clispec knows.
-    passThrough*: bool
-      ## The positional that collects an unmigrated command's arguments,
-      ## unparsed.
     clientSide*: bool
       ## A ``build`` flag the thin client must hand over on.
 
@@ -59,15 +53,9 @@ proc extensionBool(arg: NimNode; name: string): bool =
 proc parseCliParamExtension*(ext: var ReproCommandLineParamExt;
                              kind: CliParamKind; arg: NimNode): bool =
   ## clispec's parameter-extension hook (``clispec/dsl``, "Extensions"):
-  ## claims ``passThrough = <bool>`` on a positional and
-  ## ``clientSide = <bool>`` on a flag.
+  ## claims ``clientSide = <bool>`` on a flag.
   if arg.kind != nnkExprEqExpr:
     return false
-  if arg[0].eqIdent("passThrough"):
-    if kind != cpkPositional:
-      error("repro command line: `passThrough` belongs on a positional", arg)
-    ext.passThrough = extensionBool(arg, "passThrough")
-    return true
   if arg[0].eqIdent("clientSide"):
     if kind != cpkFlag:
       error("repro command line: `clientSide` belongs on a flag", arg)
@@ -81,8 +69,6 @@ const
   ReproProgramName* = "repro"
     ## The name help, errors and completion scripts use: the command a user
     ## types, whichever image answers it.
-  PassThroughParamName* = "args"
-    ## The ``passThrough`` positional's name in every unmigrated command.
 
 proc unbound(n: NimNode): NimNode {.compileTime.} =
   ## ``n`` with every symbol ``quote`` bound turned back into the identifier
@@ -1979,6 +1965,215 @@ proc arrangeCommandGroups(body: NimNode): NimNode {.compileTime.} =
       continue
     result.add(stmt)
 
+# ---- Role processes ------------------------------------------------------
+#
+# The command lines of the processes repro spawns of itself (`repro internal
+# <name>`). Each is declared once here and spliced twice: under `internal`,
+# and as the hidden top-level `__repro-<name>` spelling the shell hooks
+# installed on a machine and the RunQuota launcher still use. Values may be
+# empty words (`--activity ""`): a spawner passes every field it has.
+
+proc sharedPoolUploadPackParams(): NimNode {.compileTime.} =
+  ## Git's upload-pack for a shared clone pool: Git runs the pool's
+  ## launcher with the pool path, and the launcher runs this command.
+  quote do:
+    pos pool is string, help = "The shared pool to serve"
+
+proc resolvePackageParams(): NimNode {.compileTime.} =
+  ## A recipe's macro asks, through `staticExec`, which checkout one of its
+  ## declared packages resolves to; nothing printed means "not checked out".
+  quote do:
+    pos consumerDir is string, help = "The directory of the consuming recipe"
+    pos name is string, help = "The package to resolve"
+
+proc runquotaHelperParams(): NimNode {.compileTime.} =
+  ## One command run under a RunQuota lease, its result written as JSON.
+  quote do:
+    flag resultPath is string, perSource = [cli = "result"], required = true,
+      help = "Write the execution's result (JSON) to the path"
+    flag label is string, help = "The lease's label"
+    flag stats is string,
+      help = "The command-statistics id the execution is recorded under"
+    flag cpu is int, help = "The CPU request, in milli-CPUs"
+    flag mem is int, help = "The memory request, in bytes"
+    flag pool is string, help = "The named pool the lease draws from"
+    flag poolUnits is int, help = "The units of the named pool requested"
+    flag poolCapacity is int, help = "The named pool's capacity"
+    flag cpuMin is int, help = "The smallest CPU grant accepted, in milli-CPUs"
+    flag cpuPref is int, help = "The preferred CPU grant, in milli-CPUs"
+    flag widthFlag is string,
+      help = "The command's own parallelism flag, set from the grant"
+    flag cwd is string, help = "The command's working directory"
+    flag stdoutLimit is int, help = "The bytes of stdout kept"
+    flag stderrLimit is int, help = "The bytes of stderr kept"
+    flag env is seq[string],
+      help = "A `NAME=VALUE` entry of the command's environment"
+    boolFlag isolatedEnv is bool,
+      help = "Give the command only the `--env` entries"
+    pos command is seq[string], afterSeparator = true,
+      help = "The command to run, after `--`"
+
+proc compileProviderParams(): NimNode {.compileTime.} =
+  ## The child of the provider-compile edge: compiles a recipe's provider.
+  quote do:
+    flag module is string, required = true, help = "The recipe to compile"
+    flag out is string, required = true, help = "The provider binary"
+    flag artifact is string, required = true,
+      help = "The provider artifact to write"
+    # `interface` is a Nim keyword, so the field has another name.
+    flag interfaceArtifact is string, perSource = [cli = "interface"],
+      help = "The interface artifact the provider is compiled against " &
+        "(or --interface-fingerprint)"
+    flag interfaceFingerprint is string,
+      help = "The encoded interface fingerprint (wins over --interface)"
+    flag workDir is string, required = true, help = "The work directory"
+    flag scratchDir is string, help = "The scratch directory"
+    flag anchor is seq[string],
+      help = "A directory the provider may name relative to"
+    boolFlag recipeRelative is bool,
+      help = "Name the recipe relative to the working directory"
+
+proc extractInterfaceParams(): NimNode {.compileTime.} =
+  ## The child of the interface-extraction edge, run inside the monitored
+  ## process so every file the extraction reads is observed.
+  quote do:
+    flag module is string, required = true, help = "The recipe"
+    flag artifact is string, required = true,
+      help = "The interface artifact to write"
+    flag stub is string, required = true, help = "The interface stub to write"
+    flag workDir is string, required = true, help = "The work directory"
+    flag scratchDir is string, help = "The scratch directory"
+    flag consumerRoot is string,
+      help = "The workspace the recipe's dependencies resolve in"
+    flag resourceModule is string, help = "The recipe's resource module"
+    boolFlag requireStub is bool, help = "Fail when no stub is produced"
+    flag extraPath is seq[string], help = "An extra Nim search path"
+    flag anchor is seq[string],
+      help = "A directory the artifact may name relative to"
+    boolFlag recipeRelative is bool,
+      help = "Name the recipe relative to the working directory"
+
+proc compileProfileParams(): NimNode {.compileTime.} =
+  ## The child of the profile-compile edge: links a profile's binary.
+  quote do:
+    flag profile is string, required = true, help = "The profile root"
+    flag binary is string, required = true, help = "The binary to write"
+    flag nimcache is string, required = true, help = "The Nim cache"
+    flag repoRoot is string, required = true,
+      help = "The reprobuild sources the profile compiles against"
+    boolFlag verbose is bool, help = "Forward the compiler's diagnostics"
+
+proc probeProfilePlatformsParams(): NimNode {.compileTime.} =
+  ## The child of the platform-probe edge: evaluates a profile for every
+  ## target platform.
+  quote do:
+    flag profile is string, required = true, help = "The profile root"
+    flag out is string, required = true, help = "The outcomes to write"
+    flag nimcache is string, required = true, help = "The Nim cache"
+    flag repoRoot is string, required = true,
+      help = "The reprobuild sources the profile compiles against"
+
+proc devEnvIntrospectParams(): NimNode {.compileTime.} =
+  ## The child of the development-environment edge: asks the project's
+  ## provider for its environment.
+  quote do:
+    flag providerBinary is string, required = true, help = "The provider"
+    flag providerArtifactId is string, required = true,
+      help = "The provider's artifact id"
+    flag projectRoot is string, required = true, help = "The project"
+    flag out is string, required = true,
+      help = "The environment artifact to write"
+    flag protocolRoot is string, required = true,
+      help = "Where the provider's request and response files go"
+    flag entryPoint is string,
+      help = "The provider's entry point (default: its first)"
+    flag activity is string, help = "The activities (default: `default`)"
+    flag lockSlice is string, help = "The lock slice to match"
+    flag developOverrides is string,
+      help = "The develop-override document the provider reads"
+
+proc renderDevEnvShellParams(): NimNode {.compileTime.} =
+  ## The child of the shell-fragment edge: renders an environment's shell
+  ## operations.
+  quote do:
+    flag artifact is string, required = true,
+      help = "The environment artifact"
+    flag out is string, required = true,
+      help = "The shell fragment to write"
+    flag navigatorStats is string,
+      help = "Write the artifact reader's statistics to the path"
+
+proc direnvActivateParams(): NimNode {.compileTime.} =
+  ## What the `.envrc` block `repro hooks ensure --shell-direnv` installs
+  ## evaluates: the project's shell fragment on stdout.
+  quote do:
+    flag activity is seq[string],
+      help = "Activate the named activity; repeat it or give a " &
+        "comma-separated list for several (default: `default`)"
+    flag workRoot is string, help = "The work root"
+    flag lockSlice is string, help = "The lock slice to match"
+    flag devEnvStats is string,
+      help = "Write statistics of the computation to the path"
+    pos directory is string, required = false,
+      help = "The directory to activate (default: the current one)"
+
+proc nativeShellActivateParams(): NimNode {.compileTime.} =
+  ## What the native shell hooks run on every directory change: the script
+  ## that moves the shell from the previous environment to this one's.
+  quote do:
+    flag shell is string, default = "bash",
+      help = "The shell: `bash`, `zsh`, `fish` or `powershell` (also " &
+        "`pwsh`, `ps1`)"
+    flag previousArtifact is string,
+      help = "The environment the shell has now"
+    flag previousProjectRoot is string,
+      help = "The project of the environment the shell has now"
+    flag devEnvStats is string,
+      help = "Write statistics of the computation to the path"
+    pos directory is string, help = "The shell's directory"
+
+proc devSessionSupervisorParams(): NimNode {.compileTime.} =
+  ## The supervisor of a `repro up` / `repro dev` session.
+  quote do:
+    flag sessionId is string, help = "The session"
+    flag mode is string, help = "`up` (the default) or `dev`"
+    flag projectRoot is string, help = "The project"
+    flag module is string, help = "The project's recipe"
+    flag outDir is string, help = "The session's output directory"
+    flag workDir is string, help = "The work directory"
+    flag artifact is string, help = "The environment artifact"
+    flag activity is string, help = "The activities"
+    flag lockSlice is string, help = "The lock slice"
+    flag developOverrides is string, help = "The develop-override document"
+    flag monitorCli is string, help = "The filesystem monitor's image"
+    flag monitorShim is string, help = "The filesystem monitor's shim"
+    flag http is string, help = "Where the control API listens"
+    flag debounceMs is int, default = 250,
+      help = "How long a change waits for the next one, in milliseconds"
+    boolFlag httpAllowRemote is bool,
+      help = "Let the control API listen beyond loopback"
+    boolFlag foreground is bool, help = "Stay attached to the caller"
+
+proc devSessionHttpParams(): NimNode {.compileTime.} =
+  ## A session's control API, served beside its supervisor.
+  quote do:
+    flag parentPid is int, required = true,
+      help = "The process whose exit ends the server"
+    boolFlag supervised is bool, help = "Run under the session's supervisor"
+    flag sessionId is string, help = "The session"
+    flag sessionDir is string, help = "The session's directory"
+    flag host is string, help = "The address to listen on"
+    flag port is int, help = "The port to listen on (0: any)"
+    boolFlag httpAllowRemote is bool, help = "Listen beyond loopback"
+
+proc cmakeRegenerateParams(): NimNode {.compileTime.} =
+  ## The CMake regeneration edge's child.
+  quote do:
+    flag metadata is string, required = true,
+      help = "The regeneration metadata"
+    flag depfile is string, required = true, help = "The depfile to write"
+    flag publicCli is string, help = "The repro image to name in it"
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
@@ -1988,6 +2183,34 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## only organise the declarations; they are not the help's sections.
   let graphInspection = graphInspectionFlags()
   let devEnvSelection = devEnvSelectionFlags()
+  # The role processes: each command line twice, under `internal` (`i...`)
+  # and as its hidden `__repro-<name>` spelling (`h...`).
+  let iPoolUploadPack = sharedPoolUploadPackParams()
+  let iResolvePackage = resolvePackageParams()
+  let iRunquotaHelper = runquotaHelperParams()
+  let hRunquotaHelper = runquotaHelperParams()
+  let iCompileProvider = compileProviderParams()
+  let hCompileProvider = compileProviderParams()
+  let iExtractInterface = extractInterfaceParams()
+  let hExtractInterface = extractInterfaceParams()
+  let iCompileProfile = compileProfileParams()
+  let hCompileProfile = compileProfileParams()
+  let iProbeProfilePlatforms = probeProfilePlatformsParams()
+  let hProbeProfilePlatforms = probeProfilePlatformsParams()
+  let iDevEnvIntrospect = devEnvIntrospectParams()
+  let hDevEnvIntrospect = devEnvIntrospectParams()
+  let iRenderDevEnvShell = renderDevEnvShellParams()
+  let hRenderDevEnvShell = renderDevEnvShellParams()
+  let iDirenvActivate = direnvActivateParams()
+  let hDirenvActivate = direnvActivateParams()
+  let iNativeShellActivate = nativeShellActivateParams()
+  let hNativeShellActivate = nativeShellActivateParams()
+  let iDevSessionSupervisor = devSessionSupervisorParams()
+  let hDevSessionSupervisor = devSessionSupervisorParams()
+  let iDevSessionHttp = devSessionHttpParams()
+  let hDevSessionHttp = devSessionHttpParams()
+  let iCmakeRegenerate = cmakeRegenerateParams()
+  let hCmakeRegenerate = cmakeRegenerateParams()
   # Group 5 (development environments), one splice per command.
   let execSelection = devEnvSelectionFlags()
   let shellSelection = devEnvSelectionFlags()
@@ -3752,72 +3975,80 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
 
     # ---- Role processes ----------------------------------------------------
     # The commands repro spawns of itself. Listed only by
-    # `repro internal --help`, never by the primary help.
+    # `repro internal --help`, never by the primary help. Each command line
+    # is declared once (the `...Params` procs above) and parsed here like
+    # any other; a spawner writes it with the renderer (`reproArgvOf`).
     subcmd "internal", visibility = internal,
         help = "Role processes repro spawns of itself":
       subcmd "shared-pool-upload-pack",
           help = "The shared-clone Git transport":
-        pos args is seq[string], required = false, passThrough = true
+        `iPoolUploadPack`
       subcmd "resolve-package",
           help = "Print the checkout a declared package resolves to":
-        pos args is seq[string], required = false, passThrough = true
+        `iResolvePackage`
       subcmd "io", help = "Filesystem monitoring":
+        # The monitor's own command line (the io-mon library's, shared with
+        # `repro debug io monitor`): its words are this command's `rest`,
+        # verbatim, and io-mon's parser answers them.
         subcmd "monitor",
             help = "The filesystem-monitor shim around one action":
-          pos args is seq[string], required = false, passThrough = true
+          pos args is seq[string], rest = true, required = false,
+            help = "The monitor's command line (io-mon's)"
       subcmd "runquota-helper", help = "RunQuota lease helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iRunquotaHelper`
       subcmd "compile-provider", help = "Provider-compile helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iCompileProvider`
       subcmd "extract-interface", help = "Interface-extraction helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iExtractInterface`
       subcmd "compile-profile", help = "Profile-compile helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iCompileProfile`
       subcmd "probe-profile-platforms",
           help = "Profile platform-probe helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iProbeProfilePlatforms`
       subcmd "dev-env-introspect", help = "Dev-env introspection helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iDevEnvIntrospect`
       subcmd "render-dev-env-shell", help = "Dev-env shell renderer":
-        pos args is seq[string], required = false, passThrough = true
+        `iRenderDevEnvShell`
       subcmd "direnv-activate", help = "direnv activation helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iDirenvActivate`
       subcmd "native-shell-activate",
           help = "Native-shell activation helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iNativeShellActivate`
       subcmd "dev-session-supervisor", help = "Dev-session supervisor":
-        pos args is seq[string], required = false, passThrough = true
+        `iDevSessionSupervisor`
       subcmd "dev-session-http", help = "Dev-session HTTP bridge":
-        pos args is seq[string], required = false, passThrough = true
+        `iDevSessionHttp`
       subcmd "cmake-regenerate", help = "CMake regeneration helper":
-        pos args is seq[string], required = false, passThrough = true
+        `iCmakeRegenerate`
 
-    # The `__repro-<name>` spellings of the internal helpers, accepted for
-    # one release beside `internal <name>` and listed nowhere.
+    # The `__repro-<name>` spellings of the internal helpers, listed nowhere:
+    # the same command lines as `internal <name>`. The shell hooks installed
+    # on a machine (`.envrc`, the shell rc files) and the RunQuota launcher
+    # run them by these words, so they stay accepted.
     subcmd "__repro-runquota-helper", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hRunquotaHelper`
     subcmd "__repro-compile-provider", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hCompileProvider`
     subcmd "__repro-extract-interface", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hExtractInterface`
     subcmd "__repro-compile-profile", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hCompileProfile`
     subcmd "__repro-probe-profile-platforms", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hProbeProfilePlatforms`
     subcmd "__repro-dev-env-introspect", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hDevEnvIntrospect`
     subcmd "__repro-render-dev-env-shell", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hRenderDevEnvShell`
     subcmd "__repro-direnv-activate", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hDirenvActivate`
     subcmd "__repro-native-shell-activate", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hNativeShellActivate`
     subcmd "__repro-dev-session-supervisor", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hDevSessionSupervisor`
     subcmd "__repro-dev-session-http", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hDevSessionHttp`
     subcmd "__repro-cmake-regenerate", visibility = hidden:
-      pos args is seq[string], required = false, passThrough = true
+      `hCmakeRegenerate`
     # The older spelling of `repro home __remote-activate`.
     subcmd "__remote-activate", visibility = hidden:
       `remoteActivate`
@@ -3906,3 +4137,27 @@ macro reproFlagEnv*(path: static[seq[string]];
   if result.len == 0:
     error("repro command line: flag `" & name & "` of `" & $path &
       "` declares no environment variable")
+
+macro reproLongFlags*(path: static[seq[string]]): untyped =
+  ## The long spelling of every flag of the command at ``path``, as a named
+  ## tuple keyed by the flag's name (``reproLongFlags(@["internal",
+  ## "compile-profile"]).repoRoot == "--repo-root"``); a compile error when
+  ## there is no such command.
+  ##
+  ## For a spawner in a library below the command line's program (the
+  ## daemon client, the engines): it cannot link the generated parser and
+  ## its renderer, so it writes each flag as ``<long>=<value>`` with the
+  ## spelling the description declares, and a renamed flag is a compile
+  ## error there rather than a word the child refuses. The engine's own
+  ## spawners write their words with the renderer (``reproArgvOf``).
+  let model = reproCommandLineModel()
+  let at = model.commandNamed(path)
+  if at < 0:
+    error("repro command line: no command `" & $path & "`")
+  result = nnkTupleConstr.newTree()
+  for p in model.commands[at].params:
+    if p.kind == cpkFlag:
+      result.add(nnkExprColonExpr.newTree(ident(p.name),
+        newLit("--" & p.longName)))
+  if result.len == 0:
+    error("repro command line: command `" & $path & "` has no flag")

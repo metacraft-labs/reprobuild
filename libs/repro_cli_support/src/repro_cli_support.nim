@@ -40,6 +40,11 @@ import repro_cli_support/stdin_terminal
 import repro_cli_support/producer_channel_content
 # repro's own command line: the generated parser, help and completion.
 import repro_cli_support/cli_program
+# The role processes whose command lines test binaries also serve.
+import repro_cli_support/runquota_helper_cli
+import repro_cli_support/profile_helper_cli
+import repro_cli_support/cache_cli
+import repro_cli_support/daemon_cli
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
@@ -380,15 +385,23 @@ import repro_binary_cache_client/provider_compile_cache
 import repro_cli_support/portable_cache
 import repro_binary_cache_client/caches_config as bcCachesConfig
 # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the shared
-# single-entry publish/substitute dispatch (folded out of the retired
-# standalone ``repro-binary-cache-client`` binary). ``runCacheSubcommand``
-# routes ``repro cache <lookup|substitute|publish|derive-key|gen-key> …``.
+# single-entry publish/substitute handlers (folded out of the retired
+# standalone ``repro-binary-cache-client`` binary); ``repro cache`` runs
+# them from its configuration (``repro_cli_support/cache_cli``).
 import repro_binary_cache_client/cli_dispatch as bcCliDispatch
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
        home.ConfigurableSchemaEnvVar
 export infra.runInfraCommand, infra.runSystemCommand
+
+const
+  NimPathOption = "--path:"
+    ## The Nim compiler's search-path option, as its command lines spell it
+    ## (another program's argv, read and written here, not repro's).
+  NixOverrideInputOption = "--override-input"
+    ## Nix's flake-input override option, the word `repro flake
+    ## override-args` writes before each override triple.
 export provisioning_lock_selection
 export catalog_publication
 export cli_hardware.runHardwareCommand
@@ -1993,13 +2006,12 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     envPassthrough.add("REPROBUILD_SOURCE_ROOT")
   let depfilePath = cmakeRegenerationDepfile(meta)
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
-  let argv = @[
-    publicCliPath,
-    "__repro-cmake-regenerate",
-    "--metadata", meta.metadataFile,
-    "--public-cli", publicCliPath,
-    "--depfile", depfilePath
-  ]
+  # Written by the renderer from the helper's declaration (`repro internal
+  # cmake-regenerate`), so the child parses back exactly these values.
+  let argv = @[publicCliPath] & reproArgvOf(["internal", "cmake-regenerate"], [
+    ("metadata", @[meta.metadataFile]),
+    ("publicCli", @[publicCliPath]),
+    ("depfile", @[depfilePath])])
   action("__repro_cmake_regenerate", argv,
     # Named-Lock-Files §7.2. CMake regeneration re-runs the generator over
     # recorded metadata; no solved package instance reaches it. See
@@ -2710,7 +2722,10 @@ proc scriptInterpreterArgv(executablePath: string): seq[string] =
     let normalizedInterpreter = fields[0].replace('\\', '/')
     if normalizedInterpreter.endsWith("/env"):
       var firstCommandArg = 1
-      if firstCommandArg < fields.len and fields[firstCommandArg] == "-S":
+      # env(1)'s `-S` (split the rest of the line into arguments).
+      const EnvSplitStringOption = "-S"
+      if firstCommandArg < fields.len and
+          fields[firstCommandArg] == EnvSplitStringOption:
         inc firstCommandArg
       for i in firstCommandArg ..< fields.len:
         result.add(fields[i])
@@ -7299,18 +7314,16 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
         ": no `repro` image to spawn it with. The running image is " &
         os.normalizedPath(getAppFilename()) & " and no public CLI path was " &
         "supplied. An embedded caller must pass one.")
-  var command = @[
-    helperCliPath,
-    "__repro-compile-provider",
-    "--module", modulePath,
-    "--out", plan.outputBinaryPath,
-    "--artifact", artifactPath,
-    "--interface", interfacePath,
-    "--work-dir", workDir
-  ]
-  if scratchDir.len > 0:
-    command.add("--scratch-dir")
-    command.add(scratchDir)
+  # Written by the renderer from the helper's declaration (`repro internal
+  # compile-provider`); an empty scratch directory is left out.
+  let command = @[helperCliPath] & reproArgvOf(
+    ["internal", "compile-provider"], [
+      ("module", @[modulePath]),
+      ("out", @[plan.outputBinaryPath]),
+      ("artifact", @[artifactPath]),
+      ("interfaceArtifact", @[interfacePath]),
+      ("workDir", @[workDir]),
+      ("scratchDir", (if scratchDir.len > 0: @[scratchDir] else: @[]))])
   let compilerCwd =
     if scratchDir.len > 0:
       scratchDir
@@ -7543,40 +7556,12 @@ proc invalidateCmakeProviderDerivedState(meta: CmakeRegenerationMetadata) =
     if key == "clean_manifest" or key.startsWith("clean_manifest_"):
       removeManifestEntries(value)
 
-proc runCmakeRegenerationHelper*(args: openArray[string]): int =
-  var metadataFile = ""
-  var depfilePath = ""
-  var publicCliPath = ""
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--metadata":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--metadata requires a value")
-      metadataFile = args[i + 1]
-      inc i, 2
-    elif arg.startsWith("--metadata="):
-      metadataFile = arg.split("=", maxsplit = 1)[1]
-      inc i
-    elif arg == "--depfile":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--depfile requires a value")
-      depfilePath = args[i + 1]
-      inc i, 2
-    elif arg.startsWith("--depfile="):
-      depfilePath = arg.split("=", maxsplit = 1)[1]
-      inc i
-    elif arg == "--public-cli":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--public-cli requires a value")
-      publicCliPath = args[i + 1]
-      inc i, 2
-    elif arg.startsWith("--public-cli="):
-      publicCliPath = arg.split("=", maxsplit = 1)[1]
-      inc i
-    else:
-      raise newException(ValueError,
-        "unsupported __repro-cmake-regenerate argument: " & arg)
+proc runCmakeRegenerationHelper*(metadataFile, depfilePath,
+                                  publicCliPath: string): int =
+  ## ``repro internal cmake-regenerate`` (``__repro-cmake-regenerate``), the
+  ## child of the CMake regeneration edge. Its command line is parsed from
+  ## repro's description, which requires ``--metadata`` and ``--depfile``;
+  ## an empty value is refused here.
   if metadataFile.len == 0:
     raise newException(ValueError, "--metadata is required")
   if depfilePath.len == 0:
@@ -11357,8 +11342,8 @@ proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
   # the reprobuild package path set includes sibling checkouts (io-mon,
   # runquota, ...) — is reached there from every location.
   for arg in compileCommand:
-    if arg.startsWith("--path:") and arg.len > "--path:".len:
-      let dir = arg["--path:".len .. ^1]
+    if arg.startsWith(NimPathOption) and arg.len > NimPathOption.len:
+      let dir = arg[NimPathOption.len .. ^1]
       if dir.isAbsolute:
         roots.add(dir)
   for root in roots:
@@ -11376,8 +11361,8 @@ proc recipeRelativeCompileArgs(command: openArray[string];
   for arg in command:
     if arg == absoluteModule or arg == modulePath:
       result.add(extractFilename(modulePath))
-    elif arg == "--path:" & recipeDir:
-      result.add("--path:.")
+    elif arg == NimPathOption & recipeDir:
+      result.add(NimPathOption & ".")
     else:
       result.add(arg)
 
@@ -11464,20 +11449,23 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
   let scratchDir = edgeDir / "work"
   createDir(extendedPath(scratchDir))
   createDir(extendedPath(parentDir(edge.edgePlan.outputBinaryPath)))
-  var command = @[
-    helperCliPath,
-    "__repro-compile-provider",
-    "--recipe-relative",
-    "--module", extractFilename(modulePath),
-    "--out", edge.edgePlan.outputBinaryPath,
-    "--artifact", edge.edgeArtifactPath,
-    "--interface-fingerprint",
-      encodeInterfaceFingerprintArg(edge.edgePlan.interfaceFingerprint),
-    "--work-dir", workDir,
-    "--scratch-dir", scratchDir]
-  for anchor in edge.anchors:
-    command.add("--anchor")
-    command.add(anchor)
+  # The helper's command line (`repro internal compile-provider`), its
+  # values given through `name`: the command writes the real paths, the key
+  # the names the record uses (below). Written by the renderer, which
+  # attaches each value to its flag, so a value is renamed before it is
+  # rendered rather than recognised in a word afterwards.
+  proc commandWith(name: proc (value: string): string): seq[string] =
+    @[name(helperCliPath)] & reproArgvOf(["internal", "compile-provider"], [
+      ("recipeRelative", @["true"]),
+      ("module", @[name(extractFilename(modulePath))]),
+      ("out", @[name(edge.edgePlan.outputBinaryPath)]),
+      ("artifact", @[name(edge.edgeArtifactPath)]),
+      ("interfaceFingerprint", @[
+        encodeInterfaceFingerprintArg(edge.edgePlan.interfaceFingerprint)]),
+      ("workDir", @[name(workDir)]),
+      ("scratchDir", @[name(scratchDir)]),
+      ("anchor", edge.anchors.mapIt(name(it)))])
+  let command = commandWith(proc (value: string): string = value)
   var inputs: seq[string] = @[]
   for source in edge.edgePlan.inputSources:
     inputs.add(relocatableName(source, edge.recipeDir, edge.anchors))
@@ -11485,9 +11473,10 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
   # (the helper, the work dir, the action-cache root holding the outputs)
   # absolute, anything else relative to the recipe, so a byte-identical
   # recipe elsewhere keys the same.
-  var keyedCommand: seq[string] = @[]
-  for arg in command:
-    keyedCommand.add(relocatableName(arg, edge.recipeDir, edge.anchors))
+  let recipeDir = edge.recipeDir
+  let anchors = edge.anchors
+  let keyedCommand = commandWith(proc (value: string): string =
+    relocatableName(value, recipeDir, anchors))
   action(ProviderCompileActionId, command,
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = edge.recipeDir,
@@ -11772,16 +11761,20 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   let keySuffix = "\x00provider-compile-configuration\x00" &
     digestHex(compileConfiguration) &
     (if catalogSelection.len > 0: "\x00" & catalogSelection else: "")
-  var variantArgs: seq[string] = @[]
-  variantArgs.add(@["--require-stub", (if requireStub: "1" else: "0")])
+  # What selects the extraction's variant, as values of the helper's
+  # parameters (`repro internal extract-interface`).
+  var variantValues: seq[(string, seq[string])] = @[
+    ("requireStub", @[(if requireStub: "true" else: "false")])]
   if resourceModule.len > 0:
-    variantArgs.add("--resource-module")
-    variantArgs.add(
-      if relocatable: recipeSpelling(resourceModule) else: resourceModule)
+    variantValues.add(("resourceModule", @[
+      if relocatable: recipeSpelling(resourceModule) else: resourceModule]))
+  var extraValues: seq[string] = @[]
   for extra in extraPaths:
     if extra.len > 0:
-      variantArgs.add("--extra-path")
-      variantArgs.add(if relocatable: recipeSpelling(extra) else: extra)
+      extraValues.add(if relocatable: recipeSpelling(extra) else: extra)
+  variantValues.add(("extraPath", extraValues))
+  let variantArgs = reproArgvOf(["internal", "extract-interface"],
+    variantValues, commandWords = false)
   var command: seq[string]
   var edgeArtifact, edgeStub, edgeCwd: string
   # Recipe-relative only: the identity directory and its staging directory
@@ -11806,36 +11799,31 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     edgeArtifact = edgeDir / "project-interface.rbsz"
     edgeStub = edgeDir / "project-interface.nim"
     edgeCwd = recipeDir
-    command = @[
-      helperCliPath,
-      "__repro-extract-interface",
-      "--recipe-relative",
-      "--module", moduleName,
-      "--artifact", edgeArtifact,
-      "--stub", edgeStub,
-      "--work-dir", workDir,
-      "--consumer-root", ".",
-      "--scratch-dir", edgeDir / "work"] & variantArgs
-    for anchor in anchors:
-      command.add("--anchor")
-      command.add(anchor)
+    command = @[helperCliPath] & reproArgvOf(
+      ["internal", "extract-interface"], @[
+        ("recipeRelative", @["true"]),
+        ("module", @[moduleName]),
+        ("artifact", @[edgeArtifact]),
+        ("stub", @[edgeStub]),
+        ("workDir", @[workDir]),
+        ("consumerRoot", @["."]),
+        ("scratchDir", @[edgeDir / "work"]),
+        ("anchor", anchors)] & variantValues)
     createDir(extendedPath(identityDir))
   else:
     edgeArtifact = artifactPath
     edgeStub = stubPath
     edgeCwd =
       if scratchDir.len > 0: scratchDir else: parentDir(artifactPath)
-    command = @[
-      helperCliPath,
-      "__repro-extract-interface",
-      "--module", modulePath,
-      "--artifact", artifactPath,
-      "--stub", stubPath,
-      "--work-dir", workDir,
-      "--consumer-root", consumerRoot] & variantArgs
-    if scratchDir.len > 0:
-      command.add("--scratch-dir")
-      command.add(scratchDir)
+    command = @[helperCliPath] & reproArgvOf(
+      ["internal", "extract-interface"], @[
+        ("module", @[modulePath]),
+        ("artifact", @[artifactPath]),
+        ("stub", @[stubPath]),
+        ("workDir", @[workDir]),
+        ("consumerRoot", @[consumerRoot]),
+        ("scratchDir", (if scratchDir.len > 0: @[scratchDir] else: @[]))] &
+        variantValues)
   let edgeArtifactPath = rebasedName(edgeArtifact, edgeCwd)
   let edgeStubPath = rebasedName(edgeStub, edgeCwd)
 
@@ -15001,14 +14989,6 @@ proc runInDevelopEnvironment(command: openArray[string]; projectRoot: string;
   # this call site can fix.)
   return runActivatedCommand(artifact, "", command, canonicalProjectRoot)
 
-proc valueAfterFlag(args: openArray[string]; flag: string): string =
-  var i = 0
-  while i < args.len:
-    if args[i] == flag and i + 1 < args.len:
-      return args[i + 1]
-    inc i
-  ""
-
 proc navigatorStatsJson(stats: DevEnvNavigatorStats): JsonNode =
   %*{
     "envelopeBytesChecked": stats.envelopeBytesChecked,
@@ -15024,33 +15004,36 @@ proc navigatorStatsJson(stats: DevEnvNavigatorStats): JsonNode =
     "servicesSectionStart": stats.servicesSectionStart
   }
 
-proc runProviderCompileHelper(args: openArray[string]): int =
-  let modulePath = valueAfterFlag(args, "--module")
-  let outputPath = valueAfterFlag(args, "--out")
-  let artifactPath = valueAfterFlag(args, "--artifact")
-  let interfacePath = valueAfterFlag(args, "--interface")
-  let workDir = valueAfterFlag(args, "--work-dir")
-  let scratchDir = valueAfterFlag(args, "--scratch-dir")
-  let interfaceFingerprintArg = valueAfterFlag(args, "--interface-fingerprint")
+proc runProviderCompileHelper[T](c: T): int =
+  ## ``repro internal compile-provider`` (``__repro-compile-provider``), the
+  ## child of the provider-compile edge, from its configuration.
+  let modulePath = c.module
+  let outputPath = c.`out`
+  let artifactPath = c.artifact
+  let interfacePath = c.interfaceArtifact
+  let workDir = c.workDir
+  let scratchDir = c.scratchDir
+  let interfaceFingerprintArg = c.interfaceFingerprint
   # A recipe-relative compile (`recipeRelativeProviderCompileAction`) runs
   # with its cwd at the recipe, names the recipe by file name, and takes the
   # interface fingerprint itself rather than the caller's interface artifact.
-  let recipeRelative = "--recipe-relative" in args
+  let recipeRelative = c.recipeRelative
   var anchors: seq[string] = @[]
-  for i in 0 ..< args.len - 1:
-    if args[i] == "--anchor" and args[i + 1].len > 0:
-      anchors.add(args[i + 1])
+  for anchor in c.anchor:
+    if anchor.len > 0:
+      anchors.add(anchor)
+  # The parser requires the flags; a value given empty is refused here.
   for (name, value) in [
-    ("--module", modulePath),
-    ("--out", outputPath),
-    ("--artifact", artifactPath),
-    ("--interface",
+    ("module", modulePath),
+    ("out", outputPath),
+    ("artifact", artifactPath),
+    ("interface",
       if interfaceFingerprintArg.len > 0: interfaceFingerprintArg
       else: interfacePath),
-    ("--work-dir", workDir)
+    ("work-dir", workDir)
   ]:
     if value.len == 0:
-      stderr.writeLine("repro provider compile: missing " & name)
+      stderr.writeLine("repro provider compile: missing --" & name)
       return 2
   try:
     # Both provider edges share this compile boundary. Prepare even when the
@@ -15090,44 +15073,48 @@ proc runProviderCompileHelper(args: openArray[string]): int =
     stderr.writeLine("repro provider compile: error: " & err.msg)
     return 1
 
-proc runInterfaceExtractHelper(args: openArray[string]): int =
-  ## Child side of the interface-extraction edge. Runs INSIDE the monitored
+proc runInterfaceExtractHelper[T](c: T): int =
+  ## Child side of the interface-extraction edge (``repro internal
+  ## extract-interface``, ``__repro-extract-interface``), from its
+  ## configuration. Runs INSIDE the monitored
   ## process, so everything the extraction reads — the recipe, every module
   ## it imports, every nim config file, and whatever a ``staticExec`` in a
   ## recipe macro reaches — is observed by io-mon and becomes evidence for
   ## the edge, without anyone declaring it.
-  let modulePath = valueAfterFlag(args, "--module")
-  let artifactPath = valueAfterFlag(args, "--artifact")
-  let stubPath = valueAfterFlag(args, "--stub")
-  let workDir = valueAfterFlag(args, "--work-dir")
-  let scratchDir = valueAfterFlag(args, "--scratch-dir")
+  let modulePath = c.module
+  let artifactPath = c.artifact
+  let stubPath = c.stub
+  let workDir = c.workDir
+  let scratchDir = c.scratchDir
   # Passed explicitly, never taken from the child's cwd: the engine chooses
   # the action's working directory, and this value is baked into the
   # compiled recipe as ``-d:reproConsumerRoot``. Deriving it from the
   # ambient cwd here would silently point a recipe's dependency resolution
   # at the wrong workspace.
-  let consumerRoot = valueAfterFlag(args, "--consumer-root")
-  let resourceModule = valueAfterFlag(args, "--resource-module")
-  let requireStub = valueAfterFlag(args, "--require-stub") == "1"
+  let consumerRoot = c.consumerRoot
+  let resourceModule = c.resourceModule
+  let requireStub = c.requireStub
   var extraPaths: seq[string] = @[]
   var anchors: seq[string] = @[]
-  for i in 0 ..< args.len - 1:
-    if args[i] == "--extra-path" and args[i + 1].len > 0:
-      extraPaths.add(args[i + 1])
-    elif args[i] == "--anchor" and args[i + 1].len > 0:
-      anchors.add(args[i + 1])
+  for path in c.extraPath:
+    if path.len > 0:
+      extraPaths.add(absolutePath(path))
+  for anchor in c.anchor:
+    if anchor.len > 0:
+      anchors.add(anchor)
   # A recipe-relative extraction (`extractInterfaceEdge`) runs with its cwd
   # at the recipe and names everything beside it relative to that, so the
   # same argv describes the compile at every location of the recipe.
-  let recipeRelative = "--recipe-relative" in args
+  let recipeRelative = c.recipeRelative
+  # The parser requires the flags; a value given empty is refused here.
   for (name, value) in [
-    ("--module", modulePath),
-    ("--artifact", artifactPath),
-    ("--stub", stubPath),
-    ("--work-dir", workDir)
+    ("module", modulePath),
+    ("artifact", artifactPath),
+    ("stub", stubPath),
+    ("work-dir", workDir)
   ]:
     if value.len == 0:
-      stderr.writeLine("repro interface extract: missing " & name)
+      stderr.writeLine("repro interface extract: missing --" & name)
       return 2
   try:
     discard ensureLockPinnedCatalog(modulePath, consumerRoot)
@@ -15142,7 +15129,7 @@ proc runInterfaceExtractHelper(args: openArray[string]): int =
       (if scratchDir.len > 0: absolutePath(scratchDir) else: ""),
       requireStub,
       (if resourceModule.len > 0: absolutePath(resourceModule) else: ""),
-      extraPaths.mapIt(absolutePath(it)),
+      extraPaths,
       (if consumerRoot.len > 0: absolutePath(consumerRoot) else: ""),
       useExtractionCache = false, recipeRelative = recipeRelative,
       relocationAnchors = anchors)
@@ -15239,28 +15226,31 @@ const DevelopOverridesEnvVar = "REPRO_DEVELOP_OVERRIDES_FILE"
   ## engine rather than any code, so the two spellings have nothing but this
   ## comment holding them together.
 
-proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
+proc runDevEnvIntrospectionHelper[T](c: T): int =
+  ## ``repro internal dev-env-introspect`` (``__repro-dev-env-introspect``),
+  ## the child of the development-environment edge, from its configuration.
   # Provider compilation has finished. Its private source roots must not be
   # mistaken for caller variables when foreign capture subtracts its baseline.
   clearSeededSourcePackageEnvironment()
-  let providerBinary = valueAfterFlag(args, "--provider-binary")
-  let providerArtifactId = valueAfterFlag(args, "--provider-artifact-id")
-  let projectRoot = valueAfterFlag(args, "--project-root")
-  let artifactPath = valueAfterFlag(args, "--out")
-  let protocolRoot = valueAfterFlag(args, "--protocol-root")
-  let entryPointId = valueAfterFlag(args, "--entry-point")
-  let activity = valueAfterFlag(args, "--activity")
-  let lockSliceId = valueAfterFlag(args, "--lock-slice")
-  let developOverridesPath = valueAfterFlag(args, "--develop-overrides")
+  let providerBinary = c.providerBinary
+  let providerArtifactId = c.providerArtifactId
+  let projectRoot = c.projectRoot
+  let artifactPath = c.`out`
+  let protocolRoot = c.protocolRoot
+  let entryPointId = c.entryPoint
+  let activity = c.activity
+  let lockSliceId = c.lockSlice
+  let developOverridesPath = c.developOverrides
+  # The parser requires the flags; a value given empty is refused here.
   for (name, value) in [
-    ("--provider-binary", providerBinary),
-    ("--provider-artifact-id", providerArtifactId),
-    ("--project-root", projectRoot),
-    ("--out", artifactPath),
-    ("--protocol-root", protocolRoot)
+    ("provider-binary", providerBinary),
+    ("provider-artifact-id", providerArtifactId),
+    ("project-root", projectRoot),
+    ("out", artifactPath),
+    ("protocol-root", protocolRoot)
   ]:
     if value.len == 0:
-      stderr.writeLine("repro dev-env introspection: missing " & name)
+      stderr.writeLine("repro dev-env introspection: missing --" & name)
       return 2
   try:
     if developOverridesPath.len > 0:
@@ -15342,16 +15332,19 @@ proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
     stderr.writeLine("repro dev-env introspection: error: " & err.msg)
     return 1
 
-proc runDevEnvShellRenderHelper(args: openArray[string]): int =
-  let artifactPath = valueAfterFlag(args, "--artifact")
-  let outputPath = valueAfterFlag(args, "--out")
-  let navigatorStatsPath = valueAfterFlag(args, "--navigator-stats")
+proc runDevEnvShellRenderHelper[T](c: T): int =
+  ## ``repro internal render-dev-env-shell`` (``__repro-render-dev-env-shell``),
+  ## the child of the shell-fragment edge, from its configuration.
+  let artifactPath = c.artifact
+  let outputPath = c.`out`
+  let navigatorStatsPath = c.navigatorStats
+  # The parser requires the flags; a value given empty is refused here.
   for (name, value) in [
-    ("--artifact", artifactPath),
-    ("--out", outputPath)
+    ("artifact", artifactPath),
+    ("out", outputPath)
   ]:
     if value.len == 0:
-      stderr.writeLine("repro dev-env shell render: missing " & name)
+      stderr.writeLine("repro dev-env shell render: missing --" & name)
       return 2
   try:
     var navigatorStats: DevEnvNavigatorStats
@@ -15469,17 +15462,6 @@ type
     forwardedArgs: seq[string]
 
 
-proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
-  let arg = args[i]
-  if arg.startsWith(flag & "="):
-    return arg.split("=", maxsplit = 1)[1]
-  if arg == flag:
-    if i + 1 >= args.len:
-      raise newException(ValueError, flag & " requires a value")
-    inc i
-    return args[i]
-  ""
-
 proc acceptTrustProfileFlag*(seen: var bool; value: string): string =
   ## Distributed-Execution M7: `--trust-profile=` names THE profile of the
   ## node a command starts, so a second one is refused — never resolved by
@@ -15502,22 +15484,6 @@ type
     requested*: bool
     path*: string
     suppressed*: bool
-
-proc consumeReportFlag*(arg: string; spec: var ReportSpec): bool =
-  ## True when ``arg`` was a ``--write-report`` / ``--write-report=PATH`` /
-  ## ``--no-write-report`` flag and has been consumed into ``spec``. Callers
-  ## place this branch BEFORE their generic "unsupported flag" catch-all.
-  if arg == "--write-report":
-    spec.requested = true
-    return true
-  if arg.startsWith("--write-report="):
-    spec.requested = true
-    spec.path = arg["--write-report=".len .. ^1]
-    return true
-  if arg == "--no-write-report":
-    spec.suppressed = true
-    return true
-  false
 
 proc workspaceReportDir*(workspaceRoot: string): string =
   ## Conventional home for workspace-wide report artifacts. Reports are
@@ -18731,27 +18697,25 @@ proc supervisorConfig(parsed: ParsedDevSessionCommand;
     debounceMs: parsed.debounceMs)
 
 proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
-  result = @[
-    "__repro-dev-session-supervisor",
-    "--session-id", config.sessionId,
-    "--mode", config.mode.modeName,
-    "--project-root", config.projectRoot,
-    "--module", config.modulePath,
-    "--out-dir", config.outDir,
-    "--work-dir", config.workDir,
-    "--artifact", config.artifactPath,
-    "--activity", config.activity,
-    "--lock-slice", config.lockSliceId,
-    "--develop-overrides", config.developOverridesPath,
-    "--monitor-cli", config.monitorCliPath,
-    "--monitor-shim", config.monitorShimLibPath,
-    "--http", config.httpBind,
-    "--debounce-ms", $config.debounceMs
-  ]
-  if config.httpAllowRemote:
-    result.add(AllowRemoteFlag)
-  if config.foreground:
-    result.add("--foreground")
+  ## The supervisor's command line (`repro internal dev-session-supervisor`),
+  ## written by the renderer from its declaration.
+  reproArgvOf(["internal", "dev-session-supervisor"], [
+    ("sessionId", @[config.sessionId]),
+    ("mode", @[config.mode.modeName]),
+    ("projectRoot", @[config.projectRoot]),
+    ("module", @[config.modulePath]),
+    ("outDir", @[config.outDir]),
+    ("workDir", @[config.workDir]),
+    ("artifact", @[config.artifactPath]),
+    ("activity", @[config.activity]),
+    ("lockSlice", @[config.lockSliceId]),
+    ("developOverrides", @[config.developOverridesPath]),
+    ("monitorCli", @[config.monitorCliPath]),
+    ("monitorShim", @[config.monitorShimLibPath]),
+    ("http", @[config.httpBind]),
+    ("debounceMs", @[$config.debounceMs]),
+    ("httpAllowRemote", (if config.httpAllowRemote: @["true"] else: @[])),
+    ("foreground", (if config.foreground: @["true"] else: @[]))])
 
 proc startBackgroundSupervisor(config: DevSessionSupervisorConfig):
     DevSessionLaunch =
@@ -20694,35 +20658,34 @@ proc runDownCommand(conf: ReproCommandLineDown): int =
       "  supervisor output: " & (parsed.selection.outDir.sessionDir /
         "supervisor.log"))
 
-proc runDevSessionSupervisorHelper(args: openArray[string];
-                                   publicCliPath: string): int =
-  let modeText = valueAfterFlag(args, "--mode")
+proc runDevSessionSupervisorHelper[T](c: T; publicCliPath: string): int =
+  ## ``repro internal dev-session-supervisor``
+  ## (``__repro-dev-session-supervisor``), from its configuration.
   let mode =
-    case modeText
+    case c.mode
     of "dev": dsmDev
     of "up", "": dsmUp
     else:
-      raise newException(ValueError, "unsupported dev session mode: " & modeText)
-  let debounceText = valueAfterFlag(args, "--debounce-ms")
-  let sessionProjectRoot = valueAfterFlag(args, "--project-root")
+      raise newException(ValueError, "unsupported dev session mode: " & c.mode)
+  let sessionProjectRoot = c.projectRoot
   let config = DevSessionSupervisorConfig(
-    sessionId: valueAfterFlag(args, "--session-id"),
+    sessionId: c.sessionId,
     mode: mode,
-    foreground: args.find("--foreground") >= 0,
+    foreground: c.foreground,
     projectRoot: sessionProjectRoot,
-    modulePath: valueAfterFlag(args, "--module"),
-    outDir: valueAfterFlag(args, "--out-dir"),
-    workDir: valueAfterFlag(args, "--work-dir"),
+    modulePath: c.module,
+    outDir: c.outDir,
+    workDir: c.workDir,
     publicCliPath: publicCliPath,
-    monitorCliPath: valueAfterFlag(args, "--monitor-cli"),
-    monitorShimLibPath: valueAfterFlag(args, "--monitor-shim"),
-    artifactPath: valueAfterFlag(args, "--artifact"),
-    activity: valueAfterFlag(args, "--activity"),
-    lockSliceId: valueAfterFlag(args, "--lock-slice"),
-    developOverridesPath: valueAfterFlag(args, "--develop-overrides"),
-    httpBind: valueAfterFlag(args, "--http"),
-    httpAllowRemote: args.find(AllowRemoteFlag) >= 0,
-    debounceMs: if debounceText.len > 0: parseInt(debounceText) else: 250)
+    monitorCliPath: c.monitorCli,
+    monitorShimLibPath: c.monitorShim,
+    artifactPath: c.artifact,
+    activity: c.activity,
+    lockSliceId: c.lockSlice,
+    developOverridesPath: c.developOverrides,
+    httpBind: c.http,
+    httpAllowRemote: c.httpAllowRemote,
+    debounceMs: c.debounceMs)
   # W2 — a ``repro dev`` / ``repro up`` session starts services and runs
   # watch-cycle tasks in the activated environment, so it is an activation
   # surface like ``repro exec`` and gets the same treatment: bind the producer
@@ -20732,16 +20695,17 @@ proc runDevSessionSupervisorHelper(args: openArray[string];
   runDevSessionSupervisor(config,
     devEnvProducerOpsResolver(sessionProjectRoot))
 
-proc runDevSessionHttpHelper(args: openArray[string]): int =
-  let portText = valueAfterFlag(args, "--port")
+proc runDevSessionHttpHelper[T](c: T): int =
+  ## ``repro internal dev-session-http`` (``__repro-dev-session-http``), from
+  ## its configuration.
   runDevSessionHttpServer(DevSessionHttpConfig(
-    parentPid: parseInt(valueAfterFlag(args, "--parent-pid")),
-    supervised: args.find("--supervised") >= 0,
-    sessionId: valueAfterFlag(args, "--session-id"),
-    sessionDir: valueAfterFlag(args, "--session-dir"),
-    host: valueAfterFlag(args, "--host"),
-    port: if portText.len > 0: parseInt(portText) else: 0,
-    allowRemote: args.find(AllowRemoteFlag) >= 0))
+    parentPid: c.parentPid,
+    supervised: c.supervised,
+    sessionId: c.sessionId,
+    sessionDir: c.sessionDir,
+    host: c.host,
+    port: c.port,
+    allowRemote: c.httpAllowRemote))
 
 const
   DirenvManagedBlockId = "repro-dev-env-direnv"
@@ -25784,39 +25748,18 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       uninstallNativeShellHook(shell)
   0
 
-proc parseNativeShellActivationRequest(args: openArray[string]):
-    NativeShellActivationRequest =
-  if args.len == 0:
-    raise newException(ValueError,
-      "__repro-native-shell-activate requires a directory argument")
-  result.cwd = args[0]
-  result.shell = nskBash
-  var i = 1
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--shell" or arg.startsWith("--shell="):
-      result.shell = parseNativeShell(valueFromFlag(args, i, "--shell"))
-    elif arg == "--previous-artifact" or
-        arg.startsWith("--previous-artifact="):
-      result.previousArtifact = valueFromFlag(args, i,
-        "--previous-artifact")
-    elif arg == "--previous-project-root" or
-        arg.startsWith("--previous-project-root="):
-      result.previousProjectRoot = valueFromFlag(args, i,
-        "--previous-project-root")
-    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
-      result.statsPath = valueFromFlag(args, i, "--dev-env-stats")
-    elif arg.startsWith("-"):
-      raise newException(ValueError,
-        "unsupported native shell activation flag: " & arg)
-    else:
-      raise newException(ValueError,
-        "unexpected native shell activation argument: " & arg)
-    inc i
+proc nativeShellActivationRequestOf[T](c: T): NativeShellActivationRequest =
+  ## The request of ``repro internal native-shell-activate``
+  ## (``__repro-native-shell-activate``, which the installed shell hooks
+  ## run), from its configuration.
+  result.cwd = c.directory
+  result.shell = parseNativeShell(c.shell)
+  result.previousArtifact = c.previousArtifact
+  result.previousProjectRoot = c.previousProjectRoot
+  result.statsPath = c.devEnvStats
 
-proc runReproNativeShellActivationHelper(args: openArray[string];
-                                         publicCliPath: string): int =
-  let request = parseNativeShellActivationRequest(args)
+proc runReproNativeShellActivationHelper(
+    request: NativeShellActivationRequest; publicCliPath: string): int =
   let format = nativeShellFormat(request.shell)
   let projectRoot = findDevEnvProjectRoot(request.cwd)
   if projectRoot.len == 0:
@@ -25838,29 +25781,20 @@ proc runReproNativeShellActivationHelper(args: openArray[string];
     some(artifact), edge.artifactPath, format))
   return 0
 
-proc runReproDirenvActivationHelper(args: openArray[string];
+proc direnvActivationSelectionOf[T](c: T): DevEnvCliSelection =
+  ## The selection of ``repro internal direnv-activate``
+  ## (``__repro-direnv-activate``, which the installed ``.envrc`` block runs),
+  ## from its configuration.
+  for activity in c.activity:
+    result.activity.appendActivitySelection(activity)
+  result.workRoot = c.workRoot
+  result.lockSliceId = c.lockSlice
+  result.statsPath = c.devEnvStats
+  result.selector = c.directory
+
+proc runReproDirenvActivationHelper(selection: DevEnvCliSelection;
                                     publicCliPath: string): int =
-  var selection = DevEnvCliSelection()
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity.appendActivitySelection(valueFromFlag(args, i,
-        "--activity"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      selection.workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
-      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
-    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
-      selection.statsPath = valueFromFlag(args, i, "--dev-env-stats")
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported direnv activation flag: " & arg)
-    elif selection.selector.len == 0:
-      selection.selector = arg
-    else:
-      raise newException(ValueError,
-        "unexpected direnv activation argument: " & arg)
-    inc i
+  var selection = selection
   selection.resolveDevEnvSelection()
   let edge = computePublicDevEnv(selection, publicCliPath, renderShell = true,
     announce = true)
@@ -39700,20 +39634,18 @@ proc developSetSelectionOf[T](c: T): DevelopSetSelection =
   result.named = modes.len > 0 or c.only.len > 0 or c.project.len > 0 or
     c.tag.len > 0
   proc single(r: var DevelopSetSelection; flag: string;
-              values: openArray[string]): string =
+              values: openArray[string]; note = ""): string =
     for value in values:
       if result.len > 0 and value != result:
         r.refuse(flag & " was given twice with different values ('" &
           result & "' and '" & value & "'). It takes a single value, and " &
           "taking the last one would make the answer depend on argv order. " &
-          "Pass one " & flag &
-          (if flag == "--filter":
-             " (a glob: `--filter='{a,b}'` is not supported, but " &
-             "`--only=a,b` names both exactly)"
-           else: "") & ".")
+          "Pass one " & flag & note & ".")
         return
       result = value
-  result.filter = result.single("--filter", c.filter)
+  result.filter = result.single("--filter", c.filter,
+    note = " (a glob: `--filter='{a,b}'` is not supported, but " &
+      "`--only=a,b` names both exactly)")
   var revisions: seq[string]
   for rev in c.at:
     if rev.strip().len == 0:
@@ -40861,30 +40793,6 @@ proc installUserDaemonBuildExecutor()
 proc installUserDaemonWatchExecutor()
 proc installUserDaemonPeerCacheService*()
 
-proc userDaemonConfigOf(d: ReproCommandLineDaemon): UserDaemonConfig =
-  ## The daemon configuration `repro daemon`'s flags select, over the
-  ## per-user defaults; without `--log` the log is
-  ## `<state dir>/logs/repro-daemon.log`.
-  result = defaultUserDaemonConfig()
-  result.foreground = d.foreground
-  result.devMode = d.dev
-  result.systemScope = d.system
-  if d.daemonExe.len > 0: result.daemonExe = d.daemonExe
-  if d.sourceExe.len > 0: result.sourceExe = d.sourceExe
-  if d.stagedGeneration.len > 0:
-    result.stagedGenerationDir = d.stagedGeneration
-  if d.previousStagedGeneration.len > 0:
-    result.previousStagedGenerationDir = d.previousStagedGeneration
-  if d.restartRunId.len > 0: result.restartRunId = d.restartRunId
-  if d.endpoint.len > 0: result.endpoint = d.endpoint
-  if d.stateDir.len > 0: result.stateDir = d.stateDir
-  if d.stateRoot.len > 0: result.leaseStoreRoot = d.stateRoot
-  if d.peerCache.len > 0: result.peerCacheSpec = d.peerCache
-  if d.trustProfile.len > 0: result.trustProfile = d.trustProfile
-  result.logPath =
-    if d.log.len > 0: d.log
-    else: result.stateDir / "logs" / "repro-daemon.log"
-
 proc runUserDaemonCliCommand(conf: ReproCommandLineDaemon): int =
   ## ``repro daemon <subcommand>``. The command line is parsed from repro's
   ## description (``repro_cli_support/cli_description``): the daemon's
@@ -40894,9 +40802,8 @@ proc runUserDaemonCliCommand(conf: ReproCommandLineDaemon): int =
   let config = userDaemonConfigOf(conf)
   if conf.command == ReproCommandLineDaemonCommand.serve:
     # `repro daemon serve` is the daemon PROCESS entry — the role formerly
-    # carried by the standalone `repro-daemon` binary (whose program name
-    # stays a compatibility alias). Every other subcommand is a client
-    # control command.
+    # carried by the standalone `repro-daemon` binary, whose program name is
+    # retired. Every other subcommand is a client control command.
     installUserDaemonParentPrewarmer()
     installUserDaemonBuildExecutor()
     installUserDaemonWatchExecutor()
@@ -75739,9 +75646,11 @@ proc populateSubmodules(identity: GitToolIdentity;
     if key.len == 0:
       return "submodule '" & path & "' of " & clone & " has no entry in " &
         ".gitmodules"
-    for argv in [@["-C", clone, "config", key & ".url", src],
+    # Two git command lines (git's argv, not a comparison of repro's).
+    let gitCommands = [@["-C", clone, "config", key & ".url", src],
         @["-C", clone, "-c", "protocol.file.allow=always", "submodule",
-          "--quiet", "update", "--init", "--reference", src, "--", path]]:
+          "--quiet", "update", "--init", "--reference", src, "--", path]]
+    for argv in gitCommands:
       let res = gitRunPlainQuery(identity, argv)
       if res.code != 0:
         return "could not populate submodule '" & path & "' from " & src &
@@ -87009,6 +86918,7 @@ type
                                    # the alternate committed solved-graph
                                    # lock, forwarded to ``runBuildCommand``
                                    # on the verb-alias path.
+    lockPath: string               # The ``<file>`` of ``lockFlag``.
     toolProvisioning: ToolProvisioningMode
       ## Workspace-mode discovery needs typed tool provisioning when the
       ## project's interface declares ``uses:`` blocks (the default for any
@@ -89458,6 +89368,7 @@ proc testOptionsOf[C, O](c: C; origin: O): ReproTestShardOpts =
     # MO-1 carry-through for the sharded path: the alternate committed
     # solved-graph lock (the last `--lock`).
     result.lockFlag = "--lock=" & c.lock[^1]
+    result.lockPath = c.lock[^1]
   result.certificateOut = c.certificateOut
   result.certWorkspaceRoot = c.workspaceRoot
   result.certCurrentRepo = c.currentRepo
@@ -89652,7 +89563,8 @@ proc runFixtureCmd(cmd: seq[string]; cwd: string): tuple[code: int; output: stri
   # trailing `# comment` swallowed it. The newline before `}` ends any such
   # comment.
   var argv: seq[string] = @[]
-  if cmd.len >= 3 and cmd[0] == "sh" and cmd[1] == "-c":
+  const ShellCommandOption = "-c"   # sh(1): run the next word as a script
+  if cmd.len >= 3 and cmd[0] == "sh" and cmd[1] == ShellCommandOption:
     let body = "{ " & cmd[2] & "\n} >'" & logPath & "' 2>&1"
     argv = @["sh", "-c", body]
   else:
@@ -89997,10 +89909,7 @@ proc shardLockProvenance(opts: ReproTestShardOpts):
   ## so the sharded/fixture run is demonstrably tied to the LOCKED graph, not
   ## a fresh re-solve. A no-op (``found = false``) when no lock is present, so
   ## every pre-existing shard run (no ``repro.lock``) is byte-unchanged.
-  let lockOverride =
-    if opts.lockFlag.startsWith("--lock="):
-      opts.lockFlag["--lock=".len .. ^1]
-    else: ""
+  let lockOverride = opts.lockPath
   let resolved = resolveSolvedGraphForBuild(getCurrentDir(), lockOverride, "")
   result.found = resolved.found and resolved.source == "lock"
   if result.found:
@@ -96420,42 +96329,6 @@ proc runPromptInitCommand*(shell: string): int =
   stdout.write(snippet)
   0
 
-const internalHelperAliases = {
-  # Documented ``repro internal <name>`` spellings (Executable-Consolidation
-  # M1) mapped to the historical ``__repro-<name>`` argument forms. The
-  # ``__``-prefixed forms remain accepted as compatibility aliases for one
-  # release; both route to the identical handler. ``io monitor`` is handled
-  # separately because it has no ``__repro-`` form (its user-facing spelling
-  # is ``repro debug io monitor``).
-  "runquota-helper": "__repro-runquota-helper",
-  "compile-provider": "__repro-compile-provider",
-  "extract-interface": "__repro-extract-interface",
-  "compile-profile": "__repro-compile-profile",
-  "probe-profile-platforms": "__repro-probe-profile-platforms",
-  "dev-env-introspect": "__repro-dev-env-introspect",
-  "render-dev-env-shell": "__repro-render-dev-env-shell",
-  "direnv-activate": "__repro-direnv-activate",
-  "native-shell-activate": "__repro-native-shell-activate",
-  "dev-session-supervisor": "__repro-dev-session-supervisor",
-  "dev-session-http": "__repro-dev-session-http",
-  "cmake-regenerate": "__repro-cmake-regenerate",
-}.toTable
-
-proc normalizeInternalArgs(args: seq[string]): seq[string] =
-  ## Map ``internal <name> <rest…>`` onto the same argument vector the
-  ## ``__repro-<name>`` helper forms use, so the documented ``internal``
-  ## namespace and the historical ``__``-prefixed aliases share one set of
-  ## handlers below. Subcommands without a ``__repro-`` equivalent
-  ## (``io monitor``, usage/help) are left untouched for the dedicated
-  ## ``internal`` arm in ``runThinApp`` to handle.
-  if args.len >= 1 and args[0] == "internal" and args.len >= 2 and
-      internalHelperAliases.hasKey(args[1]):
-    result = @[internalHelperAliases[args[1]]]
-    if args.len > 2:
-      result.add(args[2 .. ^1])
-  else:
-    result = args
-
 # ---- RA-6: host-ergonomics verbs -------------------------------------------
 #
 # RA-6's host-ergonomics surface:
@@ -99058,7 +98931,7 @@ proc flakeBindingsFromAppliedArgs*(args: openArray[string];
   ## is unreproducible by construction, because the pins are not the inputs.
   var i = 0
   while i < args.len:
-    if args[i] != "--override-input" or i + 2 >= args.len:
+    if args[i] != NixOverrideInputOption or i + 2 >= args.len:
       # Not a triple we act on. Advance ONE word rather than three: a stride of
       # three is correct only for a vector that is nothing but triples, and it
       # mis-aligns on every other shape instead of skipping it.
@@ -100081,7 +99954,7 @@ proc runFlakeOverrideArgsCommand*(c: ReproCommandLineFlakeOverrideArgs): int =
   else:
     var words: seq[string]
     for e in emitted:
-      words.add("--override-input")
+      words.add(NixOverrideInputOption)
       words.add(quoteShell(e.input))
       words.add(quoteShell(flakeSiblingOverrideRef(e.path,
         identity.binaryPath)))
@@ -105652,231 +105525,126 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
       "' (expected: list, add, remove)")
     return 2
 
-proc runLegacyCommand(programName: string; args: seq[string];
-                      publicCliPath: string): int =
-  ## The commands whose parsing has not moved onto repro's command-line
-  ## description yet. ``runReproCommandLine`` has already parsed the words
-  ## that select the command with the generated parser and hands over
-  ## ``args``: the command's canonical words (aliases resolved) followed by
-  ## the rest of the command line, unparsed, exactly as the user wrote it.
-  ## Each arm below goes when its command moves onto the description.
-  let args = normalizeInternalArgs(args)
-  if args.len >= 3 and args[0] == "internal" and args[1] == "io" and
-      args[2] == "monitor":
-    let monitorArgs =
-      if args.len > 3:
-        args[3 .. ^1]
-      else:
-        @[]
-    return runIoMonitorCli(programName & " internal io monitor", monitorArgs)
-  if args.len >= 2 and args[0] == "internal" and
-      args[1] == "shared-pool-upload-pack":
-    # Git invokes this transport through remote.repro-pool.uploadpack.
-    # Keep stdout exclusively for Git's wire protocol: even a usage error
-    # must go to stderr rather than corrupting the client's advertisement.
-    if args.len != 3:
-      stderr.writeLine("repro internal shared-pool-upload-pack: expected one pool path")
-      return 2
-    let gitBin = findExe("git")
-    if gitBin.len == 0:
-      stderr.writeLine("repro internal shared-pool-upload-pack: git was not found on PATH")
-      return 1
-    return serveSharedPoolUploadPack(gitBin, args[2])
-
-  if args.len >= 4 and args[0] == "internal" and args[1] == "resolve-package":
-    # ``repro internal resolve-package <consumerDir> <name>``
-    #
-    # Resolve one declared package dependency to its checkout and print the
-    # absolute path, or print nothing when it is not checked out.
-    #
-    # This exists to be called from a recipe's own macro expansion via
-    # ``staticExec``. A macro cannot reuse the engine's resolution directly --
-    # it runs at compile time, in a scratch directory, with none of the
-    # engine's state -- and reimplementing workspace lookup inside the macro
-    # would create a second resolver free to drift from the one that builds
-    # ``--path:``. Shelling back into the engine keeps exactly one.
-    #
-    # ALWAYS exits 0, including when unresolved. ``staticExec`` surfaces a
-    # non-zero status as an opaque compile failure with no useful location,
-    # so "not found" is reported as empty output and diagnosed by the caller,
-    # which can say which recipe asked and for what.
-    let consumerDir = args[2]
-    let name = args[3]
-    let resolved = resolvePackageRoot(consumerDir, name)
-    if resolved.len > 0:
-      echo resolved
-    return 0
-
-  if args.len > 0 and args[0] == "__repro-runquota-helper":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runRunQuotaHelperCli(helperArgs)
-  if args.len > 0 and args[0] == "__repro-compile-provider":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runProviderCompileHelper(helperArgs)
-  if args.len > 0 and args[0] == "__repro-extract-interface":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runInterfaceExtractHelper(helperArgs)
-  if args.len > 0 and args[0] == "__repro-compile-profile":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runProfileCompileHelper(helperArgs)
-  if args.len > 0 and args[0] == "__repro-probe-profile-platforms":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runProfilePlatformProbeHelper(helperArgs)
-  if args.len > 0 and args[0] == "__repro-dev-env-introspect":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runDevEnvIntrospectionHelper(helperArgs)
-  if args.len > 0 and args[0] == "__repro-render-dev-env-shell":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runDevEnvShellRenderHelper(helperArgs)
-  if args.len > 0 and args[0] == "__repro-direnv-activate":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    try:
-      return runReproDirenvActivationHelper(helperArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro direnv activate: error: " & err.msg)
-      return 1
-  if args.len > 0 and args[0] == "__repro-native-shell-activate":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    try:
-      return runReproNativeShellActivationHelper(helperArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro native shell activate: error: " & err.msg)
-      return 1
-  if args.len > 0 and args[0] == "__repro-dev-session-supervisor":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    try:
-      return runDevSessionSupervisorHelper(helperArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro dev-session supervisor: error: " & err.msg)
-      return 1
-  if args.len > 0 and args[0] == "__repro-dev-session-http":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    try:
-      return runDevSessionHttpHelper(helperArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro dev-session http: error: " & err.msg)
-      return 1
-  if args.len > 0 and args[0] == "__repro-cmake-regenerate":
-    let helperArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    try:
-      return runCmakeRegenerationHelper(helperArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro cmake regeneration: error: " & err.msg)
-      return 1
-  # The parser accepted the command's words, so what reaches here is a
-  # subcommand word or an argument shape the command's own parser does not
-  # know.
-  stderr.writeLine("repro: '" & args.join(" ") & "' is not a command " &
-    "line `repro " & args[0] & "` accepts; run `repro help " & args[0] & "`")
-  2
-
-proc printNamespaceHelp(namespace: string; topic: seq[string]) =
-  ## The help `repro <namespace> help [<word>...]` prints: the subcommand's
-  ## when the words name one, else the namespace's (whose own parser always
-  ## answered `help` with its usage, whatever followed).
-  try:
-    printReproHelp(@[namespace] & topic)
-  except CliUsageError:
-    printReproHelp([namespace])
-
-proc cacheIdentityValuesOf[T](c: T): bcCliDispatch.CacheIdentityValues =
-  ## The identity flags of `repro cache publish|derive-key|gen-key`.
-  bcCliDispatch.CacheIdentityValues(packageName: c.packageName,
-    packageVersion: c.packageVersion, platformCpu: c.platformCpu,
-    platformOs: c.platformOs, platformAbi: c.platformAbi,
-    platformLibc: c.platformLibc, toolchainName: c.toolchainName,
-    toolchainVersion: c.toolchainVersion,
-    toolchainHostLdSo: c.toolchainHostLdso,
-    toolchainExtra: c.toolchainExtra, providerRevision: c.providerRevision,
-    deps: c.dep, options: c.option)
-
-proc runCacheCommand(conf: ReproCommandLineCache): int =
-  ## ``repro cache <subcommand>``: the single-entry binary-cache client,
-  ## folding in the retired standalone ``repro-binary-cache-client``
-  ## toolset. Each
-  ## subcommand calls the SAME shared ``substituteInProcess`` + HTTP-publish
-  ## machinery ``repro build`` uses (including R1 default-untrusted trust);
-  ## the command line is parsed from repro's description
-  ## (``repro_cli_support/cli_description``). A malformed `--option` is a
-  ## usage error (exit 2); another malformed value (an entry key, a CPU
-  ## family) is reported as an error (exit 1).
-  try:
-    case conf.command
-    of ReproCommandLineCacheCommand.call:
-      # `repro cache` alone prints its help.
-      printReproHelp(["cache"])
-      return 0
-    of ReproCommandLineCacheCommand.help:
-      printNamespaceHelp("cache", conf.help.topic)
-      return 0
-    of ReproCommandLineCacheCommand.lookup:
-      return bcCliDispatch.cacheLookup(conf.lookup.entryKey)
-    of ReproCommandLineCacheCommand.substitute:
-      return bcCliDispatch.cacheSubstitute(conf.substitute.entryKey,
-        conf.substitute.outDir)
-    of ReproCommandLineCacheCommand.publish:
-      let c = conf.publish
-      return bcCliDispatch.cachePublish(c.entryKey, c.prefixDir,
-        cacheIdentityValuesOf(c))
-    of ReproCommandLineCacheCommand.deriveKey:
-      return bcCliDispatch.cacheDeriveKey(cacheIdentityValuesOf(
-        conf.deriveKey))
-    of ReproCommandLineCacheCommand.genKey:
-      return bcCliDispatch.cacheGenKey()
-  except bcCliDispatch.CacheUsageError as err:
-    stderr.writeLine(err.msg)
-    return 2
-  except CatchableError as err:
-    stderr.writeLine("repro cache: error: " & err.msg)
+proc runSharedPoolUploadPack(pool: string): int =
+  ## ``repro internal shared-pool-upload-pack <pool>``: Git invokes this
+  ## transport through ``remote.repro-pool.uploadpack``. Keep stdout
+  ## exclusively for Git's wire protocol: a failure goes to stderr rather
+  ## than corrupting the client's advertisement.
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    stderr.writeLine("repro internal shared-pool-upload-pack: git was not " &
+      "found on PATH")
     return 1
+  serveSharedPoolUploadPack(gitBin, pool)
+
+proc runResolvePackage(consumerDir, name: string): int =
+  ## ``repro internal resolve-package <consumerDir> <name>``
+  ##
+  ## Resolve one declared package dependency to its checkout and print the
+  ## absolute path, or print nothing when it is not checked out.
+  ##
+  ## This exists to be called from a recipe's own macro expansion via
+  ## ``staticExec``. A macro cannot reuse the engine's resolution directly --
+  ## it runs at compile time, in a scratch directory, with none of the
+  ## engine's state -- and reimplementing workspace lookup inside the macro
+  ## would create a second resolver free to drift from the one that builds
+  ## ``--path:``. Shelling back into the engine keeps exactly one.
+  ##
+  ## ALWAYS exits 0, including when unresolved. ``staticExec`` surfaces a
+  ## non-zero status as an opaque compile failure with no useful location,
+  ## so "not found" is reported as empty output and diagnosed by the caller,
+  ## which can say which recipe asked and for what.
+  let resolved = resolvePackageRoot(consumerDir, name)
+  if resolved.len > 0:
+    echo resolved
+  0
+
+proc runCmakeRegenerationOf[T](c: T): int =
+  ## ``repro internal cmake-regenerate`` (``__repro-cmake-regenerate``).
+  try:
+    runCmakeRegenerationHelper(c.metadata, c.depfile, c.publicCli)
+  except CatchableError as err:
+    stderr.writeLine("repro cmake regeneration: error: " & err.msg)
+    1
+
+proc runDirenvActivationOf[T](c: T; publicCliPath: string): int =
+  ## ``repro internal direnv-activate`` (``__repro-direnv-activate``).
+  try:
+    runReproDirenvActivationHelper(direnvActivationSelectionOf(c),
+      publicCliPath)
+  except CatchableError as err:
+    stderr.writeLine("repro direnv activate: error: " & err.msg)
+    1
+
+proc runNativeShellActivationOf[T](c: T; publicCliPath: string): int =
+  ## ``repro internal native-shell-activate``
+  ## (``__repro-native-shell-activate``).
+  try:
+    runReproNativeShellActivationHelper(nativeShellActivationRequestOf(c),
+      publicCliPath)
+  except CatchableError as err:
+    stderr.writeLine("repro native shell activate: error: " & err.msg)
+    1
+
+proc runDevSessionSupervisorOf[T](c: T; publicCliPath: string): int =
+  ## ``repro internal dev-session-supervisor``
+  ## (``__repro-dev-session-supervisor``).
+  try:
+    runDevSessionSupervisorHelper(c, publicCliPath)
+  except CatchableError as err:
+    stderr.writeLine("repro dev-session supervisor: error: " & err.msg)
+    1
+
+proc runDevSessionHttpOf[T](c: T): int =
+  ## ``repro internal dev-session-http`` (``__repro-dev-session-http``).
+  try:
+    runDevSessionHttpHelper(c)
+  except CatchableError as err:
+    stderr.writeLine("repro dev-session http: error: " & err.msg)
+    1
+
+proc runInternalCommand(conf: ReproCommandLineInternal;
+                        publicCliPath: string): int =
+  ## ``repro internal <role>``: the processes repro spawns of itself, each
+  ## from the configuration the generated parser read from its command line
+  ## (``repro_cli_support/cli_description``, the role processes). The
+  ## hidden ``__repro-<name>`` spellings run the same procs
+  ## (``runReproCommandLine``).
+  case conf.command
+  of ReproCommandLineInternalCommand.sharedPoolUploadPack:
+    runSharedPoolUploadPack(conf.sharedPoolUploadPack.pool)
+  of ReproCommandLineInternalCommand.resolvePackage:
+    runResolvePackage(conf.resolvePackage.consumerDir,
+      conf.resolvePackage.name)
+  of ReproCommandLineInternalCommand.io:
+    case conf.io.command
+    of ReproCommandLineInternalIoCommand.monitor:
+      # The monitor's own command line (io-mon's), verbatim.
+      runIoMonitorCli("repro internal io monitor", conf.io.monitor.args)
+  of ReproCommandLineInternalCommand.runquotaHelper:
+    runRunQuotaHelperOf(conf.runquotaHelper)
+  of ReproCommandLineInternalCommand.compileProvider:
+    runProviderCompileHelper(conf.compileProvider)
+  of ReproCommandLineInternalCommand.extractInterface:
+    runInterfaceExtractHelper(conf.extractInterface)
+  of ReproCommandLineInternalCommand.compileProfile:
+    runProfileCompileOf(conf.compileProfile)
+  of ReproCommandLineInternalCommand.probeProfilePlatforms:
+    runProfilePlatformProbeOf(conf.probeProfilePlatforms)
+  of ReproCommandLineInternalCommand.devEnvIntrospect:
+    runDevEnvIntrospectionHelper(conf.devEnvIntrospect)
+  of ReproCommandLineInternalCommand.renderDevEnvShell:
+    runDevEnvShellRenderHelper(conf.renderDevEnvShell)
+  of ReproCommandLineInternalCommand.direnvActivate:
+    runDirenvActivationOf(conf.direnvActivate, publicCliPath)
+  of ReproCommandLineInternalCommand.nativeShellActivate:
+    runNativeShellActivationOf(conf.nativeShellActivate, publicCliPath)
+  of ReproCommandLineInternalCommand.devSessionSupervisor:
+    runDevSessionSupervisorOf(conf.devSessionSupervisor, publicCliPath)
+  of ReproCommandLineInternalCommand.devSessionHttp:
+    runDevSessionHttpOf(conf.devSessionHttp)
+  of ReproCommandLineInternalCommand.cmakeRegenerate:
+    runCmakeRegenerationOf(conf.cmakeRegenerate)
 
 proc runSelfCommand(conf: ReproCommandLineSelf): int =
   ## ``repro self <subcommand>`` (``repro_cli_support/selfhost``), its
@@ -105938,7 +105706,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       enclosingWorkspaceRoot(startPath))
   case conf.command
   of ReproCommandLineBundleCommand.help:
-    printNamespaceHelp("bundle", conf.help.topic)
+    printReproNamespaceHelp("bundle", conf.help.topic)
     return 0
   of ReproCommandLineBundleCommand.create:
     let c = conf.create
@@ -105981,7 +105749,7 @@ proc runReapCommand(conf: ReproCommandLineReap): int =
   ## The command line is parsed from repro's description
   ## (``repro_cli_support/cli_description``). `repro build`'s
   ## `--hard-rebuild` and `--rebuild-host-bound` are accepted only to be
-  ## refused with a pointer to `--force` (see ``runReapCli``).
+  ## refused with a pointer to `--force` (see ``reapRefusalOfBuildSpelling``).
   if conf.hardRebuild or conf.rebuildHostBound:
     echo reapRefusalOfBuildSpelling(
       if conf.hardRebuild: "--hard-rebuild" else: "--rebuild-host-bound")
@@ -106140,9 +105908,10 @@ proc runWatchVerbCommand(args: seq[string]; publicCliPath: string): int =
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string; all = false): int =
   ## ``repro help [--all] [<command>...]``: the help of repro or of one
-  ## command, on stdout. A migrated command's help is generated from its
-  ## declarations. A command that hands its words to another parser
-  ## unparsed prints the help its declaration gives, whatever words follow.
+  ## command, on stdout, generated from its declarations. A command that
+  ## hands its words to another program's command line (a `rest`
+  ## positional) prints the help its declaration gives, whatever words
+  ## follow.
   ## With ``all`` it is the page ``--help-all`` prints, which also lists
   ## the ``secondary`` commands.
   var command = 0
@@ -106157,7 +105926,7 @@ proc runReproHelp(programName: string; topic: seq[string];
         return reportReproUsageError(e)
       return 2
     command = next
-    if reproCommandIsPassThrough(command) or reproCommandTakesRest(command):
+    if reproCommandTakesRest(command):
       break
   # Printed as every help page is (``printReproHelp``: styled for stdout by
   # clispec's printer).
@@ -106299,9 +106068,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
   ##
   ## Help (``--help``, ``-h``, ``--help=json``) and completion requests
   ## (``__complete``) are answered on stdout with exit 0; a command line the
-  ## parser rejects is a usage error (exit 2). A migrated command runs from
-  ## its typed configuration; any other is handed to ``runLegacyCommand``
-  ## with its unparsed arguments.
+  ## parser rejects is a usage error (exit 2). Every command runs from its
+  ## typed configuration.
   var conf: ReproCommandLine
   var origins: ReproCommandLineOrigins
   let answered = loadReproCommandLine(args, conf, origins)
@@ -106754,15 +106522,36 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
-  else:
-    let passed = reproPassThrough(conf)
-    if not passed.found:
-      # Every command is either handled above or declares its pass-through
-      # positional; `cli_program` checks the second at compile time.
-      stderr.writeLine("repro: no handler for this command")
-      return 2
-    return runLegacyCommand(programName, passed.path & passed.args,
+  of ReproCommandLineCommand.internal:
+    return runInternalCommand(conf.internal, publicCliPath)
+  # The hidden `__repro-<name>` spellings of `internal <name>`, which the
+  # shell hooks installed on a machine and the RunQuota launcher run.
+  of ReproCommandLineCommand.reproRunquotaHelper:
+    return runRunQuotaHelperOf(conf.reproRunquotaHelper)
+  of ReproCommandLineCommand.reproCompileProvider:
+    return runProviderCompileHelper(conf.reproCompileProvider)
+  of ReproCommandLineCommand.reproExtractInterface:
+    return runInterfaceExtractHelper(conf.reproExtractInterface)
+  of ReproCommandLineCommand.reproCompileProfile:
+    return runProfileCompileOf(conf.reproCompileProfile)
+  of ReproCommandLineCommand.reproProbeProfilePlatforms:
+    return runProfilePlatformProbeOf(conf.reproProbeProfilePlatforms)
+  of ReproCommandLineCommand.reproDevEnvIntrospect:
+    return runDevEnvIntrospectionHelper(conf.reproDevEnvIntrospect)
+  of ReproCommandLineCommand.reproRenderDevEnvShell:
+    return runDevEnvShellRenderHelper(conf.reproRenderDevEnvShell)
+  of ReproCommandLineCommand.reproDirenvActivate:
+    return runDirenvActivationOf(conf.reproDirenvActivate, publicCliPath)
+  of ReproCommandLineCommand.reproNativeShellActivate:
+    return runNativeShellActivationOf(conf.reproNativeShellActivate,
       publicCliPath)
+  of ReproCommandLineCommand.reproDevSessionSupervisor:
+    return runDevSessionSupervisorOf(conf.reproDevSessionSupervisor,
+      publicCliPath)
+  of ReproCommandLineCommand.reproDevSessionHttp:
+    return runDevSessionHttpOf(conf.reproDevSessionHttp)
+  of ReproCommandLineCommand.reproCmakeRegenerate:
+    return runCmakeRegenerationOf(conf.reproCmakeRegenerate)
 
 proc runReproCommandLineInProcess*(args: seq[string]): int =
   ## ``repro <args>`` run in this process, through the same generated parser
@@ -106826,33 +106615,12 @@ proc runThinAppDispatch(programName: string): int =
     return runPrivilegedBrokerMode(args)
   if programName == "repro":
     return runReproCommandLine(programName, args, publicCliPath)
-  # ``internal io monitor`` is the canonical self-spawn argv the build
-  # engine's monitor wrapper uses (``getAppFilename() internal
-  # io monitor …``). Because the engine prepends those args to
-  # ``getAppFilename()`` — whichever binary is currently running — we
-  # have to dispatch the monitor BEFORE the per-program arms below.
-  # Otherwise a ``repro-daemon``-hosted build run would route the
-  # monitor's self-spawn into ``runUserDaemonCommand``, which only
-  # parses daemon-config flags and rejects ``internal`` with
-  # ``repro-daemon: unexpected argument: internal`` and exit code 2.
-  # Mirrors ``repro debug io monitor``: forward the remaining args to
-  # the shared io-monitor CLI.
-  if args.len >= 3 and args[0] == "internal" and args[1] == "io" and
-      args[2] == "monitor":
-    let monitorArgs =
-      if args.len > 3:
-        args[3 .. ^1]
-      else:
-        @[]
-    return runIoMonitorCli(programName & " internal io monitor", monitorArgs)
-  if programName == "reprostored":
-    return runReprostoredCommand(args)
-  if programName == "repro-daemon":
-    installUserDaemonParentPrewarmer()
-    installUserDaemonBuildExecutor()
-    installUserDaemonWatchExecutor()
-    installUserDaemonPeerCacheService()
-    return runUserDaemonCommand(args)
+  # Every role of this image is a command of repro's command line (the
+  # daemon is `repro daemon serve`, the store daemon `repro store serve`),
+  # selected by its words, never by the name the image was started under.
+  # The `repro-daemon` and `reprostored` program names, which once chose
+  # those roles, are retired: an image that declares another name has no
+  # command line.
   stderr.writeLine(programName & " " & versionString() & ": no command " &
     "line is declared for this image")
   2
