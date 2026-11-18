@@ -555,11 +555,11 @@ proc resetDslConfigurables() =
   ## Drop any pending configurable overrides so each NDE-I test
   ## observes the registered defaults. Mirrors the per-package
   ## ``resetConfigurable`` discipline NDE-F/G/H test fixtures use.
-  resetConfigurable("reproosDesktop.desktopKind")
-  resetConfigurable("reproosDesktop.activeAtBoot")
-  resetConfigurable("reproosDesktop.defaultUser")
-  resetConfigurable("reproosDesktop.bootloaderTimeout")
-  resetConfigurable("reproosDesktop.aptSnapshot")
+  resetConfigurable("package.reproosDesktop.desktopKind")
+  resetConfigurable("package.reproosDesktop.activeAtBoot")
+  resetConfigurable("package.reproosDesktop.defaultUser")
+  resetConfigurable("package.reproosDesktop.bootloaderTimeout")
+  resetConfigurable("package.reproosDesktop.aptSnapshot")
 
 proc resetDslRecipeState(storeRoot: string) =
   ## Test-fixture reset: clear every M8/M9.A registry + materialiser
@@ -632,9 +632,9 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # M9.D's seq[Enum] overload preserves the enum type-name + the
     # registered ord-sequence. The fallback-flavoured reader returns
     # the registered default when the type matches.
-    resetConfigurable("reproosDesktop.desktopKind")
+    resetConfigurable("package.reproosDesktop.desktopKind")
     let got = readConfigurable[DesktopKind](
-      "reproosDesktop.desktopKind", newSeq[DesktopKind]())
+      "package.reproosDesktop.desktopKind", newSeq[DesktopKind]())
     check got == @[dkSway]
     check got.len == 1
 
@@ -648,7 +648,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # identifier (``"dkSway"``). The two would coincide for enums
     # without explicit string values (e.g. the M9.D fixture's bare
     # ``dkSway`` shape).
-    let stored = inspectConfigurable("reproosDesktop.desktopKind")
+    let stored = inspectConfigurable("package.reproosDesktop.desktopKind")
     check stored.kind == dskSeqEnum
     check stored.seqEnumTypeName == "DesktopKind"
     check stored.seqEnumValueNames == @[$dkSway]   # == @["sway"]
@@ -659,11 +659,11 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # value name. The shim's enum carries explicit string values so
     # ``$dkSway`` resolves to ``"sway"``; see the seq-enum test above
     # for the same observation.
-    resetConfigurable("reproosDesktop.activeAtBoot")
+    resetConfigurable("package.reproosDesktop.activeAtBoot")
     check readConfigurable[DesktopKind](
-      "reproosDesktop.activeAtBoot", dkGnome) == dkSway
+      "package.reproosDesktop.activeAtBoot", dkGnome) == dkSway
 
-    let stored = inspectConfigurable("reproosDesktop.activeAtBoot")
+    let stored = inspectConfigurable("package.reproosDesktop.activeAtBoot")
     check stored.kind == dskEnum
     check stored.enumTypeName == "DesktopKind"
     check stored.enumValueName == $dkSway   # == "sway"
@@ -712,7 +712,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # Prior to the NDE-I widening this test pinned the broken shape
     # (``activeVariantArms(...).len == 0``) as an HONEST DEFERRAL; the
     # close-out fix landed in the same commit as this recipe rewrite.
-    resetConfigurable("reproosDesktop.desktopKind")
+    resetConfigurable("package.reproosDesktop.desktopKind")
 
     # Default configurable value: @[dkSway] — only the dkSway arm
     # fires (1 arm).
@@ -726,7 +726,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # Override to all three — every arm fires; source-declaration
     # order is preserved.
     setConfigurable[seq[DesktopKind]](
-      "reproosDesktop.desktopKind", @[dkSway, dkGnome, dkPlasma])
+      "package.reproosDesktop.desktopKind", @[dkSway, dkGnome, dkPlasma])
     let activeAll =
       activeVariantArms("reproosDesktop", "desktopKind")
     check activeAll.len == 3
@@ -737,7 +737,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # Single-element override picks just one arm regardless of source
     # position.
     setConfigurable[seq[DesktopKind]](
-      "reproosDesktop.desktopKind", @[dkPlasma])
+      "package.reproosDesktop.desktopKind", @[dkPlasma])
     let activePlasma =
       activeVariantArms("reproosDesktop", "desktopKind")
     check activePlasma.len == 1
@@ -746,7 +746,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
 
     # Reset to the default so subsequent tests in this binary aren't
     # poisoned.
-    resetConfigurable("reproosDesktop.desktopKind")
+    resetConfigurable("package.reproosDesktop.desktopKind")
 
   test "M9.E validate: predicate registers exactly once with non-empty exprRepr":
     let preds = registeredValidates("reproosDesktop")
@@ -759,8 +759,8 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
   test "M9.E validate: passing predicate does NOT raise on default config":
     # Default config: desktopKind=@[dkSway], activeAtBoot=dkSway →
     # dkSway in @[dkSway] is true → no raise.
-    resetConfigurable("reproosDesktop.desktopKind")
-    resetConfigurable("reproosDesktop.activeAtBoot")
+    resetConfigurable("package.reproosDesktop.desktopKind")
+    resetConfigurable("package.reproosDesktop.activeAtBoot")
     var raised = false
     try:
       evaluateValidates("reproosDesktop")
@@ -775,11 +775,11 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # as ``EDslConfigViolation`` to avoid clashing with the shim's
     # ``EConfigViolation`` the v1 suite uses.
     setConfigurable[DesktopKind](
-      "reproosDesktop.activeAtBoot", dkPlasma)
+      "package.reproosDesktop.activeAtBoot", dkPlasma)
     expect EDslConfigViolation:
       evaluateValidates("reproosDesktop")
     # Hygiene: restore the default so subsequent tests run unpoisoned.
-    resetConfigurable("reproosDesktop.activeAtBoot")
+    resetConfigurable("package.reproosDesktop.activeAtBoot")
 
   test "M9.G bootloader: generationEntry + timeout + 1 menu entry":
     let cfg = registeredBootloaderConfig("reproosDesktop")
@@ -888,7 +888,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # Pass B — flip activeAtBoot to dkGnome; the symlink target
     # re-keys to gdm.service.
     setConfigurable[DesktopKind](
-      "reproosDesktop.activeAtBoot", dkGnome)
+      "package.reproosDesktop.activeAtBoot", dkGnome)
     resetDslPortFsState()
     resetDslPortFsExtState()
     resetDslPortMaterialiseState()
@@ -903,7 +903,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
     # Pass C — flip activeAtBoot to dkPlasma; the symlink target
     # re-keys to sddm.service.
     setConfigurable[DesktopKind](
-      "reproosDesktop.activeAtBoot", dkPlasma)
+      "package.reproosDesktop.activeAtBoot", dkPlasma)
     resetDslPortFsState()
     resetDslPortFsExtState()
     resetDslPortMaterialiseState()
@@ -918,7 +918,7 @@ suite "NDEM1 reproos-desktop DSL surface (NDE-I)":
 
     # Hygiene: restore default so the next test in this binary
     # observes the registered default activeAtBoot=dkSway.
-    resetConfigurable("reproosDesktop.activeAtBoot")
+    resetConfigurable("package.reproosDesktop.activeAtBoot")
 
   test "recipe registers exactly 2 files: artifacts (mergedLdConf + displayManagerSymlink)":
     # M3 ``registeredArtifacts`` returns one row per ``files <name>:``

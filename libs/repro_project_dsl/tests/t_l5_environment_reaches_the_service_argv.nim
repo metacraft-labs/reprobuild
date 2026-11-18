@@ -69,8 +69,8 @@ proc argvUnder(environment: string): seq[string] =
   ## definition, which is what "resolved under two environments" means.
   let pkg = pkgDef()
   clearRegisteredServices("l5ArgvPkg")
-  for key in ["l5ArgvPkg.issuer", "l5ArgvPkg.sso.externalDomain",
-              "l5ArgvPkg.sso.externalSecure"]:
+  for key in ["package.l5ArgvPkg.issuer", "package.l5ArgvPkg.sso.externalDomain",
+              "package.l5ArgvPkg.sso.externalSecure"]:
     resetConfigurable(key)
   if environment.len > 0:
     applyEnvironment("l5ArgvPkg", environment)
@@ -99,8 +99,8 @@ suite "L5 — the fixture really is one definition, declaring two environments":
   test "and two environments, both binding the same three configurables":
     check registeredEnvironmentNames("l5ArgvPkg") == @["dev", "production"]
     check environmentOwnedConfigKeys("l5ArgvPkg") ==
-      @["l5ArgvPkg.issuer", "l5ArgvPkg.sso.externalDomain",
-        "l5ArgvPkg.sso.externalSecure"]
+      @["package.l5ArgvPkg.issuer", "package.l5ArgvPkg.sso.externalDomain",
+        "package.l5ArgvPkg.sso.externalSecure"]
 
 suite "L5 — the bound value reaches the lowered service's argv":
 
@@ -145,15 +145,15 @@ suite "L5 — and reaches the rendered configuration's BYTES":
     # `buildPackageFragment` drives; here the configurable read is
     # exercised directly against the same text template, because the
     # fixture's `build:` body is what produced `argvSsoConfig`.
-    resetConfigurable("l5ArgvPkg.issuer")
-    check readConfigurable[string]("l5ArgvPkg.issuer") ==
+    resetConfigurable("package.l5ArgvPkg.issuer")
+    check readConfigurable[string]("package.l5ArgvPkg.issuer") ==
       "http://localhost:8080"
     applyEnvironment("l5ArgvPkg", "dev")
-    let devIssuer = readConfigurable[string]("l5ArgvPkg.issuer")
-    resetConfigurable("l5ArgvPkg.issuer")
+    let devIssuer = readConfigurable[string]("package.l5ArgvPkg.issuer")
+    resetConfigurable("package.l5ArgvPkg.issuer")
     applyEnvironment("l5ArgvPkg", "production")
-    let prodIssuer = readConfigurable[string]("l5ArgvPkg.issuer")
-    resetConfigurable("l5ArgvPkg.issuer")
+    let prodIssuer = readConfigurable[string]("package.l5ArgvPkg.issuer")
+    resetConfigurable("package.l5ArgvPkg.issuer")
     check devIssuer == "https://login.metacraft-labs.test"
     check prodIssuer == "https://login.metacraft-labs.com"
     check devIssuer != prodIssuer
@@ -166,15 +166,15 @@ suite "L5 — and reaches the rendered configuration's BYTES":
     # real files in
     # `libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim`
     # -- this is the half that belongs beside the argv.
-    resetConfigurable("l5ArgvPkg.issuer")
+    resetConfigurable("package.l5ArgvPkg.issuer")
     applyEnvironment("l5ArgvPkg", "dev")
     let devText = "issuer = \"" &
-      readConfigurable[string]("l5ArgvPkg.issuer") & "\"\n"
-    resetConfigurable("l5ArgvPkg.issuer")
+      readConfigurable[string]("package.l5ArgvPkg.issuer") & "\"\n"
+    resetConfigurable("package.l5ArgvPkg.issuer")
     applyEnvironment("l5ArgvPkg", "production")
     let prodText = "issuer = \"" &
-      readConfigurable[string]("l5ArgvPkg.issuer") & "\"\n"
-    resetConfigurable("l5ArgvPkg.issuer")
+      readConfigurable[string]("package.l5ArgvPkg.issuer") & "\"\n"
+    resetConfigurable("package.l5ArgvPkg.issuer")
     check devText == "issuer = \"https://login.metacraft-labs.test\"\n"
     check prodText == "issuer = \"https://login.metacraft-labs.com\"\n"
     check devText != prodText
@@ -220,7 +220,7 @@ proc reqRequest(pkg: PackageDef): ProviderGraphRequest =
 proc reqReset() =
   clearRegisteredServices("l5ReqPkg")
   resetBuildActionRegistry()
-  for key in ["l5ReqPkg.sso.externalDomain", "l5ReqPkg.sso.externalSecure"]:
+  for key in ["package.l5ReqPkg.sso.externalDomain", "package.l5ReqPkg.sso.externalSecure"]:
     resetConfigurable(key)
 
 proc reqResolve(environment: string):
@@ -302,14 +302,14 @@ suite "L5 — §6's OWN example: a REQUIRED `config:` key bound by an environmen
     # The design in one assertion: "no default" is not "no slot". The
     # refusal this replaced rested on the slot not existing.
     reqReset()
-    check isConfigKeyRegistered("l5ReqPkg.sso.externalDomain")
-    check configurableIsRequired("l5ReqPkg.sso.externalDomain")
-    check not configurableIsSatisfied("l5ReqPkg.sso.externalDomain")
+    check isConfigKeyRegistered("package.l5ReqPkg.sso.externalDomain")
+    check configurableIsRequired("package.l5ReqPkg.sso.externalDomain")
+    check not configurableIsSatisfied("package.l5ReqPkg.sso.externalDomain")
     # And the key WITH a default is registered and already satisfied,
     # which is the control for the two predicates above.
-    check isConfigKeyRegistered("l5ReqPkg.sso.externalSecure")
-    check not configurableIsRequired("l5ReqPkg.sso.externalSecure")
-    check configurableIsSatisfied("l5ReqPkg.sso.externalSecure")
+    check isConfigKeyRegistered("package.l5ReqPkg.sso.externalSecure")
+    check not configurableIsRequired("package.l5ReqPkg.sso.externalSecure")
+    check configurableIsSatisfied("package.l5ReqPkg.sso.externalSecure")
 
   test "the seed is a SHAPE and not a value: reading the slot directly refuses too":
     # THE SECOND LINE OF DEFENCE, and it needs a case of its own because
@@ -322,30 +322,30 @@ suite "L5 — §6's OWN example: a REQUIRED `config:` key bound by an environmen
     # guard there is what stops `readConfigurable[string]` returning ""
     # for a hostname nobody bound.
     reqReset()
-    check not configurableIsSatisfied("l5ReqPkg.sso.externalDomain")
+    check not configurableIsSatisfied("package.l5ReqPkg.sso.externalDomain")
     # The enumeration of unsatisfied required keys, which is the
     # diagnostic surface a resolver (L6/L7) asks "what is still
     # missing?" rather than key-by-key.
-    check "l5ReqPkg.sso.externalDomain" in unsatisfiedRequiredConfigKeys()
-    check "l5ReqPkg.sso.externalSecure" notin
+    check "package.l5ReqPkg.sso.externalDomain" in unsatisfiedRequiredConfigKeys()
+    check "package.l5ReqPkg.sso.externalSecure" notin
       unsatisfiedRequiredConfigKeys()
     expect EDslPortUnsatisfiedRequired:
-      discard readConfigurable[string]("l5ReqPkg.sso.externalDomain")
+      discard readConfigurable[string]("package.l5ReqPkg.sso.externalDomain")
     # The FALLBACK-flavoured overload must not substitute either. That
     # silent substitution is why `EDslPortUnsatisfiedRequired` is
     # deliberately NOT a subtype of `EDslPortMissingKey`, which that
     # overload catches and answers with the fallback.
     expect EDslPortUnsatisfiedRequired:
-      discard readConfigurable("l5ReqPkg.sso.externalDomain", "fallback")
+      discard readConfigurable("package.l5ReqPkg.sso.externalDomain", "fallback")
     # THE CONTROL: the same two reads once the environment has satisfied
     # the key. Without it the two refusals above could be a key that is
     # simply unreadable.
     applyEnvironment("l5ReqPkg", "dev")
-    check readConfigurable[string]("l5ReqPkg.sso.externalDomain") ==
+    check readConfigurable[string]("package.l5ReqPkg.sso.externalDomain") ==
       "login.metacraft-labs.test"
-    check readConfigurable("l5ReqPkg.sso.externalDomain", "fallback") ==
+    check readConfigurable("package.l5ReqPkg.sso.externalDomain", "fallback") ==
       "login.metacraft-labs.test"
-    check "l5ReqPkg.sso.externalDomain" notin
+    check "package.l5ReqPkg.sso.externalDomain" notin
       unsatisfiedRequiredConfigKeys()
     reqReset()
 
@@ -448,7 +448,7 @@ proc varargsRefusalMessage(): string =
   ## none -- and return the refusal's message, or "" if none was raised.
   let pkg = varargsPkgDef()
   clearRegisteredServices("l5VarargsPkg")
-  resetConfigurable("l5VarargsPkg.sso.externalDomain")
+  resetConfigurable("package.l5VarargsPkg.sso.externalDomain")
   delEnv(ReproEnvironmentEnvVar)
   try:
     discard buildPackageDevEnv(pkg, ProviderGraphRequest(
@@ -465,7 +465,7 @@ proc varargsRefusalMessage(): string =
     result = err.msg
   finally:
     clearRegisteredServices("l5VarargsPkg")
-    resetConfigurable("l5VarargsPkg.sso.externalDomain")
+    resetConfigurable("package.l5VarargsPkg.sso.externalDomain")
 
 suite "L5 — the `varargs` shape expansion cannot decide is still caught at RESOLUTION":
 
@@ -506,7 +506,7 @@ suite "L5 — the `varargs` shape expansion cannot decide is still caught at RES
     # Proves the refusal is about the key being unsatisfied and not
     # about the fixture being unresolvable for some other reason.
     clearRegisteredServices("l5VarargsPkg")
-    setConfigurable("l5VarargsPkg.sso.externalDomain", "login.varargs.test")
+    setConfigurable("package.l5VarargsPkg.sso.externalDomain", "login.varargs.test")
     var raised = false
     try:
       discard buildPackageDevEnv(varargsPkgDef(), ProviderGraphRequest(
@@ -527,5 +527,5 @@ suite "L5 — the `varargs` shape expansion cannot decide is still caught at RES
         for arg in svc.typedArgs:
           argv.add(arg.value)
     check argv == @["start-from-init", "--domain", "login.varargs.test"]
-    resetConfigurable("l5VarargsPkg.sso.externalDomain")
+    resetConfigurable("package.l5VarargsPkg.sso.externalDomain")
     clearRegisteredServices("l5VarargsPkg")

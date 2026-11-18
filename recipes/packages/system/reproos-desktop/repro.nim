@@ -179,7 +179,7 @@ proc currentActiveAtBoot*(): DesktopKind =
   ## (e.g. from a unit test that imported the recipe but is exercising
   ## the helper in isolation).
   result = readConfigurable[DesktopKind](
-    "reproosDesktop.activeAtBoot", dkSway)
+    "package.reproosDesktop.activeAtBoot", dkSway)
 
 proc currentDesktopKind*(): seq[DesktopKind] =
   ## Read the ``desktopKind`` variant into the typed
@@ -188,7 +188,7 @@ proc currentDesktopKind*(): seq[DesktopKind] =
   ## returns the fallback when the key is unknown — matches the
   ## ``activeAtBoot`` scalar path.
   result = readConfigurable[DesktopKind](
-    "reproosDesktop.desktopKind", @[dkSway])
+    "package.reproosDesktop.desktopKind", @[dkSway])
 
 proc registerMergedLdConf*() =
   ## /etc/ld.so.conf.d/00-reproos-linux.conf — the multi-contributor
@@ -385,9 +385,9 @@ package reproosDesktop:
   validate:
     proc(): bool =
       readConfigurable[DesktopKind](
-        "reproosDesktop.activeAtBoot", dkSway) in
+        "package.reproosDesktop.activeAtBoot", dkSway) in
         readConfigurable[DesktopKind](
-          "reproosDesktop.desktopKind", newSeq[DesktopKind]())
+          "package.reproosDesktop.desktopKind", newSeq[DesktopKind]())
 
   # -------------------------------------------------------------------------
   # M9.G bootloader: block — per-package GRUB metadata. Lowers to one

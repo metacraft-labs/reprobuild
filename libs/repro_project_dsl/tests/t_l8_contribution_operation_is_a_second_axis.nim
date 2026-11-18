@@ -49,14 +49,14 @@ proc devEnvRequest(pkg: PackageDef; activity: string):
     activity: activity)
 
 const
-  AppendLow = "l8MatrixOwner.sso.appendLow"
-  AppendHigh = "l8MatrixOwner.sso.appendHigh"
-  ReplaceLow = "l8MatrixOwner.sso.replaceLow"
-  ReplaceHigh = "l8MatrixOwner.sso.replaceHigh"
-  NoDefault = "l8MatrixOwner.sso.noDefault"
-  EnvBound = "l8MatrixOwner.sso.envBound"
-  EmptyPoint = "l8MatrixOwner.sso.emptyPoint"
-  PackageLevel = "l8PackageLevelOwner.siteList"
+  AppendLow = "package.l8MatrixOwner.sso.appendLow"
+  AppendHigh = "package.l8MatrixOwner.sso.appendHigh"
+  ReplaceLow = "package.l8MatrixOwner.sso.replaceLow"
+  ReplaceHigh = "package.l8MatrixOwner.sso.replaceHigh"
+  NoDefault = "package.l8MatrixOwner.sso.noDefault"
+  EnvBound = "package.l8MatrixOwner.sso.envBound"
+  EmptyPoint = "package.l8MatrixOwner.sso.emptyPoint"
+  PackageLevel = "package.l8PackageLevelOwner.siteList"
 
 proc members(key: string): seq[string] =
   readConfigurable[seq[string]](key)
@@ -70,7 +70,7 @@ suite "Shared-Development-Services L8: a collection IS a configurable":
     check AppendLow in registeredConfigKeys()
     check AppendLow in registeredContributionPoints()
     # And a SCALAR key is not one, so the two are distinguishable.
-    check not isContributionPoint("l8MatrixOwner.sso.doesNotExist")
+    check not isContributionPoint("package.l8MatrixOwner.sso.doesNotExist")
 
   test "a contribution point with no default seeds EMPTY and is not required":
     # L5's "a key with no default is REQUIRED" is right for a scalar and
@@ -90,7 +90,7 @@ suite "L8: the runtime funnel refuses by name rather than dropping":
     # degrade into a replace.
     var raised = false
     try:
-      contributeConfigurableRaw("l8MatrixOwner.sso.aScalar", "pkg",
+      contributeConfigurableRaw("package.l8MatrixOwner.sso.aScalar", "pkg",
         epSet, coAppend, dslScalarSeqString(@["x"]), "p.nim", 1)
     except EDslPortMissingKey:
       # The scalar key does not exist in the fixture, so the key check
@@ -98,7 +98,7 @@ suite "L8: the runtime funnel refuses by name rather than dropping":
       # refusal it names rather than a different one.
       recordConfigDefault[string]("l8MatrixOwner", "aScalar", "s")
       try:
-        contributeConfigurableRaw("l8MatrixOwner.aScalar", "pkg",
+        contributeConfigurableRaw("package.l8MatrixOwner.aScalar", "pkg",
           epSet, coAppend, dslScalarSeqString(@["x"]), "p.nim", 1)
       except EDslPortNotAContributionPoint as e:
         raised = true
@@ -109,11 +109,11 @@ suite "L8: the runtime funnel refuses by name rather than dropping":
   test "a contribution to an UNKNOWN key is refused, naming the key":
     var raised = false
     try:
-      contributeConfigurableRaw("l8MatrixOwner.sso.notDeclared", "pkg",
+      contributeConfigurableRaw("package.l8MatrixOwner.sso.notDeclared", "pkg",
         epSet, coAppend, dslScalarSeqString(@["x"]), "p.nim", 1)
     except EDslPortMissingKey as e:
       raised = true
-      check "l8MatrixOwner.sso.notDeclared" in e.msg
+      check "package.l8MatrixOwner.sso.notDeclared" in e.msg
     check raised
 
   test "a contribution of the WRONG kind is refused, naming both kinds":
@@ -476,7 +476,7 @@ suite "L8: `converge` resolves a contribution point or refuses by name":
     except EDslPortMissingKey as e:
       raised = true
       check "notAPoint" in e.msg
-      check "l8MatrixOwner.sso.appendLow" in e.msg
+      check "package.l8MatrixOwner.sso.appendLow" in e.msg
     check raised
 
   test "a known point resolves to the fully qualified key":

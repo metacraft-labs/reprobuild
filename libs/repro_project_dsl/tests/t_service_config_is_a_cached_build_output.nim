@@ -86,7 +86,7 @@ package ssoDevPkg:
 
   build:
     devConfig = renderConfigFile(ConfigPath,
-      renderedConfig("ssoDevPkg.issuer"), actionId = RenderActionId)
+      renderedConfig("package.ssoDevPkg.issuer"), actionId = RenderActionId)
 
   service sso:
     executable zitadelBin
@@ -102,7 +102,7 @@ package ssoProdPkg:
 
   build:
     prodConfig = renderConfigFile(ConfigPath,
-      renderedConfig("ssoProdPkg.issuer"), actionId = RenderActionId)
+      renderedConfig("package.ssoProdPkg.issuer"), actionId = RenderActionId)
 
 proc renderEdges(): seq[BuildActionDef] =
   ## The two ``render-sso-config`` edges, in registration order: the dev

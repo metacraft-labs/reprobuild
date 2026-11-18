@@ -145,15 +145,15 @@ proc currentGnomeCfg*(): gnomeImpl.GnomeConfig =
   let defaults = gnomeImpl.defaultConfig()
   result = gnomeImpl.GnomeConfig(
     aptSnapshot: readConfigurable[string](
-      "gnomeDesktop.aptSnapshot", defaults.aptSnapshot),
+      "package.gnomeDesktop.aptSnapshot", defaults.aptSnapshot),
     autoLogin: readConfigurable[bool](
-      "gnomeDesktop.autoLogin", defaults.autoLogin),
+      "package.gnomeDesktop.autoLogin", defaults.autoLogin),
     autoLoginUser: readConfigurable[string](
-      "gnomeDesktop.autoLoginUser", defaults.autoLoginUser),
+      "package.gnomeDesktop.autoLoginUser", defaults.autoLoginUser),
     waylandSession: readConfigurable[bool](
-      "gnomeDesktop.waylandSession", defaults.waylandSession),
+      "package.gnomeDesktop.waylandSession", defaults.waylandSession),
     disableInitialSetup: readConfigurable[bool](
-      "gnomeDesktop.disableInitialSetup", defaults.disableInitialSetup),
+      "package.gnomeDesktop.disableInitialSetup", defaults.disableInitialSetup),
     storeRoot: defaults.storeRoot)
 
 # ---------------------------------------------------------------------------
