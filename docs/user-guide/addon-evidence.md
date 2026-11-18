@@ -212,9 +212,14 @@ did:
    repro system addon contain --operator alice --reason "refused compile at seq 15"
    ```
 
-   It records the containment and ships the record to the sink first. Then
-   it stops the deploy agent's fetch and apply units, and while the
-   containment lasts they do not start again, not after a reboot either. The host stays on its current
+   It first stops the deploy agent's fetch and apply units from starting,
+   and waits up to three minutes for a run already in progress to finish.
+   Then it records the containment and ships the record to the sink. Only
+   then does it stop the units. While the containment lasts they do not
+   start again, not after a reboot either. If a run is still going when
+   the wait ends, `contain` says so; any record that run writes later
+   reaches the sink as `ticked-while-contained`. If `contain` is
+   interrupted before it records, run it again. The host stays on its current
    generation. The sink's detectors then report the agent as `contained`
    instead of `silent`. A stop that was not recorded this way, or that came
    after the agent had already gone silent, still reads as silence.

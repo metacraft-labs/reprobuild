@@ -32,6 +32,7 @@ import repro_hash
 import repro_interface_artifacts
 import repro_interface_artifacts/catalog_composition
 import repro_interface_artifacts/catalog_declaration
+import repro_lock/catalog_imports # CatalogImportKind
 import repro_home_apply/catalog_projection
 
 import ./catalog_discovery
@@ -67,6 +68,13 @@ proc readHomeCatalogImports*(profilePath: string): ImportedCatalogs =
       "imports yet; remove it" & HomeImportSuffix)
   for d in located.declaration.imports:
     let at = located.path & ":" & $d.line
+    if d.kind != cikProvisioning:
+      # Read as provisioning, another kind's repository would be looked for
+      # as published interfaces; a home profile has no use for its content.
+      refusals.add("the import \"" & d.repo & "\" (" & at & ") is of kind `" &
+        $d.kind & "`; a home profile reads only `provisioning` catalogs" &
+        HomeImportSuffix)
+      continue
     if d.gitRef.len > 0 or d.commit.len == 0:
       refusals.add("the import \"" & d.repo & "\" (" & at & ") names ref " &
         d.gitRef.escape() & "; a home profile pins by `commit` only, since " &
