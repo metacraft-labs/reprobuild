@@ -53,6 +53,11 @@
 ##     `forgetWarmBuildCaches()` call for a changed `outDir` reddens it.
 ##   * `a_forced_rebuild_warms_nothing` — a forced rebuild consults none of
 ##     these caches. Dropping the `forceRefresh` arm reddens it.
+##   * `the_parent_derives_the_anchor_the_build_derives` — taking the first
+##     positional as the target again (as both readers did until reprobuild-pm
+##     issue 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor),
+##     or looking a sibling checkout up from the process directory instead of
+##     the request's, reddens it.
 ##   * `a_rekeyed_cache_file_does_not_accumulate` — one entry per persisted
 ##     file, whatever keys it has had. Removing the
 ##     `dropWarmEntriesWithPrefix` calls for lowered graphs, or the one in
@@ -246,8 +251,9 @@ suite "MAC-2 daemon parent prewarm":
     check inTree == project / ".repro" / "build" / "repro"
 
     # A relative target resolves against the REQUEST's working directory, not
-    # the process's.
-    let relative = daemonPrewarmTargetOutputDir(@["p"], root, @[])
+    # the process's. Spelled `./p`: a bare `p` is a NAME of the project at
+    # `root` (CLI/build.md "Target Selection"), not the directory.
+    let relative = daemonPrewarmTargetOutputDir(@["./p"], root, @[])
     check relative == project / ".repro" / "build" / "repro"
 
   test "a_forced_rebuild_warms_nothing":
@@ -282,8 +288,98 @@ suite "MAC-2 daemon parent prewarm":
       check daemonPrewarmTargetOutputDir(args, root, @[]) == expected
     # A real value flag still consumes its value, so the value is never
     # mistaken for the target.
-    check daemonRequestProjectRoot(@["--log", "summary", "p"], root) ==
+    check daemonRequestProjectRoot(@["--log", "summary", "./p"], root) ==
       project
+
+  test "the_parent_derives_the_anchor_the_build_derives":
+    # reprobuild-pm issue
+    # 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor.
+    # Both request readers took the FIRST POSITIONAL as the project, while the
+    # build anchors on the first PATH-SHAPED selector (`parseAndResolveSelectors`,
+    # CLI/build.md "Target Selection"). Each case below was red under that rule:
+    # the session was recorded under, and the prewarm warmed, a project no
+    # build of that command line uses. Each check also compares with the
+    # anchor the build's own resolver computes when run IN the request's
+    # directory, so the two cannot drift again.
+    let workspace = createTempDir("repro-anchor", "")
+    defer: removeDir(workspace)
+    let project = workspace / "proj"
+    createDir(project)
+    writeFile(project / "repro.nim", "# project\n")
+    # A `test/` directory that is itself a project: the decoy the first
+    # positional rule picked for `repro build test`.
+    createDir(project / "test")
+    writeFile(project / "test" / "repro.nim", "# decoy project\n")
+    let sub = project / "sub"
+    createDir(sub)
+    writeFile(sub / "repro.nim", "# sub project\n")
+    # A sibling checkout `runquota` beside `proj`.
+    let sibling = workspace / "runquota"
+    createDir(sibling)
+    writeFile(sibling / "repro.nim", "# sibling project\n")
+    let projectOut = project / ".repro" / "build" / "repro"
+
+    # The daemon parent's own directory belongs to no request: a decoy, with
+    # a decoy `runquota` sibling of its own, which a lookup from the process
+    # directory instead of the request's would find.
+    let decoy = createTempDir("repro-anchor-decoy", "")
+    defer: removeDir(decoy)
+    createDir(decoy / "daemon")
+    createDir(decoy / "runquota")
+    writeFile(decoy / "runquota" / "repro.nim", "# decoy sibling\n")
+    let previousCwd = getCurrentDir()
+    defer: setCurrentDir(previousCwd)
+    setCurrentDir(decoy / "daemon")
+
+    # `repro build test` beside a `test/` project: the current project's
+    # `test`, not `./test`.
+    checkpoint("bare name beside a same-named project directory")
+    check daemonRequestProjectRoot(@["test"], project) == project
+    check daemonPrewarmTargetOutputDir(@["test"], project, @[]) == projectOut
+
+    # `repro build lint ./sub`: anchored on `./sub`, not on `lint`.
+    checkpoint("a name before the path anchor")
+    check daemonRequestProjectRoot(@["lint", "./sub"], project) == sub
+    check daemonPrewarmTargetOutputDir(@["lint", "./sub"], project, @[]) ==
+      sub / ".repro" / "build" / "repro"
+
+    # `repro build runquota:runquotad` from `proj`: the sibling checkout
+    # beside it, looked up from the REQUEST's directory, not the decoy's.
+    checkpoint("a qualified selector naming a sibling checkout")
+    check daemonRequestProjectRoot(@["runquota:runquotad"], project) == sibling
+    check daemonPrewarmTargetOutputDir(@["runquota:runquotad"], project, @[]) ==
+      sibling / ".repro" / "build" / "repro"
+
+    # `repro build ./mods#mod`: the module `mods/mod.nim` in a directory with
+    # no project file. The project is the module's directory, as the worker
+    # names it; dropping the fragment named no project at all.
+    createDir(project / "mods")
+    writeFile(project / "mods" / "mod.nim", "discard\n")
+    checkpoint("a path anchor selecting a module")
+    check daemonRequestProjectRoot(@["./mods#mod"], project) == project / "mods"
+    check daemonPrewarmTargetOutputDir(@["./mods#mod"], project, @[]) ==
+      project / "mods" / ".repro" / "build" / "mod"
+
+    # A request whose working directory is not absolute names no directory:
+    # nothing is derived, and nothing is resolved against the daemon's own.
+    checkpoint("a relative request working directory")
+    check daemonRequestBuildAnchor(@["test"], "proj") == ""
+    check daemonRequestProjectRoot(@["./sub"], "proj") == ""
+    check daemonRequestBuildAnchor(@["#test"], project) == ""
+
+    # The build's own resolver, run where the worker runs it, agrees.
+    setCurrentDir(project)
+    for args in [@["test"], @["lint", "./sub"], @["runquota:runquotad"]]:
+      checkpoint("args=" & $args)
+      let resolved = parseAndResolveSelectors(args, "repro build")
+      let anchor = daemonRequestBuildAnchor(args, project)
+      let base = resolved.target.split('#')[0]
+      let fragment =
+        if '#' in resolved.target: resolved.target.split('#')[1] else: ""
+      let expected =
+        (if base.isAbsolute: base else: absolutePath(base, project)) &
+          (if fragment.len > 0: "#" & fragment else: "")
+      check os.normalizedPath(anchor) == os.normalizedPath(expected)
 
   test "a_rekeyed_cache_file_does_not_accumulate":
     # ReproOS M7 sibling (6): an uncacheable Nix expression puts a fresh

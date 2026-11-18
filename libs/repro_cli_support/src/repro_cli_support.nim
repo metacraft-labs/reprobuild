@@ -1034,7 +1034,8 @@ proc findSiblingProjectFile*(packageName: string;
   ""
 
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
-                               command: string): ResolvedPositionalSelectors =
+                               command: string;
+                               currentDir = ""): ResolvedPositionalSelectors =
   ## Named-Targets M3: shared path-vs-name resolver for ``repro build``
   ## and ``repro watch``. Mirrors the rules in
   ## [CLI/build.md §"Target Selection"] and
@@ -1057,6 +1058,13 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ## ``command`` is the user-visible verb (``"repro build"`` /
   ## ``"repro watch"``) so the duplicate-path-anchor diagnostic blames
   ## the right command.
+  ##
+  ## ``currentDir`` is the directory a ``<package>:<name>`` selector's
+  ## sibling checkout is looked up from; empty means the process's current
+  ## directory, which is the request's own for every caller but the daemon
+  ## parent. The daemon parent passes the request's ``workingDir``
+  ## (``daemonRequestBuildAnchor``), because its own directory belongs to
+  ## no request.
   result.targetWasOmitted = positionalSelectors.len == 0
   if positionalSelectors.len == 0:
     result.target = ""
@@ -1096,7 +1104,8 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
       # disambiguator below — the disambiguator is for cross-package
       # collisions inside ONE project, so it never legitimately matches
       # a sibling-checkout package name. The sibling-found branch wins.
-      let siblingProjectFile = findSiblingProjectFile(classified.package)
+      let siblingProjectFile = findSiblingProjectFile(classified.package,
+        currentDir)
       if siblingProjectFile.len > 0:
         if not anchorSet:
           result.target = siblingProjectFile & "#" & classified.name
@@ -25719,7 +25728,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       c.cachePush.workspaceName)
   of ReproCommandLineHooksCommand.help:
     # `repro hooks help [<word>...]` is `repro help hooks [<word>...]`.
-    stdout.write(ReproCommandLine.helpText(@["hooks"] & c.help.topic))
+    printReproHelp(@["hooks"] & c.help.topic)
     return 0
   of ReproCommandLineHooksCommand.ensure:
     parsed = hooksCommandOf(c.ensure, hakEnsure)
@@ -33440,8 +33449,7 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
   var selectors: seq[string] = @[]
   case conf.command
   of Cmd.help:
-    stdout.write(ReproCommandLine.helpText(@["certificates"] &
-      conf.help.topic))
+    printReproHelp(@["certificates"] & conf.help.topic)
     return 0
   of Cmd.policy:
     let c = conf.policy
@@ -41259,33 +41267,87 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+proc daemonRequestBuildAnchor*(selectors: openArray[string];
+                               workingDir: string): string =
+  ## The project anchor a daemon-hosted ``repro build`` request's worker will
+  ## build, as an ABSOLUTE ``<path>[#<fragment>]`` — derived by the rule the
+  ## worker applies ([CLI/build.md §"Target Selection"],
+  ## ``parseAndResolveSelectors``), not by a copy of it. The anchor is the
+  ## first PATH-SHAPED selector, not the first positional: ``repro build
+  ## test`` selects the current project's ``test`` (``.#test``) even beside a
+  ## ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
+  ## ``repro build runquota:runquotad`` anchors on the sibling checkout
+  ## (reprobuild-pm issue
+  ## 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor:
+  ## both daemon-parent readers took the first positional, so they recorded
+  ## and warmed a project the build never used).
+  ##
+  ## Nothing here reads the daemon's own current directory: every
+  ## path-shaped selector is absolutized against ``workingDir`` before the
+  ## shared resolver sees it, and the sibling lookup runs from ``workingDir``.
+  ## "" when ``workingDir`` is empty or relative and the anchor is relative,
+  ## when the anchor is a fragment with no path (``#name``, which names no
+  ## project), or when the selectors are ones the build itself refuses.
+  ## Never raises.
+  let workingDir =
+    if workingDir.len > 0 and workingDir.isAbsolute: workingDir else: ""
+  var absolutized: seq[string] = @[]
+  for sel in selectors:
+    if classifyBuildSelector(sel).kind == bskPath:
+      let parts = splitTarget(sel)
+      if parts.base.len == 0 and parts.fragment.len > 0:
+        return ""
+      var base = if parts.base.len == 0: "." else: parts.base
+      if not base.isAbsolute:
+        if workingDir.len == 0:
+          return ""
+        base = absolutePath(base, workingDir)
+      absolutized.add(
+        if parts.fragment.len > 0: base & "#" & parts.fragment else: base)
+    else:
+      absolutized.add(sel)
+  if workingDir.len == 0:
+    # No directory to look a sibling up from, and a name-only request
+    # anchors on it; only an absolute path anchor can still be read.
+    for sel in absolutized:
+      if classifyBuildSelector(sel).kind == bskPath:
+        return sel
+    return ""
+  let resolved =
+    try:
+      parseAndResolveSelectors(absolutized, "repro build", workingDir)
+    except CatchableError:
+      return ""
+  let parts = splitTarget(if resolved.target.len == 0: "." else: resolved.target)
+  var base = if parts.base.len == 0: "." else: parts.base
+  if not base.isAbsolute:
+    base = absolutePath(base, workingDir)
+  if parts.fragment.len > 0: base & "#" & parts.fragment else: base
+
 proc daemonRequestProjectRoot*(rawArgs: openArray[string];
                                workingDir: string): string =
   ## The project a daemon-hosted ``repro build`` request is for, derived from
-  ## the request alone — the same target the worker will build: the first
-  ## positional of ``rawArgs`` (``.`` when there is none), resolved against the
-  ## request's ``workingDir``, never the daemon's own. "" when the target does
-  ## not resolve to a project file; the session record then keeps its
-  ## working-directory fallback. Read-only, so it is safe in the daemon parent
-  ## (see ``UserDaemonProjectRootResolver``). The arguments are read by the
-  ## parser generated from repro's description (``buildRequestOf``), the one
-  ## the worker reads them with.
+  ## the request alone — the project the worker's build anchors on
+  ## (``daemonRequestBuildAnchor``, the build's own selector rule), resolved
+  ## against the request's ``workingDir``, never the daemon's own: the
+  ## directory of the module the anchor selects. "" when that module does not
+  ## exist; the session record then keeps its working-directory fallback.
+  ## Read-only, so it is safe in the daemon parent (see
+  ## ``UserDaemonProjectRootResolver``). The arguments are read by the parser
+  ## generated from repro's description (``buildRequestOf``), the one the
+  ## worker reads them with.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   if target.len == 0:
-    target = "."
-  var base = splitTarget(target).base
-  if base.len == 0:
-    base = "."
-  if not base.isAbsolute:
-    if workingDir.len == 0:
-      return ""
-    base = absolutePath(base, workingDir)
+    return ""
+  # Parsed WITH its fragment, as the worker parses it when it names the
+  # project its stats session belongs to (``runDirectBuild``): ``./sub#mod``
+  # selects the module ``sub/mod.nim`` even where ``sub/`` holds no project
+  # file, and dropping the fragment named no project at all.
   try:
-    let parsed = parseBuildTarget(base)
+    let parsed = parseBuildTarget(target)
     if not parsed.modulePath.isAbsolute or
         not fileExists(extendedPath(parsed.modulePath)):
       return ""
@@ -41312,18 +41374,17 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
   ## a build decide differently — every warm-table key embeds the full path, so
   ## entries under the wrong directory are never looked up — but it would make
   ## the pass useless, so it is derived rather than guessed.
-  # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
+  # THE SELECTORS ARE THE BUILD'S, with no `build` verb to skip.
   # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every route
   # into it strips the verb first -- the dispatcher passes the words after
   # it, and the internal callers compose their own argument vectors without
-  # one. Skipping a literal "build" here would therefore skip a real target:
-  # ``repro build build``, in a directory holding a ``build/`` project, would
-  # warm the caches of ``.`` instead.
+  # one. Skipping a literal "build" here would therefore skip a real
+  # selector. The anchor is chosen by the build's own rule
+  # (``daemonRequestBuildAnchor``), not by taking the first positional.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   var workRoot = request.get.workRoot
   let forceRefresh = request.get.forceRebuild or request.get.dryRun
   if forceRefresh:
@@ -41331,7 +41392,7 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
     # work with no consumer.
     return ""
   if target.len == 0:
-    target = "."
+    return ""
   if workRoot.len == 0:
     for entry in requestEnvironment:
       let eq = entry.find('=')
@@ -86915,7 +86976,8 @@ type
     reportPath: string
     buildFlags: seq[string]
       ## The build's command line: every `repro build` flag given on this
-      ## command line (``buildWordsOf``), for the build the verb-alias and
+      ## command line (``argvOf`` of its origins, ``reproBuildFlagNames``),
+      ## for the build the verb-alias and
       ## certifying paths run. Selectors and the words after ``--`` are not
       ## in it.
     lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
@@ -89404,7 +89466,12 @@ proc testOptionsOf[C, O](c: C; origin: O): ReproTestShardOpts =
     c.listTargetsJson or c.printSolvedGraph)
   result.selectors = c.selectors
   result.actionArgs = c.actionArgs
-  result.buildFlags = buildWordsOf(c, origin)
+  # The build flags this command line gave, written back by confutils as
+  # the build's words (`--<long>[=<value>]`, in the order given, a switch
+  # that stands for another flag's value as itself); what a variable gave
+  # is left out, because the build reads the same variable.
+  result.buildFlags = argvOf(origin, only = reproBuildFlagNames(),
+    commandWords = false)
 
 proc testBuildArgs(opts: ReproTestShardOpts;
                    selectors: seq[string]): seq[string] =
@@ -91334,8 +91401,8 @@ proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
     # multi-machine CI path; the alias is the inner-loop "run my
     # tests" path.
     # The build's command line is every build flag this command line gave
-    # (``buildWordsOf``); the build reads the variables those flags declare
-    # itself.
+    # (``argvOf`` of its origins); the build reads the variables those flags
+    # declare itself.
     #
     # TC-8e: a run that executes tests issues a certificate for each
     # certificate-producing node it materializes. ``--no-certify`` opts out,
@@ -91537,6 +91604,17 @@ proc reproTestRunVariants*(args: openArray[string]):
       putEnv("REPRO_VARIANTS", opts.callerVariants.get)
     else:
       delEnv("REPRO_VARIANTS")
+
+proc reproTestBuildWords*(args: openArray[string]):
+    tuple[buildFlags, variants: seq[string]] =
+  ## What ``repro test <args>`` hands the builds it runs (``buildFlags``:
+  ## the build flags its command line gave, as words) and the variant
+  ## assignments it evaluates the recipe with itself (``variants``: the
+  ## certificate plan, the lock refresh, the sharded path). Runs nothing;
+  ## for the tests of the build's command line.
+  let (c, origin) = loadTestCommandLine(args)
+  let opts = testOptionsOf(c, origin)
+  (opts.buildFlags, opts.variants)
 
 const checkSetTarget* = "pre-commit"
   ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
@@ -96307,7 +96385,7 @@ proc runPromptInitCommand*(shell: string): int =
   ## the live prompt. ``repro prompt init help`` is its help, as it always
   ## was.
   if shell == "help":
-    stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
+    printReproHelp(["prompt", "init"])
     return 0
   let snippet = renderPromptInitSnippet(shell.toLowerAscii())
   if snippet.len == 0:
@@ -104949,8 +105027,7 @@ proc runWorkspaceSetsCommand*(c: ReproCommandLineWorkspaceSets): int =
   ## ``repro workspace sets …`` from its configuration.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "sets"] &
-      req.names))
+    printReproHelp(@["workspace", "sets"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "sets")
 
@@ -104963,8 +105040,7 @@ proc runWorkspaceProjectsCommand*(c: ReproCommandLineWorkspaceProjects): int =
   ## is removed with the third migration step rather than the second.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "projects"] &
-      req.names))
+    printReproHelp(@["workspace", "projects"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "projects")
 
@@ -105039,8 +105115,7 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
   ## repeatable flag here rather than a positional implying exactly one.
   let req = reposRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "repos"] &
-      req.sets))
+    printReproHelp(@["workspace", "repos"] & req.sets)
     return 0
   let sub = req.sub
   let workspaceRoot = projectsWorkspaceRoot(req.workspaceRoot)
@@ -105728,14 +105803,14 @@ proc runLegacyCommand(programName: string; args: seq[string];
     "line `repro " & args[0] & "` accepts; run `repro help " & args[0] & "`")
   2
 
-proc namespaceHelpText(namespace: string; topic: seq[string]): string =
+proc printNamespaceHelp(namespace: string; topic: seq[string]) =
   ## The help `repro <namespace> help [<word>...]` prints: the subcommand's
   ## when the words name one, else the namespace's (whose own parser always
   ## answered `help` with its usage, whatever followed).
   try:
-    ReproCommandLine.helpText(@[namespace] & topic)
+    printReproHelp(@[namespace] & topic)
   except CliUsageError:
-    ReproCommandLine.helpText([namespace])
+    printReproHelp([namespace])
 
 proc cacheIdentityValuesOf[T](c: T): bcCliDispatch.CacheIdentityValues =
   ## The identity flags of `repro cache publish|derive-key|gen-key`.
@@ -105762,10 +105837,10 @@ proc runCacheCommand(conf: ReproCommandLineCache): int =
     case conf.command
     of ReproCommandLineCacheCommand.call:
       # `repro cache` alone prints its help.
-      stdout.write(ReproCommandLine.helpText(["cache"]))
+      printReproHelp(["cache"])
       return 0
     of ReproCommandLineCacheCommand.help:
-      stdout.write(namespaceHelpText("cache", conf.help.topic))
+      printNamespaceHelp("cache", conf.help.topic)
       return 0
     of ReproCommandLineCacheCommand.lookup:
       return bcCliDispatch.cacheLookup(conf.lookup.entryKey)
@@ -105848,7 +105923,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       enclosingWorkspaceRoot(startPath))
   case conf.command
   of ReproCommandLineBundleCommand.help:
-    stdout.write(namespaceHelpText("bundle", conf.help.topic))
+    printNamespaceHelp("bundle", conf.help.topic)
     return 0
   of ReproCommandLineBundleCommand.create:
     let c = conf.create
@@ -106058,9 +106133,12 @@ proc runReproHelp(programName: string; topic: seq[string];
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
     if next < 0:
-      stderr.writeLine("repro help: unknown command '" &
-        topic[0 .. i].join(" ") & "'")
-      stderr.writeLine("Run `repro --help` for the list of commands.")
+      # Words that name no command: clispec's unknown-subcommand error for
+      # them (its error block, with the similar subcommands as the tip).
+      try:
+        discard ReproCommandLine.helpText(topic[0 .. i])
+      except CliUsageError as e:
+        return reportReproUsageError(e)
       return 2
     command = next
     if reproCommandIsPassThrough(command):
@@ -106070,9 +106148,10 @@ proc runReproHelp(programName: string; topic: seq[string];
         stdout.write(synopsis)
         return 0
       break
+  # Printed as every help page is (``printReproHelp``: styled for stdout by
+  # clispec's printer).
   try:
-    stdout.write(ReproCommandLine.helpText(reproCommandPath(command),
-      long = all, all = all))
+    printReproHelp(reproCommandPath(command), all = all)
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
@@ -106119,8 +106198,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace bootstrap"
       case c.bootstrap.command
       of ReproCommandLineWorkspaceBootstrapCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "bootstrap"] &
-          c.bootstrap.help.topic))
+        printReproHelp(@["workspace", "bootstrap"] & c.bootstrap.help.topic)
         return 0
       of ReproCommandLineWorkspaceBootstrapCommand.call:
         return runWorkspaceBootstrapCommand(c.bootstrap.call.dir,
@@ -106184,8 +106262,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace provision"
       case c.provision.command
       of ReproCommandLineWorkspaceProvisionCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "provision"] &
-          c.provision.help.topic))
+        printReproHelp(@["workspace", "provision"] & c.provision.help.topic)
         return 0
       of ReproCommandLineWorkspaceProvisionCommand.call:
         return runWorkspaceProvisionCommand(c.provision.call.installRoot,
@@ -106224,7 +106301,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
       echo renderVersion(programName)
       return 0
     # Bare `repro`: no command was given, which is a usage error.
-    stderr.write(ReproCommandLine.helpText())
+    printReproHelp(stream = stderr)
     return 2
   of ReproCommandLineCommand.help:
     return runReproHelp(programName, conf.help.topic, publicCliPath,

@@ -57,7 +57,7 @@ libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim	nim	2
 libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim	nim	4
-libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim	nim	11
+libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim	nim	12
 libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim	nim	7
 libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
@@ -299,7 +299,7 @@ libs/repro_cli_support/tests/t_cli_parse_reads_only_declared_env.nim	nim	4
 libs/repro_cli_support/tests/t_connection_ends_with_its_leaf.nim	nim	3
 libs/repro_cli_support/tests/t_cross_target_flag.nim	nim	8
 libs/repro_cli_support/tests/t_daemon_carried_environment.nim	nim	18
-libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	8
+libs/repro_cli_support/tests/t_daemon_parent_prewarm.nim	nim	9
 libs/repro_cli_support/tests/t_data_file_row_selection_fixtures.nim	nim	3
 libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim	nim	4
 libs/repro_cli_support/tests/t_deploy_agent_keygen_cli.nim	nim	4
@@ -523,7 +523,7 @@ libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
-libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_sized_typed_tools.nim	nim	12
@@ -692,6 +692,7 @@ libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.
 libs/repro_local_store/tests/t_tar_member_listing.nim	nim	15
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
+libs/repro_local_store/tests/t_write_sequence_never_falls_behind_a_surviving_record.nim	nim	5
 libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim	nim	7
 libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim	nim	5
 libs/repro_lock/tests/t_catalog_import_pins.nim	nim	5
@@ -1848,12 +1849,13 @@ tests/integration/t_cose_rfc9052_vectors.nim	nim	21
 tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	nim	3
 tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim	nim	5
 tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim	nim	1
-tests/integration/t_cs_m6_build_family_command_lines.nim	nim	19
+tests/integration/t_cs_m6_build_family_command_lines.nim	nim	21
 tests/integration/t_cs_m6_dev_env_command_lines.nim	nim	5
 tests/integration/t_cs_m6_develop_and_flake_command_lines.nim	nim	4
 tests/integration/t_cs_m6_machines_command_lines.nim	nim	4
 tests/integration/t_cs_m6_project_introspection_command_lines.nim	nim	4
 tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim	nim	3
+tests/integration/t_cs_m6_usage_errors_and_coloured_help.nim	nim	5
 tests/integration/t_cs_m6_workspace_command_lines.nim	nim	5
 tests/integration/t_ct_test_surface_case_addressability.nim	nim	6
 tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim	nim	9
