@@ -18746,7 +18746,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_elevation"
+        "repro_elevation",
+        "repro_test_support"
       ],
       "owner": "libs/repro_elevation",
       "requiresReproBinary": false,

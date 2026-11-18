@@ -32,6 +32,7 @@
 import std/unittest
 
 import repro_elevation
+import repro_test_support/reasoned_skip
 
 when defined(windows):
   import std/[os, strutils, sysrand, winlean]
@@ -52,11 +53,12 @@ when defined(windows):
 
   proc pipeName(id: string): string = "\\\\.\\pipe\\repro-elev-" & id
 
-  proc squatInstance(name: string): Handle =
+  proc squatInstance(name: string;
+                     maxInstances = PipeUnlimitedInstances): Handle =
     ## What a same-user process would do: create an instance of `name`
-    ## with the default DACL and room for more instances.
+    ## with the default DACL and, by default, room for more instances.
     createNamedPipe(newWideCString(name), PipeAccessDuplex,
-      PipeRejectRemoteClients, PipeUnlimitedInstances, 4096, 4096, 0, nil)
+      PipeRejectRemoteClients, maxInstances, 4096, 4096, 0, nil)
 
   proc openClient(name: string; access: int32): Handle =
     createFileW(newWideCString(name), access, 0, nil, OpenExisting, 0, 0)
@@ -66,13 +68,17 @@ when defined(windows):
       let id = freshId()
       var ch = createListeningChannel(id)
       defer: ch.close()
-      let squatter = squatInstance(pipeName(id))
-      let err = osLastError()
-      if squatter != INVALID_HANDLE_VALUE:
-        discard closeHandle(squatter)
-      checkpoint "elevated=" & $isProcessElevated() &
-        " squatter CreateNamedPipeW status " & $int(err)
-      check squatter == INVALID_HANDLE_VALUE
+      # Both instance counts: a squatter asking for unlimited instances
+      # is refused on the count mismatch alone, so one asking for 1, the
+      # parent's own count, is what shows the parent's limit holds.
+      for maxInstances in [PipeUnlimitedInstances, 1'i32]:
+        let squatter = squatInstance(pipeName(id), maxInstances)
+        let err = osLastError()
+        if squatter != INVALID_HANDLE_VALUE:
+          discard closeHandle(squatter)
+        checkpoint "elevated=" & $isProcessElevated() & " nMaxInstances=" &
+          $maxInstances & " squatter CreateNamedPipeW status " & $int(err)
+        check squatter == INVALID_HANDLE_VALUE
 
     test "the parent refuses a name somebody created first":
       let id = freshId()
@@ -85,9 +91,8 @@ when defined(windows):
 
     test "a non-elevated process can neither open the pipe nor rewrite its DACL":
       if isProcessElevated():
-        echo "    SKIP reason: needs a non-elevated run; an elevated " &
-          "client is admitted by design"
-        skip()
+        skip("needs a non-elevated run; an elevated client is " &
+          "admitted by design")
       else:
         let id = freshId()
         var ch = createListeningChannel(id)
@@ -103,8 +108,7 @@ when defined(windows):
 
     test "an elevated client is accepted":
       if not isProcessElevated():
-        echo "    SKIP reason: needs an elevated run"
-        skip()
+        skip("needs an elevated run")
       else:
         let id = freshId()
         var ch = createListeningChannel(id)
@@ -117,4 +121,4 @@ when defined(windows):
 else:
   suite "elevation pipe: a same-user squatter gets nothing":
     test "Windows named pipes only":
-      skip()
+      skip("the squatting cases use Windows named pipes; this is not Windows")

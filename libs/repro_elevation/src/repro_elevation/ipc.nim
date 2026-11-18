@@ -36,7 +36,7 @@
 
 import std/[strutils, sysrand]
 when defined(windows):
-  import std/typedthreads
+  import std/[monotimes, times, typedthreads]
 
 import ./errors
 import ./protocol
@@ -477,6 +477,9 @@ when defined(windows):
   proc WaitForSingleObject(handle: HANDLE; ms: DWORD): DWORD
     {.importc, stdcall, dynlib: "kernel32".}
 
+  proc GetExitCodeProcessW(process: HANDLE; code: ptr DWORD): BOOL
+    {.importc: "GetExitCodeProcess", stdcall, dynlib: "kernel32".}
+
   proc GetCurrentProcessId(): DWORD
     {.importc, stdcall, dynlib: "kernel32".}
 
@@ -484,16 +487,34 @@ when defined(windows):
     {.importc, stdcall, dynlib: "kernel32".}
 
   type
+    Luid = object
+      ## `LUID` (winnt.h): two 32-bit halves, so the struct is 4-byte
+      ## aligned. An `int64` here would be 8-byte aligned and move it.
+      lowPart: uint32
+      highPart: int32
+
     TokenPrivileges1 = object
+      ## `TOKEN_PRIVILEGES` with one `LUID_AND_ATTRIBUTES` entry:
+      ## https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-token_privileges
       count: DWORD
-      luid: int64
+      luid: Luid
       attributes: DWORD
+
+  # The layout Windows reads: 16 bytes, LUID at 4, attributes at 12. An
+  # earlier declaration used `int64` for the LUID, which Nim aligned to
+  # offset 8, so `AdjustTokenPrivileges` read a wrong LUID and the
+  # privilege was never enabled. Checked at compile time so it cannot
+  # come back silently.
+  static:
+    doAssert sizeof(TokenPrivileges1) == 16
+    doAssert offsetOf(TokenPrivileges1, luid) == 4
+    doAssert offsetOf(TokenPrivileges1, attributes) == 12
 
   proc OpenProcessToken(process: HANDLE; access: DWORD; token: PHANDLE): BOOL
     {.importc, stdcall, dynlib: "advapi32".}
 
   proc LookupPrivilegeValueW(system: LPCWSTR; name: LPCWSTR;
-                             luid: ptr int64): BOOL
+                             luid: ptr Luid): BOOL
     {.importc, stdcall, dynlib: "advapi32".}
 
   proc AdjustTokenPrivileges(token: HANDLE; disableAll: BOOL;
@@ -507,6 +528,8 @@ when defined(windows):
     SYNCHRONIZE: DWORD = 0x00100000
     PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000
     WAIT_TIMEOUT: DWORD = 258
+    STILL_ACTIVE: DWORD = 259
+    ERROR_NOT_ALL_ASSIGNED: DWORD = 1300
 
   type
     ParentWatch* = object
@@ -527,25 +550,33 @@ when defined(windows):
     ## the broker can hold the parent and know it is the same process.
     (int(GetCurrentProcessId()), processStartTime(GetCurrentProcess()))
 
-  proc enableDebugPrivilege() =
+  proc setDebugPrivilege(enable: bool): bool =
     ## Under Administrator Protection, or an over-the-shoulder
     ## elevation, the broker runs as another account, which the
     ## parent's process DACL may not admit. An elevated administrator
-    ## holds SeDebugPrivilege (disabled); enable it so the parent can
-    ## be opened. Best effort: a failure surfaces as the open's error.
+    ## holds SeDebugPrivilege (disabled); the broker enables it only
+    ## around opening the parent, then disables it again.
+    ##
+    ## Returns whether the privilege now has the requested state.
+    ## Best effort: when enabling fails, the open that needed it
+    ## surfaces the error. `AdjustTokenPrivileges` succeeds with
+    ## `ERROR_NOT_ALL_ASSIGNED` when the token lacks the privilege, so
+    ## that status is read too.
     var token: HANDLE
     if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES or
         TOKEN_QUERY, addr token) == 0:
-      return
+      return false
     defer: discard CloseHandle(token)
     var name = toWideZ("SeDebugPrivilege")
     var tp: TokenPrivileges1
     if LookupPrivilegeValueW(nil, cast[LPCWSTR](addr name[0]),
         addr tp.luid) == 0:
-      return
+      return false
     tp.count = 1
-    tp.attributes = SE_PRIVILEGE_ENABLED
-    discard AdjustTokenPrivileges(token, 0, addr tp, 0, nil, nil)
+    tp.attributes = if enable: SE_PRIVILEGE_ENABLED else: 0
+    if AdjustTokenPrivileges(token, 0, addr tp, 0, nil, nil) == 0:
+      return false
+    GetLastError() != ERROR_NOT_ALL_ASSIGNED
 
   proc processStartTimeOf*(pid: int): uint64 =
     ## Creation time of a running process (test support and diagnostics).
@@ -560,12 +591,15 @@ when defined(windows):
     ## process that launched this broker (pid AND creation time).
     if pid <= 0 or pid > int(high(uint32)):
       raiseChannelAuth("not a process id: " & $pid)
-    enableDebugPrivilege()
+    let enabled = setDebugPrivilege(true)
     let h = OpenProcess(SYNCHRONIZE or PROCESS_QUERY_LIMITED_INFORMATION,
       0, DWORD(pid))
+    let openErr = GetLastError()
+    if enabled:
+      discard setDebugPrivilege(false)
     if h == nil:
       raiseChannelAuth("cannot open the launching parent (pid " & $pid &
-        ", status " & $GetLastError() & "); refusing to connect")
+        ", status " & $openErr & "); refusing to connect")
     result.handle = h
     if processStartTime(h) != start:
       discard CloseHandle(h)
@@ -581,7 +615,14 @@ when defined(windows):
     ## (`DuplicateHandle` with `DUPLICATE_CLOSE_SOURCE`) while the
     ## parent lives; that is tampering with the parent, the residual
     ## the spec names.
-    if WaitForSingleObject(w.handle, 0) != WAIT_TIMEOUT:
+    # Both signals: the process object not yet signalled AND its exit
+    # code still STILL_ACTIVE. A process that has begun exiting may have
+    # released its handles (the pipe's name) before its object is
+    # signalled; the exit code is set first.
+    var code: DWORD
+    if WaitForSingleObject(w.handle, 0) != WAIT_TIMEOUT or
+        GetExitCodeProcessW(w.handle, addr code) == 0 or
+        code != STILL_ACTIVE:
       raiseChannelAuth("the launching parent exited before the broker " &
         "connected; the pipe may not be the parent's")
 
@@ -600,7 +641,7 @@ when defined(windows):
     ## parent, so opening the name reaches the parent's instance.
     let name = pipeNameForChannel(channelId)
     var wide = toWideZ(name)
-    var waited = 0
+    let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
     while true:
       let h = CreateFileW(cast[LPCWSTR](addr wide[0]),
         GENERIC_READ or GENERIC_WRITE, 0, nil, OPEN_EXISTING,
@@ -617,11 +658,12 @@ when defined(windows):
       if err != ERROR_PIPE_BUSY:
         raiseBrokerLaunch("broker could not open the parent pipe " &
           name & " (status " & $err & ")")
-      if waited >= timeoutMs:
+      # Measure real time: `WaitNamedPipeW` can return at once, so
+      # counting its slice would give up long before the timeout.
+      if getMonoTime() >= deadline:
         raiseBrokerLaunch("timed out waiting for the parent pipe " & name)
       let slice: DWORD = 250
       discard WaitNamedPipeW(cast[LPCWSTR](addr wide[0]), slice)
-      waited += int(slice)
 
 else:
   # POSIX skeleton — M68 Phase A/B precedent. The platform-pure

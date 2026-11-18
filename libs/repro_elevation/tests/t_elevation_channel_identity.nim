@@ -87,8 +87,14 @@ when defined(windows):
     test "the launching parent is accepted while it lives":
       let me = currentProcessIdentity()
       var w = watchParent(me.pid, me.start)
-      requireParentAlive(w)
+      let accepted =
+        try:
+          requireParentAlive(w)
+          true
+        except EChannelAuth:
+          false
       w.close()
+      check accepted
 
     test "a parent that died before the connect is refused":
       # The attack: kill the parent so its pipe name is released, then
