@@ -1886,6 +1886,41 @@ proc splitDeclaredPathEnv(env: openArray[(string, string)]):
     else:
       result.rest.add(entry[0] & "=" & entry[1])
 
+proc withEdgeEnvPassthrough*(decided: seq[string];
+                             declared: openArray[string];
+                             actionId: string): seq[string] =
+  ## An action's engine-side ``envPassthrough``: the names the `PATH`
+  ## decision chose (``ActionPathDecision.passthrough``) followed by the
+  ## names the edge itself declared (``BuildActionDef.envPassthrough``,
+  ## e.g. the temp-directory names ``nim.c`` names), deduplicated in that
+  ## order. Every process lowering site in ``lowerGraphAction`` builds its
+  ## list here -- after the `PATH` decision where it makes one; the built-in
+  ## HCR site makes none and passes ``decided = @[]`` -- so no site can drop
+  ## the edge's declaration: a site that did would key those reads by value
+  ## again and miss on the first build in every new shell.
+  ##
+  ## Passed to ``repro_build_engine.action`` rather than set on the result,
+  ## because ``action()`` folds the names into the weak fingerprint
+  ## (``keyedOnActionEnvironment``): a passthrough NAME is part of what the
+  ## action is, its value is not.
+  ##
+  ## ``PATH`` is refused. Its class -- hermetic and keyed by value, or the
+  ## host's and keyed by name -- is decided by ``actionPathDecision`` alone,
+  ## and an edge-declared ``PATH`` passthrough on a hermetic edge would
+  ## drop the composed toolchain directories from its key while
+  ## ``classifyActionPath`` reported it as inherited.
+  result = decided
+  for name in declared:
+    if name.len == 0:
+      continue
+    if cmpIgnoreCase(name, "PATH") == 0:
+      raise newException(ValueError,
+        "action " & actionId & " declares `" & name & "` as environment " &
+          "passthrough; an action's PATH class is decided by its tool " &
+          "references, not declared by the edge")
+    if name notin result:
+      result.add(name)
+
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
   # CMake may invoke ``repro build --prepare-only`` while regenerating.
@@ -3442,7 +3477,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     let inlinePath = actionPathDecision(actionPathPrefix,
       declaredPath = inlineDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-    var inlineEnvPassthrough = inlinePath.passthrough
+    var inlineEnvPassthrough = withEdgeEnvPassthrough(inlinePath.passthrough,
+      payload.envPassthrough, payload.id)
     for entry in inlinePath.env:
       inlineEnv.add(entry)
     for entry in inlineDeclaredEnv.rest:
@@ -3601,6 +3637,11 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       # ``nim.c`` does (see ``compileDependencyPolicy``).
       nonDeterminism = payload.nonDeterminism,
       nonDeterminismJustification = payload.nonDeterminismJustification,
+      # This site makes no `PATH` decision (it runs this image by absolute
+      # path), so the edge's own names are the whole list; carried so a
+      # declaration is never dropped silently. Empty for every edge today.
+      envPassthrough = withEdgeEnvPassthrough(@[], payload.envPassthrough,
+        payload.id),
       commandStatsId = commandStatsId)
 
   let executableName = payload.call.executableName
@@ -3734,7 +3775,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     let unittestPath = actionPathDecision(actionPathPrefix,
       declaredPath = unittestDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-    var mergedEnvPassthrough = unittestPath.passthrough
+    var mergedEnvPassthrough = withEdgeEnvPassthrough(
+      unittestPath.passthrough, payload.envPassthrough, payload.id)
     for entry in unittestPath.env:
       mergedEnv.add(entry)
     # MR10: per-edge env-var injections from the typed-tool wrapper's
@@ -3851,7 +3893,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   let typedToolPath = actionPathDecision(actionPathPrefix,
     declaredPath = typedDeclaredEnv.path,
     edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-  var mergedEnvPassthrough = typedToolPath.passthrough
+  var mergedEnvPassthrough = withEdgeEnvPassthrough(
+    typedToolPath.passthrough, payload.envPassthrough, payload.id)
   for entry in typedToolPath.env:
     mergedEnv.add(entry)
   # MR10: per-edge env-var injections from the typed-tool wrapper's
