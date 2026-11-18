@@ -323,6 +323,25 @@ class StagedDataFilesTests(unittest.TestCase):
         self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
         self.assertIn("ok      source/libs/r/src/closures/m.manifest", check.stdout)
 
+    def test_a_constant_early_in_a_large_crlf_module_is_resolved(self):
+        # The constant is found on line 1 of a module far larger than a pipe
+        # buffer. Fed through a pipe, the reader's early exit killed the
+        # writer with SIGPIPE, and `pipefail` made the whole check exit 141,
+        # depending on timing (seen on reprobuild agents, 2026-11-18). CRLF
+        # line endings cover the Windows checkout that motivated the check.
+        padding = "".join(f"# padding {i}\r\n" for i in range(100_000))
+        pkg = self._recipe_pkg(
+            "const\r\n  Manifest* = \"closures/m.manifest\"\r\n" + padding +
+            "package p:\r\n  provisioning:\r\n"
+            "    tarball url = \"u\", closureManifest = Manifest\r\n")
+        (pkg / "share/repro/source/libs/r/src/closures").mkdir()
+        (pkg / "share/repro/source/libs/r/src/closures/m.manifest").write_text("")
+        for _ in range(3):
+            check = self._check(pkg)
+            self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+            self.assertIn("ok      source/libs/r/src/closures/m.manifest",
+                          check.stdout)
+
     def test_a_reference_the_check_cannot_resolve_fails_it(self):
         pkg = self._recipe_pkg(
             "package p:\n  provisioning:\n"

@@ -120,8 +120,13 @@ check_file() {
 # one line, or `Name* =` with the literal on the next non-blank line.
 const_value() {
   # awk, not a sed script with labels: BSD sed (macOS) and GNU sed disagree
-  # on those, and the release verification runs under both.
-  tr -d '\r' < "$1" | awk -v name="$2" '
+  # on those, and the release verification runs under both. awk reads the
+  # file itself and strips CRs per line: fed through a pipe, the writer is
+  # killed by SIGPIPE when awk exits at the match before reading a large
+  # module to the end, and under `pipefail` + `set -e` that exit 141 ends the
+  # whole check.
+  awk -v name="$2" '
+    { sub(/\r$/, "") }
     function literal(s) {
       if (match(s, /^[[:space:]]*"[^"]*"/)) {
         s = substr(s, RSTART, RLENGTH); sub(/^[[:space:]]*"/, "", s)
@@ -138,7 +143,7 @@ const_value() {
       if (!sub("^[[:space:]]*" name "[*]?[[:space:]]*(:[^=]*)?=", "", line)) next
       if (line ~ /^[[:space:]]*$/) { pending = 1; next }
       literal(line); exit
-    }'
+    }' "$1"
 }
 
 echo "=== Checking the run-time data files the recipes in $share name ==="
