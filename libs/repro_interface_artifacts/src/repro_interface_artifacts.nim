@@ -1239,9 +1239,9 @@ const
     ##                decided 2026-11-17, option 1). v33 and older
     ##                payloads decode them empty. They bind into every
     ##                fingerprint that binds the record, so a changed
-    ##                closure moves the interface fingerprint and the realization
-    ##                digest (the contribution field view of
-    ##                ``contribution_fingerprint`` does not bind it); the fingerprint projection
+    ##                closure moves the interface fingerprint, the realization
+    ##                digest and the contribution fingerprint (``tarballFieldView``
+    ##                names it, only when present); the fingerprint projection
     ##                writes the block only when entries exist, so no
     ##                fingerprint hashed from a record without a closure
     ##                moves.
