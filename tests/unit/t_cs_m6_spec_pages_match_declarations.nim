@@ -191,11 +191,7 @@ const
     "flag\trepro watch\t--debounce", "flag\trepro watch\t--http",
     "flag\trepro watch\t--max-debounce", "flag\trepro watch\t--no-initial",
     "flag\trepro watch\t--target", "flag\trepro watch\t--task",
-    "flag\trepro watch\t--tier",
-    # Specified by its page after round 8a's fixture was cut, not
-    # implemented yet: `repro workspace shared-clones --reset-refs` (the
-    # gateway's stale-lease remedy).
-    "flag\trepro workspace shared-clones\t--reset-refs"]
+    "flag\trepro watch\t--tier"]
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [

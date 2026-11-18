@@ -22438,7 +22438,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_cs_m6_build_family_command_lines.nim",
@@ -23146,7 +23146,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_develop_refuses_cross_backend_revision_conflict.nim",
@@ -24022,7 +24022,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_gate_runs_after_the_chained_hook.nim",
@@ -24075,6 +24075,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_gateway_finds_certificates_by_the_pushed_tree.nim",
     binary: "build/test-bin/t_gateway_finds_certificates_by_the_pushed_tree",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g06",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_gateway_forced_push_publishes_a_rewrite_under_a_lease.nim",
+    binary: "build/test-bin/t_gateway_forced_push_publishes_a_rewrite_under_a_lease",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,

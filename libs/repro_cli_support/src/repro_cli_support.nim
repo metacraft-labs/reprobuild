@@ -68565,6 +68565,22 @@ type
       ## The real upstream (a second bare repo standing in for GitHub) the
       ## ``pre-receive`` forwards an accepted push to, before the gateway's
       ## own refs move (so an upstream refusal rejects the push).
+    workspaceRoot*: string
+      ## The workspace this gateway serves (Push-Gateway-Wiring-And-Policy
+      ## §3.2, §6.1 step 5). ``pre-receive`` resolves the declared roles of
+      ## ``repo`` from it to refuse a forced update or a deletion of a role
+      ## branch (§5.3 "Forced updates"). Empty in a config written before the
+      ## key existed: the role cannot be resolved, and such an update is
+      ## refused (fail closed).
+    project*: string
+      ## The project ``workspaceRoot``'s manifests are resolved for. Empty
+      ## resolves the workspace's active project.
+    repo*: string
+      ## The workspace member this gateway publishes, by its manifest name.
+    repoIsWorkspaceRoot*: bool
+      ## The gateway publishes the workspace ROOT repository, which is no
+      ## project member: its declared roles come from the settings file
+      ## (Workspace-Branch-Roles §3.4), as the client protocol reads them.
     # TC-8c (operator decision D12): there is no certificate-store setting.
     # The gateway reads certificates ONLY from the notes that arrive with the
     # push; its former read of ``.repro/workspace/certificates`` is gone and
@@ -68580,6 +68596,17 @@ proc serializeGatewayConfig*(cfg: GatewayConfig): string =
   result.add("registered_keys = \"" &
     tomlEscapeCert(cfg.registeredKeysPath) & "\"\n")
   result.add("upstream = \"" & tomlEscapeCert(cfg.upstreamUrl) & "\"\n")
+  # Written only when known, so a gateway wired outside a workspace keeps the
+  # bytes it always had.
+  if cfg.workspaceRoot.len > 0:
+    result.add("workspace_root = \"" & tomlEscapeCert(cfg.workspaceRoot) &
+      "\"\n")
+  if cfg.project.len > 0:
+    result.add("project = \"" & tomlEscapeCert(cfg.project) & "\"\n")
+  if cfg.repo.len > 0:
+    result.add("repo = \"" & tomlEscapeCert(cfg.repo) & "\"\n")
+  if cfg.repoIsWorkspaceRoot:
+    result.add("repo_is_workspace_root = true\n")
 
 const GatewayRetiredPolicyKeys* = ["gate_mode", "required_targets",
                                    "required_platforms"]
@@ -68616,6 +68643,11 @@ proc parseGatewayConfig*(content: string): GatewayConfig =
     of "lock_records_dir": result.lockRecordsDir = parseTomlBasicValue(rhs)
     of "registered_keys": result.registeredKeysPath = parseTomlBasicValue(rhs)
     of "upstream": result.upstreamUrl = parseTomlBasicValue(rhs)
+    of "workspace_root": result.workspaceRoot = parseTomlBasicValue(rhs)
+    of "project": result.project = parseTomlBasicValue(rhs)
+    of "repo": result.repo = parseTomlBasicValue(rhs)
+    of "repo_is_workspace_root":
+      result.repoIsWorkspaceRoot = rhs.strip() == "true"
     else: discard
   if not sawSchema:
     raise newException(ValueError,
@@ -69581,9 +69613,263 @@ const AtomicPushUnsupportedMarker =
   "the receiving end does not support --atomic push"
   ## git's own refusal when the receiving side does not advertise ``atomic``.
 
+proc declaredRoleBranches(resolved: ResolvedProject;
+    repoName: string): seq[tuple[role, branch: string]]
+  ## Forward declaration; defined beside the pre-push role refusal.
+
+proc rootDeclaredRoleBranches(settings: WorkspaceSettings):
+    seq[tuple[role, branch: string]]
+  ## Forward declaration; defined beside ``declaredRoleBranches``.
+
+const gatewayZeroSha = "0000000000000000000000000000000000000000"
+
+proc isZeroOid(oid: string): bool =
+  ## git's all-zeroes object name, of either hash length (SHA-1 or SHA-256).
+  oid.len > 0 and oid.allCharsInSet({'0'})
+
+type
+  GatewayLease* = object
+    ## One ``--force-with-lease=<ref>:<expect>`` the forward carries
+    ## (Push-Gateway-Wiring-And-Policy §5.3 "Forced updates").
+    refName*: string
+    expect*: string   ## the ``<old>`` the client saw: the gateway's ref
+    newSha*: string   ## all-zeroes for a deletion
+
+  GatewayUpdateClassification* = object
+    ok*: bool
+    diagnostic*: string          ## why the push is refused, when not ``ok``
+    leases*: seq[GatewayLease]   ## forced branch updates and branch deletions
+
+proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+    tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
+  ## The branches a declared role names for the repository this gateway
+  ## publishes, resolved from the workspace its config names the way the
+  ## client protocol resolves them: a member's from the active project set
+  ## (the recorded ``project`` only when that does not contain the member),
+  ## the workspace root's from the settings file. ``ok`` is false when they
+  ## cannot be resolved; the caller then refuses (fail closed).
+  if cfg.workspaceRoot.len == 0 or
+      (cfg.repo.len == 0 and not cfg.repoIsWorkspaceRoot):
+    return (ok: false, branches: @[], why: "the gateway's config names no " &
+      "workspace repository (the gateway was wired outside a workspace, or " &
+      "before 'workspace_root' and 'repo' were recorded; in the latter case " &
+      "'repro gateway migrate' in the workspace rewrites its config)")
+  if not dirExists(cfg.workspaceRoot):
+    return (ok: false, branches: @[], why: "the workspace '" &
+      cfg.workspaceRoot & "' named by the gateway's config does not exist")
+  if cfg.repoIsWorkspaceRoot:
+    try:
+      let settingsPath = findWorkspaceSettingsPath(cfg.workspaceRoot)
+      if settingsPath.len == 0 or not fileExists(settingsPath):
+        return (ok: true, branches: @[], why: "")
+      return (ok: true, branches: rootDeclaredRoleBranches(
+        readWorkspaceSettings(settingsPath)), why: "")
+    except CatchableError as err:
+      return (ok: false, branches: @[], why: "the settings of '" &
+        cfg.workspaceRoot & "' could not be read: " & err.msg)
+  var candidates = @[(name: "", label: "the active project set")]
+  if cfg.project.len > 0:
+    candidates.add((name: cfg.project, label: "project '" & cfg.project & "'"))
+  var tried: seq[string]
+  for candidate in candidates:
+    var resolved: ResolvedProject
+    try:
+      resolved = resolveWorkspaceProjectShared(cfg.workspaceRoot,
+        candidate.name, "`repro gateway pre-receive`").resolved
+    except CatchableError as err:
+      tried.add(candidate.label & " could not be resolved: " & err.msg)
+      continue
+    for repo in resolved.repos:
+      if repo.name == cfg.repo:
+        return (ok: true, branches: declaredRoleBranches(resolved, cfg.repo),
+          why: "")
+    tried.add("'" & cfg.repo & "' is not a member of " & candidate.label)
+  (ok: false, branches: @[], why: "in '" & cfg.workspaceRoot & "', " &
+    tried.join("; "))
+
+proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
+                             updates: seq[GatewayRefUpdate];
+                             cfg: GatewayConfig;
+                             received = ReceivedObjectStore()):
+    GatewayUpdateClassification =
+  ## Push-Gateway-Wiring-And-Policy §5.3 "Forced updates", everything that
+  ## happens before the forward:
+  ##
+  ##   1. ``<old>`` must equal the gateway's current value of the ref
+  ##      (all-zeroes when it is absent). It is the CLIENT's claim, and git
+  ##      checks it only after ``pre-receive`` has forwarded; a crafted
+  ##      ``<old>`` naming the upstream's tip would otherwise lease away what
+  ##      the client never saw.
+  ##   2. An update is FORCED when ``<old>`` and ``<new>`` are both non-zero
+  ##      and ``<old>`` is not an ancestor of ``<new>``. Any other exit of
+  ##      ``merge-base --is-ancestor`` refuses the push.
+  ##   3. A forced update or a deletion of a ``refs/heads/*`` ref is leased
+  ##      at ``<old>``; of a branch a declared role names, it is refused, and
+  ##      it is refused too when the roles cannot be resolved. Forced updates
+  ##      of other refs stay plain (the upstream refuses them as before).
+  result.ok = true
+  var rolesLoaded = false
+  var roles: tuple[ok: bool; branches: seq[tuple[role, branch: string]];
+                   why: string]
+  for u in updates:
+    # The object the ref names (a tag object for an annotated tag), which is
+    # what git compares ``<old>`` with.
+    # The update must name a change: an all-zeroes ``<new>`` over an
+    # all-zeroes ``<old>`` is no deletion (nothing was there to delete), yet
+    # the forward would send it as ``:<ref>`` and delete the upstream's
+    # branch with no lease and no role check. Only a crafted client sends it.
+    if isZeroOid(u.oldSha) and isZeroOid(u.newSha):
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": the update names neither an old nor a new value; nothing was " &
+        "forwarded")
+    # The EXACT ref: ``rev-parse`` would fall back to git's name-guessing
+    # rules (``refs/heads/x`` also finds ``refs/heads/refs/heads/x``).
+    # ``for-each-ref`` exits 0 whether or not the ref exists; any other exit
+    # is a failure to look, which must not read as "absent".
+    let current = gitNoteQuery(gitBin, ["--git-dir=" & gatewayBareDir,
+      "for-each-ref", "--format=%(objectname) %(refname)", u.refName])
+    if current.code != 0:
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": could not read the gateway's current value (git for-each-ref " &
+        "exited " & $current.code & ": " & current.diagnostic.strip() &
+        "); nothing was forwarded")
+    var gatewayValue = ""
+    for line in current.output.splitLines():
+      let parts = line.strip().split(' ')
+      if parts.len == 2 and parts[1] == u.refName:
+        gatewayValue = parts[0]
+    let matches =
+      if gatewayValue.len == 0: isZeroOid(u.oldSha)
+      else: u.oldSha == gatewayValue
+    if not matches:
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": the pushed old value " & u.oldSha & " does not match the " &
+        "gateway's current value " &
+        (if gatewayValue.len > 0: gatewayValue else: "(absent)") &
+        "; nothing was forwarded (fetch, then push again)")
+    let isBranch = u.refName.startsWith("refs/heads/")
+    let deletion = isZeroOid(u.newSha) and not isZeroOid(u.oldSha)
+    var forced = false
+    # Only a branch can be leased or refused by role, so only a branch's
+    # ancestry is asked; any other ref is forwarded plain, as before.
+    if isBranch and not isZeroOid(u.oldSha) and not isZeroOid(u.newSha):
+      let anc = gitNoteRun(gitBin, ["--git-dir=" & gatewayBareDir,
+        "merge-base", "--is-ancestor", u.oldSha, u.newSha], received)
+      case anc.code
+      of 0: forced = false
+      of 1: forced = true
+      else:
+        return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+          ": could not tell whether " & u.oldSha & " is an ancestor of " &
+          u.newSha & " (git merge-base exited " & $anc.code & ": " &
+          anc.output.strip() & "); nothing was forwarded")
+    if not isBranch or not (forced or deletion):
+      continue
+    if not rolesLoaded:
+      roles = gatewayRoleBranchesFor(cfg)
+      rolesLoaded = true
+    let what = if deletion: "deletion" else: "forced update"
+    if not roles.ok:
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": a " & what & " is refused because the gateway cannot tell " &
+        "whether a declared role names this branch: " & roles.why)
+    let branch = u.refName["refs/heads/".len .. ^1]
+    for declared in roles.branches:
+      if declared.branch == branch:
+        let named =
+          if declared.role == "mainline": "the shared mainline '" & branch & "'"
+          else: "the shared branch '" & branch & "' (role `" &
+            declared.role & "`)"
+        return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+          ": mainline-history-rewrite: a " & what & " of " & named &
+          " is refused at the gateway ('--no-verify' does not bypass it); " &
+          "put the work on top of " & u.oldSha & ", which this gateway " &
+          "last published, or push it to a different branch. If the " &
+          "upstream itself was rewound and no longer holds " & u.oldSha &
+          ", run 'repro workspace shared-clones rewire --reset-refs' to " &
+          "reset this gateway's refs to it, then push again")
+    result.leases.add(GatewayLease(refName: u.refName, expect: u.oldSha,
+      newSha: u.newSha))
+
+proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
+                             lease: GatewayLease;
+                             received: ReceivedObjectStore): string =
+  ## The §5.3 diagnostic for a lease the upstream refused: what the upstream
+  ## holds now, the commits there the forced push would have discarded
+  ## (``rev-list U ^<new>``), and the remedy in order. ``""`` when the
+  ## upstream still holds ``<old>`` (this lease was not the stale one).
+  let remote = gitNoteQuery(gitBin, ["--git-dir=" & gatewayBareDir,
+    "ls-remote", upstreamUrl, lease.refName])
+  if remote.code != 0:
+    # Not knowing what the upstream holds must not read as "it has no such
+    # branch, nothing to integrate".
+    return lease.refName & ": the upstream refused the lease at " &
+      lease.expect & ", and what it holds now could not be read (git " &
+      "ls-remote exited " & $remote.code & ": " & remote.diagnostic.strip() &
+      "). Nothing was overwritten. Fetch '" &
+      lease.refName["refs/heads/".len .. ^1] & "', integrate it, run " &
+      "'repro workspace shared-clones rewire --reset-refs', and push again."
+  var upstreamTip = gatewayZeroSha
+  for line in remote.output.splitLines():
+    let parts = line.strip().split('\t')
+    if parts.len == 2 and parts[1] == lease.refName:
+      upstreamTip = parts[0]
+  if upstreamTip == lease.expect or
+      (isZeroOid(upstreamTip) and isZeroOid(lease.expect)):
+    return ""
+  let branch = lease.refName["refs/heads/".len .. ^1]
+  result = lease.refName & ": stale lease: the upstream holds " &
+    upstreamTip & ", not " & lease.expect & ", which this gateway last " &
+    "published"
+  if not isZeroOid(upstreamTip):
+    # The commits are on the upstream only. Fetch them into this gateway's
+    # object store (no ref, no FETCH_HEAD, no auto gc), then list them
+    # against <new>, which is still in the push quarantine. For a deletion
+    # there is no <new>: list what the client never saw, ``U ^<old>``.
+    let fetched = gitNoteRun(gitBin, ["--git-dir=" & gatewayBareDir, "fetch",
+      "--quiet", "--no-auto-gc", "--no-write-fetch-head", upstreamUrl,
+      upstreamTip], ReceivedObjectStore())
+    var listArgs = @["--git-dir=" & gatewayBareDir, "rev-list",
+      "--format=%h %s", "--no-commit-header", upstreamTip]
+    listArgs.add("^" & (if isZeroOid(lease.newSha): lease.expect
+                        else: lease.newSha))
+    let listed =
+      if fetched.code == 0: gitNoteQuery(gitBin, listArgs, received)
+      else: (code: fetched.code, output: "", diagnostic: fetched.output)  # git-merged-text: quoted whole, never parsed
+    if listed.code == 0:
+      const MaxListed = 20
+      var lines: seq[string]
+      var total = 0
+      for line in listed.output.splitLines():
+        if line.strip().len == 0: continue
+        inc total
+        if lines.len < MaxListed: lines.add("    " & line.strip())
+      if total > MaxListed:
+        lines.add("    ... and " & $(total - MaxListed) & " more")
+      result.add(if isZeroOid(lease.newSha):
+          ". The deletion would have discarded, among others, these " &
+            $total & " upstream commit(s) this gateway never published:\n"
+        else: ". The forced push would have discarded these " & $total &
+          " upstream commit(s):\n")
+      result.add(lines.join("\n"))
+    else:
+      result.add(". The upstream commits it would have discarded could not " &
+        "be listed: " & listed.diagnostic.strip())
+  result.add("\nNothing was overwritten. To publish this branch:\n" &
+    (if isZeroOid(upstreamTip):
+       "  1. the upstream no longer has '" & branch & "'; nothing there " &
+         "needs integrating;\n"
+     else:
+       "  1. fetch '" & branch & "' and integrate " & upstreamTip &
+         " (for example, rebase onto it);\n") &
+    "  2. run 'repro workspace shared-clones rewire --reset-refs', which " &
+    "resets this gateway's refs to the refreshed pool's;\n" &
+    "  3. push again: the push then descends from the upstream's tip.")
+
 proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
                                updates: seq[GatewayRefUpdate];
-                               received = ReceivedObjectStore()):
+                               received = ReceivedObjectStore();
+                               leases: seq[GatewayLease] = @[]):
     tuple[ok: bool; diagnostic: string] =
   ## The forward: push the refs being received from the gateway bare to the
   ## REAL upstream, from ``pre-receive``, after the gate accepted and BEFORE
@@ -69603,10 +69889,16 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
   ## reads the pushed objects through it as an alternate only
   ## (``forwardingObjectStoreEnv``). Branch deletions propagate as deletions;
   ## the certificate notes ref travels like any other received ref.
+  ##
+  ## ``leases`` (from ``gatewayClassifyUpdates``) are the forced branch
+  ## updates and branch deletions: each is forwarded with
+  ## ``--force-with-lease=<ref>:<old>`` and WITHOUT a ``+``, which git lets
+  ## override a stale lease (§5.3 "Forced updates", measured with git 2.43).
+  ## A stale lease refuses the whole atomic push, and the diagnostic lists the
+  ## upstream commits that would have been discarded.
   var refspecs: seq[string]
-  let zeroSha = "0000000000000000000000000000000000000000"
   for u in updates:
-    if u.newSha == zeroSha:
+    if isZeroOid(u.newSha):
       refspecs.add(":" & u.refName)             # deletion
     else:
       refspecs.add(u.newSha & ":" & u.refName)  # set ref to the received value
@@ -69619,6 +69911,9 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
       " push"
     if atomic:
       cmd.add(" --atomic")
+    for lease in leases:
+      cmd.add(" " & quoteShell("--force-with-lease=" & lease.refName & ":" &
+        lease.expect))
     cmd.add(" " & quoteShell(upstreamUrl))
     for r in refspecs:
       cmd.add(" " & quoteShell(r))
@@ -69632,9 +69927,16 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
       "non-atomically, so a partial update is possible)"
     res = push(atomic = false)
   if res.code != 0:
+    var stale: seq[string]
+    if "stale info" in res.output:  # git-merged-text: push's refusal reason
+      for lease in leases:
+        let report = gatewayStaleLeaseReport(gitBin, gatewayBareDir,
+          upstreamUrl, lease, received)
+        if report.len > 0: stale.add(report)
     return (ok: false, diagnostic: "the upstream " & upstreamUrl &
       " refused the forward" & note & "; nothing was published by this " &
-      "gateway: " & res.output.strip())
+      "gateway: " & res.output.strip() &
+      (if stale.len > 0: "\n" & stale.join("\n") else: ""))
   (ok: true, diagnostic: note.strip())
 
 # ---- ``repro gateway <phase>`` dispatch ------------------------------------
@@ -69878,12 +70180,23 @@ proc gatewayBarePathFor*(cacheRoot, workspaceName, upstreamUrl: string): string 
   ## intended relationship.
   parentDir(cacheRoot) / "gateways" / workspaceName / urlSlug(upstreamUrl)
 
-proc gatewayConfigForRepo(gitBin, workspaceRoot, repoName: string): GatewayConfig =
+proc gatewayConfigForRepo(gitBin, workspaceRoot, repoName, repoPath: string):
+    GatewayConfig =
   ## The bare gateway cannot resolve workspace routing while receiving a
   ## push. Capture the lock writer's project and per-repo backend here, when
   ## the workspace is available; a policy snapshot is not the record lock.
   let args = WorkspaceLockArgs(workspaceRoot: absolutePath(workspaceRoot))
   result.registeredKeysPath = registeredKeyStorePath(args.workspaceRoot)
+  # §5.3 "Forced updates": where ``pre-receive`` resolves the declared roles.
+  result.workspaceRoot = args.workspaceRoot
+  result.repo = repoName
+  # The workspace ROOT repository takes its roles from the settings file. It
+  # is told apart by its path, not by its name's absence from the project:
+  # its enumerated name is the workspace directory's, which may collide with a
+  # member's, and a member missing from the resolution must fail closed in
+  # ``pre-receive`` rather than borrow the root's roles.
+  result.repoIsWorkspaceRoot =
+    cmpPaths(absolutePath(repoPath), args.workspaceRoot) == 0
   let composed = composeLockingRouting(args.workspaceRoot, gitBin)
   var selection: tuple[resolved: ResolvedProject;
                        workspaceLocal: Option[WorkspaceLocal]]
@@ -69900,6 +70213,7 @@ proc gatewayConfigForRepo(gitBin, workspaceRoot, repoName: string): GatewayConfi
       return
     raise
   let (resolved, local) = selection
+  result.project = resolved.projectName
   var selected: seq[ResolvedRepo]
   for repo in resolved.repos:
     if repo.name == repoName:
@@ -69969,6 +70283,79 @@ proc seedGatewayRefsFromPool*(gitBin, gatewayDir, pool: string): string =
   if failures.len > 0:
     return "could not seed the gateway's branches: " & failures.join("; ")
   ""
+
+proc resetGatewayRefsToPool*(gitBin, gatewayDir, pool: string):
+    tuple[ok: bool; diagnostic: string] =
+  ## ``repro workspace shared-clones rewire --reset-refs``
+  ## (Push-Gateway-Wiring-And-Policy §5.2, §5.3 "Forced updates"): make the
+  ## gateway's ``refs/heads/*`` equal to the pool's. It DISCARDS this
+  ## workspace's publication record, which is why it is explicit: a branch the
+  ## pool lacks is deleted, and every other branch is moved to the pool's tip.
+  ##
+  ## It presumes a PG-0 pool, whose ``refs/heads/*`` track the upstream
+  ## through ``SharedBareFetchRefspec``. A pool without that refspec has refs
+  ## frozen at clone time, and resetting to them would rewind the gateway to a
+  ## stale tip; it is REFUSED, and nothing is changed.
+  let refspecs = gitNoteQuery(gitBin, ["--git-dir=" & pool, "config",
+    "--get-all", "remote.origin.fetch"])
+  var tracks = false
+  if refspecs.code == 0:
+    for line in refspecs.output.splitLines():
+      if line.strip() == SharedBareFetchRefspec:
+        tracks = true
+  if not tracks:
+    return (ok: false, diagnostic: "--reset-refs refused: the pool '" & pool &
+      "' carries no '" & SharedBareFetchRefspec & "' fetch refspec, so its " &
+      "branches are frozen at clone time and resetting the gateway '" &
+      gatewayDir & "' to them would rewind it; nothing was changed")
+  proc heads(gitDir: string): tuple[ok: bool; refs: seq[(string, string)];
+                                    why: string] =
+    let listed = gitNoteQuery(gitBin, ["--git-dir=" & gitDir, "for-each-ref",
+      "--format=%(objectname) %(refname)", "refs/heads/"])
+    if listed.code != 0:
+      return (ok: false, refs: @[], why: listed.diagnostic)
+    var refs: seq[(string, string)]
+    for line in listed.output.splitLines():
+      let parts = line.strip().split(' ')
+      if parts.len == 2 and parts[1].startsWith("refs/heads/"):
+        refs.add((parts[1], parts[0]))
+    (ok: true, refs: refs, why: "")
+  let poolHeads = heads(pool)
+  if not poolHeads.ok:
+    return (ok: false, diagnostic: "--reset-refs: could not list the pool's " &
+      "branches: " & poolHeads.why)
+  let gatewayHeads = heads(gatewayDir)
+  if not gatewayHeads.ok:
+    return (ok: false, diagnostic: "--reset-refs: could not list the " &
+      "gateway's branches: " & gatewayHeads.why)
+  var moved, removed: int
+  var failures: seq[string]
+  for (refName, sha) in poolHeads.refs:
+    var current = ""
+    for (r, s) in gatewayHeads.refs:
+      if r == refName: current = s
+    if current == sha: continue
+    # The old value makes git refuse to move a ref a push moved meanwhile.
+    let res = gitNoteRun(gitBin, ["--git-dir=" & gatewayDir, "update-ref",
+      refName, sha, current])
+    if res.code == 0: inc moved
+    else: failures.add(refName & ": " & res.output.strip())
+  for (refName, sha) in gatewayHeads.refs:
+    var inPool = false
+    for (r, _) in poolHeads.refs:
+      if r == refName: inPool = true
+    if inPool: continue
+    let res = gitNoteRun(gitBin, ["--git-dir=" & gatewayDir, "update-ref",
+      "-d", refName, sha])
+    if res.code == 0: inc removed
+    else: failures.add(refName & ": " & res.output.strip())
+  if failures.len > 0:
+    return (ok: false, diagnostic: "--reset-refs: could not reset the " &
+      "gateway '" & gatewayDir & "' completely (" & $moved & " moved and " &
+      $removed & " removed before the failures, and they stay so): " &
+      failures.join("; "))
+  (ok: true, diagnostic: "gateway refs reset to the pool's: " & $moved &
+    " moved, " & $removed & " removed")
 
 proc ensureGateway*(gitBin, repoPath, gatewayDir, upstreamUrl, poolCacheRoot:
                     string; cfg: GatewayConfig; remoteName = "origin"):
@@ -70107,7 +70494,7 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
          else: "no provenance record says reprobuild set it") & ")"
       return
   try:
-    var cfg = gatewayConfigForRepo(gitBin, workspaceRoot, repoName)
+    var cfg = gatewayConfigForRepo(gitBin, workspaceRoot, repoName, repoPath)
     cfg.upstreamUrl = result.upstreamUrl
     if dryRun:
       result.outcome = if alreadyWired: gwoAlreadyWired else: gwoWouldWire
@@ -70624,6 +71011,14 @@ proc runGatewayCommand*(phase, explicitGatewayDir: string): int =
   let updates = parseGatewayRefUpdates(stdinText)
   case phase
   of "pre-receive":
+    # §5.3 "Forced updates": the <old> check, the forced-update test and the
+    # role-branch refusal, before any gate reads and before any forward.
+    let classified = gatewayClassifyUpdates(gitBin, gatewayDir, updates, cfg,
+      received)
+    if not classified.ok:
+      stderr.writeLine("reprobuild gateway: push REJECTED — " &
+        classified.diagnostic)
+      return 1
     # Cert gate (TC-5/TC-1) — kept verbatim (HL-5 is ADDITIVE).
     let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg, received)
     for note in verdict.policyNotes:
@@ -70684,7 +71079,7 @@ proc runGatewayCommand*(phase, explicitGatewayDir: string): int =
     # so an upstream refusal is the push's refusal.
     if cfg.upstreamUrl.len > 0:
       let fwd = gatewayForwardToUpstream(gitBin, gatewayDir, cfg.upstreamUrl,
-        updates, received)
+        updates, received, classified.leases)
       if not fwd.ok:
         stderr.writeLine("reprobuild gateway: push REJECTED — " &
           fwd.diagnostic)
@@ -81229,6 +81624,7 @@ type
     projectName: string
     json: bool
     force: bool
+    resetRefs: bool       ## ``rewire --reset-refs`` (Push-Gateway §5.2, §5.3)
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
   SharedClonesRepoReport* = object
@@ -81468,6 +81864,10 @@ proc sharedClonesArgsOf(c: ReproCommandLineWorkspaceSharedClones):
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
         "list|rewire|consolidate|root|gc|maintenance|migrate, got: " & result.verb)
+  result.resetRefs = c.resetRefs
+  if result.resetRefs and result.verb != "rewire":
+    raise newException(ValueError,
+      "`repro workspace shared-clones`: --reset-refs applies only to rewire")
   result.workspaceRoot =
     if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
 
@@ -81521,6 +81921,40 @@ proc liveWorkspaceNamesForCache(workspaceRoot: string;
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   var ignored: seq[string]
   liveWorkspaceNamesForCache(workspaceRoot, ignored)
+
+proc resetRepoGatewayRefs(identity: GitToolIdentity;
+    cacheRoot, workspaceRoot, repoAbs: string): tuple[ok: bool; note: string] =
+  ## ``rewire --reset-refs`` for one checkout (Push-Gateway-Wiring-And-Policy
+  ## §5.2, §5.3 "Forced updates"). Only THIS workspace's gateway for the
+  ## checkout's own upstream is touched: the ``pushurl`` must name the path
+  ## ``gatewayBarePathFor`` gives for ``remote.origin.url``, and the refs come
+  ## from that upstream's pool, refreshed first. Any other ``pushurl`` is left
+  ## alone and reported.
+  let pushurl = gitRunPlainQuery(identity, ["-C", repoAbs, "config",
+    "--get", "remote.origin.pushurl"])
+  let gatewayDir = pushurl.output.strip()
+  if pushurl.code != 0 or gatewayDir.len == 0:
+    return (ok: true, note: "no push gateway; no gateway refs to reset")
+  let origin = gitRunPlainQuery(identity, ["-C", repoAbs, "config", "--get",
+    "remote.origin.url"])
+  let upstreamUrl = origin.output.strip()
+  if origin.code != 0 or upstreamUrl.len == 0:
+    return (ok: false, note: "--reset-refs NOT applied: no remote.origin.url")
+  let expected = gatewayBarePathFor(cacheRoot, lastPathPart(workspaceRoot),
+    upstreamUrl)
+  if cmpPaths(absolutePath(gatewayDir), absolutePath(expected)) != 0 or
+      not gatewayIsComplete(gatewayDir):
+    return (ok: true, note: "remote.origin.pushurl '" & gatewayDir &
+      "' is not this workspace's gateway for " & upstreamUrl &
+      "; left untouched")
+  let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
+    upstreamUrl)
+  if not refreshed.ok:
+    return (ok: false, note: "--reset-refs NOT applied: the pool for " &
+      upstreamUrl & " could not be refreshed: " & refreshed.diagnostic)
+  let reset = resetGatewayRefsToPool(identity.binaryPath, gatewayDir,
+    refreshed.sharedBarePath)
+  (ok: reset.ok, note: reset.diagnostic)
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -81683,6 +82117,11 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       let refreshed = sharedBareByUrl[cloneUrl]
       if not refreshed.ok:
         entry.diagnostic = "shared bare unavailable: " & refreshed.diagnostic
+        if parsed.resetRefs:
+          # A reset that was asked for and did not run is a failure: the
+          # stale-lease remedy would otherwise read as done.
+          entry.diagnostic.add("; --reset-refs NOT applied")
+          result.exitCode = 1
         result.repos.add(entry)
         continue
       entry.barePresent = true
@@ -81717,6 +82156,13 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
           entry.diagnostic = "alternates wiring failed: " & wired.diagnostic
           # The bare WAS present but we could not wire — a genuine failure.
           result.exitCode = 1
+      if parsed.resetRefs:
+        let reset = resetRepoGatewayRefs(identity, result.cacheRoot,
+          parsed.workspaceRoot, repoAbs)
+        if not reset.ok: result.exitCode = 1
+        entry.diagnostic =
+          if entry.diagnostic.len > 0: entry.diagnostic & "; " & reset.note
+          else: reset.note
 
     elif parsed.verb == "gc":
       # RA-15 maintenance: prune dead-workspace cache refs and gc/repack the
@@ -81751,6 +82197,15 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       except CatchableError as error:
         entry.diagnostic.add("; cannot inspect alternates: " & error.msg)
     result.repos.add(entry)
+
+  # The workspace ROOT repository is no project member, so the loop above
+  # never visits it, but it can publish through a gateway of its own.
+  if parsed.verb == "rewire" and parsed.resetRefs and
+      dirExists(parsed.workspaceRoot / ".git"):
+    let reset = resetRepoGatewayRefs(identity, result.cacheRoot,
+      parsed.workspaceRoot, parsed.workspaceRoot)
+    if not reset.ok: result.exitCode = 1
+    result.diagnostics.add("workspace root repository: " & reset.note)
 
   # Every other bare in the cache: one whose checkouts only read or sync, or
   # that only a workspace elsewhere declares, is maintained from here too,
