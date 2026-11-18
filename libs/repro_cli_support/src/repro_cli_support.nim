@@ -25719,7 +25719,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       c.cachePush.workspaceName)
   of ReproCommandLineHooksCommand.help:
     # `repro hooks help [<word>...]` is `repro help hooks [<word>...]`.
-    stdout.write(ReproCommandLine.helpText(@["hooks"] & c.help.topic))
+    printReproHelp(@["hooks"] & c.help.topic)
     return 0
   of ReproCommandLineHooksCommand.ensure:
     parsed = hooksCommandOf(c.ensure, hakEnsure)
@@ -33265,8 +33265,7 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
   var selectors: seq[string] = @[]
   case conf.command
   of Cmd.help:
-    stdout.write(ReproCommandLine.helpText(@["certificates"] &
-      conf.help.topic))
+    printReproHelp(@["certificates"] & conf.help.topic)
     return 0
   of Cmd.policy:
     let c = conf.policy
@@ -86660,7 +86659,8 @@ type
     reportPath: string
     buildFlags: seq[string]
       ## The build's command line: every `repro build` flag given on this
-      ## command line (``buildWordsOf``), for the build the verb-alias and
+      ## command line (``argvOf`` of its origins, ``reproBuildFlagNames``),
+      ## for the build the verb-alias and
       ## certifying paths run. Selectors and the words after ``--`` are not
       ## in it.
     lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
@@ -89132,7 +89132,12 @@ proc testOptionsOf[C, O](c: C; origin: O): ReproTestShardOpts =
     c.listTargetsJson or c.printSolvedGraph)
   result.selectors = c.selectors
   result.actionArgs = c.actionArgs
-  result.buildFlags = buildWordsOf(c, origin)
+  # The build flags this command line gave, written back by confutils as
+  # the build's words (`--<long>[=<value>]`, in the order given, a switch
+  # that stands for another flag's value as itself); what a variable gave
+  # is left out, because the build reads the same variable.
+  result.buildFlags = argvOf(origin, only = reproBuildFlagNames(),
+    commandWords = false)
 
 proc testBuildArgs(opts: ReproTestShardOpts;
                    selectors: seq[string]): seq[string] =
@@ -91056,8 +91061,8 @@ proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
     # multi-machine CI path; the alias is the inner-loop "run my
     # tests" path.
     # The build's command line is every build flag this command line gave
-    # (``buildWordsOf``); the build reads the variables those flags declare
-    # itself.
+    # (``argvOf`` of its origins); the build reads the variables those flags
+    # declare itself.
     #
     # TC-8e: a run that executes tests issues a certificate for each
     # certificate-producing node it materializes. ``--no-certify`` opts out,
@@ -91259,6 +91264,17 @@ proc reproTestRunVariants*(args: openArray[string]):
       putEnv("REPRO_VARIANTS", opts.callerVariants.get)
     else:
       delEnv("REPRO_VARIANTS")
+
+proc reproTestBuildWords*(args: openArray[string]):
+    tuple[buildFlags, variants: seq[string]] =
+  ## What ``repro test <args>`` hands the builds it runs (``buildFlags``:
+  ## the build flags its command line gave, as words) and the variant
+  ## assignments it evaluates the recipe with itself (``variants``: the
+  ## certificate plan, the lock refresh, the sharded path). Runs nothing;
+  ## for the tests of the build's command line.
+  let (c, origin) = loadTestCommandLine(args)
+  let opts = testOptionsOf(c, origin)
+  (opts.buildFlags, opts.variants)
 
 const checkSetTarget* = "pre-commit"
   ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
@@ -95964,7 +95980,7 @@ proc runPromptInitCommand*(shell: string): int =
   ## the live prompt. ``repro prompt init help`` is its help, as it always
   ## was.
   if shell == "help":
-    stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
+    printReproHelp(["prompt", "init"])
     return 0
   let snippet = renderPromptInitSnippet(shell.toLowerAscii())
   if snippet.len == 0:
@@ -104606,8 +104622,7 @@ proc runWorkspaceSetsCommand*(c: ReproCommandLineWorkspaceSets): int =
   ## ``repro workspace sets …`` from its configuration.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "sets"] &
-      req.names))
+    printReproHelp(@["workspace", "sets"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "sets")
 
@@ -104620,8 +104635,7 @@ proc runWorkspaceProjectsCommand*(c: ReproCommandLineWorkspaceProjects): int =
   ## is removed with the third migration step rather than the second.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "projects"] &
-      req.names))
+    printReproHelp(@["workspace", "projects"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "projects")
 
@@ -104696,8 +104710,7 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
   ## repeatable flag here rather than a positional implying exactly one.
   let req = reposRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "repos"] &
-      req.sets))
+    printReproHelp(@["workspace", "repos"] & req.sets)
     return 0
   let sub = req.sub
   let workspaceRoot = projectsWorkspaceRoot(req.workspaceRoot)
@@ -105385,14 +105398,14 @@ proc runLegacyCommand(programName: string; args: seq[string];
     "line `repro " & args[0] & "` accepts; run `repro help " & args[0] & "`")
   2
 
-proc namespaceHelpText(namespace: string; topic: seq[string]): string =
+proc printNamespaceHelp(namespace: string; topic: seq[string]) =
   ## The help `repro <namespace> help [<word>...]` prints: the subcommand's
   ## when the words name one, else the namespace's (whose own parser always
   ## answered `help` with its usage, whatever followed).
   try:
-    ReproCommandLine.helpText(@[namespace] & topic)
+    printReproHelp(@[namespace] & topic)
   except CliUsageError:
-    ReproCommandLine.helpText([namespace])
+    printReproHelp([namespace])
 
 proc cacheIdentityValuesOf[T](c: T): bcCliDispatch.CacheIdentityValues =
   ## The identity flags of `repro cache publish|derive-key|gen-key`.
@@ -105419,10 +105432,10 @@ proc runCacheCommand(conf: ReproCommandLineCache): int =
     case conf.command
     of ReproCommandLineCacheCommand.call:
       # `repro cache` alone prints its help.
-      stdout.write(ReproCommandLine.helpText(["cache"]))
+      printReproHelp(["cache"])
       return 0
     of ReproCommandLineCacheCommand.help:
-      stdout.write(namespaceHelpText("cache", conf.help.topic))
+      printNamespaceHelp("cache", conf.help.topic)
       return 0
     of ReproCommandLineCacheCommand.lookup:
       return bcCliDispatch.cacheLookup(conf.lookup.entryKey)
@@ -105505,7 +105518,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       enclosingWorkspaceRoot(startPath))
   case conf.command
   of ReproCommandLineBundleCommand.help:
-    stdout.write(namespaceHelpText("bundle", conf.help.topic))
+    printNamespaceHelp("bundle", conf.help.topic)
     return 0
   of ReproCommandLineBundleCommand.create:
     let c = conf.create
@@ -105715,9 +105728,12 @@ proc runReproHelp(programName: string; topic: seq[string];
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
     if next < 0:
-      stderr.writeLine("repro help: unknown command '" &
-        topic[0 .. i].join(" ") & "'")
-      stderr.writeLine("Run `repro --help` for the list of commands.")
+      # Words that name no command: clispec's unknown-subcommand error for
+      # them (its error block, with the similar subcommands as the tip).
+      try:
+        discard ReproCommandLine.helpText(topic[0 .. i])
+      except CliUsageError as e:
+        return reportReproUsageError(e)
       return 2
     command = next
     if reproCommandIsPassThrough(command):
@@ -105727,9 +105743,10 @@ proc runReproHelp(programName: string; topic: seq[string];
         stdout.write(synopsis)
         return 0
       break
+  # Printed as every help page is (``printReproHelp``: styled for stdout by
+  # clispec's printer).
   try:
-    stdout.write(ReproCommandLine.helpText(reproCommandPath(command),
-      long = all, all = all))
+    printReproHelp(reproCommandPath(command), all = all)
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
@@ -105776,8 +105793,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace bootstrap"
       case c.bootstrap.command
       of ReproCommandLineWorkspaceBootstrapCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "bootstrap"] &
-          c.bootstrap.help.topic))
+        printReproHelp(@["workspace", "bootstrap"] & c.bootstrap.help.topic)
         return 0
       of ReproCommandLineWorkspaceBootstrapCommand.call:
         return runWorkspaceBootstrapCommand(c.bootstrap.call.dir,
@@ -105841,8 +105857,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace provision"
       case c.provision.command
       of ReproCommandLineWorkspaceProvisionCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "provision"] &
-          c.provision.help.topic))
+        printReproHelp(@["workspace", "provision"] & c.provision.help.topic)
         return 0
       of ReproCommandLineWorkspaceProvisionCommand.call:
         return runWorkspaceProvisionCommand(c.provision.call.installRoot,
@@ -105881,7 +105896,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
       echo renderVersion(programName)
       return 0
     # Bare `repro`: no command was given, which is a usage error.
-    stderr.write(ReproCommandLine.helpText())
+    printReproHelp(stream = stderr)
     return 2
   of ReproCommandLineCommand.help:
     return runReproHelp(programName, conf.help.topic, publicCliPath,

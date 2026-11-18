@@ -12,7 +12,8 @@
 ## declaration): each is `repro build` of its conventional collection.
 ## `repro test` (and `repro certify`, which takes its command line) adds its
 ## own flags to `build`'s and hands the build exactly the build flags it was
-## given (`buildWordsOf`). `repro watch` declares the build flags a watch
+## given (confutils' generated `argvOf`, which writes them back from their
+## origins). `repro watch` declares the build flags a watch
 ## cycle takes with the same declarations as `build`.
 ##
 ## The arms, and what makes each one evidence:
@@ -63,7 +64,17 @@
 ##      same values, and the words after `--`; what the run evaluates itself
 ##      sees its variant assignments in `$REPRO_VARIANTS` after the caller's,
 ##      and each build it runs starts from the caller's value, so a second
-##      build in one run does not add them twice.
+##      build in one run does not add them twice. `--release` and `-v` reach
+##      the build as themselves and build exactly what their values
+##      (`--variant=buildType=release`, `--log=summary`) build, sharded or
+##      not.
+##   6. `--work-root` over `REPROBUILD_WORK_ROOT` and `--action-cache-root`
+##      over `REPROBUILD_ACTION_CACHE_ROOT`, in both orders, on every command
+##      that declares them (`build`, `bench`, `lint`, `test`, `certify`,
+##      `watch`, `clean`, `graph`, `why`, `stats`, `store
+##      closure|export|import`, `bundle create|restore`); a variable set to
+##      the empty string counts as unset, and what a variable gave is not
+##      handed to `repro test`'s build.
 ##
 ## No mocks: the real `build/bin/repro` runs as a subprocess, in an empty
 ## directory with a fresh HOME and XDG directories and a daemon endpoint
@@ -107,6 +118,7 @@ proc newScratch(): Scratch =
     ("REPROBUILD_SHOW", ""), ("REPRO_UNICODE", ""),
     ("REPROBUILD_NO_RUNQUOTA", ""), ("REPRO_VARIANTS", ""),
     ("REPRO_TOOL_PROVISIONING", ""), ("REPRO_RESTORE_CACHED_OUTPUTS", ""),
+    ("REPROBUILD_WORK_ROOT", ""), ("REPROBUILD_ACTION_CACHE_ROOT", ""),
     ("GITHUB_BASE_REF", ""), ("GITHUB_REF_NAME", ""),
     ("REPRO_WORKSPACE_CONFIG", ""), ("REPRO_DEFAULT_PROJECTS", "")]
 
@@ -139,7 +151,8 @@ const
 const BuildEnv = ["REPRO_DAEMON", "REPROBUILD_PROGRESS", "REPRO_PROGRESS",
   "REPROBUILD_LOG", "REPROBUILD_MEASURE", "REPROBUILD_SHOW", "REPRO_UNICODE",
   "REPROBUILD_NO_RUNQUOTA", "REPRO_TOOL_PROVISIONING",
-  "REPRO_RESTORE_CACHED_OUTPUTS", "GITHUB_BASE_REF", "GITHUB_REF_NAME"]
+  "REPRO_RESTORE_CACHED_OUTPUTS", "GITHUB_BASE_REF", "GITHUB_REF_NAME",
+  "REPROBUILD_WORK_ROOT", "REPROBUILD_ACTION_CACHE_ROOT"]
 
 template withBuildEnv(assignments: openArray[(string, string)];
                       body: untyped) =
@@ -627,14 +640,16 @@ suite "the build family's command lines":
       check not c.certify
       check c.selectors == @["sel"]
       check c.actionArgs == @["-x", "a b"]
-      let words = buildWordsOf(c, o)
+      let words = reproTestBuildWords(argv).buildFlags
       checkpoint(words.join(" "))
-      # Only what the command line gave, in canonical spellings; none of
-      # `repro test`'s own flags, the positionals or what a variable gave.
-      check words == @["--daemon=require", "--variant=buildType=release",
-        "--variant=a=1", "--lock=L", "--no-unicode", "--log=summary",
-        "--write-report", "--write-stats=s.db", "--dry-run",
-        "--hard-rebuild", "--only=x", "--runquota"]
+      # Only what the command line gave, in the order given and in the
+      # flags' long spellings; none of `repro test`'s own flags, the
+      # positionals or what a variable gave. A switch that stands for
+      # another flag's value is written as itself.
+      check words == @["--daemon=require", "--verbose", "--release",
+        "--variant=a=1", "--runquota", "--write-report", "--write-stats=s.db",
+        "--no-unicode", "--lock=L", "--only=x", "--hard-rebuild",
+        "--dry-run"]
       # The build reads them back to the same values; the variables the
       # flags declare it reads itself.
       let (b, bo) = loadBuildCommandLine(words & @["sel", "--", "-x", "a b"])
@@ -642,6 +657,7 @@ suite "the build family's command lines":
       check bo.daemon.winner.kind == cokCli
       check b.log == "summary"
       check b.variant == @["buildType=release", "a=1"]
+      check b.release and b.verbose
       check b.lock == @["L"]
       check b.writeReport == some("")
       check b.writeStats == some("s.db")
@@ -655,7 +671,7 @@ suite "the build family's command lines":
       check b.actionArgs == @["-x", "a b"]
       # Without the flags, the build reads the variables, as before.
       let (e, eo) = loadTestCommandLine(NoArgs)
-      check buildWordsOf(e, eo).len == 0
+      check reproTestBuildWords(NoArgs).buildFlags.len == 0
       check e.daemon == "off"
       check eo.daemon.winner.kind == cokEnv
       check e.certify
@@ -669,17 +685,19 @@ suite "the build family's command lines":
       check c.selectors == @["cert.toml"]
       check c.content == "x"
       check c.registeredKeys == "k"
-      check buildWordsOf(c, o).len == 0
+      check argvOf(o, only = reproBuildFlagNames(),
+        commandWords = false).len == 0
       let (t, to) = loadCertifyCommandLine(["--check-set",
         "--check-set-command=true", "--tool-provisioning=nix"])
       check t.checkSet
       check t.checkSetCommand == "true"
-      check buildWordsOf(t, to) == @["--tool-provisioning=nix"]
+      check argvOf(to, only = reproBuildFlagNames(),
+        commandWords = false) == @["--tool-provisioning=nix"]
 
   test "repro test's variants: the run's own reads see them, its builds add them once":
     # The certificate plan, the lock refresh and the sharded path evaluate
     # the recipe in this process, under `$REPRO_VARIANTS`; the builds the run
-    # starts get the assignments on their command line (`buildWordsOf`) and
+    # starts get the assignments on their command line (`argvOf`) and
     # must start from the caller's value, or a second build in one run
     # (`repro certify`'s re-execution) would see them twice.
     let saved = (existsEnv("REPRO_VARIANTS"), getEnv("REPRO_VARIANTS"))
@@ -705,3 +723,101 @@ suite "the build family's command lines":
     finally:
       if saved[0]: putEnv("REPRO_VARIANTS", saved[1])
       else: delEnv("REPRO_VARIANTS")
+
+  test "repro test --release and -v build as before, sharded and not":
+    # Before confutils wrote the build's words back, `--release` reached the
+    # build as `--variant=buildType=release` and `-v` as `--log=summary`.
+    # Now they reach it as themselves, which also sets the build's `release`
+    # and `verbose` switches; nothing reads those, so the build must see the
+    # same variants and the same log level, from the command line.
+    withBuildEnv([("REPROBUILD_LOG", "actions")]):
+      for shard in [NoArgs, @["--shard=1/2"]]:
+        for (given, before) in [
+            (@["--release"], @["--variant=buildType=release"]),
+            (@["-v"], @["--log=summary"]),
+            (@["--variant=a=1", "--release", "-v", "--debug"],
+              @["--variant=a=1", "--variant=buildType=release",
+                "--log=summary", "--variant=buildType=debug"]),
+            (@["-vv", "--release", "--verbose"], @["--log=actions",
+              "--variant=buildType=release", "--log=summary"])]:
+          checkpoint((shard & given).join(" "))
+          let opts = reproTestBuildWords(shard & given)
+          # The sharded path evaluates with the run's own variants, which
+          # `--release` gives in its place among the `--variant`s.
+          let (old, oldOrigin) = loadBuildCommandLine(before)
+          check opts.variants == old.variant
+          let (b, bo) = loadBuildCommandLine(opts.buildFlags)
+          check b.variant == old.variant
+          check b.log == old.log
+          check bo.log.winner.kind == oldOrigin.log.winner.kind
+          check bo.variant.winner.kind == oldOrigin.variant.winner.kind
+
+  test "--work-root and --action-cache-root over their variables, in both orders":
+    const
+      WorkRoot = "REPROBUILD_WORK_ROOT"
+      CacheRoot = "REPROBUILD_ACTION_CACHE_ROOT"
+    # Each command that takes the flags reads the variables they declare,
+    # the flag winning; an empty variable counts as unset.
+    template both(argv: openArray[string]; field: untyped) =
+      block:
+        let flagged = @argv & @["--work-root=/flag/w"]
+        withBuildEnv([(WorkRoot, "/env/w")]):
+          check parsed(argv) == 0
+          check field.workRoot == "/env/w"
+          check parsed(flagged) == 0
+          check field.workRoot == "/flag/w"
+        withBuildEnv([(WorkRoot, "")]):
+          check parsed(argv) == 0
+          check field.workRoot == ""
+    template bothCache(argv: openArray[string]; field: untyped) =
+      block:
+        let flagged = @argv & @["--action-cache-root=/flag/c"]
+        withBuildEnv([(CacheRoot, "/env/c")]):
+          check parsed(argv) == 0
+          check field.actionCacheRoot == "/env/c"
+          check parsed(flagged) == 0
+          check field.actionCacheRoot == "/flag/c"
+        withBuildEnv([(CacheRoot, "")]):
+          check parsed(argv) == 0
+          check field.actionCacheRoot == ""
+    both(["build"], parsedCommand.build)
+    bothCache(["build"], parsedCommand.build)
+    both(["bench"], parsedCommand.bench)
+    bothCache(["bench"], parsedCommand.bench)
+    both(["lint"], parsedCommand.lint)
+    bothCache(["lint"], parsedCommand.lint)
+    both(["test"], parsedCommand.test)
+    bothCache(["test"], parsedCommand.test)
+    both(["certify"], parsedCommand.certify)
+    bothCache(["certify"], parsedCommand.certify)
+    both(["watch"], parsedCommand.watch)
+    both(["clean"], parsedCommand.clean)
+    both(["graph"], parsedCommand.graph)
+    bothCache(["graph"], parsedCommand.graph)
+    both(["why", "x"], parsedCommand.why)
+    bothCache(["why", "x"], parsedCommand.why)
+    both(["stats"], parsedCommand.stats)
+    bothCache(["stats"], parsedCommand.stats)
+    bothCache(["store", "closure", "--root=r"], parsedCommand.store.closure)
+    bothCache(["store", "export", "--root=r", "--out=o"],
+      parsedCommand.store.`export`)
+    bothCache(["store", "import", "d"], parsedCommand.store.`import`)
+    bothCache(["bundle", "create", "--out=o", "x"], parsedCommand.bundle.create)
+    bothCache(["bundle", "restore", "b"], parsedCommand.bundle.restore)
+    # The origin says which one gave it.
+    withBuildEnv([(WorkRoot, "/env/w"), (CacheRoot, "/env/c")]):
+      let (c, o) = loadBuildCommandLine(NoArgs)
+      check o.workRoot.winner.kind == cokEnv
+      check o.actionCacheRoot.winner.kind == cokEnv
+      let (f, fo) = loadBuildCommandLine(["--work-root", "/flag/w",
+        "--action-cache-root=/flag/c"])
+      check f.workRoot == "/flag/w" and f.actionCacheRoot == "/flag/c"
+      check fo.workRoot.winner.kind == cokCli
+      check fo.actionCacheRoot.winner.kind == cokCli
+      # `repro test` hands its build only what its command line gave; the
+      # build reads the variables itself.
+      check c.workRoot == "/env/w"
+      check loadTestCommandLine(NoArgs).conf.workRoot == "/env/w"
+      check reproTestBuildWords(NoArgs).buildFlags.len == 0
+      check reproTestBuildWords(["--work-root=/flag/w"]).buildFlags ==
+        @["--work-root=/flag/w"]

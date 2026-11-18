@@ -917,6 +917,47 @@ suite "the guard holds for every monitored policy kind, not just the first":
     check warm.byId(act.id).cacheDecision in ReuseDecisions
     check f.runCount() == 1
 
+  test "converter-validated-by-monitor: a converted runtime object under /run is counted and host-bound":
+    # A converter's report never passes through the monitor fold, which is
+    # where an observed socket under `/run` is counted and makes the record
+    # host-bound (Filesystem-Policy-And-Observed-Inputs.md §"Volatile Runtime
+    # Prefixes": every path left out is counted, on every channel). The
+    # cache record drops it all the same, so `addPathSet` judges it as it is
+    # added. Falsifier: removing that judgement leaves `hostBoundInput`
+    # empty and the drop uncounted. A test cannot create a socket under
+    # `/run`, so it uses one of the host's daemon endpoints.
+    var socket = ""
+    if dirExists("/run"):
+      for kind, dir in walkDir("/run"):
+        if socket.len > 0: break
+        if kind != pcDir or dir in ["/run/user", "/run/media"]: continue
+        for entryKind, path in walkDir(dir):
+          if entryKind == pcFile and
+              corepaths.runtimeEntryKind(path) == rekSocket and
+              corepaths.dropsAsVolatileRuntimeState(path,
+                corepaths.volatileScope([])):
+            socket = path
+            break
+    if socket.len == 0:
+      skip("this host has no socket under /run for a converter to report")
+    else:
+      let f = makeFixture("validated-converter-socket")
+      defer: removeFixtureTree(f.root)
+      f.writeRmdf(@[processRecord()])
+      let act = f.converterValidatedByMonitorEdge(
+        "validated-converter-socket/run",
+        converterReports = "input\\t" & f.observedPath & "\\ninput\\t" &
+          socket & "\\n")
+      let first = runBuild(graph([act]), testConfig(f.cacheRoot))
+      let r0 = first.byId(act.id)
+      checkpoint("first: status=" & $r0.status &
+        " reads=" & $r0.evidence.monitorReads &
+        " diagnostics=" & r0.evidence.diagnostics.join(" | "))
+      check r0.status == asSucceeded
+      check r0.evidence.hostBoundInput == socket
+      check r0.evidence.runtimeStateDrops == 1
+      check not r0.portable
+
 suite "the zero-evidence diagnostic names the platform's floor regime":
   ## Both regimes are graded here, on whatever host runs the suite. The
   ## no-floor branch is the operationally important one and is NOT

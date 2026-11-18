@@ -226,7 +226,7 @@ libs/repro_build_engine/tests/t_present_outputs_without_a_record_do_not_make_an_
 libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim	nim	10
 libs/repro_build_engine/tests/t_provision_receipt_publish_is_atomic.nim	nim	3
 libs/repro_build_engine/tests/t_published_record_states_evidence_source.nim	nim	3
-libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim	nim	4
+libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim	nim	8
 libs/repro_build_engine/tests/t_publishers_refuse_zero_evidence_records.nim	nim	3
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	8
 libs/repro_build_engine/tests/t_remove_before_run.nim	nim	5
@@ -245,7 +245,7 @@ libs/repro_build_engine/tests/t_whole_graph_prefix_refuses_free_before_statting.
 libs/repro_build_engine/tests/t_whole_graph_prefix_warm_state_reaches_the_scheduler.nim	nim	2
 libs/repro_build_engine/tests/t_whole_graph_shortcut_matches_per_edge_verdict.nim	nim	2
 libs/repro_build_engine/tests/t_workspace_declaring_nothing_unchanged.nim	nim	7
-libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	32
+libs/repro_build_engine/tests/t_zero_evidence_edge_is_not_cacheable.nim	nim	33
 libs/repro_build_engine/tests/t_zero_output_edge_is_cacheable.nim	nim	5
 libs/repro_build_engine/tests/test_action_cache_restore_narrow_payloads.nim	nim	5
 libs/repro_build_engine/tests/test_binary_cache_publisher_hook.nim	nim	12
@@ -260,7 +260,7 @@ libs/repro_build_engine/tests/test_m6_entropy_blessing.nim	nim	27
 libs/repro_build_engine/tests/test_m6_entropy_image_attribution.nim	nim	20
 libs/repro_build_engine/tests/test_m9r72_monitor_loss_classifier.nim	nim	14
 libs/repro_build_engine/tests/test_m9r72_phaseD_end_to_end.nim	nim	6
-libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	11
+libs/repro_build_engine/tests/test_m9r73_narrow_invalidation.nim	nim	12
 libs/repro_build_engine/tests/test_m9r75_double_write_reject.nim	nim	9
 libs/repro_build_engine/tests/test_m9r75_source_write_reject.nim	nim	12
 libs/repro_build_engine/tests/test_monitor_depfile_flush_is_async_and_atomic.nim	nim	5
@@ -398,6 +398,7 @@ libs/repro_core/tests/t_relocatable_names_keep_dotdot_after_a_symlink.nim	nim	9
 libs/repro_core/tests/t_show_conventions_cli.nim	nim	7
 libs/repro_core/tests/t_source_root_installed_layout.nim	nim	9
 libs/repro_core/tests/t_target_object_check.nim	nim	32
+libs/repro_core/tests/t_volatile_runtime_input_by_file_type.nim	nim	6
 libs/repro_core/tests/t_zig_target_vendored_hash.nim	nim	6
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_pipe.nim	nim	3
 libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim	nim	3
@@ -659,10 +660,10 @@ libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_a_prefix_an_older_build_named_is_found_where_it_lies.nim	nim	6
 libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	nim	13
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
-libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim	nim	5
+libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim	nim	6
 libs/repro_local_store/tests/t_distinct_realizations_never_share_a_prefix_directory.nim	nim	2
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	12
-libs/repro_local_store/tests/t_input_access_sidecar.nim	nim	3
+libs/repro_local_store/tests/t_input_access_sidecar.nim	nim	4
 libs/repro_local_store/tests/t_m8_multi_output_realize.nim	nim	6
 libs/repro_local_store/tests/t_multi_output_realization_id_covers_modes_and_links.nim	nim	2
 libs/repro_local_store/tests/t_newest_alias_and_interned_records.nim	nim	22
@@ -1694,6 +1695,7 @@ tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	nim	1
 tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim	nim	1
 tests/integration/t_a_sibling_whose_pin_is_not_fetched_is_not_recorded.nim	nim	1
 tests/integration/t_a_test_that_reads_an_ignored_file_is_not_certified.nim	nim	1
+tests/integration/t_a_tool_reached_through_run_is_an_input.nim	nim	3
 tests/integration/t_a_worktree_sibling_is_not_invisible_to_the_refresh.nim	nim	1
 tests/integration/t_action_cache_concurrent_same_edge_converges_atomically.nim	nim	1
 tests/integration/t_action_cache_fingerprint_policies.nim	nim	1
@@ -1845,12 +1847,13 @@ tests/integration/t_cose_rfc9052_vectors.nim	nim	21
 tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	nim	3
 tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim	nim	5
 tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim	nim	1
-tests/integration/t_cs_m6_build_family_command_lines.nim	nim	19
+tests/integration/t_cs_m6_build_family_command_lines.nim	nim	21
 tests/integration/t_cs_m6_dev_env_command_lines.nim	nim	5
 tests/integration/t_cs_m6_develop_and_flake_command_lines.nim	nim	4
 tests/integration/t_cs_m6_machines_command_lines.nim	nim	4
 tests/integration/t_cs_m6_project_introspection_command_lines.nim	nim	4
 tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim	nim	3
+tests/integration/t_cs_m6_usage_errors_and_coloured_help.nim	nim	5
 tests/integration/t_cs_m6_workspace_command_lines.nim	nim	5
 tests/integration/t_ct_test_surface_case_addressability.nim	nim	6
 tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim	nim	9

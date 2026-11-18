@@ -1715,6 +1715,32 @@ type
       ## working directory (`actionVolatileScope`). The default exempts
       ## nothing, which is the prefix-only fold a test driving the fold
       ## directly gets.
+    runtimeStateDrops*: int
+      ## How many monitor records under `/run` the fold left out as runtime
+      ## state: an input that was a socket, a FIFO or a device node there
+      ## (`vvDropRuntimeObject`), or a write or removal there outside the
+      ## invocation's trees. Dependency-Observation-Attribution.md
+      ## §"Attribution, not suppression": "Every elision is counted". One per
+      ## RECORD, before de-duplication, so it says how much the fold elided,
+      ## not how many distinct paths. Traced per action as
+      ## `volatile-runtime-dropped` (`traceVolatileRuntimeDrops`).
+    kernelStateDrops*: int
+      ## The same count for `/dev`, `/proc` and `/sys` (`vvDropKernelState`
+      ## and the writes there): kernel and device state, dropped by prefix.
+      ## Kept apart because nearly every action reads `/dev/null`, so this one
+      ## is rarely zero and means little, while `runtimeStateDrops` names an
+      ## action that talked to something on this host.
+    hostBoundInput*: string
+      ## The first INPUT the fold dropped as a runtime object under `/run`
+      ## (a daemon's socket, a FIFO, a device node there), or "". Such an
+      ## action read state of THIS host that no fingerprint can carry, so its
+      ## record must never serve another host: the portable recorder refuses
+      ## a portable identity naming this path (`finishPortableRecord`), the
+      ## peer-cache publisher is not offered the record
+      ## (`publishPeerCacheBundle`), and the access sidecar carries it (`InputAccesses.hostBoundReason`) so a
+      ## later local hit cannot derive one either. Kernel state under `/dev`,
+      ## `/proc`, `/sys` does not set it: every host has its own and none of
+      ## it is a cache input anywhere.
     depfileInputs*: ObservedPathChannel
     monitorReads*: ObservedPathChannel
     monitorWrites*: ObservedPathChannel
@@ -5677,20 +5703,31 @@ proc selfConsumedDeclaredPaths*(action: BuildAction): seq[string] =
       result.add(materialized)
 
 proc isVolatileMonitorPath(path: string; scope: VolatileScope): bool =
-  ## Runtime pseudo-filesystems describe the monitored process or host at one
-  ## instant. They cannot be reopened reliably when the action is fingerprinted
-  ## and must never become cache inputs, unless they are inside the
-  ## invocation's own trees (`PathSetEvidence.volatileScope`); see
-  ## ``repro_core/paths.dropsAsVolatileRuntimeState``.
+  ## Whether a recorded INPUT of `path` is left out as runtime state:
+  ## ``repro_core/paths.dropsAsVolatileInput``. Kernel pseudo-filesystems and
+  ## devices (`/dev`, `/proc`, `/sys`) describe the monitored process or host
+  ## at one instant, cannot be reopened reliably when the action is
+  ## fingerprinted, and are dropped by prefix unless they are inside the
+  ## invocation's own trees (`PathSetEvidence.volatileScope`). Under `/run`
+  ## the disk decides: a regular file, a directory, a symbolic link or an
+  ## absent path is an ordinary input (NixOS's `/run/current-system`,
+  ## `/run/wrappers`, `/run/opengl-driver` are links into the store), and
+  ## only a socket, a FIFO or a device node is dropped.
   ##
-  ## THE ONLY PLACE THE DROP IS DECIDED. The monitor fold calls it for every
-  ## observed channel, and ``cacheInputPaths`` for the declared and the
-  ## tool-reported ones, with the same scope, so what reaches the evidence and
-  ## what reaches the cache RECORD cannot disagree. ``repro_local_store`` used
-  ## to make the decision a second time when recording, on the prefix alone;
-  ## a path the evidence kept and the record dropped is fingerprinted as an
-  ## input the entry does not carry, the same stale serve one layer down.
-  dropsAsVolatileRuntimeState(path, scope)
+  ## THE ONLY PLACE THE INPUT DROP IS DECIDED. The monitor fold calls it (as
+  ## `volatileInputVerdict`, to count) for every input channel, the root
+  ## image reconstruction for the image it adds, ``cacheInputPaths`` for the
+  ## declared and the tool-reported ones, and the portable recorder for what
+  ## it may name, all with the same scope, so what reaches the evidence, the
+  ## cache RECORD and the portable record cannot disagree.
+  ## ``repro_local_store`` used to make the decision a second time when
+  ## recording, on the prefix alone; a path the evidence kept and the record
+  ## dropped is fingerprinted as an input the entry does not carry, the same
+  ## stale serve one layer down.
+  ##
+  ## Writes and removals are not inputs and keep the prefix rule
+  ## (`dropsAsVolatileRuntimeState`); see `foldOneMonitorRecord`.
+  dropsAsVolatileInput(path, scope)
 
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
@@ -8535,8 +8572,73 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
   if unprefixed.isNtDevicePath():
     return
   let materialized = materialPath(cwd, unprefixed)
-  if materialized.isVolatileMonitorPath(evidence.volatileScope) or materialized.isNtDevicePath():
+  if materialized.isNtDevicePath():
     return
+  # Only the kinds the `case` below folds into a channel are judged and
+  # counted; everything else lands on its `else: discard` anyway, and a
+  # record whose `path` is not a filesystem path (an IPC peer, a capability
+  # id) must not be stat'ed or counted as a drop.
+  let isInput =
+    case record.kind
+    of mrFileRead, mrLibraryLoad, mrProcessExec, mrPathProbe,
+       mrDirectoryEnumerate: true
+    of mrFileOpen: record.observationKind in {moFileRead, moFileOpen}
+    else: false
+  let isWrite =
+    case record.kind
+    of mrFileWrite, mrPathMutation: true
+    of mrFileOpen: record.observationKind == moFileWrite
+    else: false
+  if not isInput and not isWrite:
+    return
+  # THE VOLATILE-RUNTIME FOLD, ahead of every arm, so an executed image and a
+  # loaded library are judged exactly as a read is.
+  #
+  # An INPUT is judged by `volatileInputVerdict`: by prefix under `/dev`,
+  # `/proc` and `/sys`, by what is on disk under `/run`. It used to be the
+  # prefix everywhere, and on NixOS that dropped the system `PATH`
+  # (`/run/current-system/sw/bin`), the setuid wrappers (`/run/wrappers/bin`)
+  # and the GPU drivers (`/run/opengl-driver/lib`), all links into the store:
+  # after a `nixos-rebuild switch` the edge kept hitting with the old tool's
+  # outputs. Only a socket, a FIFO or a device node under `/run` is dropped
+  # now, and such a drop makes the record host-bound (`hostBoundInput`).
+  #
+  # A WRITE or REMOVAL keeps the prefix rule. What the path is after the
+  # action says nothing about an input, and keeping host writes under `/run`
+  # (a lock or pid file a tool drops there) would make every such action's
+  # record look like it had undeclared products (`undeclaredSurvivingWrites`).
+  #
+  # Every drop is counted (Dependency-Observation-Attribution.md "Every
+  # elision is counted"), and traced per action.
+  let verdict =
+    if isInput: materialized.volatileInputVerdict(evidence.volatileScope)
+    elif not materialized.dropsAsVolatileRuntimeState(evidence.volatileScope):
+      vvKeep
+    elif materialized.replace('\\', '/').startsWith("/run"):
+      vvDropRuntimeObject
+    else: vvDropKernelState
+  case verdict
+  of vvKeep:
+    discard
+  of vvDropKernelState:
+    inc evidence.kernelStateDrops
+    return
+  of vvDropRuntimeObject:
+    inc evidence.runtimeStateDrops
+    if isInput and evidence.hostBoundInput.len == 0:
+      evidence.hostBoundInput = materialized
+    return
+  # An input KEPT under `/run` by its file type (outside the places and
+  # trees the prefix rule keeps) is usually reached through a link there:
+  # NixOS's `/run/current-system`, `/run/opengl-driver`. A metadata check of
+  # the input cannot see the link move to a generation whose file has the
+  # same size and the store's mtime of 1, so each link on the way is a probe
+  # of its own, fingerprinted by its target (`linkHopsUnderRun`).
+  if isInput and
+      materialized.dropsAsVolatileRuntimeState(evidence.volatileScope):
+    for hop in materialized.linkHopsUnderRun():
+      evidence.monitorProbes.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorProbes, hop)
   case record.kind
   of mrFileRead:
     evidence.monitorReads.observe(evidence.evidenceProvenance,
@@ -8605,8 +8707,9 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # nothing while a host with a mutable `/usr/lib` still served stale
     # results. Cost: one `lstat` per loaded DSO on the warm path.
     # `cacheInputPaths` still drops the ones under the action's own
-    # tool roots, and `isVolatileMonitorPath` above still drops
-    # `/run`-resident driver libraries.
+    # tool roots. A driver library loaded from `/run/opengl-driver/lib` is
+    # KEPT by the volatile-runtime fold above (it is a link into the store,
+    # not runtime state), so a driver update re-runs the edge.
     evidence.monitorReads.observe(evidence.evidenceProvenance,
       evcMonitorCapture, seen.monitorReads, materialized)
   of mrFileOpen:
@@ -9115,6 +9218,33 @@ proc addPathSet(evidence: var PathSetEvidence; seen: var EvidenceSeenSets;
       evidence.depfileInputs.observe(evidence.evidenceProvenance,
         contributor, seen.depfileInputs, input)
   else:
+    # A converter's report never passes through the monitor fold, which is
+    # where an observed input under a volatile prefix is counted and marks
+    # the record host-bound. Its inputs are judged here with the same
+    # decision, once per path; they stay in their channels, and the cache
+    # record leaves the dropped ones out (`cacheInputPathsImpl`) exactly as
+    # it does for a declared input (`countDeclaredVolatileDrops`).
+    # Dependency-Observation-Attribution.md "Every elision is counted".
+    var judged = initHashSet[string]()
+    for input in pathSet.inputs & pathSet.probes & pathSet.enumerations:
+      if judged.containsOrIncl(input):
+        continue
+      case volatileInputVerdict(input, evidence.volatileScope)
+      of vvKeep:
+        discard
+      of vvDropKernelState:
+        inc evidence.kernelStateDrops
+      of vvDropRuntimeObject:
+        inc evidence.runtimeStateDrops
+        if evidence.hostBoundInput.len == 0:
+          evidence.hostBoundInput = input
+      # A kept input under `/run` gets its link hops as probes, exactly as a
+      # monitored one does in `foldOneMonitorRecord`.
+      if input.dropsAsVolatileRuntimeState(evidence.volatileScope) and
+          not input.dropsAsVolatileInput(evidence.volatileScope):
+        for hop in input.linkHopsUnderRun():
+          evidence.monitorProbes.observe(evidence.evidenceProvenance,
+            contributor, seen.monitorProbes, hop)
     for input in pathSet.inputs:
       evidence.monitorReads.observe(evidence.evidenceProvenance,
         contributor, seen.monitorReads, input)
@@ -9961,6 +10091,64 @@ proc isUnderScratch(key: string; roots: openArray[string]): bool =
     if recordedPathUnderRoot(key, root):
       return true
 
+const PreRunVerdictSidecarRefusal* =
+  "the local record's input-access record predates version 4: the run " &
+  "that produced it left every input under /run out unrecorded (NixOS's " &
+  "system tools and GPU drivers included), so whether it read host state " &
+  "there is unknown and the record is kept to this host"
+  ## The reason a record whose access sidecar predates version 4
+  ## (`InputAccesses.hostBoundUnknown`) is neither derived into a portable
+  ## record nor published from a local hit.
+
+func hostBoundRefusal*(hostBoundInput: string): string =
+  ## The reason every publisher and the portable recorder give for refusing a
+  ## record that read `hostBoundInput`, a runtime object under `/run`
+  ## (`PathSetEvidence.hostBoundInput`). One text, so a trace and
+  ## `repro why` say the same thing whichever refusal fired. "" when
+  ## nothing was read there.
+  if hostBoundInput.len == 0:
+    return ""
+  "input " & hostBoundInput & " is a runtime object under /run (a socket, " &
+    "FIFO or device node) of this host, which no fingerprint can carry, so " &
+    "the record is host-bound"
+
+proc countDeclaredVolatileDrops*(action: BuildAction;
+                                  evidence: var PathSetEvidence) =
+  ## Counts the DECLARED and recognized-format TOOL-REPORTED (depfile) inputs
+  ## the volatile-runtime filter will leave out of the cache record, and makes
+  ## the record host-bound when one of them is a runtime object under `/run`.
+  ## (A post-build converter's report is judged as it is added, in
+  ## `addPathSet`.)
+  ## The monitor fold counts and marks what it drops from the observed
+  ## channels (`foldOneMonitorRecord`); these two channels never pass through
+  ## it, and `cacheInputPathsImpl`, which drops them, is asked many times per
+  ## action and must stay a pure function of the evidence. So they are
+  ## judged here, once, at the end of `collectEvidence`, with the same
+  ## decision (`isVolatileMonitorPath`) and scope `cacheInputPathsImpl` uses.
+  ##
+  ## Dependency-Observation-Attribution.md §"Attribution, not suppression":
+  ## "Every elision is counted". One per PATH here, where the monitor fold
+  ## counts one per record: a declared input is stated once.
+  var candidates: seq[string] = @[]
+  for input in evidence.declaredInputs:
+    candidates.add(input)
+  for input in evidence.depfileInputs:
+    candidates.add(input)
+  var seen = initHashSet[string]()
+  for input in candidates:
+    let path = materialContainmentPath(action.cwd, input)
+    if seen.containsOrIncl(path):
+      continue
+    case volatileInputVerdict(path, evidence.volatileScope)
+    of vvKeep:
+      discard
+    of vvDropKernelState:
+      inc evidence.kernelStateDrops
+    of vvDropRuntimeObject:
+      inc evidence.runtimeStateDrops
+      if evidence.hostBoundInput.len == 0:
+        evidence.hostBoundInput = path
+
 proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
   ## Removes every observation at or below one of the action's scratch
   ## directories (`BuildAction.scratchDirs`).
@@ -10800,6 +10988,9 @@ proc collectEvidence(action: BuildAction; strict: bool;
   # the evidence here, before the key is graded -- the local key, the
   # portable record and the determinism probe all read what remains.
   dropScratchEvidence(action, result.evidence)
+  # The declared and tool-reported channels' volatile drops, counted once
+  # (the observed channels were counted by the fold above).
+  countDeclaredVolatileDrops(action, result.evidence)
   # LAST OF ALL, after every contributor to the key — the root-image fold at
   # the head of this proc included — grade the set the key is actually built
   # from. Rule 7. See `gradeKeyedInputSet`.
@@ -12115,12 +12306,14 @@ proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
   ##   ``build/`` before ``mkdir -p build`` created it) is the action's own
   ##   side effect, not an input — see ``outputAncestorDirectoryKeys``.
   ## * the volatile-runtime filter (``isVolatileMonitorPath``) drops a path
-  ##   under `/dev`, `/proc`, `/sys` or `/run` outside the invocation's own
-  ##   trees, on EVERY channel and a declaration included: a declared
-  ##   `/proc/cpuinfo` cannot be fingerprinted any better than an observed
-  ##   one. The monitor fold has already applied it to the observed channels
-  ##   with the same scope; here it reaches the declared and tool-reported
-  ##   ones, which the cache record used to drop on its own, by prefix.
+  ##   under `/dev`, `/proc` or `/sys`, and a socket, FIFO or device node
+  ##   under `/run`, outside the invocation's own trees, on EVERY channel and
+  ##   a declaration included: a declared `/proc/cpuinfo` cannot be
+  ##   fingerprinted any better than an observed one. A file, directory,
+  ##   symbolic link or absent path under `/run` is kept. The monitor fold has
+  ##   already applied it to the observed channels with the same scope; here
+  ##   it reaches the declared and tool-reported ones, which the cache record
+  ##   used to drop on its own, by prefix.
   # Every containment question this computation asks about one `..`-spelled
   # path resolves the same prefix through the filesystem (once per tool
   # root, ignored root and output); within one computation it is asked once.
@@ -19756,7 +19949,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc publishPeerCacheBundle(query: PeerCacheActionQuery;
                               record: ActionResultRecord;
                               evidenceLevel: EvidenceLevel;
-                              action: BuildAction) =
+                              action: BuildAction;
+                              hostBoundInput = "") =
     ## Peer-Cache publisher hook. Hands the freshly recorded execution and
     ## the engine's CAS (which holds its output blobs) to the configured
     ## publisher closure; Distributed-Execution M0's two-phase publish
@@ -19771,6 +19965,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## observed input is not offered to the publisher at all. The refusal is
     ## a trace event naming the policy or the level, never a failure: the
     ## record is already stored and keeps serving this host.
+    ##
+    ## `hostBoundInput` is a runtime object under `/run` (a socket, a FIFO, a
+    ## device node) the execution read and the volatile-runtime fold dropped
+    ## (`PathSetEvidence.hostBoundInput`), or "". A non-empty one keeps the
+    ## record on this host, exactly as `finishPortableRecord` keeps its
+    ## portable record: what the action saw there is in no key, so a peer
+    ## could not verify it.
     if config.peerCacheActionPublisher == nil:
       return
     let actionId = action.id
@@ -19804,6 +20005,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return
     if record.determinism.declared and
         not record.determinism.class.allowsCrossMachineSubstitution():
+      return
+    if hostBoundInput.len > 0:
+      runResult.trace(actionId, "peer-cache-publish-refused",
+        hostBoundRefusal(hostBoundInput))
       return
     let refusal = publicationRefusal(record, evidenceLevel,
       query.evidenceSource)
@@ -20468,9 +20673,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                             policy: FileFingerprintPolicy;
                             recordInputs: seq[FileFingerprint];
                             evidenceLevel: EvidenceLevel;
-                            evidenceSource: EvidenceSource) =
+                            evidenceSource: EvidenceSource;
+                            hostBoundInput = "") =
     ## The shared tail of both portable recorders: fingerprint, outputs,
     ## local memo record, and (once per record) publication.
+    ##
+    ## `hostBoundInput` is a runtime object under `/run` (a socket, a FIFO, a
+    ## device node) the execution read and the volatile-runtime fold dropped
+    ## (`PathSetEvidence.hostBoundInput`, carried across a local hit by
+    ## `InputAccesses.hostBoundReason`), or "". A non-empty one makes the
+    ## record not portable: what the action saw there is state of this host
+    ## that no fingerprint carries.
     ##
     ## The record is the published-trace record `rbpm-v2` (campaign M17
     ## chunk 2; Edge-Derived-Identities.md §3.1): it states the policy, the
@@ -20508,23 +20721,44 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       action.cwd, portableEnvOf(action), portableDeclaredInputsOf(action),
       reads, probes, enumerations, portableStaticFieldsOf(action),
       observedEnv, graphViewIdentifier(action))
+    if hostBoundInput.len > 0:
+      # HOST-BOUND: the fold dropped a runtime object under `/run` that the
+      # action read (a daemon's socket, a FIFO, a device node). Its outputs
+      # may depend on what that endpoint answered on THIS host, and nothing
+      # about it is in any key, so the record serves this host only. The
+      # local record is unaffected: on this host the same endpoint is there.
+      #
+      # It REPLACES a reason the fingerprint already gave (an input outside
+      # every logical root, say): that one is a fact about this build's root
+      # configuration and goes away when a root is declared, while this one
+      # is a fact about the execution and no configuration lifts it, so it is
+      # the one the trace and `repro why` must name.
+      fp.portable = false
+      fp.reason = hostBoundRefusal(hostBoundInput)
+      fp.strongHex = ""
     if fp.portable:
-      # An input the volatile-path fold KEPT under `/dev` (the project's own
-      # file, or one in a directory under `/dev/shm`) that the untracked
-      # `/dev` system root claims would be left out of the portable key, and
-      # a record keyed without it would be served after it changed. A
-      # tracked root claims a project at `/dev/shm/<name>` (longest root
-      # wins); this is what no tracked root claims, such as the project
-      # reached through a symlink whose resolved spelling is under `/dev/shm`
-      # (portable roots carry the declared spelling only), or a dependency
-      # checkout there. Such a record is not portable, as an input outside
-      # every root is not.
-      let scope = actionVolatileScope(action, config.filesystemRoots,
-        sourceTreeSpellings)
+      # An input the volatile-path fold KEPT under a volatile prefix -- under
+      # `/dev`, the project's own file or one in a directory under
+      # `/dev/shm`; under `/run`, any file, directory, link or absence there
+      # (NixOS's `/run/current-system`, a mount at `/run/<dir>`) -- that no
+      # tracked root names would be left out of the portable key or named by
+      # a host-specific spelling, and a record keyed that way would be served
+      # after it changed on another host. A tracked root claims a project at
+      # `/dev/shm/<name>` (longest root wins); this is what no tracked root
+      # claims, such as the project reached through a symlink whose resolved
+      # spelling is under `/dev/shm` (portable roots carry the declared
+      # spelling only), a dependency checkout there, or the system profile
+      # under `/run`. Such a record is not portable, as an input outside
+      # every root is not; its LOCAL record still names the path, so this
+      # host re-runs the action when it changes.
+      #
+      # Every path here is one the fold KEPT, so the prefix alone decides:
+      # asking the disk again (`isVolatileMonitorPath`) would let an entry
+      # that became a socket after the fold escape this check and leave the
+      # record portable with an input no tracked root names.
       let roots = portableRecordRoots()
       for path in reads & probes & enumerations:
         if path.isVolatileRuntimeStatePath() and
-            not path.dropsAsVolatileRuntimeState(scope) and
             toLogicalPath(roots, path).kind == lpkUntracked:
           fp.portable = false
           fp.reason = "input " & path & " is under a volatile runtime " &
@@ -20693,6 +20927,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # had one portable key.
     for path in evidence.monitorReads:
       probed.excl(materialPath(action.cwd, path))
+    # Stored beside the record with the accesses, so a portable record
+    # derived from a later local hit is host-bound exactly as this one is.
+    result.hostBoundReason = evidence.hostBoundInput
     let transient = transientOwnWrites(evidence)
     for path in keyed:
       if path in enumerated or isHostTempListing(path) or
@@ -20739,7 +20976,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         present: variable.present, value: variable.value))
     finishPortableRecord(idx, action, accesses.reads, accesses.probes,
       accesses.enumerations, observed, record.policy, record.inputs,
-      evidenceLevel, evidenceSource)
+      evidenceLevel, evidenceSource, accesses.hostBoundReason)
 
   proc recordFixedOutputPortable(idx: int; action: BuildAction;
                                  evidenceLevel: EvidenceLevel) =
@@ -20822,6 +21059,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       observed.add(ObservedEnv(name: variable.name,
         present: variable.present, value: variable.value))
     let derived = accesses.get()
+    if derived.hostBoundUnknown:
+      runResult.results[idx].portable = false
+      runResult.results[idx].portableReason = PreRunVerdictSidecarRefusal
+      runResult.trace(action.id, "portable-fingerprint-unavailable",
+        runResult.results[idx].portableReason)
+      return
     # The level the producing run stored beside the record: a hit is served
     # without monitor evidence of its own, and a Level-1 record must not
     # publish from its hit what it could not publish when it ran.
@@ -20829,14 +21072,45 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # for a sidecar written before the field, which keeps the record local).
     finishPortableRecord(idx, action, derived.reads, derived.probes,
       derived.enumerations, observed, record.policy, record.inputs,
-      derived.evidenceLevel, derived.evidenceSource)
+      derived.evidenceLevel, derived.evidenceSource, derived.hostBoundReason)
+
+  proc localHitHostBoundRefusal(record: ActionResultRecord): string =
+    ## Why a record served by a local hit must not leave this host, or "".
+    ## The hit has no evidence of its own, so the access sidecar of the run
+    ## that produced the record answers (`InputAccesses.hostBoundReason`).
+    ##
+    ## * A sidecar written before version 4 (`hostBoundUnknown`) came from a
+    ##   fold that dropped every input under `/run` without recording it,
+    ##   NixOS's system tools and GPU drivers included: what the run read
+    ##   there is unknown, so the record stays here.
+    ## * NO sidecar is not a refusal here: a record installed from a peer or
+    ##   a binary cache has none and was published by the host that ran it,
+    ##   and the binary cache has never required one. (The portable record,
+    ##   which IS derived from the sidecar, derives nothing without one --
+    ##   `recordPortableFromLocalHit`.)
+    let accesses = cache.inputAccessesFor(record.weakFingerprint,
+      record.strongFingerprint)
+    if accesses.isNone:
+      return ""
+    if accesses.get().hostBoundUnknown:
+      return PreRunVerdictSidecarRefusal
+    hostBoundRefusal(accesses.get().hostBoundReason)
 
   proc publishBinaryCacheBundle(action: BuildAction;
                                 record: ActionResultRecord;
-                                allowMaterializedOutputs = false) =
+                                allowMaterializedOutputs = false;
+                                hostBoundInput = "";
+                                fromLocalHit = false) =
     ## M9.L.4-refactor Step A binary-cache publisher hook. Soft-fail
     ## like ``publishPeerCacheBundle``: a failed publish is logged
     ## into stats but does NOT abort the build.
+    ##
+    ## A HOST-BOUND record is never published (Filesystem-Policy-And-
+    ## Observed-Inputs.md §"Volatile Runtime Prefixes"; §10.3 below): a fresh
+    ## execution passes the runtime object under `/run` it read as
+    ## `hostBoundInput`; a local hit (`fromLocalHit`) has no evidence of its
+    ## own and is judged by the access sidecar of the run that produced it
+    ## (`localHitHostBoundRefusal`).
     ##
     ## Guards (any failure = no-op):
     ##   * ``BuildEngineConfig.binaryCachePublisher == nil`` — no
@@ -20898,6 +21172,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if action.readsContentKeyedToolCache:
         runResult.trace(action.id, "binary-cache-publish-refused",
           classRefusal)
+      return
+    let hostBound =
+      if fromLocalHit: localHitHostBoundRefusal(record)
+      else: hostBoundRefusal(hostBoundInput)
+    if hostBound.len > 0:
+      runResult.trace(action.id, "binary-cache-publish-refused", hostBound)
       return
     let publishStart = statStart()
     var recordOutputs: seq[string] = @[]
@@ -21549,6 +21829,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # ``sessionInvalidatedPaths`` accumulator is the whole story.
   var sessionInvalidatedPaths = initHashSet[string]()
   var sessionCacheHitsDisabled = false
+
+  proc traceVolatileRuntimeDrops(id: string; evidence: PathSetEvidence) =
+    ## Dependency-Observation-Attribution.md "Every elision is counted": the
+    ## monitor records the volatile-runtime fold left out of this action's
+    ## evidence, by where they were (`run=`: runtime objects and writes under
+    ## `/run`; `kernel=`: `/dev`, `/proc`, `/sys`), and the runtime object
+    ## under `/run` that makes the record host-bound, if one was read.
+    ## Called from every site that collects evidence, beside
+    ## `registerEvidenceInvalidation`. Silent when nothing was dropped.
+    if evidence.runtimeStateDrops == 0 and evidence.kernelStateDrops == 0:
+      return
+    var detail = "run=" & $evidence.runtimeStateDrops & " kernel=" &
+      $evidence.kernelStateDrops
+    if evidence.hostBoundInput.len > 0:
+      detail.add(" host-bound=" & evidence.hostBoundInput)
+    runResult.trace(id, "volatile-runtime-dropped", detail)
 
   proc registerEvidenceInvalidation(evidence: EvidenceCollection) =
     ## M9.R.73.2 — fold a completed action's evidence into the
@@ -23356,7 +23652,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
-                  allowMaterializedOutputs = true)
+                  allowMaterializedOutputs = true, fromLocalHit = true)
               completeSuccess(id, asUpToDate, cdHit, false,
                 if action.declaresNoOutputs(): "no-declared-outputs"
                 else: "outputs-present")
@@ -23393,7 +23689,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   lookup.record)
                 if config.publishCachedResults:
                   publishBinaryCacheBundle(action, lookup.record,
-                    allowMaterializedOutputs = true)
+                    allowMaterializedOutputs = true, fromLocalHit = true)
                 completeSuccess(id, asCacheHit, cdHit, false, restore.detail)
                 inc completed
                 launchedAny = true
@@ -23422,7 +23718,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 lookup.record)
               if config.publishCachedResults:
                 publishBinaryCacheBundle(action, lookup.record,
-                  allowMaterializedOutputs = true)
+                  allowMaterializedOutputs = true, fromLocalHit = true)
               completeSuccess(id, asUpToDate, cdHybridCutoff, false,
                 if action.declaresNoOutputs(): "no-declared-outputs"
                 else: "outputs-present")
@@ -23455,7 +23751,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   lookup.record)
                 if config.publishCachedResults:
                   publishBinaryCacheBundle(action, lookup.record,
-                    allowMaterializedOutputs = true)
+                    allowMaterializedOutputs = true, fromLocalHit = true)
                 completeSuccess(id, asCacheHit, cdHybridCutoff, false,
                   restore.detail)
                 inc completed
@@ -23549,6 +23845,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             sourceTreeSpellings = addr sourceTreeSpellings)
           finishStat("repro evidence collect", evidenceStart)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
+          traceVolatileRuntimeDrops(id, evidence.evidence)
           # M9.R.73.2 — the FOURTH evidence-collection site, and it was the
           # one that did not fold its result into the session accumulator.
           # An action reached here has not re-run, but the evidence just
@@ -23689,6 +23986,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             finishStat("repro evidence collect", evidenceStart)
             siteTables.learnSiteTableImages(action, evidence.evidence)
             runResult.results[idx].evidence = evidence.evidence
+            traceVolatileRuntimeDrops(id, evidence.evidence)
             if not evidence.publishable:
               runResult.results[idx].status = asFailed
               runResult.results[idx].stderr =
@@ -23743,8 +24041,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 recordPortableFingerprint(idx, action, evidence.evidence, record,
                   evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(action), record,
-                  evidenceLevelOf(evidence.monitorStatus), action)
-                publishBinaryCacheBundle(action, record)
+                  evidenceLevelOf(evidence.monitorStatus), action,
+                  evidence.evidence.hostBoundInput)
+                publishBinaryCacheBundle(action, record,
+                  hostBoundInput = evidence.evidence.hostBoundInput)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
             elif action.cacheable and evidence.disableCacheHits:
@@ -23943,6 +24243,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               evidence.evidence.evidenceProvenance.incl(
                 evcForeignProvisionerReport)
             runResult.results[idx].evidence = evidence.evidence
+            traceVolatileRuntimeDrops(finished.id, evidence.evidence)
             if not evidence.publishable:
               runResult.results[idx].status = asFailed
               runResult.results[idx].stderr =
@@ -24004,8 +24305,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
                   record, evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
-                  evidenceLevelOf(evidence.monitorStatus), plan.action)
-                publishBinaryCacheBundle(plan.action, record)
+                  evidenceLevelOf(evidence.monitorStatus), plan.action,
+                  evidence.evidence.hostBoundInput)
+                publishBinaryCacheBundle(plan.action, record,
+                  hostBoundInput = evidence.evidence.hostBoundInput)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
             elif plan.action.cacheable and evidence.disableCacheHits:
@@ -24620,6 +24923,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             "monitor depfile flush failed; action-cache publish skipped so " &
             "the next build re-executes: " & monitorFlushFailures[finished.id])
         runResult.results[idx].evidence = evidence.evidence
+        traceVolatileRuntimeDrops(finished.id, evidence.evidence)
         if not evidence.publishable:
           runResult.results[idx].status = asFailed
           runResult.results[idx].stderr =
@@ -24665,8 +24969,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             recordPortableFingerprint(idx, action, evidence.evidence, record,
               evidenceLevelOf(evidence.monitorStatus), keyed)
             publishPeerCacheBundle(peerCacheQueryOf(action), record,
-              evidenceLevelOf(evidence.monitorStatus), action)
-            publishBinaryCacheBundle(action, record)
+              evidenceLevelOf(evidence.monitorStatus), action,
+              evidence.evidence.hostBoundInput)
+            publishBinaryCacheBundle(action, record,
+              hostBoundInput = evidence.evidence.hostBoundInput)
           except UnreadableInputError as err:
             runResult.traceUnreadableInput(finished.id, idx, err.msg)
         elif action.cacheable and evidence.disableCacheHits:

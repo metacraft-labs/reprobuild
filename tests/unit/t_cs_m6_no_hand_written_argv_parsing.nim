@@ -84,7 +84,7 @@ const
     "runUserDaemonCliCommand", "userDaemonConfigOf", "runStoreCommand",
     "runStoreDaemonCommand", "runStoreServeCommand", "runCasCommand",
     "parseCasDigest", "runCacheCommand",
-    "runBundleCliCommand", "namespaceHelpText", "runReapCommand",
+    "runBundleCliCommand", "printNamespaceHelp", "runReapCommand",
     "runLaunchPlanCommand", "runCertSignerCommand", "runSelfCommand",
     # The fourth group (machines) whose procs live here: `health`, `debug
     # artifact`. Its other commands' modules (`home`, `infra`, `disk`,
@@ -161,9 +161,9 @@ const
     # with `list`, `plan`, `policy`, `ci plan` and `watch`, whose daemon
     # worker reads the client's arguments through `loadWatchCommandLine`.
     # (`testOptionsOf`, generic over `test`'s and `certify`'s configuration,
-    # is not found by `procBody`; it reads typed fields only, and so does
-    # `buildWordsOf` in `cli_program`, which renders a build's command line
-    # from them.)
+    # is not found by `procBody`; it reads typed fields only, and hands its
+    # build the words confutils' generated `argvOf` writes back from the
+    # origins.)
     "runTestVerbCommand", "loadTestCommandLine", "runReproTestCommand",
     "runReproTest", "testBuildArgs", "plainTestBuild",
     "runCertifyingTestBuild", "runCertifyVerbCommand",
