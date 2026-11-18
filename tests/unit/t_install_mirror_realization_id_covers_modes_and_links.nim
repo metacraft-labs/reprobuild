@@ -146,9 +146,8 @@ suite "install-mirror realization id covers modes, links and directories":
         depB / "libdep.so"
 
   test "a directory-only difference yields a distinct realization id":
-    # Only the id is asserted here: the store's materializer copies files
-    # and file links, so the empty directory itself does not reach the
-    # prefix (a separate gap; see the report that accompanied this test).
+    # The prefix carries the directory too; that, and the directory-link
+    # and copy-arm cases, are t_install_mirror_prefix_reproduces_its_source_tree.
     let scratch = createTempDir("im-realization-dir-", "")
     defer: removeScratch(scratch)
     let bare = scratch / "bare"
@@ -161,3 +160,5 @@ suite "install-mirror realization id covers modes, links and directories":
     let first = publish(scratch, "bare", bare)
     let second = publish(scratch, "with-dir", withDir)
     check first.realizationHashHex != second.realizationHashHex
+    check dirExists(second.absolutePath / "var" / "empty")
+    check not dirExists(first.absolutePath / "var" / "empty")

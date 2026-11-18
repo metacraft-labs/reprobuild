@@ -38,7 +38,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	177
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	183
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
@@ -615,7 +615,7 @@ libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_rep
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
-libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim	nim	3
+libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim	nim	4
 libs/repro_infra/tests/t_service_account.nim	nim	25
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	225
@@ -2809,6 +2809,7 @@ tests/unit/t_hcr_watch_inference.nim	nim	1
 tests/unit/t_host_system_tools.nim	nim	7
 tests/unit/t_infra_apply_lock_hung_owner.nim	nim	5
 tests/unit/t_install_mirror_optional_version.nim	nim	3
+tests/unit/t_install_mirror_prefix_reproduces_its_source_tree.nim	nim	1
 tests/unit/t_install_mirror_realization_id_covers_modes_and_links.nim	nim	4
 tests/unit/t_install_mirror_rebuild_after_hashed_publish.nim	nim	3
 tests/unit/t_install_mirror_relocation.nim	nim	30

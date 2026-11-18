@@ -3022,3 +3022,121 @@ OnCalendar=daily
     let host = systemdLike(shows)
     check unitId(host, "mygetty@.service") == "getty@.service"
     check essentialInHoldSet(["mygetty@.service"], [], [], host) == @["getty@.service"]
+
+  # --- A13 review round 14 (the reviewer's probes N1-N4 as cases) -------
+  test "N1: a drop-in on a dashed prefix, a template or a whole type that sets Service=, Unit= or Sockets= is refused":
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemDropIn {
+  unit = "systemd-.socket"
+  name = "a13-prefix"
+  content = "[Socket]
+Service=gen.service
+"
+}
+systemd.systemDropIn {
+  unit = "bk@.timer"
+  name = "a13-tpl"
+  content = "[Timer]
+Unit=gen.service
+"
+}
+systemd.systemDropIn {
+  unit = "app@.service"
+  name = "a13-sockets"
+  content = "[Service]
+Sockets=sshd.socket
+"
+}
+systemd.systemDropIn {
+  unit = "x-.socket"
+  name = "a13-harmless"
+  content = "[Socket]
+Backlog=16
+"
+}
+""")
+    let r = triggerDropInRefusal(p)
+    checkpoint $r
+    check r.len == 3
+    check "systemd-.socket sets Service=" in r[0]
+    check "bk@.timer sets Unit=" in r[1]
+    check "app@.service sets Sockets=" in r[2]
+
+  test "N2: a drop-in on ssh.socket whose Service= names an alias of the judged unit is its trigger":
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "gen.service"
+  content = "[Service]
+ExecStart=/bin/true
+"
+}
+systemd.systemDropIn {
+  unit = "ssh.socket"
+  name = "a13-repoint"
+  content = "[Socket]
+Service=genalias.service
+"
+}
+""")
+    var shows = initTable[string, Table[string, string]]()
+    shows["genalias.service"] = {"Id": "gen.service"}.toTable
+    shows["gen.service"] = {"Id": "gen.service"}.toTable
+    let host = systemdLike(shows)
+    let pt = profileTriggersOf(p, ["gen.service"], host)
+    checkpoint $pt
+    check "ssh.socket" in pt
+    check essentialInHoldSet(["gen.service"], [], pt, host) == @["ssh.socket"]
+
+  test "N3: recover leaves an instance timer whose template service is held":
+    let state = scratch12("n3")
+    defer: removeDir(state)
+    let holds = state / "run"
+    putEnv(HostApplyLockEnvVar, state / "lock")
+    defer: delEnv(HostApplyLockEnvVar)
+    recordLiveCheckTriggers(state, ["bk@daily.timer"])
+    discard writeHolds(["bk@.service", "bk@daily.timer"], CarriedCheckHoldName, "x", holds)
+    var log = new seq[string]
+    let active = new seq[string]
+    let host = LiveHost(
+      isActive: proc (u: string): bool = u in active[],
+      show: proc (u: string): Table[string, string] =
+        result = {"LoadState": "loaded", "Triggers": "bk@daily.service"}.toTable
+        result["ActiveState"] = (if u in active[]: "active" else: "inactive"),
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("start " & u); active[].add(u); (true, ""),
+      stop: proc (u: string): tuple[ok: bool, output: string] = (true, ""),
+      resetFailed: proc (u: string) = discard)
+    discard repairTriggerRecords(state, host, holdDir = holds)
+    check "start bk@daily.timer" notin log[]
+    check readLiveCheckTriggers(state) == @["bk@daily.timer"]
+
+  test "N4: a judged template's running instances are recorded, and adoption keeps them active":
+    let rec = liveCheckUnitsRecord(["tpl@.service", "a.service"],
+                                   ["tpl@x.service", "a.service", "tplx@y.service"])
+    check (unit: "tpl@x.service", wasActive: true) in rec
+    check (unit: "tplx@y.service", wasActive: true) notin rec
+    let ad = adoptDeadUnits(rec, ["tpl@.service"])
+    check "tpl@x.service" in ad.active
+    check "a.service" in ad.active and "a.service" in ad.adopted
+
+  test "decision 177(c), 2026-11-18: a late essential trigger fails the apply, naming it and the held unit":
+    var shows = initTable[string, Table[string, string]]()
+    shows["sshd.socket"] = {"Id": "sshd.socket", "Triggers": "gen.service"}.toTable
+    shows["app.socket"] = {"Id": "app.socket", "Triggers": "gen.service"}.toTable
+    let host = systemdLike(shows)
+    let late = postReloadTriggers(["sshd.socket", "app.socket"], [], host)
+    let failures = lateEssentialFailures(late.essential, ["gen.service"], host)
+    checkpoint $failures
+    check failures.len == 1
+    check "sshd.socket is essential and triggers gen.service" in failures[0]
+    check "app.socket" notin failures[0]
+
+  test "an Accept=yes socket, an instance's included, triggers its prefix's template":
+    let accept = {"Accept": "yes"}.toTable
+    check acceptTemplateOf("foo@x.socket", accept) == "foo@.service"
+    check acceptTemplateOf("foo.socket", accept) == "foo@.service"
+    check acceptTemplateOf("foo.socket", {"Accept": "no"}.toTable) == ""

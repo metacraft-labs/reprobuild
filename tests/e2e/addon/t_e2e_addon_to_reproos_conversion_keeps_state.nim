@@ -2137,6 +2137,57 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "stopped nor held", sshOk, o & "\nwritten: " & written &
            "\nheld: " & heldAnywhere & "\nbefore: " & sshBefore &
            " after: " & sshAfter)
+    # A13 review round 14 (the owner decision "fail the apply", 2026-11-18,
+    # decision 177(c)): an essential trigger that systemd links to a judged
+    # unit only at the apply's own reload. A dummy sshd.socket -- an
+    # essential name absent on these bases (checked first; ssh.socket is
+    # never touched) -- listening on an unused local port, enabled by a
+    # link so the reload loads it, never started; a generator, installed
+    # without a reload, points it at the judged eth-r10-path.service. The
+    # apply must fail, naming the trigger and the judged unit, and leave
+    # sshd.socket neither stopped nor held. Falsifier: the engine build
+    # late-essential-report-dropped (the apply passes).
+    block:
+      let leLoad = nw.exec("systemctl show -p LoadState --value sshd.socket").stdout.strip()
+      var leOut, leHeld, leActive = ""
+      var leExit = -1
+      if leLoad == "not-found":
+        discard nw.run("printf '[Unit]\\nDescription=A13 round-14 probe: an " &
+          "essential name, a dummy listener\\n[Socket]\\nListenStream=" &
+          "127.0.0.1:18714\\n[Install]\\nWantedBy=sockets.target\\n' > " &
+          "/etc/systemd/system/sshd.socket && mkdir -p " &
+          "/etc/systemd/system/sockets.target.wants && ln -sf ../sshd.socket " &
+          "/etc/systemd/system/sockets.target.wants/sshd.socket && mkdir -p " &
+          "/etc/systemd/system-generators && printf '#!/bin/sh\\nmkdir -p " &
+          "\"$1/sshd.socket.d\"\\nprintf \"[Socket]\\\\nService=" & R10PathSvc &
+          "\\\\n\" > \"$1/sshd.socket.d/10-a13-late.conf\"\\n' > " &
+          "/etc/systemd/system-generators/a13r14-late && chmod 755 " &
+          "/etc/systemd/system-generators/a13r14-late")
+        let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
+          "/system_next.nim --host " & AgentTarget & " --no-preview",
+          timeoutSec = 3600)
+        leExit = r.exitCode
+        leOut = r.stdout & r.stderr
+        leHeld = nw.exec("ls /etc/systemd/system/sshd.socket.d/" &
+          "zz-repro-carried-check-hold.conf /run/systemd/system/sshd.socket.d/" &
+          "zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+        leActive = nw.exec("systemctl is-active sshd.socket").stdout.strip()
+        discard nw.run("rm -f /etc/systemd/system-generators/a13r14-late " &
+          "/etc/systemd/system/sockets.target.wants/sshd.socket " &
+          "/etc/systemd/system/sshd.socket; rm -rf /etc/systemd/system/" &
+          "sshd.socket.d /run/systemd/system/sshd.socket.d; systemctl " &
+          "daemon-reload; systemctl reset-failed sshd.socket 2>/dev/null; true")
+      let leNamed = "sshd.socket is essential and triggers " & R10PathSvc in leOut
+      let leOk = leLoad == "not-found" and leExit != 0 and leNamed and
+        leHeld.len == 0 and leActive != "active"
+      record["lateEssentialTrigger"] = %*{"sshdSocketBefore": leLoad,
+        "exit": leExit, "named": leNamed, "held": leHeld,
+        "active": leActive, "ok": leOk}
+      step("decision 177(c): an essential trigger systemd links to a judged " &
+           "unit only at the apply's reload fails the apply, named, and is " &
+           "neither stopped nor held", leOk,
+           "sshd.socket before: " & leLoad & "\n" & leOut & "\nheld: " &
+           leHeld & " active: " & leActive)
     # Decision 177 (A13 review round 11): with carried state restored, an
     # apply of the next generation plus a drop-in that makes a console getty
     # require a judged unit would hold an essential unit, so it is refused

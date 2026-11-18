@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2977,
+    "nimTestBinaries": 2978,
     "pureUnitConsolidationGroups": 86,
     "pureUnitTests": 797,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3026
+    "testEntries": 3027
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -467,19 +467,6 @@
       "sources": [
         "libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim",
         "libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_infra"
-      ],
-      "owner": "libs/repro_infra",
-      "sources": [
-        "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
-        "libs/repro_infra/tests/t_system_profile_addon_fields.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1519,6 +1506,20 @@
     },
     {
       "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_local_store",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_install_mirror_prefix_reproduces_its_source_tree.nim",
+        "tests/unit/t_install_mirror_realization_id_covers_modes_and_links.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
       "defines": [
         "reproInterfaceMode"
       ],
@@ -1693,7 +1694,7 @@
     "classificationCounts": {
       "graph-fixture": 24,
       "integration": 1645,
-      "platform/destructive": 196,
+      "platform/destructive": 197,
       "pure unit": 797,
       "unclassified": 364
     },
@@ -1909,9 +1910,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2977,
+    "nimTestBinaryCount": 2978,
     "pythonTestFileCount": 49,
-    "testEntryCount": 3026
+    "testEntryCount": 3027
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9242,7 +9243,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 33,
-      "staticCaseCount": 177,
+      "staticCaseCount": 183,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20055,8 +20056,8 @@
     },
     {
       "binary": "build/test-bin/t_every_apply_waits_for_carried_state",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -20065,8 +20066,8 @@
       "owner": "libs/repro_infra",
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59406,6 +59407,24 @@
       "source": "tests/unit/t_install_mirror_optional_version.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_install_mirror_prefix_reproduces_its_source_tree",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_install_mirror_prefix_reproduces_its_source_tree.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

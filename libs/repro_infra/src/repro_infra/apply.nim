@@ -181,6 +181,14 @@ type
       ## generation (spec §7.2 step 9, §7.5; reprobuild-pm issue
       ## 2026-10-30-infra-apply-commits-a-generation-whose-privileged-set-failed).
 
+  LiveCheckSeed* = object
+    ## Test seam (A13 review round 14): the state of a full apply's
+    ## carried-state check, as ``beginLiveCheck`` would leave it, for a
+    ## library apply that cannot hold units (no root, no systemd) to unwind
+    ## through. Only ``stateDir``, the units and the triggers are read.
+    stateDir*: string
+    units*, triggers*, remembered*, triggersActive*, driverStarts*: seq[string]
+
   ApplyOptions* = object
     stateDir*: string
     hostIdentity*: string
@@ -188,6 +196,11 @@ type
     planId*: string                   ## empty => compute a fresh plan
     elevationMode*: ElevationMode
     forceBroker*: bool                ## REPRO_FORCE_BROKER test seam
+    liveCheckSeed*: LiveCheckSeed
+    liveCheckSeeded*: bool
+      ## Test seam: begin from ``liveCheckSeed`` instead of holding nothing
+      ## (a library apply off the live host), so the unwinding of an apply
+      ## that raises between its hold and its release can be tested.
     noPreview*: bool                  ## scripted: converge without preview
     acceptPasswdDestroy*: bool
       ## The M69 Phase-C `--accept-passwd-destroy` flag. A
@@ -722,7 +735,12 @@ proc acceptTemplateOf*(socket: string; show: Table[string, string]): string =
   if not socket.endsWith(".socket"): return ""
   if show.getOrDefault("Accept").strip().toLowerAscii() notin ["yes", "true", "1", "on"]:
     return ""
-  socket[0 ..< socket.len - len(".socket")] & "@.service"
+  # The prefix is the name before any instance: ``foo@x.socket`` is an
+  # instance of ``foo@.socket`` and triggers ``foo@.service``, as
+  # ``foo.socket`` does (A13 review round 14).
+  let stem = socket[0 ..< socket.len - len(".socket")]
+  let at = stem.find('@')
+  (if at >= 0: stem[0 ..< at] else: stem) & "@.service"
 
 proc skippedUnderHold*(show: Table[string, string];
                        holdStampUsec: int64): bool =
@@ -934,12 +952,61 @@ proc fireSources*(driverStarts, heldTriggers: openArray[string]): seq[string] =
   for t in heldTriggers:
     if t notin result: result.add(t)
 
-proc profileTriggersOf*(p: SystemProfile; units: openArray[string]): seq[string] =
+proc profileTriggersOf*(p: SystemProfile; units: openArray[string];
+                        host: LiveHost = LiveHost()): seq[string] =
   ## The profile's own socket, path and timer units whose triggered unit
   ## is held (an instance by its template): known before any of them is
-  ## written or loaded, so the apply can hold them with their unit.
+  ## written or loaded, so the apply can hold them with their unit. With a
+  ## ``host``, each target is the name systemd knows it by (``unitId``)
+  ## before it is matched, so a drop-in whose ``Service=`` names an alias of
+  ## a judged unit is a trigger of that unit (§13 decision 177 as the owner
+  ## decided it on 2026-11-18; A13 review round 14).
+  var judged = @units
+  when ApplyMutation != "trigger-targets-by-name":
+    # FALSIFYING MUTATION (when absent): targets are matched as written.
+    if host.show != nil: judged = unitIds(host, units)
   for (trigger, target) in triggerTargets(p):
-    if heldBy(target, units) and trigger notin result: result.add(trigger)
+    var t = target
+    when ApplyMutation != "trigger-targets-by-name":
+      if host.show != nil: t = unitId(host, target)
+    if heldBy(t, judged) and trigger notin result: result.add(trigger)
+
+proc triggerDropInRefusal*(p: SystemProfile): seq[string] =
+  ## The generation's drop-ins that a full apply carrying out a carried-state
+  ## check refuses before it writes anything (the owner decision "refuse
+  ## Service=/Unit= there", 2026-11-18, §13 decision 177; A13 review round
+  ## 14): a drop-in on a dashed prefix (``systemd-.socket``, which applies
+  ## to ``systemd-networkd.socket`` and every unit the prefix names), on a
+  ## template (``foo@.socket``) or type-wide (``socket.d``) that sets
+  ## ``Service=``, ``Unit=`` or ``Sockets=`` -- it re-points triggers this
+  ## check cannot enumerate, an essential one among them. One line each,
+  ## naming the drop-in, its unit and the key.
+  when ApplyMutation == "prefix-trigger-dropins-allowed":
+    # FALSIFYING MUTATION: such a drop-in is let through.
+    return
+  for r in p.resources:
+    if r.kind != srkSystemdSystemDropIn: continue
+    let u = r.diUnit
+    let dot = u.rfind('.')
+    let stem = if dot > 0: u[0 ..< dot] else: ""
+    let typeWide = dot < 0 and u in ["socket", "timer", "path", "service"]
+    if not (typeWide or stem.endsWith("-") or stem.endsWith("@")): continue
+    var keys: seq[string]
+    for line in systemdLogicalLines(r.diContent):
+      let t = line.strip()
+      if t.len == 0 or t[0] in {'#', ';', '['}: continue
+      let eq = t.find('=')
+      if eq <= 0: continue
+      let k = t[0 ..< eq].strip()
+      if k in ["Service", "Unit", "Sockets"] and k notin keys: keys.add(k)
+    if keys.len > 0:
+      result.add("ECarriedStatePending: the drop-in " & r.diName & " on " &
+        u & " sets " & keys.join("=, ") & "=; a drop-in on a prefix, a " &
+        "template or a whole unit type that sets Service=, Unit= or " &
+        "Sockets= re-points units the carried-state check cannot list, so " &
+        "it is refused before anything is written (§13 decision 177 on " &
+        "the essential units never held, as the owner decided it on " &
+        "2026-11-18)")
 
 proc triggersToStop*(triggers, stopping: openArray[string];
                      host: LiveHost;
@@ -1636,6 +1703,29 @@ proc targetLeadsTo(t: string; held: openArray[string]; host: LiveHost;
     for d in props.getOrDefault(key).splitWhitespace():
       if heldBy(d, held) or targetLeadsTo(d, held, host, visited): return true
 
+proc lateEssentialFailures*(essential, held: openArray[string];
+                            host: LiveHost): seq[string] =
+  ## The failures of a full apply for each essential trigger systemd names
+  ## only after the drivers' reload (``postReloadTriggers``): one line
+  ## each, naming the trigger and the held units it triggers. Such a
+  ## trigger is never stopped or held; the apply fails so the operator
+  ## acts (the owner decision "fail the apply", 2026-11-18, §13 decision
+  ## 177(c); A13 review round 14).
+  for t in essential:
+    var targets: seq[string]
+    try:
+      for u in triggeredUnits(host.show(t)):
+        if heldBy(u, held) and u notin targets: targets.add(u)
+      let tmpl = acceptTemplateOf(t, host.show(t))
+      if tmpl.len > 0 and heldBy(tmpl, held) and tmpl notin targets:
+        targets.add(tmpl)
+    except CatchableError: discard
+    result.add("ECarriedStatePending: " & t & " is essential and triggers " &
+      (if targets.len > 0: targets.join(", ") else: "a unit") & ", which " &
+      "the carried-state check holds; it was neither stopped nor held, and " &
+      "the apply fails so that the operator decides (§13 decision 177(c) " &
+      "as the owner decided it on 2026-11-18)")
+
 proc requiringRefused*(passed, refused: openArray[string]; host: LiveHost;
                        instancesOf: proc (tmpl: string): seq[string] = nil):
     seq[tuple[unit, because: string]] =
@@ -1823,7 +1913,7 @@ when defined(posix):
     if units.len == 0: return
     let names = liveJudgedNames(units, p,
       proc (t: string): seq[string] = hostRunningInstances(t))
-    result = profileTriggersOf(p, units)
+    result = profileTriggersOf(p, units, host)
     for t in loadedTriggersOf(names, host):
       if t notin result: result.add(t)
     for t in templateTriggerInstances(p, units, hostLoadedInstances):
@@ -1895,6 +1985,11 @@ when defined(posix):
     let ess = essentialInHoldSet(result.units & result.adopted,
                                  result.requirers, result.triggers, host)
     if ess.len > 0: raise essentialRefusal(ess)
+    # And a drop-in that re-points triggers it cannot list (the owner
+    # decision "refuse Service=/Unit= there", 2026-11-18).
+    let dropIns = triggerDropInRefusal(p)
+    if dropIns.len > 0:
+      raise newException(ECarriedStatePending, dropIns.join("; "))
     for u in result.adoptedActive:
       if u notin result.wasActive: result.wasActive.add(u)
     for u in result.requirers & result.adopted:
@@ -1966,12 +2061,14 @@ when defined(posix):
       for t in late.stop:
         c.triggers.add(t)
         stopTriggers(c, [t], [], host, p)
-    var problems: seq[string]
+    # A late essential trigger fails the apply on its own path (the owner
+    # decision "fail the apply", 2026-11-18, §13 decision 177(c)): never as
+    # one of ``problems``, which ``refusedUnits`` reads as refusing units --
+    # and which the check below assigns afresh.
+    var lateEssential: seq[string]
     when ApplyMutation != "triggers-left-running":
-      for t in late.essential:
-        problems.add("ECarriedStatePending: " & t & " triggers a unit the " &
-          "carried-state check holds and is essential, so it is neither " &
-          "stopped nor held; the apply reports it")
+      lateEssential = lateEssentialFailures(late.essential, names, host)
+    var problems: seq[string]
     when not LiveCheckSkipped:
       # One reading of each template's running instances serves both the
       # check and the report of what it judged.
@@ -2117,6 +2214,10 @@ when defined(posix):
     for t in refusedTriggers:
       result.add("ECarriedStatePending: " & t & " stays stopped: it " &
         "triggers a unit the carried-state check refused")
+    when ApplyMutation != "late-essential-report-dropped":
+      # FALSIFYING MUTATION (when absent): the failure is dropped, as the
+      # round-13 wiring lost it, and the apply passes.
+      result.add(lateEssential)
 
 proc recordComparisonProfile*(writtenText, appliedText: string): SystemProfile =
   ## What a full apply's generation is compared with the record of triggers
@@ -2183,8 +2284,13 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
                   else: "/"
     if not opts.carriedStateChecked and opts.elevationMode != emNoElevate and
         essRoot == "/" and isProcessElevated():
-      let ess = essentialRefusalBeforeWrites(
-        withCarriedRequirements(profileText, essDir, essRoot), essDir, essRoot)
+      let essText = withCarriedRequirements(profileText, essDir, essRoot)
+      let essProfile = parseSystemProfile(essText)
+      if liveReachUnits(essProfile, essDir, essRoot).len > 0:
+        let refused = triggerDropInRefusal(essProfile)
+        if refused.len > 0:
+          raise newException(ECarriedStatePending, refused.join("; "))
+      let ess = essentialRefusalBeforeWrites(essText, essDir, essRoot)
       if ess.len > 0: raise essentialRefusal(ess)
   # Before any mutation: an add-on switch interrupted on this host (its
   # pending marker present, its owner gone) is recovered first, under the
@@ -2360,8 +2466,16 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     # 11, H1), with the units it held (``LiveCheckUnitsFile``). The holds
     # stay: the next full apply adopts them (round 12, M3).
     defer:
-      if not liveCheckFinished:
-        recordInterruptedLiveCheck(liveCheck)
+      when ApplyMutation != "interrupted-apply-unrecorded":
+        # FALSIFYING MUTATION (when absent): an apply that raises between
+        # its hold and its release records nothing.
+        if not liveCheckFinished:
+          recordInterruptedLiveCheck(liveCheck)
+    if opts.liveCheckSeeded:
+      let sd = opts.liveCheckSeed
+      liveCheck = LiveCheck(stateDir: sd.stateDir, units: sd.units,
+        triggers: sd.triggers, remembered: sd.remembered,
+        triggersActive: sd.triggersActive, driverStarts: sd.driverStarts)
     # The triggers and units an earlier full apply held and never released
     # -- it died between the two -- are adopted by this apply's check
     # (``beginLiveCheck``) and started after it, their holds kept (the owner
