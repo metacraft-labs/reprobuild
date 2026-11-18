@@ -32,6 +32,10 @@ import repro_bundle/[nix_half, sources_half, select, bootstrap, github]
 import repro_local_store/store_bundle
 import repro_test_support/reasoned_skip
 
+const NoHandoffLatest = repeat('0', 64)
+  ## The latest.json hash restore.sh hands over, for the tests that never
+  ## reach the handoff (no `repro` on their PATH) or never run the script.
+
 proc sh(cmd: string; cwd = ""): string =
   let (output, code) = execCmdEx(cmd, workingDir = cwd)
   doAssert code == 0, cmd & "\n" & output
@@ -160,7 +164,7 @@ suite "restore.sh":
       shells: @[BundleShell(name: "lib:default", input: "/nix/store/in",
         env: "/nix/store/env")])
     let latest = %*{"system": "x86_64-linux", "name": "demo"}
-    let script = renderRestoreScript(latest, true, h)
+    let script = renderRestoreScript(latest, true, h, NoHandoffLatest)
     check "aa  part-0000" in script
     check "ab  registration" in script
     check "'/nix/store/rrr-repro'" in script
@@ -170,7 +174,7 @@ suite "restore.sh":
     writeFile(path, script)
     defer: removeFile(path)
     check execCmdEx("bash -n " & quoteShell(path)).exitCode == 0
-    let bare = renderRestoreScript(latest, false, NixHalf())
+    let bare = renderRestoreScript(latest, false, NixHalf(), NoHandoffLatest)
     check "install repro first" in bare
 
 suite "github layout":
@@ -310,7 +314,7 @@ suite "restore.sh as a setup script":
     defer: removeDir(top)
     let script = top / "restore.sh"
     writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
-      "name": "demo"}, false, NixHalf()))
+      "name": "demo"}, false, NixHalf(), NoHandoffLatest))
     let log = top / "log" / "restore.log"
     let env = "env -i PATH=" & quoteShell(restoreScriptPath(top)) &
       " REPRO_BUNDLE_LOG=" & quoteShell(log)
@@ -471,7 +475,7 @@ suite "nix half restore after an interrupted unpack":
       # The bootstrap path: restore.sh, from a local bundle directory.
       let script = top / "restore.sh"
       writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
-        "name": "bundle"}, true, h))
+        "name": "bundle"}, true, h, NoHandoffLatest))
       let shRoot = top / "sh-root"
       interruptedUnpack(partsDir, h, shRoot)
       let log = top / "restore.log"
@@ -505,7 +509,7 @@ suite "nix half restore after an interrupted unpack":
       check not pathValid(badRoot, b)
       check outsideUntouched(badRoot)
       writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
-        "name": "bundle"}, true, h))
+        "name": "bundle"}, true, h, NoHandoffLatest))
       let badShRoot = top / "bad-sh-root"
       interruptedUnpack(partsDir, h, badShRoot)
       removeFile(log)
@@ -687,7 +691,7 @@ suite "nix half restore beside a Nix writer":
       # The bootstrap path: restore.sh.
       let script = top / "restore.sh"
       writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
-        "name": "bundle"}, true, h))
+        "name": "bundle"}, true, h, NoHandoffLatest))
       let shRoot = top / "sh-root"
       let shScratch = top / "sh-holder"
       createDir(shScratch)
@@ -735,7 +739,7 @@ suite "nix half restore beside a Nix writer":
         shells: @[BundleShell(name: "t:default", input: a, env: b)])
       let script = top / "restore.sh"
       writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
-        "name": "bundle"}, true, h))
+        "name": "bundle"}, true, h, NoHandoffLatest))
       let log = top / "restore.log"
       proc runScript(root: string) =
         discard execCmdEx("env -i PATH=" & quoteShell(restoreScriptPath(top)) &
@@ -845,7 +849,7 @@ suite "restore.sh from a local bundle directory":
         shells: @[BundleShell(name: "t:default", input: a, env: b)])
       let script = top / "restore.sh"
       writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
-        "name": "bundle"}, true, h))
+        "name": "bundle"}, true, h, NoHandoffLatest))
       # A zstd that, at restore.sh's first call (the registration decompress,
       # after `sha256sum -c`), empties every part of the source directory:
       # what a writer of that directory could do between check and read.
@@ -914,7 +918,7 @@ proc runRestoreSh(top: string; h: NixHalf; root, source: string;
   ## against `source` with the Nix half restored into `root`.
   let script = top / ("restore-" & h.id & ".sh")
   writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
-    "name": "bundle"}, true, h))
+    "name": "bundle"}, true, h, NoHandoffLatest))
   let log = top / ("restore-" & h.id & "-" & extractFilename(root) & ".log")
   removeFile(log)
   let (output, code) = execCmdEx(restoreShEnv(top, root, log) & " " &
@@ -1461,3 +1465,117 @@ suite "a hostile latest.json cannot steer a download outside the bundle":
     check "refusing part name" in refused
     check not dirExists(top / "ws")
 
+proc handoffOptions(args: seq[string]): RestoreOptions =
+  ## The `repro bundle restore` options restore.sh's handoff asked for, from
+  ## the arguments the `repro` it ran was given: the flags this suite's
+  ## handoff carries, spelled as the CLI's description spells them.
+  doAssert args.len > 2 and args[0 .. 1] == @["bundle", "restore"],
+    "restore.sh did not hand over to `repro bundle restore`: " & $args
+  result.source = args[2]
+  for a in args[3 .. ^1]:
+    if a == "--after-bootstrap": result.afterBootstrap = true
+    elif a == "--activate": result.activate = true
+    elif a.startsWith("--latest-sha256="):
+      result.latestSha256 = a["--latest-sha256=".len .. ^1]
+    elif a.startsWith("--nix-root="): result.nixRoot = a["--nix-root=".len .. ^1]
+    elif a.startsWith("--activation-file="):
+      result.activationFile = a["--activation-file=".len .. ^1]
+    elif a.startsWith("--bashrc-file="):
+      result.bashrcFile = a["--bashrc-file=".len .. ^1]
+    else: doAssert false, "unexpected handoff argument " & a
+
+suite "the bootstrap's handoff reads the latest.json restore.sh was made from":
+  ## A local bundle directory others can write, with restore.sh from a place
+  ## they cannot (the documented `curl …/restore.sh | bash -s -- <dir>`).
+  ## restore.sh verifies the Nix half from its private copies; a writer then
+  ## replaces <dir>/<system>/latest.json, before the handoff reads it, with
+  ## one whose primary shell environment is theirs. `--activate` would write
+  ## that environment into the profile script every new shell sources.
+  ##
+  ## restore.sh runs as rendered by the production renderer, and the handoff
+  ## is the production `restoreBundle`. The one stand-in is the `repro`
+  ## restore.sh hands over to: a script on PATH that records its arguments,
+  ## because this test binary builds no `repro`; `handoffOptions` reads them
+  ## back as the CLI would. See reprobuild-pm issues/2026-11-16-bootstrap-
+  ## handoff-re-reads-latest-json-from-the-source.md.
+  test "a latest.json replaced after the Nix half was verified is refused":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-handoff-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let tree = top / "payload"
+      createDir(tree)
+      writeFile(tree / "env.sh", "export T_REPRO_BUNDLE_HANDOFF=1\n")
+      writeFile(tree / "lib.so", "honest\n")
+      let a = sh("nix-store --add " & quoteShell(tree)).strip()
+      let b = sh("nix-store --add " & quoteShell(tree / "env.sh")).strip()
+      let system = hostSystem()
+      let id = "0123456789abcdef0123456789abcdef"
+      let bundle = top / "bundle"
+      let partsDir = bundle / system / NixHalfDir / id
+      let packed = packNixHalf(@[a, b], partsDir, 3, 128 * 1024)
+      let h = NixHalf(id: id, system: system,
+        zstd: storePathOf(expandFilename(findExe("zstd"))), paths: @[a, b],
+        unpackedBytes: packed.unpackedBytes,
+        compressedBytes: packed.compressedBytes, parts: packed.parts,
+        registration: packed.registration,
+        shells: @[BundleShell(name: "t:default", input: a, env: b)],
+        primary: "t:default")
+      proc latestWith(env: string): string =
+        var nix = h.toJson
+        nix["dir"] = %(system / NixHalfDir / id)
+        nix["shells"]["t:default"]["env"] = %env
+        pretty(%*{"schema": BundleSchema, "name": "bundle", "system": system,
+          "workspace_dir": top / "ws", "halves": {"nix": nix}}) & "\n"
+      let honest = latestWith(b)
+      let latestPath = bundle / system / LatestName
+      writeFile(latestPath, honest)
+      let script = top / "restore.sh"
+      writeFile(script, renderRestoreScript(parseJson(honest), true, h,
+        sha256Hex(honest)))
+      # The `repro` restore.sh hands over to records what it was asked.
+      let tools = restoreScriptPath(top)
+      let argsFile = top / "handoff.args"
+      writeFile(tools / "repro", "#!/bin/sh\nprintf '%s\\n' \"$@\" > " &
+        quoteShell(argsFile) & "\n")
+      setFilePermissions(tools / "repro", {fpUserRead, fpUserWrite, fpUserExec})
+      let shRoot = top / "sh-root"
+      let activation = top / "etc" / "zz-repro-bundle.sh"
+      let bashrc = top / "etc" / "bash.bashrc"
+      let log = top / "restore.log"
+      let (output, code) = execCmdEx(restoreShEnv(top, shRoot, log) &
+        " bash " & quoteShell(script) & " " & quoteShell(bundle) &
+        " --activate --activation-file=" & quoteShell(activation) &
+        " --bashrc-file=" & quoteShell(bashrc))
+      checkpoint "restore.sh exit " & $code & ":\n" &
+        (if fileExists(log): readFile(log) else: output)
+      check code == 0
+      check pathValid(shRoot, b)
+      let opts = handoffOptions(readFile(argsFile).strip().splitLines())
+      check opts.afterBootstrap
+      check opts.latestSha256 == sha256Hex(honest)
+      # The writer's latest.json, put in place once the Nix half is verified.
+      let theirs = "/nix/store/00000000000000000000000000000000-theirs-env"
+      writeFile(latestPath, latestWith(theirs))
+      var refusal = ""
+      try:
+        discard restoreBundle(opts)
+      except BundleError as e:
+        refusal = e.msg
+      checkpoint "handoff: " & refusal
+      check "refusing latest.json" in refusal
+      check not fileExists(activation) or theirs notin readFile(activation)
+      # The latest.json restore.sh was made from is restored as before.
+      writeFile(latestPath, honest)
+      let r = restoreBundle(opts)
+      check r.primaryEnv == b
+      check b in readFile(activation)
+      # A hash that is not one is refused, not ignored.
+      var bad = opts
+      bad.latestSha256 = "not-a-hash"
+      expect BundleError:
+        discard restoreBundle(bad)

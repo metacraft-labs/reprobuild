@@ -4913,6 +4913,46 @@ proc providerCompileNimcacheRoot*(): string =
       "cannot resolve the user cache directory for the provider nimcache")
   absolutePath(cache) / "repro-nimcache-provider"
 
+proc recipeCompileToolPath*(modulePath, nim, cc: string): string =
+  ## The `PATH` a recipe compile declares: the directories of the Nim
+  ## compiler and the C compiler it runs, plus resolved Git when `modulePath`
+  ## selects a lock-pinned catalog the compile must verify. Empty when none
+  ## of them is an absolute path.
+  ##
+  ## Declared rather than inherited because the compile reads `PATH` (the C
+  ## compiler driver searches it), and its monitor then records the value:
+  ## an inherited `PATH` makes the caller's shell, and on another machine
+  ## that machine's default `PATH`, part of the compile's key. Both recipe
+  ## compiles declare it, the provider compile (`providerCompileLaunchEnv`)
+  ## and the interface extraction (`repro_cli_support.extractInterfaceEdge`).
+  var dirs: seq[string] = @[]
+  # A lock-pinned catalog the compile helper must materialize is fetched and
+  # verified with Git. Resolve Git here, before isolation, and declare only
+  # that tool directory rather than inheriting the shell PATH. A checkout
+  # selected in the pin's place -- at the pinned commit, or through develop
+  # mode -- is read in place and needs no Git. `$REPROBUILD_PACKAGES_ROOT`
+  # selects no pin at all.
+  let catalogGit =
+    if modulePath.len > 0 and
+        getEnv(ReprobuildPackagesRootEnv).len == 0 and
+        selectExternalCatalog(modulePath).kind == eckLockPinned:
+      findExe("git")
+    else: ""
+  for tool in [nim, cc, catalogGit]:
+    if tool.len > 0 and tool.isAbsolute:
+      let dir = parentDir(tool)
+      if dir notin dirs:
+        dirs.add(dir)
+  dirs.join($PathSep)
+
+proc recipeCompileToolPath*(modulePath = ""): string =
+  ## `recipeCompileToolPath` for the Nim and C compilers the next recipe
+  ## compile will run (`nimCompilerPath`, `hostCCompilerPath`).
+  let cc =
+    try: hostCCompilerPath()
+    except CatchableError: ""
+  recipeCompileToolPath(modulePath, nimCompilerPath(), cc)
+
 proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   ## The environment values the provider-compile edge DECLARES, so that the
   ## caller's shell stops deciding what the edge is.
@@ -4972,25 +5012,7 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   let cc =
     try: hostCCompilerPath()
     except CatchableError: ""
-  var dirs: seq[string] = @[]
-  # A lock-pinned catalog the compile helper must materialize is fetched and
-  # verified with Git. Resolve Git here, before isolation, and declare only
-  # that tool directory rather than inheriting the shell PATH. A checkout
-  # selected in the pin's place -- at the pinned commit, or through develop
-  # mode -- is read in place and needs no Git, so those compiles, like every
-  # other, retain their original PATH. `$REPROBUILD_PACKAGES_ROOT` selects
-  # no pin at all.
-  let catalogGit =
-    if modulePath.len > 0 and
-        getEnv(ReprobuildPackagesRootEnv).len == 0 and
-        selectExternalCatalog(modulePath).kind == eckLockPinned:
-      findExe("git")
-    else: ""
-  for tool in [nim, cc, catalogGit]:
-    if tool.len > 0 and tool.isAbsolute:
-      let dir = parentDir(tool)
-      if dir notin dirs:
-        dirs.add(dir)
+  let toolPath = recipeCompileToolPath(modulePath, nim, cc)
   if nim.len > 0 and nim.isAbsolute:
     result.add("REPRO_NIM_COMPILER=" & nim)
   if cc.len > 0 and cc.isAbsolute:
@@ -5005,8 +5027,8 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   let sdk = getEnv(bootstrapSdkRootEnv)
   if sdk.len > 0:
     result.add(bootstrapSdkRootEnv & "=" & sdk)
-  if dirs.len > 0:
-    result.add("PATH=" & dirs.join($PathSep))
+  if toolPath.len > 0:
+    result.add("PATH=" & toolPath)
   result.add("TERM=dumb")
   result.add("LANG=C")
   # Carry the cache BASE across the isolated HOME, always reserving the
@@ -5015,6 +5037,12 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   # through providerCompileIgnoredInputPrefixes.
   let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
   result.add(cacheHomeEnv & "=" & parentDir(providerCompileNimcacheRoot()))
+  # Created here, before the edge's cache lookup, so the directories above
+  # the nimcache exist whenever the lookup compares the record: the compile
+  # probes them on its way to the nimcache, and a fresh machine restoring a
+  # bundle (or a fresh HOME) would otherwise miss on "absent" for a
+  # directory the edge creates for itself.
+  createDir(extendedPath(providerCompileNimcacheRoot()))
   if homeDir.len > 0:
     createDir(extendedPath(homeDir))
     result.add("HOME=" & homeDir)
@@ -7912,11 +7940,23 @@ const InterfaceNimcacheSlotCount* = 4
 
 proc interfaceExtractionNimcacheRoot*(): string =
   ## Root of the interface extraction's shared nimcache, beside the provider
-  ## compile's (`providerCompileNimcacheRoot`) and for the same reasons:
-  ## machine-local derived state that must survive a new action-cache root,
-  ## a writable location when the reprobuild sources are an immutable store
-  ## path, and a short prefix on Windows (Nim's mkdir is MAX_PATH-bound).
-  getTempDir() / "repro-nimcache-interface"
+  ## compile's (`providerCompileNimcacheRoot`, in the user cache directory)
+  ## and for the same reasons: machine-local derived state that must survive
+  ## a new action-cache root, a writable location when the reprobuild sources
+  ## are an immutable store path, and a short prefix on Windows (Nim's mkdir
+  ## is MAX_PATH-bound).
+  ##
+  ## Not the temporary directory, where it used to be. The extraction creates
+  ## the root and so probes every directory above it, and the monitor records
+  ## those probes. A temporary directory is often made per shell (a Nix dev
+  ## shell's `TMPDIR` is a fresh `mktemp -d`), so the extraction's record
+  ## named a directory that a new shell, or another machine restoring a
+  ## bundle, does not have, and it missed there.
+  let cache = getCacheDir()
+  if cache.len == 0:
+    raise newException(ValueError,
+      "cannot resolve the user cache directory for the interface nimcache")
+  absolutePath(cache) / "repro-nimcache-interface"
 
 proc interfaceExtractionIgnoredInputPrefixes*(): seq[string] =
   ## What the extraction edge's monitor must not record from the shared

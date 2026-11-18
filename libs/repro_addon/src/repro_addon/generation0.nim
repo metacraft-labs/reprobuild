@@ -277,6 +277,9 @@ const
   EgressUnit* = "repro-addon-egress.service"
   EgressCheckUnit* = "repro-addon-egress-check.service"
   EgressCheckTimer* = "repro-addon-egress-check.timer"
+  HostNftablesUnit* = "nftables.service"
+    ## The distribution's ruleset loader, whose flush deletes the egress
+    ## observer's table; the observer unit is tied to it by reference.
   DefaultEvidenceHeartbeatSec* = 300
   DefaultAgentPollSec* = 300
   AgentPollRandomDelaySec* = 30
@@ -1157,8 +1160,39 @@ proc egressUnit*(nft: string; tableSha256 = ""): string =
   ## the switch restarts a changed unit, which loads the new table into the
   ## kernel. Without it the unit's bytes stayed the same and the old sets
   ## stayed loaded until a reboot (A11 review round 2).
+  ##
+  ## The host's ``nftables.service`` (Debian's and Ubuntu's) loads an
+  ## ``/etc/nftables.conf`` that begins ``flush ruleset`` at start and
+  ## reload, runs ``nft flush ruleset`` at stop, and a package upgrade
+  ## try-restarts it: each deletes this table while this unit, which
+  ## ``RemainAfterExit=yes``, stays active. So the unit is tied to that
+  ## service by reference, within spec §13 decision 43 (the add-on's own
+  ## table), with nothing written on the service, a management-path unit:
+  ## ``After=`` orders the load after the host's ruleset at boot and in
+  ## every shared transaction; ``PartOf=`` carries a restart (and a
+  ## try-restart) of it here, which the fetch unit's ``Requires=`` carries
+  ## on to a running fetch, and its stop, which stops this unit (before the
+  ## flush: stops run in reverse order) and a running fetch until the next
+  ## fetch starts this unit again; ``ReloadPropagatedFrom=`` carries its
+  ## reload to ``ExecReload=``, which loads the table again (the file
+  ## declares, deletes and defines it in one transaction, so a load over a
+  ## missing or present table is the same). Not covered: a start of that
+  ## service while this unit is active (``systemctl enable --now
+  ## nftables`` after bootstrap), or a flush by hand. ``ExecStop=``
+  ## tolerates a table such a flush already deleted, so a later stop or
+  ## restart of this unit does not end ``failed``. A base without that
+  ## service leaves the references unresolved, which systemd ignores.
+  ## Reprobuild-pm issue
+  ## ``2026-11-16-addon-egress-table-stays-deleted-after-nftables-service-flushes-the-ruleset.md``.
   let load = when mutated("egress-observer-not-installed"): "/bin/true"
              else: nft & " -f " & EgressNftPath
+  let hostRuleset = when mutated("egress-unit-ignores-host-ruleset"): ""
+                    else:
+                      "After=" & HostNftablesUnit & "\n" &
+                      "PartOf=" & HostNftablesUnit & "\n" &
+                      "ReloadPropagatedFrom=" & HostNftablesUnit & "\n"
+  let reload = when mutated("egress-unit-ignores-host-ruleset"): ""
+               else: "ExecReload=" & load & "\n"
   let table = when mutated("egress-unit-ignores-table"): ""
               else:
                 if tableSha256.len > 0:
@@ -1169,13 +1203,15 @@ proc egressUnit*(nft: string; tableSha256 = ""): string =
   table &
   "Requires=" & AgentSlice & "\n" &
   "After=" & AgentSlice & "\n" &
+  hostRuleset &
   "Before=" & AgentFetchUnit & " " & ReassertUnit & "\n" &
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
   "RemainAfterExit=yes\n" &
   "ExecStart=" & load & "\n" &
-  "ExecStop=" & nft & " delete table inet repro_addon_egress\n" &
+  reload &
+  "ExecStop=-" & nft & " delete table inet repro_addon_egress\n" &
   "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &

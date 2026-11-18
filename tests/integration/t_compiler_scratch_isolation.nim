@@ -142,6 +142,7 @@ when defined(posix) and isNixSupported:
       let oldFake = getEnv("REPRO_TEST_FAKE_PROVIDER")
       let oldRuntimeRpath = getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH")
       let oldTmpDir = getEnv("TMPDIR")
+      let oldCacheHome = getEnv("XDG_CACHE_HOME")
       defer:
         putEnv("REPRO_NIM_COMPILER", oldCompiler)
         putEnv("REPRO_PROVIDER_NIMCACHE_MODE", oldMode)
@@ -149,6 +150,8 @@ when defined(posix) and isNixSupported:
         putEnv("REPRO_TEST_FAKE_PROVIDER", oldFake)
         putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
         if oldTmpDir.len > 0: putEnv("TMPDIR", oldTmpDir) else: delEnv("TMPDIR")
+        if oldCacheHome.len > 0: putEnv("XDG_CACHE_HOME", oldCacheHome)
+        else: delEnv("XDG_CACHE_HOME")
         setFilePermissions(modulePath, {fpUserRead, fpUserWrite})
         setFilePermissions(projectRoot,
           {fpUserRead, fpUserWrite, fpUserExec})
@@ -274,12 +277,14 @@ when defined(posix) and isNixSupported:
       putEnv("REPRO_TEST_NIM_FAIL", "")
       putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", oldRuntimeRpath)
       putEnv("REPRO_PROVIDER_NIMCACHE_MODE", "shared")
-      # The shared interface nimcache lives under the temporary directory
+      # The shared interface nimcache lives under the user cache directory
       # (`interfaceExtractionNimcacheRoot`), outside any scratch or
       # action-cache root. A private one keeps the object counts below about
       # this fixture alone.
       createDir(tempRoot / "tmp")
       putEnv("TMPDIR", tempRoot / "tmp")
+      createDir(tempRoot / "cache")
+      putEnv("XDG_CACHE_HOME", tempRoot / "cache")
 
       let first = extractInterfaceFromModule(modulePath,
         outputRoot / "first.rbsz", outputRoot / "first.nim", sourceRoot,

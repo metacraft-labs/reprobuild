@@ -591,7 +591,7 @@ type EngineSourceFile = object
 ## and no rewrite-warning template there either, so the compile-time linter
 ## does not see them at all — which is the other half of why they needed a
 ## row here.
-const SpawnPrimitives: array[45, tuple[name: string; expected: int;
+const SpawnPrimitives: array[47, tuple[name: string; expected: int;
                                        why: string]] = [
   ("startProcess", 4,
     "post-build converter, L2 RunQuota helper, nix daemon, config-free Nim metadata"),
@@ -615,8 +615,11 @@ const SpawnPrimitives: array[45, tuple[name: string; expected: int;
   ("execCmd", 0, "std/osproc; NOT matched by a search for execCmdEx"),
   ("execCmdEx", 0, ""),
   ("uncontrolledExecCmdEx", 0, ""),
+  ("uncontrolledExecArgvEx", 0, "uncontrolledExecCmdEx for an argv, no shell"),
   ("execProcess", 0, ""),
   ("execProcesses", 0, "std/osproc; NOT matched by a search for execProcess"),
+  ("execArgvProcesses", 0,
+    "std/osproc (the Nim fork): execProcesses for argvs, no shell"),
   ("uncontrolledExecProcess", 0, ""),
   ("execShellCmd", 0, ""),
   ("uncontrolledExecShellCmd", 0, ""),
@@ -841,7 +844,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "osproc", audit: caFullSurface,
       sourceRels: @["pure/osproc.nim"],
       spawning: @["execProcess", "execCmd", "startProcess", "execProcesses",
-                  "execCmdEx"],
+                  "execCmdEx", "execArgvProcesses"],
       inert: @["close", "suspend", "resume", "terminate", "kill", "running",
                "processID", "waitForExit", "peekExitCode", "inputStream",
                "outputStream", "errorStream", "peekableOutputStream",
@@ -1043,8 +1046,8 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "ambient_execution", audit: caFullSurface,
       sourceRels: @["libs/repro_core/src/repro_core/ambient_execution.nim"],
       spawning: @["uncontrolledFindExe", "uncontrolledExecCmdEx",
-                  "uncontrolledExecProcess", "uncontrolledExecShellCmd",
-                  "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
+                  "uncontrolledExecArgvEx", "uncontrolledExecProcess",
+                  "uncontrolledExecShellCmd", "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
                   "warnExecProcess", "warnExecShellCmd", "warnStartProcess"],
       inert: @[]),
     # THE OPERATING SYSTEM. Both rows are `caImportAllowlist`: they export

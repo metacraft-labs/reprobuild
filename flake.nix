@@ -929,8 +929,17 @@
     # pipes only on fd 0, 1 and 2 and its own children inherit no further
     # copies; a grandchild that outlives the child no longer delays the
     # parent's end-of-file.
+    #
+    # Advanced from bb0e8943 to c47c55d1: the compiler starts a C compile,
+    # assembly or link without `/bin/sh -c` when the command needs no shell
+    # (`compiler/shellfreeexec.nim`), so a compile no longer reads the host's
+    # `/bin/sh` and its libraries, which a monitored compile recorded as
+    # inputs that another machine's shell does not match. Riding along
+    # (bb0e8943..93793d47): `std/osproc` closes the child's pipes and reaps
+    # it when a start fails, frees the clone child's stack by its base
+    # pointer, and retries the error-pipe read and `waitpid` on EINTR.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c47c55d166224bcffe485045378c766a0f5e67a2";
       flake = false;
     };
     nim-csources-src = {
