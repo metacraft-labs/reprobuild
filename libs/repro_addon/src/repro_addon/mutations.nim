@@ -1308,8 +1308,9 @@
 ## ``contain-records-before-quiesce``         contain records its statement
 ##                                            while the agent can still start
 ##                                            or finish a tick, so the tick's
-##                                            heartbeat lands after it
-##                                            (decision 51, A11 round 23b)
+##                                            heartbeat lands after the
+##                                            containment (decision 51, A11
+##                                            round 23b)
 ## ``first-use-without-ledger-copy``         with no identity and no ledger
 ##                                            copy, the records' directory is
 ##                                            recorded at first use, a
