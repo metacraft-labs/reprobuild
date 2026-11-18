@@ -523,7 +523,7 @@ libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
-libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	8
+libs/repro_dsl_stdlib/tests/t_shared_library_is_written_under_its_soname.nim	nim	12
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_sized_typed_tools.nim	nim	12
