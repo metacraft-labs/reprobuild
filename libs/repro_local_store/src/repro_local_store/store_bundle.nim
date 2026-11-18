@@ -620,14 +620,16 @@ proc devEnvProblem(c: BundleClosure; env: FrozenDevEnv): string =
   if not c.entries.anyIt(it.kind == bekFile and it.path == expected):
     return "bundle declares the frozen dev-env script " & expected.escape &
       " without carrying it as a file entry"
-  # A world-writable script, or a world-writable directory above it, would
-  # let anyone replace what every login shell sources. (Ownership and the
-  # other mode bits are the unpack's business: reprobuild-pm issues/
+  # A world-writable script, or any world-writable directory the bundle
+  # carries above it (export carries every directory up to and including
+  # the store root, and above it when the store lies in a workspace root),
+  # would let anyone rename a directory aside and plant what every login
+  # shell sources; tar applies the declared mode to a directory that already
+  # exists. (Ownership and the other mode bits are the unpack's business:
+  # reprobuild-pm issues/
   # 2026-11-17-bundle-extraction-keeps-the-archive-s-setuid-bits-and-owners.md.)
   for e in c.entries:
-    if (e.path == expected or e.path == expected.parentDir or
-        e.path == expected.parentDir.parentDir) and
-        (e.mode and 0o002) != 0:
+    if expected.isWithin(e.path) and (e.mode and 0o002) != 0:
       return "bundle declares the frozen dev-env path " & e.path.escape &
         " world-writable (mode " & toOct(e.mode, 4) & ")"
   ""

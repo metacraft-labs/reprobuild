@@ -221,7 +221,8 @@ schema `reprobuild.store-bundle.v2`. They are unverified there;
    an excluded directory, and a `devenv` line that names anything but what
    export writes (§6): a project root in the selection, and that project's
    own frozen script, carried as a regular file (not a hard link) that is
-   not world-writable, nor is either directory above it. `repro bundle restore
+   not world-writable, nor is any directory above it that the bundle
+   carries, the store root included. `repro bundle restore
    --activate` sources that script from `/etc/profile.d` and
    `--allow-dev-env` allow-lists the project, so neither may be a path the
    bundle picks. Nothing has been written at this point, not even

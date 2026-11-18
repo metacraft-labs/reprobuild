@@ -137,13 +137,13 @@ suite "a bundle's contents confine import to its roots and selection":
       for path in carried:
         text.add("entry\tf\t644\t1\t1\t00\t" & escapeField(path) & "\n")
       refusal(parseContents(text))
-    proc withMode(script: string; mode: int): string =
+    proc withMode(script, dir: string; mode: int): string =
       let text = "reprobuild.store-bundle.contents.v2\n" &
         "producer\t1.2.3\tabc\n" &
         "root\tstore\t/s\nroot\taction-cache\t/c\nroot\tworkspace\t/w\n" &
         "devenv\t/w/alpha\t" & escapeField(script) & "\n" &
         "entry\td\t" & toOct(mode, 3) & "\t0\t1\t-\t" &
-        escapeField(script.parentDir) & "\n" &
+        escapeField(dir) & "\n" &
         "entry\tf\t644\t1\t1\t00\t" & escapeField(script) & "\n"
       refusal(parseContents(text))
     let script = frozenScriptPath(Store, "/w/alpha")
@@ -160,8 +160,11 @@ suite "a bundle's contents confine import to its roots and selection":
     let other = frozenScriptPath(Store, "/w/beta")
     check "must be" in devenvRefusal("/w/alpha", other, @[other])
     # A world-writable directory above the script lets anyone replace it.
-    check withMode(script, 0o755).len == 0
-    check "world-writable" in withMode(script, 0o777)
+    # Every carried directory above it counts, up to the store root itself:
+    # a world-writable <store> lets anyone rename frozen-dev-env aside.
+    for dir in [script.parentDir, script.parentDir.parentDir, Store]:
+      check withMode(script, dir, 0o755).len == 0
+      check "world-writable" in withMode(script, dir, 0o777)
     # The right path, but not carried: nothing holds it to the bundle's bytes.
     check "without carrying" in devenvRefusal("/w/alpha", script, @[])
     # A project outside the roots or the selection is not allow-listed.
