@@ -51459,7 +51459,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_records_url_locates_the_lock_record_store.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
