@@ -48,6 +48,7 @@ type
     activate*: bool            ## `restore --activate`
     allowDevEnv*: bool         ## `restore --allow-dev-env`
     afterBootstrap*: bool      ## `restore --after-bootstrap`
+    latestSha256*: string      ## `restore --latest-sha256`
     storeRoot*: string         ## `--store-root`
     actionCacheRoot*: string   ## `--action-cache-root`
     emitJson*: bool            ## `--json`
@@ -153,7 +154,8 @@ else:
           staging: a.staging, activate: a.activate,
           activationFile: a.activationFile,
           bashrcFile: a.bashrcFile,
-          afterBootstrap: a.afterBootstrap, storeRoot: storeRoot,
+          afterBootstrap: a.afterBootstrap, latestSha256: a.latestSha256,
+          storeRoot: storeRoot,
           actionCacheRoot: acRoot)
         if a.parallel.isSome: ro.parallel = a.parallel.get
         ro.importNative = proc (dir: string): ImportReport =

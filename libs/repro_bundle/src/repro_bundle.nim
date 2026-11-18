@@ -63,6 +63,8 @@ type
     activationFile*: string
     bashrcFile*: string    ## default /etc/bash.bashrc
     afterBootstrap*: bool
+    latestSha256*: string  ## when set, the only latest.json accepted
+      ## (`restore.sh` passes the one it was generated beside)
     storeRoot*: string
     actionCacheRoot*: string
     importNative*: proc (partsDir: string): ImportReport
@@ -199,11 +201,14 @@ proc createBundle*(opts: CreateOptions): CreateReport =
   # The bootstrap is written last: it is what a session fetches first, and
   # it names only halves that are complete.
   result.latestPath = systemDir / LatestName
-  writeFile(result.latestPath & ".partial", pretty(latest) & "\n")
+  let latestText = pretty(latest) & "\n"
+  writeFile(result.latestPath & ".partial", latestText)
   moveFile(result.latestPath & ".partial", result.latestPath)
   result.restoreScript = systemDir / RestoreScriptName
+  # restore.sh carries this latest.json's hash, and its handoff refuses any
+  # other (§7, §9).
   writeFile(result.restoreScript & ".partial",
-    renderRestoreScript(latest, hasNix, nixHalf))
+    renderRestoreScript(latest, hasNix, nixHalf, sha256Hex(latestText)))
   setFilePermissions(result.restoreScript & ".partial",
     {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec,
      fpOthersRead, fpOthersExec})
@@ -435,9 +440,19 @@ proc fetchHalf(src: Source; staging: string; node: JsonNode;
     githubDownload(src.gh.repo, jobs, parallel)
   of skDir: discard
 
-proc readLatest(source, system: string; staging: string):
+proc readLatest(source, system: string; staging: string;
+                expectedSha256 = ""):
     tuple[src: Source; latest: JsonNode] =
+  ## The bundle's latest.json, read once. With `expectedSha256` (restore.sh's
+  ## `--latest-sha256`), any other latest.json is refused before a field of
+  ## it is used: the caller holds the parsed copy and never reads the source's
+  ## latest.json again (Workspace-Bundles.md §7, §9).
   var text = ""
+  let expected = expectedSha256.toLowerAscii()
+  if expected.len > 0 and (expected.len != 64 or
+      not expected.allCharsInSet({'0' .. '9', 'a' .. 'f'})):
+    bundleFail("--latest-sha256 must be 64 hex digits, got " &
+      expectedSha256.escape)
   refuseHttp(source)
   if isGithubSource(source):
     let gh = parseGithubSource(source)
@@ -465,6 +480,12 @@ proc readLatest(source, system: string; staging: string):
       if not fileExists(latestRef):
         bundleFail("no bundle at " & latestRef)
       text = readFile(latestRef)
+  if expected.len > 0 and sha256Hex(text) != expected:
+    bundleFail("refusing " & LatestName & " from " & source & ": its SHA-256 " &
+      "is " & sha256Hex(text) & ", not the " & expected & " of the " &
+      LatestName & " restore.sh was made from. It changed after restore.sh " &
+      "was fetched: a publish landed in between (run restore.sh again), or " &
+      "something else wrote to the bundle's source")
   result.latest = parseJson(text)
   if result.latest{"schema"}.getStr() != BundleSchema:
     bundleFail("unsupported bundle schema " & result.latest{"schema"}.getStr())
@@ -493,7 +514,8 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
   let system = hostSystem()
   let probeDir = createTempDir("repro-bundle-latest-", "")
   defer: removeDir(probeDir)
-  let (src, latest) = readLatest(opts.source, system, probeDir)
+  let (src, latest) = readLatest(opts.source, system, probeDir,
+    opts.latestSha256)
   let halves = latest["halves"]
   # §7 step 2: every half's directory is checked before anything is fetched
   # or written, the halves already present included. A half this restorer
