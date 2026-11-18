@@ -1130,10 +1130,16 @@ type
       ## path and not bytes: like ``expressionFile``, the manifest is read
       ## from the recipe's own directory at realize time, so a consumer that
       ## receives this provisioning as a CONTRIBUTION through an interface
-      ## artifact does not get the file with it. A federated catalog
-      ## publishing a closure package must be checked out, not merely
-      ## pinned. Lifting that means moving the entries into the artifact,
-      ## which is a larger change to the provisioning schema than this field.
+      ## artifact does not get the file with it. The lift therefore inlines
+      ## the parsed entries into the artifact record (envelope v34,
+      ## ``InterfaceTarballProvisioning.closureEntries``), and a consumer
+      ## realizes from those.
+    closureEntries*: seq[string]
+      ## The closure manifest INLINED, one canonical manifest line per entry.
+      ## Empty on a recipe (which names the file in ``closureManifest``);
+      ## set when the def is rebuilt from a published artifact, whose
+      ## consumer has no such file (envelope v34). Realization prefers these
+      ## to the file.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
