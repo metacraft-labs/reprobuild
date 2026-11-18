@@ -4,7 +4,9 @@
 # The release job's installed-compile gate, runnable BEFORE a tag: stage
 # share/repro exactly as the release does (stage_release_sources.sh) into a
 # scratch package directory, then prove with check_release_source_closure.sh
-# that the staged tree alone closes the compiles an installed reprobuild runs.
+# that the staged tree alone closes the compiles an installed reprobuild runs,
+# and with check_release_data_files.sh that it carries the data files its
+# recipes name for the engine to read at run time.
 #
 # WHY. Until now that gate ran only in .github/workflows/release.yml, after an
 # hour of release builds, so a source-only input that compiled from the
@@ -43,3 +45,4 @@ trap 'chmod -R u+w "$work" 2>/dev/null || true; rm -rf "$work" 2>/dev/null || tr
 
 bash scripts/release/stage_release_sources.sh "$work"
 bash scripts/release/check_release_source_closure.sh "$work"
+bash scripts/release/check_release_data_files.sh "$work"

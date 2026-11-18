@@ -65,20 +65,29 @@ copy_listed() {
   (cd "$from" && tar --null -T - -cf -) | (cd "$to_abs" && tar -xf -)
 }
 
-# Copy <from> to <to>, keeping only what a `nim c` reads: Nim sources and
-# configs, the C/C++ sources and headers `{.compile.}`/`-I` name, and licence
-# files. Build products, VCS metadata and test trees are dropped.
+# copy_tree <from> <to> [compile|all]
+#
+# Copy the files of <from> to <to>. Build products, VCS metadata and test
+# trees are dropped either way. `compile` (the default, for the source-only
+# inputs) keeps only what a `nim c` reads: Nim sources and configs, the C/C++
+# sources and headers `{.compile.}`/`-I` name, and licence files. `all` keeps
+# every file, for reprobuild's own source root, which also carries data the
+# installed engine reads at run time (see below).
 copy_tree() {
-  local from=$1 to=$2
-  (cd "$from" && find . \
-      \( -name .git -o -name build -o -name nimcache -o -name .repro \
-         -o -name tests -o -name node_modules \) -prune -o \
-      -type f \( \
+  local from=$1 to=$2 kinds=${3:-compile}
+  local -a only=()
+  if [[ "$kinds" == compile ]]; then
+    only=( \( \
         -name '*.nim' -o -name '*.nims' -o -name '*.nimble' -o -name '*.cfg' \
         -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' \
         -o -name '*.cpp' -o -name '*.inc' -o -name '*.S' -o -name '*.s' \
-        -o -name '*.asm' -o -name 'LICENSE*' -o -name 'COPYING*' \) \
-      -print0) | copy_listed "$from" "$to"
+        -o -name '*.asm' -o -name 'LICENSE*' -o -name 'COPYING*' \) )
+  fi
+  # `${only[@]+...}`: an empty array is "unbound" to bash < 4.4 under `set -u`.
+  (cd "$from" && find . \
+      \( -name .git -o -name build -o -name nimcache -o -name .repro \
+         -o -name tests -o -name node_modules \) -prune -o \
+      -type f ${only[@]+"${only[@]}"} -print0) | copy_listed "$from" "$to"
   # Store paths are read-only; the archive tree must stay removable.
   chmod -R u+w "$to"
 }
@@ -87,22 +96,52 @@ copy_tree() {
 # What it carries -- trees and root-level files -- is the list in
 # scripts/lib/stage_source_root.sh, shared with the native-package payload
 # stagers so an entry added for one format reaches every format. This stager
-# keeps its own copy: every tracked file of each tree outside tests/ (some lib
-# modules read data files at compile time, `staticRead` of recipe templates, so
-# no extension filter here), in one tar pipe. The filter loop uses only shell
-# builtins, so it spawns nothing per file.
+# keeps its own copy: every file of each tree outside tests/, in one tar pipe.
+#
+# EVERY file, with no extension filter, because the source root is not only
+# compiled. Some lib modules read data files at compile time (`staticRead` of
+# recipe templates), and the installed engine reads others at RUN time from
+# beside the stdlib recipe that names them: a tarball arm's
+# `closureManifest = "closures/<name>.manifest"` and a nixPackage arm's
+# `expressionFile = "nix/<name>/default.nix"` (with the files that expression
+# imports) resolve against the declaring module's directory, which for an
+# installed reprobuild is this tree. v0.2.26's Windows archive was staged
+# through an extension filter and lacked them, and every consumer's tarball
+# provisioning of playwright failed with "closure manifest not found".
+# check_release_data_files.sh fails a staged tree that lacks one.
+#
+# The file list is git's when this is a git checkout (tracked files only, so a
+# build product left in libs/ stays out), and a directory walk when it is not
+# (a source archive). Both list every file kind. Git runs through
+# release_git.sh: a bare `git` here met the Windows release leg's traps (not
+# on PATH, or the checkout not owned by the runner's account), failed with its
+# error discarded, and silently switched this stager to a walk that then
+# filtered by extension. A checkout git cannot read is now an error, with git's
+# own message. The filter loop uses only shell builtins, so it spawns nothing
+# per file.
 # shellcheck source=scripts/lib/stage_source_root.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/stage_source_root.sh"
-# shellcheck disable=SC2086 # the lists are deliberately word-split
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git ls-files -z -- $REPRO_SOURCE_ROOT_TREES | while IFS= read -r -d '' f; do
-    case "/$f/" in */tests/*) continue ;; esac
-    [[ -f "$f" ]] || continue
-    printf '%s\0' "$f"
-  done | copy_listed . "$source_root"
+# shellcheck source=scripts/lib/release_git.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/release_git.sh"
+if [[ -e .git ]]; then
+  release_git_init stage_release_sources || exit 1
+  if ! why=$(release_git -C . rev-parse --is-inside-work-tree 2>&1 >/dev/null); then
+    echo "stage_release_sources: ERROR: git cannot read the checkout at $(pwd): ${why//$'\n'/ }" >&2
+    exit 1
+  fi
+  echo "stage_release_sources: source root <- the tracked files of $(pwd)"
+  # shellcheck disable=SC2086 # the list is deliberately word-split
+  release_git -C . ls-files -z -- $REPRO_SOURCE_ROOT_TREES |
+    while IFS= read -r -d '' f; do
+      case "/$f/" in */tests/*) continue ;; esac
+      [[ -f "$f" ]] || continue
+      printf '%s\0' "$f"
+    done | copy_listed . "$source_root"
 else
+  echo "stage_release_sources: source root <- every file of $(pwd) (no .git here)"
+  # shellcheck disable=SC2086 # the list is deliberately word-split
   for tree in $REPRO_SOURCE_ROOT_TREES; do
-    copy_tree "$tree" "$source_root/$tree"
+    copy_tree "$tree" "$source_root/$tree" all
   done
 fi
 # The root-level files beside the trees. The profile compile (`repro home
