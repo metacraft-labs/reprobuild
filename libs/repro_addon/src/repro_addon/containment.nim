@@ -64,7 +64,9 @@ proc shipNow(site: EvidenceSite): tuple[shipped: bool; error: string] =
     return (false, "this host has no Evidence sink")
   try:
     let conf = loadEvidenceConf()
-    let r = runEvidenceShip(defaultShipSite(), conf, site.host)
+    # In the shipping unit's confinement (§13 decision 181): this root
+    # process decodes nothing the sink sends.
+    let r = shipFor(defaultShipSite(), conf, site.host)
     (r.pending == 0 and r.error.len == 0, r.error)
   except CatchableError as e:
     (false, e.msg)

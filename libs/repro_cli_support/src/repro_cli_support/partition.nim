@@ -168,6 +168,22 @@ proc loadEstimateDurations(dbPath, scope: string): Table[string, int64] =
     except ValueError:
       discard
 
+proc testHistoryKeyForBinary*(binaryPath: string): string =
+  ## The ``historyKey`` of a whole-binary test edge: the test binary's file
+  ## name without a trailing ``.exe``.
+  ##
+  ## The ``NimUnittestBinary`` typed output names the file the compile edge
+  ## writes, which is ``<stem>.exe`` on Windows (``ct_test_nim_unittest``'s
+  ## ``nimUnittestExecutablePath``). ``test-durations.json`` is one history
+  ## shared by every host, so one test must key the same on all of them:
+  ## dropping only the ``.exe`` suffix gives Windows the key Linux and macOS
+  ## already use. Any other dot is part of the name and is kept, as the
+  ## plain file name always kept it.
+  const exeSuffix = ".exe"
+  result = extractFilename(binaryPath)
+  if result.len > exeSuffix.len and result.endsWith(exeSuffix):
+    result.setLen(result.len - exeSuffix.len)
+
 proc loadTestDurations(historyDir: string): Table[string, int64] =
   ## Returns a ``"<suite>::<test>" -> wall_time_ns`` map by reading
   ## ``historyDir/test-durations.json``.  Missing dir, missing file, or

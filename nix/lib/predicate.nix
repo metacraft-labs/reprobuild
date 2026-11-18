@@ -2,7 +2,7 @@
 #
 # Guards in a `repro home export` document and the `when` field of a plan-time
 # data file use the built-in predicate grammar only: `windows`, `macos`,
-# `linux`, `bsd`, `wsl`, `x86_64`, `arm64`, `arm32`, `true`, `false`,
+# `linux`, `bsd`, `wsl`, `nixos`, `x86_64`, `arm64`, `arm32`, `true`, `false`,
 # `host == "…"` / `!=` / `in [ … ]`, combined with `and`, `or`, `not` and
 # parentheses (reprobuild-pm spec Gradual-Nix-To-Reprobuild-Migration.md
 # §Declarative data files read at plan time).
@@ -41,6 +41,7 @@ let
     "linux"
     "bsd"
     "wsl"
+    "nixos"
   ];
   standardArchIdents = [
     "x86_64"
@@ -460,7 +461,7 @@ let
 
   # ---------------------------------------------------------------------------
   # Evaluator (`evaluateBool` / `predicateHolds`) over facts
-  # `{ platform; arch; host; wsl; }`. Only validated ASTs reach it.
+  # `{ platform; arch; host; wsl; nixos; }` (`nixos` null: not stated). Only validated ASTs reach it.
   # ---------------------------------------------------------------------------
   resolveString =
     facts: n:
@@ -481,6 +482,14 @@ let
       in
       if id == "wsl" then
         facts.wsl
+      else if id == "nixos" then
+        # Whether a Linux target is NixOS is not part of its system name, so
+        # the consumer states it; unstated, the guard is refused, never read
+        # as false (the planner's `EFactNotStated`).
+        if facts.nixos == null then
+          throw "the `nixos` predicate needs to know whether the target is NixOS, which is not part of its system name; state it (readIntent's / readData's `nixos` argument, `repro home export --target ... --nixos`)"
+        else
+          facts.nixos
       else if elem id standardPlatformIdents then
         facts.platform == id
       else if elem id standardArchIdents then
@@ -502,7 +511,23 @@ let
     else
       throw "a ${n.kind} cannot stand alone as a boolean predicate";
 
+  # Whether the guard names the `nixos` predicate anywhere.
+  mentionsNixos =
+    n:
+    if n.kind == "ident" then
+      lower n.name == "nixos"
+    else if n.kind == "and" || n.kind == "or" then
+      any mentionsNixos n.operands
+    else if n.kind == "not" then
+      mentionsNixos n.operand
+    else
+      false;
+
   # Whether `source` holds for `facts`; `null` (no guard) always holds.
+  # A guard that NAMES `nixos` is refused while the fact is not stated,
+  # whatever the operands before it evaluate to: the refusal does not depend
+  # on the order `and` / `or` operands are written in (the planner reads a
+  # data file's `when` canonicalized, Nix as written).
   # Throws, naming the predicate, when it is not of the built-in grammar.
   holds =
     facts: source:
@@ -513,7 +538,10 @@ let
         v = validate source;
       in
       if v.ok then
-        evaluate facts v.ast
+        if facts.nixos == null && mentionsNixos v.ast then
+          throw "the `nixos` predicate needs to know whether the target is NixOS, which is not part of its system name; state it (readIntent's / readData's `nixos` argument, `repro home export --target ... --nixos`)"
+        else
+          evaluate facts v.ast
       else
         throw "reprobuild: `${source}` is not a predicate of the built-in grammar: ${v.message}";
 in

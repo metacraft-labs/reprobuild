@@ -101,10 +101,15 @@ package cross_compilation:
     # locally by the stdlib catalogue rather than the solver's package
     # set, so the constraints exist for documentation / solver
     # warm-up purposes.
+    #
+    # One ``of`` arm per triple and no ``else:``: every arm of a
+    # variant-conditioned dependency must be enumerable from the source
+    # (Configurable-System §"uses: Resolution Driven by Variants"), and
+    # an ``else:`` stands for every triple nobody wrote down. The DSL
+    # refuses one at compile time.
     case targetTriple.value:
     of "native":              "gcc >=12 <16"
     of "aarch64-linux-gnu":   "gcc >=12 <16"
-    else:                     "gcc >=12 <16"
 
   build:
     emitCrossCompilationEdges()

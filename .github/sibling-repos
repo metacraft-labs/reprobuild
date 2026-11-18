@@ -251,7 +251,7 @@ reprobuild-packages
 # flake.nix and flake.lock: a macOS monitored root that is itself a
 # SIP-protected binary (`/bin/sh -c ...`) is spawned through its drop-in
 # (30d8579). 4212d138 is an ancestor.
-io-mon=30d85793e891c1a80859d52a9eb197b42d56752c
+io-mon=735726963f48d91031463cbd9d1e9cf8f444f5ee
 # `release.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at
@@ -267,18 +267,21 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=9dd3d5fe09293c51865a0b23c038f9b6fb335a91
+runquota=6ff973131e7f715f0237cb0f08b8dd16cbeba0dc
 nim-shm-queue
 nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 # clispec, the `cli:` language and typed CLI model repro_project_dsl builds
 # on. Cloned at repro.lock's revision, like nim-shm-queue.
 nim-cli-spec
+# nim-entrypoints, the `entrypoints` package (declarative entry-point
+# descriptions); cloned at repro.lock's revision, like nim-cli-spec.
+nim-entrypoints
 # confutils (the metacraft-labs fork): repro's own command line is
 # instantiated through its clispec bridge (CONFUTILS_SRC). repro.lock does not
 # pin it -- the fork has no repro.nim declaring a library, so it cannot be a
 # `uses:` producer (see repro.nim) -- so it is pinned here, at flake.lock's
 # `nim-confutils-src` revision. Move the two together.
-nim-confutils=1a60f8c08d877e7f8e1d18f2cc84aad741c2facb
+nim-confutils=0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74
 
 # nim-shm-lease: runquota's published stats table imports its anchor on
 # WINDOWS now, not only on Linux/macOS, and the Windows release leg builds
@@ -289,8 +292,9 @@ nim-confutils=1a60f8c08d877e7f8e1d18f2cc84aad741c2facb
 # (`nodes.nim-shm-lease.locked.rev`); move it when runquota moves that pin.
 # stage_release_runquota.sh exports the same revision from this clone.
 # Moved e3254b7 -> 22e3100 (2026-10-20) with the runquota pin above, whose
-# flake.lock names it; e3254b7 is an ancestor.
-nim-shm-lease=22e3100cdb4fbc374689ddac55b4b32c90654140
+# flake.lock names it; e3254b7 is an ancestor. Moved 22e3100 -> 08a3f50 (2026-11-16)
+# with the runquota pin above, for the same reason; 22e3100 is an ancestor.
+nim-shm-lease=08a3f50a391b32b053598f64c670d5232e1eb051
 
 # The shared-actions repo, declared here as an ordinary sibling (GitHub
 # materialises a `uses: metacraft-labs/metacraft-github-actions/...@dev`

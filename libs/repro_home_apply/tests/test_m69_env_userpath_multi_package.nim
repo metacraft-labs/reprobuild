@@ -106,8 +106,8 @@ suite "M69 env.userPath multi-package regression":
       # User's pre-existing content survived.
       check body.contains("export USER_VAR=42")
       # Both per-package sentinels are present.
-      check body.contains("repro-managed:" & alpha.pathBlockId)
-      check body.contains("repro-managed:" & beta.pathBlockId)
+      check body.contains("repro:home:" & alpha.pathBlockId)
+      check body.contains("repro:home:" & beta.pathBlockId)
       # Both bin dirs are present in the rc file.
       check body.contains("/tmp/store/alpha/bin")
       check body.contains("/tmp/store/beta/bin")
@@ -116,13 +116,13 @@ suite "M69 env.userPath multi-package regression":
       check beta.pathBlockId != "repro-home-userpath"
       # And the legacy single shared sentinel must NOT appear — the
       # M69 emitter MUST emit per-package ids.
-      check (not body.contains("repro-managed:repro-home-userpath\n"))
+      check (not body.contains("repro:home:repro-home-userpath "))
 
       # Drop one resource: removing alpha's contribution must leave
       # beta's block byte-identical.
       let bodyBeforeRemove = readFile(rc)
-      let openBeta = "# >>> repro-managed:" & beta.pathBlockId
-      let closeBeta = "# <<< repro-managed:" & beta.pathBlockId
+      let openBeta = "# >>> repro:home:" & beta.pathBlockId
+      let closeBeta = "# <<< repro:home:" & beta.pathBlockId
       let betaOpenBefore = bodyBeforeRemove.find(openBeta)
       let betaCloseBefore = bodyBeforeRemove.find(closeBeta)
       check betaOpenBefore >= 0
@@ -135,7 +135,7 @@ suite "M69 env.userPath multi-package regression":
       let bodyAfter = readFile(rc)
 
       # Alpha's block is gone.
-      check (not bodyAfter.contains("repro-managed:" & alpha.pathBlockId))
+      check (not bodyAfter.contains("repro:home:" & alpha.pathBlockId))
       # Beta's block survives byte-identically.
       let betaOpenAfter = bodyAfter.find(openBeta)
       let betaCloseAfter = bodyAfter.find(closeBeta)

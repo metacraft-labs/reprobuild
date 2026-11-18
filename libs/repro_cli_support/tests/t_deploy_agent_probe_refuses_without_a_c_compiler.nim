@@ -55,7 +55,7 @@ suite "a host with no C compiler (decision 31)":
         msg = e.msg
       check "no C compiler" in msg
       check "install one from the distribution" in msg
-      check runDeployAgentCompileProfile(@["--probe-c-compiler"]) == 1
+      check runDeployAgentCommand(@["compile-profile", "--probe-c-compiler"]) == 1
 
   test "a cc on PATH is the answer, and the probe exits 0":
     let bin = createTempDir("cc-only-", "")
@@ -64,7 +64,7 @@ suite "a host with no C compiler (decision 31)":
     withEnvs([("REPRO_BOOTSTRAP_CC", ""), ("CC", ""), ("PATH", bin),
               (ProfileNimCompilerEnvVar, getAppFilename())]):
       check resolveProfileCCompiler() == bin / "cc"
-      check runDeployAgentCompileProfile(@["--probe-c-compiler"]) == 0
+      check runDeployAgentCommand(@["compile-profile", "--probe-c-compiler"]) == 0
 
   test "Nim's default compiler on PATH is left to Nim":
     let bin = createTempDir("gcc-", "")
@@ -73,4 +73,4 @@ suite "a host with no C compiler (decision 31)":
     withEnvs([("REPRO_BOOTSTRAP_CC", ""), ("CC", ""), ("PATH", bin),
               (ProfileNimCompilerEnvVar, getAppFilename())]):
       check resolveProfileCCompiler() == ""
-      check runDeployAgentCompileProfile(@["--probe-c-compiler"]) == 0
+      check runDeployAgentCommand(@["compile-profile", "--probe-c-compiler"]) == 0

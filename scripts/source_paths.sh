@@ -50,6 +50,15 @@ resolve_cli_spec_src() {
   return 2
 }
 
+# entrypoints: the declarative description of a program's entry points.
+resolve_entrypoints_src() {
+  if resolve_repo_source_path "ENTRYPOINTS_SRC" "entrypoints.nim" "../nim-entrypoints/src"; then
+    return 0
+  fi
+  echo "missing nim-entrypoints source; set ENTRYPOINTS_SRC or provide ../nim-entrypoints/src" >&2
+  return 2
+}
+
 # confutils (the metacraft-labs fork), rooted at its checkout: repro's own
 # command line is instantiated through ``confutils/clispec_config``.
 resolve_confutils_src() {

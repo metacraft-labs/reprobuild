@@ -1142,8 +1142,11 @@ proc cachedImageDigestHex(config: UserDaemonConfig; imagePath: string): string =
   ## `imageDigestHex` memoized on `fileIdentityStamp`.
   ##
   ## The digest is hashed over the whole `repro` image -- 15.66 MiB on this
-  ## host -- and the ONLY consumer is the daemon-staleness comparison in
-  ## `startUserDaemon`, which every `repro build` performs. Measured in situ
+  ## host -- and its consumers are the daemon-staleness comparison in
+  ## `startUserDaemon` and the `engineDigest` a routed request states
+  ## (`expectedUserDaemonDigest`), both of which every routed `repro build`
+  ## performs on the same image, so the second is a memo hit except in the
+  ## racy window after a rebuild. Measured in situ
   ## it cost 16.5 ms of a 74.7 ms warm no-op: the second-largest term in the
   ## invocation's fixed cost, and pure re-derivation of an answer that does
   ## not change between builds.
@@ -1242,19 +1245,47 @@ proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
       return companionDigest
   fileDigestHex(sourceExe)
 
+proc expectedUserDaemonDigest*(publicCliPath: string;
+                               requestedConfig: UserDaemonConfig): string =
+  ## The digest of the engine a build or watch request is sent for, which the
+  ## request carries as ``engineDigest``: the digest ``startUserDaemon``
+  ## expects the daemon to be running, computed the same way (the same
+  ## anchoring of the config's paths, ``daemonExe`` over ``publicCliPath``,
+  ## and ``expectedDaemonRunningDigestHex`` in the config's mode). A daemon
+  ## that passed the client's staleness check therefore always matches it.
+  ##
+  ## Computed on its own rather than taken from ``startUserDaemon``'s result,
+  ## which carries a digest only when a daemon was already running.
+  ##
+  ## "" when the image cannot be digested (missing, relative or unreadable).
+  ## The daemon declines such a request with ``engine-unknown`` and the
+  ## client falls back to its own engine; it never serves on it.
+  let config = withAnchoredDaemonPaths(requestedConfig)
+  let sourceExe =
+    if config.daemonExe.len > 0: config.daemonExe
+    else: publicCliPath
+  try:
+    expectedDaemonRunningDigestHex(config, sourceExe, config.devMode)
+  except CatchableError:
+    ""
+
 type ForeignEngineVerdict* = object
-  ## What `foreignEngineVerdict` found. `decline` is true only when a
-  ## mismatch is PROVEN; the two digests are carried for the decline's
-  ## payload and the daemon log.
+  ## What `foreignEngineVerdict` found. `decline` is true unless both
+  ## digests are KNOWN and EQUAL. `reason` is empty when the request is
+  ## served, `engine-mismatch` when the digests are known and differ, and
+  ## `engine-unknown` when either is unknown. The digests that are known are
+  ## carried for the decline's payload and the daemon log.
   decline*: bool
+  reason*: string
   requestImageHash*: string
   daemonImageHash*: string
 
-proc foreignEngineVerdict*(config: UserDaemonConfig;
-                           requestPublicCliPath, daemonRunningHash: string):
+proc foreignEngineVerdict*(requestEngineDigest, daemonRunningHash: string):
     ForeignEngineVerdict =
-  ## Whether a build or watch request was sent for an engine OTHER than the
-  ## one this daemon is running, and must therefore be declined.
+  ## Whether a build or watch request must be declined because this daemon
+  ## cannot prove it runs the engine the request was sent for: the engine is
+  ## a different one (`engine-mismatch`), or either identity is unknown
+  ## (`engine-unknown`).
   ##
   ## WHY THE CLIENT'S OWN CHECK IS NOT ENOUGH. `startUserDaemon` compares the
   ## daemon's running-image digest with the client's engine and restarts a
@@ -1268,33 +1299,75 @@ proc foreignEngineVerdict*(config: UserDaemonConfig;
   ## fails the build with `unsupported interface envelope version`
   ## (reprobuild-pm issue 2026-10-16, shared-daemon dry-run). No client-side
   ## check can close the window, because the daemon can always be swapped
-  ## after it. The request, however, names the engine it was sent for
-  ## (`publicCliPath`), so the daemon can close it at the only point that
-  ## is not racy: when it holds the request.
+  ## after it. The daemon can close it at the only point that is not racy:
+  ## when it holds the request.
   ##
-  ## THE SAME COMPARISON AS `startUserDaemon`, on purpose: the request's image
-  ## through the memoized `cachedImageDigestHex` (which the client has
-  ## normally just warmed for exactly this path, so this is a stat and a
-  ## small read rather than a hash of the whole image), against the
-  ## daemon's `runningHash`. A request that passed the client's check against
-  ## an un-swapped daemon therefore always passes this one.
+  ## THE REQUEST STATES ITS ENGINE'S DIGEST (`engineDigest`, computed by
+  ## `expectedUserDaemonDigest`, the very value the client's staleness check
+  ## compared), and that is what is compared with the daemon's `runningHash`.
+  ## A request that passed the client's check against an un-swapped daemon
+  ## therefore always passes this one. The daemon deliberately does NOT
+  ## digest the file it finds at the request's `publicCliPath`: a daemon
+  ## whose filesystem view differs from the client's (a service manager that
+  ## mounts a different `/home`, a private mount namespace) can find a
+  ## different file at that path, whose digest may equal its own while the
+  ## client's engine differs -- a cross-engine serve that failing closed on
+  ## an unknown digest would not catch (reprobuild-pm issue 2026-11-16, the
+  ## daemon identifies a request's engine by a path it may see differently).
+  ## Trusting the stated digest is sound for the per-user daemon because its
+  ## clients are its own principal: the check guards correctness, not access.
   ##
-  ## THIS SIDE SERVES WHAT IT CANNOT DISPROVE: an empty, relative or missing
-  ## path (an older client, or an engine deleted since) or an unavailable
-  ## digest proves nothing, and the request is served as before. That is
-  ## the opposite of `startUserDaemon`, which refuses to route to a daemon
-  ## whose identity it cannot establish (reprobuild-pm issue 2026-09-30).
-  ## The client's check is the one that must establish identity; this one
-  ## only closes the race after it, so declining on an unknown here would
-  ## turn every request from a client too old to name its engine into a
-  ## direct build without making any of them more correct.
+  ## THIS SIDE FAILS CLOSED, as the client's reuse rule does
+  ## (`startUserDaemon`, reprobuild-pm issue 2026-09-30) and as
+  ## reprobuild-pm `spec/Failure-Semantics.md` §"General Rules" requires of
+  ## an ambiguous correctness failure. The request is served only when both
+  ## digests are known and equal. A request with no `engineDigest` (a client
+  ## that predates the field) or a daemon that cannot digest its own running
+  ## image proves nothing, and an unknown identity is never a reason to
+  ## serve: such a request is declined with `engine-unknown`, and the client
+  ## falls back to its own engine exactly as on `engine-mismatch`
+  ## (reprobuild-pm `spec/Local-Daemons-And-Control-Plane.md` §"A Daemon
+  ## Serves Only Its Own Engine").
+  result.requestImageHash = requestEngineDigest
   result.daemonImageHash = daemonRunningHash
-  if requestPublicCliPath.len == 0 or not isAbsolute(requestPublicCliPath) or
-      not fileExists(requestPublicCliPath) or daemonRunningHash.len == 0:
-    return
-  result.requestImageHash = cachedImageDigestHex(config, requestPublicCliPath)
-  result.decline = result.requestImageHash.len > 0 and
-    result.requestImageHash != daemonRunningHash
+  if requestEngineDigest.len == 0 or daemonRunningHash.len == 0:
+    result.decline = true
+    result.reason = "engine-unknown"
+  elif requestEngineDigest != daemonRunningHash:
+    result.decline = true
+    result.reason = "engine-mismatch"
+
+proc foreignEngineDeclineMessage(command, requestPublicCliPath,
+                                 daemonImagePath: string;
+                                 verdict: ForeignEngineVerdict): string =
+  proc shown(value: string): string =
+    if value.len > 0: value else: "unknown"
+  if verdict.reason == "engine-mismatch":
+    # The request's digest is the one it STATED (`engineDigest`); the path
+    # is only what the client called its engine and is not what was digested.
+    "daemon-hosted " & command & " declined: the request was sent " &
+      "for engine digest " & verdict.requestImageHash & " (client engine " &
+      requestPublicCliPath & ") but this repro-daemon runs " &
+      daemonImagePath & " (" & verdict.daemonImageHash & "); it was " &
+      "restarted onto another image after the client checked it, by " &
+      "another reprobuild build sharing this endpoint or by a rebuild"
+  else:
+    "daemon-hosted " & command & " declined: this repro-daemon cannot " &
+      "prove it runs the engine the request was sent for (request engine " &
+      shown(requestPublicCliPath) & ", digest " &
+      shown(verdict.requestImageHash) & "; daemon engine " &
+      shown(daemonImagePath) & ", digest " & shown(verdict.daemonImageHash) &
+      "); an unknown engine identity is never served -- run a current " &
+      "repro client, or `repro daemon restart`"
+
+proc foreignEngineDeclinePayload(verdict: ForeignEngineVerdict): string =
+  ## Carries each digest that is known; an unknown one is omitted.
+  result = "{\"fallbackAllowed\":true,\"reason\":\"" & verdict.reason & "\""
+  if verdict.requestImageHash.len > 0:
+    result.add(",\"requestImageHash\":\"" & verdict.requestImageHash & "\"")
+  if verdict.daemonImageHash.len > 0:
+    result.add(",\"daemonImageHash\":\"" & verdict.daemonImageHash & "\"")
+  result.add("}")
 
 proc foreignEngineDeclineEvent(command, runId, projectRoot,
                                requestPublicCliPath, daemonImagePath: string;
@@ -1317,16 +1390,11 @@ proc foreignEngineDeclineEvent(command, runId, projectRoot,
     command: command,
     kind: bekUnsupported,
     severity: "warning",
-    message: "daemon-hosted " & command & " declined: the request was sent " &
-      "for engine " & requestPublicCliPath & " (" & verdict.requestImageHash &
-      ") but this repro-daemon runs " & daemonImagePath & " (" &
-      verdict.daemonImageHash & "); another reprobuild build sharing this " &
-      "endpoint restarted it",
+    message: foreignEngineDeclineMessage(command, requestPublicCliPath,
+      daemonImagePath, verdict),
     terminal: true,
     exitCode: 64,
-    payloadJson: "{\"fallbackAllowed\":true,\"reason\":\"engine-mismatch\"," &
-      "\"requestImageHash\":\"" & verdict.requestImageHash & "\"," &
-      "\"daemonImageHash\":\"" & verdict.daemonImageHash & "\"}")
+    payloadJson: foreignEngineDeclinePayload(verdict))
 
 proc writeSessionRecord*(config: UserDaemonConfig; session: UserDaemonSession) =
   ## Exported for `t_daemon_active_session_tally.nim`. It is the daemon's
@@ -2694,12 +2762,14 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
     let request = parseBuildRequestBody(frame.body)
     # Before the request is accepted, and before anything (the parent
     # prewarm included) reads its project: a request sent for another
-    # engine is declined here, with no session record, because no session
-    # ever ran. See `foreignEngineVerdict` for why only the daemon can do it.
-    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+    # engine, or for an engine this daemon cannot identify, is declined
+    # here, with no session record, because no session ever ran. See
+    # `foreignEngineVerdict` for why only the daemon can do it.
+    let verdict = foreignEngineVerdict(request.engineDigest,
       devRestart.runningHash)
     if verdict.decline:
-      logLine(config.logPath, "build request declined reason=engine-mismatch" &
+      logLine(config.logPath, "build request declined reason=" &
+        verdict.reason &
         " request-image=" & request.publicCliPath & " request-hash=" &
         verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
       socket.writeFrame(udkBuildEvent, buildEventBody(
@@ -2716,10 +2786,11 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
     let request = parseWatchRequestBody(frame.body)
     # Same decline as a build request, for the same reason: every watch
     # cycle is a build run by this daemon's engine.
-    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+    let verdict = foreignEngineVerdict(request.engineDigest,
       devRestart.runningHash)
     if verdict.decline:
-      logLine(config.logPath, "watch request declined reason=engine-mismatch" &
+      logLine(config.logPath, "watch request declined reason=" &
+        verdict.reason &
         " request-image=" & request.publicCliPath & " request-hash=" &
         verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
       socket.writeFrame(udkWatchEvent, buildEventBody(

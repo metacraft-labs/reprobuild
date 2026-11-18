@@ -46,9 +46,31 @@ let
   data = import ./data.nix { inherit predicate platforms hostSelection; };
   intent = import ./intent.nix { inherit predicate platforms hostSelection; };
   realizations = import ./realizations.nix { inherit catalogs; };
+  sourceLib = import ./realization-sources.nix { inherit (realizations) lookup; };
+  # `lookupCanonical` that also identifies a derivation a realization source
+  # resolves to (nix/lib/realization-sources.nix), by store path, before the
+  # catalog's name-based lookup.
+  lookupCanonical =
+    {
+      pkgs,
+      drv,
+      index ? realizations.reverseIndex pkgs,
+      realizationSources ? { },
+    }:
+    let
+      viaSource =
+        if realizationSources == { } then null else sourceLib.identify { sources = realizationSources; inherit drv; };
+    in
+    if viaSource != null then
+      viaSource // { packageName = viaSource.name or null; }
+    else
+      realizations.lookupCanonical { inherit pkgs drv index; };
   brew = import ./brew.nix { inherit catalogs; };
   hostFacts = import ./host-facts.nix {
-    inherit realizations reproFor;
+    realizations = realizations // {
+      inherit lookupCanonical;
+    };
+    inherit reproFor;
     brew = {
       lookupToken = brew.lookupBrewToken;
     };
@@ -75,7 +97,24 @@ in
   # The reverse of nixRealizationOf, for the equivalence report:
   # `{ pkgs, drv }` -> `{ found, name, attribute, packageName }` or
   # `{ found = false; reason; packageName; }` (nix/lib/realizations.nix).
-  lookupNixPackageName = realizations.lookupCanonical;
+  # `realizationSources ? { }` (realization-sources.nix) first identifies a
+  # derivation that a source resolves to, by store path, as that canonical name.
+  lookupNixPackageName = lookupCanonical;
+
+  # Realization sources (nix/lib/realization-sources.nix):
+  # `resolveRealizationSource { name, source }` -> `{ found, drv, label }` or
+  # `{ found = false; reason; }`; `realizationSourceProblems { sources,
+  # document }` -> the refusals for a mapping (a name that is no canonical
+  # package, a canonical package the document selects on no host, a malformed
+  # source), empty when there are none.
+  resolveRealizationSource = { name, source }: sourceLib.resolve name source;
+  realizationSourceProblems =
+    { sources ? { }, document }:
+    sourceLib.problems {
+      inherit sources;
+      catalogNames = realizations.catalogPackageNames;
+      selectedNames = intent.selectedPackageNames document;
+    };
 
   # Host facts (nix/lib/host-facts.nix; docs/user-guide/host-facts.md):
   # `homeManagerFacts` -- the Nix side of `repro home compare`, a derivation
@@ -115,6 +154,7 @@ in
   predicates = {
     inherit (predicate) validate holds evaluate;
     factsFor = platforms.factsFor;
+    factsWith = platforms.factsWith;
   };
   targetSystems = platforms.systems;
 

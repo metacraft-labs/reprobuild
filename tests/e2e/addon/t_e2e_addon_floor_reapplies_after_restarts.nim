@@ -99,6 +99,9 @@
 ##   unit killed with ``RestartSec=0`` and with ``RestartSec=3``; the next
 ##   apply accepts the directory the restart made, and with the delay a root
 ##   tree made 3 s into the restarted run is refused;
+## - **a ``RestartSteps=`` restart** (systemd 254 and later; §13 decision
+##   156 as amended): after two restarts whose delays grow, the next apply
+##   accepts the directory the second made;
 ## - **a socket the revert holds** (§13 decision 155): a base template of the
 ##   stem makes the socket's listener refused; the revert keeps the socket
 ##   held, stopped and not listening;
@@ -117,7 +120,8 @@
 ##   the manager binds a new listener, and the record follows it, so the
 ##   next apply accepts it;
 ##
-## Falsifying builds (each red here): ``revert-refuses-on-floor``,
+## Falsifying builds (each red here): ``accept-instances-by-triggered-by``
+## (round 19, finding 2), ``revert-refuses-on-floor``,
 ## ``revert-hold-runtime-only`` (the held unit starts at the reboot),
 ## ``revert-holds-any-subject`` (a hold for every service),
 ## ``cleared-hold-not-started`` (a held unit stays down after its hold goes),
@@ -144,14 +148,20 @@
 ## ``t_addon_floor_round15``, not here: the end-of-step record usually
 ## catches the directory under this host's timing, so these cases are its
 ## positive control only), ``recreated-bound-from-inactive-exit-only`` (the
-## restart's directory is refused), ``revert-held-left-running`` (the
+## restart's directory is refused), ``restart-delay-from-next`` (the
+## directory the second ``RestartSteps=`` restart made is refused, debian-13),
+## ``revert-held-left-running`` (the
 ## control unit the revert holds keeps running),
 ## ``activators-unheld`` (the held service's socket has no
 ## persistent hold and listens after the reboot; the switch's trigger holds,
 ## §13 decision 151, cover the other activator cases), ``boot-hold-after-sysinit`` and
 ## ``boot-holds-unrecorded`` (at the reboot the activators start),
 ## ``restarted-listener-not-rerecorded`` (the socket's next apply is
-## refused ``existing-listener``).
+## refused ``existing-listener``), ``revert-stopped-not-restarted`` (the
+## floored service only a Wants= starts stays down after the passing
+## switch), ``revert-stopped-instances-by-enablement`` (the Wants=-pulled
+## instance of a floored template stays down: A9 review round 18, L1; A9 review round 17, finding 7, a case decision 160's
+## held-triggers record does not cover).
 ##
 ## Also red here: ``restarted-listener-not-rerecorded`` (the record keeps
 ## the listener the socket's restart unlinked). ``start-hold-any-content``
@@ -520,7 +530,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # §13 decision 144: a reboot before the recovery. Every floored unit
     # waits for the boot re-assertion, which replays the pending revert and
     # puts its start holds back first, so the refused unit stays down.
+    # A9 review round 20: what decides the boot-hold unit's run, recorded
+    # before the reboot and after it.
+    record["bootHoldBeforeReboot"] = %g.bootHoldBeforeReboot()
     g.rebootGuest()
+    record["bootHoldUnit"] = %g.bootHoldAfterBoot()
     # The boot re-assertion replays the pending revert; wait for it to end
     # (a oneshot that stays active), so the recovery below does not find it
     # running and defer.
@@ -539,14 +553,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # §13 decision 159: the boot-hold unit ran before sysinit.target and put
     # the holds back, so no activator got past its assertions: each start
     # the boot queued asserted after the unit had exited, and failed.
+    # The unit is inactive once it has run (RemainAfterExit=no, §13
+    # decision 172) and a switch may start it again later, when its own
+    # check returns at once; so the boot's run is read from the journal:
+    # when it reported the holds in place (after its one reload).
     let bh = g.exec("systemctl show -p ActiveState -p Result " &
-      "-p ExecMainExitTimestampMonotonic repro-addon-boot-hold.service; " &
-      "journalctl -b -o cat --no-pager -u repro-addon-boot-hold.service | tail -3").stdout
+      "repro-addon-boot-hold.service; " &
+      "journalctl -b -o short-monotonic --no-pager -u repro-addon-boot-hold.service " &
+      "| grep 'repro-addon boot-holds: held' | head -1").stdout
     var bhExit = 0'i64
     for l in bh.splitLines():
-      if l.startsWith("ExecMainExitTimestampMonotonic="):
-        try: bhExit = parseBiggestInt(l.split('=')[1]) except ValueError: discard
-    var actOk = bhExit > 0 and "ActiveState=active" in bh and "Result=success" in bh
+      let a = l.find('[')
+      let z = l.find(']')
+      if a >= 0 and z > a and "boot-holds: held" in l:
+        try: bhExit = int64(parseFloat(l[a + 1 ..< z].strip()) * 1_000_000)
+        except ValueError: discard
+    var actOk = bhExit > 0 and "Result=success" in bh
     var actDetail = bh
     for a in Activators:
       let sh = g.exec("systemctl show -p ActiveState -p AssertResult " &
@@ -572,6 +594,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active",
          recw.stdout & recw.stderr)
     notPending("the recovery of the revert with an unwritable hold")
+    # The header's claim, checked (A9 review round 16, finding 11): the
+    # three activators the boot kept down are back once the revert commits.
+    var actBack = ""
+    for a in Activators:
+      actBack.add(a & " " & g.exec("systemctl is-active " & a & "; true").stdout.strip() & "\n")
+    step("and the socket, path unit and timer the boot kept down are back",
+         actBack.count(" active\n") == Activators.len, actBack)
     discard g.run("rm -rf /var/lib/a9r-st")
     r = g.applyProfile(repro, "w2", sta("w2"))
     step("then the unit applies and starts, its hold cleared, its socket listening",
@@ -590,7 +619,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let srp = proc (d: string): string =
       control & unitResource("a9r-sr.service", "User=a9e\nStateDirectory=a9r-sr\n",
                              binary, enabled = false, description = d) &
-        socketResource("a9r-sr.socket", "ListenStream=/run/a9r-sr\nService=a9r-sr.service\n")
+        socketResource("a9r-sr.socket", "ListenStream=/run/a9r-sr\nService=a9r-sr.service\n") &
+        # A9 review round 16, finding 5: a timer declared as a
+        # systemd.systemTimer resource, which the revert holds and stops too.
+        "systemd.systemTimer {\n  name = \"a9r-sr.timer\"\n  content = \"[Timer]\n" &
+        "OnCalendar=daily\nUnit=a9r-sr.service\n\"\n}\n"
     const SrHold = "/etc/systemd/system/a9r-sr.socket.d/" & HoldName
     r = g.applyProfile(repro, "r1", srp("r1"))
     step("a floored service only its socket starts applies", r.exitCode == 0,
@@ -620,6 +653,86 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.exitCode == 0 and g.exec("test -e " & SrHold).exitCode != 0 and
          g.exec("systemctl is-active a9r-sr.socket").stdout.strip() == "active",
          r.stdout & r.stderr)
+    step("and the timer resource the revert stopped is running again (A9 review " &
+         "round 16, finding 5)",
+         g.exec("systemctl is-active a9r-sr.timer").stdout.strip() == "active",
+         g.exec("systemctl show -p ActiveState -p UnitFileState a9r-sr.timer; " &
+                "cat /var/lib/repro/system/revert-stopped 2>&1").stdout)
+    # A9 review round 17, finding 7: a floored service no switch starts by
+    # itself (enabled = false, no trigger), pulled in by Wants= from an
+    # enabled unit and running when a revert holds it and stops it. The
+    # held-triggers record (§13 decision 160) does not name it, its file is
+    # unchanged and it is not enabled, so only the revert's record of what
+    # it stopped brings it back.
+    let wtp = proc (d: string): string =
+      Head & unitResource("a9r-control.service", "", binary, description = d) &
+        unitResource("a9r-wp.service", "", binary,
+                     unitLines = "Wants=a9r-wt.service a9r-wi@x.service\n" &
+                                 "After=a9r-wt.service a9r-wi@x.service\n",
+                     description = "A9 round 17 puller") &
+        unitResource("a9r-wt.service", "User=a9e\nStateDirectory=a9r-wt\n",
+                     binary, enabled = false, description = "A9 round 17 wanted") &
+        # A9 review round 18, L1: an instance of a floored template the same
+        # Wants= pulls in -- not enabled, not socket-activated.
+        unitResource("a9r-wi@.service", "User=a9e\nStateDirectory=a9r-wi\n",
+                     binary, description = "A9 round 18 wanted instance") &
+        # A9 review round 19, finding 2: an instance an Accept=yes socket
+        # started. Once the revert stops it, systemd collects it and reports
+        # no TriggeredBy=; started again without a connection it fails
+        # (its standard input is the connection), so the passing switch
+        # must leave it to its socket.
+        unitResource("a9r-ai@.service", "User=a9e\nStateDirectory=a9r-ai\nStandardInput=socket\n",
+                     binary, description = "A9 round 19 accepted instance") &
+        socketResource("a9r-ai.socket", "ListenStream=127.0.0.1:7319\nAccept=yes\n")
+    let connect = "bash -c 'exec 3<>/dev/tcp/127.0.0.1/7319; sleep 1'; sleep 2; " &
+      "systemctl list-units --no-legend --plain --state=active 'a9r-ai@*.service' | wc -l"
+    r = g.applyProfile(repro, "q1", wtp("q1"))
+    let accepted = g.exec(connect).stdout.strip()
+    record["acceptedInstances"] = %accepted
+    step("a floored service only another unit's Wants= starts applies, and runs; " &
+         "a connection starts an instance of the Accept=yes socket's template",
+         r.exitCode == 0 and
+         g.exec("systemctl is-active a9r-wi@x.service").stdout.strip() == "active" and
+         g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active" and
+         accepted != "0" and accepted.len > 0,
+         r.stdout & r.stderr & "\naccepted instances: " & accepted)
+    discard g.run("rm -rf /var/lib/a9r-wt /var/lib/a9r-wi /var/lib/a9r-ai; " &
+                  "mkdir /var/lib/a9r-wt /var/lib/a9r-wi /var/lib/a9r-ai; " &
+                  "touch /var/lib/a9r-wt/theirs /var/lib/a9r-wi/theirs /var/lib/a9r-ai/theirs")
+    r = g.applyProfile(repro, "q2", wtp("q2"))
+    let outWanted = r.stdout & r.stderr
+    let stoppedRec = g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
+      "/var/lib/repro/system/revert-stopped 2>/dev/null; true").stdout
+    step("its tree refused, the revert holds it, stops it and records it",
+         r.exitCode != 0 and "a9r-wt.service" in outWanted and
+         g.exec("systemctl is-active a9r-wt.service").stdout.strip() != "active" and
+         "a9r-wt.service" in stoppedRec and "a9r-wi@x.service" in stoppedRec,
+         outWanted & "\nrecord: " & stoppedRec)
+    let aiStopped = g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
+      "/var/lib/repro/system/revert-stopped 2>/dev/null | grep -c '^a9r-ai@'; " &
+      "systemctl show -p TriggeredBy --value $(grep -h '^a9r-ai@' " &
+      "/var/lib/repro/system/addon/revert-stopped /var/lib/repro/system/revert-stopped " &
+      "2>/dev/null | head -1) 2>&1; true").stdout
+    record["acceptedStopped"] = %aiStopped
+    discard g.run("rm -rf /var/lib/a9r-wt /var/lib/a9r-wi /var/lib/a9r-ai")
+    r = g.applyProfile(repro, "q3", wtp("q1"))
+    let aiAfter = g.exec("systemctl list-units --no-legend --plain --all 'a9r-ai@*.service'; " &
+      "systemctl is-active a9r-ai.socket; true").stdout
+    record["acceptedAfter"] = %aiAfter
+    step("once the tree is gone, the switch whose check passes starts it again " &
+         "from the record alone, and clears the record (A9 review round 17, finding 7); " &
+         "the Accept=yes instance it leaves to its socket, which listens again " &
+         "(round 19, finding 2)",
+         r.exitCode == 0 and
+         g.exec("systemctl is-active a9r-wt.service").stdout.strip() == "active" and
+         g.exec("systemctl is-active a9r-wi@x.service").stdout.strip() == "active" and
+         # No instance at all: one started again with no connection fails
+         # (StandardInput=socket), and one that ran would be listed.
+         "a9r-ai@" notin aiAfter and aiAfter.strip().splitLines()[^1].strip() == "active" and
+         "a9r-wt.service" notin g.exec("cat /var/lib/repro/system/addon/revert-stopped " &
+           "/var/lib/repro/system/revert-stopped 2>/dev/null; true").stdout,
+         r.stdout & r.stderr & "\naccepted: " & aiStopped & aiAfter &
+           g.exec("systemctl status --no-pager a9r-wt.service 2>&1 | head -5").stdout)
     # Back to the floored unit the next case refuses, so its revert has a
     # unit to hold.
     discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st")
@@ -742,6 +855,39 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         notPending("the refused apply over a tree made into a restarted run")
       discard g.run("systemctl stop a9r-r.service; true")
       discard g.applyProfile(repro, "rs" & delay & "-c", control)
+    # §13 decision 156 as amended (A9 review round 16, finding 2): with
+    # RestartSteps= the delay before restart n grows from RestartSec=
+    # towards RestartMaxDelaySec=; RestartUSecNext is the NEXT one. Two
+    # restarts: the second waits 2 s (1 s * (4 / 1) ^ (1 / 2)) where
+    # RestartUSecNext says 4 s, and a 6 s ExecStartPre= puts the main
+    # process well after the run's start, so reading the next delay moves
+    # the run's start past the directory's birth. systemd 254 and later.
+    let sdv = g.exec("systemctl --version | head -1 | cut -d' ' -f2").stdout.strip()
+    var sdMajor = 0
+    try: sdMajor = parseInt(sdv) except ValueError: discard
+    if sdMajor >= 254:
+      let rsp = proc (d: string): string =
+        control & unitResource("a9r-rp.service", "User=a9e\nRuntimeDirectory=a9r-rp\n" &
+          "Restart=on-failure\nRestartSec=1\nRestartSteps=2\nRestartMaxDelaySec=4\n",
+          binary, description = d, exceptions = Sleep, kind = "exec",
+          exec = "ExecStartPre=/bin/sleep 6\nExecStart=/bin/sleep infinity\n")
+      r = g.applyProfile(repro, "rp-1", rsp("rp-1"))
+      step("a Restart= unit with RestartSteps= applies", r.exitCode == 0, r.stdout & r.stderr)
+      let evp = g.exec("systemctl kill -s KILL a9r-rp.service; sleep 10; " &
+        "systemctl kill -s KILL a9r-rp.service; sleep 12; " &
+        "systemctl show --timestamp=us+utc -p NRestarts -p RestartUSecNext " &
+        "-p InactiveExitTimestamp -p ExecMainStartTimestamp -p ActiveState a9r-rp.service; " &
+        "stat -c '%n %U %.9W' /run/a9r-rp").stdout
+      record["restartSteps"] = %evp
+      r = g.applyProfile(repro, "rp-2", rsp("rp-2"))
+      step("after the second RestartSteps= restart the next apply accepts the " &
+           "directory it made (§13 decision 156)",
+           r.exitCode == 0 and "NRestarts=2" in evp, evp & r.stdout & r.stderr)
+      notPending("the apply after RestartSteps= restarts")
+      discard g.run("systemctl stop a9r-rp.service; true")
+      discard g.applyProfile(repro, "rp-c", control)
+    else:
+      record["restartSteps"] = %("systemd " & sdv & " has no RestartSteps=")
     # §13 decision 141, the upper bound: a tree a root process makes seconds
     # into a run that began outside a switch is not systemd's.
     discard g.run("systemctl restart a9r-st.service; sleep 3; rm -rf /var/lib/a9r-st; " &

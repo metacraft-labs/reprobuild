@@ -378,7 +378,14 @@
       # The range also carries Linux fixes (wordexp/pidfd_spawn process starts,
       # an uninjectable /bin/sh under system/popen reported as a loss, a
       # refusal to build the shim against a non-glibc libc).
-      url = "github:metacraft-labs/io-mon/30d85793e891c1a80859d52a9eb197b42d56752c";
+      # Bumped 30d85793 -> 73572696 (2026-11-16, io-mon `agents`): io-mon
+      # accepts a sealed table of each image's inline syscall sites
+      # (`io_mon/inline_site_table`, `FsSnoopRequest.inlineSiteTables`), so the
+      # engine computes a compiler image's sites once per build instead of
+      # every monitored process decoding it again. The range also builds the
+      # debug shim at the stated -O level and injects native ARM64 children on
+      # Windows on Arm.
+      url = "github:metacraft-labs/io-mon/735726963f48d91031463cbd9d1e9cf8f444f5ee";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -434,7 +441,20 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/a9684dfc1e659af309acf646915dbfe400896b65";
+      url = "github:metacraft-labs/nim-cli-spec/8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
+      flake = false;
+    };
+    nim-entrypoints-src = {
+      # nim-entrypoints ships the ``entrypoints`` package: the declarative
+      # description of a program's entry points (and what each one reads from
+      # its environment) that repro's command line is being moved onto. It is a
+      # leaf library needing only the standard library; the ``compat/`` shims
+      # in that repository are not part of the pin. config.nims reads
+      # ENTRYPOINTS_SRC (after a ``../nim-entrypoints`` sibling); the sandboxed
+      # package build + override-free CI jobs have no sibling, so seed it from
+      # here, exactly like nim-cli-spec-src. Keep this URL, flake.lock,
+      # repro.lock and .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-entrypoints/8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
       flake = false;
     };
     nim-confutils-src = {
@@ -447,7 +467,7 @@
       # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
+      url = "github:metacraft-labs/nim-confutils/0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74";
       flake = false;
     };
     nimcrypto-src = {
@@ -574,7 +594,10 @@
       # promotion merge, now the tip of both `dev` and `agents`. Its tree is
       # identical to c1d55ce, but a checkout synced to either branch is at this
       # commit, and the engine refuses a placed sibling off its pin.
-      url = "github:metacraft-labs/nim-stackable-hooks/d715806424e8373708494913e59a48237978cc2a";
+      # Bumped d715806 -> c34e325 (2026-11-16) with io-mon-src: io-mon
+      # 73572696 is built against it; it makes the raw syscall entries safe
+      # for CLONE_VM clones.
+      url = "github:metacraft-labs/nim-stackable-hooks/c34e3252d413361a0f250d8921e00c119d30e114";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -900,8 +923,14 @@
     # bits (wasm32, i386, JS) instead of raising a RangeDefect. 259a2595
     # rides along: `std/osproc` applies `workingDir` in the child process
     # instead of changing the parent's directory around the spawn.
+    #
+    # Advanced from 8384ff3f to bb0e8943: `std/osproc` creates the child's
+    # pipes close-on-exec, so a child started with `startProcess` holds the
+    # pipes only on fd 0, 1 and 2 and its own children inherit no further
+    # copies; a grandchild that outlives the child no longer delays the
+    # parent's end-of-file.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=8384ff3fecfdbd8772d46c79054967769915d6fd";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654";
       flake = false;
     };
     nim-csources-src = {
@@ -986,7 +1015,7 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/bb14c2e1b25e50be320261bea93400263f2deeb5";
+      url = "github:metacraft-labs/reprobuild-nix-packages/c6f6f509316d4b789d0e64a346d2d4bb3271e12d";
       flake = false;
     };
 
@@ -1025,6 +1054,7 @@
       nim-shm-gset-src,
       nim-shm-queue-src,
       nim-cli-spec-src,
+      nim-entrypoints-src,
       nim-confutils-src,
       nim-fork-src,
       nim-csources-src,
@@ -1259,6 +1289,7 @@
               (row "SHM_GSET_SRC" "nim-shm-gset-src" "/src")
               (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
               (row "CLI_SPEC_SRC" "nim-cli-spec-src" "/src")
+              (row "ENTRYPOINTS_SRC" "nim-entrypoints-src" "/src")
               (row "CONFUTILS_SRC" "nim-confutils-src" "")
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
@@ -1504,6 +1535,7 @@
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 export CLI_SPEC_SRC=${nim-cli-spec-src}/src
+                export ENTRYPOINTS_SRC=${nim-entrypoints-src}/src
                 export CONFUTILS_SRC=${nim-confutils-src}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
@@ -1630,6 +1662,7 @@
               shmGsetSrc = nim-shm-gset-src;
               shmQueueSrc = nim-shm-queue-src;
               cliSpecSrc = nim-cli-spec-src;
+              entrypointsSrc = nim-entrypoints-src;
               confutilsSrc = nim-confutils-src;
               codetracerSrc = codetracer-src;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
@@ -1786,6 +1819,7 @@
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
                 CLI_SPEC_SRC|${nim-cli-spec-src}/src
+                ENTRYPOINTS_SRC|${nim-entrypoints-src}/src
                 CONFUTILS_SRC|${nim-confutils-src}
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
@@ -2017,6 +2051,7 @@
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
                                       ${nim-cli-spec-src} \
+                                      ${nim-entrypoints-src} \
                                       ${nim-confutils-src} \
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
@@ -2499,6 +2534,55 @@
               brewIntentModule = brewFixtureHomeManagerModule;
               root = ./.;
             };
+            # The user reference page of the library and the module
+            # (docs/users/content/reference/nix-library.md) names every
+            # public function of the library with its arguments, and its
+            # options region is what the module declares
+            # (nix/tests/lib-reference.nix). The build fails listing each
+            # difference; `nix eval --raw .#checks.<system>.lib-reference.render`
+            # prints the options region to paste. A control run against the
+            # page with one option deleted must fail too.
+            lib-reference =
+              let
+                result = import ./nix/tests/lib-reference.nix {
+                  inherit (pkgs) lib;
+                  inherit reprobuildLib;
+                  intentOptions =
+                    (inputs.nixos-modules.inputs.home-manager-unstable.lib.homeManagerConfiguration {
+                      inherit pkgs;
+                      modules = [
+                        intentHomeManagerModule
+                        {
+                          home = {
+                            username = "reference";
+                            homeDirectory = if pkgs.stdenv.isDarwin then "/Users/reference" else "/home/reference";
+                            stateVersion = "25.05";
+                          };
+                        }
+                      ];
+                    }).options.reprobuild.intent;
+                  pageText = builtins.readFile ./docs/users/content/reference/nix-library.md;
+                };
+                problems =
+                  result.failures
+                  ++ pkgs.lib.optional (result.controlFailures == [ ])
+                    "the control (the page without option ${result.controlOption}) passed, so the check proves nothing"
+                  ++ pkgs.lib.optional (reprobuildLib ? resolveRealizationSource && result.sourceControlFailures == [ ])
+                    "the realization-source control (the packages bullet without attribute) passed, so that comparison proves nothing";
+              in
+              pkgs.runCommand "reprobuild-lib-reference"
+                {
+                  problems = builtins.concatStringsSep "\n" problems;
+                  passthru = { inherit (result) render; };
+                }
+                ''
+                  if [ -n "$problems" ]; then
+                    echo "reprobuild lib-reference: docs/users/content/reference/nix-library.md does not match the library:" >&2
+                    printf '%s\n' "$problems" | sed 's/^/  - /' >&2
+                    exit 1
+                  fi
+                  echo ok > $out
+                '';
             # readIntent's IFD mode: the packaged `repro` exports the fixture
             # profiles inside the build sandbox, on the EVALUATOR's system
             # (`builtins.currentSystem` under `--impure`, else this check's
@@ -2632,6 +2716,7 @@
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             CLI_SPEC_SRC = "${nim-cli-spec-src}/src";
+            ENTRYPOINTS_SRC = "${nim-entrypoints-src}/src";
             CONFUTILS_SRC = "${nim-confutils-src}";
             # Kernel UAPI syscall tables for the CONF-3 lease-floor derivation
             # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.
@@ -2965,6 +3050,13 @@
               # B build (grub-install reached ``modinfo.sh`` search
               # only after the switch to ``grub2_efi``).
               pkgs.qemu
+              # The add-on VM gates' restricted-guest mirror relay
+              # (`tests/e2e/addon/addon_testbed.nim`, `relayPort`): a guest
+              # booted with QEMU `restrict=on` reaches the time-shifted
+              # snapshot mirror only through a `guestfwd` that runs
+              # `socat STDIO TCP:127.0.0.1:<port>`, and
+              # `scripts/run_addon_gate.sh` refuses to start without it.
+              pkgs.socat
               pkgs.grub2_efi
               pkgs.kmod
               # ReproOS add-on mode A16 (`repro infra image`, spec §6.5.2):

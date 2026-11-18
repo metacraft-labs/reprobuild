@@ -23,18 +23,33 @@
 ## Where the host has no store the cases `skip()` with that reason rather
 ## than passing vacuously.
 
-import std/[monotimes, options, os, sets, strutils, times, unittest]
+import std/[monotimes, options, os, osproc, sets, strutils, times, unittest]
 
 import repro_local_store
+import repro_test_support/reasoned_skip
+
+proc nixStoreSaysValid(path: string): bool =
+  ## Nix's own answer, from `nix-store --check-validity`, as an oracle that is
+  ## independent of the database read under test. False when there is no
+  ## `nix-store` to ask.
+  # Not followed: `nix-store` is a symlink to `nix`, which dispatches on the
+  # name it was invoked by.
+  let nixStore = findExe("nix-store", followSymlinks = false)
+  if nixStore.len == 0:
+    return false
+  execCmdEx(quoteShellCommand([nixStore, "--check-validity", path])).exitCode == 0
 
 proc anExistingStoreOutputPath(): string =
-  ## A real published output path on this host, or "" if there is none.
+  ## A real published output path on this host -- one Nix has registered
+  ## VALID, not merely a directory under the store -- or "" if there is none.
   if not dirExists("/nix/store"):
     return ""
   for kind, path in walkDir("/nix/store"):
     if kind != pcDir:
       continue
     if path.lastPathPart.startsWith("."):
+      continue
+    if not nixStoreSaysValid(path):
       continue
     # Must itself be listable, so the "absent inside it" case is genuinely
     # absence rather than an unreadable directory.
@@ -116,6 +131,50 @@ suite "absent store inputs skip revalidation":
     let record = recordWith(absentInput(missing))
     check hotMetadataRecordInputsUnchanged([record], addr cache)
     check storeAbsenceSkipStats() == 0
+
+  test "an input absent inside an UNREGISTERED store directory is still probed":
+    # A directory under the store that Nix has not registered valid -- the
+    # leftover of an interrupted build or substitution -- carries no
+    # immutability guarantee: Nix may replace it, and a file can then appear
+    # where the probe found none. Existence is therefore not the condition;
+    # validity is (reprobuild-pm spec/Filesystem-Policy-And-Observed-Inputs.md
+    # §"Immutable Roots Answer Absent Probes Statically", condition 2).
+    #
+    # Needs a writable real store, so it runs where the test runs as the
+    # store's owner (a single-user install, or root) and skips elsewhere.
+    # The name carries the process id, so a run killed before its `defer`
+    # cannot make every later run skip.
+    let leftover = "/nix/store/0000000000000000000000000000000z-" &
+      "repro-invalid-leftover-" & $getCurrentProcessId()
+    var created = false
+    if dirExists("/nix/store") and not dirExists(leftover):
+      try:
+        createDir(leftover / "lib")
+        created = true
+      except OSError:
+        discard
+    if not created:
+      skip("no writable /nix/store on this host; the case plants a directory " &
+        "there that Nix has not registered valid")
+    else:
+      defer: removeDir(leftover)
+      # The premise: Nix itself rejects it. Without this the case could pass
+      # against a directory that happens to be registered.
+      check not nixStoreSaysValid(leftover)
+      let inside = leftover / "lib" / "x.h"
+      let record = recordWith(absentInput(inside))
+      resetOutputStateCheckStats()
+      var cache = initFileMetadataCache()
+      check hotMetadataRecordInputsUnchanged([record], addr cache)
+      check storeAbsenceSkipStats() == 0
+      check cache.metadataStats().warmRevalidated == 1
+      # And the consequence the skip would hide: the file appears, and the
+      # record must stop matching.
+      writeFile(inside, "#pragma once\n")
+      resetOutputStateCheckStats()
+      var after = initFileMetadataCache()
+      check not hotMetadataRecordInputsUnchanged([record], addr after)
+      check storeAbsenceSkipStats() == 0
 
   test "a PRESENT input inside an output path is still probed":
     # Immutability stops entries being ADDED; it does not stop the whole

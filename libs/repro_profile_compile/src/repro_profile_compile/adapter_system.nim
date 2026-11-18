@@ -29,6 +29,7 @@
 import std/[algorithm, sets, strutils, tables]
 
 import repro_elevation
+import repro_core/system_file_holding
 import repro_profile
 import repro_infra
 import repro_home_intent
@@ -373,6 +374,17 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "fs.systemFile '" & sfPath &
         "' sets `sha256` but no `sourceUrl` — the digest is only " &
         "meaningful when paired with a URL fetch")
+    # How the file is held. These fields were once accepted by the
+    # constructor and dropped here, so a `mode = "0640"` secret was written
+    # 0644 (reprobuild-pm issue
+    # 2026-11-12-fs-systemfile-cannot-express-mode-group-or-copy-form).
+    let sfMode = fieldString(r, "mode")
+    let sfGroup = fieldString(r, "group")
+    let sfForm = fieldString(r, "form")
+    let holdingError = systemFileHoldingError(sfMode, sfGroup, sfForm)
+    if holdingError.len > 0:
+      raise newException(ValueError,
+        "fs.systemFile '" & sfPath & "' " & holdingError)
     result = SystemResource(kind: srkFsSystemFile,
       sfPath: sfPath,
       sfContent: sfContent,
@@ -380,7 +392,10 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       sfSha256: sfSha256,
       sfSourceLocal: sfSourceLocal,
       sfCollision: parseCollisionField("fs.systemFile",
-        fieldString(r, "collision"), FileCollisionOptIns))
+        fieldString(r, "collision"), FileCollisionOptIns),
+      sfMode: sfMode,
+      sfGroup: sfGroup,
+      sfForm: sfForm)
   of "fs.systemDirectory":
     let dirPath = fieldString(r, "path")
     # ACL is optional. The fsSystemDirectory template emits the three
@@ -1338,6 +1353,14 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("sourceLocal", quoteSystemValue(r.sfSourceLocal)))
       if r.sfCollision.len > 0:
         pairs.add(("collision", quoteSystemValue(r.sfCollision)))
+      # How the file is held: only when declared, so an undeclared file
+      # renders exactly as before the fields existed.
+      if r.sfMode.len > 0:
+        pairs.add(("mode", quoteSystemValue(r.sfMode)))
+      if r.sfGroup.len > 0:
+        pairs.add(("group", quoteSystemValue(r.sfGroup)))
+      if r.sfForm.len > 0:
+        pairs.add(("form", quoteSystemValue(r.sfForm)))
     of srkFsSystemDirectory:
       pairs.add(("path", quoteSystemValue(r.dirPath)))
       if r.dirAclPresent:

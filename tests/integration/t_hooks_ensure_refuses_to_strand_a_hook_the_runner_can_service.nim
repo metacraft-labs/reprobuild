@@ -41,7 +41,10 @@
 ##       skewed — so ``ensure`` proceeds. A guard that refused here would break
 ##       every first install.
 ##   (C) THE ORDINARY UPGRADE still works. Runner services the NEW token and not
-##       the old one → ``ensure`` rewrites. Without this arm (A) would be
+##       the old one → ``ensure --re-anchor`` rewrites. (Since 2026-11-16 a
+##       plain ``ensure`` leaves a foreign-contract body alone, so (A)-(C) all
+##       run under ``--re-anchor``; the guard pinned here is the one that
+##       flag is still subject to.) Without this arm (A) would be
 ##       satisfied by a guard that refuses every rewrite, i.e. by breaking
 ##       ``ensure``.
 ##   (D) THE CONTRACT-LESS STATE is reported as itself:
@@ -191,13 +194,21 @@ proc setupFixture(gitBin: string): Fixture =
   result.managed = result.repoPath / ".git" / "hooks" /
     "post-commit.repro-managed"
 
-proc ensureHooks(fx: Fixture; runner: string): CmdResult =
+proc ensureHooks(fx: Fixture; runner: string; reAnchor = false): CmdResult =
+  ## ``reAnchor`` passes ``--re-anchor``. Since 2026-11-16 a plain ``ensure``
+  ## never replaces a body demanding a contract this build does not generate
+  ## (CLI/hooks.md §"Re-anchoring is explicit";
+  ## t_hooks_ensure_never_replaces_a_body_whose_contract_it_does_not_generate
+  ## pins that), so the writer/runner guard below is reached only under
+  ## ``--re-anchor``, and arms (A)-(C) ask for it.
   var env: seq[tuple[name, value: string]]
   if runner.len > 0:
     env.add((name: "REPROBUILD_REPRO", value: runner))
-  runShell(shellCommand(
-    @[fx.reproBin, "hooks", "ensure", "--vcs", "--json",
-      "--workspace-root=" & fx.workspaceRoot], env))
+  var args = @[fx.reproBin, "hooks", "ensure", "--vcs", "--json",
+    "--workspace-root=" & fx.workspaceRoot]
+  if reAnchor:
+    args.add("--re-anchor")
+  runShell(shellCommand(args, env))
 
 proc outcomeOf(output, hookName: string): string =
   ## The reported outcome for one hook, out of the ``--json`` report. Returns
@@ -263,7 +274,7 @@ suite "PG-14 — hooks ensure refuses to strand a hook its runner can service":
       # The runner services what is installed and not what we would write.
       let oldOnly = fx.scratch / "runner-services-old"
       writeTokenStub(oldOnly, foreignToken)
-      let refused = ensureHooks(fx, oldOnly)
+      let refused = ensureHooks(fx, oldOnly, reAnchor = true)
       checkpoint("(A) ensure under skew:\n" & refused.output)
       check refused.code != 0
       # Both builds named, with how the runner was resolved.
@@ -282,7 +293,8 @@ suite "PG-14 — hooks ensure refuses to strand a hook its runner can service":
       # No interpreter resolvable → no skew, so `ensure` proceeds. (The env
       # var names a path that does not exist, which is how the generated body
       # resolves nothing too.)
-      let absent = ensureHooks(fx, fx.scratch / "no-such-repro")
+      let absent = ensureHooks(fx, fx.scratch / "no-such-repro",
+        reAnchor = true)
       checkpoint("(B) ensure with no interpreter:\n" & absent.output)
       check absent.code == 0
       check readFile(fx.managed) == canonical
@@ -294,7 +306,7 @@ suite "PG-14 — hooks ensure refuses to strand a hook its runner can service":
       writeFile(fx.managed, foreignBody)
       let newOnly = fx.scratch / "runner-services-new"
       writeTokenStub(newOnly, realToken)
-      let upgraded = ensureHooks(fx, newOnly)
+      let upgraded = ensureHooks(fx, newOnly, reAnchor = true)
       checkpoint("(C) ensure as an upgrade:\n" & upgraded.output)
       check upgraded.code == 0
       check readFile(fx.managed) == canonical

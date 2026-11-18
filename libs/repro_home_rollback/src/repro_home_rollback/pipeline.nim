@@ -24,6 +24,7 @@
 
 import std/[algorithm, os, sets, strutils, times]
 from repro_core/paths import extendedPath
+from repro_core/managed_block import ManagedBlockError
 
 import repro_home_apply
 import repro_home_generations
@@ -508,69 +509,12 @@ proc restoreFileFromTarget(store: var Store; rec: GeneratedFile;
 proc rewriteManagedBlock(hostFilePath, blockId: string;
                         blockBytes: openArray[byte]) =
   ## Re-insert `blockBytes` between the sentinels in the host file
-  ## (creating the file if missing). Mirrors the writer in
-  ## `repro_home_apply/materialize_managed_blocks.nim`.
-  let parent = parentDir(hostFilePath)
-  if parent.len > 0:
-    createDir(extendedPath(parent))
-  var existing = ""
-  if fileExists(extendedPath(hostFilePath)):
-    existing = readFile(extendedPath(hostFilePath))
-  let openS = OpenSentinelPrefix & blockId & OpenSentinelSuffix
-  let closeS = CloseSentinelPrefix & blockId & CloseSentinelSuffix
-  let openIdx = existing.find(openS)
-  let closeIdx = existing.find(closeS)
-  let bodyText = stringFromBytes(blockBytes)
-  var rewritten = ""
-  if openIdx >= 0 and closeIdx >= 0 and closeIdx > openIdx:
-    let lineEndAfterOpen = existing.find('\n', openIdx)
-    let bodyStart = if lineEndAfterOpen >= 0: lineEndAfterOpen + 1
-                    else: openIdx + openS.len
-    rewritten = existing[0 ..< bodyStart] & bodyText &
-      (if bodyText.len > 0 and not bodyText.endsWith("\n"): "\n" else: "") &
-      existing[closeIdx .. ^1]
-  else:
-    let sep = if existing.len == 0 or existing.endsWith("\n"): "" else: "\n"
-    rewritten = existing & sep & openS & "\n" & bodyText &
-      (if bodyText.len > 0 and not bodyText.endsWith("\n"): "\n" else: "") &
-      closeS & "\n"
-  let tmp = hostFilePath & ".repro.tmp"
-  writeFile(extendedPath(tmp), rewritten)
-  if fileExists(extendedPath(hostFilePath)):
-    try: removeFile(extendedPath(hostFilePath)) except OSError: discard
-  moveFile(extendedPath(tmp), extendedPath(hostFilePath))
-
-proc removeManagedBlock(hostFilePath, blockId: string) =
-  ## Strip the sentinel-delimited region (and the sentinel lines)
-  ## from the host file. Leaves the file alone if the sentinels are
-  ## missing.
-  if not fileExists(extendedPath(hostFilePath)):
-    return
-  let existing = readFile(extendedPath(hostFilePath))
-  let openS = OpenSentinelPrefix & blockId & OpenSentinelSuffix
-  let closeS = CloseSentinelPrefix & blockId & CloseSentinelSuffix
-  let openIdx = existing.find(openS)
-  let closeIdx = existing.find(closeS)
-  if openIdx < 0 or closeIdx < 0 or closeIdx <= openIdx:
-    return
-  # Drop the open line, the body, the close line, and the trailing
-  # newline if any.
-  let openLineStart = block:
-    var s = openIdx
-    while s > 0 and existing[s - 1] != '\n':
-      dec s
-    s
-  let closeLineEnd = block:
-    var e = closeIdx + closeS.len
-    if e < existing.len and existing[e] == '\n':
-      inc e
-    e
-  let rewritten = existing[0 ..< openLineStart] & existing[closeLineEnd .. ^1]
-  let tmp = hostFilePath & ".repro.tmp"
-  writeFile(extendedPath(tmp), rewritten)
-  if fileExists(extendedPath(hostFilePath)):
-    try: removeFile(extendedPath(hostFilePath)) except OSError: discard
-  moveFile(extendedPath(tmp), extendedPath(hostFilePath))
+  ## (creating the file if missing), through the one managed-file writer
+  ## the apply pipeline uses (`repro_home_resources/drivers/managed_block`
+  ## -> `repro_core/managed_block`): same sentinels, same locator, same
+  ## atomic temp + fsync + rename.
+  discard writeHomeManagedBlock(hostFilePath, blockId,
+    stringFromBytes(blockBytes))
 
 # ---- Launcher restoration ----
 
@@ -693,6 +637,25 @@ proc refuseUnmanagedAppBundleRestores(plan: RollbackPlan) =
         "generation; refusing to replace it")
       e.targetPath = path
       raise e
+
+proc refuseMalformedManagedBlocks*(plan: RollbackPlan) =
+  ## Before any rollback op runs: every host file a block op will touch must
+  ## hold its block at most once and terminated. Step 7 restores files
+  ## before it rewrites blocks, so a block the shared locator refuses there
+  ## would leave the rollback half done; `--accept-overwrite` accepts a
+  ## changed block body, never one the writer cannot locate.
+  for op in plan.blockOps:
+    if op.kind notin {rokRemoveBlock, rokRestoreBlock, rokUpdateBlock}:
+      continue
+    if not fileExists(extendedPath(op.hostFilePath)):
+      continue
+    try:
+      discard readHomeManagedBlockBody(
+        readFile(extendedPath(op.hostFilePath)), op.blockId, op.hostFilePath)
+    except ManagedBlockError as err:
+      raise newException(EHomeRollback, "repro home rollback: " & err.msg &
+        "; nothing was changed. Repair or remove the block's sentinels in " &
+        op.hostFilePath.escape & " and run the rollback again")
 
 proc discardStagedAppBundles(staged: seq[StagedAppBundle]) =
   ## Drop staged copies that will not be committed, newest first (so an
@@ -831,6 +794,7 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
           activeIdHex)
 
       refuseUnmanagedAppBundleRestores(plan)
+      refuseMalformedManagedBlocks(plan)
 
       # ---- Step 6b: stage + verify re-placed application bundles ----
       let stagedBundles = stageAppBundleRestores(store, tgt.manifest,
@@ -854,7 +818,11 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
       for op in plan.blockOps:
         case op.kind
         of rokRemoveBlock:
-          removeManagedBlock(op.hostFilePath, op.blockId)
+          # The apply's removal path: the bytes around the block are kept
+          # as they are now (never reverted to the file's state at first
+          # write), and a file left empty is deleted
+          # (Generated-Configuration-Files.md §"Deletion semantics").
+          destroyManagedBlockResource(op.hostFilePath, op.blockId)
         of rokRestoreBlock, rokUpdateBlock:
           rewriteManagedBlock(op.hostFilePath, op.blockId,
             op.targetRecord.postWriteBlockBytes)

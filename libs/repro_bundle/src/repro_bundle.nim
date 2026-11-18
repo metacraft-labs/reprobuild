@@ -16,7 +16,7 @@ import repro_local_store/store_bundle
 import repro_bundle/[exec, select, nix_half, sources_half, bootstrap, github]
 
 export exec.BundleError, select.BundleMember, select.resolveMembers,
-  nix_half.NixHalf, nix_half.NixHalfOptions,
+  select.nativeSelection, nix_half.NixHalf, nix_half.NixHalfOptions,
   sources_half.SourcesHalf
 
 type
@@ -123,6 +123,13 @@ proc createBundle*(opts: CreateOptions): CreateReport =
   latest["workspace_dir"] = %ws
   latest["members"] = memberPaths
   latest["created"] = %now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+  let producer = localProducer()
+  latest["repro"] = %*{"version": producer.version,
+    "revision": producer.revision}
+  # What the restoring machine must provide at these absolute paths
+  # (docs/workspace-bundles.md, "Reading a bundle before restoring it");
+  # filled in as the halves are made.
+  var provision = %*{"workspaceDir": ws}
   var halves = newJObject()
   var nixHalf: NixHalf
   var hasNix = false
@@ -133,6 +140,7 @@ proc createBundle*(opts: CreateOptions): CreateReport =
     let (h, reused) = createNixHalf(members, systemDir, no)
     nixHalf = h
     hasNix = true
+    provision["nixStore"] = %"/nix/store"
     result.halves.add(HalfReport(kind: "nix", id: h.id,
       dir: result.system / NixHalfDir / h.id, reused: reused,
       compressedBytes: h.compressedBytes, unpackedBytes: h.unpackedBytes))
@@ -152,7 +160,17 @@ proc createBundle*(opts: CreateOptions): CreateReport =
     var roots = opts.nativeRoots
     if ws notin roots.workspaceRoots:
       roots.workspaceRoots.insert(ws, 0)
-    let closure = computeClosure(roots, opts.devEnvs)
+    # The selection, not the whole workspace root (docs/workspace-bundles.md,
+    # "What a bundle of a selection carries"):
+    # every checkout under it that the selector did not name is excluded.
+    # The store and the action cache are walked by their own rules.
+    let selection = nativeSelection(ws, members,
+      [normalizedPath(absolutePath(roots.storeRoot)),
+       normalizedPath(absolutePath(roots.actionCacheRoot))])
+    let closure = computeClosure(roots, opts.devEnvs, selection)
+    provision["storeRoot"] = %closure.roots.storeRoot
+    provision["actionCacheRoot"] = %closure.roots.actionCacheRoot
+    provision["workspaceRoots"] = %closure.roots.workspaceRoots
     let id = bundleIdOf(closure)
     let rel = result.system / NativeHalfDir / id
     let dir = bundleDir / rel
@@ -174,6 +192,7 @@ proc createBundle*(opts: CreateOptions): CreateReport =
     halves["native_store"] = node
   if halves.len == 0:
     bundleFail("nothing to bundle: every half was turned off")
+  latest["provision"] = provision
   latest["halves"] = halves
   for h in result.halves: result.unpackedBytes += h.unpackedBytes
   latest["unpacked_bytes"] = %result.unpackedBytes
@@ -191,11 +210,121 @@ proc createBundle*(opts: CreateOptions): CreateReport =
   moveFile(result.restoreScript & ".partial", result.restoreScript)
 
 # ---------------------------------------------------------------------------
+# inspect (docs/store-bundles.md §7)
+# ---------------------------------------------------------------------------
+
+const InspectSchema* = "reprobuild.bundle-inspect.v1"
+
+proc isUrl(s: string): bool =
+  ## A source fetched with curl. Plain `http://` is not one: `refuseHttp`
+  ## turns it away first.
+  s.startsWith("https://") or s.startsWith("file://")
+
+proc refuseHttp(source: string) =
+  ## Nothing in a bundle is signed: the parts are checked against hashes
+  ## from the same place they come from. A plain `http://` source would let
+  ## anyone on the path choose them, so it is refused outright (curl itself
+  ## is told the same, `CurlProtocols`, for redirects).
+  if source.toLowerAscii().startsWith("http://"):
+    bundleFail("refusing the plain http:// source " & source &
+      ": a bundle is fetched over https:// (or from a directory, a file:// " &
+      "URL or a github: source)")
+
+proc inspectJsonOf(v: VerifiedContents): JsonNode =
+  let c = v.closure
+  result = %*{
+    "schema": InspectSchema,
+    "kind": "native-store",
+    "producer": {"version": c.producer.version,
+      "revision": c.producer.revision},
+    "provision": {"storeRoot": c.roots.storeRoot,
+      "actionCacheRoot": c.roots.actionCacheRoot,
+      "workspaceRoots": %c.roots.workspaceRoots},
+    "selection": {"exclude": %c.selection.excluded,
+      "include": %c.selection.included},
+    "bundleId": v.bundleId,
+    "halves": {"native_store": v.bundleId}}
+
+proc inspectBundle*(source: string): JsonNode =
+  ## What a machine must provide to restore the bundle at `source` (a local
+  ## directory or `file://` URL): the roots to provision, the producing
+  ## `repro` and the selection, read from the native half's verified
+  ## `contents`. Writes nothing anywhere.
+  var path = source
+  if path.startsWith("file://"):
+    path = path["file://".len .. ^1]
+  if isUrl(path) or isGithubSource(path):
+    bundleFail("inspect reads a local bundle directory; fetch " & source &
+      " first, or read its latest.json")
+  path = normalizedPath(absolutePath(path))
+  if fileExists(path / NativeManifestName):
+    return inspectJsonOf(readVerifiedContents(path, NativeManifestName))
+  var systemDir = ""
+  if fileExists(path / LatestName):
+    systemDir = path
+  elif fileExists(path / hostSystem() / LatestName):
+    systemDir = path / hostSystem()
+  elif dirExists(path):
+    for kind, d in walkDir(path):
+      if kind == pcDir and fileExists(d / LatestName):
+        if systemDir.len > 0:
+          bundleFail(path & " holds bundles for several systems; name one " &
+            "of them, e.g. " & d)
+        systemDir = d
+  if systemDir.len == 0:
+    bundleFail("no bundle at " & path & " (neither " & NativeManifestName &
+      " nor <system>/" & LatestName & ")")
+  let latest =
+    try: parseJson(readFile(systemDir / LatestName))
+    except JsonParsingError as e:
+      bundleFail("malformed " & systemDir / LatestName & ": " & e.msg)
+  if latest{"schema"}.getStr() != BundleSchema:
+    bundleFail("unsupported bundle schema " & latest{"schema"}.getStr())
+  let bundleDir = systemDir.parentDir
+  let halves = latest{"halves"}
+  if halves.isNil or halves.kind != JObject:
+    bundleFail(systemDir / LatestName & " lists no halves")
+  var members = newJArray()
+  for m in latest{"members"}.getElems(): members.add(m)
+  result = %*{
+    "schema": InspectSchema,
+    "kind": "workspace",
+    "name": latest{"name"}.getStr(),
+    "selector": latest{"selector"}.getStr(),
+    "system": latest{"system"}.getStr(),
+    "members": members,
+    "producer": (if latest.hasKey("repro"): latest["repro"] else: newJNull()),
+    "provision": {"workspaceDir": latest{"workspace_dir"}.getStr()},
+    "selection": {"exclude": newJArray(), "include": newJArray()},
+    "halves": newJObject()}
+  for kind, node in halves:
+    result["halves"][kind] = %node{"id"}.getStr(
+      node{"bundleId"}.getStr())
+  if halves.hasKey("nix"):
+    result["provision"]["nixStore"] = %"/nix/store"
+  if halves.hasKey("native_store"):
+    let node = halves["native_store"]
+    let rel = node{"dir"}.getStr()
+    if rel.len == 0 or rel.isAbsolute or ".." in rel.split('/'):
+      bundleFail("latest.json names an unusable native half directory: " &
+        rel.escape)
+    let v = readVerifiedContents(bundleDir / rel, NativeManifestName)
+    if v.bundleId != rel.extractFilename:
+      bundleFail("the native half in " & rel & " has contents of bundle " &
+        v.bundleId)
+    let native = inspectJsonOf(v)
+    # The verified values win over the unverified JSON.
+    result["producer"] = native["producer"]
+    for key in ["storeRoot", "actionCacheRoot", "workspaceRoots"]:
+      result["provision"][key] = native["provision"][key]
+    result["selection"] = native["selection"]
+    result["bundleId"] = %v.bundleId
+    result["halves"]["native_store"] = %v.bundleId
+
+# ---------------------------------------------------------------------------
 # restore
 # ---------------------------------------------------------------------------
 
-proc isUrl(s: string): bool =
-  s.startsWith("https://") or s.startsWith("http://") or s.startsWith("file://")
 
 proc freeBytes*(path: string): int64 =
   ## Free space on the filesystem holding `path` (or its nearest existing
@@ -207,15 +336,45 @@ proc freeBytes*(path: string): int64 =
     return high(int64)
   int64(st.f_bavail) * int64(st.f_frsize)
 
-proc download(urls: seq[tuple[url, dest: string]]; parallel: int) =
-  ## Parallel `curl` transfers. curl honours HTTPS_PROXY and the system CA
-  ## bundle (SSL_CERT_FILE), which the session needs.
-  if urls.len == 0: return
-  var cfg = ""
+proc curlQuote*(value: string): string =
+  ## `value` as a double-quoted string in curl's `-K` config syntax: `\\`
+  ## and `"` escaped. A control character is refused rather than escaped:
+  ## no legitimate URL, path or header holds one, and an unescaped newline
+  ## would end the value and start a directive of the caller's choosing
+  ## (Workspace-Bundles.md §7 step 2). The refusal names the character's
+  ## position, never the value: on the publish side the value can be a
+  ## credential (`authConfig`), such as a secret read with a trailing newline.
+  result = "\""
+  for i, c in value:
+    case c
+    of '\\', '"':
+      result.add('\\')
+      result.add(c)
+    of '\0' .. '\x1f', '\x7f':
+      bundleFail("refusing a curl config value with the control character " &
+        ($c).escape & " at offset " & $i & " of " & $value.len)
+    else:
+      result.add(c)
+  result.add('"')
+
+proc downloadConfig*(urls: seq[tuple[url, dest: string]]): string =
+  ## The `curl -K -` config for `urls`: one url/output pair per transfer,
+  ## every value quoted by `curlQuote`.
   for (url, dest) in urls:
-    cfg.add("url = \"" & url & "\"\noutput = \"" & dest & "\"\n")
-  discard mustRun(requireExe("curl"), ["-fsS", "--retry", "3", "--parallel",
-    "--parallel-max", $max(1, parallel), "-K", "-"], stdinData = cfg)
+    result.add("url = " & curlQuote(url) & "\noutput = " & curlQuote(dest) &
+      "\n")
+
+proc download*(urls: seq[tuple[url, dest: string]]; parallel: int) =
+  ## Parallel `curl` transfers. curl honours HTTPS_PROXY and the system CA
+  ## bundle (SSL_CERT_FILE), which the session needs. Only https:// and
+  ## file:// are fetched, and a redirect only to https:// (`CurlProtocols`).
+  if urls.len == 0: return
+  let cfg = downloadConfig(urls)
+  # --globoff: a URL reaches curl as itself, never as a `{a,b}` or `[1-9]`
+  # pattern that fans out into transfers the manifest does not name.
+  discard mustRun(requireExe("curl"), @["-fsS", "--globoff", "--retry", "3"] &
+    @CurlProtocols & @["--parallel", "--parallel-max", $max(1, parallel),
+    "-K", "-"], stdinData = cfg)
 
 type
   SourceKind = enum skDir, skUrl, skGithub
@@ -224,11 +383,35 @@ type
     base: string          ## directory or URL of the bundle (skDir, skUrl)
     gh: GithubSource      ## skGithub
 
+proc isHalfId(s: string): bool =
+  s.len == 32 and s.allCharsInSet({'0' .. '9', 'a' .. 'f'})
+
+proc checkHalfDir*(node: JsonNode; key, system: string): string =
+  ## The half's `dir` from the unsigned latest.json, refused unless it is
+  ## exactly the directory §5 lays that half out in: `<system>/nix/<id>`,
+  ## `sources/<id>` or `<system>/native-store/<id>`, with `<system>` the
+  ## system the bundle was read for and `<id>` 32 lowercase hex digits. It
+  ## is joined onto the bundle's base, a staging directory and curl's
+  ## config, so anything else (`..`, `/`, a quote, a newline) could reach
+  ## outside the bundle (Workspace-Bundles.md §7 step 2, §9).
+  let rel = node{"dir"}.getStr()
+  let prefix = (case key
+    of "nix": system & "/" & NixHalfDir & "/"
+    of "sources": SourcesHalfDir & "/"
+    of "native_store": system & "/" & NativeHalfDir & "/"
+    else: "")
+  if prefix.len == 0 or not rel.startsWith(prefix) or
+      not isHalfId(rel[prefix.len .. ^1]):
+    bundleFail("refusing the " & key & " half's directory " & rel.escape &
+      ": expected " & prefix & "<32 lowercase hex digits>")
+  rel
+
 proc fetchHalf(src: Source; staging: string; node: JsonNode;
                manifestName: string; parts: seq[BundlePart];
                extra: seq[string]; fetchManifest: bool; parallel: int): string =
   ## A directory holding the half's files: the half itself for a local
-  ## bundle, otherwise a staging directory they were downloaded into.
+  ## bundle, otherwise a staging directory they were downloaded into. The
+  ## half's `dir` was checked by `checkHalfDir` before anything was written.
   let rel = node["dir"].getStr()
   if src.kind == skDir:
     return src.base / rel
@@ -255,6 +438,7 @@ proc fetchHalf(src: Source; staging: string; node: JsonNode;
 proc readLatest(source, system: string; staging: string):
     tuple[src: Source; latest: JsonNode] =
   var text = ""
+  refuseHttp(source)
   if isGithubSource(source):
     let gh = parseGithubSource(source)
     result.src = Source(kind: skGithub, gh: gh)
@@ -311,6 +495,12 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
   defer: removeDir(probeDir)
   let (src, latest) = readLatest(opts.source, system, probeDir)
   let halves = latest["halves"]
+  # §7 step 2: every half's directory is checked before anything is fetched
+  # or written, the halves already present included. A half this restorer
+  # does not know is never read, so it is not checked either.
+  for key in ["nix", "sources", "native_store"]:
+    if halves.hasKey(key):
+      discard checkHalfDir(halves[key], key, system)
   let ws = (if opts.workspaceDir.len > 0:
               normalizedPath(absolutePath(opts.workspaceDir))
             else: latest["workspace_dir"].getStr())
@@ -333,6 +523,11 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
     needSources = not sourcesHalf.sourcesPresent(ws)
     if not needSources: result.alreadyPresent.add("sources")
   let needNative = halves.hasKey("native_store")
+  # Its part names are checked here, with the other halves', before any
+  # half is fetched (§7 step 2).
+  let nativeParts = (if needNative:
+                       parsePartsJson(halves["native_store"]["parts"])
+                     else: @[])
   var nixBytes, wsBytes, compressed = 0'i64
   if needNix:
     nixBytes += nixHalf.unpackedBytes
@@ -384,7 +579,7 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
       bundleFail("this bundle has a native-store half and no importer")
     let node = halves["native_store"]
     let dir = fetchHalf(src, staging, node, NativeManifestName,
-      parsePartsJson(node["parts"]), @[], true, parallel)
+      nativeParts, @[], true, parallel)
     phase("download native-store")
     result.native = opts.importNative(dir)
     if remote: removeDir(dir)
@@ -467,11 +662,12 @@ proc authConfig(opts: PublishOptions): string =
     bundleFail("publishing needs AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY " &
       "in the environment")
   let region = (if opts.region.len > 0: opts.region else: "us-east-1")
-  result = "user = \"" & ak & ":" & sk & "\"\n" &
-    "aws-sigv4 = \"aws:amz:" & region & ":s3\"\n"
+  result = "user = " & curlQuote(ak & ":" & sk) & "\n" &
+    "aws-sigv4 = " & curlQuote("aws:amz:" & region & ":s3") & "\n"
   let token = getEnv("AWS_SESSION_TOKEN")
   if token.len > 0:
-    result.add("header = \"x-amz-security-token: " & token & "\"\n")
+    result.add("header = " & curlQuote("x-amz-security-token: " & token) &
+      "\n")
 
 proc curlS3(opts: PublishOptions; blocks: seq[string];
             extraArgs: seq[string] = @[]): seq[tuple[code: int, url: string]] =
@@ -495,7 +691,8 @@ proc curlS3(opts: PublishOptions; blocks: seq[string];
       " transfers (exit " & $r.code & "): " & r.errors.strip())
 
 proc remoteExists(opts: PublishOptions; url: string): bool =
-  let r = curlS3(opts, @["url = \"" & url & "\"\nhead\noutput = \"/dev/null\"\n"])
+  let r = curlS3(opts, @["url = " & curlQuote(url) &
+    "\nhead\noutput = \"/dev/null\"\n"])
   r[0].code in 200 .. 299
 
 proc uploadFiles(opts: PublishOptions; files: seq[tuple[path, url: string]];
@@ -503,9 +700,10 @@ proc uploadFiles(opts: PublishOptions; files: seq[tuple[path, url: string]];
   if files.len == 0: return
   var blocks: seq[string]
   for (path, url) in files:
-    blocks.add("upload-file = \"" & path & "\"\nurl = \"" & url & "\"\n" &
-      "header = \"Cache-Control: " & cacheControl & "\"\n" &
-      "header = \"Content-Type: " & contentType & "\"\n" &
+    blocks.add("upload-file = " & curlQuote(path) & "\nurl = " &
+      curlQuote(url) & "\n" &
+      "header = " & curlQuote("Cache-Control: " & cacheControl) & "\n" &
+      "header = " & curlQuote("Content-Type: " & contentType) & "\n" &
       "output = \"/dev/null\"\n")
   let results = curlS3(opts, blocks, @["--parallel", "--parallel-max",
     $(if opts.parallel > 0: opts.parallel else: 16)])

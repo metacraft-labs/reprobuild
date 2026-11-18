@@ -332,9 +332,14 @@ reference as `unresolved` for that target.
 
 A reference no definition it can see
 names at all might be an application defined in the `reprobuild-packages`
-catalog, so when there is one and no catalog checkout is reachable (beside
-the profile, beside the `reprobuild` checkout, or `$REPROBUILD_PACKAGES_ROOT`),
-the export fails instead of guessing. On a host that gives Reprobuild one of
+catalog, so when there is one and no catalog checkout is reachable
+(`$REPROBUILD_PACKAGES_ROOT`; when a `repro.lock` above the profile pins the
+catalog, a `repro develop` checkout of it, the workspace's own checkout, a
+checkout beside the profile at the pinned commit, or the pinned revision
+fetched under `.repro/`; otherwise a checkout beside the profile or a
+directory above it, else beside the `reprobuild` checkout), the export fails
+instead of guessing. A checkout beside the profile at some other commit does
+not replace the pin. On a host that gives Reprobuild one of
 `packages` / `applications` and Nix the other, `repro home apply` refuses a
 package whose selection on this host — which honors the local lock and can
 use the host's `PATH` — would put it in a different concern than the export
@@ -501,10 +506,15 @@ records each file's digest.
 ### Predicates
 
 Guards use the built-in predicate grammar: `windows`, `macos`, `linux`,
-`bsd`, `wsl`, `x86_64`, `arm64`, `arm32`, `host == "name"`,
+`bsd`, `wsl`, `nixos`, `x86_64`, `arm64`, `arm32`, `host == "name"`,
 `host != "name"`, `host in ["a", "b"]`, combined with `and`, `or`, `not` and
 parentheses. When `repro home export --target` evaluates them, `wsl` is false
-for every target and `host` is the selected host.
+for every target and `host` is the selected host. `nixos` is a fact about the
+host that the target's system name does not carry (Home Manager
+configurations exist for both a NixOS and another Linux), so the export states
+nothing for it: pass `--nixos` (or `--nixos=false`) with `--target`, and a
+profile whose guards reach `nixos` is refused (exit `3`) without it. On the
+machine itself the planner reads `ID=nixos` from `/etc/os-release`.
 
 All digests are lower-case hex. The document adds no absolute paths of its
 own (provenance paths are relative to the profile directory); anything

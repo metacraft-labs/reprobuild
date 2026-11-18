@@ -132,7 +132,7 @@ let
       if v.ok then
         ""
       else if v.class == "unknown-identifier" then
-        "`${source}` names '${v.identifier}', which is not a built-in predicate; data files accept only windows, macos, linux, bsd, wsl, x86_64, arm64, arm32 and host ==/!=/in, combined with and/or/not (a user-defined predicate has no evaluator outside the profile's Nim code)"
+        "`${source}` names '${v.identifier}', which is not a built-in predicate; data files accept only windows, macos, linux, bsd, wsl, nixos, x86_64, arm64, arm32 and host ==/!=/in, combined with and/or/not (a user-defined predicate has no evaluator outside the profile's Nim code)"
       else
         "`${source}` is not a valid predicate: ${v.message}";
 
@@ -268,9 +268,10 @@ let
       system,
       host,
       activities,
+      nixos ? null,
     }:
     let
-      facts = platforms.factsFor system host;
+      facts = platforms.factsWith nixos system host;
       applies = r: elem r.activity activities && predicate.holds facts r.when;
       activityOrder = foldl' (acc: r: if elem r.activity acc then acc else acc ++ [ r.activity ]) [ ] rows;
       plannerOrder = builtins.concatMap (a: filter (r: r.activity == a) rows) activityOrder;
@@ -306,6 +307,7 @@ let
       hosts ? { },
       activities ? null,
       name ? baseNameOf (toString path),
+      nixos ? null,
     }:
     let
       parsed = parseRows name (builtins.readFile path);
@@ -320,7 +322,7 @@ let
           hostSelection.enabledActivities hosts host;
       selected = selectRows {
         inherit (parsed) rows;
-        inherit system host;
+        inherit system host nixos;
         activities = enabled;
       };
     in
@@ -361,10 +363,23 @@ in
   # binaries, activity }`, one per package, sorted by name; `rows` every
   # validated row. Throws with the planner's diagnostic for a file the
   # planner refuses, and for every file with `[[resource]]` rows.
+  # The argument pattern restates readDataResult's, so that
+  # `builtins.functionArgs reprobuild.lib.readData` names the arguments (the
+  # user reference page is checked against it, nix/tests/lib-reference.nix).
   readData =
-    args:
+    args@{
+      path,
+      system,
+      host,
+      hosts ? { },
+      activities ? null,
+      name ? null,
+      nixos ? null,
+    }:
     let
-      r = readDataResult args;
+      # `name` defaults inside readDataResult (the file's base name); pass it
+      # only when given.
+      r = readDataResult (if name == null then builtins.removeAttrs args [ "name" ] else args);
     in
     if r ? error then throw "reprobuild.lib.readData: ${r.error}" else r;
 }

@@ -243,8 +243,8 @@ proc observeWindowsVsInstaller*(op: PrivilegedOperation):
   ## The `dispatch.nim`-facing observe entry point. `present` is true
   ## when a matching VS product is installed; `digestHex` covers the
   ## canonical observed state (product presence + actionable membership
-  ## delta) so the broker's drift gate is uniform with the other
-  ## drivers.
+  ## delta) so the broker's observed-vs-desired test is uniform with
+  ## the other drivers.
   when defined(windows):
     let observed = observeVsInstallerState(op)
     result.present = observed.diff.productInstalled

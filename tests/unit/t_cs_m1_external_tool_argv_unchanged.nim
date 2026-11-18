@@ -1,37 +1,74 @@
 ## Moving the ``cli:`` language into the clispec library changed nothing an
-## external tool sees.
+## external tool sees, and nothing since has changed it by accident.
 ##
 ## ``test_cs_m1_external_tool_argv_unchanged`` renders the external-tool
-## surface of every in-tree ``cli:`` tool definition — the model the
+## surface of every in-tree ``cli:`` tool definition -- the model the
 ## ``package`` macro builds (including reprobuild's extension: roles,
 ## outputs, optional outputs, ``removeBeforeRun``, sub-tools, dependency
-## policy, entropy blessing, provider entry points), the argv each command
-## renders with every parameter supplied, the interface artifact of each
-## package, and the recorded calls and argv of a ``defineCliInterface``
-## fixture — and compares it byte for byte with a golden capture.
+## policy, input-check policy, entropy blessing, provider entry points), the
+## argv each command renders with every parameter supplied, the command
+## surface of each package's interface artifact read back through the codec,
+## and the recorded calls and argv of a ``defineCliInterface`` fixture -- and
+## compares it byte for byte with a golden capture.
 ##
 ## The golden (``tests/fixtures/cs-m1-external-tool-surface/surface.golden``)
-## was captured on the tree BEFORE the move (3f90ff7dd), by this same
+## was first captured on the tree BEFORE the move (3f90ff7dd), by this same
 ## renderer with one difference: the pre-move model had no ``ext`` slot, so
-## the capture defined ``ext`` as the identity. It is a historical record,
-## not a snapshot to refresh: if this test fails, the extraction changed
-## behaviour. Change the golden only together with a deliberate change to a
-## tool definition or to argv rendering, and say so in that commit.
+## the capture defined ``ext`` as the identity. If this test fails, a tool's
+## command line, its build-graph declarations or the argv rendering changed.
+## Change the golden only together with a deliberate change to a tool
+## definition or to argv rendering, and say so in that commit and in the list
+## below. The rendering leaves out source line numbers and the digest of the
+## whole interface artifact (see ``cs_m1_external_tool_surface.nim``), so an
+## edit that does not touch a command line does not fail this test.
+##
+## Maintenance: nothing runs this test for you when you change a tool. It is
+## not part of ``just lint``, the suite that does run it is not run for a
+## commit to ``agents``, and no rule selects the tests that guard a changed
+## path, so a change under ``libs/repro_dsl_stdlib/`` (a ``cli:`` block, a
+## tool's build-graph declarations), under ``cli_extension.nim`` /
+## ``packageLiteral``, or to ``argvForCall`` reaches ``agents`` without it.
+## That is how the golden went stale for two days in November 2026, after
+## three deliberate tool changes. Run it yourself for such a change:
+## ``nim c -r tests/unit/t_cs_m1_external_tool_argv_unchanged.nim``.
 ##
 ## Deliberate changes since the capture:
 ##
 ## * clispec now reads ``required`` on a positional (it used to drop it), so
 ##   the four ``pos args is seq[string], ..., required = false`` declarations
-##   (git, mktemp, node, sh) record ``required=false``, as they always said,
-##   and those packages' interface hashes changed with it. Their argv did not
-##   change.
+##   (git, mktemp, node, sh) record ``required=false``, as they always said.
+##   Their argv did not change.
+## * ``cargo-nextest`` gained a ``cli:`` block (269fd0da9, "add a thin cargo
+##   edge"): ``cargo_nextest.nextest(run = true, ...)`` is a typed call, sized
+##   with ``--test-threads``. A new package; no existing argv changed.
+## * ``nim`` gained the optional ``skipUserCfg`` flag (``--skipUserCfg``,
+##   9442575a2, "harden helper dependency lists"): test-helper binaries are
+##   built with it. It is rendered only when a caller sets it.
+## * ``gcc``, ``clang`` and ``ar`` declare ``inputCheckPolicy hybrid``
+##   (dfd3ba20c, "share content-checked compile and archive edges by
+##   default"). Not an argv change; the field was added to the model then,
+##   and is rendered since the golden was refreshed.
+## * The refresh that recorded the three entries above also dropped source
+##   line numbers and the whole-artifact interface digest from the rendering
+##   (both had moved on edits that change no command line: the envelope
+##   version bump of 0b52b4b4c moved every package's digest), and renders the
+##   artifact's decoded command surface instead.
+## * ``gcc`` and ``clang`` gained the optional ``soname`` flag
+##   (``-Wl,-soname,<value>``, spelled as ``zig cc``'s already is), so
+##   ``gccLink`` / ``clangLink`` bake a shared library's full SONAME into its
+##   ``DT_SONAME``, as ``LinkOptions.soname`` always promised. It is
+##   rendered only when a caller sets it: a shared link with a SONAME.
 ##
 ## The negative controls prove the comparison can fail: a model with one
-## flag's ``alias`` changed, and one with a flag's ``format`` changed, must
-## both render differently from the golden, at that flag.
+## flag's ``alias`` changed, one with a flag's ``format`` changed, one with a
+## command's input-check policy changed, and one with an extra package must
+## each render differently from the golden, at that place. The positive
+## control proves the rendering ignores what it claims to ignore: every
+## source line moved, the rendering is still the golden.
 ##
 ## No mocks: the stdlib packages are the real modules, registered by their
-## real ``package`` blocks; argv is rendered by the engine's ``argvForCall``.
+## real ``package`` blocks; argv is rendered by the engine's ``argvForCall``;
+## the interface artifact goes through the real codec.
 
 import std/[os, strutils, unittest]
 
@@ -127,3 +164,60 @@ suite "CS-M1: the clispec extraction leaves external tools unchanged":
     let difference = firstDifference(golden, actual)
     checkpoint("mutated " & mutated & ": " & difference)
     check difference.contains("format=cafEquals")
+
+  test "negative control: a changed input-check policy makes the comparison fail":
+    var packages = registeredPackages()
+    var mutated = ""
+    block search:
+      for pkg in packages.mitems:
+        for exe in pkg.executables.mitems:
+          for cmd in exe.commands.mitems:
+            if cmd.ext.inputCheckPolicy == acfpUnstated:
+              cmd.ext.inputCheckPolicy = acfpChecksum
+              mutated = pkg.packageName & "/" & exe.exportName
+              break search
+    check mutated.len > 0
+    let actual = surfaceOf(packages)
+    check actual != golden
+    let difference = firstDifference(golden, actual)
+    checkpoint("mutated " & mutated & ": " & difference)
+    check difference.contains("inputCheckPolicy=acfpChecksum")
+
+  test "negative control: a new package with a command makes the comparison fail":
+    var packages = registeredPackages()
+    var added = PackageDef()
+    for pkg in packages:
+      if pkg.executables.len > 0 and pkg.executables[0].commands.len > 0:
+        added = pkg
+        break
+    check added.packageName.len > 0
+    # Sorts after every stdlib package, so the first difference is the new
+    # package itself and not a shifted neighbour.
+    added.packageName = "zz-cs-m1-new-tool"
+    packages.add(added)
+    let actual = surfaceOf(packages)
+    check actual != golden
+    let difference = firstDifference(golden, actual)
+    checkpoint("added zz-cs-m1-new-tool: " & difference)
+    check difference.contains("zz-cs-m1-new-tool")
+
+  test "positive control: moving every source line leaves the rendering unchanged":
+    var packages = registeredPackages()
+    var moved = 0
+    for pkg in packages.mitems:
+      pkg.sourceLine += 1000
+      for exe in pkg.executables.mitems:
+        exe.sourceLine += 1000
+        for cmd in exe.commands.mitems:
+          cmd.sourceLine += 1000
+          for td in cmd.ext.typedOutputs.mitems:
+            td.sourceLine += 1000
+          for param in cmd.params.mitems:
+            param.sourceLine += 1000
+            inc moved
+    check moved > 100
+    let actual = surfaceOf(packages)
+    let difference = firstDifference(golden, actual)
+    if difference.len > 0:
+      checkpoint("moved source lines changed the rendering at " & difference)
+    check actual == golden

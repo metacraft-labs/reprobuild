@@ -56,10 +56,16 @@ class ReadmeMatchesDispatcher(unittest.TestCase):
         documented = set(re.findall(r"\brepro infra ([a-z][a-z-]*)", README))
         self.assertEqual(sorted(documented - arms), [])
 
-    def test_add_and_remove_are_described_as_workspace_membership(self):
+    def test_add_and_remove_describe_the_layer_they_edit(self):
+        # `repro add|remove` edit the package dependencies of repro.nim; the
+        # workspace-repository verbs are `repro ws add|remove`. A README line
+        # that shows one with the other's flags or meaning is the confusion
+        # the split exists to remove.
         for line in README.splitlines():
             if "`repro add" in line:
-                self.assertNotIn("dependenc", line)
+                self.assertIn("package", line)
+                self.assertNotIn("--remote", line)
+            if "`repro ws add" in line:
                 self.assertIn("repositor", line)
 
     def test_user_guide_does_not_show_the_undispatched_verbs(self):

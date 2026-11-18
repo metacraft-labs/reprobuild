@@ -26,6 +26,17 @@
 import repro_project_dsl
 import ./library
 
+const
+  DefaultArModifiers* =
+    when defined(macosx): "rcs"
+    else: "rcsD"
+    ## The ``ar`` modifiers an archive takes when the caller names none.
+    ## ``D`` writes zero for each member's timestamp, owner and group, so the
+    ## archive is a function of its members' bytes and names alone (GNU
+    ## ``ar`` built without ``--enable-deterministic-archives`` defaults to
+    ## ``U``). The Darwin ``ar`` has no ``D`` modifier, so macOS keeps
+    ## ``rcs``. https://sourceware.org/binutils/docs/binutils/ar-cmdline.html
+
 type
   LinkOutputKind* = enum
     ## Link-output discriminator consumed by ``LinkOptions.kind`` and
@@ -79,10 +90,15 @@ type
     target*: string
       ## Output path (``-o``).
     soname*: string
-      ## When non-empty, emit ``-Wl,-soname=<value>``. Auto-lifted
-      ## from the surrounding ``library <name>: api: soname "..."``
-      ## declaration; recipes calling Layer 2 directly may override
-      ## by populating this field explicitly.
+      ## The FULL SONAME of a shared library (``libfoo.so.1``, not the
+      ## ``api:`` block's base name ``foo``). When non-empty and ``kind``
+      ## is ``lokShared``, every link adapter (gcc, clang, zig) passes it
+      ## verbatim as ``-Wl,-soname,<value>``; it is ignored for other
+      ## kinds. A consumer's ``DT_NEEDED`` is this string, so the library
+      ## must be written under it: ``c_library`` derives it with
+      ## ``sharedLibrarySoname`` and names the link output after it
+      ## (C-Cpp.md §"Mode A — Fine-grained build graph (primary)").
+      ## Recipes calling Layer 2 directly set it themselves.
     extra*: seq[string]
       ## Pass-through linker flags.
 
@@ -94,7 +110,7 @@ type
     target*: string
       ## Output ``.a`` path.
     modifiers*: string
-      ## ``ar`` modifier string (default ``"rcs"``). Carried verbatim
+      ## ``ar`` modifier string (default ``DefaultArModifiers``). Carried verbatim
       ## into the ``ar`` argv.
 
   StripOptions* = object

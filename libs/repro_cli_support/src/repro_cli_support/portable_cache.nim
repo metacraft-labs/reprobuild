@@ -1,6 +1,16 @@
 ## Cache-Scope P3.4 — the CLI's side of portable (cross-host) caching.
 ##
-## Opt-in with ``REPRO_PORTABLE_CACHE=1``. When on, a build:
+## Three settings of ``REPRO_PORTABLE_CACHE`` (Caching-Architecture.md D1):
+##
+## * unset (the default): the portable identity is computed for every edge
+##   whose input-check policy is ``checksum`` or ``hybrid`` -- the edges that
+##   declared they want their results shared -- and for no other edge. It
+##   covers THIS HOST only: the local memo plane and the pre-pass lookup
+##   against it. Nothing is published to, or looked up in, a remote or peer
+##   cache because of it, and the action environment is not changed.
+## * ``0`` / ``false`` / ``no``: no portable identity for any edge.
+## * ``1`` / ``true`` / ``yes``: every edge, ``timestamp`` ones included, and
+##   the remote memo plane, as described below. When on, a build:
 ##
 ## * computes a portable fingerprint for every recorded action against the
 ##   logical roots below, and stores its memo record locally;
@@ -33,7 +43,13 @@ import repro_local_store
 import repro_binary_cache_client/portable_memo_cache
 
 proc portableCacheEnabled*(): bool =
+  ## ``REPRO_PORTABLE_CACHE=1``: the full, cross-host portable configuration.
   getEnv("REPRO_PORTABLE_CACHE", "").toLowerAscii() in ["1", "true", "yes"]
+
+proc portableCacheDisabled*(): bool =
+  ## ``REPRO_PORTABLE_CACHE=0``: no portable identity at all, not even the
+  ## same-host default of Caching-Architecture.md D1.
+  getEnv("REPRO_PORTABLE_CACHE", "").toLowerAscii() in ["0", "false", "no"]
 
 proc repositoryRootOf*(projectRoot: string): string =
   ## The nearest ancestor-or-self of `projectRoot` holding `.git` (a
@@ -133,15 +149,27 @@ proc wireFilesystemRoots*(config: var BuildEngineConfig;
 
 proc wirePortableCache*(config: var BuildEngineConfig;
                         projectRoot, workRoot: string) =
-  ## Attach portable caching to an engine configuration, when enabled.
+  ## Attach portable caching to an engine configuration.
   ##
   ## The root classification is declared either way: see
   ## `wireFilesystemRoots`.
+  ##
+  ## By default (Caching-Architecture.md D1) the portable identity is on for
+  ## content-checked edges, on this host: `portableContentCheckedOnly`, the
+  ## local memo plane and the pre-pass lookup, and nothing else -- no
+  ## allowlisted environment (a variable an action reads is keyed by its
+  ## value either way, with tracked roots logicalized, and changing every
+  ## hybrid edge's environment by default is not what D1 decided), no remote
+  ## lookup, restore or publication. `REPRO_PORTABLE_CACHE=1` is the full
+  ## configuration below; `=0` turns the identity off.
   wireFilesystemRoots(config, projectRoot, workRoot)
-  if not portableCacheEnabled():
+  if portableCacheDisabled():
     return
   config.portableRoots = config.filesystemRoots
   config.portableLookup = true
+  if not portableCacheEnabled():
+    config.portableContentCheckedOnly = true
+    return
   # A portable key is only shareable if the action cannot see the invoking
   # shell's own variables, so portable caching launches actions with an
   # allowlisted environment. `REPRO_HERMETIC_ENV=0` turns that off, for

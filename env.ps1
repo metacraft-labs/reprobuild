@@ -195,6 +195,23 @@ if (Test-BootstrapStepEnabled "OPENSSL") {
     $env:REPRO_WINDOWS_OPENSSL_DIR = $openSslDir
 }
 
+# --- 1d'. windows-aarch64 runtime DLLs (sqlite, zstd) ------------------------
+# x64 gets sqlite3_64.dll from the Nim zip and libzstd.dll from WinLibs; on
+# arm64 neither tool carries them, so they are their own pinned inputs
+# (windows/ensure-runtime-dlls.ps1; reprobuild-pm Distribution-And-Packaging.md
+# §7.1, W4). Fatal like OpenSSL: every image that links the local store dies
+# at start-up without sqlite.
+$runtimeDllDir = ""
+if (Test-BootstrapStepEnabled "RUNTIME_DLLS") {
+    . (Join-Path $scriptDir "windows\ensure-runtime-dlls.ps1")
+    $reproToolchain = Read-KeyValueFile -Path (Join-Path $scriptDir "windows\toolchain-versions.env")
+    $runtimeDllDir = Ensure-WindowsRuntimeDlls -Root $installRoot -Arch (Get-WindowsArch) -Toolchain $reproToolchain
+    if ($runtimeDllDir) {
+        Add-PathEntry -Dir $runtimeDllDir
+        $env:REPRO_WINDOWS_RUNTIME_DLL_DIR = $runtimeDllDir
+    }
+}
+
 # --- 1e. Optional Windows HCR test drivers ----------------------------------
 if ($env:WINDOWS_DIY_HCR_TESTS -eq "1") {
     . (Join-Path $scriptDir "windows\ensure-python.ps1")

@@ -534,13 +534,13 @@ suite "WV-7 — repro branch --from=mainline":
       check not dirExists(forkPath)
       check res.output.contains("--from=<role>")
 
-      # The retired spelling is an unsupported flag, exit 1 like every
-      # unknown flag, naming the spelling that replaced it.
+      # The retired spelling is an unknown flag, a usage error (exit 2) like
+      # every unknown flag, naming the spelling that replaced it.
       let retired = invokeFork(fx, "feature-z", forkPath, @["--from-mainlines"])
       checkpoint(retired.output)
-      check retired.code == 1
+      check retired.code == 2
       check not dirExists(forkPath)
-      check "unsupported `repro branch` flag: --from-mainlines" in retired.output
+      check "unknown flag '--from-mainlines' for 'repro branch'" in retired.output
       check "`--from=mainline`" in retired.output
 
   test "test_wv7_from_mainlines_adopts_renamed_mainline_member_path":

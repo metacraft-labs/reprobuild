@@ -525,12 +525,13 @@ proc directDependencyNames*(packages: openArray[PackageDecl]): HashSet[string] =
   ## Conditional (variant-gated) arms are INCLUDED, for the same
   ## over-approximation reason `fetchPlan` includes them: which arm is live is
   ## the solve's own output, so a gate-respecting walk here would need the
-  ## answer it is helping to produce. Over-approximating "direct" costs a
-  ## dormant package a preference term that never fires, because the term is
-  ## conditioned on `package_chosen` and a dormant package still chooses.
+  ## answer it is helping to produce. Over-approximating "direct" gives a
+  ## dormant package a preference term, and the term does fire: it is
+  ## conditioned on `package_chosen`, and a dormant package still chooses.
   ## Measured consequence, stated rather than implied: a dormant direct arm
-  ## does get a term, and it is harmless because §5.7's interval derivation
-  ## records nothing for an UNSELECTED package.
+  ## does get a term, so its chosen version — which the lock records — is
+  ## minimised, and §5.7's interval derivation records it with a DOWNWARD
+  ## interval for exactly that reason (`deriveConsultedIntervals`).
   let roots = rootPackageNames(packages)
   for p in packages:
     if p.name notin roots: continue

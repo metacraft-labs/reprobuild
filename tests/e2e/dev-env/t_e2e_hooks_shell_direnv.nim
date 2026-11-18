@@ -216,13 +216,21 @@ suite "e2e_hooks_shell_direnv":
       let statsPath = c.tempRoot / "direnv-real-stats.json"
       check requireDirenvValue(c, statsPath) == "DIR:alpha|dev|dev-env.rbde|tool:alpha:dev"
       let envrc = readFile(c.projectRoot / ".envrc")
-      check "repro-managed:repro-dev-env-direnv" in envrc
+      check "repro:home:repro-dev-env-direnv" in envrc
       check "__repro-direnv-activate" in envrc
-      check "hooks ensure --vcs" in envrc
-      let hooksAfterDirenv = c.requireVcsHooksInstalled()
+      # The block no longer installs VCS hooks on directory entry
+      # (reprobuild-pm spec/CLI/hooks.md §"Direnv Integration", amended
+      # 2026-11-16): it ran `hooks ensure --vcs` with its output discarded and
+      # its status swallowed. So activation leaves the hooks alone, and an
+      # explicit `hooks ensure --vcs` installs them, idempotently.
+      check "hooks ensure --vcs" notin envrc
+      check not fileExists(c.hooksDir() / "pre-push.repro-managed")
+      check not fileExists(c.hooksDir() / "post-commit.repro-managed")
+      discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
+      let hooksAfterFirstEnsure = c.requireVcsHooksInstalled()
       discard requireRepro(c, @["hooks", "ensure", "--vcs", c.projectRoot])
       let hooksAfterExplicitEnsure = c.requireVcsHooksInstalled()
-      check hooksAfterExplicitEnsure == hooksAfterDirenv
+      check hooksAfterExplicitEnsure == hooksAfterFirstEnsure
 
       let stats = parseJson(readFile(statsPath))
       check stats["command"].getStr() == "hooks shell-direnv"
@@ -275,7 +283,7 @@ suite "e2e_hooks_shell_direnv":
         c.projectRoot])
       let withBlock = readFile(envrcPath)
       check withBlock.contains(userBytes)
-      check withBlock.contains("repro-managed:repro-dev-env-direnv")
+      check withBlock.contains("repro:home:repro-dev-env-direnv")
 
       discard requireRepro(c, @["hooks", "ensure", "--shell-direnv",
         c.projectRoot])

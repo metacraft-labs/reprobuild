@@ -16,6 +16,15 @@
 ## ``sh -c`` on POSIX) — no external tool dependencies, no host-PATH
 ## assumptions.
 ##
+## Fakes, and why (the mock-justification rule): the tool identities come
+## from an in-memory ``ToolIdentityResolver`` table because the seam under
+## test is the engine's use of a resolver's ANSWER, not catalog resolution;
+## and the ``dgAutomaticMonitor`` actions run under a passthrough monitor
+## driver (``repro_test_support/passthrough_monitor``) that records nothing,
+## because a monitored action with no driver fails by design and this file
+## asserts the launched environment, not dependency evidence. The engine,
+## its wrapper argv, the launch and the child process are all real.
+##
 ## See ``libs/repro_build_engine/src/repro_build_engine.nim``
 ## §resolvedToolBinDirs + §launchChildEnv + ``ResolvedToolIdentity`` /
 ## ``ToolIdentityResolver`` / ``BuildEngineConfig.toolIdentityResolver``
@@ -32,6 +41,7 @@ import repro_project_dsl/shell_fetch
 import io_mon/writer
 from io_mon import findShimLibrary, ShimLibOverrideEnv
 from repro_test_support import testCaseScratchSlug
+import repro_test_support/passthrough_monitor
 
 # One scratch root PER CASE, not per binary.
 #
@@ -95,17 +105,38 @@ proc stubArgv(): seq[string] =
   else:
     @["sh", "-c", "printf %s \"$PATH\""]
 
+proc setOutputPathValues(captured: string): seq[string] =
+  ## Every ``PATH`` value in ``cmd.exe set PATH`` output, which prints each
+  ## env var whose name STARTS with ``PATH`` (``PATHEXT`` included).
+  ##
+  ## Windows environment names are case-insensitive, and the child sees
+  ## the variable under whatever casing its environment block carries --
+  ## ``Path`` when it was inherited from a Windows session -- so the name
+  ## is matched case-insensitively
+  ## (https://learn.microsoft.com/windows/win32/procthread/environment-variables).
+  ## All matches are returned so the caller can require exactly one. Pure
+  ## text, compiled on every host, so the case below pins it on Linux too.
+  for raw in captured.splitLines:
+    let line = raw.strip()
+    let eq = line.find('=')
+    if eq > 0 and cmpIgnoreCase(line[0 ..< eq], "PATH") == 0:
+      result.add(line[eq + 1 .. ^1])
+
 proc stripPathPrefix(captured: string): string =
-  ## Extract the ``PATH=<value>`` line from ``cmd.exe set PATH`` output
-  ## (which prints every env var whose name starts with ``PATH``,
-  ## including ``PATHEXT``). Return just the ``PATH``'s value. POSIX
-  ## stubs print bare PATH so this is a no-op there.
+  ## Extract the ``PATH`` value from the stub's capture. POSIX stubs print
+  ## bare PATH so this is a no-op there.
+  ##
+  ## On Windows exactly ONE ``PATH``-named line is required: an environment
+  ## block holding both ``PATH`` and ``Path`` leaves which one a program
+  ## reads to the program, so a duplicate is itself a failure rather than
+  ## something to pick a winner from. With no match the result is empty, so
+  ## every check on it fails instead of reading the whole capture
+  ## (``PATHEXT`` included) as the value.
   when defined(windows):
-    for raw in captured.splitLines:
-      let line = raw.strip()
-      if line.startsWith("PATH="):
-        return line[5 .. ^1]
-    return captured
+    let values = setOutputPathValues(captured)
+    check values.len == 1
+    if values.len > 0:
+      result = values[0]
   else:
     result = captured
 
@@ -186,46 +217,19 @@ proc passthroughMonitorCli(cacheRoot: string): string =
   ## no monitor CLI wired now FAILS by design (Monitor-Hook-Shim.md:501:
   ## "injection failure MUST fail the monitored action or make it
   ## non-cacheable"). This test is about env plumbing, not monitor
-  ## evidence, so it wires a passthrough fake-monitor: parse ``--depfile``,
-  ## copy a pre-built empty-but-valid iomon there (the engine's evidence
-  ## read then succeeds with a complete, zero-record dependency set), then
-  ## ``exec`` the real action argv unchanged (preserving the inherited
-  ## environment the test asserts on). The iomon template is produced via
-  ## io-mon's own ``encodeCanonical(@[])`` so the wrapper stays decoupled
-  ## from the iomon wire format.
+  ## evidence, so it wires a passthrough fake-monitor
+  ## (``repro_test_support/passthrough_monitor``): find ``--depfile``, copy
+  ## a pre-built empty-but-valid iomon there (the engine's evidence read
+  ## then succeeds with a complete, zero-record dependency set), then run
+  ## the action argv after the first ``--`` unchanged (preserving the
+  ## inherited environment the test asserts on). The iomon template is
+  ## produced via io-mon's own ``encodeCanonical(@[])`` so the wrapper stays
+  ## decoupled from the iomon wire format.
   let dir = cacheRoot / "monitor-cli"
   createDir(dir)
   let rmdfTemplate = dir / "empty.rmdf"
   writeFile(rmdfTemplate, encodeCanonical(@[]))
-  when defined(windows):
-    result = dir / "passthrough-monitor.cmd"
-    # ``%1 %2`` are ``--depfile`` and the depfile path; ``%3`` is ``--``;
-    # ``%4`` onward is the real argv. Create the depfile's directory, copy
-    # the iomon template there, then invoke the real argv.
-    writeFile(result,
-      "@echo off\r\n" &
-      "for %%I in (\"%~2\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\r\n" &
-      "copy /Y \"" & rmdfTemplate & "\" %~2 >nul\r\n" &
-      "%4 %5 %6 %7 %8 %9\r\n")
-  else:
-    result = dir / "passthrough-monitor.sh"
-    writeFile(result,
-      "#!/bin/sh\n" &
-      "depfile=\"\"\n" &
-      "while [ \"$#\" -gt 0 ]; do\n" &
-      "  case \"$1\" in\n" &
-      "    --depfile) depfile=\"$2\"; shift 2;;\n" &
-      "    --) shift; break;;\n" &
-      "    *) shift;;\n" &
-      "  esac\n" &
-      "done\n" &
-      "if [ -n \"$depfile\" ]; then\n" &
-      "  mkdir -p \"$(dirname \"$depfile\")\"\n" &
-      "  cp \"" & rmdfTemplate & "\" \"$depfile\"\n" &
-      "fi\n" &
-      "exec \"$@\"\n")
-    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
-      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  writePassthroughMonitorCli(dir, rmdfTemplate)
 
 proc runnerCfg(cacheRoot: string;
                resolver: ToolIdentityResolver = nil): BuildEngineConfig =
@@ -494,6 +498,22 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
       check subPkgConfig notin fields[3]
       check suspectBin notin fields[4]
 
+  test "the set PATH reader finds one PATH line in any casing and reports duplicates":
+    ## The Windows PATH cases below read the child's ``set PATH`` output
+    ## through ``setOutputPathValues`` and require exactly one value. This
+    ## pins that reader on synthetic captures, so the "exactly one" check is
+    ## known to fire on a duplicate and on a missing line rather than being
+    ## assumed to. Before it, the reader matched only ``PATH=`` and fell back
+    ## to the whole capture, which made the "no contribution" cases pass on
+    ## ``PATHEXT`` text.
+    check setOutputPathValues("Path=C:\\a;C:\\b\r\nPATHEXT=.COM;.EXE\r\n") ==
+      @["C:\\a;C:\\b"]
+    check setOutputPathValues("PATHEXT=.COM\nPATH=C:\\x\n") == @["C:\\x"]
+    check setOutputPathValues("PATH=C:\\x\r\nPath=C:\\y\r\n") ==
+      @["C:\\x", "C:\\y"]
+    check setOutputPathValues("PATHEXT=.COM;.EXE\r\n").len == 0
+    check setOutputPathValues("").len == 0
+
   test "PATH is prepended with the resolved bin dir when ref + resolver are set":
     resetTmp()
     let cacheRoot = TmpDir / "cache-plumbed"
@@ -624,8 +644,11 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     let captured = stripPathPrefix(
       readBypassStdout(cacheRoot, "direct-before-transitive"))
     let entries = captured.split(pathSeparator())
-    check entries.len >= 3
-    check entries[0 .. 2] == @[mesonBin, modulePythonBin, basePythonBin]
+    # Compare a prefix clamped to what was captured: a short capture then
+    # fails this check, showing what arrived, instead of raising an
+    # IndexDefect from the slice.
+    check entries[0 ..< min(3, entries.len)] ==
+      @[mesonBin, modulePythonBin, basePythonBin]
 
   test "An unresolved ref is silently skipped, others still contribute":
     resetTmp()

@@ -160,8 +160,12 @@ proc run(f: Fixture; args: openArray[string]; hostname = "";
 proc infra(f: Fixture; args: openArray[string]; hostname = "";
            reproHost = ""): ReproRun =
   ## A system-scope command against the fixture's profile and state dir.
+  ## `repro system history` reads only the state dir and takes no
+  ## `--profile` (its command line refuses one).
   var argv = @args
-  argv.add ["--profile", f.systemPath, "--state-dir", f.stateDir]
+  if not (argv.len >= 2 and argv[0] == "system" and argv[1] == "history"):
+    argv.add ["--profile", f.systemPath]
+  argv.add ["--state-dir", f.stateDir]
   f.run(argv, hostname, reproHost)
 
 proc field(output, label: string): string =

@@ -37,6 +37,7 @@ proc ciPlanAgainst(fx: StoreFixture; base: string): JsonNode =
   let res = runArgv(@[fx.reproBin, "ci", "plan",
     "--platform=" & currentPlatformTag(), "--branch=main", "--base=" & base,
     "--workspace-root=" & fx.workspaceRoot, "--current-repo=" & fx.libAPath,
+    "--registered-keys=" & jobOwnedKeyStore(fx.workspaceRoot, fx.scratch),
     "--json"])
   checkpoint("ci plan --base=" & base & ":\n" & res.output)
   doAssert res.code == 0, "repro ci plan failed:\n" & res.output

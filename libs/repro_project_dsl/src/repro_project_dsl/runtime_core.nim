@@ -295,7 +295,16 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 33'u16
+  BuildActionPayloadVersion* = 35'u16
+    ## v35: ``contentKeyedToolCaches`` -- the content-keyed tool-owned caches
+    ## the action reads (Tool-Owned-Caches.md §"Trust Boundary"), a string
+    ## list appended after the width fields. v34-and-earlier payloads decode
+    ## with the list empty, which is what every action declared before it.
+    ## v34: Caching-Architecture D2 -- the action cache policy byte gains
+    ## ``acfpUnstated`` as value 0 (the edge stated no policy), and the
+    ## stated policies move up by one. A v9..v33 byte (0 timestamp,
+    ## 1 checksum, 2 hybrid) decodes as the policy it named, never as
+    ## unstated: an older payload's policy was resolved when it was written.
     ## v33: the action's width range and width flag (``cpuMinMilli``,
     ## ``cpuPreferredMilli``, ``widthFlag``), appended after the optional
     ## output candidates. v32-and-earlier payloads decode as unsized.
@@ -1270,14 +1279,50 @@ proc dependencyRootEnvVarName*(depName: string): string {.dynOrStatic.} =
     body = "X"
   "DEP_" & body & "_ROOT"
 
+const SiblingRecipeFileNames = ["repro.nim", "reprobuild.nim"]
+  ## The project files that make `<recipes root>/<name>` a recipe.
+
+proc siblingRecipeExists(recipesRoot, depName: string): bool =
+  ## Caching-Architecture.md D5: `<recipesRoot>/<depName>` holds a recipe --
+  ## one of its project files exists. In a recipe catalog every dependency
+  ## the catalog builds is one; in a standalone project a `uses:` tool the
+  ## provisioning supplies (host, Nix, tarball) is not, and naming
+  ## `<parent of the project>/<tool>/.repro/output/install` for it put a
+  ## path that exists nowhere into every action's environment, and so made
+  ## the action's portable key follow the checkout's parent directory.
+  ##
+  ## Inside a provider each candidate file is recorded as an input of the
+  ## graph evaluation (`fileReadInput`, digest `missing` when absent), so a
+  ## sibling recipe that appears or disappears re-derives the graph instead
+  ## of replaying a cached one that names, or omits, the wrong root.
+  for name in SiblingRecipeFileNames:
+    let candidate = recipesRoot / depName / name
+    when defined(reproProviderMode):
+      # Once per evaluation: every action of the package asks again.
+      var recorded = false
+      for input in providerEvaluationInputRegistry:
+        if input.kind == gevFileRead and input.identity == candidate:
+          recorded = true
+          break
+      if not recorded:
+        providerEvaluationInputRegistry.add(fileReadInput(candidate))
+    if fileExists(extendedPath(candidate)):
+      result = true
+
 proc dependencyRootEnvEntries*(recipesRoot: string;
                                depConstraints: openArray[string];
-                               onlyExistingSiblings = true):
+                               onlyExistingSiblings = false):
     seq[(string, string)] {.dynOrStatic.} =
   ## M9.R.81: produce resolver-backed per-dependency install-mirror env
   ## entries in caller-supplied declaration order. Duplicate env var
   ## names are collapsed first-wins so action envs are deterministic
   ## even if two constraint strings select the same dependency.
+  ##
+  ## ``onlyExistingSiblings`` keeps only a dependency whose sibling
+  ## ``<recipesRoot>/<name>`` holds a recipe (``siblingRecipeExists``). The
+  ## package action environment (``packageDependencyRootEnvEntries``) asks
+  ## for it; the default answers every dependency the resolver names, so a
+  ## caller that only wants the resolver's paths is unchanged.
   if recipesRoot.len == 0:
     return
   var seenEnvNames: seq[string] = @[]
@@ -1291,8 +1336,7 @@ proc dependencyRootEnvEntries*(recipesRoot: string;
     let root = packageInstallMirrorRoot(recipesRoot, depName)
     if root.len == 0:
       continue
-    if onlyExistingSiblings and not dirExists(recipesRoot / depName) and
-        not dirExists(root):
+    if onlyExistingSiblings and not siblingRecipeExists(recipesRoot, depName):
       continue
     seenEnvNames.add(envName)
     result.add((envName, root))
@@ -1611,6 +1655,14 @@ when defined(reproProviderMode):
     ## A missing file is recorded too, with the digest `missing`, so a file
     ## that appears later — an optional committed lock — also invalidates.
     providerEvaluationInputRegistry.add(fileReadInput(materialProviderPath(path)))
+
+  proc providerUnobservedInput*(identity: string) {.dynOrStatic.} =
+    ## Report that the graph this evaluation emits was derived from reads
+    ## that could not be observed completely, so no stored copy of it may be
+    ## reused: the fragment is produced again on every refresh
+    ## (``unobservedEvaluationInput``; Failure-Semantics.md §"Monitoring
+    ## Failures", unknown-scope loss).
+    providerEvaluationInputRegistry.add(unobservedEvaluationInput(identity))
 
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
@@ -2030,7 +2082,10 @@ proc iomonReportPolicy*(depfile: string;
     captureBreadth: captureBreadth)
 
 proc defaultActionCachePolicy*(): ActionCacheFingerprintPolicy {.dynOrStatic.} =
-  acfpTimestamp
+  ## No stated policy (Caching-Architecture.md D2): lowering gives the edge
+  ## the policy its tools declare, else ``timestamp``. A caller that wants
+  ## ``timestamp`` whatever its tools declare says ``acfpTimestamp``.
+  acfpUnstated
 
 const
   BuiltinPackageName = "reprobuild.builtin"
@@ -2121,7 +2176,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   scratchDirs: openArray[string] = [];
                   removeBeforeRun: openArray[string] = [];
                   optionalOutputs: openArray[string] = [];
-                  sizedBy = ""):
+                  sizedBy = "";
+                  contentKeyedToolCaches: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``sizedBy``: the width flag of a command that is not a typed call but
   ## runs a parallel tool (``sized_tools.sizedWidthByFlag``). The edge then
@@ -2169,6 +2225,11 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## ``ProfileBuildAction``, which is not a route any recipe has. A cache
   ## hit does NOT re-raise it, and the versioned payload codec does not
   ## carry it — see the field's own comment in ``types.nim`` for why.
+  ##
+  ## ``contentKeyedToolCaches``: the content-keyed tool-owned caches the
+  ## action reads and shares with other edges (Go's build cache, ccache).
+  ## The engine then treats the edge as ``host-bound`` at least, so its
+  ## records never leave this host; see the field in ``types.nim``.
   # M9.R.34: stamp the recipe-revision fingerprint at registration
   # time so edits to ``repro.nim`` / ``reprobuild.nim`` bus the local
   # action-cache key. ``computeRecipeRevisionFingerprint`` returns the
@@ -2225,7 +2286,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     declaredOutputs: @declaredOutputs,
     readOnlyRoots: @readOnlyRoots,
     scratchDirs: @scratchDirs,
-    removeBeforeRun: @removeBeforeRun)
+    removeBeforeRun: @removeBeforeRun,
+    contentKeyedToolCaches: @contentKeyedToolCaches)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -4211,15 +4273,33 @@ proc readDependencyPolicy(bytes: openArray[byte]; pos: var int; version: uint16)
     result.captureBreadth = MonitorCaptureBreadth(breadth)
 
 proc writeActionCachePolicy(outp: var seq[byte];
-                            policy: ActionCacheFingerprintPolicy) =
-  outp.writeByte(byte(ord(policy)))
+                            policy: ActionCacheFingerprintPolicy;
+                            version: uint16) =
+  if version >= 34'u16:
+    outp.writeByte(byte(ord(policy)))
+  else:
+    # A legacy image (v9..v33) has no unstated value: it carried the
+    # resolved default, timestamp.
+    let legacy =
+      case policy
+      of acfpUnstated, acfpTimestamp: 0'u8
+      of acfpChecksum: 1'u8
+      of acfpHybrid: 2'u8
+    outp.writeByte(legacy)
 
-proc readActionCachePolicy(bytes: openArray[byte]; pos: var int):
-    ActionCacheFingerprintPolicy =
+proc readActionCachePolicy(bytes: openArray[byte]; pos: var int;
+                           version: uint16): ActionCacheFingerprintPolicy =
   let policy = readByte(bytes, pos)
-  if policy > byte(ord(acfpHybrid)):
+  if version >= 34'u16:
+    if policy > byte(ord(high(ActionCacheFingerprintPolicy))):
+      raisePayload("invalid action cache policy in build action payload")
+    return ActionCacheFingerprintPolicy(policy)
+  case policy
+  of 0'u8: acfpTimestamp
+  of 1'u8: acfpChecksum
+  of 2'u8: acfpHybrid
+  else:
     raisePayload("invalid action cache policy in build action payload")
-  ActionCacheFingerprintPolicy(policy)
 
 proc writeCacheEntryIdentity(outp: var seq[byte]; idy: CacheEntryIdentity) =
   ## M9.L.4-refactor Step B v16 codec — encode the
@@ -4334,7 +4414,7 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
     payload.writeDependencyPolicy(action.dependencyPolicy, version)
   # v9: action cache policy.
   if version >= 9'u16:
-    payload.writeActionCachePolicy(action.actionCachePolicy)
+    payload.writeActionCachePolicy(action.actionCachePolicy, version)
   # v11: Named-Targets M1 implicit target names.
   if version >= 11'u16:
     payload.writeStringSeq(action.targetNames)
@@ -4435,6 +4515,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
     payload.writeU32Le(action.cpuMinMilli)
     payload.writeU32Le(action.cpuPreferredMilli)
     payload.writeString(action.widthFlag)
+  # v35: the content-keyed tool-owned caches the action reads.
+  if version >= 35'u16:
+    payload.writeStringSeq(action.contentKeyedToolCaches)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4526,9 +4609,11 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   else:
     result.dependencyPolicy = defaultDependencyPolicy()
   if version >= 9'u16:
-    result.actionCachePolicy = readActionCachePolicy(bytes, pos)
+    result.actionCachePolicy = readActionCachePolicy(bytes, pos, version)
   else:
-    result.actionCachePolicy = defaultActionCachePolicy()
+    # A v1..v8 payload carries no policy: it was written when every edge was
+    # `timestamp` (the policy it named, as for v9..v33), not "unstated".
+    result.actionCachePolicy = acfpTimestamp
   if version >= 11'u16:
     result.targetNames = readStringSeq(bytes, pos)
   if version >= 12'u16:
@@ -4719,6 +4804,12 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.cpuMinMilli = 0'u32
     result.cpuPreferredMilli = 0'u32
     result.widthFlag = ""
+  if version >= 35'u16:
+    result.contentKeyedToolCaches = readStringSeq(bytes, pos)
+  else:
+    # An older payload names no cache: absence of the list is absence of the
+    # declaration, which is what every action said before the field existed.
+    result.contentKeyedToolCaches = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
@@ -5137,19 +5228,34 @@ proc ensureLine*(tool: ReproFs; output, line: string; actionId = "";
     dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
-proc ensureSnippet*(tool: ReproFs; output, openSentinel, closeSentinel, openSearch, closeSearch, snippet: string; actionId = "";
+proc ensureSnippet*(tool: ReproFs; output, blockId, snippet: string;
+                    actionId = "";
                     deps: openArray[string] = [];
                     after: openArray[BuildActionDef] = [];
                     cacheable = true; commandStatsId = "";
                     actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable, dynOrStatic.} =
+  ## Ensure ``output`` holds the managed block ``blockId`` of the package
+  ## declaring this action, with ``snippet`` as its content
+  ## (reprobuild-pm spec/CLI/internal/fs-file-utilities.md §3). The
+  ## sentinels are ``# >>> repro:project:<packageName>:<blockId> >>>`` and its
+  ## closing twin, rendered by the managed-file writer: the caller names the
+  ## block, never the sentinel text, so every writer reads every block.
+  ##
+  ## ``<packageName>`` is the package whose ``build:`` body is running
+  ## (``currentOwningPackage``); a call outside one has no owner to name and
+  ## is refused.
   discard tool
+  let packageName = currentOwningPackage()
+  if packageName.len == 0:
+    raise newException(ValueError, "fs.ensureSnippet(" & output & ", " &
+      blockId & "): called outside a package's build body, so the block " &
+      "has no owning package to name in its sentinels")
   let call = builtinFsCall("ensureSnippet", [
     outputArg("output", output),
-    cliArg("openSentinel", openSentinel),
-    cliArg("closeSentinel", closeSentinel),
-    cliArg("openSearch", openSearch),
-    cliArg("closeSearch", closeSearch),
+    cliArg("scope", "project"),
+    cliArg("packageName", packageName),
+    cliArg("blockId", blockId),
     cliArg("snippet", snippet)
   ])
   let selectedActionId =

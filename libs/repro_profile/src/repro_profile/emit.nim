@@ -248,6 +248,10 @@ proc encodeBuildAction(b: ProfileBuildAction): string =
   # Only when set: a profile-level edge encodes exactly as before.
   if b.activity.len > 0:
     result.add ",\"activity\":" & encodeStr(b.activity)
+  # Only when set, for the same reason: an edge without its own deadline
+  # encodes exactly as before.
+  if b.timeoutSeconds > 0:
+    result.add ",\"timeoutSeconds\":" & $b.timeoutSeconds
   result.add "}"
 
 proc encodeDiskLayout*(l: DiskLayout): string
@@ -605,7 +609,10 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         substituteOnly: (if b.hasKey("substituteOnly"):
                            b["substituteOnly"].getBool() else: false),
         expectedOutputDigest: (if b.hasKey("expectedOutputDigest"):
-                                 b["expectedOutputDigest"].getStr() else: ""))
+                                 b["expectedOutputDigest"].getStr() else: ""),
+        # Optional: absent for an edge that takes the default deadline.
+        timeoutSeconds: (if b.hasKey("timeoutSeconds"):
+                           b["timeoutSeconds"].getInt() else: 0))
       for it in b["argv"]:
         ba.argv.add it.getStr()
       for it in b["deps"]:

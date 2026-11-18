@@ -282,6 +282,10 @@ in
       lookupNixRealization,
       brewRealizationOf ? (_: null),
       concerns ? null,
+      # `{ "<canonical name>" = source; }` (realization-sources.nix), already
+      # checked: where a package comes from when not this `pkgs`.
+      realizationSources ? { },
+      resolveRealizationSource ? null,
     }:
     let
       applies = evaluation.applies or null;
@@ -305,8 +309,31 @@ in
         p:
         let
           brew = brewOf p;
-          r = lookupNixRealization p.name;
-          drv = if r.found or false then lib.attrByPath r.attrPath null pkgs else null;
+          sourced =
+            if realizationSources ? ${p.name} then
+              resolveRealizationSource {
+                name = p.name;
+                source = realizationSources.${p.name};
+              }
+            else
+              null;
+          r =
+            if sourced != null then
+              {
+                found = sourced.found;
+                reason = sourced.reason or "";
+                attribute = sourced.label or "";
+              }
+            else
+              lookupNixRealization p.name;
+          drv =
+            if sourced != null then
+              (if sourced.found then sourced.drv else null)
+            else if r.found or false then
+              lib.attrByPath r.attrPath null pkgs
+            else
+              null;
+          fromWhere = if sourced != null then r.attribute else "pkgs.${r.attribute}";
           id = "package:${p.name}";
           # Concern-scoped apply: the package's concern, from Reprobuild's
           # classification (`evaluation.packages[].concern`); null without a
@@ -349,13 +376,13 @@ in
           {
             unmapped =
               report "packages" id
-                (unresolvedNote + "pkgs.${r.attribute} is not available on ${system} (meta.platforms / meta.broken)");
+                (unresolvedNote + "${fromWhere} is not available on ${system} (meta.platforms / meta.broken)");
           }
         else if p.version != "" && (drv.version or null) != p.version then
           {
             unmapped =
               report "packages" id
-                (unresolvedNote + "pinned to version ${p.version}, but pkgs.${r.attribute} is ${
+                (unresolvedNote + "pinned to version ${p.version}, but ${fromWhere} is ${
                   toString (drv.version or "unversioned")
                 }");
           }

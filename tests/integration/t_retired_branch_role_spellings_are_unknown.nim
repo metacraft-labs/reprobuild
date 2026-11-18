@@ -25,7 +25,8 @@
 ## * `project_trunk` / `project_default_revision` — `[project] trunk` and
 ##   `[project] default_revision`: refused naming the key and its replacement;
 ## * `from_mainlines_flag` — `repro branch <path> --from-mainlines`: an
-##   unsupported flag (exit 1, like every unknown flag) naming `--from=mainline`.
+##   unknown flag (exit 2, a usage error like every unknown flag) naming
+##   `--from=mainline`.
 ##
 ## A further case runs the pre-push gate from a member repository of a root
 ## whose only marker is its state file under the retired name (the layered
@@ -174,8 +175,8 @@ proc cases(): seq[RetiredCase] =
   result.add(RetiredCase(name: "from_mainlines_flag",
     retired: Shape(files: base), current: Shape(files: base),
     command: @["branch", "{scratch}/fork-from-mainlines", "--from-mainlines"],
-    code: 1, currentOk: false,
-    needles: @["unsupported `repro branch` flag: --from-mainlines",
+    code: 2, currentOk: false,
+    needles: @["unknown flag '--from-mainlines' for 'repro branch'",
                "`--from=mainline`", "`--mainline`"]))
 
 proc expand(s, root, scratch: string): string =

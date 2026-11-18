@@ -70,19 +70,24 @@ type
 
 proc managedBlockBodyDigest(content: string): Digest256 =
   ## Digest of a managed-block body exactly as the shared
-  ## managed-block writer (`drivers/managed_block.nim:spliceManagedBlock`)
-  ## lays it on disk between the sentinels: a non-empty body is
-  ## normalized to end with a single trailing `\n` (so the close
-  ## sentinel sits on its own line), an empty body is left empty.
+  ## managed-block writer (`repro_core/managed_block`, reached through
+  ## `drivers/managed_block.nim`) lays it on disk between the sentinels:
+  ## a non-empty body that does not end in `\n` is given one (so the close
+  ## sentinel sits on its own line), an empty body is left empty, and every
+  ## CRLF is written with the host file's terminator -- so the body is
+  ## compared in its LF-folded form, as `observeManagedBlock` reads it.
   ##
   ## Both the `fs.managedBlock` and `shell.integration` resources
   ## are written by that same writer (`shell.integration` reuses it
   ## via `drivers/shell_integration.nim:applyShellIntegration` ->
   ## `applyManagedBlockResource`), so both digest branches MUST use
   ## this one helper — keeping them from drifting apart again.
-  var normalized = content
+  var normalized = content.replace("\r\n", "\n")
   if normalized.len > 0 and normalized[^1] != '\n':
     normalized.add('\n')
+    # A body ending in a lone `\r` is now terminated `\r\n`, which the
+    # reader folds too.
+    normalized = normalized.replace("\r\n", "\n")
   var buf = newSeq[byte](normalized.len)
   for i, ch in normalized:
     buf[i] = byte(ord(ch))

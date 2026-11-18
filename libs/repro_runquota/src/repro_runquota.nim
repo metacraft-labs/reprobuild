@@ -13,9 +13,30 @@ export runquota_client.RunQuotaLease
 import runquota_codec
 import runquota_core
 import runquota_core/image_digest
+import runquota_core/measurement
+from runquota_core/cpu_profile import MaxAfterLeases
+export MaxAfterLeases
 import runquota_ipc except connectDefault
 import runquota_process
 import runquota_protocol
+import runquota_client/pressure_text
+import repro_runquota/build_pressure
+import repro_runquota/store_status
+
+export build_pressure
+
+const
+  RunQuotaBypassFlag* = "--no-runquota"
+    ## The command-line spelling of the RunQuota full bypass, as the build
+    ## parser declares it (``noRunquota`` in ``cli_description``). Every
+    ## diagnostic that names the bypass takes it from here, so the remedy it
+    ## prints is a flag ``repro build`` accepts.
+  RunQuotaUnresponsiveRemedy* =
+    "Retry the build, restart runquotad (`runquota daemon restart`), or " &
+    "rerun with the unsafe single-process fallback `" & RunQuotaBypassFlag &
+    "` (or `REPROBUILD_NO_RUNQUOTA=1` on a command that has no such flag)."
+    ## The remedy both wedged-daemon diagnostics print: the grant wait in
+    ## ``awaitGrantLoop`` and the build engine's inline lease path.
 
 type
   ReproRunQuotaError* = object of CatchableError
@@ -93,6 +114,11 @@ type
     stdoutBytes*: uint64
     stderrBytes*: uint64
     elapsedMillis*: uint64
+    expectedUncontendedMillis*: uint64
+      ## The daemon's learned expected uncontended duration of this command
+      ## at its granted width, from the finish's acknowledgement; 0 when it
+      ## knew none or was not asked (the ``pressure-reports`` measurement
+      ## is off). What build-wait pressure measures a run's slowdown by.
     peakResidentMemoryBytes*: uint64
     processCount*: uint32
     backendName*: string
@@ -105,6 +131,10 @@ type
     active*: bool
     completed*: bool
     execution*: ReproRunQuotaExecution
+    afterKnown: bool
+    afterLeases: seq[uint64]
+      ## The leases of the actions this one waited for, declared by the
+      ## engine (`declareAfter`) and sent with the finish for sizing replay.
 
   ReproDirectRunningProcess* = object
     ## A directly launched command that uses RunQuota's argv-preserving,
@@ -400,10 +430,9 @@ proc awaitGrantLoop*(
             "runquota stopped responding while a lease for '" & label &
             "' was queued: no grant-stream frame and no status reply for " &
             $unresponsiveMs & "ms (the daemon may be wedged or mid-restart). " &
-            "Retry the build, restart runquotad (`runquota daemon restart`), " &
-            "or rerun with the unsafe single-process fallback `--runquota=off`. " &
-            "Raise REPRO_RUNQUOTA_GRANT_TIMEOUT if this build legitimately " &
-            "queues longer than " & $unresponsiveMs & "ms under load.")
+            RunQuotaUnresponsiveRemedy & " Raise REPRO_RUNQUOTA_GRANT_TIMEOUT " &
+            "if this build legitimately queues longer than " &
+            $unresponsiveMs & "ms under load.")
         maybeHeartbeat(now)
         napMs(25)
 
@@ -1815,7 +1844,8 @@ proc runWithRunQuota*(request: ReproResourceRequest;
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount,
         totals = completion.totals,
-        cpuProfile = completion.cpuProfile)
+        cpuProfile = completion.cpuProfile,
+        sizing = completion.finishSizing())
       result = ReproRunQuotaExecution(
         leaseId: lease.id.value,
         exitCode: completion.exitCode,
@@ -1954,16 +1984,128 @@ proc cancelAndWait*(running: var ReproDirectRunningProcess):
     raise newException(ReproRunQuotaError, err.msg)
 
 proc openRunQuotaSession*(name = "reprobuild action";
-                          version = "0.1.0"): ReproRunQuotaSession =
+                          version = "0.1.0"; project = "";
+                          entryPoint = ""): ReproRunQuotaSession =
+  ## ``project`` / ``entryPoint`` are the sizing declarations; the client
+  ## library prefers `RUNQUOTA_PROJECT` / `RUNQUOTA_ENTRY_POINT` only when
+  ## these are empty, so a caller that wants the variables to win reads
+  ## them first (`buildSizingDeclaration`).
   result = ReproRunQuotaSession()
   try:
     result.client = connectDefault()
-    result.session = result.client.registerSession(name, version)
+    result.session = result.client.registerSession(name, version, project,
+      entryPoint)
     result.nextCandidateId = 1'u64
     result.active = true
   except CatchableError as err:
     result.client.close()
     raise newException(ReproRunQuotaError, err.msg)
+
+proc runQuotaEndpointText*(): string
+  ## Defined below, with the queue diagnostics.
+
+proc buildPressureEnabled*(): bool =
+  ## The ``pressure-reports`` measurement switch (``RUNQUOTA_MEASUREMENT``;
+  ## off by default).
+  pressureReportsEnabled()
+
+proc sendPressureReport*(session: ReproRunQuotaSession;
+                         report: PressureReportMessage): bool =
+  ## Send one build-wait pressure report on the build's session. One-way:
+  ## nothing is read back, and a daemon that predates pressure reports is
+  ## sent nothing. Returns whether it was written.
+  if session.isNil or not session.active:
+    return false
+  session.session.reportPressure(report)
+
+proc pressureFailureJson(report: StoreStatusReport; error: string): JsonNode =
+  ## What ``repro pressure --json`` prints when it has no answer to print:
+  ## the store status, the remedy and the error, so a tool reading stdout
+  ## gets an object rather than nothing.
+  result = %*{
+    "endpoint": runQuotaEndpointText(),
+    "error": error
+  }
+  addStoreStatus(result, report)
+
+proc runPressureCommand*(group = ""; json = false): int =
+  ## ``repro pressure [--group G] [--json]``: the build-wait pressure of the
+  ## RunQuota daemon this process would use, as ``runquota pressure``
+  ## prints it. ``group`` limits the session groups (and their sessions) to
+  ## those of that name. Exit 0 when the daemon answered, 1 when it could
+  ## not be reached or predates pressure reports. The command line is
+  ## parsed by repro's generated parser, which exits 2 on bad arguments.
+  ##
+  ## Both modes report the store status (``repro_runquota/store_status``):
+  ## ``--json`` adds ``capture_enabled``, ``store_status`` and ``remedy``
+  ## to the daemon's answer (and prints them on their own, with ``error``,
+  ## when there is no answer), and text mode prints one stderr line when
+  ## the status is not ``ready``.
+  const command = "repro pressure"
+  var answer = ""
+  var connected = false
+  try:
+    var client = connectDefault()
+    connected = true
+    defer: client.close()
+    answer = client.queryPressure(psAll, group)
+  except CatchableError as err:
+    # A daemon that answered the handshake and then could not serve the
+    # query (one that predates pressure reports) is reachable but
+    # unusable; only a failed connection is judged against the endpoint's
+    # provisioning.
+    var report =
+      if connected:
+        StoreStatusReport(captureEnabled: false, status: ssDaemonUnreachable,
+          reason: "runquotad at " & runQuotaEndpointText() &
+            " could not answer QueryPressure (" & err.msg & ")",
+          remedy: "upgrade or restart runquotad at that endpoint: " &
+            startDaemonRemedy(defaultEndpoint().path))
+      else:
+        unreachableReport(err.msg)
+    if json:
+      echo $pressureFailureJson(report, err.msg)
+      stderr.writeLine(command & ": " & err.msg & " (endpoint " &
+        runQuotaEndpointText() & ")")
+    else:
+      # ONE LINE: the notice's reason already names the error and the
+      # endpoint.
+      writeStoreStatusNotice(command, report)
+    return 1
+  var root: JsonNode
+  try:
+    root = parseJson(answer)
+    if root.kind != JObject:
+      raise newException(ValueError, "the answer is not a JSON object")
+  except CatchableError as err:
+    let report = StoreStatusReport(captureEnabled: false,
+      status: ssDaemonUnreachable,
+      reason: "the daemon's answer could not be read (" & err.msg & ")",
+      remedy: "runquota pressure (asks the daemon at " &
+        runQuotaEndpointText() & " directly)")
+    if json:
+      echo $pressureFailureJson(report,
+        "could not read the daemon's answer: " & err.msg)
+      stderr.writeLine(command & ": could not read the daemon's answer: " &
+        err.msg)
+    else:
+      writeStoreStatusNotice(command, report)
+    return 1
+  let report = pressureStoreStatus(root, buildPressureEnabled())
+  if json:
+    # The daemon's answer as it was sent, with three keys added beside its
+    # own; none of the daemon's keys is renamed or removed.
+    addStoreStatus(root, report)
+    echo $root
+    return 0
+  try:
+    echo renderPressureText(answer)
+  except CatchableError as err:
+    stderr.writeLine(command & ": could not read the daemon's answer: " &
+      err.msg)
+    return 1
+  writeStoreStatusNotice(command, report)
+  0
 
 # ---------------------------------------------------------------------------
 # Domain extensions (M17)
@@ -2730,6 +2872,32 @@ proc pollCompletion*(running: var ReproRunQuotaRunningProcess): bool =
     return false
   running.child.pollCompletion()
 
+proc sizingDataEnabled*(): bool =
+  ## Whether this process takes the `sizing-data` measurement
+  ## (`RUNQUOTA_MEASUREMENT`, off by default): the engine then computes each
+  ## action's `after` list, which costs a walk of its dependencies per
+  ## finish, and the launcher sends memory profiles and IO bytes.
+  measureSizingData in clientMeasurements()
+
+proc declareAfter*(running: var ReproRunQuotaRunningProcess;
+                   leases: seq[uint64]) =
+  ## The leases (of this build's session) of the actions this one waited
+  ## for. More than `MaxAfterLeases` is not declared at all: the replay then
+  ## falls back to the recorded offset, which is weaker but not wrong,
+  ## whereas a truncated list would claim the rest were not waited for.
+  if leases.len > MaxAfterLeases:
+    running.afterKnown = false
+    running.afterLeases = @[]
+    return
+  running.afterKnown = true
+  running.afterLeases = leases
+
+proc sizingOf(running: ReproRunQuotaRunningProcess;
+              completion: ProcessCompletion): FinishSizing =
+  result = completion.finishSizing()
+  result.afterKnown = running.afterKnown
+  result.afterLeases = running.afterLeases
+
 proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
     ReproRunQuotaExecution =
   if running.completed:
@@ -2750,7 +2918,9 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount,
         totals = completion.totals,
-        cpuProfile = completion.cpuProfile)
+        cpuProfile = completion.cpuProfile,
+        askExpectedDuration = pressureReportsEnabled(),
+        sizing = running.sizingOf(completion))
       leaseFinishedSent = true
     finally:
       if running.lease.active:
@@ -2762,6 +2932,8 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
       running.child.info.backend.name,
       leaseFinishedSent,
       leaseReleased)
+    running.execution.expectedUncontendedMillis =
+      running.lease.expectedUncontendedMillis
     running.completed = true
     running.active = false
     running.execution
@@ -2786,7 +2958,8 @@ proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount,
         totals = completion.totals,
-        cpuProfile = completion.cpuProfile)
+        cpuProfile = completion.cpuProfile,
+        sizing = running.sizingOf(completion))
       leaseFinishedSent = true
     finally:
       if running.lease.active:

@@ -290,8 +290,8 @@ let
   # Evaluate a validated document for `system` and `host`. Returns the
   # `evaluation` object `repro home export --target` prints (see the module
   # header: packages are sorted by name).
-  evaluate =
-    doc: system: host:
+  evaluateWith =
+    nixos: doc: system: host:
     let
       selectedHost = if host != null then host else doc.selection.host;
       # The host first, as `repro home export` does: the export of an
@@ -301,7 +301,7 @@ let
           r = hostRefusalReason doc selectedHost;
         in
         if r != null then r else refusalReason doc system;
-      facts = platforms.factsFor system selectedHost;
+      facts = platforms.factsWith nixos system selectedHost;
       intent = doc.intent;
       enabled = hostSelection.enabledActivities (intent.hosts or { }) selectedHost;
       declared = map (a: a.name) intent.activities;
@@ -469,11 +469,63 @@ let
       "${xdgStateHome}/${location.path}"
     else
       throw "reprobuild.lib.profileBinPath: the profile bin directory of ${evaluation.host} on ${evaluation.target} is under `${location.base}`, which a Nix consumer does not manage";
+  # `evaluate` without the `nixos` fact: a guard that reaches it is refused.
+  evaluate = evaluateWith null;
+
+  # Every package name some host of the document selects on some target
+  # system: the union of the evaluation over the registry's hosts and every
+  # target the document can describe. What a realization source may be given
+  # for (realization-sources.nix): a mapping for a name outside it and outside
+  # the catalogs is not a canonical package, and one for a canonical name
+  # outside it is stale. Packages only (no concern classification is read).
+  selectedPackageNames =
+    doc:
+    let
+      hosts = doc.intent.hosts or { };
+      # A profile without a `hosts:` registry is host-agnostic: every host
+      # gets `default` (hosts.nix), so evaluate once for an anonymous host.
+      hostNames = if hosts == { } then [ "" ] else builtins.attrNames hosts;
+      perHost =
+        host:
+        concatMap (
+          system:
+          if refusalReason doc system != null then
+            [ ]
+          else
+            let
+              enabled = hostSelection.enabledActivities hosts host;
+            in
+            # Whether a Linux target is NixOS is stated by the consumer, so a
+            # package a `nixos` guard selects counts either way.
+            concatMap (
+              nixos:
+              let
+                facts = platforms.factsWith nixos system host;
+              in
+              concatMap (
+                a: if elem a.name enabled then map (p: p.name) (bodyPackages facts a.name a.body) else [ ]
+              ) doc.intent.activities
+            ) [
+              true
+              false
+            ]
+        ) platforms.systems;
+    in
+    builtins.attrNames (
+      builtins.listToAttrs (
+        map (n: {
+          name = n;
+          value = true;
+        }) (concatMap perHost hostNames)
+      )
+    );
 in
 {
   inherit
     profileBinPath
+    selectedPackageNames
     evaluate
+    evaluateWith
     refusalReason
     hostRefusalReason
     exportDerivation
@@ -483,15 +535,17 @@ in
     ;
 
   # reprobuild.lib.readIntent { host, system, snapshot ? null, profileDir ? null,
-  #                             buildSystem ? <evaluator>, repro ? <pinned>,
-  #                             packagesCatalog ? null }
+  #                             buildSystem ? <evaluator>, nixos ? null,
+  #                             repro ? <pinned>, packagesCatalog ? null }
   #
   # Snapshot mode when `snapshot` (a path to a committed export) is given,
   # IFD mode otherwise (`profileDir` required; `packagesCatalog`, a
   # `reprobuild-packages` checkout, lets the sandboxed export classify the
   # packages that catalog defines -- see `exportDerivation`). Returns
   # `{ mode, document, evaluation }`, `evaluation` being what
-  # `repro home export --target ${system}` reports for `host`. Throws when
+  # `repro home export --target ${system}` reports for `host`. `nixos` states
+  # whether the target is NixOS (its system name does not say); a guard that
+  # reaches the `nixos` predicate is refused while it is null. Throws when
   # the document cannot describe `system` (see `refusalReason`).
   mkReadIntent =
     {
@@ -504,6 +558,7 @@ in
       snapshot ? null,
       profileDir ? null,
       buildSystem ? builtins.currentSystem or null,
+      nixos ? null,
       repro ? null,
       packagesCatalog ? null,
     }:
@@ -538,6 +593,6 @@ in
     else
       {
         inherit mode document;
-        evaluation = evaluate document system host;
+        evaluation = evaluateWith nixos document system host;
       };
 }

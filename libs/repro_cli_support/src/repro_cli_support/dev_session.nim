@@ -1,5 +1,5 @@
 import std/[algorithm, atomics, hashes, json, monotimes, nativesockets, net, options, os, osproc, sequtils,
-            strtabs, strutils, tables, times]
+            strtabs, strutils, sysrand, tables, times]
 
 import cbor
 import repro_core
@@ -16,6 +16,7 @@ import repro_resources/readiness_edge    # D-SS10 (§7.1): the edge's own names
 import repro_cli_support/service_registrar  # §7.3: the env var a refusal names
 import repro_cli_support/watch
 import repro_cli_support/session_process_owner
+import repro_cli_support/dev_session_access
 
 type
   DevSessionMode* = enum
@@ -63,6 +64,11 @@ type
     lockSliceId*: string
     developOverridesPath*: string
     httpBind*: string
+      ## ``--http <host>:<port>``, or EMPTY for the platform default: an
+      ## AF_UNIX socket in the per-user endpoint directory on POSIX,
+      ## ``127.0.0.1:0`` on Windows (``dev_session_access``).
+    httpAllowRemote*: bool
+      ## ``--http-allow-remote``: admit a non-loopback ``httpBind`` host.
     debounceMs*: int
 
   DevSessionHttpConfig* = object
@@ -71,7 +77,21 @@ type
     sessionId*: string
     sessionDir*: string
     host*: string
+      ## Empty selects the platform default transport; see
+      ## ``DevSessionSupervisorConfig.httpBind``.
     port*: int
+    allowRemote*: bool
+      ## Admit a non-loopback ``host``. The listener checks it again, so a
+      ## caller that skipped the CLI's refusal still cannot expose the API.
+
+  DevSessionControlClient* = object
+    ## How to reach, and authenticate to, one session's control API: its
+    ## published bind (``unix:<path>`` or ``http://<host>:<port>``) and the
+    ## session token read from the ``httpTokenPath`` the session published.
+    ## Built by ``controlClientFor`` from ``http-ready.json`` or
+    ## ``session.json``; used with ``controlRequest`` / ``controlGetJson``.
+    bindValue*: string
+    token*: string
 
   ServiceSpec* = object
     ## Shared-Development-Services L9 exported this type and its fields.
@@ -240,6 +260,9 @@ type
     activity: string
     sessionDir: string
     httpBind: string
+    httpTokenPath: string
+      ## Where the control API's token is; the token itself is never
+      ## recorded (§"Control API Access Control").
     httpPid: int
     status: string
     terminalEvents: bool
@@ -387,6 +410,48 @@ proc writeJsonFile(path: string; node: JsonNode) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), pretty(node) & "\n")
 
+proc publishJsonFile*(path: string; node: JsonNode) =
+  ## Write ``path`` so that a reader sees either no file or the whole file,
+  ## never the empty or partial file ``writeFile`` leaves visible between its
+  ## ``O_TRUNC`` open and the end of its write. The content goes to a staging
+  ## sibling first and is then renamed into place; ``rename(2)`` within one
+  ## directory is atomic on POSIX
+  ## (https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html).
+  ##
+  ## Used for files a reader waits for and then parses once, such as
+  ## ``http-ready.json``: ``controlClientFor`` and the tests treat its mere
+  ## existence as "the bind is published".
+  ##
+  ## THE STAGING FILE. The session directory's permissions are not
+  ## guaranteed (see ``removeReadyOwnedBy``), so the staging name carries
+  ## 64 random bits and, on POSIX, is created ``O_EXCL | O_NOFOLLOW``: a
+  ## name planted in advance -- a symlink to one of this user's files -- is
+  ## never written through. ``moveFile`` then renames it over ``path``.
+  ##
+  ## WINDOWS. ``moveFile`` replaces through ``MoveFileExW`` with
+  ## ``MOVEFILE_REPLACE_EXISTING``, which fails while another process holds
+  ## the TARGET open without ``FILE_SHARE_DELETE``. For ``http-ready.json``
+  ## the supervisor removes any previous marker before it starts the helper
+  ## (``discardStaleControlApiBind``), so the target normally does not exist;
+  ## if a stale marker survived that removal because a reader held it, the
+  ## publish fails and raises, naming the file, rather than leaving a
+  ## half-written one. A file rewritten under live readers (``session.json``)
+  ## keeps ``writeJsonFile`` and ``readJsonFileResilient``.
+  let dir = parentDir(path)
+  createDir(extendedPath(dir))
+  var suffix = ""
+  for b in urandom(8):
+    suffix.add toHex(b, 2).toLowerAscii
+  let staging = dir / ("." & extractFilename(path) & "." &
+    $getCurrentProcessId() & "." & suffix & ".tmp")
+  let content = pretty(node) & "\n"
+  try:
+    writeNewFileExclusive(staging, content)
+    moveFile(extendedPath(staging), extendedPath(path))
+  except CatchableError:
+    try: removeFile(extendedPath(staging)) except OSError: discard
+    raise
+
 proc readJsonFileResilient*(path: string): JsonNode =
   # `parseFile` lifts the race that exists between a concurrent
   # `writeFile` (open(O_TRUNC) → write → close) on the supervisor side
@@ -426,16 +491,16 @@ proc parseHttpBind*(value: string): tuple[host: string; port: int] =
     raw = "127.0.0.1:0"
   if raw.startsWith("http://"):
     raw = raw["http://".len .. ^1]
-  let colon = raw.rfind(':')
-  if colon < 0:
-    return (host: raw, port: 0)
-  let host = raw[0 ..< colon]
-  let portText = raw[colon + 1 .. ^1]
-  (host: if host.len > 0: host else: "127.0.0.1",
-    port: if portText.len > 0: parseInt(portText) else: 0)
+  # `[::1]:8080` as well as `127.0.0.1:8080`; the brackets are dropped, so
+  # the host is what a socket call takes.
+  let parts = splitHostPort(raw)
+  if not parts.ok:
+    raise newException(ValueError, "invalid HTTP bind address: " & value)
+  (host: if parts.host.len > 0: parts.host else: "127.0.0.1",
+    port: if parts.port.len > 0: parseInt(parts.port) else: 0)
 
 proc httpUrl(host: string; port: int): string =
-  "http://" & host & ":" & $port
+  "http://" & (if ':' in host: "[" & host & "]" else: host) & ":" & $port
 
 proc eventLogPath(state: SessionState): string =
   state.sessionDir / EventLogFile
@@ -481,6 +546,7 @@ proc stateJson(state: SessionState): JsonNode =
     "sessionDir": state.sessionDir,
     "metadataPath": state.metadataPath,
     "httpBind": state.httpBind,
+    "httpTokenPath": state.httpTokenPath,
     "httpPid": state.httpPid,
     "status": state.status,
     "failure": state.failure,
@@ -2166,26 +2232,63 @@ proc reconcileResources(state: var SessionState; specs: openArray[ServiceSpec]) 
       state.resources.add((kind: resource.kind, path: resource.path,
         status: "ready"))
 
-proc httpRequest*(httpBindValue, path: string; httpMethod = "GET"):
+proc httpRequest*(httpBindValue, path: string; httpMethod = "GET";
+                  token = ""; contentType = ""; body = ""):
     tuple[status: int; body: string] =
-  var raw = httpBindValue
-  if raw.startsWith("http://"):
-    raw = raw["http://".len .. ^1]
-  let slash = raw.find('/')
-  if slash >= 0:
-    raw = raw[0 ..< slash]
-  let colon = raw.rfind(':')
-  if colon < 0:
-    raise newException(ValueError, "invalid HTTP bind address: " & httpBindValue)
-  let host = raw[0 ..< colon]
-  let port = parseInt(raw[colon + 1 .. ^1])
-  var socket = newSocket()
+  ## One HTTP/1.1 exchange with ``httpBindValue``: ``unix:<socket path>`` or
+  ## ``[http://]<host>:<port>[/...]``. ``token``, when given, is sent as
+  ## ``Authorization: Bearer``; ``contentType`` and ``body`` go with it.
+  ##
+  ## This is the transport only. A caller talking to a dev-session control
+  ## API uses ``controlRequest``, which supplies the token and content type
+  ## the API requires; this proc stays token-optional because it also
+  ## probes service readiness URLs (``readinessProbeSatisfied``), which are
+  ## not the control API.
+  var socket: Socket
+  var hostHeader: string
+  if httpBindValue.startsWith(UnixBindPrefix):
+    when defined(posix):
+      socket = newSocket(Domain.AF_UNIX, SockType.SOCK_STREAM, Protocol.IPPROTO_IP)
+      try:
+        socket.connectUnix(httpBindValue[UnixBindPrefix.len .. ^1])
+      except CatchableError:
+        socket.close()
+        raise
+      # A loopback name: the listener accepts it on either transport.
+      hostHeader = "localhost"
+    else:
+      raise newException(ValueError,
+        "an AF_UNIX control-API bind cannot be dialled on this platform: " &
+          httpBindValue)
+  else:
+    var raw = httpBindValue
+    if raw.startsWith("http://"):
+      raw = raw["http://".len .. ^1]
+    let slash = raw.find('/')
+    if slash >= 0:
+      raw = raw[0 ..< slash]
+    let parts = splitHostPort(raw)
+    if not parts.ok or parts.port.len == 0:
+      raise newException(ValueError,
+        "invalid HTTP bind address: " & httpBindValue)
+    let port = parseInt(parts.port)
+    socket = newSocket(if ':' in parts.host: AF_INET6 else: AF_INET)
+    try:
+      socket.connect(parts.host, Port(port))
+    except CatchableError:
+      socket.close()
+      raise
+    hostHeader = raw
   defer: socket.close()
-  socket.connect(host, Port(port))
-  socket.send(httpMethod & " " & path & " HTTP/1.1\r\n" &
-    "Host: " & host & "\r\n" &
-    "Connection: close\r\n" &
-    "Content-Length: 0\r\n\r\n")
+  var request = httpMethod & " " & path & " HTTP/1.1\r\n" &
+    "Host: " & hostHeader & "\r\n"
+  if token.len > 0:
+    request.add("Authorization: Bearer " & token & "\r\n")
+  if contentType.len > 0:
+    request.add("Content-Type: " & contentType & "\r\n")
+  request.add("Connection: close\r\n" &
+    "Content-Length: " & $body.len & "\r\n\r\n" & body)
+  socket.send(request)
   var response = ""
   while true:
     let chunk = socket.recv(4096)
@@ -2201,8 +2304,32 @@ proc httpRequest*(httpBindValue, path: string; httpMethod = "GET"):
   result.body =
     if headEnd >= 0: response[headEnd + 4 .. ^1] else: ""
 
-proc httpGetJson*(httpBindValue, path: string): JsonNode =
-  let response = httpRequest(httpBindValue, path)
+proc controlClientFor*(record: JsonNode): DevSessionControlClient =
+  ## The client for the session described by ``record`` -- an
+  ## ``http-ready.json`` or ``session.json`` -- with its token read from the
+  ## ``httpTokenPath`` it names. Raises ``IOError`` naming the file when the
+  ## token cannot be read: a caller that cannot read it is not the
+  ## session's user, and a record without one predates the token.
+  if record.isNil or record.kind != JObject:
+    raise newException(IOError, "no dev-session record to read a bind from")
+  result.bindValue = record{"httpBind"}.getStr()
+  if result.bindValue.len == 0:
+    raise newException(IOError, "the dev-session record names no httpBind")
+  result.token = readControlToken(record{"httpTokenPath"}.getStr())
+
+proc controlRequest*(client: DevSessionControlClient; path: string;
+                     httpMethod = "GET"): tuple[status: int; body: string] =
+  ## One authenticated request to a session's control API. A ``POST`` (every
+  ## mutating route) carries ``Content-Type: application/json`` and an empty
+  ## JSON object, which is what such routes require.
+  if httpMethod == "POST":
+    httpRequest(client.bindValue, path, httpMethod, token = client.token,
+      contentType = "application/json", body = "{}")
+  else:
+    httpRequest(client.bindValue, path, httpMethod, token = client.token)
+
+proc controlGetJson*(client: DevSessionControlClient; path: string): JsonNode =
+  let response = controlRequest(client, path)
   if response.status < 200 or response.status >= 300:
     raise newException(IOError,
       "HTTP GET " & path & " failed with " & $response.status & ": " &
@@ -2479,9 +2606,12 @@ proc waitForReadyFile(path: string; timeoutMs = 5000): JsonNode =
 proc eventLogHint(config: DevSessionSupervisorConfig): string =
   "  per-service state: " & (config.outDir.sessionDir / EventLogFile)
 
-proc controlApiStatus(httpBindValue: string): JsonNode =
-  ## The session's published state, read ONLY through the live control API.
-  ## ``nil`` when the API does not answer.
+proc controlApiStatus(record: JsonNode): JsonNode =
+  ## The session's published state, read ONLY through the live control API
+  ## that ``record`` (an ``http-ready.json`` or ``session.json``) names,
+  ## authenticated with the token at its ``httpTokenPath``. ``nil`` when the
+  ## API does not answer or its token cannot be read -- a session whose
+  ## token is gone has no listener that would accept a request anyway.
   ##
   ## THERE WAS A ``session.json`` FALLBACK HERE AND IT IS DELETED, because
   ## reading ``up`` out of the file turned a loud failure into a silent
@@ -2512,7 +2642,7 @@ proc controlApiStatus(httpBindValue: string): JsonNode =
   ## situation as what it is -- nothing answered -- instead of guessing from
   ## a file.
   try:
-    httpGetJson(httpBindValue, "/status")
+    controlGetJson(controlClientFor(record), "/status")
   except CatchableError:
     nil
 
@@ -2523,7 +2653,7 @@ proc reusableDevSession*(config: DevSessionSupervisorConfig): JsonNode =
   let metadataPath = config.outDir.sessionDir / MetadataFile
   if not fileExists(extendedPath(metadataPath)): return nil
   let persisted = readJsonFileResilient(metadataPath)
-  let live = controlApiStatus(persisted{"httpBind"}.getStr())
+  let live = controlApiStatus(persisted)
   if live.isNil or
       live{"sessionId"}.getStr().len == 0 or
       live{"sessionId"}.getStr() != persisted{"sessionId"}.getStr() or
@@ -2717,7 +2847,7 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
   var sessionId = ""
   while true:
     checkTerminalLaunch()
-    let status = controlApiStatus(httpBindValue)
+    let status = controlApiStatus(launchBind)
     if not status.isNil:
       statusReads.inc
       let reported = status{"status"}.getStr("")
@@ -2761,7 +2891,7 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
   # state.status`` unconditionally, and ``state.status`` is already
   # ``"starting"`` at the first ``writeState()`` before the control-API
   # child is even spawned -- so a served body always carries a non-empty
-  # status. The 404 raises in ``httpGetJson``, a torn read of the file
+  # status. The 404 raises in ``controlGetJson``, a torn read of the file
   # raises in ``parseJson``, and both land in the third arm via
   # ``controlApiStatus``'s ``nil``.
   #
@@ -3270,16 +3400,20 @@ proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
     state.runWatchCycle(config, artifact, artifactPath)
 
 proc startHttpServer(config: DevSessionSupervisorConfig): Process =
-  let httpBindParts = parseHttpBind(config.httpBind)
-  let args = @[
+  var args = @[
     "__repro-dev-session-http",
     "--session-dir", config.outDir.sessionDir,
-    "--host", httpBindParts.host,
-    "--port", $httpBindParts.port,
     "--parent-pid", $getCurrentProcessId(),
     "--supervised",
     "--session-id", config.sessionId
   ]
+  # No `--host` means the platform default transport, which the listener
+  # chooses (`runDevSessionHttpServer`); only an explicit `--http` names one.
+  if config.httpBind.len > 0:
+    let httpBindParts = parseHttpBind(config.httpBind)
+    args.add(["--host", httpBindParts.host, "--port", $httpBindParts.port])
+  if config.httpAllowRemote:
+    args.add(AllowRemoteFlag)
   startProcess(config.publicCliPath,
     args = args,
     workingDir = config.projectRoot,
@@ -3355,13 +3489,10 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
     discard httpProcess.waitForExit()
     httpProcess.close()
     httpStopped = true
-    let readyPath = config.readyPath
-    try:
-      if fileExists(extendedPath(readyPath)) and
-          readJsonFileResilient(readyPath){"pid"}.getInt() == httpPid:
-        removeFile(extendedPath(readyPath))
-    except CatchableError:
-      discard
+    # The child was killed, so its own cleanup did not run: remove the bind,
+    # token and socket it published (only if it is the one that published
+    # them).
+    removeReadyOwnedBy(config.outDir.sessionDir, httpPid)
   defer: stopHttpServer()
   state.writeState()
   let ready =
@@ -3371,6 +3502,7 @@ proc runDevSessionSupervisor*(config: DevSessionSupervisorConfig;
       state.recordStartFailure("", err.msg)
       raise
   state.httpBind = ready["httpBind"].getStr()
+  state.httpTokenPath = ready{"httpTokenPath"}.getStr()
   state.writeState()
   state.emitEvent("session.created")
 
@@ -3449,28 +3581,47 @@ proc queryValue(query, name, fallback: string): string =
       return part[eq + 1 .. ^1]
   fallback
 
-proc sendResponse(client: Socket; status: int; contentType, body: string) =
+proc sendAll(client: Socket; data: string) =
+  ## Send ``data`` to one control-API client, raising ``OSError`` when the
+  ## client has gone away.
+  ##
+  ## Not ``client.send(data)``: see ``writeFully`` for the two defects in
+  ## the pinned ``std/net`` loop (a reset peer spins the single-threaded
+  ## listener forever; a short write resends from byte 0). Raising ends
+  ## that one exchange; the accept loop (``runDevSessionHttpServer``) drops
+  ## the connection and goes on.
+  writeFully(proc (p: pointer; size: int): int = client.send(p, size), data)
+
+proc sendResponse(client: Socket; status: int; contentType, body: string;
+                  extraHeaders = "") =
+  ## ``extraHeaders`` is zero or more complete ``Name: value\r\n`` lines.
+  ## No CORS header is ever sent: no other origin may read a response.
   let reason =
     case status
     of 200: "OK"
     of 202: "Accepted"
+    of 400: "Bad Request"
+    of 401: "Unauthorized"
+    of 403: "Forbidden"
     of 404: "Not Found"
+    of 405: "Method Not Allowed"
+    of 415: "Unsupported Media Type"
     else: "Error"
-  client.send("HTTP/1.1 " & $status & " " & reason & "\r\n" &
+  client.sendAll("HTTP/1.1 " & $status & " " & reason & "\r\n" &
     "Content-Type: " & contentType & "\r\n" &
     "Content-Length: " & $body.len & "\r\n" &
+    extraHeaders &
     "Connection: close\r\n\r\n" & body)
 
 proc sendSse(client: Socket; id: int; node: JsonNode) =
   let kind = node{"kind"}.getStr("message")
-  client.send("id: " & $id & "\n")
-  client.send("event: " & kind & "\n")
-  client.send("data: " & $node & "\n\n")
+  client.sendAll("id: " & $id & "\n" & "event: " & kind & "\n" &
+    "data: " & $node & "\n\n")
 
 proc serveEvents(client: Socket; sessionDir, query: string) =
   let waitMs = parseInt(queryValue(query, "wait-ms", "250"))
   let since = parseInt(queryValue(query, "since", "0"))
-  client.send("HTTP/1.1 200 OK\r\n" &
+  client.sendAll("HTTP/1.1 200 OK\r\n" &
     "Content-Type: text/event-stream\r\n" &
     "Cache-Control: no-cache\r\n" &
     "Connection: close\r\n\r\n")
@@ -3488,33 +3639,163 @@ proc serveEvents(client: Socket; sessionDir, query: string) =
     sleep(50)
     waited.inc(50)
 
-proc recvHttpLine(socket: Socket): string =
+const
+  MaxHttpHeaderLineBytes = 8192
+    ## One request or header line longer than this ends the exchange: the
+    ## listener holds every header of a request in memory before it decides
+    ## anything, so their size has to be bounded.
+  MaxHttpHeaderCount = 100
+  MaxHttpBodyBytes = 64 * 1024
+    ## The largest request body read and discarded. Reading it rather than
+    ## closing on unread bytes keeps the kernel from answering the client
+    ## with a reset that can destroy the response it has not read yet.
+  HttpRequestReadTimeoutMs = 5000
+    ## The whole request -- request line, headers and drained body -- must
+    ## arrive within this long of the connection being accepted. The
+    ## listener serves one connection at a time, so without a deadline any
+    ## account that can reach a TCP port could connect, send nothing, and
+    ## keep ``repro down`` and every other client from the API for as long
+    ## as it liked (§"Control API Access Control", "Request deadline").
+
+proc remainingMs(deadline: MonoTime): int =
+  ## Milliseconds left before ``deadline``; 0 once it has passed.
+  max(0, int((deadline - getMonoTime()).inMilliseconds))
+
+proc recvBefore(socket: Socket; size: int; deadline: MonoTime): string =
+  ## ``recv`` that gives up at ``deadline``: "" when the deadline passes or
+  ## the peer closes, so the caller treats both as the end of the exchange.
+  let left = remainingMs(deadline)
+  if left <= 0:
+    return ""
+  try:
+    socket.recv(size, timeout = left)
+  except TimeoutError:
+    ""
+
+proc recvHttpLine(socket: Socket; deadline: MonoTime):
+    tuple[line: string; ok: bool] =
+  ## One CRLF- (or LF-) terminated line. ``ok`` is false at end of stream,
+  ## when ``deadline`` passes, or when the line exceeds
+  ## ``MaxHttpHeaderLineBytes``.
   while true:
-    let chunk = socket.recv(1)
+    let chunk = socket.recvBefore(1, deadline)
     if chunk.len == 0:
-      return
+      return (result.line, false)
     let ch = chunk[0]
     if ch == '\n':
-      if result.len > 0 and result[^1] == '\r':
-        result.setLen(result.len - 1)
-      return
-    result.add(ch)
+      if result.line.len > 0 and result.line[^1] == '\r':
+        result.line.setLen(result.line.len - 1)
+      return (result.line, true)
+    if result.line.len >= MaxHttpHeaderLineBytes:
+      return (result.line, false)
+    result.line.add(ch)
 
-proc handleHttpClient(client: Socket; sessionDir: string) =
+type
+  ControlApiAccess = object
+    ## What ``handleHttpClient`` checks every request against
+    ## (§"Control API Access Control").
+    token: string
+      ## The session token the listener minted and wrote to its
+      ## ``httpTokenPath``.
+    configuredHost: string
+      ## The ``--http`` host, accepted in ``Host`` beside the loopback
+      ## names; empty on the AF_UNIX transport.
+    port: int
+      ## The listening TCP port, which the API's own ``Origin`` names; 0 on
+      ## the AF_UNIX transport, where no browser origin is the API's own.
+
+proc headerValues(headers: openArray[tuple[name, value: string]];
+                  name: string): seq[string] =
+  for header in headers:
+    if cmpIgnoreCase(header.name, name) == 0:
+      result.add(header.value)
+
+proc bearerToken(values: openArray[string]): string =
+  ## The token of the request's single ``Authorization: Bearer`` header, or
+  ## "" when it has none, several, or another scheme.
+  const scheme = "bearer "
+  if values.len != 1 or values[0].len <= scheme.len or
+      cmpIgnoreCase(values[0][0 ..< scheme.len], scheme) != 0:
+    return ""
+  values[0][scheme.len .. ^1].strip()
+
+proc isJsonMediaType(values: openArray[string]): bool =
+  ## Exactly one ``Content-Type`` whose media type is ``application/json``
+  ## (parameters such as ``charset`` are allowed). That type is not
+  ## CORS-safelisted, so a browser cannot send it cross-origin without a
+  ## preflight, and the API approves no preflight.
+  values.len == 1 and
+    cmpIgnoreCase(values[0].split(';')[0].strip(), "application/json") == 0
+
+proc handleHttpClient(client: Socket; sessionDir: string;
+                      access: ControlApiAccess) =
+  ## Serve one request. Every request, on every route and both transports,
+  ## passes four checks IN THIS ORDER before anything else happens -- Host,
+  ## Origin, token, then method and content type -- so a caller that is
+  ## not authenticated learns nothing about which routes exist, and a
+  ## refused request has no side effect.
   defer: client.close()
-  let request = client.recvHttpLine()
-  if request.len == 0:
+  let deadline = getMonoTime() + initDuration(
+    milliseconds = HttpRequestReadTimeoutMs)
+  let (request, requestOk) = client.recvHttpLine(deadline)
+  if not requestOk or request.len == 0:
     return
+  var headers: seq[tuple[name, value: string]] = @[]
   while true:
-    let line = client.recvHttpLine()
+    let (line, ok) = client.recvHttpLine(deadline)
+    if not ok:
+      return
     if line.len == 0:
       break
+    if headers.len >= MaxHttpHeaderCount:
+      return
+    let colon = line.find(':')
+    if colon <= 0:
+      client.sendResponse(400, "text/plain", "bad request\n")
+      return
+    headers.add((name: line[0 ..< colon].strip(),
+      value: line[colon + 1 .. ^1].strip()))
   let parts = request.splitWhitespace()
   if parts.len < 2:
     client.sendResponse(404, "text/plain", "bad request\n")
     return
   let httpMethod = parts[0]
   let target = parts[1].requestPathAndQuery()
+
+  # Host: exactly one, naming a loopback host or the configured `--http`
+  # host. DNS rebinding sends the attacker's name here.
+  let hosts = headers.headerValues("Host")
+  if hosts.len != 1 or
+      not hostHeaderAccepted(hosts[0], access.configuredHost):
+    client.sendResponse(403, "application/json",
+      "{\"error\":\"Host is not this API\"}\n")
+    return
+  # Origin: absent (not a browser), or exactly the API's own.
+  let origins = headers.headerValues("Origin")
+  if origins.len > 1 or (origins.len == 1 and
+      not originAccepted(origins[0], access.configuredHost, access.port)):
+    client.sendResponse(403, "application/json",
+      "{\"error\":\"cross-origin requests are refused\"}\n")
+    return
+  # Token: compared without an early exit (`tokensEqual`).
+  if not tokensEqual(bearerToken(headers.headerValues("Authorization")),
+      access.token):
+    client.sendResponse(401, "application/json",
+      "{\"error\":\"the session token is required\"}\n",
+      extraHeaders = "WWW-Authenticate: Bearer\r\n")
+    return
+  # Drain a (bounded) body so closing the connection cannot reset it
+  # before the client reads the response; see `MaxHttpBodyBytes`.
+  let lengths = headers.headerValues("Content-Length")
+  if lengths.len == 1:
+    var remaining = 0
+    try: remaining = min(parseInt(lengths[0]), MaxHttpBodyBytes)
+    except ValueError: remaining = 0
+    while remaining > 0:
+      let chunk = client.recvBefore(min(remaining, 4096), deadline)
+      if chunk.len == 0: break
+      remaining -= chunk.len
+
   case target.path
   of "/status", "/session":
     let metadata = sessionDir / MetadataFile
@@ -3526,9 +3807,13 @@ proc handleHttpClient(client: Socket; sessionDir: string) =
   of "/events":
     client.serveEvents(sessionDir, target.query)
   of "/session/stop":
+    # A mutating route: POST only, and only with application/json.
     if httpMethod != "POST":
-      client.sendResponse(404, "application/json",
-        "{\"error\":\"POST required\"}\n")
+      client.sendResponse(405, "application/json",
+        "{\"error\":\"POST required\"}\n", extraHeaders = "Allow: POST\r\n")
+    elif not isJsonMediaType(headers.headerValues("Content-Type")):
+      client.sendResponse(415, "application/json",
+        "{\"error\":\"Content-Type: application/json required\"}\n")
     else:
       # Queue the asynchronous acknowledgement before publishing the stop:
       # either the supervisor or the lifetime watchdog may then close this
@@ -3546,7 +3831,20 @@ proc handleHttpClient(client: Socket; sessionDir: string) =
     client.sendResponse(404, "application/json", "{\"error\":\"not found\"}\n")
 
 proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
+  ## The session's control-API listener. Its access control is
+  ## §"Control API Access Control" of
+  ## `Development-Environments-And-Control-API.md`: the bind restriction is
+  ## enforced here before anything is created, the endpoint lives in the
+  ## per-user directory (`dev_session_access`), the token is written before
+  ## the bind is published, and token and socket are removed on exit.
   createDir(extendedPath(config.sessionDir))
+  # An empty host is the platform default: AF_UNIX on POSIX, an ephemeral
+  # loopback TCP port on Windows.
+  let unixTransport = config.host.len == 0 and defined(posix)
+  let host = if config.host.len > 0: config.host else: "127.0.0.1"
+  if config.host.len > 0:
+    refuseNonLoopbackBind(config.host & ":" & $config.port, config.host,
+      config.allowRemote)
   let parent = openSessionParent(config.parentPid)
   defer: parent.close()
   if not parent.alive(): return 0
@@ -3559,21 +3857,48 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
   let ownership = acquireSessionProcessLock(config.sessionDir / "http.lock")
   defer: ownership.release()
   defer: config.sessionDir.removeOwnedReady()
-  var server = newSocket()
+  # Everything below is owned by this listener (it holds `http.lock`), so a
+  # token or socket left by a killed predecessor is replaced, not reused.
+  let endpointDir = devSessionEndpointDir(config.sessionDir)
+  ensurePrivateEndpointDir(endpointDir)
+  let tokenPath = controlTokenPath(endpointDir)
+  let socketPath = if unixTransport: controlSocketPath(endpointDir) else: ""
+  defer: removeControlEndpointFiles(tokenPath, socketPath)
+  var server: Socket
+  var httpBindValue: string
+  var listenPort = 0
+  if unixTransport:
+    when defined(posix):
+      try: removeFile(socketPath)
+      except OSError: discard
+      server = newSocket(Domain.AF_UNIX, SockType.SOCK_STREAM, Protocol.IPPROTO_IP)
+      server.bindUnix(socketPath)
+      httpBindValue = UnixBindPrefix & socketPath
+  else:
+    server = newSocket(if ':' in host: AF_INET6 else: AF_INET)
+    server.setSockOpt(OptReuseAddr, true)
+    server.bindAddr(Port(config.port), host)
   defer: server.close()
-  server.setSockOpt(OptReuseAddr, true)
-  server.bindAddr(Port(config.port), config.host)
   server.listen()
-  let local = server.getLocalAddr()
-  let httpBindValue = httpUrl(
-    if config.host.len > 0: config.host else: local[0],
-    int(local[1]))
-  writeJsonFile(config.sessionDir / HttpReadyFile, %*{
+  if not unixTransport:
+    let local = server.getLocalAddr()
+    listenPort = int(local[1])
+    httpBindValue = httpUrl(host, listenPort)
+  # The token exists, owner-only, BEFORE the bind is published: a client
+  # that sees the bind can always read the token it needs.
+  let token = mintControlToken()
+  writeControlToken(tokenPath, token)
+  # Published atomically: readers poll for this file's existence and parse
+  # it at once, so it must never be visible half-written.
+  publishJsonFile(config.sessionDir / HttpReadyFile, %*{
     "schemaId": "reprobuild.dev-session.http.v1",
     "sessionId": config.sessionId,
     "httpBind": httpBindValue,
+    "httpTokenPath": tokenPath,
     "pid": getCurrentProcessId()
   })
+  let access = ControlApiAccess(token: token,
+    configuredHost: config.host, port: listenPort)
   # Publish completely before the watchdog may remove the marker. A death
   # during publication must not race cleanup against a partial JSON write.
   var stopped: Atomic[bool]
@@ -3587,5 +3912,13 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
     var client: owned(Socket)
     server.accept(client)
     if not client.isNil:
-      client.handleHttpClient(config.sessionDir)
+      # One client's failure ends only its own exchange: a peer that resets
+      # mid-answer (`sendAll`), or an authenticated request whose query does
+      # not parse, must not take the listener -- and with it `repro down`
+      # -- away from everyone else. `handleHttpClient` closes the socket on
+      # every path.
+      try:
+        client.handleHttpClient(config.sessionDir, access)
+      except CatchableError:
+        discard
   0

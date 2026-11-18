@@ -195,6 +195,18 @@ package clang:
       dependencyPolicy automaticMonitor,
         captureBreadth = fullCapture
 
+      # Caching-Architecture.md D2 -- THE INPUT-CHECK POLICY this tool's edges
+      # take when they state none: ``hybrid``. A typed call gets it as the
+      # default of its ``actionCachePolicy``; an edge that names the tool only
+      # in ``toolIdentityRefs`` gets it through
+      # ``repro_core/tool_input_check_policies``, which
+      # ``t_tool_input_check_policies`` checks against this line. ``hybrid``
+      # records a content hash for every input, so a record of the edge can
+      # be shared across checkouts (Edge-Derived-Identities.md §3.3a), and
+      # still hashes only an input whose metadata moved. An edge that states
+      # ``timestamp`` keeps it.
+      inputCheckPolicy hybrid
+
       # The clang driver call mirrors gcc.nim's M9.R.2 surface.
       call:
         boolFlag pic is bool, alias = "-fPIC"
@@ -234,6 +246,14 @@ package clang:
           format = concat
         flag standard is string,
           alias = "-std=",
+          format = concat
+        # The full SONAME (``LinkOptions.soname``), baked into a shared
+        # library's ``DT_SONAME``. Spelled ``-Wl,-soname,<value>`` -- the
+        # comma form, as ``zig cc`` spells it (``packages/zig.nim``) -- so
+        # one rendering is valid for every driver that passes it through to
+        # ld (https://sourceware.org/binutils/docs/ld/Options.html).
+        flag soname is string,
+          alias = "-Wl,-soname,",
           format = concat
         flag output is string,
           alias = "-o",
@@ -301,6 +321,9 @@ proc clangLink*(opts: LinkOptions): BuildActionDef =
     output = opts.target,
     shared = (opts.kind == lokShared),
     staticLink = (opts.kind == lokStatic),
+    # Only a shared library carries a SONAME; on an executable
+    # ``-soname`` would stamp a ``DT_SONAME`` no loader reads.
+    soname = (if opts.kind == lokShared: opts.soname else: ""),
     libs = libs,
     libDirs = libDirs)
 
@@ -315,7 +338,7 @@ proc clangArchive*(opts: ArchiveOptions): BuildActionDef =
       subcommand: "",
       arguments: @[]))
   let modifiers =
-    if opts.modifiers.len > 0: opts.modifiers else: "rcs"
+    if opts.modifiers.len > 0: opts.modifiers else: DefaultArModifiers
   result.call.arguments.add(PublicCliArg(
     name: "modifiers",
     kind: cpkPositional,

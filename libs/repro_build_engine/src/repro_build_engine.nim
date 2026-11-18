@@ -16,18 +16,11 @@ when defined(windows):
     MAXIMUM_WAIT_OBJECTS, WOHandleArray, openProcess, closeHandle,
     waitForMultipleObjects
 elif defined(posix):
-  # ``Mode`` / ``umask`` / ``dup2`` / ``close`` / ``fcntl`` and
-  # ``F_DUPFD_CLOEXEC`` are the In-Process-Monitor-Hosting HM-4 spawn context
-  # and nothing else (marking the other descriptors close-on-exec across the
-  # spawn lives in ``repro_core/descriptor_inheritance``, shared with the
-  # CLI). io-mon spawns with ``poParentStreams``, so a monitored child
-  # inherits THIS process's descriptors — 0, 1 and 2, and any
-  # other one not marked close-on-exec — and the canonical 0022 file-creation
-  # mask used to arrive through the ``/bin/sh -c 'umask 022 && …'`` wrapper
-  # the monitor CLI ran under. All of it is re-established across the spawn
-  # instead — see ``beginMonitorSpawnContext``. None of them starts a child.
-  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid, Mode, umask,
-    dup2, close, fcntl, F_DUPFD_CLOEXEC
+  # The In-Process-Monitor-Hosting HM-4 spawn context (stdio, stdin, the
+  # canonical 0022 mask and close-on-exec above 2 across io-mon's
+  # ``poParentStreams`` spawn) is ``repro_core/monitor_spawn_stdio``'s
+  # ``beginMonitorSpawnContext``, imported below. None of these starts a child.
+  from std/posix import Pid, SIGKILL, SIGTERM, kill, setpgid
   # Endpoint ownership for Dev-Env-Warm-Entry.md §3 (`endpointRootOwned`).
   # Metadata reads only; nothing here starts a child.
   from std/posix import Stat, lstat, S_ISDIR, S_ISLNK, S_ISSOCK
@@ -105,6 +98,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/source_root
 import repro_core/arg_files
 import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
@@ -112,6 +106,13 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # note in `runBuild`.
 import repro_core/nix_store_roots
 import repro_core/nix_configuration_env
+# The ONE managed-file writer behind ``ensureLine`` / ``ensureSnippet`` (and
+# the home-profile ``fs.managedBlock``): sentinel format, locator, splice and
+# atomic write. reprobuild-pm spec/CLI/internal/fs-file-utilities.md §3-§4.
+from repro_core/managed_block import ManagedBlockKey, ManagedBlockError,
+  managedBlockKey, validateManagedBlockKey, spliceManagedBlock,
+  ensureLineContent, readManagedFile, updateManagedFile, alAfterBlankLine,
+  ProjectBlockScope
 from repro_core/process_streams import drainStream
 # ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
 # second time on POSIX. This scheduler thread is not alone once the worker
@@ -120,12 +121,6 @@ from repro_core/process_streams import drainStream
 # child it starts — converters, RunQuota helpers — is released through
 # ``closeProcessOnce``. See ``repro_core/process_close``.
 from repro_core/process_close import closeProcessOnce
-# Every descriptor above 2 close-on-exec across io-mon's in-process spawn
-# (``beginMonitorSpawnContext``). Shared with ``repro_cli_support``, which
-# applies the same rule around the ``runquotad`` an invocation owns.
-when defined(posix):
-  from repro_core/descriptor_inheritance import
-    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors
 import repro_depfile
 import repro_hash
 import repro_local_store
@@ -143,6 +138,7 @@ import repro_cas_store
 # The former `io_mon/codec` + `io_mon/writer` internal imports (the hand-rolled
 # iomon decoder reached into them) are gone.
 import io_mon
+import repro_build_engine/inline_site_tables
 import repro_platform
 import repro_runquota
 import repro_cargo_edge/wrapper_env
@@ -163,6 +159,7 @@ import repro_build_engine/monitor_flush
 # because a private field is writable from anywhere in its declaring module, so
 # declared here it would seal nothing. Read its header before adding a refusal.
 import repro_build_engine/cache_refusal
+import repro_build_engine/embedded_root_scan
 # Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
 # worker pool, not a thread of its own, and TP-2's monitor finish is the
 # second. The flush's tenancy is entirely inside ``monitor_flush``, so the
@@ -538,6 +535,29 @@ type
       ## §2.2 makes its ABSENCE an error). ``crkForever`` — the zero value —
       ## is what every other class carries and what every existing action
       ## keeps, so the cache read path for them is byte-for-byte unchanged.
+    contentKeyedToolCaches*: seq[string]
+      ## The CONTENT-KEYED tool-owned caches this action reads
+      ## (``Tool-Owned-Caches.md`` §"Trust Boundary"): directories such as
+      ## Go's ``GOCACHE`` or a ccache store, whose entries are named by a
+      ## digest of what produced them and are shared with other edges.
+      ##
+      ## The tool trusts such an entry by its name and never re-checks its
+      ## bytes, and the directory's contents are not inputs of this action
+      ## (its reads under it are left out of the key). So whoever else writes
+      ## the cache can change this action's outputs while its fingerprint
+      ## stays the same. The cache is therefore an unkeyed producer of this
+      ## action, and the action composes with it as with a ``host-bound``
+      ## producer (``Edge-Determinism-And-Soft-Rebuild.md`` §1.4):
+      ## ``determinismClass`` answers the strictest of the declared class and
+      ## ``edHostBound`` whenever this list is non-empty. Its records are then
+      ## kept and served on this host, and never published to, or
+      ## substituted from, a peer cache, a remote portable memo or a binary
+      ## cache. That is composition, not a per-edge override, so no
+      ## declaration lifts it (the §2.3 weakening ban is about overrides).
+      ##
+      ## Naming a directory here does NOT exclude it from the key; the
+      ## action's dependency policy does that. Empty (the default) changes
+      ## nothing for any action.
     builtinText*: string
     builtinEntries*: seq[string]
     targetNames*: seq[string]
@@ -1151,11 +1171,24 @@ type
     portableRoots*: seq[LogicalRoot]
       ## Cache-Scope P3.1: the logical roots against which each recorded
       ## action's PORTABLE fingerprint is computed
-      ## (`repro_local_store/portable_fingerprint`). Empty — the default —
-      ## computes none: path independence is "off unless explicitly
-      ## requested" (Hermetic-Builds-And-Path-Independence.md), and it
-      ## costs a BLAKE3 pass over every observed input. The local
-      ## fingerprint and every local cache decision are unaffected.
+      ## (`repro_local_store/portable_fingerprint`). Empty — the default of
+      ## a hand-built configuration — computes none: path independence is
+      ## "off unless explicitly requested"
+      ## (Hermetic-Builds-And-Path-Independence.md), and it costs a BLAKE3
+      ## pass over every observed input. The local fingerprint and every
+      ## local cache decision are unaffected. Which edges it applies to is
+      ## `portableContentCheckedOnly`'s.
+    portableContentCheckedOnly*: bool
+      ## Caching-Architecture.md D1: when true, the portable identity (the
+      ## record and the pre-pass lookup) is computed only for an edge whose
+      ## input-check policy is `ffpChecksum` or `ffpHybrid` -- the edges that
+      ## REQUESTED sharing by declaring a content-checked policy
+      ## (Edge-Derived-Identities.md §3.3a). A `timestamp` edge is left
+      ## exactly as if `portableRoots` were empty. False applies the
+      ## identity to every edge, which is what `REPRO_PORTABLE_CACHE=1`
+      ## asks for. The CLI sets it for its default, same-host-only portable
+      ## configuration (`wirePortableCache`); it has no effect while
+      ## `portableRoots` is empty.
     portableMemoPublisher*: PortableMemoPublisher
       ## Cache-Scope P3.3. When non-nil (and `portableRoots` is set), every
       ## portable record is also published to the remote memoization plane.
@@ -1164,7 +1197,10 @@ type
       ## its upstream records without their bytes. Output BYTES go only
       ## where the binary-cache scope publishes them — actions tagged
       ## `publishToBinaryCache`, or every action under
-      ## `binaryCacheIntermediateScope`.
+      ## `binaryCacheIntermediateScope`. (On THIS host the bytes of every
+      ## record that may be served across checkouts are stored whether or
+      ## not a publisher is configured: `portable_output_store`,
+      ## Caching-Architecture D6.)
     portableLookup*: bool
       ## Cache-Scope P3.4. Before scheduling, resolve the graph against the
       ## portable memo plane (the local store under the shared action-cache
@@ -2236,7 +2272,7 @@ type
     traceEnabled: bool
     runQuotaBypassed*: bool
       ## RA-13: true when at least one action in this build launched without a
-      ## RunQuota lease (explicit ``--runquota=off`` / ``REPROBUILD_NO_RUNQUOTA``
+      ## RunQuota lease (explicit ``--no-runquota`` / ``REPROBUILD_NO_RUNQUOTA``
       ## bypass, or the unreachable-daemon fallback). In that state RunQuota is
       ## NOT the resource authority for this run: host limits, cross-session
       ## fairness, and named-pool capacity are enforced only by the engine's
@@ -2420,7 +2456,8 @@ type
                               {.gcsafe, closure.}
     ## Cache-Scope P3.4. Place a record's output bytes, verified against the
     ## record, at this host's paths (`portable_memo_cache.restoreMemoOutputs`).
-    ## Returns "" or why nothing was placed.
+    ## Returns "" or why nothing was placed. Tried after the bytes stored on
+    ## this host (`portable_output_store`, Caching-Architecture D6).
 
   BinaryCachePublisher* = proc(req: BinaryCachePublishRequest):
     BinaryCachePublishResult {.gcsafe, closure.}
@@ -2947,19 +2984,30 @@ proc nixStoreRoot(normalized: string): string =
   else:
     prefix & rest[0 ..< slash]
 
+proc endsWithDigestOfWidth(name: string; width: int): bool =
+  ## `<anything>-<exactly width lowercase hex>` at the end of `name`: a
+  ## separator `width + 1` characters from the end (the separator arm, which
+  ## also bounds the length) and nothing but lowercase hex after it (the
+  ## digit arm).
+  if name.len < width + 1 or name[name.len - width - 1] != '-':
+    return false
+  for i in name.len - width ..< name.len:
+    if name[i] notin {'0' .. '9', 'a' .. 'f'}:
+      return false
+  true
+
 proc isRealizationDirName(name: string): bool =
   ## Does this directory name carry a realization digest?
   ##
   ## `repro_local_store/prefix_paths.realizationDirName` composes
-  ## `<version>-<first 16 hex of the BLAKE3 realization hash>`. Recognising
-  ## the SHAPE rather than trusting the location is what bounds the damage a
-  ## bogus `REPRO_STORE_ROOT` can do — see `reproStoreRootPath`.
-  if name.len < 17 or name[name.len - 17] != '-':
-    return false
-  for i in name.len - 16 ..< name.len:
-    if name[i] notin {'0' .. '9', 'a' .. 'f'}:
-      return false
-  true
+  ## `<version>-<first 40 hex of the BLAKE3 realization hash>`, and a store
+  ## an older build wrote still holds prefixes it named with the first 16
+  ## (`legacyRealizationDirName`), which the store keeps where they lie. Both
+  ## shapes state a digest; nothing else does. Recognising the SHAPE rather
+  ## than trusting the location is what bounds the damage a bogus
+  ## `REPRO_STORE_ROOT` can do — see `reproStoreRootPath`.
+  endsWithDigestOfWidth(name, RealizationDirHexChars) or
+    endsWithDigestOfWidth(name, LegacyRealizationDirHexChars)
 
 proc reproStoreRootPath(): string =
   ## Reprobuild's OWN content-addressed store root, forward-slashed and with
@@ -2984,7 +3032,8 @@ proc reproStoreRootPath(): string =
   ## What the env var still could do is nominate a MUTABLE tree as
   ## content-addressed within one consistent setting, and that is what
   ## `isRealizationDirName` bounds: the only thing elided under this root is a
-  ## directory whose own name states a 16-hex realization digest.
+  ## directory whose own name states a realization digest (40 hex, or the 16
+  ## of a prefix an older build named).
   ##
   ## A ROOT OF `/` NAMES NOTHING AT ALL, which is stronger than the bound
   ## above and worth stating because a reader will look here for it. The
@@ -3379,14 +3428,17 @@ proc keyedOnArgv*(fingerprint: ContentDigest; argv: openArray[string];
                   cwd = ""): ContentDigest =
   ## `fingerprint` with every element of `argv`, and `cwd`, mixed in.
   ##
-  ## `action()` keys `argv[0]` only when it lies under a content-addressed
-  ## root, and the rest of the command line not at all: an edge whose
-  ## constructor computes its fingerprint over less than what it spawns
-  ## shares one local record across command lines that compute different
-  ## things. A constructor calls this over the argv it hands to `action()`,
-  ## after every rewrite it applies, so the key covers the command by
-  ## construction rather than by a list of the arguments its author thought
-  ## could matter.
+  ## `action()` applies this to every process edge itself, over the argv it
+  ## is handed — after every rewrite its constructor applied, before any
+  ## execution-time rewrite (the monitor wrapper) — so the key covers the
+  ## command by construction rather than by a list of the arguments its
+  ## author thought could matter (Caching-Architecture.md §"BuildXL-Inspired
+  ## Fingerprinting", rider of 2026-11-16). Until then `action()` keyed
+  ## `argv[0]` only when it lay under a content-addressed root and the rest
+  ## of the command line not at all, so each constructor had to call this
+  ## itself; the calls that remain are harmless and some key a form the
+  ## engine cannot derive at construction (an expanded arg file,
+  ## `withArgFilesExpanded`).
   ##
   ## A relocatable edge passes its argv with each path named the way its
   ## record names inputs (`relocatableName`), and no `cwd`: its key must be
@@ -3587,13 +3639,78 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   framed.add($image.len & "\x1f" & image & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc argvKeyComponents*(argv: openArray[string]; cwd: string;
+                        relocatable: bool;
+                        relocationAnchors: openArray[string]):
+    tuple[argv: seq[string]; cwd: string] =
+  ## The argv and cwd `action()` mixes into every process edge's weak
+  ## fingerprint (`keyedOnArgv`), in the form the edge's record uses.
+  ##
+  ## An ordinary edge keys its argv as given and its cwd. A relocatable edge
+  ## keys each argv element the way its record names an input
+  ## (`relocatableName` against its cwd and anchors) and no cwd:
+  ## `keyedOnRelocation` keys the cwd's DEPTH instead, so a byte-identical
+  ## tree elsewhere still keys the same (Caching-Architecture.md
+  ## §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16: "A relocatable
+  ## edge keeps its relocation-safe form of each component").
+  if not relocatable:
+    return (argv: @argv, cwd: cwd)
+  let anchors = effectiveAnchors(cwd, relocationAnchors)
+  for arg in argv:
+    result.argv.add(relocatableName(arg, cwd, anchors))
+  result.cwd = ""
+
+func builtinKindName*(kind: BuildActionKind): string
+
+const PayloadKeyedBuiltinKinds* = {bakCopyFile, bakEnsureDir, bakWriteText,
+                                   bakStamp, bakPreserveTree, bakEnsureLine,
+                                   bakEnsureSnippet}
+  ## The builtins `builtinAction` keys on their kind and whole payload: the
+  ## in-process filesystem builtins, whose payload is all they compute.
+  ##
+  ## The executor-backed kinds (`bakWorkspaceVcs`, `bakForeignProvision`,
+  ## `bakBinaryCacheSubstitute`, `bakMetadataFetch`, `bakSolveLock`,
+  ## `bakLockUpdate`) keep the key their constructor computes. Their
+  ## payloads carry fields their designs keep out of the key on purpose: a
+  ## git clone's reference path, filter, depth and single-branch flag are
+  ## acceleration knobs, so a full and a shallow clone of one revision share
+  ## a receipt (`fingerprintPayload` in `repro_workspace_vcs`, RA-5 and
+  ## RA-14); a Nix provision's payload names the directory `repro` ran from.
+  ## Whether those kinds key their whole payload, or name the fields that
+  ## are identity, awaits an owner decision (reprobuild-pm issue
+  ## `issues/2026-11-16-action-default-weak-fingerprint-is-the-id-alone.md`).
+
+proc keyedOnBuiltinPayload*(fingerprint: ContentDigest; kind: BuildActionKind;
+                            text: string;
+                            entries: openArray[string]): ContentDigest =
+  ## `fingerprint` with a builtin's kind and its whole payload (`text`,
+  ## `entries`) mixed in. A builtin writes its payload; the payload is what
+  ## it computes, so two builtins with one id and different payloads are two
+  ## computations. `builtinAction` applies this to every builtin it builds,
+  ## whatever fingerprint its caller passed (Caching-Architecture.md
+  ## §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16). Length-framed,
+  ## entry count first, like `keyedOnArgv`.
+  var framed = "action-builtin-payload\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  let kindName = builtinKindName(kind)
+  framed.add($kindName.len & "\x1f" & kindName & "\x1e")
+  framed.add($text.len & "\x1f" & text & "\x1e")
+  framed.add($entries.len & "\x1e")
+  for entry in entries:
+    framed.add($entry.len & "\x1f" & entry & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc weakFingerprintFor*(id: string;
                          governingLockIdentity: LockIdentity): ContentDigest =
-  ## The fingerprint `action()` / `builtinAction()` would compute for an edge
-  ## with this id under this lock. For the call sites that construct a
-  ## `BuildAction` object literally rather than through a constructor — §7.2's
-  ## `{.requiresInit.}` field reaches those, but the constructor's mixing
-  ## cannot, so they compose it here instead of re-deriving it.
+  ## The id-and-lock part of what `action()` / `builtinAction()` compute for
+  ## an edge with this id under this lock: the constructors also mix in the
+  ## argv and cwd (`keyedOnArgv`) or the builtin payload
+  ## (`keyedOnBuiltinPayload`), which an id alone cannot supply. For the call
+  ## sites that construct a `BuildAction` object literally rather than
+  ## through a constructor — §7.2's `{.requiresInit.}` field reaches those,
+  ## but the constructor's mixing cannot, so they compose it here instead of
+  ## re-deriving it.
   keyedOnGoverningLock(weakFingerprintFromText(id), governingLockIdentity)
 
 proc legacyDepfileGatheringPolicy(depfile: string;
@@ -3635,6 +3752,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
              entropyBlessedImages: openArray[EntropyBlessedTool] = [];
              determinism = none(EdgeDeterminism);
              cacheRetention = forever();
+             contentKeyedToolCaches: openArray[string] = [];
              env: openArray[string] = [];
              envPassthrough: openArray[string] = [];
              requiresElevation = false;
@@ -3714,13 +3832,28 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # subtracts that root's contents out of the key — see
     # `keyedOnContentAddressedToolRoot` for the measurement that showed
     # the two halves had never been connected.
-    weakFingerprint: keyedOnRelocation(keyedOnGoverningLock(
-      keyedOnContentAddressedToolRoot(
-        keyedOnEnvironmentIsolation(
-          keyedOnActionEnvironment(weakFingerprint, env, envPassthrough),
-          isolateHostEnvironment),
-        argv),
-      governingLockIdentity), relocatable, cwd),
+    #
+    # The argv mix is innermost, and it is the ENGINE's, not the caller's:
+    # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+    # 2026-11-16 — a caller-supplied fingerprint is mixed in addition and
+    # never replaces an engine component. The default caller fingerprint is
+    # the id alone, so before this every direct caller that did not call
+    # `keyedOnArgv` itself shared one local record (and, with portable
+    # caching off, one peer key) across command lines that differ only in a
+    # flag. A caller that already mixed its argv in is keyed on it twice,
+    # which costs nothing and changes no decision.
+    weakFingerprint: block:
+      let keyed = argvKeyComponents(argv, cwd, relocatable,
+        relocationAnchors)
+      keyedOnRelocation(keyedOnGoverningLock(
+        keyedOnContentAddressedToolRoot(
+          keyedOnEnvironmentIsolation(
+            keyedOnActionEnvironment(
+              keyedOnArgv(weakFingerprint, keyed.argv, keyed.cwd),
+              env, envPassthrough),
+            isolateHostEnvironment),
+          argv),
+        governingLockIdentity), relocatable, cwd),
     actionCachePolicy: actionCachePolicy,
     relocatable: relocatable,
     relocationAnchors: @relocationAnchors,
@@ -3741,6 +3874,7 @@ proc action*(id: string; argv: openArray[string]; cwd = "";
     # `weak` to `strong` does not invalidate existing entries)."
     determinism: determinism,
     cacheRetention: cacheRetention,
+    contentKeyedToolCaches: @contentKeyedToolCaches,
     requiresElevation: requiresElevation)
 
 proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
@@ -3770,7 +3904,15 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     cwd: cwd,
     commandStatsId: commandStatsId,
     cacheable: cacheable,
-    weakFingerprint: keyedOnGoverningLock(weakFingerprint,
+    # The kind and payload are the ENGINE's mix, as argv is for `action()`:
+    # the default caller fingerprint is the id alone, and a caller-supplied
+    # one adds to these and never replaces them (Caching-Architecture.md
+    # §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16). Only for the
+    # kinds whose payload is all they compute: see `PayloadKeyedBuiltinKinds`.
+    weakFingerprint: keyedOnGoverningLock(
+      (if kind in PayloadKeyedBuiltinKinds:
+        keyedOnBuiltinPayload(weakFingerprint, kind, text, entries)
+      else: weakFingerprint),
       governingLockIdentity),
     actionCachePolicy: actionCachePolicy,
     dependencyPolicy: automaticMonitorGatheringPolicy(),
@@ -3778,6 +3920,40 @@ proc builtinAction*(kind: BuildActionKind; id: string; cwd = "";
     builtinEntries: @entries,
     networkMode: networkMode,
     netDestinations: @netDestinations)
+
+const ManagedFileWriterKinds* = {bakEnsureLine, bakEnsureSnippet}
+  ## The built-ins that rewrite part of their output file through the
+  ## managed-file writer (``repro_core/managed_block``) and may therefore
+  ## share that file with each other, under ``validateGraph``'s rules.
+
+proc ensureSnippetEntries*(packageName, blockId, snippet: string;
+                           scope = ProjectBlockScope): seq[string] =
+  ## The ``builtinEntries`` payload of a ``bakEnsureSnippet`` action: the
+  ## block's key and its content, never sentinel text. reprobuild-pm
+  ## spec/CLI/internal/fs-file-utilities.md §3: the sentinels are rendered by
+  ## the managed-file writer from ``(scope, packageName, blockId)``, so no
+  ## caller can invent a format the other writers cannot read. The DSL
+  ## lowering and every direct constructor encode through this one proc.
+  @[scope, packageName, blockId, snippet]
+
+proc ensureSnippetPayload*(action: BuildAction):
+    tuple[key: ManagedBlockKey; snippet: string] =
+  ## Decode ``ensureSnippetEntries``. Raises ``BuildEngineError`` for a
+  ## payload of the wrong shape and ``ManagedBlockError`` for a key that is
+  ## not a valid ``project`` block key (fs-file-utilities.md §3:
+  ## ``fs.ensureSnippet`` is the project-scope entry point).
+  if action.builtinEntries.len != 4:
+    raise newException(BuildEngineError, "ensureSnippet action " & action.id &
+      " requires the payload (scope, packageName, blockId, snippet); got " &
+      $action.builtinEntries.len & " entries")
+  let key = managedBlockKey(action.builtinEntries[0],
+    action.builtinEntries[1], action.builtinEntries[2])
+  if key.scope != ProjectBlockScope:
+    raise newException(ManagedBlockError, "ensureSnippet action " &
+      action.id & " writes a '" & key.scope &
+      "' block; ensureSnippet writes project blocks only")
+  validateManagedBlockKey(key)
+  (key: key, snippet: action.builtinEntries[3])
 
 proc pool*(name: string; capacity: uint32): BuildPool =
   BuildPool(name: name, capacity: capacity)
@@ -4090,7 +4266,46 @@ proc removalParentOf(spelling: string): string =
       suffix = ancestor.substr(slash) & suffix
       ancestor = ancestor[0 ..< slash]
 
+var
+  containmentMemoDepth {.threadvar.}: int
+  containmentMemo {.threadvar.}: Table[string, Option[string]]
+
+proc beginContainmentMemo(): int =
+  ## Opens a scope in which `containmentLocation` answers each distinct
+  ## question once. A scope is ONE evaluation of one action's evidence (the
+  ## keyed input set, the portable accesses): every containment question it
+  ## asks about a path is a question about the filesystem at one moment, and
+  ## asking it again a few microseconds later, once per root it is compared
+  ## with, can only give the same answer or race with a change that the first
+  ## answer could have raced with just as well. Nothing is kept across scopes,
+  ## so no answer outlives the evaluation that asked it: a symlink or a tree
+  ## a later action changes is resolved afresh by the next evaluation.
+  ## Scopes nest; the memo is emptied when the outermost one ends.
+  inc containmentMemoDepth
+  containmentMemoDepth
+
+proc endContainmentMemo(depth: int) =
+  if depth != containmentMemoDepth:
+    raise newException(AssertionDefect,
+      "containment memo scopes ended out of order")
+  dec containmentMemoDepth
+  if containmentMemoDepth == 0:
+    containmentMemo.clear()
+
+proc containmentLocationUncached(path: string; parentEnd: int): Option[string]
+
 proc containmentLocation(path: string; parentEnd: int): Option[string] =
+  ## `containmentLocationUncached`, answered once per question inside a
+  ## `beginContainmentMemo` scope.
+  if containmentMemoDepth == 0:
+    return containmentLocationUncached(path, parentEnd)
+  let key = $parentEnd & "\0" & path
+  containmentMemo.withValue(key, known):
+    return known[]
+  result = containmentLocationUncached(path, parentEnd)
+  containmentMemo[key] = result
+
+proc containmentLocationUncached(path: string; parentEnd: int): Option[string] =
   ## A parent walk must be resolved by the filesystem THROUGH the last `..`.
   ## The remaining suffix may be absent (a probe, removal or new output), so
   ## it is appended without requiring the final object to exist. Failure to
@@ -4452,7 +4667,11 @@ proc validateGraph(g: BuildGraph) =
 
   var ids = initHashSet[string]()
   var byId = initTable[string, BuildAction]()
-  var outputs = initHashSet[string]()
+  # Managed-file writers (``ensureLine`` / ``ensureSnippet``) may share an
+  # output file: each owns only its line or block in it. Whether two of them
+  # may coexist is decided by the managed-file pass below, so a duplicate
+  # between two of them is deferred to it; any other duplicate is refused.
+  var outputs = initTable[string, bool]()
   for action in g.actions:
     if action.id.len == 0:
       raiseEngine("action id is required")
@@ -4462,10 +4681,13 @@ proc validateGraph(g: BuildGraph) =
     byId[action.id] = action
     if action.kind == bakProcess and action.argv.len == 0 and action.outputs.len == 0 and action.optionalOutputs.len == 0:
       raiseEngine("action has neither command nor outputs: " & action.id)
+    let managedWriter = action.kind in ManagedFileWriterKinds
     for output in action.outputs & action.optionalOutputs:
-      if outputs.contains(output):
+      if outputs.hasKey(output):
+        if managedWriter and outputs[output]:
+          continue
         raiseEngine("duplicate declared output: " & output)
-      outputs.incl(output)
+      outputs[output] = managedWriter
   for action in g.actions:
     for dep in action.deps:
       if not ids.contains(dep):
@@ -4505,6 +4727,54 @@ proc validateGraph(g: BuildGraph) =
           if dep notin seen:
             stack.add(dep)
     false
+
+  # reprobuild-pm spec/CLI/internal/fs-file-utilities.md §4. Managed-file
+  # writers read their output and replace it, so for any two that write the
+  # same FILE (compared by location, not by spelling):
+  #   * declaring the same block -- the same ``(scope, packageName,
+  #     blockId)`` -- is refused whatever their order: a block has one owner
+  #     (Generated-Configuration-Files.md §"Sentinel uniqueness");
+  #   * otherwise they are a double write unless a dependency chain orders
+  #     them (Filesystem-Policy-And-Observed-Inputs.md §"Double Writes"):
+  #     two concurrent read-modify-replace runs lose one update.
+  # A malformed ``ensureSnippet`` payload is left to the action, which fails
+  # naming it when it runs.
+  var managedWriters: seq[tuple[actionId, raw, file: string;
+    hasKey: bool; key: ManagedBlockKey]] = @[]
+  for action in g.actions:
+    if action.kind notin ManagedFileWriterKinds or action.outputs.len != 1:
+      continue
+    var entry = (actionId: action.id, raw: action.outputs[0],
+      file: outputRemovalLocation(action.cwd, action.outputs[0]),
+      hasKey: false, key: ManagedBlockKey())
+    if action.kind == bakEnsureSnippet and action.builtinEntries.len == 4:
+      entry.hasKey = true
+      entry.key = managedBlockKey(action.builtinEntries[0],
+        action.builtinEntries[1], action.builtinEntries[2])
+    managedWriters.add(entry)
+  for i in 0 ..< managedWriters.len:
+    for j in (i + 1) ..< managedWriters.len:
+      let a = managedWriters[i]
+      let b = managedWriters[j]
+      if a.file.len == 0 or a.file != b.file:
+        continue
+      if a.hasKey and b.hasKey and a.key == b.key:
+        raiseEngine("managed block '" & $a.key & "' in '" & a.raw &
+          "' is declared by two actions, '" & a.actionId & "' and '" &
+          b.actionId & "': a block has one owner, whatever the order of " &
+          "its writers. Rename one block id or merge the two snippets " &
+          "into one block. Spec: CLI/internal/fs-file-utilities.md §4, " &
+          "Generated-Configuration-Files.md §\"Sentinel uniqueness\".")
+      if reachable(a.actionId, b.actionId) or
+          reachable(b.actionId, a.actionId):
+        continue
+      raiseEngine("double-write reject: '" & a.actionId & "' and '" &
+        b.actionId & "' both rewrite one file ('" & a.raw & "' and '" &
+        b.raw & "') with no dependency chain between them; " &
+        "each reads the file and replaces it, so concurrent runs would " &
+        "lose one update. Add a dependency edge from one to the other. " &
+        "Spec: CLI/internal/fs-file-utilities.md §4, " &
+        "Filesystem-Policy-And-Observed-Inputs.md §\"Double Writes\".")
 
   var declaredIndex: seq[tuple[actionId: string; root: string;
     optional: bool; ordinary: bool]] = @[]
@@ -4706,11 +4976,46 @@ proc allOutputsExist(action: BuildAction): bool =
 proc declaresNoOutputs(action: BuildAction): bool {.inline.} =
   action.outputs.len == 0
 
+proc readsContentKeyedToolCache*(action: BuildAction): bool {.inline.} =
+  ## Does this edge read a content-keyed tool-owned cache that other edges
+  ## write? See `BuildAction.contentKeyedToolCaches`.
+  action.contentKeyedToolCaches.len > 0
+
 proc determinismClass*(action: BuildAction): EdgeDeterminism {.inline.} =
-  ## The class this edge is treated as. `none` is §2.1's unlabelled case and
-  ## resolves to `weak`; see `BuildAction.determinism` for why the field is an
-  ## `Option`.
-  effectiveDeterminism(action.determinism)
+  ## The class this edge is treated as: its EFFECTIVE class. `none` is §2.1's
+  ## unlabelled case and resolves to `weak`; see `BuildAction.determinism` for
+  ## why the field is an `Option`.
+  ##
+  ## An edge that reads a content-keyed tool-owned cache composes with that
+  ## cache as with a `host-bound` producer (§1.4, and Tool-Owned-Caches.md
+  ## §"Trust Boundary"), so its class is never weaker than `host-bound`.
+  ## Every reader of the class -- retention, the rebuild selectors, the
+  ## cache-entry stamp and each cross-host publisher and substituter -- goes
+  ## through here, so the composition cannot be applied at one of them and
+  ## forgotten at another.
+  result = effectiveDeterminism(action.determinism)
+  if action.readsContentKeyedToolCache:
+    result = strictest(result, edHostBound)
+
+proc crossHostRefusal*(action: BuildAction): string =
+  ## Why this edge's results may neither leave this host nor be substituted
+  ## from another one, judged by its effective determinism class (§3, §5);
+  ## "" when its class allows it. A content-keyed tool-owned cache is named
+  ## in the reason, because it is not a class anyone declared and the trace
+  ## has to say where the class came from.
+  let cls = action.determinismClass
+  if cls.allowsCrossMachineSubstitution():
+    return ""
+  if action.readsContentKeyedToolCache:
+    result = "reads the content-keyed tool-owned cache " &
+      action.contentKeyedToolCaches.join(", ") & ", which other edges " &
+      "write and its key does not cover; its effective determinism class " &
+      "is " & $cls & " (declared " &
+      $effectiveDeterminism(action.determinism) & "), which forbids " &
+      "cross-machine substitution (Tool-Owned-Caches.md \"Trust Boundary\")"
+  else:
+    result = "determinism class " & $cls &
+      " forbids cross-machine substitution"
 
 proc effectiveRetention*(action: BuildAction): CacheRetention {.inline.} =
   ## Retention applies only to `volatile` edges. §1's table gives every other
@@ -4743,7 +5048,13 @@ proc entryDeterminismFor*(config: BuildEngineConfig;
   ## that cannot tell them apart will eventually mistake one for the other.
   ## It also means the overwhelming majority of edges write no sidecar and
   ## pay nothing for this milestone existing.
-  if action.determinism.isNone:
+  ##
+  ## An unlabelled edge that reads a content-keyed tool-owned cache is NOT
+  ## silent, though: its `host-bound` class is a fact the engine derived, and
+  ## the record carries it so that anything judging the RECORD alone (the
+  ## peer-cache publisher, reached with nothing but the record) refuses it as
+  ## it refuses a declared `host-bound` one.
+  if action.determinism.isNone and not action.readsContentKeyedToolCache:
     return EntryDeterminism()
   declaredDeterminism(action.determinismClass, action.effectiveRetention,
     nowUnix = config.nowUnix, buildEpoch = config.buildEpoch)
@@ -5294,21 +5605,25 @@ proc normalizedDeclaredActionPath(action: BuildAction; path: string): string =
 
 proc inferDeclaredActionDeps(g: BuildGraph): BuildGraph =
   result = g
-  var outputProducer = initTable[string, string]()
+  # A path normally has one producer; several managed-file writers
+  # (``ensureLine`` / ``ensureSnippet``, ordered by dependencies -- see
+  # ``validateGraph``) may share one file, and a reader of that file then
+  # depends on every one of them, not only on whichever came first.
+  var outputProducers = initTable[string, seq[string]]()
   for action in g.actions:
     for output in action.outputs & action.optionalOutputs:
       let normalized = normalizedDeclaredActionPath(action, output)
-      if normalized.len > 0 and not outputProducer.hasKey(normalized):
-        outputProducer[normalized] = action.id
+      if normalized.len > 0:
+        outputProducers.mgetOrPut(normalized, @[]).addUnique(action.id)
 
   for i in 0 ..< result.actions.len:
     for input in result.actions[i].inputs:
       let normalized = normalizedDeclaredActionPath(result.actions[i], input)
-      if normalized.len == 0 or not outputProducer.hasKey(normalized):
+      if normalized.len == 0 or not outputProducers.hasKey(normalized):
         continue
-      let producerId = outputProducer[normalized]
-      if producerId != result.actions[i].id:
-        result.actions[i].deps.addUnique(producerId)
+      for producerId in outputProducers[normalized]:
+        if producerId != result.actions[i].id:
+          result.actions[i].deps.addUnique(producerId)
 
 proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
@@ -6876,7 +7191,8 @@ proc class3Contribution*(kind: DeclarableDaemonKind):
   of ddkReproStoreDaemon:
     ## BRANCH (b), for the same reason and over reprobuild's own CAS store:
     ## it realizes and serves prefixes under
-    ## `<storeRoot>/…/prefixes/<package>/<version>-<16 hex>`, the second root
+    ## `<storeRoot>/…/prefixes/<package>/<version>-<40 hex>` (16 in a prefix
+    ## an older build named), the second root
     ## `contentAddressedRoot` recognises. DA-2's text names it and DA-2
     ## declined to register it because nothing spawns it — which is a statement
     ## about DERIVATION, not about the branch, and is what a checked
@@ -9375,6 +9691,7 @@ proc preparedActionEnv(action: BuildAction;
 # only the visibility ordering moves.
 proc cacheInputPaths*(action: BuildAction;
                       evidence: PathSetEvidence): seq[string]
+proc hasCacheInputPath*(action: BuildAction; evidence: PathSetEvidence): bool
 proc evidenceInputPaths(action: BuildAction;
                         evidence: PathSetEvidence): seq[string]
 # DA-1i/DA-1j — forward-declared for the same reason: `collectEvidence` has to
@@ -9495,6 +9812,37 @@ proc executedToolImagePath(action: BuildAction;
       return os.normalizedPath(candidate)
   ""
 
+
+proc siteTableRootImage(action: BuildAction;
+                        config: ptr BuildEngineConfig): string =
+  ## The root image whose site table matters for `action`: its own program,
+  ## for a process action the monitor will gather evidence for; "" otherwise.
+  if action.kind != bakProcess or
+      action.dependencyPolicy.kind notin MonitorPolicyKinds or
+      action.monitorDepfile.len > 0:
+    return ""
+  executedToolImagePath(action, config)
+
+proc prepareSiteTablesFor(t: InlineSiteTables; action: BuildAction;
+                          config: ptr BuildEngineConfig): string =
+  ## Before a monitored action launches: make sure the build has a table for
+  ## its root image (which the monitor's evidence never records, see
+  ## `executedToolImagePath`), and return the path of the sealed memfd
+  ## holding every table the build has, "" when there is none.
+  t.noteLaunch(siteTableRootImage(action, config), action.id)
+  t.currentPath()
+
+proc learnSiteTableImages(t: InlineSiteTables; action: BuildAction;
+                          evidence: PathSetEvidence) =
+  ## After a monitored action ran: table every executable or shared object it
+  ## was observed reading or looking up. The libraries the loader opened are
+  ## reads; the programs a driver execs (`cc1`, `as`) reach the evidence as
+  ## the lookups the driver made for them, not as reads.
+  for path in evidence.monitorReads:
+    t.noteImage(materialPath(action.cwd, path))
+  for path in evidence.monitorProbes:
+    t.noteImage(materialPath(action.cwd, path))
+
 proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
   ## The zero-evidence guard, applied to the set the RECORD IS KEYED ON.
   ##
@@ -9534,8 +9882,7 @@ proc gradeKeyedInputSet(action: BuildAction; col: var EvidenceCollection) =
   let observed = action.evidenceInputPaths(col.evidence).len
   if observed == 0:
     return
-  let keyed = action.cacheInputPaths(col.evidence)
-  if keyed.len > 0:
+  if action.hasCacheInputPath(col.evidence):
     return
   col.evidence.diagnostics.add(
     emptyKeyedInputSetDiagnostic(action.id, observed, observed))
@@ -11702,7 +12049,35 @@ proc isGitObjectStorePath*(path: string): bool =
   var memo = initTable[string, bool]()
   path.isGitObjectStorePath(memo)
 
+proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
+                         firstOnly: bool): seq[string]
+
+var cacheInputPathsComputationCount: Atomic[int]
+
+proc cacheInputPathsComputations*(): int =
+  ## How many complete keyed-input computations this process has made (the
+  ## early-stopping `hasCacheInputPath` is not one). For the regression test
+  ## that holds an executed action to one.
+  cacheInputPathsComputationCount.load()
+
 proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[string] =
+  ## The action-cache key's input path set; see `cacheInputPathsImpl`.
+  ##
+  ## An executed action needs it twice: for its local record and for the
+  ## portable accesses stored beside it. Both publish sites compute it ONCE
+  ## and hand the same set to both (`recordPortableFingerprint`'s `keyed`),
+  ## and the keyed-set grade asks only whether it is empty
+  ## (`hasCacheInputPath`), so a monitored compile's few hundred observations
+  ## are filtered once, not three times.
+  cacheInputPathsImpl(action, evidence, firstOnly = false)
+
+proc hasCacheInputPath*(action: BuildAction; evidence: PathSetEvidence): bool =
+  ## Whether `cacheInputPaths` is non-empty, stopping at the first path that
+  ## survives its filters.
+  cacheInputPathsImpl(action, evidence, firstOnly = true).len > 0
+
+proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
+                         firstOnly: bool): seq[string] =
   ## The action-cache key's input path set: the paths whose content or
   ## metadata a later run compares against to decide ``cdHit`` /
   ## ``cdMiss``. Exported for the regression tests that pin the two
@@ -11746,6 +12121,13 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
   ##   one. The monitor fold has already applied it to the observed channels
   ##   with the same scope; here it reaches the declared and tool-reported
   ##   ones, which the cache record used to drop on its own, by prefix.
+  # Every containment question this computation asks about one `..`-spelled
+  # path resolves the same prefix through the filesystem (once per tool
+  # root, ignored root and output); within one computation it is asked once.
+  if not firstOnly:
+    cacheInputPathsComputationCount.atomicInc()
+  let containment = beginContainmentMemo()
+  defer: endContainmentMemo(containment)
   let toolRoots = action.toolInputRoots()
   let volatile = evidence.volatileScope
   # The EXPLICIT prefix set, deliberately not the derived one. The derived
@@ -11771,6 +12153,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
       continue
     declaredMaterialized.incl(path.replace('\\', '/'))
     result.addUnique(seen, path)
+    if firstOnly: return
   for input in evidence.depfileInputs:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
@@ -11787,6 +12170,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
          path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
+    if firstOnly: return
   for input in evidence.monitorReads:
     let path = materialContainmentPath(action.cwd, input)
     let key = path.replace('\\', '/')
@@ -11803,6 +12187,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
          path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
+    if firstOnly: return
   for probe in evidence.monitorProbes:
     let path = materialContainmentPath(action.cwd, probe)
     if path.isVolatileMonitorPath(volatile):
@@ -11819,6 +12204,7 @@ proc cacheInputPaths*(action: BuildAction; evidence: PathSetEvidence): seq[strin
          path.isGitObjectStorePath(gitDirMemo)):
       continue
     result.addUnique(seen, path)
+    if firstOnly: return
 
 proc lookupEnv(env: openArray[string]; name: string):
     tuple[present: bool, value: string] =
@@ -12916,7 +13302,8 @@ proc monitorEvidenceRequirement(action: BuildAction;
 
 proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
                      cacheRoot: string;
-                     hostInProcess: bool): tuple[action: BuildAction;
+                     hostInProcess: bool;
+                     siteTablePath = ""): tuple[action: BuildAction;
                                                  diagnostic: string;
                                                  capturePath: string;
                                                  hostInProcess: bool] =
@@ -13047,10 +13434,17 @@ proc monitoredAction(action: BuildAction; config: BuildEngineConfig;
       # the action's environment would be writing into a variable io-mon
       # overwrites before any shim could read it. The flag is a channel io-mon
       # does not own and therefore cannot overwrite.
+      # The build's inline site tables (`inline_site_tables`), named to the
+      # wrapper by the engine's `/proc/<pid>/fd/<n>`: the wrapper opens the
+      # sealed memfd itself, checks it, and names its own descriptor to the
+      # tree. Like the capture path, it is not part of the action's identity.
+      let siteTableFlag =
+        if siteTablePath.len > 0: @["--inline-site-tables", siteTablePath]
+        else: @[]
       result.action.argv = @[monitorCli] & config.monitorCliArgs &
         @["--depfile", result.capturePath,
           "--interest", interestToTokens(monitorInterest(action))] &
-        monitorEvidenceFlag(monitorEvidenceScope(config)) &
+        monitorEvidenceFlag(monitorEvidenceScope(config)) & siteTableFlag &
         @["--"] & action.argv
     # M9.R.13c.2: shim-library env seed is layered at LAUNCH time via
     # ``launchChildEnv`` (NOT here on ``result.action.env``). The seed
@@ -14118,6 +14512,54 @@ proc monitorPayloadArgIndex(argv: openArray[string]): int =
     inc i
   -1
 
+const
+  ShippedMacosToolsEnvVar* = "STACKABLE_HOOKS_TOOLS_DIR"
+    ## The variable the stackable-hooks resolver (`resolveSipReplacement`)
+    ## reads for a tools root, after the invocation's own sandbox directory and
+    ## before the build-embedded store path.
+  ShippedMacosToolsSubdir* = "libexec" / "stackable-hooks-macos-tools"
+    ## Where a darwin release archive carries the non-SIP tools bundle,
+    ## relative to its prefix (`scripts/release/stage_release_macos_tools.sh`).
+
+proc shippedMacosToolsDirFor*(prefixes: openArray[string];
+                              validShell: proc(sh: string): bool): string =
+  ## The first ``<prefix>/libexec/stackable-hooks-macos-tools`` whose
+  ## ``bin/sh`` ``validShell`` accepts, or "". Pure apart from ``validShell``,
+  ## so a test can drive it on any host.
+  for prefix in prefixes:
+    if prefix.len == 0:
+      continue
+    let dir = prefix / ShippedMacosToolsSubdir
+    if validShell(dir / "bin" / "sh"):
+      return dir
+  ""
+
+when defined(macosx):
+  proc ensureShippedMacosToolsEnvironmentImpl()
+
+proc ensureShippedMacosToolsEnvironment*() =
+  ## Point the stackable-hooks resolver at the non-SIP tools bundle a darwin
+  ## release archive ships beside this image, when the caller has not chosen a
+  ## tools root (Distribution-And-Packaging.md §5.1, "The darwin non-SIP tools
+  ## bundle").
+  ##
+  ## A monitored action on macOS must start under a non-SIP shell. The
+  ## resolver's last fallback is the bundle's build-host store path, compiled
+  ## in, which a Mac without Nix does not have, so an unpacked release failed
+  ## every monitored launch with "SIP-safe monitored launch requires a non-SIP
+  ## shell". The archive carries the bundle at
+  ## ``<prefix>/libexec/stackable-hooks-macos-tools``, where ``<prefix>`` is
+  ## the parent of the running image's ``bin/``.
+  ##
+  ## Only an unset variable is filled: a caller's value always wins. It is set
+  ## in the process environment because that reaches every reader: this
+  ## engine's wrapper shell, the in-process monitor host, a ``repro internal
+  ## io monitor`` child and the shim in each monitored process, which all
+  ## resolve through the same stackable-hooks resolver. A Nix-installed engine
+  ## has no such directory and keeps the build-embedded path. A no-op off macOS.
+  when defined(macosx):
+    ensureShippedMacosToolsEnvironmentImpl()
+
 when defined(macosx):
   proc resolveNonSipShell*(): string
 
@@ -14690,6 +15132,30 @@ proc resolveMonitorShimLibForInstall*(): string =
     shimLibMemoKey = key
     shimLibMemoValue = result
 
+proc msvcInheritedSearchLists(action: BuildAction;
+                              config: BuildEngineConfig):
+    seq[(string, string)] =
+  ## The MSVC search lists (``MsvcListKeys``) the launched process inherits
+  ## from this one, with their values NOW: what ``mergeActionEnvWithMsvc``
+  ## puts the activation's MSVC-owned entries in front of when the action
+  ## does not declare the list itself. An isolated launch, or one under an
+  ## allowlisted environment, inherits none of them, so none is returned and
+  ## such an action gets the owned entries alone.
+  ##
+  ## Read per launch rather than taken from the activation, which is
+  ## captured once per process: the activation's own copy of ``PATH`` is the
+  ## host's ``PATH`` at that moment, and layering it would hide every later
+  ## change from both the launch and the key (``actionEnvResolver`` mirrors
+  ## this composition). See ``msvcDevEnvFromActivation``.
+  when defined(windows):
+    if config.hermeticEnv or action.isolateHostEnvironment:
+      return @[]
+    for name in MsvcListKeys:
+      if existsEnv(name):
+        result.add((name, getEnv(name)))
+  else:
+    discard
+
 proc launchChildEnv(action: BuildAction;
                     config: BuildEngineConfig): seq[string] =
   ## Nested-build resource model: an action's child process tree may itself
@@ -14944,6 +15410,27 @@ when defined(macosx):
   # spec's "reuse io-mon's existing population rather than re-implementing it".
   import stackable_hooks/propagation as sip_propagation
 
+  proc describeMacosToolsRoot*(root: string): string =
+    ## ``<root> (usable)``, ``<root> (no usable <root>/bin/sh)`` or
+    ## ``<root> (does not exist)``; ``(unset)`` for an empty root.
+    if root.len == 0:
+      return "(unset)"
+    if not dirExists(root):
+      return root & " (does not exist)"
+    let sh = root / "bin" / "sh"
+    if sip_propagation.isValidSipReplacement(sh):
+      root & " (usable)"
+    else:
+      root & " (no usable " & sh & ")"
+
+  proc ensureShippedMacosToolsEnvironmentImpl() =
+    if existsEnv(ShippedMacosToolsEnvVar):
+      return
+    let dir = shippedMacosToolsDirFor(runningImagePrefixCandidates(),
+      proc(sh: string): bool = sip_propagation.isValidSipReplacement(sh))
+    if dir.len > 0:
+      putEnv(ShippedMacosToolsEnvVar, dir)
+
   const nonSipShellCandidateNames* = ["sh", "bash", "dash", "ash", "zsh"]
     ## Executable names accepted as the non-SIP wrapper shell, most-preferred
     ## first. ``sh`` stays first so a host that does expose one keeps its
@@ -15026,7 +15513,13 @@ when defined(macosx):
         let candidate = entry / name
         if fileExists(candidate) and sip_propagation.isSipProtected(candidate):
           rejected.add(candidate)
-    parts.add("shipped tools=" & sip_propagation.StackableHooksBuiltToolsDir)
+    # Every tools root the shared resolver consults after PATH, with its
+    # state, rather than the build-embedded path alone as if it were shipped
+    # (Distribution-And-Packaging.md §5.1, the darwin tools bundle).
+    for (label, root) in [
+        ("STACKABLE_HOOKS_TOOLS_DIR", getEnv(ShippedMacosToolsEnvVar)),
+        ("build-embedded tools", sip_propagation.StackableHooksBuiltToolsDir)]:
+      parts.add(label & "=" & describeMacosToolsRoot(root))
     parts.add("searched " & $pathDirs & " PATH dir(s) for " &
       nonSipShellCandidateNames.join("/"))
     if rejected.len == 0:
@@ -15173,7 +15666,7 @@ proc preparedActionEnv(action: BuildAction;
   let childEnv = launchChildEnv(action, config)
   let mergedEnv =
     if actionUsesMsvcToolchain(action, monitorCliPath(config)):
-      mergeActionEnvWithMsvc(childEnv)
+      mergeActionEnvWithMsvc(childEnv, msvcInheritedSearchLists(action, config))
     else:
       childEnv
   let toolBinDirs = resolvedToolBinDirs(action, config.toolIdentityResolver)
@@ -16217,7 +16710,8 @@ proc allocMonitorHostSlot(pool: var MonitorHostPool): int =
 proc monitorHostRequest(action: BuildAction;
                         command: ReproCommandSpec;
                         depFilePath: string;
-                        evidenceScope: EvidenceScope): FsSnoopRequest =
+                        evidenceScope: EvidenceScope;
+                        siteTablePath = ""): FsSnoopRequest =
   ## Project the ONE argv+env contract every launch path shares onto io-mon's
   ## request. Both sides layer over the hosting process's own environment
   ## (``ReproCommandSpec.env`` through RunQuota's process backend,
@@ -16251,157 +16745,23 @@ proc monitorHostRequest(action: BuildAction;
     evidenceScope: evidenceScope,
     passthroughChildStdout: true,
     passthroughChildStderr: true,
-    isolateEnv: command.isolatedEnv)
+    isolateEnv: command.isolatedEnv,
+    # The build's inline site tables (`inline_site_tables`), the same memfd
+    # the wrapped path names with `--inline-site-tables`: io-mon opens and
+    # checks it itself and names its own descriptor to the tree.
+    inlineSiteTables: siteTablePath)
   for entry in command.env:
     let eq = entry.find('=')
     if eq <= 0:
       continue
     result.env.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
 
-when defined(posix):
-  type MonitorSpawnContext = object
-    savedIn: cint
-    savedOut: cint
-    savedErr: cint
-    nullFile: File
-    outFile: File
-    errFile: File
-    savedMask: Mode
-    madeCloseOnExec: seq[cint]
-    active: bool
-
-  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
-    ## Re-establish, across io-mon's spawn, the three things the retired
-    ## ``/bin/sh -c 'umask 022 && <repro> internal io monitor …'`` wrapper and
-    ## RunQuota's process backend used to provide for free.
-    ##
-    ## STDIO. io-mon spawns with ``poParentStreams``, so the monitored child
-    ## inherits THIS process's descriptors 0, 1 and 2 — for the engine, the
-    ## user's terminal, not a per-action capture. Pointing 1 and 2 at two
-    ## per-action files across the spawn gives the engine back separate
-    ## ``stdout`` and ``stderr``, and does it WITHOUT the monitored tree
-    ## opening anything: the child inherits descriptors that are already open,
-    ## so no ``open`` of a log path enters its dependency evidence. (A shell
-    ## redirect inside the monitored command would have put both log paths
-    ## into ``monitorWrites`` — which is why this is done here and not there.)
-    ##
-    ## STDIN, and it is descriptor 0 that makes this a correctness fix rather
-    ## than a capture convenience. EVERY other launch path gives the child
-    ## ``/dev/null`` on descriptor 0 — RunQuota's POSIX backend opens it
-    ## explicitly before ``execvp`` (``runquota_process.nim``), so an action
-    ## that reads stdin sees immediate EOF. ``poParentStreams`` hands the child
-    ## the ENGINE's stdin instead, which in a normal ``repro build`` is the
-    ## user's terminal: a monitored action that reads stdin would block the
-    ## build waiting for a keystroke, or worse, eat one. Redirecting it here
-    ## makes the hosted path answer EOF like every other path.
-    ##
-    ## UMASK. ``umaskWrappedArgv`` (M9.R.36.3) pins every spawned tool to the
-    ## canonical 0022 mask by wrapping the argv in a shell. A hosted action has
-    ## no wrapper shell to carry it, and monitoring one would add the shell's
-    ## own reads to the action's evidence, so the mask is set here and restored
-    ## immediately; a child inherits it across ``fork``.
-    ##
-    ## SAFE BECAUSE THE SCHEDULER IS SINGLE-THREADED, AND BECAUSE THE ONLY
-    ## OTHER THREADS OPEN NOTHING. The engine runs N concurrent child
-    ## PROCESSES from one poll loop, not N threads, so no other SCHEDULER code
-    ## can observe the window between this call and
-    ## ``endMonitorSpawnContext``.
-    ##
-    ## The qualification is Engine-Threadpool TP-1's, and the previous version
-    ## of this comment — "``createThread`` has zero occurrences in this
-    ## library" — was already wrong when it was written: HM-5's flush worker
-    ## was in ``repro_build_engine/monitor_flush.nim``, inside this library.
-    ## The claim that MATTERS was never the thread count anyway, it is what
-    ## those threads do, and it is checked rather than assumed in
-    ## ``worker_pool.nim``'s header: a pool worker opens no file and creates
-    ## no file, so neither the ``dup2`` on 0/1/2 nor the ``umask`` can be
-    ## observed by one. A future pool tenant that opens or creates a file
-    ## re-opens both questions, and it breaks by interleaving one action's
-    ## output into another's.
-    ##
-    ## EVERY DESCRIPTOR ABOVE 2, which is the same parity question as stdin
-    ## one number further up. RunQuota's POSIX backend closes every inherited
-    ## descriptor above 2 between ``fork`` and ``execvp``
-    ## (``closeInheritedChildFds`` in ``runquota_process.nim``), so a wrapped
-    ## action — and the ``repro internal io monitor`` reference it is compared
-    ## against — starts with 0, 1 and 2 and nothing else. io-mon's spawn closes
-    ## nothing, so a hosted action used to start with whatever this process
-    ## held open without ``FD_CLOEXEC``: the three stdio copies saved just
-    ## below (``dup`` does not set the flag), plus anything the engine's own
-    ## parent leaked into it. The test runner hands every test process its own
-    ## pipe ends that way, and under a parallel run the other tests' too.
-    ## Those descriptors are real kernel objects inside the monitored tree —
-    ## an action that ``fstat``s or reads one sees a pipe it did not create,
-    ## and every descriptor it opens itself lands at a different number than
-    ## it would under the wrapper, which is how TP-2's evidence comparison
-    ## caught it (a ``chan=localfd role=create`` record carrying fd 22 hosted
-    ## and fd 4 wrapped). Marking them close-on-exec for the spawn window
-    ## gives the hosted child the same table the other launch paths give; the
-    ## flags are restored in ``endMonitorSpawnContext``.
-    flushFile(stdout)
-    flushFile(stderr)
-    result.savedIn = fcntl(cint(0), F_DUPFD_CLOEXEC, cint(3))
-    result.savedOut = fcntl(cint(1), F_DUPFD_CLOEXEC, cint(3))
-    result.savedErr = fcntl(cint(2), F_DUPFD_CLOEXEC, cint(3))
-    if result.savedIn < 0 or result.savedOut < 0 or result.savedErr < 0:
-      if result.savedIn >= 0: discard close(result.savedIn)
-      if result.savedOut >= 0: discard close(result.savedOut)
-      if result.savedErr >= 0: discard close(result.savedErr)
-      raiseEngine("in-process monitor host: cannot duplicate stdio")
-
-    proc closeSaved(ctx: MonitorSpawnContext) =
-      discard close(ctx.savedIn)
-      discard close(ctx.savedOut)
-      discard close(ctx.savedErr)
-
-    if not open(result.nullFile, "/dev/null", fmRead):
-      closeSaved(result)
-      raiseEngine("in-process monitor host: cannot open /dev/null")
-    if not open(result.outFile, outPath, fmWrite):
-      close(result.nullFile)
-      closeSaved(result)
-      raiseEngine("in-process monitor host: cannot open stdout capture " &
-        outPath)
-    if not open(result.errFile, errPath, fmWrite):
-      close(result.nullFile)
-      close(result.outFile)
-      closeSaved(result)
-      raiseEngine("in-process monitor host: cannot open stderr capture " &
-        errPath)
-    discard dup2(cint(getFileHandle(result.nullFile)), cint(0))
-    discard dup2(cint(getFileHandle(result.outFile)), cint(1))
-    discard dup2(cint(getFileHandle(result.errFile)), cint(2))
-    result.savedMask = umask(Mode(0o022))
-    result.madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
-    result.active = true
-
-  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
-    if not ctx.active:
-      return
-    ctx.active = false
-    restoreInheritableDescriptors(ctx.madeCloseOnExec)
-    discard umask(ctx.savedMask)
-    flushFile(stdout)
-    flushFile(stderr)
-    discard dup2(ctx.savedIn, cint(0))
-    discard dup2(ctx.savedOut, cint(1))
-    discard dup2(ctx.savedErr, cint(2))
-    discard close(ctx.savedIn)
-    discard close(ctx.savedOut)
-    discard close(ctx.savedErr)
-    close(ctx.nullFile)
-    close(ctx.outFile)
-    close(ctx.errFile)
-else:
-  type MonitorSpawnContext = object
-    active: bool
-
-  proc beginMonitorSpawnContext(outPath, errPath: string): MonitorSpawnContext =
-    discard outPath
-    discard errPath
-
-  proc endMonitorSpawnContext(ctx: var MonitorSpawnContext) =
-    discard ctx
+# The spawn context (stdio capture, ``/dev/null`` stdin, the 0022 mask and
+# close-on-exec above 2 across io-mon's in-process spawn) lives in
+# ``repro_core/monitor_spawn_stdio``, shared with the Go standard convention's
+# monitored ``go list``.
+from repro_core/monitor_spawn_stdio import MonitorSpawnContext,
+  beginMonitorSpawnContext, endMonitorSpawnContext
 
 proc monitorHostStdioStem(actionId: string): string =
   sanitizeActionId(actionId) & "-" & actionIdFileSuffix(actionId)
@@ -16439,7 +16799,8 @@ proc releaseMonitorHostSlot(pool: var MonitorHostPool; slot: int) =
   pool.records[slot] = MonitorHostRecord()
 
 proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
-                      config: BuildEngineConfig; cacheRoot: string): int =
+                      config: BuildEngineConfig; cacheRoot: string;
+                      siteTablePath = ""): int =
   ## Bring io-mon's consumer up and launch the monitored tree, returning the
   ## pool slot that owns both. Raises like any other launch primitive; the
   ## caller turns a raise into the same ``process launch failed`` result the
@@ -16475,7 +16836,7 @@ proc startMonitorHost(pool: var MonitorHostPool; action: BuildAction;
     pool.records[slot].depTempPath = depTemp
     pool.records[slot].depDestPath = depDest
     pool.handles[slot] = startMonitor(monitorHostRequest(action, command,
-      depTemp, monitorEvidenceScope(config)))
+      depTemp, monitorEvidenceScope(config), siteTablePath))
     pool.records[slot].handleLive = true
     pool.records[slot].rootPid = int(rootPid(pool.handles[slot]))
   except CatchableError:
@@ -16993,6 +17354,63 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
     result.status = asFailed
     result.exitCode = if helperExit == 0: 1 else: helperExit
     result.stderr = "runquota helper result parse failed: " & err.msg
+
+proc runQuotaSizingProject*(): string =
+  ## The project this build's RunQuota session declares for sizing:
+  ## `RUNQUOTA_PROJECT` when set, else the name of the directory the build
+  ## runs in, the project root. The workspace manifest is not read: it does
+  ## not name a project per directory.
+  result = getEnv("RUNQUOTA_PROJECT", "")
+  if result.len == 0:
+    try:
+      result = getCurrentDir().lastPathPart
+    except OSError:
+      result = ""
+
+proc runQuotaSizingEntryPoint*(): string =
+  ## `RUNQUOTA_ENTRY_POINT` when set, else `build`.
+  result = getEnv("RUNQUOTA_ENTRY_POINT", "")
+  if result.len == 0:
+    result = "build"
+
+proc leasedFrontier(id: string; actionsById: Table[string, BuildAction];
+                    leaseOf: Table[string, uint64];
+                    memo: var Table[string, seq[uint64]]): seq[uint64] =
+  ## The leases that stand for action ``id`` in an `after` list: its own
+  ## when it ran under one in this build's session; otherwise (a cache hit,
+  ## an action run another way) the frontiers of its dependencies, so a
+  ## dependant still waits for the leased work behind it. Memoised: a
+  ## dependency's frontier is final once it has completed, which it has
+  ## before anything that depends on it finishes. Bounded just above
+  ## `MaxAfterLeases`, past which nothing is declared anyway.
+  if leaseOf.hasKey(id):
+    return @[leaseOf[id]]
+  if memo.hasKey(id):
+    return memo[id]
+  # Marked before the walk, so a (malformed) cycle ends instead of
+  # recursing forever.
+  memo[id] = @[]
+  var found: seq[uint64] = @[]
+  if actionsById.hasKey(id):
+    for dep in actionsById[id].deps:
+      for lease in leasedFrontier(dep, actionsById, leaseOf, memo):
+        if lease notin found:
+          found.add(lease)
+      if found.len > MaxAfterLeases:
+        break
+  memo[id] = found
+  found
+
+proc afterLeases*(deps: seq[string]; actionsById: Table[string, BuildAction];
+                 leaseOf: Table[string, uint64];
+                 memo: var Table[string, seq[uint64]]): seq[uint64] =
+  ## An action's `after` list: the leased frontier of every dependency.
+  for dep in deps:
+    for lease in leasedFrontier(dep, actionsById, leaseOf, memo):
+      if lease notin result:
+        result.add(lease)
+    if result.len > MaxAfterLeases:
+      return
 
 proc finishInlineRunQuotaProcess(id: string;
                                  process: var ReproRunQuotaRunningProcess):
@@ -18069,69 +18487,6 @@ when not defined(windows):
      response: exchange.response, attempts: exchange.attempts,
      diagnostic: exchange.diagnostic)
 
-proc ensureSnippetContent(content, openSentinel, closeSentinel, openSearch,
-                          closeSearch, snippet: string): string =
-  ## The bytes ``ensureSnippet`` wants the file holding ``content`` to hold.
-  ## A result equal to ``content`` means "already up to date, do not write".
-  ##
-  ## The file is often TRACKED (``nimRepropathsConfig`` targets a project's
-  ## ``config.nims``), so every byte outside the sentinel block -- each line
-  ## terminator, the presence or absence of a final one, the count of trailing
-  ## blank lines -- is copied through verbatim, never re-joined from split
-  ## lines. Re-joining is what used to add one "\n" per build: ``splitLines``
-  ## yields a trailing "" for a file ending in "\n", and the rejoin appended
-  ## another terminator after it. It also rewrote CRLF files to LF.
-  ##
-  ## Lines are recognised as ``splitLines`` does (``\r\n``, ``\n`` or a lone
-  ## ``\r``). The block's own lines, and any terminator added when appending
-  ## it, use CRLF when the file's first terminator is CRLF and LF otherwise,
-  ## so a CRLF checkout (e.g. Windows with ``core.autocrlf``) stays CRLF.
-  var eol = "\n"
-  let firstBreak = content.find({'\r', '\n'})
-  if firstBreak >= 0 and content.continuesWith("\r\n", firstBreak):
-    eol = "\r\n"
-  let newBlock =
-    if eol == "\n": openSentinel & "\n" & snippet & "\n" & closeSentinel
-    else: (openSentinel & "\n" & snippet & "\n" & closeSentinel).
-      replace("\r\n", "\n").replace("\n", eol)
-  # Byte offsets of the block: from the start of the (last) open-sentinel
-  # line before the first close-sentinel line, to the end of that close line's
-  # text -- its terminator is outside the block and therefore preserved.
-  var blockStart = -1
-  var blockEnd = -1
-  var lineStart = 0
-  var lastLineStart = 0
-  while lineStart <= content.len:
-    var lineEnd = lineStart
-    while lineEnd < content.len and content[lineEnd] notin {'\r', '\n'}:
-      inc lineEnd
-    let line = content[lineStart ..< lineEnd].strip()
-    if line.startsWith(openSearch):
-      blockStart = lineStart
-    elif line.startsWith(closeSearch) and blockStart != -1:
-      blockEnd = lineEnd
-      break
-    lastLineStart = lineStart
-    if lineEnd >= content.len:
-      break
-    lineStart = lineEnd + 1
-    if content[lineEnd] == '\r' and lineStart < content.len and
-        content[lineStart] == '\n':
-      inc lineStart
-  if blockStart != -1 and blockEnd != -1:
-    return content[0 ..< blockStart] & newBlock & content[blockEnd .. ^1]
-  # Absent block: append it after one blank line. These are byte-for-byte the
-  # bytes the action has always appended to an LF file, so a file that
-  # already received the block is not touched again by this rewrite: one
-  # terminator closes an unterminated non-blank last line, one more makes the
-  # blank separator, and the block ends with a terminator.
-  result = content
-  if content[lastLineStart .. ^1].strip().len > 0:
-    result.add(eol)
-  result.add(eol)
-  result.add(newBlock)
-  result.add(eol)
-
 proc executeBuiltinAction*(action: BuildAction): ActionResult =
   result = ActionResult(
     id: action.id,
@@ -18183,52 +18538,27 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
     of bakEnsureLine:
       if action.outputs.len != 1:
         raiseEngine("ensureLine action requires exactly one output: " & action.id)
+      # fs-file-utilities.md §2/§4: the line is written by the managed-file
+      # writer, so a changing write replaces the file atomically and an
+      # up-to-date file is not written (its mtime is kept).
       let destination = action.builtinPath(action.outputs[0])
-      let destExt = extendedPath(destination)
-      let lineToEnsure = action.builtinText
-      var content = ""
-      var linesList: seq[string] = @[]
-      if fileExists(destExt):
-        content = readFile(destExt)
-        linesList = content.splitLines()
-      var found = false
-      let lineToEnsureStrip = lineToEnsure.strip()
-      for l in linesList:
-        if l.strip() == lineToEnsureStrip:
-          found = true
-          break
-      if not found:
-        createDir(destExt.splitPath.head)
-        prepareBuiltinFileOutput(destination)
-        var newContent = content
-        if newContent.len > 0 and not newContent.endsWith("\n") and not newContent.endsWith("\r"):
-          newContent.add("\n")
-        newContent.add(lineToEnsure)
-        newContent.add("\n")
-        writeFile(destExt, newContent)
+      let prior = readManagedFile(destination)
+      discard updateManagedFile(destination, prior,
+        ensureLineContent(prior, action.builtinText))
     of bakEnsureSnippet:
       if action.outputs.len != 1:
         raiseEngine("ensureSnippet action requires exactly one output: " & action.id)
-      if action.builtinEntries.len < 5:
-        raiseEngine("ensureSnippet action requires openSentinel, closeSentinel, openSearch, closeSearch, and snippet")
+      # fs-file-utilities.md §3: the block is identified by its key, never
+      # by caller-supplied sentinel text, and spliced by the same writer
+      # ``fs.managedBlock`` uses. A duplicated or unterminated block raises
+      # ``ManagedBlockError`` naming the file and the block, which fails the
+      # action below.
       let destination = action.builtinPath(action.outputs[0])
-      let destExt = extendedPath(destination)
-      let openSentinel = action.builtinEntries[0]
-      let closeSentinel = action.builtinEntries[1]
-      let openSearch = action.builtinEntries[2]
-      let closeSearch = action.builtinEntries[3]
-      let snippet = action.builtinEntries[4]
-      var content = ""
-      if fileExists(destExt):
-        content = readFile(destExt)
-      let newContent = ensureSnippetContent(content, openSentinel,
-        closeSentinel, openSearch, closeSearch, snippet)
-      # Write only on a real change: an up-to-date tracked file keeps its
-      # bytes and its mtime.
-      if content != newContent:
-        createDir(destExt.splitPath.head)
-        prepareBuiltinFileOutput(destination)
-        writeFile(destExt, newContent)
+      let payload = action.ensureSnippetPayload()
+      let prior = readManagedFile(destination)
+      discard updateManagedFile(destination, prior,
+        spliceManagedBlock(prior, payload.key, payload.snippet,
+          alAfterBlankLine, destination))
     of bakStamp:
       if action.outputs.len != 1:
         raiseEngine("stamp action requires exactly one output: " & action.id)
@@ -19426,7 +19756,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc publishPeerCacheBundle(query: PeerCacheActionQuery;
                               record: ActionResultRecord;
                               evidenceLevel: EvidenceLevel;
-                              actionId: string) =
+                              action: BuildAction) =
     ## Peer-Cache publisher hook. Hands the freshly recorded execution and
     ## the engine's CAS (which holds its output blobs) to the configured
     ## publisher closure; Distributed-Execution M0's two-phase publish
@@ -19443,6 +19773,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## record is already stored and keeps serving this host.
     if config.peerCacheActionPublisher == nil:
       return
+    let actionId = action.id
     if actionId in preservingIds:
       runResult.trace(actionId, "peer-cache-publish-refused",
         UnsafePreserveOutputsCrossHostRefusal)
@@ -19461,6 +19792,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # UNDECLARED record is `weak` by §2.1's default and publishes as it
     # always has -- this gate narrows nothing that was previously published
     # unless someone labelled the edge.
+    #
+    # The ACTION's effective class is judged first, and traced: it is what
+    # names a content-keyed tool-owned cache the edge reads
+    # (Tool-Owned-Caches.md "Trust Boundary"), and it also refuses a record
+    # written before the engine derived that class, which carries no sidecar
+    # and would pass the record check below.
+    let classRefusal = action.crossHostRefusal()
+    if classRefusal.len > 0:
+      runResult.trace(actionId, "peer-cache-publish-refused", classRefusal)
+      return
     if record.determinism.declared and
         not record.determinism.class.allowsCrossMachineSubstitution():
       return
@@ -19481,6 +19822,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     stated.evidenceLevel = evidenceLevel
     config.peerCacheActionPublisher(stated, record, cas)
     finishStat("repro peer-cache publish", publishStart)
+
+  proc portableEligible(action: BuildAction): bool =
+    ## Whether `action` gets a portable identity at all (Caching-Architecture
+    ## D1): never without portable roots; for every edge when the
+    ## configuration asked for all of them (`REPRO_PORTABLE_CACHE=1`); else
+    ## only for an edge that declared a content-checked input policy, which
+    ## is the request to have its results shared (Edge-Derived-Identities.md
+    ## §3.3a). A `timestamp` record could not be served across a checkout
+    ## anyway, so computing its identity by default would cost a BLAKE3 pass
+    ## per input and buy nothing.
+    if config.portableRoots.len == 0:
+      return false
+    if not config.portableContentCheckedOnly:
+      return true
+    action.actionCachePolicy in {ffpChecksum, ffpHybrid}
+
+  proc graphHasPortableEligible(g: BuildGraph): bool =
+    for action in g.actions:
+      if portableEligible(action):
+        return true
+    false
 
   proc portableEnvOf(action: BuildAction): seq[(string, string)] =
     for entry in action.env:
@@ -20034,7 +20396,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     result = PeerCacheActionQuery(
       weakFingerprint: action.weakFingerprint,
       peerKey: action.weakFingerprint.bytes,
-      portable: config.portableRoots.len > 0,
+      # A peer cache is another host: the default, same-host portable scope
+      # (Caching-Architecture D1) leaves its key the local one, exactly as
+      # before that default existed; only `REPRO_PORTABLE_CACHE=1` keys peers
+      # on the portable fingerprint.
+      portable: config.portableRoots.len > 0 and
+        not config.portableContentCheckedOnly,
       cwd: action.cwd,
       policy: action.actionCachePolicy,
       workspaceRoot: config.peerCacheWorkspaceRoot,
@@ -20070,6 +20437,30 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       if key notin seen:
         seen.incl(key)
         result.add(physical)
+
+  proc embeddedRootReason(action: BuildAction): string =
+    ## Caching-Architecture D4: "" when no declared output of `action`
+    ## carries the physical path of a tracked logical root of this
+    ## invocation or of a declared source tree; else the trace reason
+    ## (`embedded_root_scan`). An output that cannot be scanned is reported
+    ## like one that embeds a path: it is not shown path-free.
+    var needles: seq[EmbeddedRootNeedle] = @[]
+    for root in config.portableRoots:
+      if root.kind == lrkTracked and root.path.len > 0:
+        needles.add(EmbeddedRootNeedle(label: root.label, path: root.path))
+    for tree in config.sourceTrees:
+      if tree.len > 0:
+        needles.add(EmbeddedRootNeedle(label: "source tree", path: tree))
+    if needles.len == 0:
+      return ""
+    for physical in portablePhysicalOutputsOf(action):
+      let finding = scanOutputForEmbeddedRoots(physical, needles)
+      if finding.found or finding.unscannable.len > 0:
+        let lp = toLogicalPath(config.portableRoots, physical)
+        let shown =
+          if lp.kind == lpkTracked: lp.label & ":" & lp.rel else: physical
+        return finding.describe(shown)
+    ""
 
   proc finishPortableRecord(idx: int; launched: BuildAction;
                             reads, probes, enumerations: seq[string];
@@ -20151,7 +20542,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       let outs = portableOutputs(config.portableRoots,
         portablePhysicalOutputsOf(action).filterIt(
           it notin optionalPaths or pathExists(it)))
-      if outs.portable:
+      # Caching-Architecture D4: an
+      # output that carries the physical path of a root -- a `-g` object's
+      # compressed debug info, a `__FILE__` string, a linked executable's
+      # interpreter in the store -- would be served to a checkout whose
+      # build names its own path there. Such a record is not portable; the
+      # local record serves this checkout as before.
+      let embedded =
+        if outs.portable: embeddedRootReason(action)
+        else: ""
+      if outs.portable and embedded.len > 0:
+        fp.portable = false
+        fp.reason = embedded
+        fp.strongHex = ""
+      elif outs.portable:
         runResult.results[idx].portableOutputs = outs.outputs
         # P3.3: persist the memo record beside the shared action cache so
         # any checkout of any project on this host can find it by portable
@@ -20169,13 +20573,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           config.binaryCacheIntermediateScope
         # A warm build re-derives the same records; publish each once. A
         # host-bound or volatile action is never offered to another host,
-        # the rule the binary-cache publisher applies.
-        let substitutable =
-          action.determinismClass.allowsCrossMachineSubstitution()
+        # the rule the binary-cache publisher applies. The class is the
+        # EFFECTIVE one, so an edge that reads a content-keyed tool-owned
+        # cache is host-bound here, and the trace names the cache.
+        let hostBoundReason = action.crossHostRefusal()
+        let substitutable = hostBoundReason.len == 0
         if not substitutable:
           runResult.trace(action.id, "portable-memo-host-bound",
-            "determinism class " & $action.determinismClass &
-            " forbids cross-machine substitution")
+            hostBoundReason)
         # The portable record's path set is what a consumer verifies, so it
         # is the evidence counted: a record naming no input in it would be
         # accepted on its weak fingerprint alone. A FIXED-OUTPUT action is
@@ -20196,6 +20601,32 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           evidenceSource, observations)
         if refusal.len == 0:
           refusal = portableRecordRefusal(memo)
+        # Caching-Architecture D6: a record that may be served across
+        # checkouts (the publication rule allows it, the edge is not
+        # host-bound, and D4 found no embedded root above) also stores the
+        # bytes of its outputs on this host, keyed by the content digests
+        # the record states, so another checkout that resolves the record
+        # restores them instead of executing. Soft-fail, like the record.
+        if substitutable and refusal.len == 0:
+          let stored =
+            try:
+              storePortableOutputs(sharedRoot / PortableOutputsDirName,
+                config.portableRoots, memo)
+            except CatchableError as err:
+              PortableOutputStoreResult(reason: err.msg)
+          if stored.reason.len > 0:
+            runResult.trace(action.id, "portable-outputs-store-failed",
+              stored.reason)
+          elif stored.blobsWritten > 0:
+            runResult.trace(action.id, "portable-outputs-stored",
+              "blobs=" & $stored.blobsWritten & " bytes=" &
+              $stored.bytesWritten & " already-stored=" &
+              $stored.blobsPresent)
+        else:
+          runResult.trace(action.id, "portable-outputs-not-stored",
+            if refusal.len > 0: refusal
+            else: "determinism class " & $action.determinismClass &
+              " forbids substitution from another checkout or host")
         if refusal.len > 0 and config.portableMemoPublisher != nil and
             substitutable:
           runResult.trace(action.id, "portable-memo-publish-refused", refusal)
@@ -20230,7 +20661,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         fp.reason)
 
   proc portableAccessesOf(action: BuildAction;
-                          evidence: PathSetEvidence): InputAccesses =
+                          evidence: PathSetEvidence;
+                          keyed: seq[string]): InputAccesses =
     ## What the portable record is computed over: the SAME filtered input
     ## set the local record uses (`cacheInputPaths`: tool roots, ignored
     ## prefixes and the action's own writes already removed), split into
@@ -20242,6 +20674,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## beside it (`recordInputAccesses`): it is the one thing a later local
     ## hit cannot recover from the record, and the only way the record that
     ## hit derives is the record this run produced (P3.4b).
+    let containment = beginContainmentMemo()
+    defer: endContainmentMemo(containment)
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence,
         membershipTrackedRoots):
@@ -20251,8 +20685,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
       probed.incl(materialPath(action.cwd, path))
+    # A path the action both probed and READ is a read: its content is what
+    # the action consumed, and keying it by its kind alone would give two
+    # different contents one key. Measured: GNU `ar` stats the object before
+    # it reads it, and the archive edge's record bound the object it
+    # archived as a probe ("file"), so the archive of two different objects
+    # had one portable key.
+    for path in evidence.monitorReads:
+      probed.excl(materialPath(action.cwd, path))
     let transient = transientOwnWrites(evidence)
-    for path in action.cacheInputPaths(evidence):
+    for path in keyed:
       if path in enumerated or isHostTempListing(path) or
           (transient.len > 0 and transientWriteKey(path) in transient) or
           isOwnOutput(action, path):
@@ -20265,7 +20707,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   proc recordPortableFingerprint(idx: int; action: BuildAction;
                                  evidence: PathSetEvidence;
                                  record: ActionResultRecord;
-                                 evidenceLevel: EvidenceLevel) =
+                                 evidenceLevel: EvidenceLevel;
+                                 keyed: seq[string]) =
     ## Cache-Scope P3.1: compute the action's portable weak/strong
     ## fingerprint over logical paths from `portableAccessesOf`. Reported on
     ## the result and the trace, and recorded in the portable memo.
@@ -20276,14 +20719,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## `evidenceLevel`, the grade of this execution, because a later hit on
     ## the record is served without it and must not publish what this run
     ## could not (campaign M17).
-    var accesses = portableAccessesOf(action, evidence)
+    ## `keyed` is `action.cacheInputPaths(evidence)`, which the caller has
+    ## just computed for `record`'s own input set.
+    var accesses = portableAccessesOf(action, evidence, keyed)
     accesses.evidenceLevel = evidenceLevel
     let evidenceSource = evidenceSourceOf(
       declaredActions.getOrDefault(action.id, action))
     accesses.evidenceSource = evidenceSource
     cache.recordInputAccesses(record.weakFingerprint,
       record.strongFingerprint, accesses)
-    if config.portableRoots.len == 0:
+    if not portableEligible(action):
       return
     # The OBSERVED environment, exactly as the local fingerprint takes it:
     # a variable a process read is an input whether or not the action
@@ -20309,7 +20754,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## M17): the action's own input-check policy and this execution's
     ## evidence level. There is no local record, so no recorded input to
     ## check for a content hash.
-    if config.portableRoots.len == 0:
+    if not portableEligible(action):
       return
     var reads: seq[string] = @[]
     for input in portableDeclaredInputsOf(action):
@@ -20340,7 +20785,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## A record without stored accesses (written before they were, or
     ## installed from a peer) derives nothing; the action's next run
     ## records the portable record live.
-    if config.portableRoots.len == 0:
+    if not portableEligible(action):
       return
     let accesses = cache.inputAccessesFor(record.weakFingerprint,
       record.strongFingerprint)
@@ -20444,8 +20889,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # published to a binary cache." Here the ACTION is in hand, so the class
     # comes from the declaration rather than from whatever a record happens
     # to carry -- an action labelled `volatile` must not publish even if the
-    # record it produced somehow lost its sidecar.
-    if not action.determinismClass.allowsCrossMachineSubstitution():
+    # record it produced somehow lost its sidecar. The class is the EFFECTIVE
+    # one: an edge reading a content-keyed tool-owned cache is host-bound
+    # (Tool-Owned-Caches.md "Trust Boundary"), and that refusal is traced
+    # because nobody declared it.
+    let classRefusal = action.crossHostRefusal()
+    if classRefusal.len > 0:
+      if action.readsContentKeyedToolCache:
+        runResult.trace(action.id, "binary-cache-publish-refused",
+          classRefusal)
       return
     let publishStart = statStart()
     var recordOutputs: seq[string] = @[]
@@ -20601,8 +21053,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     if config.publishCachedResults:
       return none(BuildRunResult)
     # Cache-Scope P3.4: portable records are derived per action from its
-    # local hit, which the whole-graph short-circuit never looks at.
-    if config.portableRoots.len > 0:
+    # local hit, which the whole-graph short-circuit never looks at. Under
+    # the default content-checked scope (Caching-Architecture D1) a graph
+    # with no `checksum` or `hybrid` edge derives nothing, so it keeps the
+    # short-circuit.
+    if graphHasPortableEligible(buildGraph):
       return none(BuildRunResult)
     if not config.rebuildMissingOutputsOnCacheHit:
       return none(BuildRunResult)
@@ -20967,6 +21422,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         RestoreOutcome(inputChanged: inputChanged)
       else:
         RestoreOutcome(declined: reason)
+    if action.kind in ManagedFileWriterKinds:
+      # ``ensureLine`` / ``ensureSnippet`` own a line or a block of their
+      # output, not the file: the recorded bytes include everything else the
+      # file held when the action last ran (the user's lines, other writers'
+      # blocks). Restoring them would revert those bytes, so a hit whose
+      # output is not what the last run left re-runs the action, which
+      # rewrites only its own line or block (reprobuild-pm
+      # spec/CLI/internal/fs-file-utilities.md §4, "Not memoized across
+      # hosts").
+      return decline("the output of a managed-file writer is not the " &
+        "recorded one; the action re-runs over it rather than restoring " &
+        "the whole file, which would revert bytes it does not own")
     if overwrites.len > 0 and action.unsafePreserveOutputs:
       let note = overwrites[0].path & " was modified (on disk " &
         overwrites[0].onDisk & ", recorded " & overwrites[0].restored &
@@ -21031,6 +21498,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # fall-through; see the note at its declaration. AC-5.
   var inlineRunQuotaSession: ReproRunQuotaSession
   var inlineRunQuotaSessionOpen = false
+  # SIZING DATA (`sizing-data`, off by default): the lease each inline action
+  # ran under, so a finishing action can name the leases of the actions it
+  # waited for (`leasedFrontier`). Kept only when the measurement is on.
+  let declareSizingAfter = sizingDataEnabled()
+  var sizingLeaseOf = initTable[string, uint64]()
+  var sizingFrontierMemo = initTable[string, seq[uint64]]()
 
   # M9.R.73.2 — session-scoped state for the spec-graded monitor-loss
   # ladder from ``reprobuild-specs/Failure-Semantics.md`` §"Monitoring
@@ -21232,6 +21705,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # pool owns live consumers and live monitored trees, and its teardown is the
   # ``finally`` below, so its lifetime has to be exactly this build's.
   var monitorHosts = MonitorHostPool()
+  # The monitor shim's inline-syscall scan, done once per image for the whole
+  # build and handed to each monitored action as a sealed table
+  # (`inline_site_tables`).
+  let siteTables = newInlineSiteTables()
+  defer: siteTables.close()
+  var siteTableRoots = initTable[string, string]()
+  proc isRunning(actionId: string): bool =
+    for item in running:
+      if item.id == actionId:
+        return true
+    false
   # HM-5 — every depfile publication that came back FAILED, by action id.
   # Consulted before an action's cache entry is published and reported again at
   # the end of the build for the publications that had not finished by then.
@@ -21276,7 +21760,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return true
     let sessionStart = statStart()
     try:
-      inlineRunQuotaSession = openRunQuotaSession()
+      inlineRunQuotaSession = openRunQuotaSession(
+        project = runQuotaSizingProject(),
+        entryPoint = runQuotaSizingEntryPoint())
       inlineRunQuotaSessionOpen = true
       runQuotaDaemonReachable = some(true)
       result = true
@@ -21416,7 +21902,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return true
     false
 
+  # BUILD-WAIT PRESSURE (see ``repro_runquota/build_pressure``): how much
+  # of this build's wall time its leased actions spent held up -- queued at
+  # RunQuota, or running slower than the daemon expects of them -- reported
+  # to the daemon on the build's session at most once a second and once
+  # more before it closes. The ``pressure-reports``
+  # measurement (off by default); with it off the tracker does nothing.
+  proc pressureNowMicros(): int64 = monotonicNowNs() div 1000
+  var buildPressure = initBuildPressure(buildPressureEnabled(),
+    pressureNowMicros(), int64(epochTime() * 1000.0))
+
+  proc reportBuildPressure(force: bool) =
+    if not buildPressure.enabled or not inlineRunQuotaSessionOpen:
+      return
+    let now = pressureNowMicros()
+    if not force and not buildPressure.reportDue(now):
+      return
+    discard sendPressureReport(inlineRunQuotaSession,
+      buildPressure.takeReport(now))
+
   proc failRunningAction(index: int; message: string) =
+    buildPressure.noteWithdrawn(running[index].id, pressureNowMicros())
     running[index].inlineFailure = inlineRunQuotaFailureResult(
       running[index].id, message)
     running[index].processKind = rpkInlineRunQuotaFailed
@@ -21438,6 +21944,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # while grants come back as fast as the build offers and halves once a
   # queued candidate waits past the threshold, within ``maxParallel``.
   var frontier = initFrontierSizer(int(maxParallel), frontierWaitMillis())
+
 
   proc pendingInlineCount(): int =
     for item in running:
@@ -21478,6 +21985,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               grant.diagnostic)
             return j
           frontier.noteQueuedGrant(engineNowMs() - running[j].queuedAtMs)
+          buildPressure.noteGranted(running[j].id, pressureNowMicros())
           try:
             var queued = running[j].queuedRunQuotaProcess
             running[j].runQuotaProcess = startGrantedWithRunQuota(
@@ -21569,8 +22077,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         pending.actions.join(", ") & " waited for a lease at " &
         runQuotaEndpointText() & ": no grant-stream frame and no status " &
         "reply for " & $grantUnresponsiveMs() & "ms (the daemon may be " &
-        "wedged or mid-restart). Retry, restart runquotad, or bypass " &
-        "RunQuota for this command with REPROBUILD_NO_RUNQUOTA=1 (unsafe).")
+        "wedged or mid-restart). " & RunQuotaUnresponsiveRemedy)
     var blocked = true
     for item in running:
       if item.processKind != rpkInlineRunQuotaPending:
@@ -21939,8 +22446,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # be able to key a hit). Nothing executes and nothing is fetched but
   # metadata.
   #
-  # Then materialize only what something still needs: the graph's sinks, and
-  # every resolved ancestor of an action that must execute. Engine deps are
+  # Then materialize only what something still needs: the graph's sinks,
+  # every resolved ancestor of an action that must execute, and every
+  # resolved action that carries a target name or a typed output, i.e.
+  # produces a result of the build (Caching-Architecture D7).
+  # The bytes come from what the record's producer stored on this host
+  # (D6), then from a remote restorer if one is configured. Engine deps are
   # ordering edges, not per-file edges, so an executing action may read any
   # ancestor's output — hence ancestors, not just direct deps. An output that
   # cannot be put in place un-resolves its action AND its descendants, whose
@@ -21993,6 +22504,17 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     var resolved = initTable[string, PortableMemoRecord]()
     var producedOutputs = initTable[string, PortableOutput]()
     var ancestorsOf = initTable[string, HashSet[string]]()
+    var diskIdentities = initTable[string, Option[string]]()
+      ## The identity a path-set entry has on disk, computed once per
+      ## pre-pass. Every compile of a project reads the same toolchain files
+      ## and probes the same search directories, so without this each
+      ## lookup re-derived the identities of the same few hundred paths
+      ## (measured: the warm no-op of a 300-source project spent most of
+      ## its extra time there). It holds only entries no graph action
+      ## produces and no graph view answers (those are resolved above, per
+      ## action), and the lookup loop writes nothing, so an entry's identity
+      ## cannot change between two lookups in it; the materialization below
+      ## does not consult it.
     const Unresolved = "unresolved-upstream-output"
       ## An identity no real input has, so a path set that names an output
       ## of an unresolved action computes a strong fingerprint no record has.
@@ -22101,7 +22623,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if view.unresolved:
               return some(Unresolved)
             return some(graphViewIdentity(view, entry.kind))
-        none(string)
+        # On disk: what `currentIdentity` would compute without a resolver,
+        # memoized for the pre-pass (`diskIdentities`).
+        let memoKey = $entry.kind & "\x00" & entry.path
+        if memoKey notin diskIdentities:
+          diskIdentities[memoKey] = currentIdentity(roots, entry, nil)
+        diskIdentities[memoKey]
 
     for id in order:
       let action = actionsById[id]
@@ -22113,6 +22640,13 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       ancestorsOf[id] = ancestors
       if not (action.cacheable or action.fixedOutput) or
           action.dynamicDepsFile.len > 0:
+        continue
+      if not portableEligible(action):
+        # Caching-Architecture D1: under the default scope only an edge that
+        # declared a content-checked policy has a portable identity, so a
+        # `timestamp` edge is never served from the portable plane; it, and
+        # every descendant (its dependency stays unresolved), go through the
+        # ordinary scheduler.
         continue
       if id in preservingIds:
         # UNSAFE preserve-outputs: never served from another host (nor
@@ -22149,8 +22683,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         hit = lookupMemo(memoRoot, roots, weak, resolver)
       except CatchableError as err:
         runResult.trace(id, "portable-lookup-failed", err.msg)
+      # A host-bound action is never substituted from another host (§5),
+      # and that includes an edge whose class is host-bound because it reads
+      # a content-keyed tool-owned cache (Tool-Owned-Caches.md "Trust
+      # Boundary"); that refusal is traced, naming the cache.
+      let remoteRefusal = action.crossHostRefusal()
       if hit.isNone and config.portableMemoLookup != nil and
-          action.determinismClass.allowsCrossMachineSubstitution():
+          remoteRefusal.len > 0 and action.readsContentKeyedToolCache:
+        runResult.trace(id, "portable-lookup-remote-refused", remoteRefusal)
+      if hit.isNone and config.portableMemoLookup != nil and
+          remoteRefusal.len == 0:
         source = "remote"
         try:
           hit = config.portableMemoLookup(roots, weak, resolver)
@@ -22195,10 +22737,62 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
 
     if resolved.len == 0:
       return
+    proc anyOutputPresent(record: PortableMemoRecord): bool =
+      ## Whether something already stands at one of the record's output
+      ## paths in this checkout (a file, a directory or a link).
+      for output in record.outputs:
+        let physical = toPhysicalPath(roots, output.path)
+        if physical.isSome:
+          let p = extendedPath(physical.get())
+          if symlinkExists(p) or fileExists(p) or dirExists(p):
+            return true
+      false
+    proc restoreResolved(action: BuildAction;
+                         record: PortableMemoRecord): string =
+      ## Caching-Architecture D6: the bytes a record's producer stored on
+      ## this host first, then a remote restorer when one is configured.
+      ## "" when the outputs are in place; otherwise every reason, the
+      ## local one first. A record the publication rule refuses, or one
+      ## whose edge is host-bound, stored no bytes and restores none here.
+      var reasons: seq[string] = @[]
+      let ruleRefusal = portableRecordRefusal(record)
+      if not action.determinismClass.allowsCrossMachineSubstitution():
+        reasons.add("determinism class " & $action.determinismClass &
+          " forbids substitution from another checkout, so its outputs " &
+          "are not stored")
+      elif ruleRefusal.len > 0:
+        reasons.add("its outputs are not stored on this host: " &
+          ruleRefusal)
+      else:
+        let local =
+          try:
+            restorePortableOutputs(sharedRoot / PortableOutputsDirName,
+              roots, record)
+          except CatchableError as err:
+            err.msg
+        if local.len == 0:
+          return ""
+        reasons.add(local)
+      if config.portableMemoRestorer != nil:
+        let remote =
+          try: config.portableMemoRestorer(roots, record)
+          except CatchableError as err: err.msg
+        if remote.len == 0:
+          return ""
+        reasons.add("remote: " & remote)
+      reasons.join("; ")
     var materialized = initTable[string, string]()
     while true:
-      # Needed: resolved sinks, and resolved ancestors of anything that
-      # must execute.
+      # Needed (Caching-Architecture D7): resolved sinks, resolved
+      # ancestors of anything that must execute, and the declared outputs
+      # of a resolved action that produces a target the build names as
+      # its result: one that carries a target name (a typed tool call's
+      # implicit target) or a typed output (a convention member's library
+      # or executable).
+      # An intermediate none of these covers is left out, unless
+      # something already stands at one of its output paths: then it must
+      # be the record's bytes, so it is checked like a demanded output and
+      # replaced, or its producer executes.
       var demanded = initHashSet[string]()
       for i in countdown(order.high, 0):
         let id = order[i]
@@ -22210,7 +22804,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if id notin resolved or id in materialized:
           continue
         let sink = dependents.getOrDefault(id).len == 0
-        if not sink and id notin demanded:
+        let namedTarget = actionsById[id].targetNames.len > 0 or
+          actionsById[id].typedOutputs.len > 0
+        if not sink and id notin demanded and not namedTarget and
+            not anyOutputPresent(resolved[id]):
           continue
         let record = resolved[id]
         var physicalRecorded: seq[string] = @[]
@@ -22241,12 +22838,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if onDisk.len > 0 and onDisk != output.digest:
             overwrites.add(OutputOverwrite(path: p,
               onDisk: "content:" & onDisk, restored: "content:" & output.digest))
-        let why =
-          if config.portableMemoRestorer == nil:
-            "no portable restorer configured"
-          else:
-            try: config.portableMemoRestorer(roots, record)
-            except CatchableError as err: err.msg
+        let why = restoreResolved(actionsById[id], record)
         fileMetadataCache.clear()
         if why.len == 0:
           materialized[id] = "portable-restored"
@@ -22347,6 +22939,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if localPoolGateActive and used + units > cap:
           inc i
           continue
+        # The first run of a toolchain image tells the engine which images
+        # its driver execs; wait for it, so this action launches with their
+        # site tables instead of decoding them (`inline_site_tables`).
+        if siteTables.firstRunPending(isRunning):
+          if not siteTableRoots.hasKey(id):
+            siteTableRoots[id] = siteTableRootImage(action, unsafeAddr config)
+          if siteTables.holdsLaunch(siteTableRoots[id], isRunning):
+            inc i
+            continue
 
         ready.delete(i)
         if not applyDynamicDeps(id):
@@ -22653,12 +23254,22 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           var peerInstalled = false
           # Not for an UNSAFE preserve-outputs step: none of its records
           # leaves a host, and its weak fingerprint is local to that mode, so
-          # no conforming peer could answer (`preservingIds`).
-          if lookup.status in {aclMissNoRecord, aclMissInputChanged,
-              aclMissNoOutputPayload} and
-              id notin preservingIds and
-              config.peerCacheActionFetcher != nil and
-              config.peerCacheActionInstaller != nil:
+          # no conforming peer could answer (`preservingIds`). Nor for an
+          # action whose effective class forbids cross-machine substitution
+          # (§5): its records are one host's realization, which for an edge
+          # reading a content-keyed tool-owned cache includes whatever the
+          # cache's other writers left in it (Tool-Owned-Caches.md "Trust
+          # Boundary"), so no peer's record of it is one this host can take.
+          let peerMiss = lookup.status in {aclMissNoRecord,
+            aclMissInputChanged, aclMissNoOutputPayload} and
+            id notin preservingIds and
+            config.peerCacheActionFetcher != nil and
+            config.peerCacheActionInstaller != nil
+          let peerClassRefusal =
+            if peerMiss: action.crossHostRefusal() else: ""
+          if peerClassRefusal.len > 0 and action.readsContentKeyedToolCache:
+            runResult.trace(id, "peer-cache-fetch-refused", peerClassRefusal)
+          if peerMiss and peerClassRefusal.len == 0:
             let peerFetchStart = statStart()
             let peerQuery = peerCacheQueryOf(action)
             let peerReply = config.peerCacheActionFetcher(peerQuery)
@@ -23076,6 +23687,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               config = addr config,
               sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
+            siteTables.learnSiteTableImages(action, evidence.evidence)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
               runResult.results[idx].status = asFailed
@@ -23100,11 +23712,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 let recordStart = statStart()
                 let storeOutputBlobs =
                   storeOutputBlobsFor(action, evidence.evidence)
+                let keyed = action.cacheInputPaths(evidence.evidence)
                 let record = cache.recordActionResult(cas.inner,
                   action.weakFingerprint,
                   action.actionCachePolicy,
-                  action.recordedInputNames(
-                    action.cacheInputPaths(evidence.evidence)),
+                  action.recordedInputNames(keyed),
                   action.recordedOutputPaths(), action.cwd,
                   storeOutputBlobs = storeOutputBlobs,
                   metadataCache = addr fileMetadataCache,
@@ -23129,9 +23741,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, action.id), record)
                 recordPortableFingerprint(idx, action, evidence.evidence, record,
-                  evidenceLevelOf(evidence.monitorStatus))
+                  evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(action), record,
-                  evidenceLevelOf(evidence.monitorStatus), action.id)
+                  evidenceLevelOf(evidence.monitorStatus), action)
                 publishBinaryCacheBundle(action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(id, idToIndex.resultIndex(id), err.msg)
@@ -23240,8 +23852,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             continue
 
         let monitorPlanStart = statStart()
+        let siteTablePath =
+          if action.kind == bakProcess and
+              action.dependencyPolicy.kind in MonitorPolicyKinds and
+              action.monitorDepfile.len == 0:
+            siteTables.prepareSiteTablesFor(action, unsafeAddr config)
+          else:
+            ""
+        siteTableRoots.del(id)
         let plan = monitoredAction(action, config, cacheRoot,
-          hostMonitorInProcess)
+          hostMonitorInProcess, siteTablePath)
         if plan.capturePath.len > 0:
           wrappedMonitorCaptures[id] = plan.capturePath
         finishStat("repro monitor plan", monitorPlanStart)
@@ -23307,6 +23927,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               config = addr config,
               sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
+            siteTables.learnSiteTableImages(plan.action, evidence.evidence)
             # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
             # cannot re-derive: what a foreign provisioner daemon reported
             # about its own evaluation. `collectEvidence` builds a fresh
@@ -23355,11 +23976,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 # silently skip otherwise.
                 let storeOutputBlobs =
                   storeOutputBlobsFor(plan.action, evidence.evidence)
+                let keyed = plan.action.cacheInputPaths(evidence.evidence)
                 let record = cache.recordActionResult(cas.inner,
                   plan.action.weakFingerprint,
                   plan.action.actionCachePolicy,
-                  plan.action.recordedInputNames(
-                    plan.action.cacheInputPaths(evidence.evidence)),
+                  plan.action.recordedInputNames(keyed),
                   plan.action.recordedOutputPaths(), plan.action.cwd,
                   storeOutputBlobs = storeOutputBlobs,
                   metadataCache = addr fileMetadataCache,
@@ -23381,9 +24002,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 writeActionResultRecordFile(
                   dependencyEvidencePath(cacheRoot, plan.action.id), record)
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                  record, evidenceLevelOf(evidence.monitorStatus))
+                  record, evidenceLevelOf(evidence.monitorStatus), keyed)
                 publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
-                  evidenceLevelOf(evidence.monitorStatus), plan.action.id)
+                  evidenceLevelOf(evidence.monitorStatus), plan.action)
                 publishBinaryCacheBundle(plan.action, record)
               except UnreadableInputError as err:
                 runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
@@ -23512,7 +24133,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # when the monitor plan said so, which it only does for a launch
             # path the engine spawns.
             monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
-              cacheRoot)
+              cacheRoot, siteTablePath)
           elif bypassRunQuota:
             directProcess = startBypassRunQuotaProcess(plan.action, config)
           else:
@@ -23629,10 +24250,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             var processKind: RunningProcessKind
             var runQuotaProcess: ReproRunQuotaRunningProcess
             var queuedRunQuotaProcess: ReproRunQuotaQueuedProcess
+            buildPressure.noteReady(staged.id, pressureNowMicros())
             case offer.kind
             of rqokStarted:
               runQuotaProcess = offer.running
               processKind = rpkInlineRunQuota
+              buildPressure.noteGranted(staged.id, pressureNowMicros())
               inc grantedAtOnce
             of rqokQueued:
               queuedRunQuotaProcess = offer.queued
@@ -23725,6 +24348,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           runIndex = tickRunQuotaQueue()
           if runIndex >= 0:
             break
+        reportBuildPressure(force = false)
         # In-Process-Monitor-Hosting HM-4 — settle EVERY hosted monitor whose
         # root has exited before choosing which action to reap, and settle
         # them in their own pass so the choice cannot skip any.
@@ -23827,6 +24451,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.id,
             "runquota inline process failed: queued action selected before grant")
         of rpkInlineRunQuota:
+          if declareSizingAfter and actionsById.hasKey(runningItem.id):
+            runningItem.runQuotaProcess.declareAfter(afterLeases(
+              actionsById[runningItem.id].deps, actionsById, sizingLeaseOf,
+              sizingFrontierMemo))
           finishInlineRunQuotaProcess(
             runningItem.id,
             runningItem.runQuotaProcess)
@@ -23852,10 +24480,26 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             runningItem.resultPath,
             cacheRoot)
       finishStat("repro runquota finish", finishStart)
+      # The lease this action ran under, for the `after` lists of the
+      # actions that depend on it (`sizing-data`).
+      if declareSizingAfter and runningItem.processKind == rpkInlineRunQuota and
+          finished.leaseId > 0'u64:
+        sizingLeaseOf[finished.id] = finished.leaseId
       if runIndex < 0:
         raiseEngine("internal missing running action: " & finished.id)
       if runningItem.processKind == rpkHelperProcess:
         closeProcessOnce(runningItem.process)
+      # The finish is where a running action's slowdown becomes known: the
+      # launcher's duration against the daemon's expected uncontended one,
+      # which the finish's acknowledgement carried. Any other way out of the
+      # running set (a denial, a failed launch) only ends its wait.
+      if runningItem.processKind == rpkInlineRunQuota and
+          runningItem.runQuotaProcess.completed:
+        buildPressure.noteFinished(runningItem.id, pressureNowMicros(),
+          runningItem.runQuotaProcess.execution.elapsedMillis,
+          runningItem.runQuotaProcess.execution.expectedUncontendedMillis)
+      else:
+        buildPressure.noteWithdrawn(runningItem.id, pressureNowMicros())
       let finishedUsed = poolRunning.getOrDefault(runningItem.pool, 0'u32)
       poolRunning[runningItem.pool] =
         if finishedUsed > runningItem.poolUnits:
@@ -23939,6 +24583,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               sourceTreeSpellings = addr sourceTreeSpellings)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
+        siteTables.learnSiteTableImages(action, evidence.evidence)
         if wrappedCapture.len > 0:
           enqueueMonitorFlush(MonitorFlushJob(actionId: finished.id,
             tempPath: wrappedCapture, destPath: action.monitorDepfile))
@@ -24000,9 +24645,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # publisher (with this action opted in) needs to read the
             # blob payloads back out of the local CAS.
             let storeOutputBlobs = storeOutputBlobsFor(action, evidence.evidence)
+            let keyed = action.cacheInputPaths(evidence.evidence)
             let record = cache.recordActionResult(cas.inner, action.weakFingerprint,
               action.actionCachePolicy,
-              action.recordedInputNames(action.cacheInputPaths(evidence.evidence)),
+              action.recordedInputNames(keyed),
               action.recordedOutputPaths(), action.cwd,
               storeOutputBlobs = storeOutputBlobs,
               metadataCache = addr fileMetadataCache,
@@ -24017,9 +24663,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             writeActionResultRecordFile(
               dependencyEvidencePath(cacheRoot, action.id), record)
             recordPortableFingerprint(idx, action, evidence.evidence, record,
-              evidenceLevelOf(evidence.monitorStatus))
+              evidenceLevelOf(evidence.monitorStatus), keyed)
             publishPeerCacheBundle(peerCacheQueryOf(action), record,
-              evidenceLevelOf(evidence.monitorStatus), action.id)
+              evidenceLevelOf(evidence.monitorStatus), action)
             publishBinaryCacheBundle(action, record)
           except UnreadableInputError as err:
             runResult.traceUnreadableInput(finished.id, idx, err.msg)
@@ -24108,6 +24754,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         teardownFailures.add("stopping action " & item.id & identities &
           ": " & err.msg)
     if inlineRunQuotaSessionOpen:
+      # The last build-wait pressure report, before the session closes:
+      # whatever is still in flight ends here.
+      try:
+        for item in running:
+          buildPressure.noteWithdrawn(item.id, pressureNowMicros())
+        reportBuildPressure(force = true)
+      except CatchableError:
+        discard
       emitActionExtensionRows(inlineRunQuotaSession, runResult, actionsById)
       # The daemon refuses to close a session that still owns leases, and
       # that refusal is correct: it is kept verbatim in the collected text,

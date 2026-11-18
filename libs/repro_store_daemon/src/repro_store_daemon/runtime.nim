@@ -335,6 +335,8 @@ proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse 
     nonRedistributable: req.nonRedistributable,
     launcher: req.launcher,
     closureManifest: req.closureManifest,
+    closureEntries: parseClosureManifestText(req.closureEntries.join("\n"),
+      "closure entries of " & req.packageSelector),
     stripComponents: req.stripComponents,
     packageId: req.packageId,
     lockIdentity: req.lockIdentity,
@@ -476,6 +478,14 @@ proc handleClient(socket: IpcConn; config: DevDaemonConfig; startedAt: Time;
       errorBody("unsupported store-daemon message: " & $frame.kind))
 
 proc runDevDaemonForeground*(config: DevDaemonConfig): int =
+  # The private per-user directory is admitted before anything is bound in
+  # it or written to it: the endpoint, when it lies there, and the status
+  # file, which lives there whenever XDG_RUNTIME_DIR is unset. reprobuild-pm
+  # spec/Store-Daemon-And-Multi-User-Coordination.md, "The per-user endpoint
+  # directory is private". A refusal raises, naming the directory.
+  admitDevEndpointDir(config.endpoint)
+  admitDevRuntimeDir()
+
   var daemonLock = acquireDevDaemonLock(config)
   defer:
     releaseDevDaemonLock(daemonLock)
@@ -491,6 +501,10 @@ proc runDevDaemonForeground*(config: DevDaemonConfig): int =
       stderr.writeLine("reprostored --dev: endpoint already hosts store " &
         existing.storeRoot)
       return 2
+  except StoreDaemonEndpointRefused:
+    # Another account listens at this endpoint. Never unlink or replace its
+    # socket (removeEndpointFiles / the bind's rename would): refuse.
+    raise
   except CatchableError:
     discard
 
@@ -503,7 +517,17 @@ proc runDevDaemonForeground*(config: DevDaemonConfig): int =
         " quarantined-prefixes=" & $report.quarantinedPrefixes.len)
 
   removeEndpointFiles(config)
-  var listener = bindIpcListener(config.endpoint)
+  var listener =
+    when defined(windows):
+      # Owner and DACL are this user's SID alone, so a client's owner check
+      # (``requireIpcListener``) admits this pipe even when the daemon runs
+      # elevated. reprobuild-pm
+      # spec/Store-Daemon-And-Multi-User-Coordination.md, "A client
+      # authenticates the daemon".
+      bindIpcListener(config.endpoint,
+        sddl = ownerOnlyPipeSddl(ipcOwnIdentity().sid))
+    else:
+      bindIpcListener(config.endpoint)
   defer:
     closeIpcListener(listener)
     removeEndpointFiles(config)
@@ -643,3 +667,13 @@ proc renderStatus*(status: StoreDaemonStatus): string =
     "realized-prefix-count: " & $status.realizedPrefixCount & "\n" &
     "root-count: " & $status.rootCount & "\n" &
     "pending-realizations: " & $status.pendingRealizationCount
+
+proc renderRefusedStatus*(endpoint, reason: string): string =
+  ## What ``repro store daemon status --dev`` prints for an endpoint the
+  ## client refused (``StoreDaemonEndpointRefused``): never "not-running",
+  ## because whoever holds it is not this user's daemon and may well be
+  ## running. reprobuild-pm ``spec/Store-Daemon-And-Multi-User-Coordination.md``
+  ## §"A client authenticates the daemon".
+  "repro store daemon: refused (the endpoint is not this user's)\n" &
+    "endpoint: " & endpoint & "\n" &
+    "reason: " & reason

@@ -30,6 +30,7 @@ const
   SqliteBusy* = 5
   SqliteLocked* = 6
 
+  SqliteOpenReadonly* = 0x00000001
   SqliteOpenReadwrite* = 0x00000002
   SqliteOpenCreate* = 0x00000004
   SqliteOpenNoMutex* = 0x00008000

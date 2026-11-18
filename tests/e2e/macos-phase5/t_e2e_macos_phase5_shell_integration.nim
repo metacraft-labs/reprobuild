@@ -220,7 +220,7 @@ suite "shell.integration: REAL apply / verify / destroy (sandbox-only)":
         doAssert fileExists(zshrc),
           ".zshrc not created by applyShellIntegration"
         let after1 = readFile(zshrc)
-        doAssert after1.contains("repro-managed:" & blockId),
+        doAssert after1.contains("repro:home:" & blockId),
           "managed-block sentinel missing from .zshrc"
         doAssert after1.contains("direnv hook zsh"),
           "direnv hook snippet body missing from .zshrc"
@@ -267,7 +267,7 @@ suite "shell.integration: REAL apply / verify / destroy (sandbox-only)":
         destroyShellIntegration(zshrc, blockId)
         let after2 =
           if fileExists(zshrc): readFile(zshrc) else: ""
-        doAssert not after2.contains("repro-managed:" & blockId),
+        doAssert not after2.contains("repro:home:" & blockId),
           "managed-block sentinel still present after destroy"
         doAssert not after2.contains("direnv hook zsh"),
           "direnv hook snippet still in .zshrc after destroy"

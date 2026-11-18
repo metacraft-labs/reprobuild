@@ -103,10 +103,11 @@ suite "M6 the entropy blessing round-trips through the action payload":
     # is spelled out too: v27's capture-breadth byte, v28's fixedOutput byte
     # v29's empty `subToolRefs` list, v30's empty `scratchDirs` list and v31's
     # empty `removeBeforeRun` list, plus v32's empty `optionalOutputs` list
-    # (a u32 count of zero each) and v33's width fields (two u32 and an empty
-    # string: the action's range and width flag, 12 bytes).
+    # (a u32 count of zero each), v33's width fields (two u32 and an empty
+    # string: the action's range and width flag, 12 bytes) and v35's empty
+    # `contentKeyedToolCaches` list.
     check encodeBuildActionPayload(action).len - v23.len ==
-      (1 + 4 + 1) + 1 + 1 + 1 + 4 + 4 + 4 + 4 + (4 + 4 + 4)
+      (1 + 4 + 1) + 1 + 1 + 1 + 4 + 4 + 4 + 4 + (4 + 4 + 4) + 4
 
     let decoded = decodeBuildActionPayload(v23)
     # The surrounding fields must still decode, or this would be testing a

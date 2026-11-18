@@ -24,9 +24,9 @@
 ## path set, and the third is what gives the first two their meaning:
 ##
 ##   1. a new version of `libssl`, whose metadata WAS fetched (§5.6's
-##      over-approximation across variant arms) and which the solve did not
-##      consult because the `tls` variant resolved to `false` — **no
-##      invalidation**;
+##      over-approximation across variant arms) and whose dormant arm cannot
+##      open because the `tls` variant is pinned `false`, published ABOVE the
+##      version `lowest` chose for it — **no invalidation**;
 ##   2. an entirely new package the fetch plan never asked for — **no
 ##      invalidation**;
 ##   3. a new version of `libfoo` INSIDE the interval the solve's answer
@@ -38,14 +38,16 @@
 ## ## Why case (1) is the one that needed NLF-M9
 ##
 ## `libssl`'s version list is fetched. It is on disk next to `libfoo`'s when
-## the solve runs. The only thing that distinguishes it is that nothing
-## SELECTED it — which is the fact NLF-M9 made the solve record
-## (`UnifiedSolution.selected`, derived in the ASP from the same
-## `variant_assigned` atom that gates the range constraint). An implementation
-## that keyed the solve edge on the files it was handed, rather than on the
-## packages it consulted, would invalidate here; and it would do so while
-## producing an identical lock, so only the solve-execution assertion catches
-## it.
+## the solve runs. What distinguishes it is that nothing SELECTED it — the
+## fact NLF-M9 made the solve record (`UnifiedSolution.selected`, derived in
+## the ASP from the same `variant_assigned` atom that gates the range
+## constraint) — so no live range bounds it and its only material fact is the
+## version the lock records for it. An implementation that keyed the solve
+## edge on the files it was handed, rather than on what the answer depends
+## on, would invalidate here; and it would do so while producing an identical
+## lock, so only the solve-execution assertion catches it. The opposite
+## failure — an unselected package treated as not consulted at all — is
+## `t_materiality_covers_unselected_and_dormant_constraints` (NLF-GEN-8).
 ##
 ## ## Test-double policy: NO mocks, doubles, or fakes
 ##
@@ -104,10 +106,19 @@ suite "NLF-GEN-1 the premise: the dormant arm's metadata IS fetched":
 
       let r = runLockSolve(req, "")
       check r.solveExecuted
-      # Fetched, and then NOT consulted: the observation set names `libfoo`
-      # and not `libssl`. That asymmetry is the whole mechanism.
-      check r.observedPackages() == @[App, LibFoo]
-      check r.intervalOf(LibSsl) == "absent"
+      # Fetched, and consulted ONLY for the version the lock records for it:
+      # `libssl` is unselected, so the lowest of its whole enumeration is
+      # what `lowest` chose, and nothing above that is material. Its dormant
+      # `>=3.0` arm records no constraint, because `tls` is PINNED off and
+      # that arm can never open. That asymmetry is the whole mechanism.
+      check r.observedPackages() == @[App, LibFoo, LibSsl]
+      check r.intervalOf(LibSsl) == "[-inf, 3.0.0]"
+      var sslObservations = 0
+      for obs in r.pathSet.observations:
+        if obs.subject == LibSsl:
+          inc sslObservations
+          check obs.basis == mbSelection
+      check sslObservations == 1
     finally:
       reg.shutdown()
 

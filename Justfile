@@ -78,6 +78,14 @@ addon-static *ARCHES="amd64 arm64 armhf":
 e2e_addon_bootstrap_uninstall_byte_identity:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
 
+# Bundles: a selection bundle made by this tree's packaged repro, published
+# to a local bare repository and restored in a plain rootless podman
+# container (debian:bookworm-slim, no Nix store, no network), builds the
+# selection with no producer action. Fails when podman cannot run. See
+# scripts/run_bundle_container_gate.sh.
+e2e_bundle_restores_on_a_plain_machine:
+    bash ./scripts/run_bundle_container_gate.sh
+
 # A16 (spec §6.5): image synthesis and remote bootstrap. Both run the full
 # engine of this checkout on the build host: `just build` first.
 e2e_addon_zero_touch_image_synthesis_boots_converged:
@@ -154,6 +162,11 @@ e2e_addon_to_reproos_conversion_keeps_state:
 
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
+
+# A declared mode, group or copy form makes an fs.systemFile a private copy
+# on an add-on host, never a link into the world-readable static tree.
+e2e_addon_declared_mode_file_is_a_private_copy:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_declared_mode_file_is_a_private_copy
 
 # Milestone A5: crash consistency, boot re-assertion, confirm-or-revert. The
 # reset gate runs the seam build (run_addon_gate.sh selects it).
@@ -931,11 +944,25 @@ lint:
     # so the disagreement surfaces when the RULE is edited rather than when
     # the first file of a new shape lands on it.
     python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
+    # The canonical `reprobuild/dsl/<module>` re-export tree against the
+    # standard library it is generated from. Same class as the suite gates
+    # above -- a tracked artifact that is a pure function of the tree, red
+    # whenever a stdlib module lands without `just regen-reprobuild-dsl-modules`
+    # -- so it runs behind them for the same reason. Before it was here the
+    # only check was one case inside a long integration test, and a stdlib
+    # module added upstream left the tree stale with nothing to say so at
+    # commit time. Reads two directory trees, no compiler, under a second.
+    python3 ./scripts/generate_reprobuild_dsl_modules.py --check 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
 
 fmt: format
+
+# Regenerate the `reprobuild/dsl/<module>` re-export modules from the
+# standard-library tree (libs/reprobuild/README.md).
+regen-reprobuild-dsl-modules:
+    python3 ./scripts/generate_reprobuild_dsl_modules.py
 
 # Regenerate the four tracked artifacts that are pure functions of the tree:
 # repro_tests.nim, scripts/reprobuild-test-shape-parity.tsv,
@@ -3303,3 +3330,16 @@ integration_hcr_linux_stack_mapping_changes_do_not_fault:
         --out:build/test-bin/integration_hcr_linux_stack_mapping_changes_do_not_fault \
         tests/e2e/hcr-linux-threads/t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim \
         2>&1 | tee test-logs/integration_hcr_linux_stack_mapping_changes_do_not_fault.log
+
+# User documentation site (docs/users/): standard Metacraft docs recipes.
+build-docs:
+    bash ./scripts/build_user_docs.sh build
+
+dev-docs port="8000" host="127.0.0.1":
+    cd docs/users && nim c -r --skipParentCfg --hints:off -o:build/dev src/dev.nim {{port}} {{host}}
+
+serve-docs port="8000" host="127.0.0.1":
+    cd docs/users && nim c -r --skipParentCfg --hints:off -o:build/serve_public src/serve_public.nim {{port}} {{host}}
+
+open-docs port="8000":
+    python3 -m webbrowser "http://127.0.0.1:{{port}}/"

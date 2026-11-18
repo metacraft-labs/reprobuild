@@ -853,7 +853,15 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
       spawning: @["commandSpec", "launchProcess"],
       inert: @["libraryInfo", "shellScriptDir", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
-               "waitForExit", "cancelAndWait", "close"]),
+               "waitForExit", "cancelAndWait", "close",
+               # The Windows leftover sweep. It reads the Job Object a
+               # command already runs in and terminates it when anything is
+               # still alive; on POSIX it answers false. It ends processes
+               # and never starts one.
+               "endJobLeftovers",
+               # Sizing data: copies a completion's memory profile and IO
+               # bytes into the finish. Pure, starts nothing.
+               "finishSizing"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
     # on the capability list with no surface at all. `startDirect` (L1),
     # `offerWithRunQuotaBatch` (L3) and `startGrantedWithRunQuota` (L3b)
@@ -896,6 +904,16 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "extNull", "extText", "extInt", "extReal",
                "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
                "denialDeadlockTimeoutMs",
+               # Sizing data: the switch read and the engine's `after` list
+               # stored on a running action for its finish. Neither starts
+               # anything.
+               "sizingDataEnabled", "declareAfter",
+               # Build-wait pressure: the switch read, a one-way report on
+               # the session's existing connection, and `repro pressure`,
+               # which connects to the daemon and asks (`QueryPressure`).
+               # None starts a process.
+               "buildPressureEnabled", "sendPressureReport",
+               "runPressureCommand",
                # The bounded queue wait (e1c068066, "make a RunQuota queue
                # wait loud and bounded"). Read one by one: the grant poll,
                # the liveness probe and the lease-holder snapshot are
@@ -927,6 +945,12 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # with the caller's existing spawn path. The other two close
                # or report the connection held to an adopted daemon. None
                # starts a process.
+               # The session-close diagnostic. `runQuotaSessionLeases` asks
+               # the daemon's `leases` inspection over the session's existing
+               # connection, and `summarizeSessionLeases` is a pure JSON
+               # parse that names the leases a refused close leaked. Neither
+               # starts a process.
+               "runQuotaSessionLeases", "summarizeSessionLeases",
                "decideRunQuotaHandover", "holdsAdoptedDaemon",
                "releaseAdoptedDaemonHold",
                # The hold every POSIX adopter and starter of the shared
@@ -1060,16 +1084,21 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # spawn of the ``runquotad`` an invocation owns), which starts nothing
     # either, so the engine's own import is down to ``fcntl`` and
     # ``F_DUPFD_CLOEXEC`` and the allowlist below with it.
+    #
+    # The rest of the spawn context then moved too, to
+    # ``repro_core/monitor_spawn_stdio`` (shared with the Go standard
+    # convention's monitored ``go list``), which starts nothing. The engine no
+    # longer names ``Mode``, ``umask``, ``dup2``, ``close``, ``fcntl`` or
+    # ``F_DUPFD_CLOEXEC`` at all, so they are no longer allowed here: an
+    # engine that imports one of them again has to be classified again.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
       # `lstat` and the `S_IS*` tests: `endpointRootOwned` reads the
       # ownership and type of a daemon endpoint's path components
       # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
-      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
+      inert: @["kill", "setpgid", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
-                        "Mode", "umask", "dup2", "close", "fcntl",
-                        "F_DUPFD_CLOEXEC",
                         "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],

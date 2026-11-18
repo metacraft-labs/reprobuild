@@ -173,7 +173,7 @@ repro deps refresh
 ```
 
 It rewrites `repro.scanned-deps.nim` with a second edge, found from the
-`import logger` line:
+`import logger` line.
 
 <!-- generated:begin capture first-build deps-refresh file=repro.scanned-deps.nim -->
 <!-- generated:end -->

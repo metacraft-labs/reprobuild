@@ -156,6 +156,15 @@ type
       ## gets none of a ref's other channels: no run-time library path,
       ## ``PKG_CONFIG_PATH``, ``CMAKE_PREFIX_PATH`` or provisioning
       ## receipt.
+    inputCheckPolicy*: ActionCacheFingerprintPolicy
+      ## Caching-Architecture.md D2 -- the input-check policy this tool
+      ## declares for the edges that run it, with ``inputCheckPolicy hybrid``
+      ## (or ``checksum`` / ``timestamp``) in the ``cli:`` block, inherited by
+      ## nested scopes like ``dependencyPolicy``. ``acfpUnstated`` (the
+      ## default) declares nothing. A typed call that states no policy takes
+      ## it; an edge that names the tool only in ``toolIdentityRefs`` takes it
+      ## through ``repro_core/tool_input_check_policies``, whose entries
+      ## ``t_tool_input_check_policies`` checks against these declarations.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -1121,10 +1130,16 @@ type
       ## path and not bytes: like ``expressionFile``, the manifest is read
       ## from the recipe's own directory at realize time, so a consumer that
       ## receives this provisioning as a CONTRIBUTION through an interface
-      ## artifact does not get the file with it. A federated catalog
-      ## publishing a closure package must be checked out, not merely
-      ## pinned. Lifting that means moving the entries into the artifact,
-      ## which is a larger change to the provisioning schema than this field.
+      ## artifact does not get the file with it. The lift therefore inlines
+      ## the parsed entries into the artifact record (envelope v34,
+      ## ``InterfaceTarballProvisioning.closureEntries``), and a consumer
+      ## realizes from those.
+    closureEntries*: seq[string]
+      ## The closure manifest INLINED, one canonical manifest line per entry.
+      ## Empty on a recipe (which names the file in ``closureManifest``);
+      ## set when the def is rebuilt from a published artifact, whose
+      ## consumer has no such file (envelope v34). Realization prefers these
+      ## to the file.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -1548,6 +1563,16 @@ type
       ## honoured.
 
   ActionCacheFingerprintPolicy* = enum
+    acfpUnstated
+      ## The edge states no input-check policy (Caching-Architecture.md D2).
+      ## It is what ``defaultActionCachePolicy()`` returns, so an edge that
+      ## says nothing can be told apart from one that says ``timestamp``.
+      ## Lowering resolves it: to the policy the edge's tools declare
+      ## (``repro_core/tool_input_check_policies``), else to ``timestamp``,
+      ## the owner-decided default of 2026-09-04. FIRST, so it is the zero
+      ## value: an object built without naming the field (a hand-built
+      ## ``BuildActionDef``, a ``ReproCliCommandExt``) states nothing rather
+      ## than silently stating ``timestamp``.
     acfpTimestamp
     acfpChecksum
     acfpHybrid
@@ -1916,6 +1941,22 @@ type
       ## Empty (the default) preserves the pre-M9.R.75 behaviour
       ## byte-for-byte: the source-write check no-ops. Payload
       ## codec v22+.
+    contentKeyedToolCaches*: seq[string]
+      ## The CONTENT-KEYED tool-owned caches this action reads
+      ## (Tool-Owned-Caches.md §"Trust Boundary"): directories whose entries
+      ## a tool names by a digest of what produced them and trusts by that
+      ## name (Go's ``GOCACHE`` and module cache, zig's cache, ccache), and
+      ## which other edges write too. Their contents are not this action's
+      ## inputs, so another writer can change its outputs without moving its
+      ## key; the engine therefore treats the edge as ``host-bound`` at least
+      ## and never publishes its records to, or substitutes them from,
+      ## another host. See ``BuildAction.contentKeyedToolCaches`` in the
+      ## engine.
+      ##
+      ## Naming a cache here says what the edge reads; it does not exclude
+      ## the cache from the key (the dependency policy's ignored roots do).
+      ## Passed to ``buildAction``. Empty (the default) changes nothing.
+      ## Payload codec v35+; an older payload decodes with the list empty.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]

@@ -27,6 +27,7 @@ from repro_dsl_stdlib/packages/apt_closure import
   adoptLegacyAptClosurePrefixes, adoptUnverifiedPrefix, LegacyAptAdoption,
   LegacyAptPrefix
 from repro_infra/apply_lock import currentBootId, processAlive
+from repro_infra/start_holds import writeHoldFile
 
 import ./etc_write
 import ./fingerprint
@@ -137,12 +138,15 @@ proc treeManifest*(files: seq[StaticFile]): string =
   lines.join("\n") & "\n"
 
 proc staticTreePath*(files: seq[StaticFile]; storeRoot = StoreRoot): string =
-  ## Where the store places the tree for ``files``: pure, so a plan can
-  ## name it without writing.
+  ## Where the store places the tree for ``files``, named without writing so
+  ## a plan can print it: the store's own answer for its id on this host
+  ## (``resolvePrefixAbsolutePath``), the 40-hex name or the 16-hex name an
+  ## older add-on realized this very tree under.
   let id = computeRealizationHash(StaticTreePackage, ReprobuildVersion,
     "addon-switch", "", "",
     provenanceChecksum = "tree:" & sha256Hex(treeManifest(files)))
-  storeRoot / prefixRelativePath(StaticTreePackage, ReprobuildVersion, id)
+  resolvePrefixAbsolutePath(storeRoot, StaticTreePackage, ReprobuildVersion,
+                            id)
 
 proc treeTorn(path: string; files: seq[StaticFile]): bool =
   ## The tree at ``path`` is what a crash leaves of these files: nothing
@@ -617,6 +621,9 @@ proc parsePendingMarker*(text: string): PendingMarker =
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
 
+proc ensureBootHoldRecord*(stateDir: string)
+  ## (Forward: defined beside the record's path below.)
+
 proc writePendingMarker*(stateDir: string; m: PendingMarker) =
   ## Atomic: a crash leaves the previous marker or this one. The writer is
   ## the switch, so the marker is stamped with this process and this boot:
@@ -626,6 +633,10 @@ proc writePendingMarker*(stateDir: string; m: PendingMarker) =
   stamped.ownerPid = getCurrentProcessId()
   stamped.ownerBoot = currentBootId()
   createDir(parentDir(pendingMarkerPath(stateDir)))
+  # The record of the switch's start holds is there first, if only as a
+  # record of none (A9 review round 20).
+  when not mutated("boot-hold-marker-without-record"):
+    ensureBootHoldRecord(stateDir)
   writeFileNoFollow(pendingMarkerPath(stateDir), stamped.render(), 0o600)
 
 proc markerOwnedByCaller*(m: PendingMarker; pid: int; bootId: string): bool =
@@ -750,18 +761,42 @@ proc bootHoldRecordPath*(stateDir: string): string =
   stateDir / "addon" / "boot-holds"
 
 proc bootHoldTextPath*(stateDir: string): string =
-  ## The start hold's text beside the record, which the boot-hold unit's
-  ## shell copies into place (``generation0.bootHoldScript``).
+  ## The start hold's text beside the record. The boot-hold unit's shell
+  ## no longer reads it -- it writes the minimal hold straight away (A9
+  ## review round 20) -- but a boot-hold unit an earlier engine rendered,
+  ## still on a host until its next apply, does.
   stateDir / "addon" / "boot-hold.conf"
 
+proc bootConfirmFlagPath*(stateDir: string): string =
+  ## Left by a boot re-assertion that leaves a pending switch to the
+  ## boot-confirm unit (§13 decision 157); the unit removes it.
+  stateDir / "addon" / "boot-confirm"
+
+proc ensureBootHoldRecord*(stateDir: string) =
+  ## A record of no start hold, written durably unless one is there: the
+  ## pending marker is never on disk without the record (A9 review round
+  ## 20; §13 decision 172 as amended 2026-11-17). The boot-hold unit holds
+  ## conservatively when it finds a marker with no record, so a missing
+  ## record holds every activator; an empty one holds nothing, which is
+  ## the truth for a switch that has written no start hold yet.
+  let p = bootHoldRecordPath(stateDir)
+  if symlinkExists(p) or fileExists(p) or dirExists(p): return
+  createDir(parentDir(p))
+  writeHoldFile(p, "")
+
 proc clearBootHoldRecord*(stateDir: string) =
-  ## The record goes once the switch's start holds are lifted, or with its
-  ## marker: a boot then puts back nothing the switch no longer holds.
+  ## The switch's start holds are lifted: a boot then puts back nothing.
+  ## While its marker stays, the record stays too, listing no hold
+  ## (``ensureBootHoldRecord``); without a marker it goes.
   discard removeLeafNoFollow(bootHoldRecordPath(stateDir))
+  when not mutated("boot-hold-marker-without-record"):
+    if fileExists(pendingMarkerPath(stateDir)) or
+        symlinkExists(pendingMarkerPath(stateDir)):
+      ensureBootHoldRecord(stateDir)
 
 proc clearPendingMarker*(stateDir: string) =
-  ## Step 9's last act. The pending switch's record of its start holds goes
-  ## first: a record without a marker is never read, a marker without a
-  ## record holds nothing at boot.
-  clearBootHoldRecord(stateDir)
+  ## Step 9's last act. The marker goes first, then the record of its
+  ## start holds: a record without a marker is never read, and a marker
+  ## is never left without its record (A9 review round 20).
   discard removeLeafNoFollow(pendingMarkerPath(stateDir))
+  clearBootHoldRecord(stateDir)

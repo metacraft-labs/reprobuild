@@ -58,8 +58,12 @@ const
   RootIdPrefix* = "addon-generation:"
 
 # ---------------------------------------------------------------------------
-# Prefix identities. Pure: the preflight computes them without writing, so
-# the plan it prints names the exact store paths generation 0 will use.
+# Prefix identities. Computed without writing, so the plan the preflight
+# prints names the exact store paths generation 0 will use. A path is the
+# store's own answer for the id on this host (``resolvePrefixAbsolutePath``):
+# the 40-hex name, or the 16-hex name an older build realized this very id
+# under, which the store's ``realizePrefix`` then reuses rather than
+# realizing a second copy. Nothing is planned off-host here.
 # ---------------------------------------------------------------------------
 
 proc binaryPrefixId*(binarySha256: string): PrefixIdBytes =
@@ -67,8 +71,8 @@ proc binaryPrefixId*(binarySha256: string): PrefixIdBytes =
     "", "bin/repro", provenanceChecksum = "sha256:" & binarySha256)
 
 proc binaryPrefixPath*(binarySha256: string): string =
-  StoreRoot / prefixRelativePath(BinaryPackage, ReprobuildVersion,
-                                 binaryPrefixId(binarySha256))
+  resolvePrefixAbsolutePath(StoreRoot, BinaryPackage, ReprobuildVersion,
+                            binaryPrefixId(binarySha256))
 
 proc reproExeFor*(binarySha256: string): string =
   binaryPrefixPath(binarySha256) / "bin" / "repro"
@@ -89,15 +93,66 @@ proc filesPrefixId*(names: openArray[string];
 proc filesPrefixPath*(names: openArray[string];
                       version = ReprobuildVersion;
                       storeRoot = StoreRoot): string =
-  storeRoot / prefixRelativePath(FilesPackage, version,
-                                 filesPrefixId(names, version))
+  resolvePrefixAbsolutePath(storeRoot, FilesPackage, version,
+                            filesPrefixId(names, version))
+
+proc isFilesPrefixPath*(path: string; names: openArray[string];
+                        version: string; storeRoot = StoreRoot): bool =
+  ## Whether ``path`` is one of the names the files prefix of ``names`` at
+  ## ``version`` can have under ``storeRoot``: its 40-hex path, or the
+  ## 16-hex path an older add-on realized it under. A shape check that
+  ## holds whether or not the prefix is on disk now (a recovery asks it
+  ## about a prefix that was altered or moved aside).
+  let base = storeRoot & "/"
+  path.startsWith(base) and isPrefixPathOf(path[base.len .. ^1],
+    FilesPackage, version, filesPrefixId(names, version))
 
 proc prefixVersionOf*(path: string): string =
-  ## The version a prefix path ``<store>/prefixes/<pkg>/<version>-<hash16>``
-  ## was realised under (the add-on's own prefixes use plain versions).
+  ## The version a prefix path ``<store>/prefixes/<pkg>/<version>-<hash>``
+  ## was realised under (the add-on's own prefixes use plain versions). The
+  ## hash is 40 hex, or 16 in a prefix an older build named.
   let leaf = extractFilename(path)
   let dash = leaf.rfind('-')
   if dash > 0: leaf[0 ..< dash] else: ""
+
+proc isStaticElf*(path: string): bool =
+  ## Whether ``path`` is an ELF executable with no program interpreter
+  ## (``PT_INTERP``): the statically linked add-on image, not the dynamic
+  ## engine, which needs the host's loader and libc and so stops working
+  ## when a release upgrade replaces them (§13 decision 174). Reads the
+  ## ELF and program headers only (the System V gABI, "Program Header":
+  ## https://refspecs.linuxfoundation.org/elf/gabi4+/ch5.pheader.html);
+  ## anything unreadable or not ELF is false.
+  var f: File
+  if not open(f, path, fmRead): return false
+  defer: f.close()
+  var h: array[64, uint8]
+  if readBytes(f, h, 0, 64) < 52: return false
+  if h[0] != 0x7f or h[1] != uint8('E') or h[2] != uint8('L') or h[3] != uint8('F'):
+    return false
+  let is64 = h[4] == 2
+  let le = h[5] == 1
+  proc rd(b: openArray[uint8]; off, n: int): uint64 =
+    for i in 0 ..< n:
+      let byt = uint64(b[off + (if le: i else: n - 1 - i)])
+      result = result or (byt shl (8 * i))
+  let phoff = if is64: rd(h, 0x20, 8) else: rd(h, 0x1C, 4)
+  let phentsize = int(if is64: rd(h, 0x36, 2) else: rd(h, 0x2A, 2))
+  let phnum = int(if is64: rd(h, 0x38, 2) else: rd(h, 0x2C, 2))
+  if phnum <= 0 or phentsize < 8 or phnum > 4096: return false
+  var ph = newSeq[uint8](phentsize)
+  for i in 0 ..< phnum:
+    f.setFilePos(int64(phoff) + int64(i * phentsize))
+    if readBytes(f, ph, 0, phentsize) != phentsize: return false
+    if rd(ph, 0, 4) == 3'u64: return false      # PT_INTERP
+  true
+
+proc binaryPrefixesOf*(paths: openArray[string]): seq[string] =
+  ## The add-on binary prefixes among ``paths`` (store prefix paths, in
+  ## the order given), as the ``bin/repro`` each holds.
+  for p in paths:
+    if p.startsWith(StoreRoot / "prefixes" / BinaryPackage & "/"):
+      result.add(p / "bin" / "repro")
 
 # ---------------------------------------------------------------------------
 # Roots.
@@ -252,16 +307,11 @@ proc realiseFilesPrefix*(files: openArray[tuple[name, content: string]];
   defer: s.close()
   realiseFilesInto(s, files, version)
 
-proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
-                           files: seq[tuple[name, content: string]]):
-    RealisedPrefixes =
-  ## Copy the running ``repro`` and generation 0's file bodies into the
-  ## store as two prefixes, and verify the binary's digest on the store
-  ## copy (not on the source): the digest the operator pinned is checked
-  ## on the bytes that will run.
-  enterWritableStoreView()
-  var s = openStore(StoreRoot)
-  defer: s.close()
+proc realiseBinaryInto(s: var Store; binaryPath, binarySha256: string):
+    tuple[id: PrefixIdBytes; path, exe, digest: string] =
+  ## The add-on binary at ``binaryPath`` as the store prefix
+  ## ``binaryPrefixPath(binarySha256)``, its digest verified on the store
+  ## copy. Idempotent: a prefix already realised is returned as it is.
   let tmp = StoreRoot / "tmp" / ("addon-staging-" & $getCurrentProcessId())
   removeDir(tmp)
   createDir(tmp / "bin")
@@ -275,14 +325,39 @@ proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
       version: ReprobuildVersion, declaredExecutablePath: "bin/repro",
       exportedExecutables: @["repro"],
       provenanceChecksum: "sha256:" & binarySha256))
-  result.binaryPrefixId = binRes.prefixId
-  result.binaryPrefixPath = binRes.absolutePath
-  result.reproExe = binRes.absolutePath / "bin" / "repro"
-  result.binaryDigest = realisationDigest(tmp, binRes.absolutePath)
-  if result.binaryPrefixPath != binaryPrefixPath(binarySha256):
+  result.id = binRes.prefixId
+  result.path = binRes.absolutePath
+  result.exe = binRes.absolutePath / "bin" / "repro"
+  result.digest = realisationDigest(tmp, binRes.absolutePath)
+  if result.path != binaryPrefixPath(binarySha256):
     raise newException(StoreRootError, "store placed the add-on binary at " &
-      result.binaryPrefixPath & ", not at the planned " &
-      binaryPrefixPath(binarySha256))
+      result.path & ", not at the planned " & binaryPrefixPath(binarySha256))
+
+proc realiseEnginePrefix*(binaryPath, binarySha256: string):
+    tuple[id: PrefixIdBytes; path, exe, digest: string] =
+  ## The running engine as an add-on binary prefix (§13 decision 164: the
+  ## re-assert unit of a host an earlier engine bootstrapped is pointed at
+  ## the engine that upgrades it).
+  enterWritableStoreView()
+  var s = openStore(StoreRoot)
+  defer: s.close()
+  realiseBinaryInto(s, binaryPath, binarySha256)
+
+proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
+                           files: seq[tuple[name, content: string]]):
+    RealisedPrefixes =
+  ## Copy the running ``repro`` and generation 0's file bodies into the
+  ## store as two prefixes, and verify the binary's digest on the store
+  ## copy (not on the source): the digest the operator pinned is checked
+  ## on the bytes that will run.
+  enterWritableStoreView()
+  var s = openStore(StoreRoot)
+  defer: s.close()
+  let b = realiseBinaryInto(s, binaryPath, binarySha256)
+  result.binaryPrefixId = b.id
+  result.binaryPrefixPath = b.path
+  result.reproExe = b.exe
+  result.binaryDigest = b.digest
   let f = realiseFilesInto(s, files)
   result.filesPrefixId = f.id
   result.filesPrefixPath = f.path

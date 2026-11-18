@@ -1,4 +1,4 @@
-import std/[os, strutils]
+import std/[os, sequtils, strutils]
 
 import repro_interface_artifacts
 import repro_local_store
@@ -9,15 +9,53 @@ import ./protocol
 type
   StoreDaemonClientError* = object of CatchableError
 
+  StoreDaemonEndpointRefused* = object of StoreDaemonClientError
+    ## The endpoint is not this user's: the account listening there is
+    ## another one (or cannot be identified), or the private directory the
+    ## default endpoint lives in is not this user's and private. Distinct
+    ## from an absent daemon, which is a plain ``StoreDaemonClientError``:
+    ## a refusal is never "not running" (reprobuild-pm
+    ## ``spec/Store-Daemon-And-Multi-User-Coordination.md`` §"A client
+    ## authenticates the daemon"). Nothing has been sent to the refused peer
+    ## and nothing read from it.
+
 proc scopedRootId*(holderId, rootId: string): string =
   "dev/" & $currentUid() & "/" & safePathSegment(holderId, "holder") & "/" &
     safePathSegment(rootId, "root")
 
 proc connectDevDaemon*(endpoint = defaultDevEndpoint()): IpcConn =
+  ## Connect to the dev store daemon at ``endpoint`` and complete the
+  ## handshake -- only after establishing that it is THIS user's daemon:
+  ##
+  ## 1. a default endpoint's private directory is created or admitted
+  ##    (``admitDevEndpointDir``) before anything is connected to;
+  ## 2. the account listening at the endpoint, as the kernel reports it
+  ##    (``requireIpcListener``), must be this process's own effective uid
+  ##    (Windows: its user SID) before ``Hello`` is sent.
+  ##
+  ## Either refusal raises ``StoreDaemonEndpointRefused``. An endpoint with
+  ## no daemon, or a private directory that cannot be created or inspected
+  ## at all, raises a plain ``StoreDaemonClientError``.
+  try:
+    admitDevEndpointDir(endpoint)
+  except OwnedDirectoryError as exc:
+    raise newException(StoreDaemonEndpointRefused, exc.msg)
+  except CatchableError as exc:
+    # The directory cannot be created or inspected at all (a missing or
+    # unwritable temporary directory): nothing can be listening in it, and
+    # nobody else's directory was found there. That is an unreachable
+    # daemon, not a refusal.
+    raise newException(StoreDaemonClientError, exc.msg)
   try:
     result = connectIpc(endpoint)
   except IpcEndpointError as exc:
     raise newException(StoreDaemonClientError, exc.msg)
+  try:
+    requireIpcListener(result, endpoint, "dev store daemon",
+      ipcOwnIdentity(), "this user")
+  except IpcPeerIdentityError as exc:
+    result.closeIpcConn()
+    raise newException(StoreDaemonEndpointRefused, exc.msg)
   result.writeFrame(sdkHello, helloBody("repro-store-client"))
   let ack = result.readFrame()
   if ack.kind == sdkError:
@@ -32,10 +70,15 @@ proc connectDevDaemon*(endpoint = defaultDevEndpoint()): IpcConn =
       "incompatible store daemon at " & endpoint)
 
 proc queryDevStatus*(endpoint = defaultDevEndpoint()): StoreDaemonStatus =
+  ## The status of the dev daemon at ``endpoint``; ``running = false`` when
+  ## no daemon answers there. An endpoint held by another account is NOT
+  ## reported as not running: ``StoreDaemonEndpointRefused`` propagates.
   result.endpoint = endpoint
   var conn: IpcConn
   try:
     conn = connectDevDaemon(endpoint)
+  except StoreDaemonEndpointRefused:
+    raise
   except CatchableError:
     result.running = false
     return
@@ -145,7 +188,10 @@ proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
     launcher: plan.declaredLauncher,
     # Resolved here, where the declaring file is known: the daemon rebuilds
     # the record without it and runs in a working directory of its own.
-    closureManifest: resolvedClosureManifest(plan),
+    closureManifest:
+      if plan.record.closureEntries.len > 0: ""
+      else: resolvedClosureManifest(plan),
+    closureEntries: plan.record.closureEntries.mapIt(canonicalClosureLine(it)),
     archiveDetail: plan.record.detail,
     stripComponents: plan.stripComponents)
 
@@ -182,6 +228,9 @@ proc realizeTarballViaDaemon*(req: StoreDaemonExternalRealizeRequest;
 proc realizeSyntheticWithFallback*(req: SyntheticRealizeRequest;
                                    endpoint = defaultDevEndpoint()):
     StoreDaemonRealizeResult =
+  ## Realize through the dev daemon, or directly when none is reachable --
+  ## including when the endpoint was refused (``StoreDaemonEndpointRefused``):
+  ## the refused peer was sent nothing and nothing it sent is used.
   try:
     result = realizeSyntheticViaDaemon(req, endpoint)
   except CatchableError:

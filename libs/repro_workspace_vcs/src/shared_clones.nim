@@ -46,6 +46,7 @@ import git_tool
 # worker pool may be live; see ``repro_core/process_close``.
 from repro_core/process_exec import execCmdExCloseOnce
 from repro_core/ambient_execution import uncontrolledFindExe, uncontrolledStartProcess
+import repro_core/process_env
 
 const
   AlternatesRelPath* = "objects/info/alternates"
@@ -630,6 +631,16 @@ const
     ## Maximum wait time (2 minutes) when acquiring a per-cache-entry or
     ## per-checkout lock before giving up.
   VcsLockPollIntervalMs = 25
+  VcsLockWaitNoticeMs* {.intdefine.} = 5_000
+    ## How long a waiter waits in silence. After this, and then every
+    ## ``VcsLockWaitNoticeRepeatMs``, it says on stderr which lock it is
+    ## waiting for and who holds it (pid, command, age). A lazy read through
+    ## the pool transport waits without a deadline, and a pre-push that sat
+    ## behind a hung holder for 55 minutes printed nothing at all
+    ## (issues/2026-11-15-a-hung-cache-push-holds-the-shared-pool-lock-and-
+    ## stalls-every-pre-push.md). Negative disables the notice.
+  VcsLockWaitNoticeRepeatMs = 60_000
+  VcsLockHolderMagic = "reprobuild.vcs-lock-holder.v1"
 
 when defined(windows):
   const
@@ -717,6 +728,88 @@ proc checkoutLockPath*(repoPath: string): string {.gcsafe.} =
     return repoPath / "repro-vcs-lock"
   ""
 
+proc vcsLockHolderPath*(lockFile: string): string {.gcsafe.} =
+  ## The holder record beside ``lockFile``: who holds the lock, since when.
+  ## A sibling file rather than the lock file's own bytes, because on Windows
+  ## the lock IS an unshared open of that file, which no waiter can read.
+  if lockFile.len == 0: "" else: lockFile & ".holder"
+
+proc holderCommandLine(): string {.gcsafe.} =
+  ## This process's command line, on one bounded line.
+  try:
+    var parts = @[getAppFilename()]
+    for i in 1 .. paramCount(): parts.add(paramStr(i))
+    result = quoteShellCommand(parts)
+  except CatchableError:
+    result = ""
+  for ch in result.mitems:
+    if ch in {'\n', '\r'}: ch = ' '
+  if result.len > 512: result = result[0 ..< 509] & "..."
+
+proc writeVcsLockHolder(lockFile: string) {.gcsafe.} =
+  ## Record this process as the holder of ``lockFile``. Called only while the
+  ## OS lock is held, so no other repro writes the record concurrently. It is
+  ## diagnostics: a failure to write it never costs the caller its lock.
+  let path = vcsLockHolderPath(lockFile)
+  if path.len == 0: return
+  let staged = path & "." & $getCurrentProcessId() & ".tmp"
+  try:
+    writeFile(staged, VcsLockHolderMagic & "\npid=" & $getCurrentProcessId() &
+      "\nacquired=" & $int64(epochTime()) & "\ncommand=" &
+      holderCommandLine() & "\n")
+    moveFile(staged, path)
+  except CatchableError:
+    try: removeFile(staged)
+    except CatchableError: discard
+
+proc readVcsLockHolder(lockFile: string):
+    tuple[pid: int; acquired: int64; command: string] {.gcsafe.} =
+  ## The record ``writeVcsLockHolder`` left; ``pid`` 0 when there is none.
+  try:
+    let lines = readFile(vcsLockHolderPath(lockFile)).splitLines()
+    if lines.len == 0 or lines[0] != VcsLockHolderMagic: return
+    for line in lines[1 .. ^1]:
+      if line.startsWith("pid="): result.pid = parseInt(line[4 .. ^1])
+      elif line.startsWith("acquired="):
+        result.acquired = parseBiggestInt(line[9 .. ^1])
+      elif line.startsWith("command="): result.command = line[8 .. ^1]
+  except CatchableError, Defect:
+    result = (pid: 0, acquired: 0'i64, command: "")
+
+proc clearVcsLockHolder(lockFile: string) {.gcsafe.} =
+  ## Remove our holder record. Called before the OS lock is released, so the
+  ## next holder's record is never the one removed.
+  if readVcsLockHolder(lockFile).pid == getCurrentProcessId():
+    try: removeFile(vcsLockHolderPath(lockFile))
+    except CatchableError: discard
+
+proc describeVcsLockHolder*(lockFile: string): string {.gcsafe.} =
+  ## "held by pid N for Ss: <command>", from the holder record. A holder that
+  ## left no record (a repro build older than the record, or another tool) is
+  ## named as such rather than guessed at.
+  let holder = readVcsLockHolder(lockFile)
+  if holder.pid <= 0:
+    return "held by a process that left no holder record (an older repro " &
+      "build, or another tool)"
+  result = "held by pid " & $holder.pid
+  if holder.acquired > 0:
+    result.add(" for " & $max(0'i64, int64(epochTime()) - holder.acquired) & "s")
+  when not defined(windows):
+    if posix.kill(Pid(holder.pid), 0) != 0 and errno == ESRCH:
+      result.add(" (that process has exited)")
+  if holder.command.len > 0:
+    result.add(": " & holder.command)
+
+proc noticeVcsLockWait(lockFile: string; waitedSeconds: float) {.gcsafe.} =
+  ## The line a waiter prints instead of sleeping in silence.
+  try:
+    {.cast(gcsafe).}:
+      stderr.writeLine("repro: waiting " & $int(waitedSeconds) &
+        "s for the lock " & lockFile & ", " & describeVcsLockHolder(lockFile))
+      stderr.flushFile()
+  except CatchableError:
+    discard
+
 proc acquireVcsFileLock*(lockFile: string;
                          timeoutMs = VcsLockDefaultTimeoutMs): VcsFileLock {.gcsafe.} =
   ## Acquire a cross-process and cross-thread re-entrant exclusive lock on
@@ -738,7 +831,13 @@ proc acquireVcsFileLock*(lockFile: string;
       return VcsFileLock(acquired: false)
 
   let tid = getThreadId()
-  let deadline = epochTime() + (float(max(0, timeoutMs)) / 1000.0)
+  let waitStarted = epochTime()
+  let deadline = waitStarted + (float(max(0, timeoutMs)) / 1000.0)
+  var nextNotice = waitStarted + float(VcsLockWaitNoticeMs) / 1000.0
+  template noticeIfDue() =
+    if VcsLockWaitNoticeMs >= 0 and epochTime() >= nextNotice:
+      noticeVcsLockWait(lockFile, epochTime() - waitStarted)
+      nextNotice = epochTime() + float(VcsLockWaitNoticeRepeatMs) / 1000.0
   while true:
     var inUseByOtherThread = false
     var reentered = false
@@ -758,6 +857,7 @@ proc acquireVcsFileLock*(lockFile: string;
     if inUseByOtherThread:
       if timeoutMs >= 0 and epochTime() >= deadline:
         return VcsFileLock(acquired: false)
+      noticeIfDue()
       sleep(VcsLockPollIntervalMs)
       continue
 
@@ -784,11 +884,14 @@ proc acquireVcsFileLock*(lockFile: string;
         # waiting indefinitely.
         permanentFault = int(osLastError()) notin [32, ERROR_LOCK_VIOLATION]
     else:
-      # This new mode has no contention deadline. An exec'd credential or
-      # transport helper must not retain its lock if the owner is interrupted.
-      let descriptorFlags = if timeoutMs < 0: posix.O_CLOEXEC else: cint(0)
+      # Close-on-exec in every mode. An flock belongs to the open file
+      # description, so a child that inherited this descriptor -- a
+      # credential helper, ``git push`` and the ``receive-pack`` and hooks it
+      # runs in the pool -- keeps the lock after its owner has gone. In the
+      # 2026-11-15 incident a hung ``receive-pack`` held the pool lock this
+      # way as fd 3. (Windows handles are opened noninheritable already.)
       let fd = posix.open(cstring(lockFile),
-        posix.O_CREAT or posix.O_RDWR or descriptorFlags, posix.Mode(0o600))
+        posix.O_CREAT or posix.O_RDWR or posix.O_CLOEXEC, posix.Mode(0o600))
       if fd >= 0:
         if cFlock(fd, LOCK_EX_C or LOCK_NB_C) == 0:
           osAcquired = true
@@ -806,6 +909,7 @@ proc acquireVcsFileLock*(lockFile: string;
         permanentFault = int(osLastError()) != int(posix.EINTR)
 
     if osAcquired:
+      writeVcsLockHolder(lockFile)
       return VcsFileLock(key: key, lockFile: lockFile, acquired: true)
 
     {.cast(gcsafe).}:
@@ -816,6 +920,7 @@ proc acquireVcsFileLock*(lockFile: string;
 
     if permanentFault or (timeoutMs >= 0 and epochTime() >= deadline):
       return VcsFileLock(acquired: false)
+    noticeIfDue()
     sleep(VcsLockPollIntervalMs)
 
 proc releaseVcsFileLock*(lock: var VcsFileLock) {.gcsafe.} =
@@ -832,6 +937,7 @@ proc releaseVcsFileLock*(lock: var VcsFileLock) {.gcsafe.} =
           vcsLockEntries.del(lock.key)
           shouldClose = true
   if shouldClose:
+    clearVcsLockHolder(lock.lockFile)
     when defined(windows):
       if toClose.handle != 0 and toClose.handle != INVALID_HANDLE_VALUE:
         discard closeHandle(toClose.handle)
@@ -1072,6 +1178,7 @@ proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
   ##
   ## ``gc.pruneExpire`` is written LAST, so a run that fails part-way never
   ## leaves a pool expiring objects without the hook that protects them.
+  ##
   result = true
   for (key, value) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
       barePath):
@@ -1770,10 +1877,12 @@ proc leafPoolUploadPackCommand*(pool: string): string =
   ## through its POSIX shell, on Windows too, and appends the pool path.
   quotePoolShell(poolUploadPackLauncherPath(pool))
 
-proc poolTransportShell(gitBin: string): string =
-  ## Use an explicit shell for file redirection. poEvalCommand does not
-  ## invoke a shell on Windows, and cmd.exe cannot safely quote arbitrary
-  ## paths containing percent signs. Git itself already requires this shell.
+proc poolTransportShell*(gitBin: string): string =
+  ## The POSIX shell ``gitBin`` runs hooks and ``!`` commands with. Used
+  ## for file redirection: poEvalCommand does not invoke a shell on
+  ## Windows, and cmd.exe cannot safely quote arbitrary paths containing
+  ## percent signs. Git itself already requires this shell. Raises
+  ## ``IOError`` on Windows when it cannot be found.
   when defined(windows):
     let declared = runGit(gitBin, ["var", "GIT_SHELL_PATH"])
     if declared.code == 0 and fileExists(declared.output.strip()):
@@ -2522,11 +2631,12 @@ const RetentionHookScript* = """#!/bin/sh
 # `git gc` runs this as gc.recentObjectsHook. Every object id printed here is
 # kept, together with everything it reaches in this pool, as if it were
 # recent. It prints what each checkout listed in repro/borrowers still names
-# -- its refs, its HEADs and its reflog entries -- and, for any of those this
-# pool does not hold itself (a commit made in the checkout), the history
-# behind it, so the parents of a checkout's own commits are kept too. If this
-# script fails, git skips pruning: a failure keeps objects, it never deletes
-# them.
+# -- its refs, its HEADs, its reflog entries and what its indexes stage --
+# and, for any of those this pool does not hold itself (a commit made in the
+# checkout), the history behind it, so the parents of a checkout's own
+# commits are kept too. If this script fails, git skips pruning: a failure
+# keeps objects, it never deletes them. It fails for a checkout it cannot
+# vouch for, including one whose refs are not stored as files (reftable).
 
 # gc exports this pool's GIT_DIR (and friends) to the hook, and they override
 # `git -C <checkout>`. Clear them before reading any checkout.
@@ -2620,6 +2730,20 @@ scan_dir() {
     scan_dir "$child" "$(($2 - 1))" || return 1
   done
 }
+# ref_storage_files COMMON-DIR succeeds only when the checkout keeps its refs
+# in the `files` backend, the only one whose HEADs and reflogs are read below
+# as files. A reftable checkout keeps them in reftable stacks; reading it as
+# files would name neither a detached HEAD nor a reflog entry, and still
+# succeed. Git reads extensions only from the common config, without
+# includes, so this reads that file alone. Unset means `files`.
+ref_storage_files() {
+  storage=$(git config --file "$1/config" --get extensions.refStorage)
+  case $? in
+    0) [ "$storage" = files ] ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
 : > "$work/found"
 while IFS= read -r parent || [ -n "$parent" ]; do
@@ -2642,6 +2766,14 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
 done < "$work/discovered"
 if [ "${1-}" = --discover ]; then
   [ "$incomplete" = 0 ] || exit 2
+  # A borrower git cannot open, or one on another ref backend, keeps expiry
+  # off (§3.2): the gc pass below would refuse it on every run. (Index
+  # readability is checked by the gc pass alone, which refuses safely.)
+  while IFS= read -r leaf || [ -n "$leaf" ]; do
+    [ -n "$leaf" ] && [ -d "$leaf" ] && [ -e "$leaf/.git" ] || continue
+    common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+    ref_storage_files "$common" || exit 1
+  done < "$work/leaves"
   exit 0
 fi
 
@@ -2654,6 +2786,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   # rather than let its objects expire.
   [ -e "$leaf/.git" ] || continue
   common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { status=1; continue; }
+  ref_storage_files "$common" || { status=1; continue; }
   : > "$work/names"
   # Refs, read from the ref store: this format never opens the objects.
   git -C "$leaf" for-each-ref --format='%(objectname)' >> "$work/names" || { status=1; continue; }
@@ -2670,6 +2803,21 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
     [ -d "$logs" ] || continue
     find "$logs" -type f -exec cat {} + | cut -d' ' -f1,2 | tr ' ' '\n' >> "$work/names"
   done
+  # Staged entries, of the checkout and of each linked worktree: a blob staged
+  # with `git checkout <old> -- <path>` may be one only expired history in this
+  # pool reaches. Each index is read by path, so a worktree whose directory is
+  # gone is still read. ls-files reads the index file, not the objects;
+  # --sparse keeps a sparse index from being expanded through trees, and
+  # core.fsmonitor=false keeps a gc from starting the checkout's monitor. An
+  # index that exists but cannot be read may stage anything: refuse. Gitlinks
+  # (mode 160000) name commits of a submodule's own repository.
+  indexes=0
+  for index in "$common/index" "$common"/worktrees/*/index; do
+    [ -e "$index" ] || continue
+    GIT_INDEX_FILE=$index git -C "$leaf" -c core.fsmonitor=false ls-files --stage --sparse > "$work/staged" || { indexes=1; break; }
+    grep -v '^160000 ' "$work/staged" | cut -d' ' -f2 >> "$work/names"
+  done
+  [ "$indexes" = 0 ] || { status=1; continue; }
   grep -E '^[0-9a-f]{40}([0-9a-f]{24})?$' "$work/names" | grep -v -E '^0+$' | sort -u > "$work/ids"
   cat "$work/ids"
   # Ids this pool does not hold were made in the checkout. Print the history
@@ -2839,18 +2987,69 @@ proc retentionHookConfigValue*(pool: string): string =
   ## that shell is ``sh`` even on Windows.
   quoteShellPosix(retentionHookPath(pool).replace('\\', '/'))
 
+proc retentionDiscoveryEnv*(gitBin: string;
+                            base: StringTableRef = nil): StringTableRef =
+  ## The environment the hook's ``--discover`` pass runs in: ``base``
+  ## (default: ``scrubbedGitRepositoryEnv()``) with the directory of the
+  ## pool's own Git first on the search path, so the pass runs the Git the
+  ## pool is configured for (Shared-Clone-Pool-Integrity §3.2).
+  ##
+  ## The prepend reads and writes the search path through ``base`` itself.
+  ## On Windows that table is case-insensitive, so the inherited ``Path`` is
+  ## extended in place; a second ``PATH`` entry beside it would leave the
+  ## child to pick one, and it could run whatever ``git`` the inherited one
+  ## finds first.
+  result = (if base.isNil: scrubbedGitRepositoryEnv() else: base)
+  result.prependPathEntry(gitBin.parentDir)
+
+const RetentionDiscoverAlias* = "repro-retention-discover"
+  ## The name of the shell alias ``retentionDiscoveryArgs`` defines for the
+  ## one ``git`` invocation that runs the hook's ``--discover`` pass.
+
+proc retentionDiscoveryArgs*(pool: string): seq[string] =
+  ## The ``git`` arguments that run the retention hook's ``--discover`` pass
+  ## the way ``git gc`` runs the hook: as a shell command Git itself starts
+  ## (a ``!`` alias defined for this one invocation), with ``GIT_DIR`` set to
+  ## the pool, from the same ``gc.recentObjectsHook`` value.
+  ##
+  ## Git starts it through its own POSIX shell, with the search path it
+  ## gives every hook: its exec-path first and, in Git for Windows, its
+  ## ``<mingw>/bin`` and ``/usr/bin`` next, ahead of the inherited
+  ## ``C:\Windows\System32``. Started directly instead, the pass depended on
+  ## which ``sh`` came first on the engine's search path. Git for Windows'
+  ## launcher (``bin\sh.exe``) put its own Git first, and its real
+  ## ``usr\bin\sh.exe`` kept ``System32`` first, so the hook's ``sort -u``
+  ## ran Windows' ``sort.exe`` (reprobuild-pm
+  ## ``issues/2026-11-16-windows-shared-pool-retention-discovery-depends-on-which-sh-is-first-on-path.md``).
+  ## ``--git-dir`` rather than ``-C``: an explicit repository is not
+  ## subject to discovery or its ownership check, and the hook clears
+  ## ``GIT_DIR`` before reading any checkout, as it does under gc.
+  @["--git-dir=" & pool,
+    "-c", "alias." & RetentionDiscoverAlias & "=!" &
+      retentionHookConfigValue(pool) & " --discover",
+    RetentionDiscoverAlias]
+
 proc poolRetentionReady*(gitBin, pool: string): bool =
   ## The hook and readiness share one discovery implementation. A newly
   ## found borrower is registered, but this pass still keeps ``never``; only
   ## a later complete pass can enable expiry. Discovery errors fail closed.
+  ##
+  ## ``gitBin`` runs the pass (``retentionDiscoveryArgs``), so it gets the
+  ## shell and search path that Git gives the hook under gc, whatever ``sh``
+  ## comes first on this process's search path. Git propagates the alias's
+  ## exit status.
   if not gitSupportsRetentionHook(gitBin) or
       not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
     return false
-  let env = scrubbedGitRepositoryEnv()
-  env["PATH"] = gitBin.parentDir & $PathSep & getEnv("PATH")
-  let discovered = execCmdExCloseOnce("sh " &
-    quoteShell(retentionHookPath(pool)) & " --discover", env = env)
-  discovered.exitCode == 0
+  var command = quoteShell(gitBin)
+  for arg in retentionDiscoveryArgs(pool):
+    command.add(" " & quoteShell(arg))
+  try:
+    execCmdExCloseOnce(command,
+      env = retentionDiscoveryEnv(gitBin)).exitCode == 0
+  except CatchableError:
+    # Git that cannot be started is a discovery failure too.
+    false
 
 proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
   ## The pool-specific rows of §3.1, beyond the static
@@ -3975,6 +4174,97 @@ proc cacheRefPushArgvFault*(argv: openArray[string];
         cacheRefNamespace
   ""
 
+const
+  CacheRefPushDeadlineMs* {.intdefine.} = 60_000
+    ## How long the cache push may hold the pool lock with its ``git push``.
+    ## The push is best-effort and every lazy read, refresh and pre-push of
+    ## that repository on the host waits behind it, so it must not be able
+    ## to hold the lock indefinitely. Half the ordinary VCS lock deadline: a
+    ## bounded waiter that queued behind the push outlasts it, stop grace
+    ## included. A push that needs longer loses only its cache ref; the
+    ## commit is untouched and its objects reach the pool by ordinary fetch.
+  CacheRefPushStopGraceMs = 3_000
+    ## Between SIGTERM and SIGKILL when the deadline stops the push. Git
+    ## removes its lock files and push quarantine on SIGTERM.
+
+proc stopProcessTree(process: Process) =
+  ## Stop ``process`` and everything it started. On POSIX it leads a process
+  ## group of its own (``poDaemon``), which holds ``git push``, the
+  ## ``receive-pack`` it runs in the pool and the pool's hooks: SIGTERM so
+  ## git can clean up, then SIGKILL for whatever did not exit in the grace.
+  let pid = process.processID
+  when defined(windows):
+    discard execCmdExCloseOnce("taskkill /T /F /PID " & $pid)
+  else:
+    discard posix.kill(Pid(-pid), SIGTERM)
+    let graceEnds = epochTime() + float(CacheRefPushStopGraceMs) / 1000.0
+    var groupGone = false
+    while epochTime() < graceEnds:
+      # Reap the leader once it exits; the group is gone when no member
+      # remains to receive a signal.
+      try: discard process.peekExitCode()
+      except OSError: discard
+      if posix.kill(Pid(-pid), 0) != 0:
+        groupGone = true
+        break
+      sleep(20)
+    # Only a group that still exists is killed: once it is empty its id is
+    # free for the system to hand to an unrelated process group.
+    if not groupGone:
+      discard posix.kill(Pid(-pid), SIGKILL)
+  try: discard process.waitForExit()
+  except OSError: discard
+
+proc runGitWithDeadline(gitBin: string; args: openArray[string];
+                        lazyFetch: bool; deadlineMs: int):
+    tuple[code: int; output: string; timedOut: bool] =
+  ## Run git (merged output) and stop its whole process tree once
+  ## ``deadlineMs`` has passed. Output goes to a file through the pool's
+  ## shell, so no pipe can fill while this process is only watching the
+  ## clock, and stdin is ``/dev/null``.
+  let env = scrubbedGitRepositoryEnv()
+  if lazyFetch: env.del("GIT_NO_LAZY_FETCH")
+  else: env["GIT_NO_LAZY_FETCH"] = "1"
+  var log: tuple[cfile: File, path: string]
+  try:
+    log = createTempFile("git-deadline-", ".log")
+    log.cfile.close()
+  except CatchableError as err:
+    return (code: -1, output: "cannot create the log for " & gitBin & ": " &
+      err.msg, timedOut: false)
+  defer:
+    try: removeFile(log.path)
+    except CatchableError: discard
+  var script = quotePoolShell(gitBin)
+  for arg in args: script.add(" " & quotePoolShell(arg))
+  script.add(" </dev/null >" & quotePoolShell(log.path) & " 2>&1")
+  var process: Process
+  try:
+    process = uncontrolledStartProcess(poolTransportShell(gitBin),
+      args = @["-c", script], env = env, options = {poDaemon, poParentStreams})
+  except CatchableError as err:
+    return (code: -1, output: "cannot run " & gitBin & ": " & err.msg,
+      timedOut: false)
+  try:
+    let deadline = epochTime() + float(max(0, deadlineMs)) / 1000.0
+    var pollMs = 1
+    while true:
+      let code = process.peekExitCode()
+      if code != -1:
+        result.code = code
+        break
+      if epochTime() >= deadline:
+        stopProcessTree(process)
+        result.code = -1
+        result.timedOut = true
+        break
+      sleep(pollMs)
+      pollMs = min(pollMs * 2, 50)
+  finally:
+    process.close()
+  try: result.output = readFile(log.path)
+  except CatchableError: discard
+
 proc cacheRefPushArgv*(repoPath: string; plan: CacheRefPushPlan): seq[string] =
   ## The argv for a validated plan. ``--force --no-verify`` is correct only
   ## because the destination is this machine's own object cache: the
@@ -3988,7 +4278,8 @@ proc cacheRefPushArgv*(repoPath: string; plan: CacheRefPushPlan): seq[string] =
     "HEAD:" & plan.cacheRef]
 
 proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
-                   branch = ""): SharedCloneResult =
+                   branch = "";
+                   deadlineMs = CacheRefPushDeadlineMs): SharedCloneResult =
   ## Push ``repoPath``'s current branch (or the explicit ``branch``) into
   ## the shared bare under ``refs/cache/<workspaceName>/<branch>``, using
   ## ``--force --no-verify`` (the publication gate does not apply to an
@@ -4007,6 +4298,11 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
   ## ref it cannot vouch for is refused here rather than pushed somewhere
   ## else. See ``cacheRefPushPlan`` for why that has to be a rule and not a
   ## convention.
+  ##
+  ## It holds the pool lock for at most ``deadlineMs``: past that the push's
+  ## whole process tree is stopped, the lock released and a diagnostic
+  ## returned. A ``receive-pack`` that never finishes once held the lock for
+  ## an hour while every pre-push on the host waited behind it.
   let useBranch =
     if branch.len > 0: branch else: currentBranch(gitBin, repoPath)
   if useBranch.len == 0:
@@ -4032,7 +4328,18 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
     # Send a self-contained pack and disable all lazy fetches in this locked
     # best-effort operation. Unexpected missing history then refuses the cache
     # push rather than waiting on the lock its own parent holds.
-    let res = runGitEnv(gitBin, argv, lazyFetch = false)
+    let res = runGitWithDeadline(gitBin, argv, lazyFetch = false, deadlineMs)
+    if res.timedOut:
+      # SIGKILL can leave the ref's lock file behind, and then every later
+      # push of this ref fails. Only this workspace's cache push writes this
+      # ref, and only under the pool lock we still hold.
+      try: removeFile(sharedBarePath / (plan.cacheRef & ".lock"))
+      except CatchableError: discard
+      return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "cache-ref push exceeded its " & $(deadlineMs div 1000) &
+          "s deadline while holding the pool lock and was stopped; the " &
+          "commit is intact and " & plan.cacheRef & " was not updated: " &
+          res.output.strip())
     if res.code != 0:
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
         diagnostic: "cache-ref push failed (" & $res.code & "): " &

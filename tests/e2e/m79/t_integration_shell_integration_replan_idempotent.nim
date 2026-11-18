@@ -153,17 +153,17 @@ suite "M79 gate: integration_shell_integration_replan_idempotent":
       check r1.output.contains("applied generation ")
 
       # The shell-integration managed block is written with its
-      # repro-managed sentinels and its body.
+      # repro:home: sentinels and its body.
       check fileExists(shellRc)
       let rcContent = readFile(shellRc)
-      check rcContent.contains("repro-managed:" & ShellBlockId)
+      check rcContent.contains("repro:home:" & ShellBlockId)
       check rcContent.contains(ShellBlockBody)
       # The writer normalizes the body to end with a single `\n`; the
       # fixture content deliberately lacks one, so the on-disk body
       # is content + "\n" — exactly the bytes M79 makes the digest
       # hash. (Confirms the writer/digest symmetry the gate verifies.)
-      let openS = "# >>> repro-managed:" & ShellBlockId & " >>>"
-      let closeS = "# <<< repro-managed:" & ShellBlockId & " <<<"
+      let openS = "# >>> repro:home:" & ShellBlockId & " >>>"
+      let closeS = "# <<< repro:home:" & ShellBlockId & " <<<"
       block confirmTrailingNewline:
         let openIdx = rcContent.find(openS)
         let closeIdx = rcContent.find(closeS)

@@ -62,13 +62,34 @@ const
   AptClosureLockHeader* = "repro-apt-closure-lock v1"
     ## First line of every lock. A future incompatible format changes this.
 
-  AptClosureRealiserVersion* = "3"
+  AptClosureRealiserVersion* = "4"
     ## Part of the closure identity. Bump it whenever the realiser changes
     ## the BYTES or LAYOUT it writes (hardening, folding, union rules), so a
     ## prefix written by an older realiser is never mistaken for a new one.
     ## "3": every prefix is published through the store (a sealed
     ## ``.repro-receipt`` and an index row) at the store's own path for its
     ## realization hash, so the collector sees it and a root can hold it.
+    ## "4": that path's directory name carries 160 bits of the realization
+    ## hash instead of 64 (Local-Content-Addressed-Store.md §"Realization
+    ## Hash (normative)"). The bump is what moves the closures: these paths
+    ## are pure functions of the lock, computed by a planner that may not be
+    ## on the host and baked into ``BindReadOnlyPaths=``, so they cannot ask
+    ## the store which name an existing prefix has. With new ids no v4
+    ## prefix ever had a 16-hex name, so the store's 40-hex path for each is
+    ## the only path it can have. Realiser 3's prefixes stay where they lie,
+    ## indexed and held by the generations that bind them
+    ## (``StoreNamedAptRealiser``).
+
+  AptClosureUnionLayout* = "alternatives-1"
+    ## Part of the UNION's realization hash only (not the members'): the
+    ## union's layout beyond the hard-link union of its members. Its
+    ## absence names the realiser-3 union that ran no alternatives
+    ## (``AptClosurePreAlternativesLayout``). "alternatives-1": the union
+    ## carries the members' update-alternatives links and their record
+    ## (spec §8.3 item 4, "Alternatives"). A member prefix is unchanged by
+    ## it, so no member moves and no archive is unpacked again; the union
+    ## moves, and a unit bound to the older union is relocated
+    ## (``legacyAptClosurePrefixPaths``).
 
   AptDebStoreAdapter* = "apt-deb"
     ## The store adapter name a member prefix's receipt and index row carry.
@@ -473,16 +494,19 @@ proc pathSafeVersion*(version: string): string =
 
 proc debStorePackage(d: AptLockedDeb): string = "apt-deb-" & d.name
 
+proc aptDebPrefixIdFor(d: AptLockedDeb; realiser: string): PrefixIdBytes =
+  computeRealizationHash(debStorePackage(d), d.version, AptDebStoreAdapter,
+    lockIdentity = d.sha256, declaredExecutablePath = "",
+    provenanceChecksum = "sha256:" & d.sha256,
+    extra = [realiser, d.architecture])
+
 proc aptDebPrefixId*(d: AptLockedDeb): PrefixIdBytes =
   ## The store realization hash of a member's prefix: a pure function of
   ## the member's archive bytes (its SHA-256), its name, version and
   ## architecture, and the realiser version. The prefix's directory is the
   ## store's own path for it (``prefixRelativePath``), so the store's
   ## recovery, index and collector treat it like any other prefix.
-  computeRealizationHash(debStorePackage(d), d.version, AptDebStoreAdapter,
-    lockIdentity = d.sha256, declaredExecutablePath = "",
-    provenanceChecksum = "sha256:" & d.sha256,
-    extra = [AptClosureRealiserVersion, d.architecture])
+  aptDebPrefixIdFor(d, AptClosureRealiserVersion)
 
 proc aptClosureIdentityFor(lock: AptClosureLock; realiser: string): string =
   var shas: seq[string] = @[]
@@ -504,30 +528,83 @@ proc rootDeb(lock: AptClosureLock): AptLockedDeb =
   raiseLock("root " & lock.roots[0] & " is not a member")
 
 proc aptDebPrefixPath*(storeRoot: string; d: AptLockedDeb): string =
-  ## ``<store>/prefixes/apt-deb-<name>/<version>-<hash16>``: the store's
+  ## ``<store>/prefixes/apt-deb-<name>/<version>-<40 hex>``: the store's
   ## path for ``aptDebPrefixId`` (name and version restricted to
   ## ``[A-Za-z0-9._-]``, every other character written ``_``, so an
-  ## epoch's ``:`` never reaches a ``BindReadOnlyPaths=`` line).
+  ## epoch's ``:`` never reaches a ``BindReadOnlyPaths=`` line). Pure: a
+  ## realiser-4 id was never named at the store's older 16-hex width, so
+  ## this is the only path its prefix can have (``AptClosureRealiserVersion``).
   storeRoot / prefixRelativePath(debStorePackage(d), d.version,
     aptDebPrefixId(d))
 
-proc aptClosurePrefixId*(lock: AptClosureLock): PrefixIdBytes =
-  ## The store realization hash of the closure's union prefix: a pure
-  ## function of the first root's name and version and of the closure's
-  ## content identity (``aptClosureIdentity``).
+proc unionPrefixIdWith(lock: AptClosureLock; realiser: string;
+                       extra: openArray[string]): PrefixIdBytes =
   let r = rootDeb(lock)
   computeRealizationHash("apt-closure-" & r.name, r.version,
-    AptClosureStoreAdapter, lockIdentity = aptClosureIdentity(lock),
-    declaredExecutablePath = "", extra = [AptClosureRealiserVersion])
+    AptClosureStoreAdapter, lockIdentity = aptClosureIdentityFor(lock, realiser),
+    declaredExecutablePath = "", extra = extra)
+
+proc aptClosurePrefixId*(lock: AptClosureLock): PrefixIdBytes =
+  ## The store realization hash of the closure's union prefix: a pure
+  ## function of the first root's name and version, of the closure's
+  ## content identity (``aptClosureIdentity``) and of the union's layout
+  ## (``AptClosureUnionLayout``).
+  unionPrefixIdWith(lock, AptClosureRealiserVersion,
+    [AptClosureRealiserVersion, AptClosureUnionLayout])
 
 proc aptClosurePrefixPath*(storeRoot: string; lock: AptClosureLock): string =
-  ## ``<store>/prefixes/apt-closure-<first root>/<root version>-<hash16>``,
+  ## ``<store>/prefixes/apt-closure-<first root>/<root version>-<40 hex>``,
   ## the store's path for ``aptClosurePrefixId``. A pure function of the
   ## lock: the planner and the host agree on it without either touching the
-  ## network.
+  ## network or the store (see ``aptDebPrefixPath`` for why no other name is
+  ## possible).
   let r = rootDeb(lock)
   storeRoot / prefixRelativePath("apt-closure-" & r.name, r.version,
     aptClosurePrefixId(lock))
+
+const StoreNamedAptRealiser* = "3"
+  ## The realiser before ``AptClosureRealiserVersion`` "4": it published
+  ## every prefix through the store, indexed and sealed, at the store's
+  ## path for its id when that path's name carried 16 hex
+  ## (``legacyPrefixRelativePath``). Its prefixes are ordinary indexed
+  ## prefixes the store's recovery keeps where they lie and the collector
+  ## takes once no generation's root holds them; units an earlier
+  ## generation bound to them are relocated (``legacyAptClosurePrefixPaths``),
+  ## and a member is published from one when its archive is no longer
+  ## served (``reusableLegacyMember``).
+
+proc storeNamedAptDebPrefixId*(d: AptLockedDeb): PrefixIdBytes =
+  ## Realiser 3's id for ``d``'s member prefix.
+  aptDebPrefixIdFor(d, StoreNamedAptRealiser)
+
+proc storeNamedAptDebPrefixPath*(storeRoot: string; d: AptLockedDeb): string =
+  ## Where realiser 3 published ``d``'s member prefix.
+  storeRoot / legacyPrefixRelativePath(debStorePackage(d), d.version,
+    storeNamedAptDebPrefixId(d))
+
+proc storeNamedAptClosurePrefixId*(lock: AptClosureLock): PrefixIdBytes =
+  ## Realiser 3's id for the closure's union prefix, in the union layout
+  ## it last used (``AptClosureUnionLayout``).
+  unionPrefixIdWith(lock, StoreNamedAptRealiser,
+    [StoreNamedAptRealiser, AptClosureUnionLayout])
+
+proc storeNamedAptClosurePrefixPath*(storeRoot: string;
+                                     lock: AptClosureLock): string =
+  ## Where realiser 3 published the closure's union prefix.
+  let r = rootDeb(lock)
+  storeRoot / legacyPrefixRelativePath("apt-closure-" & r.name, r.version,
+    storeNamedAptClosurePrefixId(lock))
+
+proc preAlternativesAptClosurePrefixPath*(storeRoot: string;
+                                          lock: AptClosureLock): string =
+  ## Where realiser 3 put this closure's union before unions carried their
+  ## alternatives links (``AptClosureUnionLayout``): a store-published
+  ## prefix at the store's older 16-hex width, its id without the layout
+  ## component. Same members, other path; a unit bound to it is relocated,
+  ## not refused.
+  let r = rootDeb(lock)
+  storeRoot / legacyPrefixRelativePath("apt-closure-" & r.name, r.version,
+    unionPrefixIdWith(lock, StoreNamedAptRealiser, [StoreNamedAptRealiser]))
 
 const LegacyAptClosureRealisers* = ["2"]
   ## Realiser versions whose closure prefixes predate the store-published
@@ -539,12 +616,17 @@ const LegacyAptClosureRealisers* = ["2"]
 
 proc legacyAptClosurePrefixPaths*(storeRoot: string;
                                   lock: AptClosureLock): seq[string] =
-  ## Where each older realiser (``LegacyAptClosureRealisers``) put this
-  ## closure's union prefix.
+  ## Where each older realiser put this closure's union prefix: each
+  ## unpublished-layout realiser's (``LegacyAptClosureRealisers``), oldest
+  ## first, then realiser 3's before unions carried alternatives
+  ## (``preAlternativesAptClosurePrefixPath``), then realiser 3's last
+  ## (``storeNamedAptClosurePrefixPath``).
   let r = rootDeb(lock)
   for v in LegacyAptClosureRealisers:
     result.add(storeRoot / "prefixes" / ("apt-closure-" & r.name) /
       (pathSafeVersion(r.version) & "-" & aptClosureIdentityFor(lock, v)))
+  result.add(preAlternativesAptClosurePrefixPath(storeRoot, lock))
+  result.add(storeNamedAptClosurePrefixPath(storeRoot, lock))
 
 proc aptClosurePrefixIds*(lock: AptClosureLock): seq[PrefixIdBytes] =
   ## Every store prefix a realised closure consists of: the union first,
@@ -1162,6 +1244,15 @@ const ReusedLegacyProvenance* = "reused-from-realiser-2:"
   ## marker's SHA-256 it was matched by. Such a receipt carries no
   ## ``provenanceChecksum``: no archive was verified for it.
 
+const ReusedStoreNamedProvenance* = "reused-from-realiser-3:"
+  ## The ``provenanceUrl`` scheme of a member published from realiser 3's
+  ## prefix of the same member (``realiseDeb``): that prefix's path, its
+  ## realization hash, and the provenance its own receipt records. Such a
+  ## receipt carries no ``provenanceChecksum`` either: this realisation
+  ## verified no archive. What it rests on is stronger than realiser 2's
+  ## marker: an indexed prefix the store verified against the tree digest
+  ## recorded when realiser 3 published it.
+
 proc publishThroughStore(st: var Store; tmp, final: string;
                          prefixId: PrefixIdBytes; hint: StoreReceiptHint;
                          mechanism = "apt-unpack";
@@ -1223,9 +1314,40 @@ proc linkTree(src, dst: string; skip: openArray[string]) =
     of pcFile: createHardlink(s, d)
     of pcLinkToFile, pcLinkToDir: createSymlink(expandSymlink(s), d)
 
+proc readMarker(path: string): string
+
+proc storeNamedMember(storeRoot: string; d: AptLockedDeb): string =
+  ## Realiser 3's prefix of exactly this member, "" when there is none that
+  ## its receipt and marker vouch for: at ``storeNamedAptDebPrefixPath``, a
+  ## directory whose receipt records realiser 3's id for this member AT THAT
+  ## PATH (``legacyPrefixOccupant``), under the member adapter and the
+  ## lock's SHA-256, with a marker naming the same SHA-256. The store index
+  ## check (the row, and the tree against its recorded digest) is
+  ## ``realiseDeb``'s, which holds the store open; a planner without it
+  ## (``closureSpace``) gets the candidate.
+  let dir = storeNamedAptDebPrefixPath(storeRoot, d)
+  let rel = "prefixes/" & dir.parentDir.extractFilename & "/" &
+    dir.extractFilename
+  if legacyPrefixOccupant(storeRoot, rel, storeNamedAptDebPrefixId(d)) !=
+      lpoThisId:
+    return ""
+  if readMarker(dir / DebPrefixMarker) != d.sha256 & "\n": return ""
+  try:
+    let rec = readReceiptFile(dir / ReceiptFileName)
+    if rec.adapter != AptDebStoreAdapter or rec.lockIdentity != d.sha256:
+      return ""
+  except CatchableError:
+    return ""
+  dir
+
+proc realiserTwoMember(storeRoot: string; d: AptLockedDeb): string
+
 proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
   ## An older realiser's prefix of exactly this member, "" when there is
-  ## none that verifies: at ``legacyAptDebPrefixPath``, its marker naming
+  ## none that verifies. Realiser 3's first (``storeNamedMember``): the
+  ## store's own indexed prefix of the same archive bytes at that
+  ## realiser's 16-hex path. Otherwise realiser 2's: at
+  ## ``legacyAptDebPrefixPath``, its marker naming
   ## the lock's SHA-256 (and its directory name that realiser's hash of
   ## it), its tree within the store's policy (``legacyDebPrefix``), and an
   ## adopted receipt, when there is one, recording the same digest at the
@@ -1240,6 +1362,13 @@ proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
   ## became version 2 (dba543f5d9), so a tree from that window was unpacked
   ## by the weaker one. A member published from it says so in its receipt
   ## (``realiseDeb``) instead of claiming the archive's digest.
+  let storeNamed = storeNamedMember(storeRoot, d)
+  if storeNamed.len > 0: return storeNamed
+  realiserTwoMember(storeRoot, d)
+
+proc realiserTwoMember(storeRoot: string; d: AptLockedDeb): string =
+  ## Realiser 2's prefix of exactly this member (``reusableLegacyMember``'s
+  ## second source), "" when there is none that verifies.
   let dir = legacyAptDebPrefixPath(storeRoot, d)
   if not dirExists(dir): return ""
   let v = legacyDebPrefix(dir)
@@ -1261,7 +1390,11 @@ proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
 
 proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
                 storeRoot: string; cacheDir: string; fetch: AptDebFetcher;
-                retainDebCache: bool; log: AptRealisationLog = nil): string =
+                retainDebCache: bool; log: AptRealisationLog = nil;
+                unserved: ref bool = nil): string =
+  ## ``unserved``, when given, is set when the archive answered that it
+  ## does not serve ``d`` and the member was published from an older
+  ## realiser's prefix instead.
   result = aptDebPrefixPath(storeRoot, d)
   let marker = result / DebPrefixMarker
   if fileExists(marker) and readFile(marker) == d.sha256 & "\n" and
@@ -1282,16 +1415,46 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
   # Karadjov, 2026-11-01). An inconclusive fetch refuses. The receipt of
   # such a member names where it came from and the marker it rests on, not
   # the archive's digest, which nothing re-checked.
+  #
+  # Realiser 3's prefix is tried first: since the bump to "4" every member
+  # is published anew, and on a host whose archive no longer serves a
+  # member the prefix realiser 3 published of it is the one a running unit
+  # binds. It is used only when the store index records it at its path
+  # and its tree verifies against the digest recorded when it was
+  # published.
   var deb = ""
   var legacy = ""
   try:
     deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
   except EAptDebUnserved as e:
-    legacy = reusableLegacyMember(storeRoot, d)
+    if unserved != nil: unserved[] = true
+    # Realiser 3's prefix only when the store index records it at its path
+    # and its tree verifies; otherwise realiser 2's, as before.
+    let storeNamed = storeNamedMember(storeRoot, d)
+    let storeNamedId = storeNamedAptDebPrefixId(d)
+    if storeNamed.len > 0 and
+        st.lookupPrefix(storeNamedId).row.realizedPath ==
+          "prefixes/" & storeNamed.parentDir.extractFilename & "/" &
+            storeNamed.extractFilename and
+        ensureIndexed(st, storeNamed, storeNamedId):
+      legacy = storeNamed
+    else:
+      legacy = realiserTwoMember(storeRoot, d)
     if legacy.len == 0:
       raise newException(EAptDebUnserved, e.msg & "; and no older " &
         "realiser's prefix of " & d.name & " " & d.version & " verifies")
   if legacy.len > 0:
+    let fromStoreNamed = legacy == storeNamedAptDebPrefixPath(storeRoot, d)
+    var provenance = ReusedLegacyProvenance & legacy &
+      "#marker-sha256=" & d.sha256
+    var mechanism = "reused-realiser-2-prefix"
+    if fromStoreNamed:
+      let rec = readReceiptFile(legacy / ReceiptFileName)
+      provenance = ReusedStoreNamedProvenance & legacy &
+        "#prefix-id=" & prefixIdHex(storeNamedAptDebPrefixId(d)) &
+        "#its-provenance=" & rec.provenanceUrl &
+        "#its-checksum=" & rec.provenanceChecksum
+      mechanism = "reused-realiser-3-prefix"
     createDir(parentDir(result))
     reclaimStaleScratch(parentDir(result))
     let tmp = tempSibling(result, "apt-deb")
@@ -1304,10 +1467,9 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
         StoreReceiptHint(adapter: AptDebStoreAdapter,
           packageName: debStorePackage(d), version: d.version,
           lockIdentity: d.sha256,
-          provenanceUrl: ReusedLegacyProvenance & legacy &
-            "#marker-sha256=" & d.sha256 & "#unserved=" & debUrl(lock, d) &
+          provenanceUrl: provenance & "#unserved=" & debUrl(lock, d) &
             "#contents-not-reverified-against-the-deb"),
-        mechanism = "reused-realiser-2-prefix", log = log)
+        mechanism = mechanism, log = log)
     except CatchableError:
       if dirExists(tmp): removeDir(tmp)
       raise
@@ -1437,6 +1599,332 @@ proc buildUnion(lock: AptClosureLock; memberRoots: seq[(string, string)];
           owner[target] = pkg
 
 # ---------------------------------------------------------------------------
+# Alternatives (update-alternatives links)
+# ---------------------------------------------------------------------------
+#
+# Debian provides some commands only through the alternatives system: no
+# package ships ``/usr/bin/awk``, ``/usr/bin/which``, ``/usr/bin/pager``,
+# ``/usr/bin/editor``, ``/bin/nc`` or ``/usr/sbin/iptables``; the providers'
+# ``postinst`` scripts register them with ``update-alternatives --install``,
+# and dpkg points each link at the provider with the highest priority
+# (update-alternatives(1), "automatic mode"). The realiser runs no
+# maintainer script (spec §8.3 item 4), so a closure had none of them
+# (issue 2026-11-12-apt-closures-leave-out-every-alternatives-managed-
+# command.md). It therefore READS each member's ``postinst`` -- it never
+# runs it -- for the ``update-alternatives --install`` invocations whose
+# arguments are literal words, and makes the links itself when it builds the
+# union: per alternative name, the highest-priority candidate whose path the
+# closure holds, with that candidate's slaves whose paths it holds. Each
+# link is a relative symlink straight to the chosen path (dpkg's
+# ``/etc/alternatives/<name>`` indirection would resolve to the HOST's
+# ``/etc``, which the unit sees). What was linked, what was not and why is
+# written to ``.repro-apt-alternatives`` at the union's top.
+#
+# https://manpages.debian.org/trixie/dpkg/update-alternatives.1.en.html
+# https://www.debian.org/doc/debian-policy/ch-customized-programs.html#alternate-versions-of-a-command
+
+const
+  AlternativesRecordName* = ".repro-apt-alternatives"
+    ## The union's record of the alternatives links it was built with.
+
+type
+  AptAlternativeSlave* = object
+    link*: string     ## absolute path of the slave link, as registered
+    name*: string     ## the slave's alternative name
+    path*: string     ## absolute path the slave link points to
+
+  AptAlternative* = object
+    ## One ``update-alternatives --install`` candidate a member registers.
+    package*: string  ## the member whose ``postinst`` registers it
+    link*: string     ## absolute path of the master link (``/usr/bin/awk``)
+    name*: string     ## the alternative's name (``awk``)
+    path*: string     ## absolute path of the candidate (``/usr/bin/mawk``)
+    priority*: int
+    slaves*: seq[AptAlternativeSlave]
+
+  AptMemberAlternatives* = object
+    ## What one member's ``postinst`` registers.
+    candidates*: seq[AptAlternative]
+    unread*: seq[string]
+      ## invocations the reader could not take literally (a ``$`` expansion,
+      ## a glob, a non-numeric priority): not linked, recorded.
+
+proc shellWords(line: string): tuple[words: seq[string]; literal: seq[bool]] =
+  ## Split one logical shell line into words, the way sh(1) splits them for
+  ## the words this reader needs: blanks separate, ``'...'`` and ``"..."``
+  ## quote, ``\`` escapes, an unquoted ``#`` at a word's start ends the
+  ## line, and ``;``, ``&``, ``|``, ``(``, ``)``, ``<``, ``>`` are words of
+  ## their own (operators). ``literal[i]`` is false for a word that holds an
+  ## expansion (``$``, a backquote) or an unquoted glob character -- one
+  ## whose value only a shell knows.
+  var w = ""
+  var lit = true
+  var inWord = false
+  var i = 0
+  proc flush(words: var seq[string]; literal: var seq[bool]) =
+    if inWord:
+      words.add(w)
+      literal.add(lit)
+    w = ""
+    lit = true
+    inWord = false
+  while i < line.len:
+    let c = line[i]
+    case c
+    of ' ', '\t':
+      flush(result.words, result.literal)
+    of '#':
+      if not inWord: break
+      w.add(c)
+    of ';', '&', '|', '(', ')', '<', '>':
+      flush(result.words, result.literal)
+      result.words.add($c)
+      result.literal.add(true)
+    of '\\':
+      inWord = true
+      if i + 1 < line.len:
+        inc i
+        w.add(line[i])
+    of '\'':
+      inWord = true
+      inc i
+      while i < line.len and line[i] != '\'':
+        w.add(line[i])
+        inc i
+    of '"':
+      inWord = true
+      inc i
+      while i < line.len and line[i] != '"':
+        if line[i] in {'$', '`'}: lit = false
+        if line[i] == '\\' and i + 1 < line.len: inc i
+        w.add(line[i])
+        inc i
+    of '$', '`', '*', '?', '[':
+      inWord = true
+      lit = false
+      w.add(c)
+    else:
+      inWord = true
+      w.add(c)
+    inc i
+  flush(result.words, result.literal)
+
+proc logicalLines(script: string): seq[string] =
+  ## The script's lines with backslash-newline continuations joined, as
+  ## sh(1) joins them before splitting words.
+  var cur = ""
+  for raw in script.splitLines():
+    let l = raw.strip(leading = false, trailing = true, chars = {'\r'})
+    if l.endsWith("\\") and not l.endsWith("\\\\"):
+      cur.add(l[0 ..< l.len - 1])
+      cur.add(' ')
+    else:
+      cur.add(l)
+      result.add(cur)
+      cur = ""
+  if cur.len > 0: result.add(cur)
+
+const
+  UaGlobalOptionsWithValue = ["--altdir", "--admindir", "--instdir",
+                              "--root", "--log"]
+  UaGlobalFlags = ["--quiet", "--verbose", "--debug", "--force", "--skip-auto"]
+
+proc parseUpdateAlternativesInstalls*(script, package: string):
+    AptMemberAlternatives =
+  ## The ``update-alternatives --install <link> <name> <path> <priority>
+  ## [--slave <link> <name> <path>]...`` invocations of a maintainer script,
+  ## read, not run. An invocation is read whatever ``if`` guards it (the
+  ## script's ``configure`` branch is what installing runs). One whose
+  ## master words are not literal (``/usr/bin/$i``, ``$priority``) is
+  ## recorded in ``unread``; a slave that is not literal ends the slaves
+  ## read from it (``$(slave ...)`` in xz-utils), also recorded. Other
+  ## actions (``--remove``, ``--set``, ``--list`` inside ``$(...)``) are not
+  ## installs and are ignored.
+  for line in logicalLines(script):
+    let (words, literal) = shellWords(line)
+    var i = 0
+    while i < words.len:
+      if words[i] != "update-alternatives" or not literal[i]:
+        inc i
+        continue
+      var j = i + 1
+      template stop(k: int): bool =
+        k >= words.len or words[k] in [";", "&", "|", "(", ")", "<", ">"]
+      while not stop(j) and (words[j] in UaGlobalFlags or
+                             words[j] in UaGlobalOptionsWithValue):
+        if words[j] in UaGlobalOptionsWithValue: inc j
+        inc j
+      if stop(j) or words[j] != "--install":
+        i = j
+        continue
+      inc j
+      var masterOk = true
+      for k in j ..< j + 4:
+        if stop(k) or not literal[k]: masterOk = false
+      var priority = 0
+      if masterOk:
+        try: priority = parseInt(words[j + 3])
+        except ValueError: masterOk = false
+      if not masterOk:
+        var shown: seq[string] = @[]
+        var k = i
+        while not stop(k) and shown.len < 6:
+          shown.add(words[k])
+          inc k
+        result.unread.add(package & ": " & shown.join(" "))
+        i = j
+        continue
+      var alt = AptAlternative(package: package, link: words[j],
+        name: words[j + 1], path: words[j + 2], priority: priority)
+      j += 4
+      while not stop(j) and words[j] == "--slave":
+        if stop(j + 1) or stop(j + 2) or stop(j + 3) or
+            not (literal[j + 1] and literal[j + 2] and literal[j + 3]):
+          result.unread.add(package & ": a slave of " & alt.name &
+            " that is not literal")
+          break
+        alt.slaves.add(AptAlternativeSlave(link: words[j + 1],
+          name: words[j + 2], path: words[j + 3]))
+        j += 4
+      if not stop(j) and (words[j] != "--slave" or literal[j] == false):
+        # Words that are neither a slave nor the end of the command:
+        # ``$(slave ...)`` (xz-utils), whose expansion only a shell knows.
+        result.unread.add(package & ": a slave of " & alt.name &
+          " that is not literal")
+      result.candidates.add(alt)
+      i = j
+
+proc debAlternatives*(debPath, package, scratch: string):
+    AptMemberAlternatives =
+  ## What the ``postinst`` in the control member of the (verified) ``.deb``
+  ## at ``debPath`` registers. The control member is unpacked into
+  ## ``scratch`` by the same in-process reader and policy as the data
+  ## member; nothing in it is executed. An archive with no control member
+  ## or no ``postinst`` registers nothing.
+  createDir(scratch)
+  let tarPath = scratch / "control.tar"
+  if not extractDebControlMemberToTar(debPath, tarPath): return
+  let dir = scratch / "control"
+  createDir(dir)
+  setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+  unpackDebTar(tarPath, dir, package)
+  let postinst = dir / "postinst"
+  if fileExists(postinst) and not symlinkExists(postinst):
+    result = parseUpdateAlternativesInstalls(readFile(postinst), package)
+
+proc closureRelative(absPath: string): string =
+  ## The closure-relative place of an absolute path a package names
+  ## (``/bin/nc`` -> ``usr/bin/nc``, merged-``/usr`` as the union folds
+  ## it), or ``""`` when it is not a plain absolute path into a tree the
+  ## union keeps.
+  if not absPath.startsWith("/"): return ""
+  var comps: seq[string] = @[]
+  for c in absPath[1 .. ^1].split('/'):
+    if c.len == 0 or c == "." or c == "..": return ""
+    comps.add(c)
+  if comps.len < 2: return ""
+  unionTarget(comps.join("/"))
+
+proc noSymlinkAncestor(dest, rel: string): bool =
+  ## Whether no existing ancestor of ``rel`` under ``dest`` is a symlink or
+  ## a non-directory (missing ancestors are fine: nothing is there yet). A
+  ## link is never made, and a path never counted as present, through a
+  ## member's symlink (the union's own rule, ``buildUnion``).
+  var p = dest
+  let comps = rel.split('/')
+  for c in comps[0 ..< comps.len - 1]:
+    p = p / c
+    if symlinkExists(p) or fileExists(p):
+      return false
+  true
+
+proc holds(dest, rel: string): bool =
+  ## Whether the union holds a file or a symlink (not a directory) at
+  ## ``rel``, reached through no symlink.
+  if rel.len == 0 or not noSymlinkAncestor(dest, rel): return false
+  let p = dest / rel
+  if symlinkExists(p): return true
+  fileExists(p)
+
+proc makeAlternativeLink(dest, linkRel, targetRel: string): string =
+  ## Make ``linkRel`` a relative symlink to ``targetRel`` inside ``dest``;
+  ## "" on success, else why it was not made.
+  if not noSymlinkAncestor(dest, linkRel):
+    return "its directory lies under a symlink"
+  let p = dest / linkRel
+  if symlinkExists(p) or fileExists(p) or dirExists(p):
+    return "the closure already has it"
+  let parent = parentDir(linkRel)
+  var d = dest
+  for c in parent.split('/'):
+    d = d / c
+    if not dirExists(d):
+      createDir(d)
+      setFilePermissions(d, DirMode)
+  createSymlink(relativePath(targetRel, parent, '/'), p)
+  ""
+
+proc linkAlternatives*(dest: string;
+                       members: seq[(string, AptMemberAlternatives)];
+                       unknown: seq[string] = @[]): string =
+  ## Make the alternatives links in the union at ``dest`` (spec §8.3 item 4,
+  ## "Alternatives") and return the record's text. ``members`` is
+  ## ``(package, what its postinst registers)``; ``unknown`` names the
+  ## members whose ``.deb`` the archive no longer serves, so whose
+  ## registrations could not be read. Per name, in name order: the
+  ## candidates whose path the union holds, highest priority first, then
+  ## by path and package; the first one's master link and the slaves of it
+  ## whose paths the union holds. A link the union already has (a shipped
+  ## file, or an earlier name's link) is not replaced, as
+  ## update-alternatives does not replace a real file. Every line of the
+  ## record is deterministic in the lock's bytes.
+  var byName = initOrderedTable[string, seq[AptAlternative]]()
+  var lines: seq[string] = @[]
+  for (pkg, m) in members:
+    for c in m.candidates:
+      byName.mgetOrPut(c.name, @[]).add(c)
+    for u in m.unread: lines.add("unread " & u.replace('\n', ' '))
+  var names = toSeq(byName.keys)
+  names.sort(cmp)
+  for name in names:
+    var cands: seq[AptAlternative] = @[]
+    for c in byName[name]:
+      if holds(dest, closureRelative(c.path)): cands.add(c)
+    if cands.len == 0:
+      lines.add("skipped " & name & " no candidate's path is in the closure")
+      continue
+    cands.sort(proc (a, b: AptAlternative): int =
+      result = cmp(b.priority, a.priority)
+      if result == 0: result = cmp(a.path, b.path)
+      if result == 0: result = cmp(a.package, b.package))
+    let best = cands[0]
+    let linkRel = closureRelative(best.link)
+    let pathRel = closureRelative(best.path)
+    if linkRel.len == 0:
+      lines.add("skipped " & name & " " & best.link &
+        " is outside the closure's trees")
+      continue
+    let why = makeAlternativeLink(dest, linkRel, pathRel)
+    if why.len > 0:
+      lines.add("skipped " & name & " " & linkRel & " " & why)
+      continue
+    lines.add("master " & name & " " & linkRel & " " & pathRel & " " &
+      $best.priority & " " & best.package)
+    for s in best.slaves:
+      let sl = closureRelative(s.link)
+      let sp = closureRelative(s.path)
+      if sl.len == 0 or not holds(dest, sp):
+        continue  # update-alternatives drops a slave whose path is absent
+      let swhy = makeAlternativeLink(dest, sl, sp)
+      if swhy.len > 0:
+        lines.add("skipped-slave " & name & " " & sl & " " & swhy)
+      else:
+        lines.add("slave " & name & " " & sl & " " & sp)
+  for u in unknown: lines.add("unknown " & u)
+  result = "repro-apt-alternatives v1\n"
+  for l in lines: result.add(l & "\n")
+
+# ---------------------------------------------------------------------------
 # Realisation locks
 # ---------------------------------------------------------------------------
 #
@@ -1554,14 +2042,46 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
                              retainDebCache, log)
       return
     var members: seq[(string, string)] = @[]
-    for d in lock.debs:
-      members.add((d.name, realiseDeb(st, lock, d, storeRoot, cacheDir,
-        fetch, retainDebCache, log)))
+    var alternatives: seq[(string, AptMemberAlternatives)] = @[]
+    var unknown: seq[string] = @[]
     createDir(parentDir(result))
     reclaimStaleScratch(parentDir(result))
+    let ctlScratch = tempSibling(result, "apt-control")
+    try:
+      for d in lock.debs:
+        # The member's archive is kept until its postinst is read: the
+        # union's alternatives links come from it (spec §8.3 item 4,
+        # "Alternatives"). A member already published (by an older union,
+        # another closure, or an interrupted run) is read from its archive
+        # too, cached or fetched and verified against the lock like any
+        # other; only the archive's own answer that it no longer serves it
+        # (the C20 case) leaves its registrations unknown, and the record
+        # says so.
+        let wasUnserved = new bool
+        members.add((d.name, realiseDeb(st, lock, d, storeRoot, cacheDir,
+          fetch, retainDebCache = true, log, wasUnserved)))
+        var deb = ""
+        if wasUnserved[]:
+          unknown.add(d.name & " " & d.version)
+        else:
+          try:
+            deb = ensureVerifiedDeb(lock, d, cacheDir, fetch)
+          except EAptDebUnserved:
+            unknown.add(d.name & " " & d.version)
+        if deb.len > 0:
+          alternatives.add((d.name, debAlternatives(deb, d.name,
+            ctlScratch / d.sha256)))
+          if not retainDebCache:
+            try: removeFile(deb)
+            except OSError: discard
+    finally:
+      if dirExists(ctlScratch): removeDir(ctlScratch)
     let tmp = tempSibling(result, "apt-closure")
     try:
       buildUnion(lock, members, tmp)
+      let record = linkAlternatives(tmp, alternatives, unknown)
+      writeFile(tmp / AlternativesRecordName, record)
+      setFilePermissions(tmp / AlternativesRecordName, FileMode)
       writeFile(tmp / ClosurePrefixMarker, closureMarkerText(lock))
       setFilePermissions(tmp / ClosurePrefixMarker, FileMode)
       let root = rootDeb(lock)

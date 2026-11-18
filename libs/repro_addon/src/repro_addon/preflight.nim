@@ -731,6 +731,16 @@ proc resolveEvidenceInputs*(sink, caPath: string;
     raise newException(ValueError, "--heartbeat-interval must be positive")
   result.heartbeatSec = heartbeatSec
 
+proc binaryStaticCheck*(binary: string): tuple[ok: bool; detail: string] =
+  ## The preflight's ``addon-binary-static`` check: ``binary`` is the static
+  ## add-on image (``isStaticElf``: no program interpreter).
+  let isStatic = when mutated("bootstrap-accepts-dynamic"): true
+                 else: isStaticElf(binary)
+  (isStatic,
+   if isStatic: "the add-on binary is statically linked"
+   else: "the add-on binary is dynamically linked (it has a program " &
+     "interpreter); bootstrap with the static add-on image")
+
 proc runPreflight*(inp: PreflightInputs): PreflightReport =
   ## Inventory the host and compute the plan. Writes nothing.
   when mutated("preflight-writes"):
@@ -743,6 +753,14 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       discard
   let binary = if inp.binaryPath.len > 0: inp.binaryPath else: "/proc/self/exe"
   result.binarySha256 = sha256OfFile(binary)
+  # Only the static add-on image is installed (§13 decision 174, enforced
+  # at bootstrap by A9 review round 19): the units generation 0 renders run
+  # the binary that bootstraps, and the dynamic engine needs the host's
+  # loader and libc, which a release upgrade replaces. An agent-only host
+  # never re-points (its ticks skip it), so a dynamic engine installed here
+  # would stay.
+  let sc = binaryStaticCheck(binary)
+  result.add("addon-binary-static", sc.ok, sc.detail)
 
   # Root: the add-on is installed by root, and only root can read the
   # facts below (PID 1's image, /var/lib).

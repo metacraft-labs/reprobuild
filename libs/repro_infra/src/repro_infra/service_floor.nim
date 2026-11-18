@@ -166,7 +166,7 @@ const
     "local-fs-pre.target", "swap.target", "cryptsetup.target",
     "-.slice", "system.slice", "repro-store.mount",
     "repro-addon-secrets.service", "repro-addon-egress.service",
-    "system-reproagent.slice"]
+    "system-reproagent.slice", "repro-addon-boot-hold.service"]
     ## Units the boot re-assertion is ordered after on every base, which
     ## the parse-time half can name without the host (spec §10.1, "A
     ## floored unit's own ordering"): the boot targets its default
@@ -177,7 +177,9 @@ const
     ## ``local-fs.target``, ``swap.target`` and ``cryptsetup.target``), its
     ## slice, and the add-on's own units ordered before it: the store
     ## mount and the secrets unit (its ``After=``), the egress observer
-    ## (``Before=`` it) and the egress observer's slice (its ``After=``).
+    ## (``Before=`` it) and the egress observer's slice (its ``After=``),
+    ## and the boot-hold unit, which is ``Before=sysinit.target`` (§13
+    ## decision 159; A9 review round 16, finding 6).
     ## ``repro_addon``'s ``t_addon_floor_boot_ordering_cycle`` holds this
     ## list to the order generation 0 writes, followed transitively. The
     ## effective half reads the whole order from systemd.
@@ -1013,6 +1015,114 @@ proc systemStateRoute*(roots: openArray[string];
     c = parents.getOrDefault(c, "")
   chain
 
+const
+  BootHoldUnitName* = "repro-addon-boot-hold.service"
+    ## generation 0's boot-hold unit (``repro_addon/generation0``).
+  BootHoldPredecessors* = ["local-fs.target", "local-fs-pre.target",
+    "systemd-remount-fs.service", "systemd-fsck-root.service", "-.mount",
+    "var.mount", "run-wrappers.mount", "tmp.mount", "boot.mount"]
+    ## The units the boot-hold unit is ordered after on every base (its
+    ## ``After=local-fs.target``) and what those are ordered after: the
+    ## local file systems and the services that check and remount them
+    ## (bootup(7), systemd.special(7) ``local-fs.target``,
+    ## systemd-remount-fs.service(8), systemd-fsck@.service(8)). Every
+    ## ``.mount``, ``systemd-fsck@``, ``systemd-growfs@`` and
+    ## ``systemd-makefs@`` unit counts as one too (``isBootHoldPredecessor``):
+    ## a local mount is ordered before ``local-fs.target`` (systemd.mount(5),
+    ## "Default Dependencies"). The owner's decision of 2026-11-16 (A9
+    ## review round 17, finding 2): an ordering that reaches one of them
+    ## from a unit ordered after the boot-hold unit is a cycle through it.
+  SysinitPredecessors* = ["sysinit.target", "swap.target",
+    "cryptsetup.target", "veritysetup.target", "integritysetup.target",
+    "systemd-tmpfiles-setup.service", "systemd-tmpfiles-setup-dev.service",
+    "systemd-tmpfiles-setup-dev-early.service", "systemd-journald.service",
+    "systemd-journald.socket", "systemd-journald-dev-log.socket",
+    "systemd-journald-audit.socket", "systemd-journal-flush.service",
+    "systemd-udevd.service", "systemd-udev-trigger.service",
+    "systemd-udev-settle.service", "systemd-udevd-control.socket",
+    "systemd-udevd-kernel.socket", "systemd-sysctl.service",
+    "systemd-modules-load.service", "systemd-sysusers.service",
+    "systemd-random-seed.service", "systemd-update-utmp.service",
+    "systemd-machine-id-commit.service", "systemd-firstboot.service",
+    "systemd-binfmt.service", "systemd-hwdb-update.service",
+    "systemd-journal-catalog-update.service", "systemd-update-done.service",
+    "ldconfig.service", "kmod-static-nodes.service", "systemd-pstore.service",
+    "systemd-boot-random-seed.service", "systemd-sysext.service",
+    "systemd-confext.service", "systemd-ask-password-console.path",
+    "systemd-ask-password-wall.path", "apparmor.service",
+    "systemd-tpm2-setup.service", "systemd-tpm2-setup-early.service",
+    "proc-sys-fs-binfmt_misc.automount", "dev-hugepages.mount",
+    "dev-mqueue.mount", "sys-kernel-debug.mount", "sys-kernel-tracing.mount",
+    "sys-kernel-config.mount", "sys-fs-fuse-connections.mount"]
+    ## Units the base orders before ``sysinit.target`` (bootup(7),
+    ## systemd.special(7) ``sysinit.target``, and the units systemd ships in
+    ## ``sysinit.target.wants``), so before every unit with default
+    ## dependencies: the parse-time half's names for them. The effective
+    ## half reads the whole order from systemd.
+
+proc isBootHoldPredecessor*(u: string): bool =
+  ## ``u`` runs before the boot-hold unit (``BootHoldPredecessors``).
+  u in BootHoldPredecessors or u.endsWith(".mount") or
+    u.startsWith("systemd-fsck@") or u.startsWith("systemd-growfs@") or
+    u.startsWith("systemd-makefs@")
+
+proc runsBeforeSysinit*(u: string): bool =
+  ## ``u`` is ordered before ``sysinit.target`` on every base, or is it:
+  ## the boot-hold unit and what it follows, the units the base orders
+  ## before ``sysinit.target``, and swap. A unit with default dependencies
+  ## runs after every one of them.
+  u == BootHoldUnitName or isBootHoldPredecessor(u) or
+    u in SysinitPredecessors or u.endsWith(".swap")
+
+proc earlyOrderingRoute*(root: string;
+                         beforeOf: proc (u: string): seq[string] {.closure.};
+                         limit = RouteLimit): seq[string] =
+  ## The chain from ``root`` by ``Before=`` (``beforeOf``) to a unit that
+  ## runs before ``sysinit.target`` (``runsBeforeSysinit``), or ``@[]``.
+  ## For a unit ordered after ``sysinit.target`` -- by default
+  ## dependencies or an explicit ``After=`` -- such a chain is an ordering
+  ## cycle through ``sysinit.target``; when it reaches the boot-hold unit or
+  ## what it follows (``isBootHoldPredecessor``), through the boot-hold
+  ## unit, whose job then must not be the one systemd deletes (it is
+  ## ``RequiredBy=sysinit.target``, so it matters to the boot's anchor and
+  ## systemd deletes another, or fails the transaction:
+  ## ``transaction_verify_order_one()``, src/core/transaction.c,
+  ## https://github.com/systemd/systemd/blob/v257/src/core/transaction.c).
+  ## Refused, at parse time and on the effective unit (the owner's decision
+  ## of 2026-11-16, A9 review round 17, finding 2). A closure of more than
+  ## ``limit`` units returns ``@["(more than <limit> units)"]``.
+  var parents = initTable[string, string]()
+  parents[root] = ""
+  var found = ""
+  let complete = walkReach([root], beforeOf,
+    proc (u, parent: string): bool =
+      parents[u] = parent
+      if u != root and runsBeforeSysinit(u):
+        found = u
+        return false
+      true, limit)
+  if not complete: return @["(more than " & $limit & " units)"]
+  if found.len == 0: return @[]
+  var chain = @[found]
+  var c = parents[found]
+  while c.len > 0:
+    chain.insert(c, 0)
+    c = parents.getOrDefault(c, "")
+  chain
+
+proc earlyOrderingReason*(route: seq[string]): string =
+  ## The refusal's text for an ``earlyOrderingRoute``.
+  let last = route[^1]
+  if last.startsWith("("):
+    return "is ordered before too many units to judge (" & route.join(" -> ") & ")"
+  "is ordered after sysinit.target and before " & last & ", which runs " &
+    (if isBootHoldPredecessor(last) or last == BootHoldUnitName:
+       "before the boot-hold unit (" & BootHoldUnitName & ")"
+     else: "before sysinit.target") &
+    " (" & route.join(" -> ") & "): an ordering cycle, in which systemd " &
+    "deletes a job at every boot, or fails the boot's transaction. Drop " &
+    "that Before= (or the After= naming it)"
+
 proc bootOrderingCycleRoute*(root: string;
                              beforeOf: proc (u: string): seq[string] {.closure.};
                              waitedFor: openArray[string] = [];
@@ -1043,7 +1153,8 @@ proc bootOrderingCycleRoute*(root: string;
   let complete = walkReach([root], beforeOf,
     proc (u, parent: string): bool =
       parents[u] = parent
-      if u == FloorReassertUnit or u in waited:
+      if u == FloorReassertUnit or u in waited or
+          (u != root and runsBeforeSysinit(u)):
         found = u
         return false
       true, limit)
@@ -1811,6 +1922,74 @@ proc baseTreeActivatorRefusal*(unitName: string): string =
       ", a tree the base system owns; such a unit is never named after one " &
       "(§13 decision 78)"
   ""
+
+const
+  ActivatorEarlyUnits* = ["sysinit.target", "local-fs.target",
+    "local-fs-pre.target", "swap.target", "cryptsetup.target",
+    "repro-addon-boot-hold.service"]
+    ## What an activator of a floored service may not be ordered before:
+    ## the boot-hold unit puts a pending switch's holds back before
+    ## ``sysinit.target`` (§13 decision 159), so an activator that can start
+    ## before or beside it starts with no hold (A9 review round 16,
+    ## finding 3).
+  ActivatorLateEnough* = ["sysinit.target", "basic.target"]
+    ## An ``After=`` naming one of these orders an activator without
+    ## default dependencies after ``sysinit.target`` (``basic.target`` is
+    ## after it; bootup(7)).
+
+proc activatorBootOrderRefusal*(unitName: string; defaultDeps: bool;
+                                after, before: openArray[string]): string =
+  ## Why the activator ``unitName`` of a floored service can start before
+  ## the boot-hold unit has put a pending switch's holds back, or "" (§13
+  ## decision 163): it must be ordered after ``sysinit.target`` -- by its
+  ## default dependencies (systemd.socket(5), systemd.timer(5),
+  ## systemd.path(5): ``After=sysinit.target``), or by an explicit
+  ## ``After=`` -- and never before one of ``ActivatorEarlyUnits``. Shared by
+  ## the parse half (the profile's files) and the effective half (what
+  ## systemd reports).
+  when FloorMutation == "activator-boot-order-unchecked":
+    return ""
+  for b in before:
+    if b in ActivatorEarlyUnits:
+      return unitName & " is ordered before " & b & ", so at boot it can " &
+        "start before a pending switch's holds are back"
+  if defaultDeps: return ""
+  for a in after:
+    if a in ActivatorLateEnough: return ""
+  unitName & " has no default dependencies and no After=sysinit.target, " &
+    "so at boot it can start before a pending switch's holds are back " &
+    "(DefaultDependencies=no)"
+
+proc activatorBootOrderOfFiles*(unitName: string; files: openArray[string]): string =
+  ## ``activatorBootOrderRefusal`` over the activator's unit file and its
+  ## drop-ins, in the order systemd reads them: the last
+  ## ``DefaultDependencies=`` wins, and ``After=`` / ``Before=`` accumulate.
+  ## An empty assignment adds nothing and resets nothing: systemd's parser
+  ## of a dependency list (``config_parse_unit_deps()``,
+  ## src/core/load-fragment.c,
+  ## https://github.com/systemd/systemd/blob/v257/src/core/load-fragment.c)
+  ## returns as soon as it finds no first word, so ``Before=`` in a drop-in
+  ## leaves the file's ``Before=`` in force (A9 review round 17, finding 6).
+  var defaultDeps = true
+  var after, before: seq[string]
+  for f in files:
+    for d in sectionDirectives(f, ["Unit"]):
+      case d.key
+      of "DefaultDependencies":
+        let v = d.value.strip().toLowerAscii()
+        if v in ["0", "no", "n", "false", "f", "off"]: defaultDeps = false
+        elif v in ["1", "yes", "y", "true", "t", "on"]: defaultDeps = true
+      of "After":
+        when FloorMutation == "deps-empty-resets":
+          # FALSIFYING MUTATION: an empty assignment resets the list.
+          if d.value.strip().len == 0: after.setLen(0)
+        after.add(d.value.splitWhitespace())
+      of "Before":
+        when FloorMutation == "deps-empty-resets":
+          if d.value.strip().len == 0: before.setLen(0)
+        before.add(d.value.splitWhitespace())
+      else: discard
+  activatorBootOrderRefusal(unitName, defaultDeps, after, before)
 
 proc activatorRefusal*(unitName, content: string; dropIn: bool;
                        half = fhParse; service = "";

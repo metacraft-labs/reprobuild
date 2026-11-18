@@ -4,8 +4,8 @@
 ## A repo's dependencies are declared only in its recipe; the committed
 ## ``repro.lock`` that ``repro lock refresh`` derives from it is the only
 ## record of them, and every closure question (the pre-push gate's scope,
-## ``repro push`` ordering, the mutual-pin rule, ``repro remove``) reads that
-## lock (owner decision 2026-11-05, Unified-Locking-And-Hooks.md §14.9). A
+## ``repro push`` ordering, the mutual-pin rule, ``repro ws remove``) reads
+## that lock (owner decision 2026-11-05, Unified-Locking-And-Hooks.md §14.9). A
 ## workspace fragment's ``depends`` key is ignored. So a fixture that needs
 ## "A depends on B" gives A a recipe whose ``uses:`` names B, gives B a recipe
 ## (``uses:`` discovers a sibling producer at ``../<name>/repro.nim``), and
@@ -136,7 +136,7 @@ proc writeLockEdges*(repoDir, selfName, selfRevision: string;
     rootDepends: openArray[string] = []) =
   ## Write ``repoDir/repro.lock`` recording that ``selfName`` depends on the
   ## repos ``pins`` names, at the revisions given — the lock EDGES a verb such
-  ## as ``repro remove`` (reachability GC) or ``repro develop``'s dependency
+  ## as ``repro ws remove`` (reachability GC) or ``repro develop``'s dependency
   ## modes reads — without compiling a recipe. Only for a verb that reads the
   ## edges and nothing else about the lock: the pre-push gate holds a lock to
   ## what its recipe derives (``committed_lock_dependency_set_*``), so a gate

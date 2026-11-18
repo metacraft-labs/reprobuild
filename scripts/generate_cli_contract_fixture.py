@@ -24,15 +24,27 @@ What it extracts, and from where:
 * `command <path>`: each command in `COVERED_COMMANDS`, whose flags and
   environment variables the test compares (a command is covered once its
   parsing has moved onto the description).
-* `flag <path> <spelling>`: the flags (`--name`, `-x`) the command's page
+* `flag <path> <spelling>`: the flags (`--name`, `-x`, `-xx`) the command's page
   or section writes where it states syntax: in a code block, or in the code
   a list item starts with (`` - `--format json|text` — the output format``).
   Code in running prose (``like `--version`, ...``) does not count, because
   prose names other commands' and other tools' flags too.
-* `env <path> <NAME>`: the environment variables (`UPPER_CASE` names with an
-  underscore) written in any code in the command's page or section. A piece of code that starts with `repro <words>` belongs to the
-  command those words name (so `repro --version` in the `version` page is
-  the root command's flag); any other piece belongs to the page's command.
+* `env <path> <NAME>`: the environment variables that are inputs of the
+  command's command line: those a flag's list item names in an
+  `environment:` clause (`` - `--daemon VALUE` — ...; environment:
+  `REPRO_DAEMON`. ``), the form the pages use for a variable that supplies a
+  flag's value when the flag is absent. Every other upper-case name a page
+  writes as code (a variable the command reads below its command line, one it
+  carries to the actions it runs, an ELF header field, a C constant) is prose
+  about what the command does, not an input of its command line, so it is not
+  recorded.
+
+A piece of code that starts with `repro <words>` belongs to the command those
+words name (so `repro --version` in the `version` page is the root command's
+flag); a piece that starts with a subcommand word of the page's command
+(`update ...` in the `lock` page) belongs to that subcommand; any other piece
+belongs to the page's command. A list item's `environment:` clause belongs to
+the command its leading code does.
 
 `--help` and `-h` are not recorded: every command accepts them, built into the
 parser, so neither side lists them.
@@ -92,6 +104,7 @@ COVERED_COMMANDS = [
     "bundle create",
     "bundle publish",
     "bundle restore",
+    "bundle inspect",
     "reap",
     "launch-plan",
     "launch-plan show",
@@ -106,6 +119,163 @@ COVERED_COMMANDS = [
     "self which",
     "self list",
     "self prune-roots",
+    "home",
+    "home add",
+    "home remove",
+    "home enable",
+    "home disable",
+    "home list",
+    "home why",
+    "home history",
+    "home apply",
+    "home plan",
+    "home export",
+    "home facts",
+    "home compare",
+    "home rollback",
+    "home gc",
+    "home set",
+    "home get",
+    "home adopt",
+    "home resource",
+    "home resource move",
+    "home migrate-from-env-scripts",
+    "system",
+    "system add",
+    "system remove",
+    "system list",
+    "system why",
+    "system plan",
+    "system apply",
+    "system sync",
+    "system history",
+    "system rollback",
+    "system audit",
+    "infra",
+    "infra plan",
+    "infra apply",
+    "infra cache-keys",
+    "infra install-root",
+    "infra image",
+    "anywhere",
+    "deploy-agent",
+    "deploy-agent keygen",
+    "deploy-agent compile-profile",
+    "hardware",
+    "hardware probe",
+    "disk",
+    "disk plan",
+    "disk apply",
+    "disk mount",
+    "disk unmount",
+    "disk generate",
+    "disk image",
+    "cargo",
+    "cargo gc",
+    "cargo record-live",
+    "cargo run",
+    "health",
+    "debug",
+    "debug artifact",
+    "exec",
+    "run",
+    "shell",
+    "shell hook",
+    "allow",
+    "deny",
+    "dev-env",
+    "dev-env export",
+    "dev-env deactivate",
+    "up",
+    "down",
+    "dev",
+    "hcr",
+    "hcr coordinate",
+    "hcr prepare-object",
+    "prompt",
+    "prompt init",
+    "workspace",
+    "workspace restore",
+    "workspace init",
+    "workspace bootstrap",
+    "workspace enable",
+    "workspace disable",
+    "workspace sets",
+    "workspace sets list",
+    "workspace sets resolve",
+    "workspace sets add",
+    "workspace sets remove",
+    "workspace projects",
+    "workspace projects list",
+    "workspace projects resolve",
+    "workspace projects add",
+    "workspace projects remove",
+    "workspace repos",
+    "workspace repos list",
+    "workspace repos add",
+    "workspace repos remove",
+    "workspace add",
+    "workspace remove",
+    "workspace status",
+    "workspace lock",
+    "workspace list",
+    "workspace manifests",
+    "workspace branch-roles",
+    "workspace forall",
+    "workspace shared-clones",
+    "workspace sync",
+    "workspace pull",
+    "workspace new",
+    "workspace switch",
+    "workspace provision",
+    "workspace migrate",
+    "workspace migrate-locks",
+    "workspace publish-evidence",
+    "sync",
+    "pull",
+    "branch",
+    "switch",
+    "push",
+    "check",
+    "hooks",
+    "hooks ensure",
+    "hooks reinstall",
+    "hooks uninstall",
+    "lock",
+    "lock list",
+    "lock solve",
+    "lock refresh",
+    "lock update",
+    "lock validate",
+    "lock diff",
+    "lock explain",
+    "locking",
+    "locking explain",
+    "locking adopt-manifest",
+    "gateway",
+    "gateway pre-receive",
+    "gateway post-receive",
+    "gateway migrate",
+    "add",
+    "remove",
+    "develop",
+    "flake",
+    "flake override-args",
+    "flake refresh-lock",
+    "flake override-status",
+    "build",
+    "bench",
+    "lint",
+    "clean",
+    "test",
+    "certify",
+    "certificates",
+    "certificates list",
+    "certificates plan",
+    "certificates policy",
+    "ci",
+    "ci plan",
+    "watch",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
@@ -114,13 +284,63 @@ FENCE = re.compile(r"^\s*```")
 HEADING = re.compile(r"^(#+)\s+(.*)$")
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 LONG_FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
-SHORT_FLAG = re.compile(r"(?<![\w-])-[A-Za-z](?![\w-])")
-ENV_VAR = re.compile(r"(?<![\w$])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![\w])")
+# A short spelling: one letter, or one letter doubled (`-vv`, which `repro
+# build` declares beside `-v`).
+SHORT_FLAG = re.compile(r"(?<![\w-])-([A-Za-z])\1?(?![\w-])")
+# A list item's `environment:` clause: the code spans after it, up to the
+# end of the item, each one variable name.
+ENV_CLAUSE = re.compile(r"\benvironment:\s*((?:`[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+`"
+                        r"(?:\s*,\s*|\s+and\s+)?)+)")
+ENV_NAME = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)`")
 COMMAND_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
 HEADED_COMMAND = re.compile(r"`repro ([a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*)`")
 
 
 BULLET_LEAD = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+`([^`\n]+)`")
+BULLET = re.compile(r"^(\s*)(?:[-*+]|\d+\.)\s+")
+
+
+def flag_items(lines: list[str]) -> list[tuple[str, str]]:
+    """The list items outside code blocks whose leading code states a flag,
+    each as (its leading code, its whole text with continuation lines
+    joined)."""
+    items: list[tuple[str, str]] = []
+    in_block = False
+    current: list[str] | None = None
+    lead = ""
+    indent = 0
+
+    def close() -> None:
+        nonlocal current
+        if current is not None:
+            items.append((lead, " ".join(current)))
+        current = None
+
+    for line in lines:
+        if FENCE.match(line):
+            close()
+            in_block = not in_block
+            continue
+        if in_block:
+            continue
+        bullet = BULLET.match(line)
+        if bullet:
+            close()
+            first = BULLET_LEAD.match(line)
+            if first and (LONG_FLAG.search(first.group(1)) or
+                          SHORT_FLAG.search(first.group(1))):
+                lead = first.group(1)
+                indent = len(bullet.group(1))
+                current = [line.strip()]
+            continue
+        if current is not None:
+            stripped = line.strip()
+            if stripped and len(line) - len(line.lstrip()) > indent:
+                current.append(stripped)
+            else:
+                close()
+    close()
+    return items
 
 
 def code_pieces(lines: list[str]) -> list[tuple[str, bool]]:
@@ -153,8 +373,21 @@ def owner(piece: str, page_command: str, known: set[str]) -> str:
     """The command a piece of code belongs to: the longest known command its
     leading `repro <words>` name, else the page's command."""
     words = piece.split()
-    if not words or words[0] != "repro":
+    if not words:
         return page_command
+    if words[0] != "repro":
+        # A namespace page that lists its verbs writes them without the
+        # `repro <namespace>` prefix (`` `update <dependency> [--to <rev>]` ``
+        # in the `lock` page): such a piece belongs to that subcommand.
+        path = page_command.split() if page_command else []
+        best = ""
+        for word in words:
+            if not COMMAND_WORD.match(word):
+                break
+            path.append(word)
+            if " ".join(path) in known:
+                best = " ".join(path)
+        return best or page_command
     path: list[str] = []
     best = ""
     for word in words[1:]:
@@ -225,12 +458,17 @@ def surface(pages: Path) -> list[str]:
             if target not in flags:
                 continue
             if syntax:
-                for spelling in LONG_FLAG.findall(piece) + SHORT_FLAG.findall(
-                        piece):
+                for spelling in LONG_FLAG.findall(piece) + [
+                        m.group(0) for m in SHORT_FLAG.finditer(piece)]:
                     if spelling not in BUILT_IN_FLAGS:
                         flags[target].add(spelling)
-            for name in ENV_VAR.findall(piece):
-                envs[target].add(name)
+        for lead, text in flag_items(lines):
+            target = owner(lead, command, known)
+            if target not in envs:
+                continue
+            for clause in ENV_CLAUSE.findall(text):
+                for name in ENV_NAME.findall(clause):
+                    envs[target].add(name)
     rows = [
         "# The command-line contract the command specification states, for",
         "# tests/unit/t_cs_m6_spec_pages_match_declarations.nim. Generated by",

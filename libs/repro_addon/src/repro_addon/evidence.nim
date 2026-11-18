@@ -37,6 +37,7 @@ import ./generation0
 import ./host_exec
 import ./ledger
 import ./mutations
+import ./record_dir
 
 export evidence_record.EvidenceCategory
 
@@ -151,18 +152,22 @@ proc writeOutboxEntry*(outbox, name, bytes: string) =
   ## with EXDEV) writes its temporary inside the outbox as before; such a
   ## torn temporary is swept by the shipping run, under its bounded
   ## backoff (``evidence_ship``).
-  when mutated("outbox-temporary-inside"):
+  ##
+  ## The outbox is the shipping unit's dynamic user's (§13 decision 181):
+  ## the entry goes in through descriptors that follow no link and is
+  ## handed to that user (``record_dir.writeDelegatedEntry``).
+  when mutated("outbox-written-by-path"):
+    # FALSIFYING BUILD: round 22's writes by path, through the staging
+    # directory's name, which the outbox's owner can replace with a link.
+    let staging = outboxStaging(outbox)
+    createDir(staging)
+    writeFileAtomic(staging / name, bytes, 0o600)
+    moveFile(staging / name, outbox / name)
+  elif mutated("outbox-temporary-inside"):
     # FALSIFYING BUILD: the temporary inside the outbox, as before.
-    writeFileAtomic(outbox / name, bytes, 0o600)
+    writeDelegatedEntry(outbox, name, bytes)
   else:
-    try:
-      let staging = outboxStaging(outbox)
-      createDir(staging)
-      setFilePermissions(staging, {fpUserRead, fpUserWrite, fpUserExec})
-      writeFileAtomic(staging / name, bytes, 0o600)
-      moveFile(staging / name, outbox / name)
-    except OSError, IOError:
-      writeFileAtomic(outbox / name, bytes, 0o600)
+    writeDelegatedEntry(outbox, name, bytes, staging = outboxStaging(outbox))
 
 proc recordEvidence*(e: EvidenceEvent; site = defaultSite()): string =
   ## Write one record (local JSON, then the outbox entry) and return the
@@ -200,8 +205,9 @@ proc recordEvidence*(e: EvidenceEvent; site = defaultSite()): string =
                          align($t.nanosecond, 9, '0') & "-" & e.kind & ".json")
     writeFileAtomic(result, pretty(doc) & "\n", 0o600)
   if shipsOffHost(site):
-    createDir(site.outbox)
-    setFilePermissions(site.outbox, {fpUserRead, fpUserWrite, fpUserExec})
+    # The outbox is the shipping unit's dynamic user's (§13 decision 181):
+    # never made or chmodded by path here; the writer below makes it,
+    # 0700, through its parent's descriptor when it is missing.
     let rec = redact(toRecord(e, extra))
     writeOutboxEntry(site.outbox, outboxName(e.kind),
                      cast[string](encodeEvidenceRecord(rec)))

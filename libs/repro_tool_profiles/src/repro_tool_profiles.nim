@@ -1593,7 +1593,10 @@ proc versionFromPackageSelector(packageSelector: string): string =
 # has already prepared (it does NOT move bytes around). Adapters are
 # expected to choose the prefix path with `unifiedPrefixPath` so a
 # subsequent `repro store gc` finds the directory through the standard
-# layout.
+# layout. That path is the store's own answer for the id
+# (`resolvePrefixAbsolutePath`): the 40-hex name, or an older build's 16-hex
+# name where its prefix of this id still lies, so an adapter reuses that
+# prefix instead of materializing a second copy beside it.
 # ---------------------------------------------------------------------------
 
 proc unifiedStoreRoot*(explicit: string): string =
@@ -1610,13 +1613,17 @@ proc unifiedPrefixPath*(storeRoot, packageName, version, adapter,
           prefixId: PrefixIdBytes] =
   ## Returns the canonical M56 prefix path the adapter must materialize
   ## into. The path is `<store-root>/prefixes/<safe-package>/<version>-
-  ## <realization-hash-prefix>/`. `relativePath` is store-rooted with
+  ## <realization-hash-prefix>/`: the store's path for the id on THIS
+  ## store (`resolvePrefixRelativePath`) -- the 40-hex name, or the 16-hex
+  ## name an older build realized this very id under, which the store
+  ## index records and units may bind. `relativePath` is store-rooted with
   ## forward slashes — the same form persisted in the `prefixes`
   ## index column.
   let prefixId = computeRealizationHash(packageName, version, adapter,
     lockIdentity, declaredExecutablePath, provenanceUrl,
     provenanceChecksum, extra)
-  let rel = prefixRelativePath(packageName, version, prefixId)
+  let rel = resolvePrefixRelativePath(storeRoot, packageName, version,
+                                      prefixId)
   (absolutePath: storeRoot / rel.replace('/', DirSep),
    relativePath: rel,
    prefixId: prefixId)
@@ -1635,10 +1642,38 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     tuple[prefixId: PrefixIdBytes; inserted: bool] =
   ## Records the materialized prefix in the unified store and seals the
   ## binary `.repro-receipt` envelope at its root.
+  ##
+  ## `absoluteRealizedPath` must be one of the id's two names under
+  ## `storeRoot` (its 40-hex or legacy 16-hex path; `unifiedPrefixPath`
+  ## gives the one to use), and the receipt and the row record THAT path.
+  ## The row is inserted with `INSERT OR IGNORE`, so a row an older build
+  ## left at the other name would silently disagree with the tree just
+  ## materialized: it is moved to this path when no prefix of this id is at
+  ## the path it records any more, and the registration is refused when
+  ## one is (two directories of one id).
   let prefixId = computeRealizationHash(packageName, version, adapter,
     lockIdentity, declaredExecutablePath, provenanceUrl,
     provenanceChecksum, extra)
-  let rel = prefixRelativePath(packageName, version, prefixId)
+  let rel = relativePath(absoluteRealizedPath, storeRoot).replace('\\', '/')
+  if not isPrefixPathOf(rel, packageName, version, prefixId):
+    raise newException(StoreError, "registerInUnifiedStore: " &
+      absoluteRealizedPath & " is not a store path of the prefix " &
+      prefixIdHex(prefixId) & " under " & storeRoot & " (expected " &
+      prefixRelativePath(packageName, version, prefixId) & ")")
+  var store = openStore(storeRoot)
+  defer: store.close()
+  # A row at this id's OTHER name: only an older build's 16-hex path can be
+  # there (``isPrefixPathOf``). Refused before anything is written while a
+  # prefix of this id still lies at it (two directories of one id); moved
+  # with the tree otherwise, below.
+  let existing = store.lookupPrefix(prefixId)
+  let repoint = existing.found and existing.row.realizedPath != rel
+  if repoint and resolvePrefixRelativePath(storeRoot, packageName, version,
+                                           prefixId) != rel:
+    raise newException(StoreError, "registerInUnifiedStore: the store " &
+      "index records the prefix " & prefixIdHex(prefixId) & " at " &
+      existing.row.realizedPath & ", which still holds it; refusing to " &
+      "register a second copy at " & rel)
   let receipt = RealizationReceipt(
     schemaVersion: 1'u16,
     adapter: adapter,
@@ -1680,9 +1715,10 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     adapter: adapter,
     receiptDigest: receiptDigest(receipt),
     createdAtUnix: receipt.createdAtUnix)
-  var store = openStore(storeRoot)
-  defer: store.close()
   let inserted = store.insertPrefixOrIgnore(row)
+  if not inserted and repoint:
+    store.repointPrefixRow(prefixId, rel, receiptDigest(receipt),
+                           receipt.createdAtUnix)
   (prefixId: prefixId, inserted: inserted)
 
 proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile)
@@ -4090,24 +4126,6 @@ proc flushStoreDiagnostics() =
   except IOError, OSError:
     discard
 
-type ClosureEntry = object
-  ## One archive the closure manifest names, and where it lands.
-  path: string    ## prefix-relative destination directory
-  sha256: string
-  url: string
-  archiveType: string   ## ``zip``, ``tar.gz`` or ``tar.xz``
-  stripComponents: int
-
-const
-  ## The entry a three-field line describes: npm publishes every package as
-  ## a ``package/``-rooted gzip tarball.
-  NpmClosureArchiveType = "tar.gz"
-  NpmClosureStripComponents = 1
-  ## The kinds a five-field line may name. Each is an archive the existing
-  ## extractor unpacks with no provisioned extractor edge; an installer or an
-  ## executable bootstrap is deliberately not one of them.
-  ClosureArchiveTypes = ["zip", "tar.gz", "tar.xz"]
-
 proc closureManifestPath(plan: TarballAcquisitionPlan): string =
   if plan.declaredClosureManifest.len == 0:
     return ""
@@ -4132,109 +4150,30 @@ proc resolvedClosureManifest*(plan: TarballAcquisitionPlan): string =
   if path.len == 0 or path.isAbsolute: path
   else: absolutePath(path)
 
-proc normalizedClosureDestination(path: string): string =
-  ## The destination with ``\`` read as ``/`` and empty and ``.`` components
-  ## dropped -- what two lines must not share, because the second would
-  ## replace the first's tree. "" when the path is unsafe or names the prefix
-  ## root itself: absolute, a drive or UNC path, or reaching a ``..``.
-  let slashed = path.replace('\\', '/')
-  if slashed.len == 0 or slashed.isAbsolute or slashed.startsWith("/") or
-      (slashed.len >= 2 and slashed[0] in {'a' .. 'z', 'A' .. 'Z'} and
-       slashed[1] == ':'):
-    return ""
-  var parts: seq[string] = @[]
-  for part in slashed.split('/'):
-    if part.len == 0 or part == ".":
-      continue
-    if part == "..":
-      return ""
-    parts.add(part)
-  parts.join("/")
-
-proc parseClosureStrip(text: string): int =
-  ## A nonnegative decimal integer that fits the extractor's ``int``; -1
-  ## otherwise. No sign, no radix prefix, no whitespace.
-  if text.len == 0 or text.anyIt(it notin {'0' .. '9'}):
-    return -1
-  try:
-    result = parseInt(text)
-  except ValueError:
-    return -1
-
-proc parseClosureManifest(path: string): seq[ClosureEntry] =
-  ## ``<destination> <sha256> <url>`` (an npm archive: ``tar.gz``, one
-  ## stripped component) or ``<destination> <sha256> <url> <archiveType>
-  ## <stripComponents>`` per line; ``#`` comments and blank lines ignored.
+proc closureEntries(plan: TarballAcquisitionPlan): seq[ClosureEntry] =
+  ## The archives the record's closure unpacks, validated: the entries
+  ## INLINED in the record when it has them (a record from a published
+  ## artifact, whose consumer has no manifest file), else the manifest file
+  ## it names. Inlined entries win and the file is never opened, so a
+  ## consumer without the catalog checkout realizes the same prefix the
+  ## publisher's checkout would.
   ##
-  ## The WHOLE manifest is validated here, and every caller parses it before
-  ## anything is fetched, so a malformed line costs no download.
-  ##
-  ## Deliberately a flat text format rather than JSON: it is GENERATED from
-  ## a lock file and read by a human reviewing a dependency change, and a
-  ## line-per-archive diff is what makes "one dependency moved" legible.
+  ## Inlined entries are re-validated through the grammar rather than
+  ## trusted: an artifact is read from a clone another party committed, and a
+  ## destination reaching outside the prefix must be refused here, before any
+  ## download, as it would be in a file.
+  if plan.record.closureEntries.len > 0:
+    return parseClosureManifestText(
+      plan.record.closureEntries.mapIt(canonicalClosureLine(it)).join("\n"),
+      "inlined closure entries of " & plan.packageSelector)
+  let path = closureManifestPath(plan)
   if not fileExists(extendedPath(path)):
     raise newException(OSError,
       "tool-resolution failed: closure manifest not found: " & path)
-  var destinations: seq[string] = @[]
-  for rawLine in readFile(extendedPath(path)).splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    let parts = line.splitWhitespace()
-    if parts.len != 3 and parts.len != 5:
-      raise newException(ValueError,
-        "tool-resolution failed: closure manifest line must be " &
-        "\"<path> <sha256> <url>\" or \"<path> <sha256> <url> " &
-        "<archiveType> <stripComponents>\": " & path & ": " & line)
-    let entryPath = parts[0].replace('\\', '/')
-    let destination = normalizedClosureDestination(entryPath)
-    if destination.len == 0:
-      raise newException(ValueError,
-        "tool-resolution failed: closure entry path must be relative and " &
-        "inside the prefix: " & entryPath & " (" & path & ": " & line & ")")
-    if destination in destinations:
-      raise newException(ValueError,
-        "tool-resolution failed: two closure entries unpack to " &
-        destination & ": " & path & ": " & line)
-    destinations.add(destination)
-    var sha = ""
-    try:
-      sha = normalizedSha256(parts[1])
-    except ValueError:
-      raise newException(ValueError,
-        "tool-resolution failed: closure entry sha256 is not a SHA-256 " &
-        "digest: " & path & ": " & line)
-    var entry = ClosureEntry(path: entryPath, sha256: sha, url: parts[2],
-      archiveType: NpmClosureArchiveType,
-      stripComponents: NpmClosureStripComponents)
-    if parts.len == 5:
-      if parts[3] notin ClosureArchiveTypes:
-        raise newException(ValueError,
-          "tool-resolution failed: closure entry archiveType must be one of " &
-          ClosureArchiveTypes.join(", ") & ": " & path & ": " & line)
-      let strip = parseClosureStrip(parts[4])
-      if strip < 0:
-        raise newException(ValueError,
-          "tool-resolution failed: closure entry stripComponents must be a " &
-          "nonnegative decimal integer: " & path & ": " & line)
-      # The zip arm strips by moving a single top-level directory up and
-      # performs no deeper strip; refused here rather than after a download.
-      if parts[3] == "zip" and strip > 1:
-        raise newException(ValueError,
-          "tool-resolution failed: closure entry stripComponents must be " &
-          "0 or 1 for a zip archive: " & path & ": " & line)
-      entry.archiveType = parts[3]
-      entry.stripComponents = strip
-    result.add(entry)
+  parseClosureManifestText(readFile(extendedPath(path)), path)
 
-proc canonicalClosureLine(entry: ClosureEntry): string =
-  ## An entry with the npm defaults is written as the three-field line, so an
-  ## explicit ``tar.gz 1`` and the legacy line share one identity; any other
-  ## kind or strip count is part of it.
-  result = entry.path & " " & entry.sha256 & " " & entry.url
-  if entry.archiveType != NpmClosureArchiveType or
-      entry.stripComponents != NpmClosureStripComponents:
-    result.add(" " & entry.archiveType & " " & $entry.stripComponents)
+proc hasClosure(plan: TarballAcquisitionPlan): bool =
+  plan.declaredClosureManifest.len > 0 or plan.record.closureEntries.len > 0
 
 proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   ## The manifest's CONTENT, canonicalised, as the cache-key contribution.
@@ -4245,7 +4184,7 @@ proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   ## rather than the raw bytes means a comment or a reordering does not
   ## move the key either, which is what lets the generator reformat.
   var canonical: seq[string] = @[]
-  for entry in parseClosureManifest(closureManifestPath(plan)):
+  for entry in closureEntries(plan):
     canonical.add(canonicalClosureLine(entry))
   canonical.sort()
   $blake3.digest(canonical.join("\n"))
@@ -4265,10 +4204,9 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
   ## manifest of pinned archives rather than a call to a package manager:
   ## the fetch is content-addressed, cached, and offline after the first
   ## time, and nothing resolves a version range at build time.
-  if plan.declaredClosureManifest.len == 0:
+  if not hasClosure(plan):
     return
-  let manifestPath = closureManifestPath(plan)
-  for entry in parseClosureManifest(manifestPath):
+  for entry in closureEntries(plan):
     var entryPlan = plan
     entryPlan.url = entry.url
     entryPlan.mirrors = @[]
@@ -4278,6 +4216,7 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     entryPlan.archiveType = entry.archiveType
     entryPlan.stripComponents = entry.stripComponents
     entryPlan.declaredClosureManifest = ""
+    entryPlan.record.closureEntries = @[]
     let downloaded = verifiedDownload(entryPlan, storeRoot)
     let target = destination / entry.path
     createDir(extendedPath(parentDir(target)))
@@ -4341,7 +4280,7 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   # manifest's CONTENT — not its path, which is a local detail — keys the
   # entry. Conditional like the others, so a package with no closure keeps
   # the key it already had.
-  if plan.declaredClosureManifest.len > 0:
+  if hasClosure(plan):
     result.addOption("closure", closureManifestDigest(plan))
   result.addOption("stripComponents", $plan.stripComponents)
   # An ELF relocation writes the realized prefix's ABSOLUTE path into every
@@ -4652,8 +4591,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   # The whole closure is validated before anything is reused, substituted or
   # fetched: a malformed manifest must cost neither the primary archive's
   # download nor any entry's, and must not be served an existing prefix.
-  if plan.declaredClosureManifest.len > 0:
-    discard parseClosureManifest(closureManifestPath(plan))
+  if hasClosure(plan):
+    discard closureEntries(plan)
   let tmpRoot = storeRoot / "tmp"
   createDir(extendedPath(tmpRoot))
   let packageName = safeStoreSegment(plan.packageSelector, "package")
@@ -5134,8 +5073,21 @@ proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
   addUniquePath(result.pkgConfigSearchList, prefix / "lib64" / "pkgconfig")
   addUniquePath(result.pkgConfigSearchList, prefix / "share" / "pkgconfig")
   addUniquePath(result.cpathList, prefix / "include")
-  addUniquePath(result.libraryPathList, prefix / "lib")
-  addUniquePath(result.libraryPathList, prefix / "lib64")
+  if not declaresElfRelocation(plan.record):
+    addUniquePath(result.libraryPathList, prefix / "lib")
+    addUniquePath(result.libraryPathList, prefix / "lib64")
+  # An archive whose ELF files realization relocated (the Linux C toolchain
+  # in the store root) contributes no library directory. Its programs find
+  # their own libraries through the `DT_RPATH` realization wrote, which the
+  # loader searches before `LD_LIBRARY_PATH`, and its compiler driver finds
+  # its link-time libraries from its own installation. Threading `lib/` onto
+  # `LIBRARY_PATH` / `LD_LIBRARY_PATH` would only leak the toolchain's
+  # private libraries (libgmp, libmpfr, libstdc++) into every program the
+  # action runs, and a runtime library directory makes the engine start the
+  # monitored payload through a shell that exports it
+  # (`deferRuntimeLibraryEnvForShell`): that host shell and its libraries
+  # then sit inside the monitored tree, outside every logical root, and the
+  # compile edge could never have a portable identity.
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
@@ -5368,8 +5320,10 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
     "\0" & $plansNode
   var inputs: seq[string]
   for plan in plans:
-    if plan.declaredClosureManifest.len > 0:
-      inputs.add(closureManifestPath(plan))
+    if hasClosure(plan):
+      # Inlined entries have no file to be an input of the edge.
+      if plan.record.closureEntries.len == 0:
+        inputs.add(closureManifestPath(plan))
       fingerprintText.add("\0closure:" & closureManifestDigest(plan))
 
   var roles: seq[string]
@@ -5982,6 +5936,19 @@ const
     "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z"
   BootstrapGccWindowsTarballSha256 =
     "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232"
+  # windows-aarch64's C compiler (reprobuild-pm Distribution-And-Packaging.md
+  # §7.1, W1): WinLibs publishes no aarch64 build and no maintained
+  # Windows-on-Arm-hosted GCC exists, so the arm64 engine compiles recipes with
+  # llvm-mingw, aarch64-hosted, UCRT -- the same archive as the catalog's
+  # ``llvm-mingw`` windows/aarch64 row and ``LLVM_MINGW_WIN_ARM64_*`` in
+  # ``windows/toolchain-versions.env``. It is recorded under its own identity;
+  # its ``gcc.exe`` is the clang target wrapper llvm-mingw ships under that
+  # name, which is the driver Nim's ``--cc:gcc`` invokes.
+  BootstrapLlvmMingwWindowsArm64Release* = "20261104"
+  BootstrapLlvmMingwWindowsArm64TarballUrl* =
+    "https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-ucrt-aarch64.zip"
+  BootstrapLlvmMingwWindowsArm64TarballSha256* =
+    "7d7f8387a8706639b0b47a629d6e23f8b3ef9acce67e9832b8cd4c5bb2816eab"
 
 proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -6079,13 +6046,19 @@ proc bootstrapNimToolUse*(): InterfaceToolUse =
   for record in result.tarballProvisioning.mitems:
     record.detail.version = BootstrapNimVersion
 
-proc bootstrapGccToolUse*(): InterfaceToolUse =
-  result = InterfaceToolUse(
-    rawConstraint: "gcc",
-    packageSelector: "gcc",
-    executableName: "gcc")
-  when defined(windows):
-    result.packageSelector = "gcc-winlibs@16.1.0"
+proc windowsBootstrapCToolUse*(cpu: string): InterfaceToolUse =
+  ## The recipe-compile C compiler a Windows engine built for ``cpu`` (Nim's
+  ## ``hostCPU``) provisions: WinLibs GCC on ``amd64``, llvm-mingw on
+  ## ``arm64``. A pure function of ``cpu`` so either answer can be tested on
+  ## any host. A CPU with no Windows C toolchain pinned gets a use with no
+  ## realization, which acquisition refuses by name -- never another CPU's
+  ## compiler.
+  case cpu
+  of "amd64":
+    result = InterfaceToolUse(
+      rawConstraint: "gcc",
+      packageSelector: "gcc-winlibs@16.1.0",
+      executableName: "gcc")
     result.tarballProvisioning = @[
       InterfaceTarballProvisioning(
         packageName: "gcc",
@@ -6099,6 +6072,40 @@ proc bootstrapGccToolUse*(): InterfaceToolUse =
           BootstrapGccWindowsTarballSha256,
         cpu: "x86_64",
         os: "windows")]
+  of "arm64":
+    const packageId = "llvm-mingw@" & BootstrapLlvmMingwWindowsArm64Release
+    result = InterfaceToolUse(
+      rawConstraint: "llvm-mingw",
+      packageSelector: packageId,
+      executableName: "gcc")
+    result.tarballProvisioning = @[
+      InterfaceTarballProvisioning(
+        packageName: "llvm-mingw",
+        url: BootstrapLlvmMingwWindowsArm64TarballUrl,
+        sha256: BootstrapLlvmMingwWindowsArm64TarballSha256,
+        archiveType: "zip",
+        executablePath: "bin/gcc.exe",
+        stripComponents: 1,
+        packageId: packageId,
+        lockIdentity: "tarball:" & packageId & ":sha256:" &
+          BootstrapLlvmMingwWindowsArm64TarballSha256,
+        cpu: "aarch64",
+        os: "windows")]
+  else:
+    result = InterfaceToolUse(
+      rawConstraint: "gcc",
+      packageSelector: "gcc",
+      executableName: "gcc")
+
+proc bootstrapGccToolUse*(): InterfaceToolUse =
+  ## The recipe-compile C compiler for this host. The name is historical: on
+  ## windows-aarch64 it is llvm-mingw (``windowsBootstrapCToolUse``).
+  result = InterfaceToolUse(
+    rawConstraint: "gcc",
+    packageSelector: "gcc",
+    executableName: "gcc")
+  when defined(windows):
+    result = windowsBootstrapCToolUse(hostCPU)
   elif defined(linux):
     let nixpkgsRef = "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
     result.nixProvisioning = @[
@@ -6255,8 +6262,8 @@ type
   BootstrapCRoute* = enum
     ## How the bootstrap obtains the C compiler for a recipe compile.
     bcrArchive
-      ## The pinned winlibs gcc archive (Windows, which has no system C
-      ## compiler).
+      ## The pinned archive (Windows, which has no system C compiler):
+      ## winlibs gcc on x64, llvm-mingw on arm64 (``windowsBootstrapCToolUse``).
     bcrNix
       ## The pinned nixpkgs gcc (Linux hosts that have Nix).
     bcrSystem
@@ -7900,10 +7907,10 @@ proc realizeScoopTool(useDef: InterfaceToolUse; storeRoot: string;
       resolvedVersion)
 
   # Compute the canonical M56 prefix path. The realization hash is
-  # derived from (bucket, app, resolvedVersion, manifestChecksum) so
-  # the first 16 hex chars match the legacy `realizationKey[0 .. 15]`
-  # value in spirit while now living in the standard
-  # `prefixes/<package>/<version>-<hash>/` shape.
+  # derived from (bucket, app, resolvedVersion, manifestChecksum), in the
+  # spirit of the legacy `realizationKey`, while the prefix now lives in
+  # the standard `prefixes/<package>/<version>-<hash>/` shape (the first
+  # 40 hex of the hash; `unifiedPrefixPath`).
   let scoopPackageName = safeStoreSegment("scoop." & plan.bucket & "." &
     plan.app, "scoop-app")
   let unified = unifiedPrefixPath(storeRoot, scoopPackageName,

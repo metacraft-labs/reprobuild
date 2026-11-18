@@ -28,6 +28,7 @@ import ./audit_log
 import ./errors
 import ./plan_envelope
 import ./profile
+import ./systemd_syntax
 import ./state_dir
 from ./start_holds import templateOf
 
@@ -277,11 +278,13 @@ proc observeResource*(r: SystemResource): ResourceObservation =
 #   observed digest == desired digest         -> no-op (cache-hit)
 #   observed digest != desired                -> update
 #
-# The planner does NOT itself fail-closed on drift — that is the
-# broker's re-observe gate at apply time. The plan simply records the
-# baseline digest it saw; if the world moves before apply, the apply
-# detects the staleness (`EPlanStale`) or the broker detects the
-# drift (`EBrokerDrift`).
+# The planner does NOT itself fail-closed on drift. The plan records
+# the baseline digest it saw; if the world moves before an apply of
+# that plan id, `detectStaleResources` makes the apply refuse with
+# `EPlanStale` before any mutation. Nothing re-checks after that: the
+# broker carries no drift gate (M82 Phase A removed `EBrokerDrift`'s
+# raise site), so a change made while the apply runs is overwritten.
+# `dispatch.dispatchOperation` step 3 (repro_elevation) says why.
 # ---------------------------------------------------------------------------
 
 proc decideAction*(obs: ResourceObservation; desiredDigestHex: string;
@@ -385,7 +388,12 @@ proc summaryLine(r: SystemResource; action: string): string =
   of srkLaunchdSystemDaemon:
     action & " system-daemon " & r.sdaLabel
   of srkFsSystemFile:
-    action & " system-file " & r.sfPath
+    # The declared mode and group are named (only when declared, so an
+    # undeclared file's summary is unchanged): a chmod or chgrp of such a
+    # file is drift, and the plan line says what the update restores.
+    action & " system-file " & r.sfPath &
+      (if r.sfMode.len > 0: " (mode " & r.sfMode & ")" else: "") &
+      (if r.sfGroup.len > 0: " (group " & r.sfGroup & ")" else: "")
   of srkFsSystemDirectory:
     action & " system-directory " & r.dirPath &
       (if r.dirAclPresent: " (acl: " & $r.dirAclEntries.len &
@@ -535,6 +543,10 @@ proc triggeredUnitIndex(profile: SystemProfile; target: string): int =
   ## (systemd.unit(5): an instance without a file of its own is loaded from
   ## its template). -1 when the profile defines neither.
   result = findResourceIndex(profile, $srkSystemdSystemUnit, target)
+  when PlannerMutation == "trigger-instance-unmapped":
+    # FALSIFYING MUTATION (§13 decision 154): an instance is not mapped to
+    # the template it is loaded from.
+    return
   if result < 0:
     let tmpl = templateOf(target)
     if tmpl.len > 0:
@@ -554,12 +566,61 @@ proc triggerTargets*(profile: SystemProfile):
   ## apply holds these triggers with the unit they trigger (§13 decision
   ## 151), before either is written. A target only the host can resolve
   ## (a host specifier) is left out.
+  var owned: seq[string]
   for r in profile.resources:
     let (name, content) = triggerContent(r)
     if name.len == 0: continue
+    owned.add(name)
     for target in triggeredUnits(name, @[content] &
                                        profileDropInsOf(profile, name)):
       if target.len > 0: result.add((trigger: name, target: target))
+  when PlannerMutation == "host-trigger-dropins-unread":
+    # FALSIFYING MUTATION: only the profile's own trigger units are read.
+    return
+  # A host's trigger unit the generation only drops in on (A13 review round
+  # 13, M-C): a drop-in that sets ``Service=`` on ``ssh.socket`` points a
+  # host socket at a profile unit, so it is a trigger of that unit too --
+  # read from the profile's drop-ins alone (the host's own file is not the
+  # generation's; its namesake default is what systemd would use).
+  for r in profile.resources:
+    if r.kind != srkSystemdSystemDropIn or r.diUnit in owned: continue
+    let name = r.diUnit
+    if triggeredUnits(name, @[""]).len == 0: continue   # not a trigger unit
+    owned.add(name)
+    for target in triggeredUnits(name, profileDropInsOf(profile, name)):
+      if target.len > 0 and (trigger: name, target: target) notin result:
+        result.add((trigger: name, target: target))
+  # And ``Sockets=`` on a service (systemd.service(5)): each socket named is
+  # a trigger of that service, a host socket included (``sshd.socket``),
+  # read from the service's file and every profile drop-in onto it.
+  var services: seq[string]
+  for r in profile.resources:
+    let n = if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn": r.suName
+            elif r.kind == srkSystemdSystemDropIn: r.diUnit
+            else: ""
+    if n.endsWith(".service") and n notin services: services.add(n)
+  for svc in services:
+    var texts: seq[string]
+    for r in profile.resources:
+      if r.kind == srkSystemdSystemUnit and r.suName == svc and
+          r.suCollision != "dropIn":
+        texts.add(r.suContent)
+    texts.add(profileDropInsOf(profile, svc))
+    for text in texts:
+      var section = ""
+      for line in systemdLogicalLines(text):
+        let t = line.strip()
+        if t.len == 0 or t[0] in {'#', ';'}: continue
+        if t[0] == '[':
+          section = if t.endsWith("]"): t[1 ..< t.len - 1] else: ""
+          continue
+        if section != "Service": continue
+        let eq = t.find('=')
+        if eq <= 0 or t[0 ..< eq].strip() != "Sockets": continue
+        for sock in t[eq + 1 .. ^1].splitWhitespace():
+          if sock.endsWith(".socket") and
+              (trigger: sock, target: svc) notin result:
+            result.add((trigger: sock, target: svc))
 
 proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
   ## Resolve every explicit `depends_on` entry + every implicit

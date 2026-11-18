@@ -39,9 +39,10 @@ import repro_profile_compile
 import repro_project_dsl
 import repro_dsl_stdlib/packages/expand_archive as expandArchive
 import io_mon/writer
+import repro_test_support/passthrough_monitor
 
 # ---------------------------------------------------------------------------
-# Real passthrough monitor (NOT a mock/skip).
+# Passthrough monitor (a justified fake, not a skip).
 #
 # bd68d952 removed the unsound declared-only ``dgNoRuntimeDependencies``
 # policy; ``profileBuildActionToBuildAction`` now lowers every profile-scope
@@ -58,13 +59,15 @@ import io_mon/writer
 # REAL passthrough monitor (parse ``--depfile``, drop a valid empty-record
 # iomon there so the engine's evidence read succeeds with a complete,
 # zero-record dependency set, then ``exec`` the real argv unchanged). The
-# action genuinely runs + materialises its output under real monitoring —
-# this is not a stub, mock, or skip.
+# action genuinely runs and materialises its output; only the dependency
+# evidence is faked (empty), which is justified because this suite asserts
+# the edges' lowering and execution, not what a monitor observes. It is not
+# a skip.
 #
 # The test wires the passthrough script as the dispatcher's explicit
-# ``monitorCliPath``. The legacy ``<bin> --depfile <path> -- <cmd>``
-# invocation shape (no ``monitorCliArgs``) is exactly what the passthrough
-# script parses.
+# ``monitorCliPath``. The script (``repro_test_support/passthrough_monitor``)
+# finds ``--depfile`` by name and the action argv after the first ``--``, so
+# it keeps parsing the engine's wrapper argv as flags are added before ``--``.
 # ---------------------------------------------------------------------------
 
 proc passthroughMonitorCli(cacheRoot: string): string =
@@ -72,32 +75,7 @@ proc passthroughMonitorCli(cacheRoot: string): string =
   createDir(dir)
   let rmdfTemplate = dir / "empty.rmdf"
   writeFile(rmdfTemplate, encodeCanonical(@[]))
-  when defined(windows):
-    result = dir / "passthrough-monitor.cmd"
-    writeFile(result,
-      "@echo off\r\n" &
-      "for %%I in (\"%~2\") do if not exist \"%%~dpI\" mkdir \"%%~dpI\"\r\n" &
-      "copy /Y \"" & rmdfTemplate & "\" %~2 >nul\r\n" &
-      "%4 %5 %6 %7 %8 %9\r\n")
-  else:
-    result = dir / "passthrough-monitor.sh"
-    writeFile(result,
-      "#!/bin/sh\n" &
-      "depfile=\"\"\n" &
-      "while [ \"$#\" -gt 0 ]; do\n" &
-      "  case \"$1\" in\n" &
-      "    --depfile) depfile=\"$2\"; shift 2;;\n" &
-      "    --) shift; break;;\n" &
-      "    *) shift;;\n" &
-      "  esac\n" &
-      "done\n" &
-      "if [ -n \"$depfile\" ]; then\n" &
-      "  mkdir -p \"$(dirname \"$depfile\")\"\n" &
-      "  cp \"" & rmdfTemplate & "\" \"$depfile\"\n" &
-      "fi\n" &
-      "exec \"$@\"\n")
-    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
-      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  writePassthroughMonitorCli(dir, rmdfTemplate)
 
 # ---------------------------------------------------------------------------
 # Helpers — assemble a ProfileBuildAction with shell-out argv so the

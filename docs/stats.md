@@ -254,6 +254,39 @@ ranking of nothing:
 | `capture-disabled` | the daemon is recording nothing | enable capture |
 | `empty` | the daemon knows nothing for this scope yet | build something |
 
+**Every view also says, at the top level, whether there is a store to read.**
+Each JSON object a `repro stats` view prints (`--json` or `--format=json`,
+including `status` and `overview`) carries `capture_enabled`, `store_status`
+and, unless the status is `ready`, a `remedy` to run. `repro pressure --json`
+carries the same three keys beside the daemon's answer, also when it exits 1
+because no daemon answered:
+
+| `store_status` | when | `remedy` |
+| --- | --- | --- |
+| `ready` | the daemon answered and holds at least one row for your scope, a thinned `incomplete` window included (even if this view's filter then matched none) | — |
+| `empty` | the daemon records and holds zero rows for your scope: nothing yet, or a window that is `incomplete` because every observation was lost | `repro build <project>` |
+| `unprovisioned` | the daemon records nothing (`capture-disabled`), or nothing was ever set up at the endpoint: neither the socket nor its directory exists | `runquotad --socket <endpoint> --measurement capture=on` |
+| `daemon_unreachable` | something was set up at the endpoint (a dead socket, or the socket's directory) and no daemon answered, or the query failed | start `runquotad` there, or point `RUNQUOTA_SOCKET` at a running one |
+
+When the daemon answered with capture off, the `remedy` follows the reason it
+gives (`store_status` in `runquota inspect observations`): restart with
+`--measurement capture=on` when it was started without capture, wait and run
+again while it is still `verifying` its store after a start, and fix the store
+when it is `degraded-corrupt`, `degraded-unwritable`,
+`degraded-no-sqlite-tool` or `refused-newer-schema`.
+
+`capture_enabled` is the daemon's own answer for `repro stats` (false when no
+daemon answered). For `repro pressure` it is whether this environment reports
+build-wait pressure (`RUNQUOTA_MEASUREMENT=pressure-reports=on`): pressure
+figures are `ready` once the daemon has received a report, `empty` while the
+switch is on and nothing has reported, and `unprovisioned` while it is off.
+Without `--json`, a run whose status is not `ready` prints one line on stderr
+and leaves stdout as it was:
+
+```text
+repro stats: store_status=unprovisioned capture_enabled=false -- <reason>; remedy: <command>
+```
+
 **A store with counted drops renders as `incomplete`, never as a thin
 `complete`.** `runquotad` counts every observation it lost — a full writer
 queue, a write failure, a refused self-report, a refused extension row — and

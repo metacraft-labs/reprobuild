@@ -151,16 +151,25 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "a9684dfc1e659af309acf646915dbfe400896b65";
-    hash = "sha256-k09Pe0+9Ue0+OK7nt/aULCRPW3MXMcK34btX65kMJAM=";
+    rev = "8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
+    hash = "sha256-2PXrPF+3a2dYMbyoFliukQRLVXc3wIBuvqDOYZWR/ko=";
+  },
+  # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
+  # package (the declarative description of a program's entry points); the
+  # `compat/` shims in that repository are not part of the pin.
+  entrypointsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim-entrypoints";
+    rev = "8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
+    hash = "sha256-2zjGCBISzkUw3tim4kUzm6sPPxyeLeX+PCrKYzbPjGk=";
   },
   # Added after the `src` commit too: confutils over a clispec description,
   # which repro's own command line is.
   confutilsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-confutils";
-    rev = "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
-    hash = "sha256-P20Zi4iwayGpeDyH1zG619F9eLuRgJolm5Zcv1Z564A=";
+    rev = "0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74";
+    hash = "sha256-zHFUtlFQEmS3jK8oGm2ItMgMcWAsW2U1LciY3QspuS8=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -248,7 +257,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.25";
+  version = "0.2.27";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -320,6 +329,7 @@ stdenv.mkDerivation (finalAttrs: {
     SHM_GSET_SRC = "${shmGsetSrc}/src";
     SHM_QUEUE_SRC = "${shmQueueSrc}/src";
     CLI_SPEC_SRC = "${cliSpecSrc}/src";
+    ENTRYPOINTS_SRC = "${entrypointsSrc}/src";
     CONFUTILS_SRC = "${confutilsSrc}";
     # Tier 3 of `config.nims`'s incremental-test-seam resolution, and the tier
     # this build has always needed. It runs in a pure sandbox with no
@@ -479,6 +489,7 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default SHM_GSET_SRC ${shmGsetSrc}/src \
         --set-default SHM_QUEUE_SRC ${shmQueueSrc}/src \
         --set-default CLI_SPEC_SRC ${cliSpecSrc}/src \
+        --set-default ENTRYPOINTS_SRC ${entrypointsSrc}/src \
         --set-default CONFUTILS_SRC ${confutilsSrc} \
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
@@ -577,6 +588,7 @@ stdenv.mkDerivation (finalAttrs: {
         shmGsetSrc
         shmQueueSrc
         cliSpecSrc
+        entrypointsSrc
         confutilsSrc
         codetracerSrc
         ctTestRunnerSrc

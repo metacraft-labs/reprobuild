@@ -73,6 +73,8 @@ type
     sourceFile*: string
     sourceLine*: int
     deps*: seq[M8Dep]
+    cargoLinks*: string
+      ## A Rust crate's Cargo `links` value, `""` for none (NLF-DIA-9).
 
   M8Artifact* = object
     name*: string
@@ -100,10 +102,10 @@ proc m8dep*(name, constraint: string; platform = dpTarget): M8Dep =
 proc m8pkg*(name: string; versions: openArray[string] = @[];
             deps: openArray[M8Dep] = @[]; pinnedLockFile = "";
             language = "c"; multiVersion = mvUnset;
-            sourceFile = ""; sourceLine = 0): M8Package =
+            sourceFile = ""; sourceLine = 0; cargoLinks = ""): M8Package =
   M8Package(name: name, versions: @versions, pinnedLockFile: pinnedLockFile,
     language: language, multiVersion: multiVersion, sourceFile: sourceFile,
-    sourceLine: sourceLine, deps: @deps)
+    sourceLine: sourceLine, deps: @deps, cargoLinks: cargoLinks)
 
 proc m8artifact*(name, package: string; lockFile = ""): M8Artifact =
   M8Artifact(name: name, package: package, lockFile: lockFile)
@@ -115,7 +117,7 @@ proc linkPackagesOf*(r: M8Recipe): seq[LinkPackage] =
     for d in p.deps:
       deps.add(linkDep(d.name, d.constraint, d.platform))
     result.add(linkPackage(p.name, deps, p.pinnedLockFile, p.language,
-      p.multiVersion, p.sourceFile, p.sourceLine))
+      p.multiVersion, p.sourceFile, p.sourceLine, p.cargoLinks))
 
 proc rootsOf*(r: M8Recipe): seq[PropRoot] =
   result = @[]

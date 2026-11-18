@@ -649,6 +649,22 @@ const
           "/var/lib/a13-r11/%n.ran'\n",
         enabled = false,
         address = "r11TimerSvc")"""
+  R12EssResource = """
+      # Decision 177 (A13 review round 11): a drop-in that makes an
+      # essential unit, a console getty, require a unit the live check
+      # judges. The apply must be refused before it writes anything.
+      systemdSystemDropIn(unit = "getty@tty6.service", name = "a13-ess",
+        content = "[Unit]\nRequires=eth-r10-sock.service\nAfter=eth-r10-sock.service\n",
+        address = "r12Ess")"""
+  R13SshResource = """
+      # A13 review round 13, M-C: a profile drop-in that points ssh.socket,
+      # a host trigger unit, at a unit the live check judges. ssh.socket is
+      # essential, so the apply must be refused before it writes anything
+      # (decision 177(c)) -- not hold it, which on a socket-activated ssh
+      # would cut remote access.
+      systemdSystemDropIn(unit = "ssh.socket", name = "a13-repoint",
+        content = "[Socket]\nService=eth-r10-path.service\n",
+        address = "r13Ssh")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -1072,9 +1088,18 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
       ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
       R10Resources & R11Resources))
+    # The next generation with one profile drop-in that makes a console
+    # getty require a judged unit (decision 177's essential-unit case).
+    writeFile(work / "system_ess.nim", src0.replace(anchor, anchor &
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources & R11Resources & R12EssResource))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
-    for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
+    writeFile(work / "system_ssh.nim", src0.replace(anchor, anchor &
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources &
+      R10Resources & R11Resources & R13SshResource))
+    for f in ["system.nim", "system_next.nim", "system_ess.nim", "system_ssh.nim",
+              PinsModule, "home.nim"]:
       nw.copyTo(work / f, RefDir / f)
     let env = ReidentifyPrefix
     putReferenceSecrets(nw, env & eng & " system secret put", jwt, adminToken,
@@ -1366,9 +1391,47 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
             else: ""), judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") &
            detail)
+    # The premise of decision 153 for units outside the judged set (A13
+    # review round 10, finding 8), measured on this host's systemd with
+    # units of the gate's own and no repro in the loop: a unit that
+    # Requires= a unit whose start a condition hold skips (the full apply's
+    # hold, ConditionPathExists=!/) starts and runs, the skipped start
+    # counting as satisfied (systemd.unit(5), "Conditions and Asserts").
+    block:
+      discard nw.run("mkdir -p /run/systemd/system/a13m-held.service.d && " &
+        "printf '[Unit]\\nDescription=A13 decision-153 premise: held\\n\\n" &
+        "[Service]\\nType=oneshot\\nRemainAfterExit=yes\\nExecStart=/bin/true\\n' " &
+        "> /run/systemd/system/a13m-held.service && printf '[Unit]\\n" &
+        "ConditionPathExists=!/\\n' > /run/systemd/system/a13m-held.service.d/" &
+        "zz-hold.conf && printf '[Unit]\\nDescription=A13 decision-153 premise: " &
+        "requires the held unit\\nRequires=a13m-held.service\\nAfter=" &
+        "a13m-held.service\\n\\n[Service]\\nType=oneshot\\nRemainAfterExit=yes\\n" &
+        "ExecStart=/bin/true\\n' > /run/systemd/system/a13m-req.service && " &
+        "systemctl daemon-reload")
+      let st = nw.exec("systemctl start a13m-req.service")
+      let show = nw.exec("systemctl show -p ActiveState -p Result a13m-req.service " &
+        "| tr '\\n' ' '; echo; systemctl show -p ActiveState -p ConditionResult " &
+        "a13m-held.service | tr '\\n' ' '").stdout
+      let lines = show.splitLines()
+      let reqRan = st.exitCode == 0 and lines.len > 0 and
+        "ActiveState=active" in lines[0]
+      let heldSkipped = "ConditionResult=no" in show
+      discard nw.run("systemctl stop a13m-req.service a13m-held.service; rm -rf " &
+        "/run/systemd/system/a13m-held.service /run/systemd/system/a13m-held.service.d " &
+        "/run/systemd/system/a13m-req.service; systemctl daemon-reload")
+      record["decision153Premise"] = %*{"startExit": st.exitCode, "show": show,
+        "requirerRan": reqRan, "heldSkipped": heldSkipped}
+      step("decision 153's premise: on this systemd a unit that requires a " &
+           "condition-held unit starts, the held unit's start skipped",
+           reqRan and heldSkipped, show & "\n" & st.stdout & st.stderr)
     # Owner decision 153 (decided 2026-11-15): on a partial refusal, a unit
     # that Requires= a refused unit stays held with it, and the apply says
-    # so. eth-r10-gen.service is refused by the live check (a generator
+    # so. As decided again in A13 review round 10, every unit of the
+    # generation that requires it, judged or not: a13r12ureq.slice is not a
+    # service, so the live check does not judge it (a slice, like a target,
+    # runs nothing). eth-r10-ureq.target requires it too, and is NOT held:
+    # the owner decision "never hold .target units" (A13 review round 12) --
+    # a target is followed through to the units that require it. eth-r10-gen.service is refused by the live check (a generator
     # makes it root at the apply's reload, as round 6's live probe);
     # eth-r10-req.service is confined, enabled and Requires= it. Without
     # the rule it is released and started, and systemd counts its
@@ -1388,9 +1451,19 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "ReadWritePaths=/var/lib/a13-r5\\nExecStart=/bin/sh -c 'id -u > " &
         ProbeMarkerDir & "/eth-r10-req.service.ran'\\n\\n[Install]\\n" &
         "WantedBy=multi-user.target\\n\",\n        address = \"r10Req\")\n"
+      let ureq = "      systemdSystemUnit(name = \"eth-r10-ureq.target\",\n" &
+        "        content = \"[Unit]\\nDescription=A13 decision-153 probe: an " &
+        "unjudged unit that requires a refused unit\\nRequires=eth-r10-gen.service\\n" &
+        "After=eth-r10-gen.service\\n\\n[Install]\\nWantedBy=multi-user.target\\n\",\n" &
+        "        address = \"r10Ureq\")\n" &
+        "      systemdSystemUnit(name = \"a13r12ureq.slice\",\n" &
+        "        content = \"[Unit]\\nDescription=A13 decision-153 probe: an " &
+        "unjudged slice that requires a refused unit\\nRequires=eth-r10-gen.service\\n" &
+        "After=eth-r10-gen.service\\n\\n[Install]\\nWantedBy=multi-user.target\\n\",\n" &
+        "        address = \"r12Uslice\")\n"
       let pf = probeFile("r10req")
       writeFile(work / pf, probeProfile("r10req",
-        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req))
+        r5Unit("eth-r10-gen.service", R6Confined, "r10Gen") & req & ureq))
       nw.copyTo(work / pf, RefDir / pf)
       let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
         pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
@@ -1406,12 +1479,32 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # Decision 153: a unit that requires a refused unit stays held.
       record["decision153"] = %*{"exit": r.exitCode, "reported": reported,
         "heldInEtc": heldReq, "started": started, "judged": judged(o)}
+      let ureqReported = "a13r12ureq.slice requires eth-r10-gen.service" in o
+      let ureqHeld = nw.exec("test -f /etc/systemd/system/a13r12ureq.slice.d/" &
+        "zz-repro-carried-check-hold.conf").exitCode == 0
+      let ureqActive = nw.exec("systemctl is-active a13r12ureq.slice").stdout.strip()
+      # The target is never held (the owner decision "never hold .target
+      # units"), in /run or /etc.
+      let targetHeld = nw.exec("ls /etc/systemd/system/eth-r10-ureq.target.d/" &
+        "zz-repro-carried-check-hold.conf /run/systemd/system/" &
+        "eth-r10-ureq.target.d/zz-repro-carried-check-hold.conf " &
+        "2>/dev/null").stdout.strip().len > 0
       discard nw.run("rm -f /etc/systemd/system-generators/a13r10-gen && rm -rf " &
         "/etc/systemd/system/eth-r10-gen.service.d && systemctl daemon-reload")
       step("decision 153: a unit that requires a unit the live check refuses " &
            "stays held with it, never started, and the apply says why",
            r.exitCode != 0 and reported and heldReq and not started,
            o & "\n" & journal & "\nheld: " & $heldReq & " ran: " & $ran)
+      record["decision153Unjudged"] = %*{"unit": "a13r12ureq.slice",
+        "reported": ureqReported, "heldInEtc": ureqHeld, "active": ureqActive,
+        "targetHeld": targetHeld}
+      step("decision 153: a unit the live check does not judge that requires " &
+           "a refused unit stays held with it, not active, and the apply " &
+           "says why; a target that requires it is not held",
+           ureqReported and ureqHeld and ureqActive != "active" and
+             not targetHeld,
+           o & "\nheld: " & $ureqHeld & " active: " & ureqActive &
+           " target held: " & $targetHeld)
     # A stored plan made now, before install-unit: no requirement is due
     # yet, so the plan has none (finding 4; applied after the restore).
     let planFile = probeFile("r5plan")
@@ -1762,6 +1855,315 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("decision 151, full apply (next generation, triggers active " &
            "before it): the socket and the path unit, held through the " &
            "apply, are active after it and their services run", ok, $ev)
+    # A13 review round 11, H1, as round 12 (M3, the owner decision "re-hold,
+    # start after check") changed it: a full apply that died between its
+    # hold and its release leaves its record of triggers and its /run holds.
+    # The gate stages that state for the unheld R11 socket (stopped, held by
+    # the full apply's own hold drop-in in /run, named in the record); the
+    # next full apply adopts the trigger and its hold into its own held set
+    # and starts it after its check, and keeps the record until it is up.
+    # (Round 11's falsifier, live-check-restart-before-stale-holds-cleared,
+    # went with the early restart it falsified; the step after this one is
+    # red under round 12's dead-apply-holds-lifted.)
+    block:
+      discard nw.run("systemctl stop " & R11Socket & " " & R11SocketSvc &
+        "; mkdir -p " &
+        "/run/systemd/system/" & R11Socket & ".d && printf '[Unit]\\n" &
+        "ConditionPathExists=!/\\n' > /run/systemd/system/" & R11Socket &
+        ".d/zz-repro-carried-check-hold.conf && printf '" & R11Socket &
+        "\\n' > /var/lib/repro/system/live-check-triggers && systemctl daemon-reload")
+      let staged = nw.exec("systemctl is-active " & R11Socket).stdout.strip()
+      let h1Apply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let h1Active = nw.exec("systemctl is-active " & R11Socket).stdout.strip()
+      let h1Record = nw.exec("cat /var/lib/repro/system/live-check-triggers " &
+        "2>/dev/null").stdout.strip()
+      let h1Hold = nw.exec("ls /run/systemd/system/" & R11Socket &
+        ".d/zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+      let h1Ok = staged != "active" and h1Active == "active" and
+        R11Socket notin h1Record and h1Hold.len == 0
+      record["decisionH1"] = %*{"staged": staged, "exit": h1Apply.exitCode,
+        "active": h1Active, "recordLeft": h1Record, "holdLeft": h1Hold,
+        "ok": h1Ok}
+      step("H1: the next full apply adopts a dead apply's held trigger and " &
+           "its hold, starts it after its own check, and keeps the record " &
+           "until it is up", h1Ok, h1Apply.stdout & h1Apply.stderr &
+           "\nactive: " & h1Active & "\nrecord: " & h1Record & "\nhold: " & h1Hold)
+    # A13 review round 12, M3 (the owner decision "re-hold, start after
+    # check"): a full apply that died before its release left a judged
+    # service held, with its socket stopped and on record, while
+    # connections keep arriving. The next full apply must not lift that
+    # hold before its own check: it adopts the service and the socket and
+    # starts them only after the check -- and here the check refuses the
+    # service (a generator makes it root at the apply's own reload, as the
+    # decision-153 case's does: installed after the staging's reload, so
+    # the static analysis before the apply does not see it and the live
+    # check judges the service), so it never runs. The order is measured
+    # on the guest: when the new apply's check began (a hold of the judged
+    # path service appears), when it released (that hold goes), and when
+    # the service first ran. Falsifier: the engine build
+    # dead-apply-holds-lifted (round 11's order: every stale hold lifted and
+    # the socket started first, so a connection starts the service before
+    # the new apply's release).
+    block:
+      discard nw.run("rm -f " & R10MarkerDir & "/" & R10SocketSvc & ".ran; " &
+        "systemctl stop " & R10Socket & " " & R10SocketSvc & "; for u in " &
+        R10Socket & " " & R10SocketSvc & "; do mkdir -p " &
+        "/run/systemd/system/$u.d && printf '[Unit]\\nConditionPathExists=!/\\n' > " &
+        "/run/systemd/system/$u.d/zz-repro-carried-check-hold.conf; done; " &
+        "printf '" & R10Socket & "\\n' > /var/lib/repro/system/live-check-triggers; " &
+        "printf '" & R10SocketSvc & "\\twas-active\\n' > " &
+        "/var/lib/repro/system/live-check-units; systemctl daemon-reload")
+      # After the reload: the generator runs first at the apply's own.
+      discard nw.run("mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
+        "mkdir -p \"$1/" & R10SocketSvc & ".d\"\\nprintf \"[Service]\\\\nUser=root\\\\n\" " &
+        "> \"$1/" & R10SocketSvc & ".d/10-root.conf\"\\n' > " &
+        "/etc/systemd/system-generators/a13r12-m3 && chmod 755 " &
+        "/etc/systemd/system-generators/a13r12-m3")
+      let watch = "H=/run/systemd/system/" & R10PathSvc &
+        ".d/zz-repro-carried-check-hold.conf\nh=; r=; s=\n" &
+        "while [ ! -e /run/a13m3-stop ]; do\n" &
+        "  t=$(cut -d' ' -f1 /proc/uptime)\n" &
+        "  if [ -z \"$h\" ] && [ -e \"$H\" ]; then h=$t; echo \"check $t\" >> /run/a13m3.log; fi\n" &
+        "  if [ -n \"$h\" ] && [ -z \"$r\" ] && [ ! -e \"$H\" ]; then r=$t; echo \"release $t\" >> /run/a13m3.log; fi\n" &
+        "  if [ -z \"$s\" ] && systemctl is-active --quiet " & R10SocketSvc &
+        "; then s=$t; echo \"service $t\" >> /run/a13m3.log; fi\n" &
+        "  sleep 0.1\ndone\n"
+      writeFile(work / "a13m3-watch.sh", watch)
+      nw.copyTo(work / "a13m3-watch.sh", "/run/a13m3-watch.sh")
+      discard nw.exec("rm -f /run/a13m3.log /run/a13m3-stop; nohup bash " &
+        "/run/a13m3-watch.sh >/dev/null 2>&1 &")
+      let m3Since = nw.exec("date +%s").stdout.strip()
+      nw.startAgitator()
+      let m3Apply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      nw.stopAgitator()
+      discard nw.exec("sleep 1; touch /run/a13m3-stop; sleep 1; true")
+      let m3Order = nw.exec("cat /run/a13m3.log 2>/dev/null").stdout
+      var checkAt, releaseAt, serviceAt = -1.0
+      for l in m3Order.splitLines():
+        let w = l.splitWhitespace()
+        if w.len != 2: continue
+        var t = -1.0
+        try: t = parseFloat(w[1])
+        except ValueError: continue
+        case w[0]
+        of "check": checkAt = t
+        of "release": releaseAt = t
+        of "service": serviceAt = t
+        else: discard
+      let beforeRelease = serviceAt >= 0 and (releaseAt < 0 or serviceAt < releaseAt)
+      let beforeCheck = serviceAt >= 0 and (checkAt < 0 or serviceAt < checkAt)
+      let m3Out = m3Apply.stdout & m3Apply.stderr
+      let m3Refused = (R10SocketSvc & " as systemd loaded it is not confined") in m3Out
+      let m3Ran = nw.exec("test -s " & R10MarkerDir & "/" & R10SocketSvc &
+        ".ran").exitCode == 0
+      let m3Journal = nw.exec("journalctl -b --no-pager -o short-monotonic " &
+        "--since @" & m3Since & " -u " & R10SocketSvc & " -u " & R10Socket &
+        " 2>&1").stdout
+      let m3Started = journalStarted(m3Journal, R10SocketSvc) or m3Ran
+      let m3HeldEtc = nw.exec("test -f /etc/systemd/system/" & R10SocketSvc &
+        ".d/zz-repro-carried-check-hold.conf").exitCode == 0
+      let m3Ok = m3Refused and not m3Started and m3HeldEtc and
+        not beforeRelease and checkAt >= 0
+      record["deadApplyAdopted"] = %*{"exit": m3Apply.exitCode,
+        "refusedForReason": m3Refused, "ran": m3Ran, "started": m3Started,
+        "heldInEtc": m3HeldEtc, "checkBeganAt": checkAt,
+        "releasedAt": releaseAt, "serviceActiveAt": serviceAt,
+        "serviceStartedBeforeCheck": beforeCheck,
+        "serviceStartedBeforeRelease": beforeRelease, "ok": m3Ok}
+      discard nw.run("rm -f /etc/systemd/system-generators/a13r12-m3 " &
+        "/var/lib/repro/system/live-check-units " &
+        "/var/lib/repro/system/live-check-triggers; for u in " & R10Socket &
+        " " & R10SocketSvc & "; do rm -f /etc/systemd/system/$u.d/" &
+        "zz-repro-carried-check-hold.conf /run/systemd/system/$u.d/" &
+        "zz-repro-carried-check-hold.conf; done; systemctl daemon-reload; " &
+        "systemctl reset-failed " & R10Socket & " " & R10SocketSvc &
+        "; systemctl start " & R10Socket)
+      step("M3: a judged service a dead full apply held, with connections " &
+           "arriving, stays held until the next apply's check, and never " &
+           "starts when that check refuses it", m3Ok,
+           m3Out & "\n" & m3Journal & "\nheld in /etc: " & $m3HeldEtc &
+           " ran: " & $m3Ran & "\norder (uptime s): " & m3Order)
+    # A13 review round 12, M2 (the owner decision "yes, same as 175"): a
+    # full apply whose generation resolves an entry of the record of
+    # triggers to restart starts it, confirmed, before its commit. Staged:
+    # the unheld R11 socket on record, stopped, and its service's unit file
+    # gone, so the guard's retry cannot start it (systemd refuses a socket
+    # whose service is not loaded); the generation rewrites the service and
+    # leaves the socket's file unchanged, so no driver starts the socket.
+    # Falsifier: the engine build full-apply-fixing-skips-starts (the apply
+    # commits and clears the record, the socket down).
+    block:
+      discard nw.run("systemctl stop " & R11Socket & " " & R11SocketSvc &
+        "; rm -f /etc/systemd/system/" & R11SocketSvc & "; systemctl " &
+        "daemon-reload; printf '" & R11Socket & "\\trendered=" & R11Socket &
+        ":0," & R11SocketSvc & ":0\\n' > /var/lib/repro/system/" &
+        "triggers-to-restart; chmod 600 /var/lib/repro/system/triggers-to-restart")
+      let m2Staged = nw.exec("systemctl start " & R11Socket & " 2>&1; " &
+        "systemctl is-active " & R11Socket).stdout.strip()
+      let m2Apply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let m2Out = m2Apply.stdout & m2Apply.stderr
+      let m2Active = nw.exec("systemctl is-active " & R11Socket).stdout.strip()
+      let m2Record = nw.exec("cat /var/lib/repro/system/triggers-to-restart " &
+        "2>/dev/null").stdout.strip()
+      let m2StagedState = m2Staged.splitLines()[^1].strip()
+      let m2Ok = m2StagedState != "active" and m2Apply.exitCode == 0 and m2Active == "active" and m2Record.len == 0
+      record["fullApplyFixing"] = %*{"staged": m2Staged,
+        "exit": m2Apply.exitCode, "active": m2Active,
+        "recordLeft": m2Record, "ok": m2Ok}
+      discard nw.run("rm -f /var/lib/repro/system/triggers-to-restart; " &
+        "systemctl start " & R11Socket & "; true")
+      step("M2: a full apply whose generation resolves a recorded trigger " &
+           "starts it before its commit, and clears the record", m2Ok,
+           m2Out & "\nstaged: " & m2Staged & "\nactive: " & m2Active &
+           "\nrecord: " & m2Record)
+    # A13 review round 13, M-B: a full apply that died before its release
+    # held a judged service that was running and is not enabled (the R10
+    # socket's service, started by a connection), with its socket stopped:
+    # staged as such an apply leaves the host -- both stopped, both held,
+    # the socket on the record of triggers and the service on the record of
+    # units as one that ran -- and no connection afterwards. The next full
+    # apply's check passes it and must start it again, only after its own
+    # check: "ran before the dead hold" is kept for a unit this apply judges
+    # too. The order is measured on the guest, as in the M3 step: when the
+    # check began (a hold of the judged path service appears), when it
+    # released (that hold goes), when the service first ran. Falsifier: the
+    # engine build dead-judged-was-active-lost (the service stays down).
+    block:
+      discard nw.exec("timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+        $R10Port & "' 2>/dev/null; for i in $(seq 15); do systemctl " &
+        "is-active --quiet " & R10SocketSvc & " && break; sleep 1; done; true")
+      let mbBefore = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
+      discard nw.run("systemctl stop " & R10Socket & " " & R10SocketSvc &
+        "; for u in " & R10Socket & " " & R10SocketSvc & "; do mkdir -p " &
+        "/run/systemd/system/$u.d && printf '[Unit]\\nConditionPathExists=!/\\n' > " &
+        "/run/systemd/system/$u.d/zz-repro-carried-check-hold.conf; done; " &
+        "printf '" & R10Socket & "\\n' > /var/lib/repro/system/live-check-triggers; " &
+        "printf '" & R10SocketSvc & "\\twas-active\\n' > " &
+        "/var/lib/repro/system/live-check-units; systemctl daemon-reload")
+      let mbStaged = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
+      let mbSocketStaged = nw.exec("systemctl is-active " & R10Socket).stdout.strip()
+      let mbWatch = "H=/run/systemd/system/" & R10PathSvc &
+        ".d/zz-repro-carried-check-hold.conf\nh=; r=; s=\n" &
+        "while [ ! -e /run/a13mb-stop ]; do\n" &
+        "  t=$(cut -d' ' -f1 /proc/uptime)\n" &
+        "  if [ -z \"$h\" ] && [ -e \"$H\" ]; then h=$t; echo \"check $t\" >> /run/a13mb.log; fi\n" &
+        "  if [ -n \"$h\" ] && [ -z \"$r\" ] && [ ! -e \"$H\" ]; then r=$t; echo \"release $t\" >> /run/a13mb.log; fi\n" &
+        "  if [ -z \"$s\" ] && systemctl is-active --quiet " & R10SocketSvc &
+        "; then s=$t; echo \"service $t\" >> /run/a13mb.log; fi\n" &
+        "  sleep 0.1\ndone\n"
+      writeFile(work / "a13mb-watch.sh", mbWatch)
+      nw.copyTo(work / "a13mb-watch.sh", "/run/a13mb-watch.sh")
+      discard nw.exec("rm -f /run/a13mb.log /run/a13mb-stop; nohup bash " &
+        "/run/a13mb-watch.sh >/dev/null 2>&1 &")
+      let mbApply = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_next.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      discard nw.exec("for i in $(seq 15); do systemctl is-active --quiet " &
+        R10SocketSvc & " && break; sleep 1; done; sleep 1; touch /run/a13mb-stop; " &
+        "sleep 1; true")
+      let mbOrder = nw.exec("cat /run/a13mb.log 2>/dev/null").stdout
+      var mbCheck, mbRelease, mbService = -1.0
+      for l in mbOrder.splitLines():
+        let w = l.splitWhitespace()
+        if w.len != 2: continue
+        var t = -1.0
+        try: t = parseFloat(w[1])
+        except ValueError: continue
+        case w[0]
+        of "check": mbCheck = t
+        of "release": mbRelease = t
+        of "service": mbService = t
+        else: discard
+      let mbAfter = nw.exec("systemctl is-active " & R10SocketSvc).stdout.strip()
+      let mbEnabled = nw.exec("systemctl is-enabled " & R10SocketSvc &
+        " 2>&1").stdout.strip()
+      let mbHold = nw.exec("ls /run/systemd/system/" & R10SocketSvc &
+        ".d/zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+      let mbAfterRelease = mbService >= 0 and mbCheck >= 0 and
+        mbRelease >= 0 and mbService >= mbRelease
+      let mbOk = mbBefore == "active" and mbStaged != "active" and
+        mbSocketStaged != "active" and mbApply.exitCode == 0 and
+        mbAfter == "active" and mbHold.len == 0 and mbAfterRelease
+      record["deadJudgedActive"] = %*{"before": mbBefore, "staged": mbStaged,
+        "socketStaged": mbSocketStaged, "exit": mbApply.exitCode,
+        "after": mbAfter, "enabled": mbEnabled, "holdLeft": mbHold,
+        "checkBeganAt": mbCheck, "releasedAt": mbRelease,
+        "serviceActiveAt": mbService, "ok": mbOk}
+      discard nw.run("rm -f /var/lib/repro/system/live-check-units " &
+        "/var/lib/repro/system/live-check-triggers; for u in " & R10Socket &
+        " " & R10SocketSvc & "; do rm -f /run/systemd/system/$u.d/" &
+        "zz-repro-carried-check-hold.conf; done; systemctl daemon-reload; " &
+        "systemctl start " & R10Socket & "; true")
+      step("M-B: a judged service a dead full apply held while it ran, not " &
+           "enabled, is started again once the next apply's check passes it",
+           mbOk, mbApply.stdout & mbApply.stderr & "\nbefore: " & mbBefore &
+           " staged: " & mbStaged & " socket staged: " & mbSocketStaged &
+           " after: " & mbAfter & " enabled: " & mbEnabled & " hold: " &
+           mbHold & "\norder (uptime s): " & mbOrder)
+    # A13 review round 13, M-C: a profile drop-in that points ssh.socket at a
+    # judged unit makes an essential trigger of it; the apply is refused
+    # before it writes anything, by that refusal and no other, and ssh.socket
+    # is neither stopped nor held. On ubuntu-24.04 ssh is socket-activated.
+    block:
+      let sshBefore = nw.exec("systemctl show -p ActiveState ssh.socket").stdout.strip()
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_ssh.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let essText = "ssh.socket would be held for the carried-state check"
+      let written = nw.exec("ls /etc/systemd/system/ssh.socket.d 2>&1").stdout
+      let heldAnywhere = nw.exec("ls /etc/systemd/system/ssh.socket.d/" &
+        "zz-repro-carried-check-hold.conf /run/systemd/system/ssh.socket.d/" &
+        "zz-repro-carried-check-hold.conf 2>/dev/null").stdout.strip()
+      let sshAfter = nw.exec("systemctl show -p ActiveState ssh.socket").stdout.strip()
+      let refusedSsh = r.exitCode != 0 and essText in o
+      let dropInWritten = "a13-repoint" in written
+      discard nw.run("rm -f /etc/systemd/system/ssh.socket.d/50-repro-a13-repoint.conf; " &
+        "rmdir /etc/systemd/system/ssh.socket.d 2>/dev/null; systemctl daemon-reload; true")
+      let sshOk = refusedSsh and not dropInWritten and heldAnywhere.len == 0 and
+        sshAfter == sshBefore
+      record["essentialHostTrigger"] = %*{"exit": r.exitCode,
+        "refused": refusedSsh, "dropInWritten": dropInWritten,
+        "held": heldAnywhere, "before": sshBefore, "after": sshAfter,
+        "ok": sshOk}
+      step("M-C: an apply whose drop-in points ssh.socket at a judged unit " &
+           "is refused before it writes anything, and ssh.socket is neither " &
+           "stopped nor held", sshOk, o & "\nwritten: " & written &
+           "\nheld: " & heldAnywhere & "\nbefore: " & sshBefore &
+           " after: " & sshAfter)
+    # Decision 177 (A13 review round 11): with carried state restored, an
+    # apply of the next generation plus a drop-in that makes a console getty
+    # require a judged unit would hold an essential unit, so it is refused
+    # before it writes anything -- by that refusal and no other (its text,
+    # and the absence of every other refusal the apply reports). Falsifier:
+    # the engine build essential-requirers-held.
+    block:
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir &
+        "/system_ess.nim --host " & AgentTarget & " --no-preview",
+        timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      let essText = "getty@tty6.service would be held for the carried-state check"
+      let otherRefusal = "carried state is not restored yet" in o or
+        "carried state's owners would not match" in o or
+        "ECarriedStatePending" in o.replace("ECarriedStatePending: getty@tty6.service would be held", "")
+      let refusedEss = r.exitCode != 0 and essText in o and not otherRefusal
+      let written = nw.exec("ls /etc/systemd/system/getty@tty6.service.d 2>&1").stdout
+      let dropInWritten = "a13-ess" in written
+      discard nw.run("rm -rf /etc/systemd/system/getty@tty6.service.d " &
+        "/run/systemd/system/getty@tty6.service.d; systemctl daemon-reload")
+      record["decisionEssential"] = %*{"exit": r.exitCode,
+        "refused": refusedEss, "essentialRefusalText": essText in o,
+        "otherRefusal": otherRefusal, "dropInWritten": dropInWritten}
+      step("decision 171: an apply in which an essential requirer would be held " &
+           "(a console getty that requires a judged unit) is refused before " &
+           "it writes anything", refusedEss and not dropInWritten,
+           o & "\n" & written)
     # Decision 151 with the socket's service running and connections
     # arriving during the apply (the common case): a trigger whose unit runs
     # cannot fire at the hold and is left alone -- with Accept=no the
@@ -1947,6 +2349,29 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["bootPathSetup"] = %(nw.exec("systemctl is-enabled " & RestoreUnit &
       " || true").stdout & "damaged " & validatorArchive)
     nw.rebootGuest()
+    # The restore unit is started more than once at boot (a carried unit's
+    # start queues it again after the first failure), so a single read can
+    # race a later run (A13 review round 12: conv-debian-12 at 6b8fa94fc6
+    # read it `activating`). Wait on the guest until it has left
+    # `activating` for 15 s in a row, up to 120 s -- a timeout fails the
+    # step -- and, at every poll of the wait, record any carried unit that
+    # is active, so one that starts between the restore's runs is caught.
+    let settleUnits = [DefaultValidatorUnit, Exe, ShadowUnit, R5DistUnit]
+    writeFile(work / "a13-restore-settle.sh",
+      "calm=0; i=0\nwhile [ $i -lt 240 ]; do\n" &
+      "  for u in " & settleUnits.join(" ") & "; do\n" &
+      "    systemctl is-active --quiet $u && echo \"ACTIVE $u $(cut -d' ' -f1 /proc/uptime)\"\n" &
+      "  done\n" &
+      "  s=$(systemctl show -p ActiveState --value " & RestoreUnit & ")\n" &
+      "  if [ \"$s\" = activating ]; then calm=0; else calm=$((calm+1)); fi\n" &
+      "  [ $calm -ge 30 ] && { echo \"SETTLED $s\"; exit 0; }\n" &
+      "  i=$((i+1)); sleep 0.5\ndone\necho TIMEOUT\n")
+    nw.copyTo(work / "a13-restore-settle.sh", "/run/a13-restore-settle.sh")
+    let settle = nw.exec("bash /run/a13-restore-settle.sh", timeoutSec = 200).stdout
+    let settled = "SETTLED " in settle and "TIMEOUT" notin settle
+    var activeDuring: seq[string]
+    for l in settle.splitLines():
+      if l.startsWith("ACTIVE "): activeDuring.add(l)
     let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
     var bad: seq[string]
     for u in [DefaultValidatorUnit, Exe, ShadowUnit, R5DistUnit]:
@@ -1954,9 +2379,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let n = nw.exec("journalctl -b -u " & u &
         " --no-pager | grep -c 'Started' || true").stdout.strip()
       if st == "active" or n != "0": bad.add(u & " " & st & ", starts " & n)
+    record["bootPathSettle"] = %*{"settled": settled,
+      "activeDuring": activeDuring, "final": rres}
     step("a carried unit does not start at boot while its restore fails",
-         "Result=success" notin rres and bad.len == 0,
-         rres & "\nstarted: " & bad.join("; ") & "\n" &
+         settled and activeDuring.len == 0 and "Result=success" notin rres and
+           bad.len == 0,
+         "settle: " & settle & "\n" & rres & "\nstarted: " & bad.join("; ") & "\n" &
          nw.serviceJournal([RestoreUnit, Exe, DefaultValidatorUnit]))
 
     # Ordering, observed while the restore is provably still running. The

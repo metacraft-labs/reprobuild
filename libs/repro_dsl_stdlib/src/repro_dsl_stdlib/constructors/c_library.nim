@@ -23,6 +23,14 @@
 ##   build:
 ##     let libfoo = c_library(into = "libfoo",
 ##                            sources = @["src/foo.c"])
+##
+## On an ELF target that writes ``lib/libfoo.so.1.0``, whose
+## ``DT_SONAME`` is ``libfoo.so.1.0``, and the link-time symlink
+## ``lib/libfoo.so -> libfoo.so.1.0`` (C-Cpp.md §"Mode A — Fine-grained
+## build graph (primary)"). A consumer linked with ``-lfoo`` records
+## ``DT_NEEDED libfoo.so.1.0`` -- a file that exists.
+
+import std/os
 
 import repro_project_dsl
 
@@ -30,6 +38,8 @@ import ../types/library
 import ../types/options
 import ../operations/compile
 import ../operations/link
+import ../active_context
+import ../adapters/native_cross_target
 
 proc activePackageName(): string {.inline.} =
   ## v1 helper — return the active ``package`` block's name, or ``""``
@@ -38,6 +48,22 @@ proc activePackageName(): string {.inline.} =
   ## haven't pushed a build frame.
   let st = tryCurrentBuildState()
   if st == nil: "" else: st.packageName
+
+proc targetIsElf(): bool =
+  ## Whether the library being linked is an ELF object, the only format
+  ## with a ``DT_SONAME``: the active target's format (the host's for a
+  ## native build). Read with ``peekActiveCrossTarget`` so asking does not
+  ## lift ``link``'s fail-closed guard for an unthreaded target.
+  var ct = peekActiveCrossTarget()
+  if ct == nil:
+    ct = nativeCrossTarget()
+  ct.binaryFormat == bfELF
+
+proc actionIdPart(value: string): string =
+  ## ``value`` reduced to the characters an action id may carry.
+  for ch in value:
+    result.add(if ch in {'a'..'z', 'A'..'Z', '0'..'9', '.', '_', '-'}: ch
+               else: '_')
 
 proc c_library*(into: string;
                 sources: seq[string];
@@ -87,17 +113,49 @@ proc c_library*(into: string;
     case api.linkKind
     of llkStatic: lokStatic
     of llkShared, llkBoth, llkUnset: lokShared
+  # One name drives the file, ``-Wl,-soname,`` and the declared output,
+  # so they cannot disagree: a consumer's ``DT_NEEDED`` is the SONAME,
+  # and the loader opens a file of exactly that name.
+  let baseName = if api.soname.len > 0: api.soname else: into
+  let linkTimeFile = "lib" & baseName & ".so"
+  let soname =
+    if linkKind == lokShared and targetIsElf():
+      sharedLibrarySoname(baseName, api.sover)
+    else: ""
+  # Under ``lib/``: a target build keys the FIRST path component
+  # (``targetKeyedPath``), so the directory becomes ``lib@<triple>/``
+  # and the file keeps the name the SONAME gives it.
   let targetName =
-    if api.soname.len > 0:
-      "lib" & api.soname & (if linkKind == lokStatic: ".a" else: ".so")
-    else:
-      "lib" & into & (if linkKind == lokStatic: ".a" else: ".so")
+    if linkKind == lokStatic: "lib" / ("lib" & baseName & ".a")
+    elif soname.len > 0: "lib" / soname
+    else: "lib" / linkTimeFile
   let linkEdge = link(LinkOptions(
     objects: objects,
     deps: deps,
     kind: linkKind,
     target: targetName,
-    soname: api.soname))
+    soname: soname))
 
-  newLibrary(install = linkEdge, api = api,
-             installPrefix = "usr/lib")
+  result = newLibrary(install = linkEdge, api = api,
+                      installPrefix = "usr/lib")
+
+  # A versioned SONAME is not the name ``-l<base>`` looks for, so write
+  # ``lib<base>.so`` beside it as a symlink to it, as the link-time name
+  # (C-Cpp.md §"Mode A"). Both are declared outputs.
+  if soname.len > 0 and soname != linkTimeFile and
+      linkEdge.outputs.len > 0:
+    let libDir = linkEdge.outputs[0].parentDir
+    let linkPath = if libDir.len > 0: libDir / linkTimeFile else: linkTimeFile
+    result.linkTimeName = buildAction(
+      id = "c-library-link-time-name-" & actionIdPart(pkg) & "-" &
+        actionIdPart(linkPath),
+      # Relative target: the symlink resolves inside its own directory,
+      # wherever the tree is mirrored or installed.
+      call = inlineExecCall(@["ln", "-sfn", soname, linkPath]),
+      deps = [linkEdge.id],
+      inputs = [linkEdge.outputs[0]],
+      outputs = [linkPath],
+      pool = "compile",
+      dependencyPolicy = automaticMonitorPolicy(),
+      publishToBinaryCache = true,
+      toolIdentityRefs = ["ln"])

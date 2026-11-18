@@ -90,9 +90,14 @@ type
       ## by name when the ``divert`` opt-in is asked for.
 
   AddonCollisionError* = object of CatchableError
-    ## A refusal of the decision table that has no typed add-on
-    ## diagnostic of its own: a symlink component, a foreign diversion,
-    ## a diversion opt-in on a base without diversions.
+    ## ``EAddOnCollision`` (``adCollision``): a refusal of the decision
+    ## table that has no more specific diagnostic -- a symlink component,
+    ## a foreign diversion, a diversion opt-in on a base without
+    ## diversions. Its message starts with the diagnostic's name, like
+    ## every add-on refusal's. It is deliberately not an ``EAddOn``: the
+    ## switch undoes a fresh switch refused by an ``EAddOn`` before its
+    ## flip, while a collision the before-each-write re-check finds takes
+    ## the failed-switch path, and that difference is kept.
 
   AddonDriftError* = object of CatchableError
     ## ``EDrift``: an object the add-on does not own differs from what the
@@ -127,6 +132,11 @@ type
       ## bytes: a no-op (nothing is written), which the apply still reports
       ## (``accepted-out-of-band`` in the ledger diff), so the out-of-band
       ## write does not vanish from the record.
+    takesOverUnowned*: bool
+      ## An update of a file the ledger does not own: its bytes are the
+      ## profile's but its mode or group is not (``attributeMismatch``).
+      ## The apply keeps the bytes, sets the attributes, and takes the file
+      ## over with its bytes before preserved (``preWriteBytes``).
 
   CollisionLine* = object
     address*: string
@@ -160,6 +170,11 @@ type
     ucElsewhere = "elsewhere" ## transient (``/run/systemd/system``), generated, or local
                               ## (``/usr/local/lib``): shadowing it silently is wrong,
                               ## and no opt-in covers it
+
+proc newAddonCollisionError*(detail: string): ref AddonCollisionError =
+  ## An ``EAddOnCollision`` refusal; ``detail`` says what was refused and
+  ## why (``"refusing <address>: ..."``).
+  newException(AddonCollisionError, diagnosticMessage(adCollision, detail))
 
 proc classifyUnit*(u: UnitProvision): UnitClass =
   if u.loadState.startsWith("masked"):
@@ -267,7 +282,7 @@ proc loadDpkgIndex(root: string; idx: DpkgIndex) =
   if idx.loaded and stamp == idx.stamp: return
   let dir = root / DpkgInfoDir
   if not dirExists(dir):
-    raise newException(AddonCollisionError, "the dpkg package database " &
+    raise newAddonCollisionError("the dpkg package database " &
       "is incomplete: " & dir & " does not exist, so package ownership " &
       "cannot be observed; nothing is decided without it")
   idx.owner = initTable[string, string]()
@@ -348,14 +363,14 @@ proc readUnitProvision*(unit: string): UnitProvision =
         "NeedDaemonReload",
       "--", templateObservationName(unit)])
   except HostToolMissing as e:
-    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+    raise newAddonCollisionError("cannot observe unit " & unit &
       ": " & e.msg)
   if r.exitCode != 0:
-    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+    raise newAddonCollisionError("cannot observe unit " & unit &
       ": systemctl show exited " & $r.exitCode & ": " & r.output.strip())
   result = unitProvisionFromShow(r.output)
   if result.loadState.len == 0:
-    raise newException(AddonCollisionError, "cannot observe unit " & unit &
+    raise newAddonCollisionError("cannot observe unit " & unit &
       ": systemctl show reported no LoadState: " & r.output.strip())
 
 proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
@@ -411,7 +426,7 @@ proc detectCollisionDriver*(root = "/"): CollisionDriver =
   ## refused rather than read as "nothing is owned" (``loadDpkgIndex``).
   if fileExists(root / "/var/lib/dpkg/status"):
     if not dirExists(root / DpkgInfoDir):
-      raise newException(AddonCollisionError, "the dpkg package database " &
+      raise newAddonCollisionError("the dpkg package database " &
         "is incomplete: " & root / DpkgInfoDir & " does not exist")
     return newDpkgDriver(root)
   raise newAddOnUnsupportedBase("unknown",
@@ -441,6 +456,10 @@ type
     ownership*: PackageOwnership
     diversion*: DiversionRecord
     unit*: UnitProvision       ## units only
+    mode*: string              ## the leaf's permission bits (four octal
+                               ## digits), ``link`` for a link, "" if absent
+    group*: string             ## the leaf's group name (``#<gid>`` when it
+                               ## has none), ``link`` for a link, "" if absent
 
 proc observeTarget*(d: CollisionDriver; path: string;
                     unit = ""): TargetObservation =
@@ -472,6 +491,18 @@ proc observeTarget*(d: CollisionDriver; path: string;
     result.exists = true
   if result.exists:
     result.etcValue = etcEntryValue(path)
+    # The mode and group an `fs.systemFile` may declare are compared
+    # against these (``attributeMismatch``); a link reads as `link`.
+    var st: Stat
+    if lstat(path.cstring, st) == 0:
+      if S_ISLNK(st.st_mode):
+        result.mode = "link"
+        result.group = "link"
+      else:
+        result.mode = toOct(int(st.st_mode) and 0o7777, 4)
+        let g = getgrgid(st.st_gid)
+        result.group = if g != nil and g.gr_name != nil: $g.gr_name
+                       else: "#" & $int(st.st_gid)
   result.ownership = d.packageOwner(path)
   result.diversion = d.diversion(path)
   if unit.len > 0:
@@ -518,6 +549,8 @@ type
     divertedByProfile*: bool   ## a `linux.dpkgDiversion` of the path is declared
     reconcileDrift*: bool
     adopt*: bool               ## `repro system adopt` named this address
+    desiredMode*: string       ## an `fs.systemFile`'s declared `mode`, ""
+    desiredGroup*: string      ## an `fs.systemFile`'s declared `group`, ""
     stanza*: proc (bytes: string): string {.closure.}
       ## The resource as the profile would declare it with ``bytes`` as
       ## its content (an ``fs.systemFile``), for a refusal to print; nil
@@ -525,7 +558,7 @@ type
 
 proc refuseLink(o: TargetObservation; address: string) =
   if o.linkComponent.len > 0:
-    raise newException(AddonCollisionError, "refusing " & address & ": " &
+    raise newAddonCollisionError("refusing " & address & ": " &
       o.linkComponent & " is a symbolic link on the target path " & o.path &
       "; the add-on never writes through a link (threat model G29)")
 
@@ -536,7 +569,7 @@ proc refuseForeignDiversion(o: TargetObservation; address: string;
   ## called -- a local diversion to ``<path>.distrib`` made by hand is not
   ## the add-on's because it spells its name the way the add-on would.
   if not o.diversion.present or ownedByLedger: return
-  raise newException(AddonCollisionError, "refusing " & address & ": " &
+  raise newAddonCollisionError("refusing " & address & ": " &
     o.path & " is already diverted to " & o.diversion.divertTo & " by " &
     (if o.diversion.package == ":": "a local diversion the ledger does not list"
      else: "package " & o.diversion.package) &
@@ -555,7 +588,7 @@ proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
   ## one.
   if not o.ownership.viaUcf: return
   let hint = d.dropInHint(o.path)
-  raise newException(AddonCollisionError, "refusing " & address & ": " &
+  raise newAddonCollisionError("refusing " & address & ": " &
     o.path & " is managed by package " & o.ownership.package &
     " through ucf (/var/lib/ucf/registry), and a ucf-managed file cannot " &
     "be diverted: ucf would withhold the package's next version of it " &
@@ -563,6 +596,21 @@ proc refuseUcfDivert(d: CollisionDriver; o: TargetObservation;
     (if hint.len > 0: "Put the change in a drop-in under " & hint & " instead."
      else: "Change it through a drop-in or configuration directory the " &
            "program reads, or leave it to the package."))
+
+proc attributeMismatch*(o: TargetObservation; inp: DecisionInputs): string =
+  ## "" when the file at the target has the mode and group the resource
+  ## declares (or it declares neither); otherwise what differs, e.g.
+  ## `mode 0644 (declared 0640)`. Such a file is not as declared even when
+  ## its bytes are: the apply changes its attributes, so the decision says
+  ## so (an update), never a silent chmod under `adopt` or `no-op`
+  ## (System-Profile-And-Infra-Apply.md, `fs.systemFile`, amended
+  ## 2026-11-16).
+  var parts: seq[string]
+  if inp.desiredMode.len > 0 and o.mode != inp.desiredMode:
+    parts.add("mode " & o.mode & " (declared " & inp.desiredMode & ")")
+  if inp.desiredGroup.len > 0 and o.group != inp.desiredGroup:
+    parts.add("group " & o.group & " (declared " & inp.desiredGroup & ")")
+  parts.join(", ")
 
 proc decideFile(d: CollisionDriver; o: TargetObservation;
                 inp: DecisionInputs): CollisionDecision =
@@ -572,8 +620,10 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
   result.observedSha256 = o.sha256
   refuseLink(o, inp.address)
   refuseForeignDiversion(o, inp.address, inp.ledgerOwnsDiversion)
-  if o.exists and not o.isRegular:
-    raise newException(AddonCollisionError, "refusing " & inp.address &
+  let ownDangling = o.exists and not o.isRegular and o.ownLink and
+    inp.ledgerOwns
+  if o.exists and not o.isRegular and not ownDangling:
+    raise newAddonCollisionError("refusing " & inp.address &
       ": " & o.path & " exists and is not a regular file")
   # Row 2: the ledger owns it -- unless a package came to own the path
   # since (spec §4.3, §7.6, §7.8): that is a package-owned path, refused by
@@ -591,8 +641,26 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
         "then declare it again with `collision = \"divert\"` if the " &
         "add-on should still own its content")
       raise e
+  let attrs = if o.exists and o.isRegular: attributeMismatch(o, inp) else: ""
+  if ownDangling:
+    # The add-on's own link (exactly `/etc/X -> /etc/repro/static/X`) of a
+    # path the ledger owns, dangling: the static tree was flipped to one
+    # without the file -- what a failed link-to-copy switch leaves for its
+    # revert, and what the revert of a copy-to-link switch finds. It is the add-on's own
+    # object; it is materialised again (a link the reverted tree resolves,
+    # or a copy renamed over exactly this link), never refused as a
+    # foreign non-file.
+    result.verdict = cvUpdate
+    result.reason = "the add-on's own link, dangling after the static " &
+      "tree was flipped; materialised again"
+    return
   if inp.ledgerOwns:
     if o.exists and o.sha256 == inp.ledgerSha256:
+      if o.sha256 == inp.desiredSha256 and attrs.len > 0:
+        result.verdict = cvUpdate
+        result.reason = "owned by the ledger, bytes as declared; " & attrs &
+          ": the apply sets the declared mode and group"
+        return
       result.verdict = (if o.sha256 == inp.desiredSha256: cvNoOp else: cvUpdate)
       result.reason = "owned by the ledger, digest matches"
       return
@@ -605,9 +673,13 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       # outside the switch applied the same profile: the deploy agent
       # before it applied through the switch, §9 "Migration"). Nothing
       # conflicts and nothing is written; the ledger records the bytes.
-      result.verdict = cvNoOp
+      # (Unless its mode or group is not the declared one: then the apply
+      # changes those, and says so.)
+      result.verdict = (if attrs.len > 0: cvUpdate else: cvNoOp)
       result.acceptedOutOfBand = true
-      result.reason = AcceptedOutOfBandReason
+      result.reason = AcceptedOutOfBandReason &
+        (if attrs.len > 0: "; " & attrs & ": the apply sets the declared " &
+           "mode and group" else: "")
       return
     if inp.adopt and not mutated("owned-drift-not-adoptable"):
       when mutated("adopt-without-profile"):
@@ -673,7 +745,7 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       raise newAddOnPackageOwned(o.path, o.ownership.package,
                                  o.ownership.conffile, d.dropInHint(o.path))
     if not d.supportsDiversions:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": " & o.path & " is owned by package " & o.ownership.package &
         " and the " & d.name & " base has no diversions; `collision = " &
         "\"divert\"` is unavailable here")
@@ -689,6 +761,18 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
     result.reason = "absent, no package owns it"
     return
   if o.sha256 == inp.desiredSha256:
+    if attrs.len > 0:
+      # The bytes are the profile's, the mode or group is not: an update
+      # that keeps the bytes and changes the attributes. The bytes before
+      # are preserved (``preWriteBytes``), as for an adoption, so removing
+      # the resource gives back the file as it was.
+      result.verdict = cvUpdate
+      result.takesOverUnowned = true
+      result.preWriteBytes = readFile(o.path)
+      result.reason = "present, unowned, bytes identical to the profile; " &
+        attrs & ": updated in place, the bytes kept and the declared mode " &
+        "and group set (the file before is preserved)"
+      return
     result.verdict = cvAdopt
     result.preWriteBytes = readFile(o.path)
     result.reason = "present, unowned, identical to the profile: adopted " &
@@ -698,7 +782,9 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
     result.verdict = cvAdopt
     result.preWriteBytes = readFile(o.path)
     result.reason = "present, unowned, claimed by `repro system adopt`: " &
-      "its current bytes become the add-on's"
+      "its current bytes become the add-on's" &
+      (if attrs.len > 0: "; " & attrs & ": the apply sets the declared " &
+         "mode and group" else: "")
     return
   if inp.reconcileDrift:
     result.verdict = cvReconcile
@@ -729,10 +815,10 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
     refuseLink(o, inp.address)
     refuseForeignDiversion(o, inp.address, inp.ledgerOwns)
     if not d.supportsDiversions:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": the " & d.name & " base has no diversions")
     if o.ownership.package.len == 0:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": no installed package owns " & path & "; a diversion is only " &
         "for a package-owned path (declare the file as an fs.systemFile)")
     refuseUcfDivert(d, o, inp.address)
@@ -760,11 +846,11 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
     let packageUnit = cls == ucPackage
     case cls
     of ucMasked:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": " & inp.unit & " is masked (" & o.unit.loadState &
         "); the add-on does not write over a mask")
     of ucElsewhere:
-      raise newException(AddonCollisionError, "refusing " & inp.address &
+      raise newAddonCollisionError("refusing " & inp.address &
         ": " & inp.unit & " is loaded from " & o.unit.fragmentPath &
         ", a transient, generated or local unit outside the package and " &
         "/etc directories; an /etc unit would shadow it silently and no " &
@@ -775,7 +861,7 @@ proc decide*(d: CollisionDriver; inp: DecisionInputs;
       # The unit itself is not written; the drop-in file is decided by
       # the file rows. Here: what the drop-in modifies, which must exist.
       if cls == ucNone:
-        raise newException(AddonCollisionError, "refusing " & inp.address &
+        raise newAddonCollisionError("refusing " & inp.address &
           ": nothing provides " & inp.unit & ", so a drop-in has nothing " &
           "to modify; declare the unit itself")
       dec.verdict = cvDropIn
@@ -852,6 +938,15 @@ type
     replay*: bool
       ## The plan is an interrupted switch's, replayed (spec §7.7): the
       ## switch may already have written this target before it stopped.
+    replacesOwnLink*: bool
+      ## The previous generation materialised this resource as the
+      ## add-on's own link (``/etc/X -> /etc/repro/static/X``, recorded in
+      ## the ledger as a link for this resource) and this one writes a
+      ## copy (an ``fs.systemFile`` that came to declare ``form = "copy"``,
+      ## ``mode`` or ``group``; ReproOS-Add-On-Mode §7.2 step 5). Step 3's
+      ## flip leaves that link dangling (the new tree does not carry the
+      ## file), so the guard judges it by the plan's observation of it, not
+      ## by what the new tree resolves it to (``preWriteRefusal``).
 
 proc plannedTarget*(address: string; inp: DecisionInputs; path: string;
                     dec: CollisionDecision; o: TargetObservation):
@@ -913,6 +1008,15 @@ proc preWriteRefusal*(d: CollisionDriver; t: PlannedTarget): string =
   if o.ownLink and o.sha256 == t.desiredSha256:
     # The static tree was flipped after the plan: the add-on's own link
     # now shows the planned bytes. That is the switch, not a change.
+    return ""
+  if o.ownLink and t.replacesOwnLink:
+    # Exactly the add-on's own link, which the plan observed (with the
+    # previous tree's bytes behind it) and decided to replace with a copy.
+    # The flip has since pointed `/etc/repro/static` at a tree without the
+    # file, so it may dangle: what it resolves to now is the switch's own
+    # doing, not a change under the plan. The copy is renamed over exactly
+    # this link (`AddOnMaterialisation.replacingLinkTo`); any other link
+    # was refused above (``linkComponent``, threat model G29).
     return ""
   if o.sha256 != expectedSha:
     return "refusing " & t.address & " at write time: " & t.path &

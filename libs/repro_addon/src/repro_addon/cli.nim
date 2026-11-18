@@ -8,6 +8,7 @@
 ##                                [--cache-publishers F [--cache-url U]]
 ##                                [--evidence-sink A:P --evidence-sink-ca F]
 ##   repro system addon evidence-ship [--heartbeat]
+##   repro system addon evidence-harvest
 ##   repro system addon evidence-credential-check
 ##   repro system addon uninstall [--keep-store]
 ##   repro system addon verify-discard-record RECORD --key HEX
@@ -151,10 +152,14 @@ commands:
       The egress observer's check (repro-addon-egress-check.service): record
       every destination the deploy agent's fetch unit was refused, and
       heartbeat.
+  evidence-harvest
+      The shipping unit's privileged first step: turn the apt hook
+      wrapper's events into evidence records. Reads root's own log only.
   evidence-credential-check
       Test this host's sink write credential: an append must succeed and a
       list, a read, an overwrite and a delete must each be refused. Exit 0
-      only then. It announces itself first, so the sink's check reads it as
+      only then. Runs in the shipping unit's confinement, as its dynamic
+      user. It announces itself first, so the sink's check reads it as
       a self-test, not as a probe (G34).
   uninstall [--keep-store] [--discard-store-evidence]
             [--discard-unacknowledged-store-evidence]
@@ -180,6 +185,10 @@ commands:
       (the apt hook): also report packages that now own ledger paths and
       changed vendor units, record findings in the journal and the hook's
       event log, and always exit 0.
+  boot-confirm
+      The boot-confirm unit, after the re-assertion: replay a pending switch
+      the re-assertion left to it (a health-checked floored unit), with its
+      confirm; always exits 0.
   reassert [--boot]
       Finish or revert an interrupted switch, check the current generation
       (static tree, store objects, ledger digests) and report ok, drift or
@@ -534,6 +543,47 @@ proc renderCompletedDiscard*(keyHex: string; removed, kept: seq[string]): string
       "not discarded:\n")
     for o in kept: result.add("  " & o & "\n")
 
+proc discardReport*(r: UninstallResult): string =
+  ## What ``uninstall`` prints about a discard of store evidence: the intent
+  ## it authorised, or the earlier one it completed (§13 decisions 62, 81
+  ## and 148), whether the discard completed, and how to verify it (§13
+  ## decision 162).
+  if r.overrideRecord.len > 0 and r.resumedIntent:
+    # §13 decision 148: an earlier run's intent, carrying its discard
+    # marker; this run authorised nothing, so it never says it did.
+    result.add("completing the discard an earlier uninstall " &
+      "authorised and carried out (its discard marker " &
+      discardMarkerPath(custodySite(DefaultStateDir), r.overrideRecord) &
+      " is valid); its signed intent record is " & r.overrideRecord & "\n")
+    if r.completionRecord.len > 0:
+      result.add("the discard completed; the signed completion " &
+        "record is " & r.completionRecord & " (signature " &
+        r.completionRecord & DiscardRecordSigExt & ")\n")
+    else:
+      result.add("the discard did NOT complete: there is no " &
+        "completion record\n")
+    # §13 decision 162: the same verify hint a plain run prints.
+    result.add("check it with `repro system addon " &
+      "verify-discard-record " & r.overrideRecord &
+      " --key <enrolled key>`\n")
+  elif r.overrideRecord.len > 0:
+    # §13 decisions 62 and 64: the record of what was discarded
+    # unshipped, its signature beside it.
+    result.add("discarding store evidence the Evidence sink has " &
+      "not acknowledged was authorised; the signed intent record is " &
+      r.overrideRecord & " (signature " & r.overrideRecord &
+      DiscardRecordSigExt & "):\n" & r.overrideRecordText)
+    if r.completionRecord.len > 0:
+      result.add("the discard completed; the signed completion " &
+        "record is " & r.completionRecord & " (signature " &
+        r.completionRecord & DiscardRecordSigExt & ")\n")
+    else:
+      result.add("the discard did NOT complete: there is no " &
+        "completion record\n")
+    result.add("check it with `repro system addon " &
+      "verify-discard-record " & r.overrideRecord &
+      " --key <enrolled key>`\n")
+
 proc runAddonCli*(args: seq[string]): int =
   ## Dispatch ``repro system addon <args>``.
   if args.len == 0 or args[0] in ["-h", "--help", "help"]:
@@ -619,43 +669,10 @@ proc runAddonCli*(args: seq[string]): int =
         return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))
-      if r.overrideRecord.len > 0 and r.resumedIntent:
-        # §13 decision 148: an earlier run's intent, carrying its discard
-        # marker; this run authorised nothing, so it never says it did.
-        stdout.write("completing the discard an earlier uninstall " &
-          "authorised and carried out (its discard marker " &
-          discardMarkerPath(custodySite(DefaultStateDir), r.overrideRecord) &
-          " is valid); its signed intent record is " & r.overrideRecord & "\n")
-        if r.completionRecord.len > 0:
-          stdout.write("the discard completed; the signed completion " &
-            "record is " & r.completionRecord & " (signature " &
-            r.completionRecord & DiscardRecordSigExt & ")\n")
-        else:
-          stdout.write("the discard did NOT complete: there is no " &
-            "completion record\n")
-        # §13 decision 162: the same verify hint a plain run prints.
-        stdout.write("check it with `repro system addon " &
-          "verify-discard-record " & r.overrideRecord &
-          " --key <enrolled key>`\n")
-      elif r.overrideRecord.len > 0:
-        # §13 decisions 62 and 64: the record of what was discarded
-        # unshipped, its signature beside it.
-        stdout.write("discarding store evidence the Evidence sink has " &
-          "not acknowledged was authorised; the signed intent record is " &
-          r.overrideRecord & " (signature " & r.overrideRecord &
-          DiscardRecordSigExt & "):\n" & r.overrideRecordText)
-        if r.completionRecord.len > 0:
-          stdout.write("the discard completed; the signed completion " &
-            "record is " & r.completionRecord & " (signature " &
-            r.completionRecord & DiscardRecordSigExt & ")\n")
-        else:
-          stdout.write("the discard did NOT complete: there is no " &
-            "completion record\n")
-        stdout.write("check it with `repro system addon " &
-          "verify-discard-record " & r.overrideRecord &
-          " --key <enrolled key>`\n")
+      stdout.write(discardReport(r))
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
+      for n in r.notes: stdout.write("note: " & n & "\n")
       for k in r.keptEvidence:
         stdout.write("kept with the store (store evidence left aside): " &
                      k & "\n")
@@ -710,17 +727,52 @@ proc runAddonCli*(args: seq[string]): int =
         except CatchableError as e:
           stdout.write("repro-addon boot-holds: " & e.msg & "\n")
         # A host bootstrapped before the shipping path unit's fix (the drill's
-        # D1) is migrated here, by one switch, rather than waiting for its
-        # next generation (A11 review finding 8).
-        try:
-          let m = migrateStaleOwnObjects(DefaultStateDir, atBoot = true)
-          if m.len > 0: stdout.write(m & "\n")
-        except CatchableError as e:
-          stdout.write("repro-addon migration: " & e.msg & "\n")
+        # D1) is migrated by one switch rather than waiting for its next
+        # generation (A11 review finding 8). That switch confirms its
+        # health checks, which a floored unit cannot pass while this unit
+        # runs (§13 decision 157): where the boot-confirm unit is installed,
+        # it migrates instead, after this unit.
+        if not fileExists(unitPath(BootConfirmUnit)):
+          try:
+            let m = migrateStaleOwnObjects(DefaultStateDir, atBoot = true)
+            if m.len > 0: stdout.write(m & "\n")
+          except CatchableError as e:
+            stdout.write("repro-addon migration: " & e.msg & "\n")
         return 0
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
       return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
+    of "boot-confirm":
+      # `repro system addon boot-confirm` (repro-addon-boot-confirm.service,
+      # §13 decision 157): after the re-assertion, replay the pending switch
+      # it left here -- with queued starts and the confirm, now that the
+      # floored units can start -- then lift the boot's holds and migrate
+      # stale generation-0 objects. Never fails the boot transaction.
+      if rest.len > 0:
+        raise newException(ValueError, "unknown option " & rest[0])
+      let flag = bootConfirmFlagPath(DefaultStateDir)
+      if fileExists(flag):
+        try:
+          stdout.write(renderReassert(runAddonReassert(DefaultStateDir,
+            atBoot = true, bootConfirm = true)))
+        except CatchableError as e:
+          stdout.write("repro-addon reassert: degraded\n  " & e.msg & "\n")
+        try: removeFile(flag)
+        except OSError: discard
+        try:
+          for l in releaseBootHolds(DefaultStateDir,
+                                    reload = proc () = daemonReload()):
+            stdout.write("repro-addon boot-holds: " & l & "\n")
+        except CatchableError as e:
+          stdout.write("repro-addon boot-holds: " & e.msg & "\n")
+      else:
+        stdout.write("repro-addon boot-confirm: nothing was left to confirm\n")
+      try:
+        let m = migrateStaleOwnObjects(DefaultStateDir, atBoot = true)
+        if m.len > 0: stdout.write(m & "\n")
+      except CatchableError as e:
+        stdout.write("repro-addon migration: " & e.msg & "\n")
+      return 0
     of "secrets":
       # `repro system addon secrets [--boot]`: re-materialise the current
       # generation's secrets (repro-addon-secrets.service at boot, §7.7).
@@ -760,6 +812,8 @@ proc runAddonCli*(args: seq[string]): int =
       return runRotateRecipientKeyCli(rest)
     of "evidence-ship":
       return runEvidenceShipCli(rest)
+    of "evidence-harvest":
+      return runEvidenceHarvestCli(rest)
     of "evidence-credential-check":
       return runCredentialCheckCli(rest)
     of "evidence-enrol":
@@ -899,6 +953,13 @@ proc renderAddonSections*(r: AddonApplyResult): string =
       "older floor version; the unit file changes and the unit " &
       "restarts):\n")
     for u in r.floorIntroduced: result.add("  " & u & "\n")
+  if r.floorWeakened.len > 0:
+    # Units whose confinement the generation weakens (§10.1): an agent
+    # apply refuses them, so the operator's plan names them apart.
+    result.add("service floor weakened (a new waiver, a new exception or " &
+      "a waived unit on a privileged account; only an operator's apply " &
+      "makes it):\n")
+    for u in r.floorWeakened: result.add("  " & u & "\n")
   if r.floorExceptions.len > 0:
     # Every weakening of the hardening floor, in every plan (§10.1, CONF-2).
     result.add("service floor exceptions:\n")
@@ -1216,22 +1277,36 @@ proc runAddonInfraPlanCli*(args: seq[string]): int =
   if r >= 0: return r
   runAddonGeneration("repro infra plan", args, planOnly = true)
 
+proc runAddonRollbackCommand*(target: string; reconcileDrift: bool): int
+
 proc runAddonRollbackCli*(args: seq[string]): int =
   ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
-  ## add-on host: re-apply a retained generation through the switch.
-  let nr = noSwapIfSecrets()
-  if nr >= 0: return nr
-  var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
-                                  hostIdentity: readHostname())
+  ## add-on host, as the static add-on binary reads it: re-apply a retained
+  ## generation through the switch (``runAddonRollbackCommand``).
+  var target = ""
+  var reconcileDrift = false
   for a in args:
-    if a == "--reconcile-drift": opts.reconcileDrift = true
+    if a == "--reconcile-drift": reconcileDrift = true
     elif a.startsWith("-"):
       stderr.write("repro system rollback: unknown option " & a & "\n")
       return 2
-    elif opts.target.len == 0: opts.target = a
+    elif target.len == 0: target = a
     else:
       stderr.write("repro system rollback: unexpected argument " & a & "\n")
       return 2
+  runAddonRollbackCommand(target, reconcileDrift)
+
+proc runAddonRollbackCommand*(target: string; reconcileDrift: bool): int =
+  ## Re-apply the retained generation ``target`` (default: the previous
+  ## one) through the add-on switch; ``reconcileDrift`` replaces drifted
+  ## objects. The command a full engine's ``repro system rollback`` runs on
+  ## an add-on host, with its command line already read.
+  let nr = noSwapIfSecrets()
+  if nr >= 0: return nr
+  var opts = AddonRollbackOptions(stateDir: DefaultStateDir,
+                                  hostIdentity: readHostname(),
+                                  target: target,
+                                  reconcileDrift: reconcileDrift)
   try:
     let r = runAddonRollback(opts)
     stdout.write("rolled back from " & r.fromGeneration & " to " &

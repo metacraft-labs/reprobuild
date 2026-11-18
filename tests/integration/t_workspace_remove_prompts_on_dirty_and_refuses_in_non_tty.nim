@@ -1,4 +1,4 @@
-## RA-9 — `repro remove <repo>` destructive-command safety.
+## RA-9 — `repro ws remove <repo>` destructive-command safety.
 ##
 ## Black-box: drives the compiled ``repro`` binary against a hermetic
 ## two-repo workspace via ``execCmdEx`` (so stdin is NON-TTY by nature).
@@ -148,7 +148,7 @@ proc makeDirty(repoPath: string) =
   writeFile(repoPath / "uncommitted.txt", "local work that must not vanish\n")
 
 proc invokeRemove(fx: Fixture; extra: seq[string]): tuple[code: int; output: string] =
-  var parts = @[q(fx.reproBin), "remove"]
+  var parts = @[q(fx.reproBin), "ws", "remove"]
   for e in extra: parts.add(q(e))
   parts.add("--workspace-root=" & q(fx.workspaceRoot))
   runCmd(parts.join(" "))
@@ -158,7 +158,7 @@ proc projectStillIncludes(fx: Fixture; fragment: string): bool =
 
 # ---- the suite ------------------------------------------------------------
 
-suite "RA-9 — repro remove destructive-command safety":
+suite "RA-9 — repro ws remove destructive-command safety":
 
   test "test_ra9_remove_dirty_non_tty_without_force_refuses_intact":
     let gitBin = findExe("git")

@@ -121,6 +121,7 @@ proc markedAction(): BuildActionDef =
   result.scratchDirs = @["scratchMarker"]
   result.removeBeforeRun = @["removeMarker"]
   result.optionalOutputs = @["optionalMarker"]
+  result.contentKeyedToolCaches = @["cacheMarker"]
 
 suite "project DSL build action payload":
   setup:
@@ -139,7 +140,9 @@ suite "project DSL build action payload":
     check automatic.call.arguments[3].repeated
     check automatic.dependencyPolicy.kind == bdpAutomaticMonitor
     check automatic.dependencyPolicy.depfiles.len == 0
-    check automatic.actionCachePolicy == acfpTimestamp
+    # The sample states no policy; since payload v34 that is its own value
+    # (`acfpUnstated`), resolved at lowering (Caching-Architecture.md D2).
+    check automatic.actionCachePolicy == acfpUnstated
 
     let makeDepfile = decodeBuildActionPayload(encodeBuildActionPayload(
       sampleAction(makeDepfilePolicy("deps/generated.d"),
@@ -314,6 +317,54 @@ suite "project DSL build action payload":
     check decodeFailure(encoded) ==
       "invalid action cache policy in build action payload"
 
+  test "a v33 policy byte decodes as the policy it named, a v34 one as itself":
+    # v34 inserted `acfpUnstated` as ordinal 0, so every stated policy moved
+    # up by one. A v9..v33 payload wrote the old ordinals (0 timestamp,
+    # 1 checksum, 2 hybrid -- the bytes the v33 encoder wrote, pinned here as
+    # raw values so a writer and reader that drifted together cannot pass),
+    # and a cached one must decode as the policy it named: a v33 `checksum`
+    # read as the new ordinal 1 would silently become `timestamp`.
+    proc policyByte(version: uint16;
+                    policy: ActionCacheFingerprintPolicy): byte =
+      let a = encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = acfpChecksum), version)
+      let b = encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = acfpHybrid), version)
+      let offset = singleDifferingByte(a, b)
+      doAssert offset >= 0
+      encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = policy), version)[offset]
+    check policyByte(33'u16, acfpTimestamp) == 0'u8
+    check policyByte(33'u16, acfpChecksum) == 1'u8
+    check policyByte(33'u16, acfpHybrid) == 2'u8
+    # An unstated policy has no v33 spelling: it was the resolved default.
+    check policyByte(33'u16, acfpUnstated) == 0'u8
+    for (stated, expected) in [(acfpUnstated, acfpTimestamp),
+                               (acfpTimestamp, acfpTimestamp),
+                               (acfpChecksum, acfpChecksum),
+                               (acfpHybrid, acfpHybrid)]:
+      check decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = stated), 33'u16)).actionCachePolicy ==
+        expected
+    # v34 keeps every value, `acfpUnstated` included, as its own ordinal.
+    check policyByte(34'u16, acfpUnstated) == 0'u8
+    check policyByte(34'u16, acfpTimestamp) == 1'u8
+    check policyByte(34'u16, acfpChecksum) == 2'u8
+    check policyByte(34'u16, acfpHybrid) == 3'u8
+    for policy in ActionCacheFingerprintPolicy:
+      check decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(
+        sampleAction(actionCachePolicy = policy), 34'u16)).actionCachePolicy ==
+        policy
+    # A byte past the v33 range is refused there, not read as a v34 value.
+    var v33 = encodeBuildActionPayloadAtVersion(
+      sampleAction(actionCachePolicy = acfpTimestamp), 33'u16)
+    let at33 = singleDifferingByte(v33, encodeBuildActionPayloadAtVersion(
+      sampleAction(actionCachePolicy = acfpChecksum), 33'u16))
+    check at33 >= 0
+    v33[at33] = 3'u8
+    check decodeFailure(v33) ==
+      "invalid action cache policy in build action payload"
+
   test "a corrupted element count fails closed without allocating for it":
     # Every list in the payload is a u32 element count followed by the
     # elements. A count corrupted on disk must be refused because the bytes
@@ -337,7 +388,8 @@ suite "project DSL build action payload":
       ("tool identity ref kinds", countAfter(encoded, "readOnlyMarker")),
       ("scratch dirs", countBefore(encoded, "scratchMarker")),
       ("remove-before-run outputs", countBefore(encoded, "removeMarker")),
-      ("optional outputs", countBefore(encoded, "optionalMarker"))]
+      ("optional outputs", countBefore(encoded, "optionalMarker")),
+      ("content-keyed tool caches", countBefore(encoded, "cacheMarker"))]
     for (site, offset) in sites:
       checkpoint site
       check offset >= 0
@@ -371,6 +423,7 @@ suite "project DSL build action payload":
     action.scratchDirs = @["", "", ""]
     action.removeBeforeRun = @["", "", ""]
     action.optionalOutputs = @["", "", ""]
+    action.contentKeyedToolCaches = @["", "", ""]
     for version in 1'u16 .. BuildActionPayloadVersion:
       checkpoint "version " & $version
       let decoded = decodeBuildActionPayload(
@@ -387,11 +440,16 @@ suite "project DSL build action payload":
         check decoded.optionalOutputs == action.optionalOutputs
       else:
         check decoded.optionalOutputs.len == 0
+      if version >= 35'u16:
+        check decoded.contentKeyedToolCaches == action.contentKeyedToolCaches
+      else:
+        check decoded.contentKeyedToolCaches.len == 0
     let currentImage = encodeBuildActionPayload(action)
     let current = decodeBuildActionPayload(currentImage)
     check current.scratchDirs == action.scratchDirs
     check current.removeBeforeRun == action.removeBeforeRun
     check current.optionalOutputs == action.optionalOutputs
+    check current.contentKeyedToolCaches == action.contentKeyedToolCaches
     check current.toolIdentityRefs == action.toolIdentityRefs
     check current.readOnlyRoots == action.readOnlyRoots
     check current.cacheEntryIdentity.isSome
@@ -403,13 +461,20 @@ suite "project DSL build action payload":
     let image32 = encodeBuildActionPayloadAtVersion(action, 32'u16)
     check image32[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
-    # The current payload ends with the width fields (v33): two u32 (the
-    # range) and an empty string (the flag), 12 zero bytes for an unsized
-    # action, after the same list. A version that appends another field fails
-    # here rather than quietly testing nothing at the boundary.
-    check currentImage[^12 .. ^1] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    check currentImage[^28 .. ^13] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+    # Version 34 ends with the width fields (v33): two u32 (the range) and an
+    # empty string (the flag), 12 zero bytes for an unsized action, after the
+    # same list.
+    let image34 = encodeBuildActionPayloadAtVersion(action, 34'u16)
+    check image34[^12 .. ^1] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    check image34[^28 .. ^13] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
+    # The current payload ends with the content-keyed tool caches (v35),
+    # again a list of three empty strings, so the current version also meets
+    # the bound with equality. A version that appends another field fails
+    # here rather than quietly testing nothing at the boundary.
+    check currentImage[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    check currentImage[^28 .. ^17] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
   test "version 4 payloads decode with default CLI argument formatting":
     let decoded = decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(

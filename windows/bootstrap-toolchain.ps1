@@ -27,8 +27,8 @@
     devShell gives Linux/macOS. A step that "finds" a tool on the host instead
     is not a bootstrap, it is a coin flip.
 
-    Scope: `toolchain-utils.ps1`, `ensure-nim.ps1` and `ensure-gcc.ps1`
-    beside this file, driven from here with the two helpers below
+    Scope: `toolchain-utils.ps1`, `ensure-nim.ps1`, `ensure-gcc.ps1` and
+    `ensure-llvm-mingw.ps1` beside this file, driven from here with the two helpers below
     (`Get-ReproToolchainInstallRoot`, `Add-PathEntry`).
 
     Deliberately NOT provisioned here: gh / gpg / python3 / git-repo. None is
@@ -38,7 +38,8 @@
     Knobs:
       $env:WINDOWS_DIY_SYNC = "0"           skip all downloads
       $env:WINDOWS_DIY_SKIP_NIM = "1"       skip the nim step
-      $env:WINDOWS_DIY_SKIP_GCC = "1"       skip the gcc step
+      $env:WINDOWS_DIY_SKIP_GCC = "1"       skip the C compiler step (WinLibs
+                                            gcc on x64, llvm-mingw on arm64)
       $env:WINDOWS_DIY_INSTALL_ROOT = ...   where toolchains are installed
       $env:NIM_WINDOWS_SOURCE_MODE = ...    prebuilt | source | auto
 #>
@@ -51,6 +52,7 @@ $reproWindowsDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 . (Join-Path $reproWindowsDir "toolchain-utils.ps1")
 . (Join-Path $reproWindowsDir "ensure-nim.ps1")
 . (Join-Path $reproWindowsDir "ensure-gcc.ps1")
+. (Join-Path $reproWindowsDir "ensure-llvm-mingw.ps1")
 
 function Get-ReproToolchainInstallRoot {
   ## Where cold-start toolchains land.
@@ -130,17 +132,34 @@ function Invoke-ReproToolchainBootstrap {
   #     clingo and nim-bearssl are fatal in env.ps1: a build that proceeds past
   #     this point cannot succeed, and every message it prints afterwards
   #     points somewhere else.
+  #
+  # The C compiler depends on the architecture (reprobuild-pm
+  # Distribution-And-Packaging.md §7.1, W1): WinLibs GCC on x64, llvm-mingw on
+  # arm64, because no maintained Windows-on-Arm-hosted GCC exists. The step
+  # keeps its GCC name for the knob's sake; what it installs is named for what
+  # it is.
   if ($doSync -and (Test-BootstrapStepEnabled "GCC")) {
-    Ensure-Gcc -Root $installRoot -Arch $arch -Toolchain $toolchain | Out-Null
+    if ($arch -eq "arm64") {
+      Ensure-LlvmMingw -Root $installRoot -Arch $arch -Toolchain $toolchain | Out-Null
+    } else {
+      Ensure-Gcc -Root $installRoot -Arch $arch -Toolchain $toolchain | Out-Null
+    }
   }
 
   $nimVersion = $toolchain["NIM_VERSION"]
   if (-not [string]::IsNullOrWhiteSpace($nimVersion)) {
     Add-PathEntry -Dir (Join-Path $installRoot "nim/$nimVersion/prebuilt/nim-$nimVersion/bin")
   }
-  $gccVersion = $toolchain["GCC_VERSION"]
-  if (-not [string]::IsNullOrWhiteSpace($gccVersion)) {
-    Add-PathEntry -Dir (Join-Path $installRoot "gcc/$gccVersion/bin")
+  if ($arch -eq "arm64") {
+    $llvmMingwRelease = $toolchain["LLVM_MINGW_WIN_ARM64_RELEASE"]
+    if (-not [string]::IsNullOrWhiteSpace($llvmMingwRelease)) {
+      Add-PathEntry -Dir (Join-Path (Get-LlvmMingwInstallDir -Root $installRoot -Release $llvmMingwRelease) "bin")
+    }
+  } else {
+    $gccVersion = $toolchain["GCC_VERSION"]
+    if (-not [string]::IsNullOrWhiteSpace($gccVersion)) {
+      Add-PathEntry -Dir (Join-Path $installRoot "gcc/$gccVersion/bin")
+    }
   }
 
   return $installRoot

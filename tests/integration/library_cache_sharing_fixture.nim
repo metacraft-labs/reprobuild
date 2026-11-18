@@ -7,8 +7,12 @@
 ## its own. The tests that import it are
 ## `t_two_checkouts_share_a_static_library_edge`,
 ## `t_two_projects_share_a_library_built_with_the_same_flags`,
-## `t_library_outputs_are_path_free_with_debug_info` and
-## `t_a_read_outside_the_logical_roots_stays_local`.
+## `t_library_outputs_are_path_free_with_debug_info`,
+## `t_a_read_outside_the_logical_roots_stays_local`,
+## `t_restored_outputs_match_the_recorded_digests`,
+## `t_a_compiler_environment_difference_is_a_miss_not_a_wrong_hit`,
+## `t_an_archive_rebuilt_in_another_checkout_is_byte_identical` and, on
+## macOS, `t_two_checkouts_share_a_static_library_edge_macos`.
 ##
 ## Everything here is real: the built `repro`, the C compiler and archiver
 ## (the dev shell's on `PATH`, or the toolchain the engine realizes into the
@@ -132,14 +136,19 @@ proc parseReport(path: string): OrderedTable[string, EdgeOutcome] =
         detail: entry{"detail"}.getStr()))
 
 proc build*(host: var SharedHost; project: string; portable: bool;
-            provisioning = "path"): BuildRun =
+            provisioning = "path";
+            extraEnv: openArray[(string, string)] = [];
+            dropEnv: openArray[string] = []): BuildRun =
   ## `repro build` of `project` against the host's shared action cache and
   ## store, with the engine's cache evidence and trace collected and written
   ## to a report. `portable` turns the portable (path-independent) identity
   ## on, which is what lets a record made in one checkout be found from
   ## another. `provisioning` is the `--tool-provisioning` mode: `path` takes
   ## the C toolchain from `PATH`, `tarball` has the engine realize its Linux
-  ## C toolchain into the store root.
+  ## C toolchain into the store root. `extraEnv` sets variables on top of
+  ## the invoking environment (after `portable` has applied), for a test
+  ## that gives one checkout's build an environment the other's lacks;
+  ## `dropEnv` removes variables the invoking environment may carry.
   inc host.reportCount
   result.reportPath = host.scratch / ("report-" & $host.reportCount & ".json")
   let env = newStringTable(modeCaseSensitive)
@@ -161,6 +170,11 @@ proc build*(host: var SharedHost; project: string; portable: bool;
     env["REPRO_PORTABLE_CACHE"] = "1"
   elif env.hasKey("REPRO_PORTABLE_CACHE"):
     env.del("REPRO_PORTABLE_CACHE")
+  for key in dropEnv:
+    if env.hasKey(key):
+      env.del(key)
+  for (key, value) in extraEnv:
+    env[key] = value
   let args = @["build", "--daemon=off", "--no-runquota",
     "--tool-provisioning=" & provisioning,
     "--action-cache-root=" & host.actionCacheRoot,
@@ -311,6 +325,112 @@ package PACKAGE:
       toolIdentityRefs = @["gcc"])
     defaultBuildAction(appLink)
 """.multiReplace(("PACKAGE", packageName), ("FLAGS", flags),
+    ("LIBOBJ", LibraryObject), ("LIBARCHIVEEDGE", LibraryArchiveEdge),
+    ("LIBARCHIVE", LibraryArchive), ("LIBCOMPILE", LibraryCompileEdge),
+    ("APPCOMPILE", AppCompileEdge), ("APPLINK", AppLinkEdge)))
+  commitCheckout(dest)
+
+# ---------------------------------------------------------------------------
+# macOS: the same library built with a store-provisioned toolchain, or with
+# the system's.
+# ---------------------------------------------------------------------------
+
+type
+  MacosToolchain* = enum
+    mtStoreZig
+      ## `zig cc` and `zig ar`, realized into the reprobuild store root by
+      ## `--tool-provisioning=tarball`: the only C compiler and archiver the
+      ## catalog provisions into the store root on Apple Silicon.
+    mtSystemUsrBin
+      ## `/usr/bin/gcc` and `/usr/bin/ar`, the platform's own tools, which
+      ## sit under the system integrity protection prefix.
+
+proc writeMacosLibraryProject*(dest, packageName: string;
+                               toolchain: MacosToolchain) =
+  ## A project that declares the `mathlib` static library's compile and
+  ## archive edges (and an application that links it), spelled for one of
+  ## the two macOS toolchains.
+  ##
+  ## Both toolchains get the same edges: a compile whose evidence is the
+  ## automatic monitor (what a content-checked compile gets under the
+  ## portable identity), and a monitored archive, both under the `hybrid`
+  ## input-check policy, which an edge states itself because no macOS
+  ## provisioning declares it for the tool. The compile takes no `-MD`
+  ## depfile flags: `zig cc -c -MD -MF` re-executes its own image and the
+  ## monitor accounts for that as an unmonitored exec (the limit recorded in
+  ## the test that uses this). `-g0` keeps the object free of the checkout
+  ## path, so the two checkouts' bytes can be compared. For `mtStoreZig` the
+  ## compiler's cache directories are inside the project, not `~/.cache/zig`.
+  createDir(dest / "vendor" / "mathlib" / "src")
+  createDir(dest / "vendor" / "mathlib" / "include" / "mathlib")
+  createDir(dest / "app")
+  writeFile(dest / "vendor" / "mathlib" / "src" / "add.c",
+    "#include \"mathlib/add.h\"\n\nint add(int a, int b) {\n" &
+    "    return a + b;\n}\n")
+  writeFile(dest / "vendor" / "mathlib" / "include" / "mathlib" / "add.h",
+    "#ifndef MATHLIB_ADD_H\n#define MATHLIB_ADD_H\n" &
+    "int add(int a, int b);\n#endif\n")
+  writeFile(dest / "app" / "main.c",
+    "#include <stdio.h>\n#include \"mathlib/add.h\"\n\n" &
+    "int main(void) {\n    printf(\"%d\\n\", add(2, 3));\n    return 0;\n}\n")
+  let (provisioning, uses, cc, ar, refs, env) =
+    case toolchain
+    of mtStoreZig:
+      ("tarball", "  uses:\n    \"zig >=0.14 <0.15\"\n",
+       "@[\"zig\", \"cc\", \"-target\", \"aarch64-macos\"]",
+       "@[\"zig\", \"ar\"]", "@[\"zig\"]",
+       "      env = zigEnv,\n")
+    of mtSystemUsrBin:
+      ("path", "", "@[\"/usr/bin/gcc\"]", "@[\"/usr/bin/ar\"]", "@[]", "")
+  writeFile(dest / "repro.nim", """import std/os
+import repro_project_dsl
+
+package PACKAGE:
+  defaultToolProvisioning "PROVISIONING"
+USES
+  build:
+    let root = activeProviderProjectRoot()
+    let cc: seq[string] = CC
+    let ar: seq[string] = AR
+    let zigEnv = @[("ZIG_GLOBAL_CACHE_DIR", root / ".repro/zig-cache"),
+      ("ZIG_LOCAL_CACHE_DIR", root / ".repro/zig-cache/local")]
+    let libObj = root / "LIBOBJ"
+    let libArchive = root / "LIBARCHIVE"
+    let appObj = root / ".repro/build/app/obj/main.o"
+    let appBin = root / ".repro/build/app/app"
+    createDir(libObj.parentDir)
+    createDir(appObj.parentDir)
+    let libCompile = buildAction(id = "LIBCOMPILE",
+      call = inlineExecCall(cc & @["-c", "-O2", "-g0",
+        "-I", root / "vendor/mathlib/include", "-o", libObj,
+        root / "vendor/mathlib/src/add.c"], root),
+      inputs = @[root / "vendor/mathlib/src/add.c"],
+      outputs = @[libObj], pool = "compile",
+      dependencyPolicy = automaticMonitorPolicy(),
+      actionCachePolicy = acfpHybrid,
+ENV      toolIdentityRefs = REFS)
+    let libArchiveAction = buildAction(id = "LIBARCHIVEEDGE",
+      call = inlineExecCall(ar & @["rcs", libArchive, libObj], root),
+      deps = @[libCompile.id], inputs = @[libObj], outputs = @[libArchive],
+      pool = "compile", dependencyPolicy = automaticMonitorPolicy(),
+      actionCachePolicy = acfpHybrid,
+ENV      toolIdentityRefs = REFS)
+    let appCompile = buildAction(id = "APPCOMPILE",
+      call = inlineExecCall(cc & @["-c", "-O2", "-g0",
+        "-I", root / "vendor/mathlib/include", "-o", appObj,
+        root / "app/main.c"], root),
+      inputs = @[root / "app/main.c"], outputs = @[appObj], pool = "compile",
+      dependencyPolicy = automaticMonitorPolicy(),
+ENV      toolIdentityRefs = REFS)
+    let appLink = buildAction(id = "APPLINK",
+      call = inlineExecCall(cc & @["-o", appBin, appObj, libArchive], root),
+      deps = @[appCompile.id, libArchiveAction.id],
+      inputs = @[appObj, libArchive], outputs = @[appBin], pool = "compile",
+      dependencyPolicy = automaticMonitorPolicy(),
+ENV      toolIdentityRefs = REFS)
+    defaultBuildAction(appLink)
+""".multiReplace(("PACKAGE", packageName), ("PROVISIONING", provisioning),
+    ("USES", uses), ("CC", cc), ("AR", ar), ("ENV", env), ("REFS", refs),
     ("LIBOBJ", LibraryObject), ("LIBARCHIVEEDGE", LibraryArchiveEdge),
     ("LIBARCHIVE", LibraryArchive), ("LIBCOMPILE", LibraryCompileEdge),
     ("APPCOMPILE", AppCompileEdge), ("APPLINK", AppLinkEdge)))
