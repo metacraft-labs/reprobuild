@@ -184,7 +184,9 @@ suite "the egress observer's table":
   test "the observer unit loads the table and deletes it when stopped":
     let u = egressUnit("/usr/sbin/nft")
     check "ExecStart=/usr/sbin/nft -f " & EgressNftPath & "\n" in u
-    check "ExecStop=/usr/sbin/nft delete table inet " & EgressTableName in u
+    # ``-``: a stop or restart after a flush nothing repaired finds the
+    # table gone and must not leave the unit failed.
+    check "ExecStop=-/usr/sbin/nft delete table inet " & EgressTableName in u
     check "CapabilityBoundingSet=CAP_NET_ADMIN\n" in u
     let f = agentFetchUnit("/repro/store/x/bin/repro", AgentUnitsInputs(
       target: "t", allowedAddresses: @["10.0.2.2"]), observed = true)
@@ -193,5 +195,27 @@ suite "the egress observer's table":
     check "OnFailure=" & EgressCheckUnit & "\n" in f
     check observeFetchUnit(agentFetchUnit("/repro/store/x/bin/repro",
       AgentUnitsInputs(target: "t", allowedAddresses: @["10.0.2.2"]))) == f
+
+  test "the observer unit follows the host's nftables.service":
+    # Reprobuild-pm issue
+    # 2026-11-16-addon-egress-table-stays-deleted-after-nftables-service-flushes-the-ruleset.md:
+    # Debian's and Ubuntu's nftables.service flushes the whole ruleset at
+    # start, reload and stop (and an upgrade try-restarts it), deleting the
+    # table while this RemainAfterExit= unit stays active. Tied by reference
+    # (within spec §13 decision 43), the unit loads after it, restarts and stops
+    # with it, and reloads the table when it reloads. Red under
+    # ``egress-unit-ignores-host-ruleset``.
+    let ls = egressUnit("/usr/sbin/nft", "ab").splitLines()
+    checkpoint ls.join("\n")
+    let unitEnd = ls.find("[Service]")
+    check unitEnd > 0
+    for want in ["After=" & HostNftablesUnit, "PartOf=" & HostNftablesUnit,
+                 "ReloadPropagatedFrom=" & HostNftablesUnit]:
+      check ls.find(want) in 0 ..< unitEnd
+    check ls.find("ExecReload=/usr/sbin/nft -f " & EgressNftPath) > unitEnd
+    # No [Install] link reaches the management-path unit: the tie is this
+    # unit's own [Unit] section only.
+    check not ls.anyIt(it.startsWith("WantedBy=" & HostNftablesUnit) or
+                       it.startsWith("RequiredBy=" & HostNftablesUnit))
 
 removeDir(root)

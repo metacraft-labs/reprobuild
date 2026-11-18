@@ -1034,6 +1034,12 @@
 ## ``egress-unit-ignores-table``              the egress observer unit does
 ##                                            not name the table it loads
 ##                                            (round 2)
+## ``egress-unit-ignores-host-ruleset``       the egress observer unit is
+##                                            not tied to the host's
+##                                            ``nftables.service``, so its
+##                                            flush leaves the table
+##                                            deleted (reprobuild-pm issue
+##                                            2026-11-16)
 ## ``sink-close-in-finally``                  the sink's connection handler
 ##                                            awaits its close in a finally,
 ##                                            as before; red under Nim 2.2.4
@@ -2314,6 +2320,9 @@ const
                           "egress-cap-advances-all", "uninstall-ignores-asides",
                           "tree-marker-on-reuse", "containment-sequence-unsynced",
                           "egress-unit-ignores-table",
+                          # reprobuild-pm issue 2026-11-16: the observer
+                          # is not tied to the host's nftables.service.
+                          "egress-unit-ignores-host-ruleset",
                           # The A11 code review, round 3.
                           "sink-close-in-finally", "egress-owed-by-listing",
                           "egress-owed-dropped-at-reload",

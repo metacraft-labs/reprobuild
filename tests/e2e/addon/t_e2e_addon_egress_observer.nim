@@ -30,6 +30,15 @@
 ##    address and ``agent-repin`` applies the new plan: ``egress.nft``, the
 ##    fetch unit's ``IPAddressAllow=`` and the kernel's LOADED ``allowed4``
 ##    set all hold the new address and not the old.
+## 3e. **The host's ``nftables.service`` does not leave it deleted**
+##    (reprobuild-pm issue
+##    ``2026-11-16-addon-egress-table-stays-deleted-after-nftables-service-flushes-the-ruleset.md``).
+##    That service flushes the whole ruleset at start, reload and stop. A
+##    restart and a reload of it each leave the table loaded again; a stop
+##    stops the observer with it, and the observer's next start loads it.
+##    A stop of the observer over a table deleted by hand does not leave
+##    it failed. The service's state, the fetch timer's and the
+##    host's tables are left as found.
 ## 4. **Uninstall removes it.** After uninstall the table is gone and the
 ##    fingerprint equals the pre-bootstrap one.
 ##
@@ -41,7 +50,11 @@
 ## ``reassert-nft-in-own-netns`` (the re-assert lists the tables in its own
 ## private network namespace: both steps of 3c go red, session 2 G4);
 ## ``egress-unit-ignores-table`` (the observer unit does not name its
-## table, so the re-pin switch leaves the old set loaded: step 3d red).
+## table, so the re-pin switch leaves the old set loaded: step 3d red);
+## ``egress-unit-ignores-host-ruleset`` (the observer unit is not tied to
+## ``nftables.service``: in 3e the restart, reload and stop steps go red,
+## and with them the steps after, which then find the observer and the
+## host's tables not as expected).
 ##
 ## Seam build (the fetch unit's pause). Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -233,6 +246,66 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          "repro-agent-fetch.service").stdout, "")
   discard g.exec("sed -i " & quoteShell("s/^" & CacheNewAddr & " " & CacheName &
                  "$/" & CacheOldAddr & " " & CacheName & "/") & " /etc/hosts")
+  # 3e. The host's nftables.service flushes the whole ruleset at start,
+  # reload and stop (Debian's and Ubuntu's /etc/nftables.conf begins
+  # `flush ruleset`; its ExecStop= is `nft flush ruleset`). The observer is
+  # tied to it by reference, so a restart or reload of it leaves the table
+  # loaded again and a stop takes the observer down with it.
+  proc tableLoaded(): bool =
+    "table inet repro_addon_egress" in g.exec("nft list tables").stdout
+  proc observerState(): string =
+    g.exec("systemctl is-active repro-addon-egress.service").stdout.strip()
+  let nftUnit = g.exec("systemctl cat nftables.service")
+  step("the base has nftables.service", nftUnit.exitCode == 0,
+       nftUnit.stdout & nftUnit.stderr)
+  let nftWasActive =
+    g.exec("systemctl is-active nftables.service").stdout.strip() == "active"
+  # A fetch tick would start the observer again (its Requires=) between a
+  # stop and its check: the timer is held for the step.
+  let timerWasActive = g.exec("systemctl is-active " &
+    "repro-agent-fetch.timer").stdout.strip() == "active"
+  discard g.exec("systemctl stop repro-agent-fetch.timer")
+  let tablesBefore = g.exec("nft list tables").stdout
+  # The service's flush deletes every table; only the add-on's may be
+  # there, or restoring the host's tables afterwards is not possible.
+  step("the guest has no nftables table but the add-on's",
+       tablesBefore.strip() == "table inet repro_addon_egress", tablesBefore)
+  let restarted = g.exec("systemctl restart nftables.service")
+  record["nftablesRestart"] = %(restarted.stdout & restarted.stderr)
+  step("a restart of nftables.service leaves the table loaded",
+       restarted.exitCode == 0 and tableLoaded() and
+         observerState() == "active",
+       g.exec("nft list tables").stdout & observerState())
+  let reloaded = g.exec("systemctl reload nftables.service")
+  step("a reload of nftables.service leaves the table loaded",
+       reloaded.exitCode == 0 and tableLoaded() and
+         observerState() == "active",
+       g.exec("nft list tables").stdout & observerState())
+  discard g.exec("systemctl stop nftables.service")
+  step("a stop of nftables.service stops the observer with it",
+       observerState() != "active" and not tableLoaded(),
+       observerState() & " / " & g.exec("nft list tables").stdout)
+  if nftWasActive:
+    discard g.exec("systemctl start nftables.service")
+  discard g.exec("systemctl start repro-addon-egress.service")
+  step("the observer's next start loads the table again",
+       tableLoaded() and observerState() == "active", observerState())
+  # A flush nothing repaired (here by hand), then a stop of the observer:
+  # its ExecStop= finds no table and must not leave the unit failed.
+  discard g.exec("nft delete table inet repro_addon_egress")
+  discard g.exec("systemctl stop repro-addon-egress.service")
+  step("a stop of the observer over a deleted table is not a failure",
+       observerState() == "inactive", observerState())
+  discard g.exec("systemctl start repro-addon-egress.service")
+  step("the observer loads the table again",
+       observerState() == "active" and tableLoaded(), observerState())
+  if timerWasActive:
+    discard g.exec("systemctl start repro-agent-fetch.timer")
+  step("nftables.service and the host's tables are as found",
+       g.exec("nft list tables").stdout == tablesBefore and
+         (g.exec("systemctl is-active nftables.service").stdout.strip() ==
+            "active") == nftWasActive,
+       tablesBefore & " / " & g.exec("nft list tables").stdout)
   # 4. Uninstall removes it.
   let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
   step("uninstall succeeds", un.exitCode == 0, un.stdout & un.stderr)
