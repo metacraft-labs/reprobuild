@@ -103,6 +103,7 @@ extern int repro_hcr_lx_probe_quiesce_trampoline_verified(void);
 extern int repro_hcr_lx_probe_quiesce_trampoline_mismatch(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_nested_adjust_count(void);
 extern unsigned long long repro_hcr_lx_probe_quiesce_nested_frames_seen(void);
+extern unsigned long long repro_hcr_lx_probe_quiesce_trampoline_frames_seen(void);
 extern size_t repro_hcr_lx_probe_page_size(void);
 extern int repro_hcr_lx_probe_last_quiesced(void);
 extern int repro_hcr_lx_probe_last_ip_adjustments(void);
@@ -832,6 +833,8 @@ int main(int argc, char **argv) {
          repro_hcr_lx_probe_quiesce_nested_adjust_count());
   printf("  \"quiesceNestedFramesSeen\": %llu,\n",
          repro_hcr_lx_probe_quiesce_nested_frames_seen());
+  printf("  \"quiesceTrampolineFramesSeen\": %llu,\n",
+         repro_hcr_lx_probe_quiesce_trampoline_frames_seen());
   printf("  \"quiesceReadableRanges\": %d,\n",
          repro_hcr_lx_probe_quiesce_readable_ranges());
   printf("  \"quiesceTrampolineVerified\": %s,\n",
