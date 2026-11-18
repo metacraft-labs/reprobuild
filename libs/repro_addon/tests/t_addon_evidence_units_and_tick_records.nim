@@ -52,8 +52,9 @@ suite "generation 0 with an Evidence sink":
     check "ProtectSystem=strict\n" in u
     check "IPAddressDeny=any\n" in u
     check "IPAddressAllow=10.0.2.100\n" in u
-    # §13 decision 181: the whole of /var/lib/repro is hidden (the agent's
-    # keys with it), and the unit writes only its own state directory.
+    # §13 decision 181: the whole of /var/lib/repro is hidden from the
+    # shipping unit (the agent's keys with it), and it writes only its own
+    # state directory.
     var hidden = false
     for line in u.splitLines():
       if line.startsWith("InaccessiblePaths=") and "-/run/repro" in line:

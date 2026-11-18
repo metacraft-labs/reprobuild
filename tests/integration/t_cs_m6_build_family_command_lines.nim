@@ -421,8 +421,9 @@ suite "the build family's command lines":
       writeFile(project / "repro.nim", "")
       let other = createTempDir("repro-build-cli-other-", "")
       defer: removeDir(other)
-      # The first positional is the target, whatever flag values precede it
-      # (`--work-root`'s and `--daemon`'s are not targets).
+      # The positionals are the selectors, whatever flag values precede them
+      # (`--work-root`'s and `--daemon`'s are not targets); the build's own
+      # anchor rule picks the project among them.
       check daemonRequestProjectRoot(["--work-root", other, "--daemon",
         "off", project], other) == project
       check daemonRequestProjectRoot(["."], project) == project

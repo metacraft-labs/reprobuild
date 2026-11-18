@@ -1034,7 +1034,8 @@ proc findSiblingProjectFile*(packageName: string;
   ""
 
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
-                               command: string): ResolvedPositionalSelectors =
+                               command: string;
+                               currentDir = ""): ResolvedPositionalSelectors =
   ## Named-Targets M3: shared path-vs-name resolver for ``repro build``
   ## and ``repro watch``. Mirrors the rules in
   ## [CLI/build.md §"Target Selection"] and
@@ -1057,6 +1058,13 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ## ``command`` is the user-visible verb (``"repro build"`` /
   ## ``"repro watch"``) so the duplicate-path-anchor diagnostic blames
   ## the right command.
+  ##
+  ## ``currentDir`` is the directory a ``<package>:<name>`` selector's
+  ## sibling checkout is looked up from; empty means the process's current
+  ## directory, which is the request's own for every caller but the daemon
+  ## parent. The daemon parent passes the request's ``workingDir``
+  ## (``daemonRequestBuildAnchor``), because its own directory belongs to
+  ## no request.
   result.targetWasOmitted = positionalSelectors.len == 0
   if positionalSelectors.len == 0:
     result.target = ""
@@ -1096,7 +1104,8 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
       # disambiguator below — the disambiguator is for cross-package
       # collisions inside ONE project, so it never legitimately matches
       # a sibling-checkout package name. The sibling-found branch wins.
-      let siblingProjectFile = findSiblingProjectFile(classified.package)
+      let siblingProjectFile = findSiblingProjectFile(classified.package,
+        currentDir)
       if siblingProjectFile.len > 0:
         if not anchorSet:
           result.target = siblingProjectFile & "#" & classified.name
@@ -41083,33 +41092,87 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+proc daemonRequestBuildAnchor*(selectors: openArray[string];
+                               workingDir: string): string =
+  ## The project anchor a daemon-hosted ``repro build`` request's worker will
+  ## build, as an ABSOLUTE ``<path>[#<fragment>]`` — derived by the rule the
+  ## worker applies ([CLI/build.md §"Target Selection"],
+  ## ``parseAndResolveSelectors``), not by a copy of it. The anchor is the
+  ## first PATH-SHAPED selector, not the first positional: ``repro build
+  ## test`` selects the current project's ``test`` (``.#test``) even beside a
+  ## ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
+  ## ``repro build runquota:runquotad`` anchors on the sibling checkout
+  ## (reprobuild-pm issue
+  ## 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor:
+  ## both daemon-parent readers took the first positional, so they recorded
+  ## and warmed a project the build never used).
+  ##
+  ## Nothing here reads the daemon's own current directory: every
+  ## path-shaped selector is absolutized against ``workingDir`` before the
+  ## shared resolver sees it, and the sibling lookup runs from ``workingDir``.
+  ## "" when ``workingDir`` is empty or relative and the anchor is relative,
+  ## when the anchor is a fragment with no path (``#name``, which names no
+  ## project), or when the selectors are ones the build itself refuses.
+  ## Never raises.
+  let workingDir =
+    if workingDir.len > 0 and workingDir.isAbsolute: workingDir else: ""
+  var absolutized: seq[string] = @[]
+  for sel in selectors:
+    if classifyBuildSelector(sel).kind == bskPath:
+      let parts = splitTarget(sel)
+      if parts.base.len == 0 and parts.fragment.len > 0:
+        return ""
+      var base = if parts.base.len == 0: "." else: parts.base
+      if not base.isAbsolute:
+        if workingDir.len == 0:
+          return ""
+        base = absolutePath(base, workingDir)
+      absolutized.add(
+        if parts.fragment.len > 0: base & "#" & parts.fragment else: base)
+    else:
+      absolutized.add(sel)
+  if workingDir.len == 0:
+    # No directory to look a sibling up from, and a name-only request
+    # anchors on it; only an absolute path anchor can still be read.
+    for sel in absolutized:
+      if classifyBuildSelector(sel).kind == bskPath:
+        return sel
+    return ""
+  let resolved =
+    try:
+      parseAndResolveSelectors(absolutized, "repro build", workingDir)
+    except CatchableError:
+      return ""
+  let parts = splitTarget(if resolved.target.len == 0: "." else: resolved.target)
+  var base = if parts.base.len == 0: "." else: parts.base
+  if not base.isAbsolute:
+    base = absolutePath(base, workingDir)
+  if parts.fragment.len > 0: base & "#" & parts.fragment else: base
+
 proc daemonRequestProjectRoot*(rawArgs: openArray[string];
                                workingDir: string): string =
   ## The project a daemon-hosted ``repro build`` request is for, derived from
-  ## the request alone — the same target the worker will build: the first
-  ## positional of ``rawArgs`` (``.`` when there is none), resolved against the
-  ## request's ``workingDir``, never the daemon's own. "" when the target does
-  ## not resolve to a project file; the session record then keeps its
-  ## working-directory fallback. Read-only, so it is safe in the daemon parent
-  ## (see ``UserDaemonProjectRootResolver``). The arguments are read by the
-  ## parser generated from repro's description (``buildRequestOf``), the one
-  ## the worker reads them with.
+  ## the request alone — the project the worker's build anchors on
+  ## (``daemonRequestBuildAnchor``, the build's own selector rule), resolved
+  ## against the request's ``workingDir``, never the daemon's own: the
+  ## directory of the module the anchor selects. "" when that module does not
+  ## exist; the session record then keeps its working-directory fallback.
+  ## Read-only, so it is safe in the daemon parent (see
+  ## ``UserDaemonProjectRootResolver``). The arguments are read by the parser
+  ## generated from repro's description (``buildRequestOf``), the one the
+  ## worker reads them with.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   if target.len == 0:
-    target = "."
-  var base = splitTarget(target).base
-  if base.len == 0:
-    base = "."
-  if not base.isAbsolute:
-    if workingDir.len == 0:
-      return ""
-    base = absolutePath(base, workingDir)
+    return ""
+  # Parsed WITH its fragment, as the worker parses it when it names the
+  # project its stats session belongs to (``runDirectBuild``): ``./sub#mod``
+  # selects the module ``sub/mod.nim`` even where ``sub/`` holds no project
+  # file, and dropping the fragment named no project at all.
   try:
-    let parsed = parseBuildTarget(base)
+    let parsed = parseBuildTarget(target)
     if not parsed.modulePath.isAbsolute or
         not fileExists(extendedPath(parsed.modulePath)):
       return ""
@@ -41136,18 +41199,17 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
   ## a build decide differently — every warm-table key embeds the full path, so
   ## entries under the wrong directory are never looked up — but it would make
   ## the pass useless, so it is derived rather than guessed.
-  # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
+  # THE SELECTORS ARE THE BUILD'S, with no `build` verb to skip.
   # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every route
   # into it strips the verb first -- the dispatcher passes the words after
   # it, and the internal callers compose their own argument vectors without
-  # one. Skipping a literal "build" here would therefore skip a real target:
-  # ``repro build build``, in a directory holding a ``build/`` project, would
-  # warm the caches of ``.`` instead.
+  # one. Skipping a literal "build" here would therefore skip a real
+  # selector. The anchor is chosen by the build's own rule
+  # (``daemonRequestBuildAnchor``), not by taking the first positional.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   var workRoot = request.get.workRoot
   let forceRefresh = request.get.forceRebuild or request.get.dryRun
   if forceRefresh:
@@ -41155,7 +41217,7 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
     # work with no consumer.
     return ""
   if target.len == 0:
-    target = "."
+    return ""
   if workRoot.len == 0:
     for entry in requestEnvironment:
       let eq = entry.find('=')
