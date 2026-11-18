@@ -218,7 +218,14 @@ schema `reprobuild.store-bundle.v2`. They are unverified there;
    the local ones (§3), and its producer with the running `repro`: refuse
    unless the version and the source revision are the same, naming both.
    Refuse an entry, a record directory or a restamp outside the roots or in
-   an excluded directory. Nothing has been written at this point, not even
+   an excluded directory, and a `devenv` line that names anything but what
+   export writes (§6): a project root in the selection, and that project's
+   own frozen script, carried as a regular file (not a hard link) that is
+   not world-writable, nor is any directory above it that the bundle
+   carries, the store root included. `repro bundle restore
+   --activate` sources that script from `/etc/profile.d` and
+   `--allow-dev-env` allow-lists the project, so neither may be a path the
+   bundle picks. Nothing has been written at this point, not even
    into the bundle's own directory.
 
    The producer check exists because provider-compile and interface records
@@ -328,8 +335,10 @@ follow that link.
 `repro store export --freeze-dev-env=<project-root>` runs the ordinary hook
 export (`repro dev-env export bash`) for that project at bundle time, with
 auto-allow on, and writes the result to
-`<store>/frozen-dev-env/<key>/activate.bash`, where `<key>` is the BLAKE3 hex
-of the project root. It appends:
+`<store>/frozen-dev-env/<key>/activate.bash`, where `<key>` is the first 32
+hex digits of the BLAKE3 digest of the project root. That path is the only
+script a bundle's `devenv` line may name; import refuses any other. It
+appends:
 
 * `export __REPRO_PROJECT_ROOT=<project-root>`. The shell hook does not call
   `repro` while this equals the directory it finds, so the frozen activation

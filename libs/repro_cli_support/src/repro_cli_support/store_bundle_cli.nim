@@ -14,7 +14,6 @@
 
 from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils]
-import blake3
 import repro_core/ambient_execution
 import repro_local_store/store
 when not defined(windows):
@@ -73,11 +72,6 @@ else:
       value > 0
     except ValueError:
       false
-
-  proc frozenScriptPath*(storeRoot, projectRoot: string): string =
-    ## `<store>/frozen-dev-env/<blake3(projectRoot)[0..31]>/activate.bash`.
-    storeRoot / FrozenDevEnvDirName /
-      blake3.digest(projectRoot).toHex()[0 ..< 32] / "activate.bash"
 
   proc shellQuote(value: string): string =
     "'" & value.replace("'", "'\\''") & "'"
