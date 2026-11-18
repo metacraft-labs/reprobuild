@@ -122,6 +122,7 @@ proc markedAction(): BuildActionDef =
   result.removeBeforeRun = @["removeMarker"]
   result.optionalOutputs = @["optionalMarker"]
   result.contentKeyedToolCaches = @["cacheMarker"]
+  result.envPassthrough = @["passthroughMarker"]
 
 suite "project DSL build action payload":
   setup:
@@ -389,7 +390,8 @@ suite "project DSL build action payload":
       ("scratch dirs", countBefore(encoded, "scratchMarker")),
       ("remove-before-run outputs", countBefore(encoded, "removeMarker")),
       ("optional outputs", countBefore(encoded, "optionalMarker")),
-      ("content-keyed tool caches", countBefore(encoded, "cacheMarker"))]
+      ("content-keyed tool caches", countBefore(encoded, "cacheMarker")),
+      ("env passthrough", countBefore(encoded, "passthroughMarker"))]
     for (site, offset) in sites:
       checkpoint site
       check offset >= 0
@@ -424,6 +426,7 @@ suite "project DSL build action payload":
     action.removeBeforeRun = @["", "", ""]
     action.optionalOutputs = @["", "", ""]
     action.contentKeyedToolCaches = @["", "", ""]
+    action.envPassthrough = @["", "", ""]
     for version in 1'u16 .. BuildActionPayloadVersion:
       checkpoint "version " & $version
       let decoded = decodeBuildActionPayload(
@@ -444,12 +447,17 @@ suite "project DSL build action payload":
         check decoded.contentKeyedToolCaches == action.contentKeyedToolCaches
       else:
         check decoded.contentKeyedToolCaches.len == 0
+      if version >= 36'u16:
+        check decoded.envPassthrough == action.envPassthrough
+      else:
+        check decoded.envPassthrough.len == 0
     let currentImage = encodeBuildActionPayload(action)
     let current = decodeBuildActionPayload(currentImage)
     check current.scratchDirs == action.scratchDirs
     check current.removeBeforeRun == action.removeBeforeRun
     check current.optionalOutputs == action.optionalOutputs
     check current.contentKeyedToolCaches == action.contentKeyedToolCaches
+    check current.envPassthrough == action.envPassthrough
     check current.toolIdentityRefs == action.toolIdentityRefs
     check current.readOnlyRoots == action.readOnlyRoots
     check current.cacheEntryIdentity.isSome
@@ -468,13 +476,21 @@ suite "project DSL build action payload":
     check image34[^12 .. ^1] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     check image34[^28 .. ^13] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
-    # The current payload ends with the content-keyed tool caches (v35),
-    # again a list of three empty strings, so the current version also meets
-    # the bound with equality. A version that appends another field fails
-    # here rather than quietly testing nothing at the boundary.
+    # Version 35 ends with the content-keyed tool caches, again a list of
+    # three empty strings, after the width fields.
+    let image35 = encodeBuildActionPayloadAtVersion(action, 35'u16)
+    check image35[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    check image35[^28 .. ^17] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    # The current payload ends with the passthrough names (v36), a third
+    # list of three empty strings right after that one, so the current
+    # version also meets the bound with equality. A version that appends
+    # another field fails here rather than quietly testing nothing at the
+    # boundary.
     check currentImage[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
-    check currentImage[^28 .. ^17] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    check currentImage[^32 .. ^17] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
 
   test "version 4 payloads decode with default CLI argument formatting":
     let decoded = decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(

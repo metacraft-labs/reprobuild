@@ -84,9 +84,12 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_core/installed_prefix_nim
 export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
+import repro_interface_artifacts/closure_manifest
+export closure_manifest
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -628,6 +631,13 @@ type
       ## unpacks into the prefix. See
       ## ``TarballProvisioningDef.closureManifest``: an entry point with
       ## runtime dependencies is not one tarball.
+    closureEntries*: seq[ClosureEntry]
+      ## v34: the manifest's parsed content, inlined by whoever lifted the
+      ## record (the publisher). When non-empty realization uses THESE and
+      ## never opens ``closureManifest``, which a consumer of a published
+      ## artifact has no way to resolve. Empty for a record whose closure
+      ## has not been inlined (a recipe read in place) and for a record
+      ## with no closure.
     detail*: TarballArchiveDetail
       ## GM4b (v21): the archive-realization metadata — version, alternative
       ## digests, install method, installer/pacman/bootstrap arguments, env
@@ -1217,8 +1227,26 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 33'u16
-    ## v33 (current): ``TarballArchiveDetail`` retains the ELF relocation of
+  EnvelopeVersion = 34'u16
+    ## v34 (current): ``InterfaceTarballProvisioning`` retains
+    ##                ``closureEntries``, the PARSED content of the
+    ##                ``closureManifest`` file (path, sha256, url,
+    ##                archiveType, stripComponents per archive), after
+    ##                ``detail``. The publisher inlines them so a consumer
+    ##                that reads only a catalog's ``published-interfaces/``
+    ##                can realize a package with a dependency closure
+    ##                without the file, which it does not have
+    ##                (Federated-Catalog-Imports.md § Home profiles,
+    ##                decided 2026-11-17, option 1). v33 and older
+    ##                payloads decode them empty. They bind into every
+    ##                fingerprint that binds the record, so a changed
+    ##                closure moves the interface fingerprint, the realization
+    ##                digest and the contribution fingerprint (``tarballFieldView``
+    ##                names it, only when present); the fingerprint projection
+    ##                writes the block only when entries exist, so no
+    ##                fingerprint hashed from a record without a closure
+    ##                moves.
+    ## v33: ``TarballArchiveDetail`` retains the ELF relocation of
     ##                a dynamically linked archive (``elfInterpreter``,
     ##                ``elfRunpath``, ``elfPatchDirs``, ``gccLinkSpecs``,
     ##                ``gccSpecDefaults``),
@@ -2160,6 +2188,18 @@ proc writeTarballProvisioning(outp: var seq[byte];
   if version >= 21'u16:
     outp.writeTarballArchiveDetail(provisioning.detail, version,
       forFingerprint)
+  if version >= 34'u16:
+    # The fingerprint projection omits an empty block (see the v34 note on
+    # ``EnvelopeVersion``); the wire payload always carries the count, since
+    # the reader decodes a fixed layout.
+    if not forFingerprint or provisioning.closureEntries.len > 0:
+      outp.writeU32Le(uint32(provisioning.closureEntries.len))
+      for entry in provisioning.closureEntries:
+        outp.writeString(entry.path)
+        outp.writeString(entry.sha256)
+        outp.writeString(entry.url)
+        outp.writeString(entry.archiveType)
+        outp.writeU32Le(uint32(max(entry.stripComponents, 0)))
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -2193,6 +2233,16 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     result.os = readString(bytes, pos)
   if version >= 21'u16:
     result.detail = readTarballArchiveDetail(bytes, pos, version)
+  if version >= 34'u16:
+    let count = int(readU32Le(bytes, pos))
+    for _ in 0 ..< count:
+      var entry: ClosureEntry
+      entry.path = readString(bytes, pos)
+      entry.sha256 = readString(bytes, pos)
+      entry.url = readString(bytes, pos)
+      entry.archiveType = readString(bytes, pos)
+      entry.stripComponents = int(readU32Le(bytes, pos))
+      result.closureEntries.add(entry)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -3010,6 +3060,38 @@ proc toInterfaceNixProvisioning(packageName: string;
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
+proc inlinedClosureEntries(provisioning: TarballProvisioningDef):
+    seq[ClosureEntry] =
+  ## The parsed content of ``provisioning``'s closure manifest, for the
+  ## record that will be PUBLISHED (envelope v34): a consumer of the artifact
+  ## cannot open the file, so the entries must travel in the record.
+  ##
+  ## A def that already carries inlined lines (it was rebuilt from a
+  ## published artifact) is parsed from them and the file is never opened. A
+  ## def with a manifest path reads the file, resolved the way realization
+  ## resolves it: absolute as written, else beside the declaring file, else
+  ## against the working directory. A missing file yields no entries here; the
+  ## publisher refuses such a record.
+  if provisioning.closureEntries.len > 0:
+    return parseClosureManifestText(provisioning.closureEntries.join("\n"),
+      "inlined closure entries of " & provisioning.url)
+  if provisioning.closureManifest.len == 0:
+    return @[]
+  let declared = provisioning.closureManifest
+  let path =
+    if declared.isAbsolute: declared
+    elif provisioning.sourceFile.len > 0:
+      parentDir(provisioning.sourceFile) / declared
+    else: declared
+  # A lift that cannot see the file (a prebuilt provider read away from its
+  # checkout) leaves the entries empty and keeps the realize-time error it
+  # always had; the PUBLISHER refuses such a record instead, because a
+  # published record without its entries cannot be realized by a consumer
+  # (``catalog_publication``).
+  if not fileExists(extendedPath(path)):
+    return @[]
+  parseClosureManifestText(readFile(extendedPath(path)), path)
+
 proc toInterfaceTarballProvisioning(packageName: string;
                                     provisioning: TarballProvisioningDef;
                                     contributor = ""):
@@ -3027,6 +3109,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     nonRedistributable: provisioning.nonRedistributable,
     launcher: provisioning.launcher,
     closureManifest: provisioning.closureManifest,
+    closureEntries: inlinedClosureEntries(provisioning),
     detail: provisioning.detail,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
@@ -3973,6 +4056,8 @@ proc emitProvisioningContributionRegistrations(code: var string;
         ", nonRedistributable: " & $provisioning.nonRedistributable &
         ", launcher: " & escForCode(provisioning.launcher) &
         ", closureManifest: " & escForCode(provisioning.closureManifest) &
+        ", closureEntries: @[" & provisioning.closureEntries.mapIt(
+          escForCode(canonicalClosureLine(it))).join(", ") & "]" &
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
         ", executableAlias: " & escForCode(provisioning.executableAlias) &
@@ -7375,25 +7460,23 @@ const
     ## tool-owned cache's identity.
   ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
   ProviderParallelBuildMax* = 64
-  ProviderCompileEnvironmentPassthrough* = [
+  ProviderCompileEnvironmentPassthrough* = @[
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",
     "REPRO_BOOTSTRAP_SDKROOT",
     "CC",
     "REPRO_PROVIDER_NIMCACHE_MODE",
-    ProviderParallelBuildEnv,
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "TEMPDIR",
-    LockedCatalogEnv
-  ]
+    ProviderParallelBuildEnv] &
+    @ScratchLocationEnvNames &
+    @[LockedCatalogEnv]
     ## Environment values already represented by the provider compile command
     ## or affecting scratch placement only. The command-derived action key
     ## carries the compiler, C toolchain, and parallelism; the remaining names
     ## only choose disposable nimcache/temp locations. Keying monitored cache
     ## evidence on their per-process values would make every new `repro`
     ## invocation miss an otherwise unchanged provider compile.
+    ## `ScratchLocationEnvNames` (`repro_core/scratch_env`) is the temp-
+    ## directory list the profile compile and `nim.c` share with this one.
     ## `LockedCatalogEnv`: its revision is in both edges' identity
     ## (`catalogSelectionIdentity`), its paths are the recipe's own location.
 
