@@ -3406,10 +3406,12 @@ proc ownedComputationDir*(record: ActionResultRecord;
   let dir = recordComputationDir(record)
   if dir.len == 0 or recipeCompilesRoot.len == 0:
     return ""
+  # `normalizedPath` writes `\` on Windows: compare on either separator.
   let root = os.normalizedPath(recipeCompilesRoot)
-  if not dir.startsWith(root & "/"):
+  if dir.len <= root.len + 1 or not dir.startsWith(root) or
+      dir[root.len] notin {DirSep, AltSep}:
     return ""
-  let parts = dir[root.len + 1 .. ^1].split('/')
+  let parts = dir[root.len + 1 .. ^1].split({DirSep, AltSep})
   if parts.len != 3 or parts[2] == ComputationStagingDirName:
     return ""
   for part in parts:

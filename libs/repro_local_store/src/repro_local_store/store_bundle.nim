@@ -180,6 +180,10 @@ type
     reinsertedPrefixes*: int
     quarantinedPrefixes*: seq[string]
     rewitnessedRecords*: int
+    unwitnessedRecords*: int
+      ## Records a `record` line vouched for but whose present outputs are
+      ## not all entries of the bundle (§5.1): left with their recorded
+      ## witnesses, so they miss rather than adopt bytes no digest verified.
     restamped*: int
     restampMismatches*: int
     devEnvs*: seq[FrozenDevEnv]
@@ -1887,6 +1891,24 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
     for r in c.records:
       wanted.mgetOrPut(r.edgeDir, initTable[string, string]())[r.strongHex] =
         r.outputRoot
+    # Re-witnessing adopts whatever file is at each output path, so it is
+    # only sound for outputs whose bytes step 4 just verified: entries of
+    # this bundle. The `.rec` files are the exporter's, and a hostile one
+    # can vouch for a record whose outputs lie elsewhere (§5.1).
+    var carried = initHashSet[string]()
+    for e in c.entries:
+      carried.incl(e.path)
+    proc outputsCarried(record: ActionResultRecord; outputRoot: string): bool =
+      for output in record.outputs:
+        if output.metadata.kind == ffkMissing:
+          continue
+        let path =
+          if output.path.isAbsolute: normalizedPath(output.path)
+          elif outputRoot.len > 0: normalizedPath(outputRoot / output.path)
+          else: ""
+        if path.len == 0 or path notin carried:
+          return false
+      true
     for edgeDir, strongs in wanted:
       var weak: ContentDigest
       if not weakFromEdgeDirName(edgeDir.extractFilename, weak):
@@ -1894,6 +1916,9 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
       for record in loadPerEdgeRecords(cache, weak):
         let hex = toHex(record.strongFingerprint.bytes)
         if hex in strongs:
+          if not outputsCarried(record, strongs[hex]):
+            inc result.unwitnessedRecords
+            continue
           discard refreshRestoredOutputs(cache, record, strongs[hex])
           inc result.rewitnessedRecords
 
