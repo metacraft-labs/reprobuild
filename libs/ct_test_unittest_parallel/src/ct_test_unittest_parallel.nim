@@ -117,6 +117,13 @@ type
     durationMs: int
     started: float
     matched: bool
+    inFlight: bool
+      ## Set by ``testStarted``, cleared by ``testEnded``. Still set when
+      ## the exit hook runs means the case left the process from inside
+      ## its body — see ``abortedCaseResult``.
+    failureSeen: bool
+      ## ``failureOccurred`` fired for this case, i.e. a ``check``,
+      ## ``require`` or ``fail`` failed.
 
   ProtocolFormatter = ref object of stdUnittest.OutputFormatter
     ## Custom formatter that captures pass/fail/skip results without
@@ -136,6 +143,9 @@ var
   gCapturedResult {.threadvar.}: CapturedResult
   gProtocolInitialized {.threadvar.}: bool
   gProtocolExitHookQueued {.threadvar.}: bool
+  gRunFormatter {.threadvar.}: ProtocolFormatter
+    ## The formatter installed for ``--run``, kept so the exit hook can
+    ## read a case that started and never reached ``testEnded``.
   gSkipReason* {.threadvar.}: string
     ## Reason recorded by the ``skip`` override below and read back by
     ## ``testEnded``. It is a module global rather than a formatter
@@ -190,10 +200,12 @@ method testStarted*(formatter: ProtocolFormatter, testName: string) =
     exception: "",
     skipReason: "",
     started: epochTime(),
-    matched: true)
+    matched: true,
+    inFlight: true)
 
 method failureOccurred*(formatter: ProtocolFormatter,
                        checkpoints: seq[string], stackTrace: string) =
+  formatter.current.failureSeen = true
   for cp in checkpoints:
     formatter.current.checkpoints.add(cp)
   if stackTrace.len > 0 and formatter.current.exception.len == 0:
@@ -207,6 +219,7 @@ method failureOccurred*(formatter: ProtocolFormatter,
 
 method testEnded*(formatter: ProtocolFormatter,
                  testResult: stdUnittest.TestResult) =
+  formatter.current.inFlight = false
   formatter.current.status = testResult.status
   if testResult.status == stdUnittest.TestStatus.SKIPPED:
     formatter.current.skipReason = gSkipReason
@@ -293,6 +306,41 @@ proc statusToExitCode(s: stdUnittest.TestStatus): int =
   of stdUnittest.TestStatus.FAILED: 1
   of stdUnittest.TestStatus.SKIPPED: 2
 
+proc abortedCaseResult(current: CapturedResult): CapturedResult =
+  ## The result of a case that left the process from inside its body.
+  ##
+  ## ``std/unittest``'s ``require`` is ``check`` with ``abortOnError``
+  ## forced on, and a failed check under ``abortOnError`` ends in
+  ## ``fail``'s ``quit(1)`` — AFTER it has reported the failure (and its
+  ## checkpoints) to ``failureOccurred``, but from inside the body, so
+  ## the ``finally`` that calls ``testEnded`` never runs: ``quit`` does
+  ## not unwind. A ``quit`` written in the body takes the same exit.
+  ## Either way ``gCapturedResult`` was never filled, and the hook used to
+  ## report the case as "test not found" — a case that ran, recorded
+  ## checkpoints and failed, described as one that did not exist.
+  ##
+  ## Always FAIL, whatever code the body quit with: the case did not
+  ## finish, so no verdict it might have reached exists.
+  result = current
+  result.status = stdUnittest.TestStatus.FAILED
+  result.inFlight = false
+  result.durationMs = int((epochTime() - current.started) * 1000)
+  if current.failureSeen:
+    # ``check`` records ``<file>(<line>, <col>): Check failed: <expr>``
+    # first, then one checkpoint per operand value; name the condition.
+    var failedCheck = ""
+    for cp in current.checkpoints:
+      if ": Check failed: " in cp:
+        failedCheck = cp
+    result.exception = "require failed (a failed check aborted the " &
+      "process before the case ended)" &
+      (if failedCheck.len > 0: ": " & failedCheck else: "")
+  else:
+    # ``checkpoint`` text is held in a private ``std/unittest`` threadvar
+    # until a failure reports it, so a bare ``quit`` leaves none to read.
+    result.exception = "the case exited the process (quit) before it " &
+      "ended; checkpoints not attached to a failure are not recoverable"
+
 proc handleProtocolExit() {.noconv.} =
   ## Exit hook installed for every protocol mode. Dispatches to the
   ## per-mode output emission and quits with the right code.
@@ -312,7 +360,12 @@ proc handleProtocolExit() {.noconv.} =
     quit(0)
   of pmRunOne:
     let resultFile = getEnv("NIMTEST_RESULT_FILE")
-    let captured = gCapturedResult
+    var captured = gCapturedResult
+    if gRunFormatter != nil and gRunFormatter.current.inFlight:
+      # Checked before ``matched``: under a suite-wide filter an EARLIER
+      # case may have ended normally, and its result must not stand in
+      # for the one that aborted.
+      captured = abortedCaseResult(gRunFormatter.current)
     if not captured.matched:
       # Requested test did not run — exit non-zero with a clear error.
       if resultFile.len > 0:
@@ -377,7 +430,8 @@ proc initProtocol*() =
   of pmRunOne:
     stdUnittest.disableParamFiltering()
     stdUnittest.resetOutputFormatters()
-    stdUnittest.addOutputFormatter(ProtocolFormatter())
+    gRunFormatter = ProtocolFormatter()
+    stdUnittest.addOutputFormatter(gRunFormatter)
 
 # Initialize protocol mode as soon as the module is loaded. Module
 # init runs before any ``suite``/``test`` top-level blocks in importing
