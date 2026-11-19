@@ -94,7 +94,10 @@ proc writeProbe(scratch, stagedSource: string; relocatable: bool) =
   writeFile(scratch / "reprobuild.nim",
     "import repro_project_dsl\n\n# generated in " & scratch &
     "\npackage cmTCProbe:\n  discard\n")
-  writeFile(scratch / "trycompile.rbsz", cast[string](encoded))
+  var bytes = newString(encoded.len)
+  for i, b in encoded:
+    bytes[i] = char(b)
+  writeFile(scratch / "trycompile.rbsz", bytes)
 
 proc runProbe(scratch: string): BuildRun =
   ## `output` is repro's STDOUT alone, where `--action-output=all` and the
