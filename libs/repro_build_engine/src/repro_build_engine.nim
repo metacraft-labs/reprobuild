@@ -1094,6 +1094,16 @@ type
       ## and `cacheRecordInputs`, and the whole-graph no-op fast path is not
       ## taken, because it answers without the per-action records those two
       ## are read from. Off by default: it costs the fast path.
+    replayCachedActionOutput*: bool
+      ## The caller prints every action's captured output, served from cache
+      ## or not (`repro build --action-output=all`; CLI/build.md §"Action
+      ## Output"). A hit then carries the stdout and stderr its record's
+      ## execution captured (`recordedActionOutputFor`), and a record that
+      ## cannot say what its run printed is not served: the action re-runs
+      ## (Provider-Compile-Tiering.md §"A TryCompile hit must replay the
+      ## probe's output"). Neither the portable pre-pass nor the whole-graph
+      ## no-op fast path is taken, because neither has a local record to
+      ## replay from. Presentation only: it never reaches a key.
     cancelCallback*: BuildCancelCallback
     statsEnabled*: bool
     suppressTrace*: bool
@@ -20978,6 +20988,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       else:
         result.reads.add(path)
 
+  proc recordCapturedOutput(idx: int; record: ActionResultRecord) =
+    ## Provider-Compile-Tiering.md §"A TryCompile hit must replay the probe's
+    ## output": keep the stdout and stderr this execution captured beside the
+    ## record it just published (CAS blobs and an action-output sidecar), so
+    ## a later hit can print them under `--action-output=all`. Written for
+    ## every published record, whatever this run's caller prints: a record
+    ## made by a build that printed nothing must still serve one that prints
+    ## everything. Best-effort, like the input-access sidecar.
+    cache.recordActionOutput(cas.inner, record.weakFingerprint,
+      record.strongFingerprint, runResult.results[idx].stdout,
+      runResult.results[idx].stderr)
+
   proc recordPortableFingerprint(idx: int; action: BuildAction;
                                  evidence: PathSetEvidence;
                                  record: ActionResultRecord;
@@ -21383,6 +21405,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # The caller needs each hit's record provenance, which only the
     # per-action lookup reports.
     if config.recordCacheHitProvenance:
+      return none(BuildRunResult)
+    # The caller needs each hit's recorded output, which only the per-action
+    # lookup finds.
+    if config.replayCachedActionOutput:
       return none(BuildRunResult)
     # A forced rebuild is a request to re-execute, and `config.forceRebuild`
     # is read in exactly one place: the scheduler's per-action cache
@@ -22542,10 +22568,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # already, and this only covers an arm that did not ask it.
     nixRecordOutputs(action, absentIsLost = not produced)
 
+  # `replayCachedActionOutput`: the output each served record's execution
+  # captured, loaded at the lookup seam and given to the action's result
+  # when it completes as served (`completeSuccess`). An action that re-runs
+  # instead never reaches that arm, so its own output is what it reports.
+  var replayedOutput = initTable[string, ReplayedActionOutput]()
+
   proc completeSuccess(id: string; status: ActionStatus; cacheDecision: CacheDecision;
                        launched: bool; detail = "") =
     noteNixRoots(id, status, launched, detail)
     let idx = idToIndex.resultIndex(id)
+    if not launched and cacheDecision in {cdHit, cdHybridCutoff} and
+        replayedOutput.hasKey(id):
+      runResult.results[idx].stdout = replayedOutput[id].stdout
+      runResult.results[idx].stderr = replayedOutput[id].stderr
     runResult.results[idx].status = status
     runResult.results[idx].cacheDecision = cacheDecision
     runResult.results[idx].launched = launched
@@ -22840,8 +22876,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   var portableSatisfied = initTable[string, string]()
 
   proc runPortablePrepass() =
+    # A portable record carries no captured output, so a caller that needs
+    # each hit's output is served by the local records alone.
     if not config.portableLookup or config.portableRoots.len == 0 or
-        config.forceRebuild:
+        config.forceRebuild or config.replayCachedActionOutput:
       return
     let roots = config.portableRoots
     let memoRoot = sharedRoot / "portable-memo"
@@ -23573,7 +23611,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             determinism = action.determinismClass,
             nowUnix = config.nowUnix,
             buildEpoch = config.buildEpoch,
-            containerOutputs = action.containerDirectoryOutputs())
+            containerOutputs = action.containerDirectoryOutputs(),
+            # The warm metadata projection drops the strong fingerprint the
+            # output replay finds its sidecar by.
+            useHotTier = not config.replayCachedActionOutput)
           finishStat("repro cache lookup", lookupStart)
           if lookup.status != aclHit and explainCacheMisses:
             # Diagnostic only: name why the lookup did not hit. A caller
@@ -23770,6 +23811,25 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 runResult.trace(id, "cache-skipped", reason)
                 lookup = ActionCacheLookup(status: aclMissInputChanged,
                   message: reason, changedInputPath: blocked)
+          # Provider-Compile-Tiering.md §"A TryCompile hit must replay the
+          # probe's output": a caller that prints every action's output is
+          # served a record only together with the output its execution
+          # captured. A record that cannot say what its run printed (written
+          # by an older binary, installed from a peer, its sidecar or a blob
+          # lost) is a miss here, and the re-run records the output.
+          if config.replayCachedActionOutput and
+              lookup.status in {aclHit, aclHybridCutoff}:
+            let replay = cache.recordedActionOutputFor(cas.inner,
+              lookup.record.weakFingerprint, lookup.record.strongFingerprint)
+            if replay.isSome:
+              replayedOutput[id] = replay.get()
+            else:
+              let reason = "the cached record carries no captured output " &
+                "to replay, and this build prints every action's output " &
+                "(--action-output=all); re-running"
+              runResult.trace(id, "cache-record-refused", reason)
+              lookup = ActionCacheLookup(status: aclMissNoRecord,
+                message: reason)
           case lookup.status
           of aclHit:
             var recordedPaths: seq[string] = @[]
@@ -24228,6 +24288,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   dependencyEvidencePath(cacheRoot, action.id), record)
                 recordPortableFingerprint(idx, action, evidence.evidence, record,
                   evidenceLevelOf(evidence.monitorStatus), keyed)
+                recordCapturedOutput(idx, record)
                 publishPeerCacheBundle(peerCacheQueryOf(action), record,
                   evidenceLevelOf(evidence.monitorStatus), action,
                   evidence.evidence.hostBoundInput)
@@ -24492,6 +24553,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   dependencyEvidencePath(cacheRoot, plan.action.id), record)
                 recordPortableFingerprint(idx, plan.action, evidence.evidence,
                   record, evidenceLevelOf(evidence.monitorStatus), keyed)
+                recordCapturedOutput(idx, record)
                 publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
                   evidenceLevelOf(evidence.monitorStatus), plan.action,
                   evidence.evidence.hostBoundInput)
@@ -25161,6 +25223,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               dependencyEvidencePath(cacheRoot, action.id), record)
             recordPortableFingerprint(idx, action, evidence.evidence, record,
               evidenceLevelOf(evidence.monitorStatus), keyed)
+            recordCapturedOutput(idx, record)
             publishPeerCacheBundle(peerCacheQueryOf(action), record,
               evidenceLevelOf(evidence.monitorStatus), action,
               evidence.evidence.hostBoundInput)

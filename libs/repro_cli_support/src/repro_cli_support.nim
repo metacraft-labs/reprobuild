@@ -2227,7 +2227,12 @@ proc capabilitiesJson*(): JsonNode =
     "cmake-regeneration-edge",
     "provider-cache-priming",
     "build-report-json-inspection",
-    "build-action-output"])
+    "build-action-output",
+    # A hit replays its record's captured output under
+    # `--action-output=all` (Provider-Compile-Tiering.md §"A TryCompile hit
+    # must replay the probe's output"). The CMake generator lets its
+    # try_compile builds be served from cache only when this is listed.
+    "build-action-output-replay"])
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
@@ -10590,8 +10595,12 @@ proc emitActionOutputs(buildResult: BuildRunResult;
   ## parsing the compiler's ``-v`` output (stderr) out of the build tool's
   ## output, and a build that prints only status lines leaves them empty.
   ##
-  ## An action served from cache or found up to date did not run and has no
-  ## output to print, as with Ninja for an up-to-date edge. Nothing is
+  ## An action served from the action cache prints the output its record's
+  ## execution captured: the engine replays it (`replayCachedActionOutput`,
+  ## set for this mode), and does not serve a record that cannot say what
+  ## its run printed (Provider-Compile-Tiering.md §"A TryCompile hit must
+  ## replay the probe's output"). A non-cacheable action found up to date
+  ## did not run and has nothing to print, as with Ninja. Nothing is
   ## printed between actions: a header line would be one more line for
   ## CMake's link-line regex to consider.
   for item in buildResult.results:
@@ -12741,6 +12750,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
+      # `--action-output=all` prints every action's output, so a hit has to
+      # carry the output its record's execution captured
+      # (Provider-Compile-Tiering.md §"A TryCompile hit must replay the
+      # probe's output").
+      replayCachedActionOutput: actionOutput == baoAll,
       runQuotaCliPath: publicCliPath,
       monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,
@@ -14529,6 +14543,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
+      # `--action-output=all` prints every action's output, so a hit has to
+      # carry the output its record's execution captured
+      # (Provider-Compile-Tiering.md §"A TryCompile hit must replay the
+      # probe's output").
+      replayCachedActionOutput: actionOutput == baoAll,
       runQuotaCliPath: publicCliPath,
       monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,

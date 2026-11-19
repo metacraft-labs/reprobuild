@@ -22,6 +22,10 @@
 ##     summary;
 ##   * the flag is presentation only: an action built without it is served
 ##     from cache when rebuilt with it, i.e. it did not enter the action key;
+##   * a hit prints the output its record's execution captured, byte for byte
+##     what the miss printed (Provider-Compile-Tiering.md §"A TryCompile hit
+##     must replay the probe's output"), and a record that cannot say what
+##     its run printed is not served under ``all``: the action re-runs;
 ##   * `repro test` forwards it to the in-process build it runs to issue
 ##     certificates;
 ##   * an unknown value is rejected with the vocabulary.
@@ -43,6 +47,8 @@ const
   StdoutMarker = "ao-stdout-marker"
   StderrMarker = "ao-stderr-marker"
   KeyedMarker = "ao-keyed-marker"
+  ReplayStdoutMarker = "ao-replay-stdout-marker"
+  ReplayStderrMarker = "ao-replay-stderr-marker"
   FailedMarker = "ao-failed-marker"
 
   # Every action writes a declared output, so none of them depends on how the
@@ -70,6 +76,11 @@ package actionOutputProbe:
       actionId = "action-output.keyed",
       extraOutputs = @["build/keyed.txt"])
     discard target("keyed", keyed)
+    let replayed = shell(
+      command = "mkdir -p build && printf 'ao-replay-stdout-marker\\n' && printf 'ao-replay-stderr-marker\\n' >&2 && printf 'r\\n' > build/replayed.txt",
+      actionId = "action-output.replayed",
+      extraOutputs = @["build/replayed.txt"])
+    discard target("replayed", replayed)
     let failing = shell(
       command = "mkdir -p build && printf 'ao-failed-marker\\n' >&2 && exit 3 && printf 'f\\n' > build/failing.txt",
       actionId = "action-output.failing",
@@ -115,9 +126,22 @@ proc explain(run: BuildRun): string =
 
 # One project for the whole suite: every build of a fresh project compiles its
 # provider first, which costs minutes here. No case depends on another's
-# outputs — each builds its own target, and only ``keyed`` is cacheable.
+# outputs — each builds its own target, and only ``keyed`` and ``replayed``
+# are cacheable.
 let project = createTempDir("repro-action-output-", "")
 writeFile(project / "repro.nim", Fixture)
+# A store root of the suite's own, so the replay cases can find (and remove)
+# the action-output sidecars this suite's records carry without touching the
+# per-user cache. The project path is fresh anyway, so this costs no extra
+# provider compile.
+let storeRoot = createTempDir("repro-action-output-store-", "")
+putEnv("REPROBUILD_STORE_ROOT", storeRoot)
+
+proc actionLine(run: BuildRun; id: string): string =
+  for line in run.stdoutText.splitLines():
+    if line.startsWith("action: " & id & " "):
+      return line
+  ""
 
 suite "repro build --action-output":
 
@@ -169,18 +193,73 @@ suite "repro build --action-output":
       check first.exitCode == 0
       check fileExists(project / "build" / "keyed.txt")
       # Rebuilt WITH the flag: if it were part of the action's identity the
-      # action would run again and its marker would be printed.
+      # action would run again. It is served, and the hit prints the output
+      # the first build's execution captured, once.
       let second = runBuild(project, ["keyed", "--action-output=all",
         "--log=actions"])
       checkpoint(explain(second))
       check second.exitCode == 0
-      check KeyedMarker notin second.stdoutText
-      var keyedLine = ""
-      for line in second.stdoutText.splitLines():
-        if line.startsWith("action: keyed "):
-          keyedLine = line
+      let keyedLine = second.actionLine("keyed")
       check keyedLine.len > 0
       check "launched=false" in keyedLine
+      check second.stdoutText.count(KeyedMarker) == 1
+
+  test "a hit prints exactly what the miss printed":
+    if not fileExists(reproBin) or findExe("sh").len == 0:
+      skip("needs " & reproBin & " (run `just build`) and `sh` on PATH")
+    else:
+      let miss = runBuild(project, ["replayed", "--action-output=all",
+        "--log=quiet"])
+      checkpoint(explain(miss))
+      check miss.exitCode == 0
+      check ReplayStdoutMarker in miss.stdoutText
+      check ReplayStderrMarker in miss.stdoutText
+      let hit = runBuild(project, ["replayed", "--action-output=all",
+        "--log=quiet"])
+      checkpoint(explain(hit))
+      check hit.exitCode == 0
+      check hit.stdoutText == miss.stdoutText
+      # And it was a hit: the same state, with status lines on.
+      let shown = runBuild(project, ["replayed", "--action-output=all",
+        "--log=actions"])
+      checkpoint(explain(shown))
+      check shown.exitCode == 0
+      check "launched=false" in shown.actionLine("replayed")
+      check shown.stdoutText.count(ReplayStdoutMarker) == 1
+      check shown.stdoutText.count(ReplayStderrMarker) == 1
+
+  test "a record without its captured output is not served under all":
+    # The record of an older binary, or one whose sidecar was lost, cannot
+    # say what its run printed. Served under ``all`` it would print nothing,
+    # which for a try_compile is a different configure result; it re-runs.
+    if not fileExists(reproBin) or findExe("sh").len == 0:
+      skip("needs " & reproBin & " (run `just build`) and `sh` on PATH")
+    else:
+      let first = runBuild(project, ["replayed", "--log=quiet"])
+      checkpoint(explain(first))
+      check first.exitCode == 0
+      var removed = 0
+      for path in walkDirRec(storeRoot):
+        if path.endsWith(".out"):
+          removeFile(path)
+          inc removed
+      check removed > 0
+      # Without the flag the record is served as before.
+      let plain = runBuild(project, ["replayed", "--log=actions"])
+      checkpoint(explain(plain))
+      check "launched=false" in plain.actionLine("replayed")
+      let rerun = runBuild(project, ["replayed", "--action-output=all",
+        "--log=actions"])
+      checkpoint(explain(rerun))
+      check rerun.exitCode == 0
+      check "launched=true" in rerun.actionLine("replayed")
+      check rerun.stdoutText.count(ReplayStdoutMarker) == 1
+      # The re-run recorded its output, so the next build is served again.
+      let again = runBuild(project, ["replayed", "--action-output=all",
+        "--log=actions"])
+      checkpoint(explain(again))
+      check "launched=false" in again.actionLine("replayed")
+      check again.stdoutText.count(ReplayStdoutMarker) == 1
 
   test "repro test forwards the flag to its in-process build":
     # ``repro test`` issues certificates, so it always builds in-process to
@@ -212,7 +291,8 @@ suite "repro build --action-output":
       check "--action-output=bogus" in combined
       check "failed or all" in combined
 
-try:
-  removeDir(project)
-except OSError:
-  discard
+for dir in [project, storeRoot]:
+  try:
+    removeDir(dir)
+  except OSError:
+    discard
