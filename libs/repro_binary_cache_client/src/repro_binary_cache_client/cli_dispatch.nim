@@ -13,9 +13,10 @@
 ## uses during ``repro build``. ``repro cache`` parses its command line from
 ## repro's description and calls the typed handlers (``cacheLookup``,
 ## ``cacheSubstitute``, ``cachePublish``, ``cacheDeriveKey``,
-## ``cacheGenKey``); ``runCacheSubcommand`` is the argv front end of the
-## test-only driver (``tests/repro_binary_cache_client_cli.nim``), and
-## ``identityFromPublishFlags`` reads the identity flags a producer renders.
+## ``cacheGenKey``), which the test-only driver
+## (``tests/repro_binary_cache_client_cli.nim``) reaches through ``repro
+## cache``'s own command line; ``identityOf`` is the identity those flags'
+## values name.
 ##
 ## ## Subcommands
 ##
@@ -102,7 +103,7 @@
 ## The reader continues to accept v1 archives, whose entries are regular
 ## files, so existing cache content remains substitutable.
 
-import std/[httpclient, httpcore, net, os, parseopt, strutils]
+import std/[httpclient, httpcore, net, os, strutils]
 
 when defined(ssl):
   import wrappers/openssl
@@ -114,39 +115,6 @@ import ../../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 
 const
   DefaultUrl = "http://localhost:7878"
-  Usage = """
-repro cache — binary-cache client (single-entry publish/substitute wiring).
-
-Usage:
-  repro cache lookup     <entry-key-hex>
-  repro cache substitute <entry-key-hex> <out-prefix-dir>
-  repro cache publish    <entry-key-hex> <prefix-dir>   [identity-flags]
-  repro cache derive-key                                 [identity-flags]
-  repro cache gen-key                                    [identity-flags]
-
-Identity flags (for publish + derive-key):
-  --package-name=NAME       --package-version=VER
-  --platform-cpu=CPU        --platform-os=OS
-  --platform-abi=ABI        --platform-libc=LIBC
-  --toolchain-name=N        --toolchain-version=V
-  --toolchain-host-ldso=LDSO  --toolchain-extra=FP
-  --provider-revision=HEX
-  --dep=<hex>               (repeatable)
-  --option=<name>=<value>   (repeatable)
-
-Cache config (substitute, R1 default-untrusted):
-  REPRO_CACHES_CONFIG             override config path (system+user else
-                                  /etc/repro/caches.conf + ~/.config/repro/caches.conf)
-  A cache is substituted from ONLY when the config lists its trusted
-  producer public key(s) and the manifest is signed by one of them.
-
-Environment:
-  REPRO_BINARY_CACHE_URL          default http://localhost:7878
-  REPRO_BINARY_CACHE_KEY_PATH     ECDSA-P256 private key (required for publish)
-  REPRO_BINARY_CACHE_CERT_PATH    matching pubkey file       (required for publish)
-  REPRO_LOCAL_STORE               local store root for substitute
-"""
-
 type
   CacheIdentityValues* = object
     ## The identity flags of ``publish`` and ``derive-key`` as given, before
@@ -283,12 +251,6 @@ proc cacheLookup*(entryKey: string): int =
     stderr.writeLine("lookup failed: " & e.msg)
     return 3
 
-proc cmdLookup(args: seq[string]): int =
-  if args.len != 1:
-    stderr.writeLine(Usage)
-    return 2
-  cacheLookup(args[0])
-
 proc cacheSubstitute*(entryKey, outDir: string): int =
   ## ``repro cache substitute <entry-key-hex> <out-prefix-dir>``: exit 0
   ## when the entry was fetched from a trusted cache and extracted, 1 on a
@@ -364,14 +326,13 @@ proc cacheSubstitute*(entryKey, outDir: string): int =
 # publish
 # ---------------------------------------------------------------------------
 
-proc identityArgsOf(v: CacheIdentityValues; cpuGiven = false): PublishArgs =
+proc identityArgsOf(v: CacheIdentityValues): PublishArgs =
   ## The identity ``v`` names, checked: the CPU family canonicalised, every
   ## dependency key validated, every option split at its first ``=``. An
-  ## empty CPU leaves the field out unless ``cpuGiven`` says the flag was
-  ## written with an empty value, which names no family.
+  ## empty CPU leaves the field out.
   result.packageName = v.packageName
   result.packageVersion = v.packageVersion
-  if v.platformCpu.len > 0 or cpuGiven:
+  if v.platformCpu.len > 0:
     # Canonicalised to the family the cache keys by (`armhf` → `armv7`,
     # `amd64` → `x86_64`); a token no host derives is refused, because an
     # entry published under it could never be substituted.
@@ -399,55 +360,6 @@ proc identityArgsOf(v: CacheIdentityValues; cpuGiven = false): PublishArgs =
         "--option requires name=value form")
     result.options.add((option[0 ..< eq], option[eq + 1 .. ^1]))
 
-proc parseIdentityFlags(flagArgs: seq[string]): PublishArgs =
-  ## The identity flags of the test driver's argv (``runCacheSubcommand``)
-  ## and of a producer's rendered flags (``identityFromPublishFlags``);
-  ## ``repro cache`` parses them from repro's description instead.
-  # ``allowWhitespaceAfterColon = false`` keeps ``--platform-libc=`` from
-  # consuming the next argv slot as its value (the build-script prelude
-  # routinely passes empty values to opt out of a field).
-  var v = CacheIdentityValues()
-  var cpuGiven = false
-  var p = initOptParser(flagArgs, allowWhitespaceAfterColon = false)
-  while true:
-    p.next()
-    case p.kind
-    of cmdEnd: break
-    of cmdShortOption, cmdLongOption:
-      case p.key
-      of "package-name": v.packageName = p.val
-      of "package-version": v.packageVersion = p.val
-      of "platform-cpu":
-        v.platformCpu = p.val
-        cpuGiven = true
-      of "platform-os": v.platformOs = p.val
-      of "platform-abi": v.platformAbi = p.val
-      of "platform-libc": v.platformLibc = p.val
-      of "toolchain-name": v.toolchainName = p.val
-      of "toolchain-version": v.toolchainVersion = p.val
-      of "toolchain-host-ldso": v.toolchainHostLdSo = p.val
-      of "toolchain-extra": v.toolchainExtra = p.val
-      of "provider-revision": v.providerRevision = p.val
-      of "dep": v.deps.add(p.val)
-      of "option": v.options.add(p.val)
-      else: discard
-    of cmdArgument: discard
-  identityArgsOf(v, cpuGiven)
-
-proc cmdSubstitute(args: seq[string]): int =
-  if args.len != 2:
-    stderr.writeLine(Usage)
-    return 2
-  cacheSubstitute(args[0], args[1])
-
-proc parsePublishArgs(args: seq[string]): PublishArgs =
-  if args.len < 2:
-    stderr.writeLine(Usage)
-    quit(2)
-  result = parseIdentityFlags(args[2 .. ^1])
-  result.entryKeyHex = parseEntryKeyHex(args[0])
-  result.prefixDir = args[1]
-
 proc identityFromArgs(a: PublishArgs): CacheEntryIdentity =
   result = newCacheEntryIdentity(
     packageName = a.packageName,
@@ -465,12 +377,13 @@ proc identityFromArgs(a: PublishArgs): CacheEntryIdentity =
   for depHex in a.depHex:
     result.addDep(depHex)
 
-proc identityFromPublishFlags*(flagArgs: seq[string]): CacheEntryIdentity =
+proc identityOf*(identity: CacheIdentityValues): CacheEntryIdentity =
   ## The identity `repro cache publish` / `derive-key` build from their
-  ## identity flags, exposed so a producer that renders those flags
+  ## identity flags' values, exposed so a producer that renders those flags
   ## (`repro infra cache-keys`) can check they round-trip to the key it
-  ## printed.
-  identityFromArgs(parseIdentityFlags(flagArgs))
+  ## printed. Raises ``CacheUsageError`` for a malformed ``--option`` and
+  ## ``ValueError`` for another malformed value.
+  identityFromArgs(identityArgsOf(identity))
 
 proc cacheDeriveKey*(identity: CacheIdentityValues): int =
   ## ``repro cache derive-key [identity-flags]``: print the entry key.
@@ -478,15 +391,6 @@ proc cacheDeriveKey*(identity: CacheIdentityValues): int =
   ## ``ValueError`` for another malformed value.
   echo deriveCacheEntryKeyHex(identityFromArgs(identityArgsOf(identity)))
   return 0
-
-proc cmdDeriveKey(args: seq[string]): int =
-  try:
-    let parsed = parseIdentityFlags(args)
-    echo deriveCacheEntryKeyHex(identityFromArgs(parsed))
-    return 0
-  except CacheUsageError as e:
-    stderr.writeLine(e.msg)
-    return 2
 
 proc cacheGenKey*(): int =
   ## Generates an ECDSA-P256 keypair and writes the matching key + cert
@@ -507,9 +411,6 @@ proc cacheGenKey*(): int =
     pubHex.add(HexChars[int(b) and 0xf])
   echo pubHex
   return 0
-
-proc cmdGenKey(args: seq[string]): int =
-  cacheGenKey()
 
 proc publish(args: PublishArgs): int =
   ## M9.L.4-refactor Step A: thin wrapper that translates CLI flags +
@@ -569,41 +470,3 @@ proc cachePublish*(entryKey, prefixDir: string;
   args.entryKeyHex = parseEntryKeyHex(entryKey)
   args.prefixDir = prefixDir
   publish(args)
-
-proc cmdPublish(rawArgs: seq[string]): int =
-  try:
-    publish(parsePublishArgs(rawArgs))
-  except CacheUsageError as e:
-    stderr.writeLine(e.msg)
-    2
-
-# ---------------------------------------------------------------------------
-# Dispatch
-# ---------------------------------------------------------------------------
-
-proc runCacheSubcommand*(args: seq[string]): int =
-  ## The test-only driver's argv front end over the typed handlers
-  ## (``args`` is everything after the subcommand selector's program name),
-  ## the dispatch the historical standalone ``repro-binary-cache-client``
-  ## exposed under its own ``main``. ``repro cache`` does not use it: its
-  ## command line is parsed from repro's description.
-  if args.len == 0:
-    echo Usage
-    return 0
-  case args[0]
-  of "lookup":
-    return cmdLookup(args[1 .. ^1])
-  of "substitute":
-    return cmdSubstitute(args[1 .. ^1])
-  of "publish":
-    return cmdPublish(args[1 .. ^1])
-  of "derive-key":
-    return cmdDeriveKey(args[1 .. ^1])
-  of "gen-key":
-    return cmdGenKey(args[1 .. ^1])
-  of "-h", "--help", "help":
-    echo Usage
-    return 0
-  else:
-    echo Usage
-    return 2

@@ -837,7 +837,7 @@ type
       ## child themselves as an inseparable part of binding it to the
       ## granted lease. This is what a normal ``repro build`` takes.
     mlpRunQuotaHelper
-      ## L2 — a separate ``repro __repro-runquota-helper`` process spawns
+      ## L2 — a separate ``repro internal runquota-helper`` process spawns
       ## the action, two processes deep.
 
   MonitorHostingMode* = enum
@@ -986,7 +986,7 @@ type
     fallbackToRunQuotaBypass*: bool
     # When true, the engine keeps one RunQuota client session for the build and
     # launches child processes directly under leases instead of spawning a
-    # `repro __repro-runquota-helper` process for every action.
+    # `repro internal runquota-helper` process for every action.
     inlineRunQuota*: bool
     runQuotaQueueTimeoutMs*: int
       ## Bound, in milliseconds, on how long this build may sit with EVERY
@@ -16000,7 +16000,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
 #
 #   * L1 bypass — the engine spawns. HOSTED.
 #   * L2 RunQuota helper — the engine spawns ``repro
-#     __repro-runquota-helper …`` and THAT process spawns the action, two
+#     internal runquota-helper …`` and THAT process spawns the action, two
 #     processes deep. There is no spawn here to hand to io-mon, so this path
 #     keeps the CLI wrapper. ``repro internal io monitor`` is therefore still
 #     a PRODUCTION path and not only a debugging entry point.
@@ -16779,7 +16779,7 @@ func monitorHostingRefusal*(path: MonitorLaunchPath): string =
   of mlpRunQuotaHelper:
     "in-process monitor hosting was requested for an action on the RunQuota " &
     "helper launch path, which starts the action from a separate " &
-    "`repro __repro-runquota-helper` process" & Why
+    "`repro internal runquota-helper` process" & Why
 
 const MonitorHostingEnvVar* = "REPROBUILD_MONITOR_HOSTING"
   ## The environment spelling of ``--monitor-hosting``
@@ -17508,7 +17508,7 @@ proc finishRunQuotaProcess(id: string; process: Process; resultPath: string;
   # N51 triage: LEFT AS `readAll` DELIBERATELY (a declared waiver of
   # scripts/check_process_stream_readall.py). This IS short-read-prone on
   # Windows, but the child is the RunQuota helper — a process supervisor
-  # (`repro __repro-runquota-helper`) whose own children are the build actions
+  # (`repro internal runquota-helper`) whose own children are the build actions
   # it launched. Draining to EOF here means waiting for every descendant that
   # inherited the helper's stdout to close it, which is exactly the class of
   # wait this call must not make: the outcome is carried by the result FILE

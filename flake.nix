@@ -947,8 +947,14 @@
     # exit code (127 or 126) for the compiler's own commands too. One
     # commit, in compiler/gorgeimpl.nim and compiler/shellfreeexec.nim plus
     # their tests.
+    #
+    # Advanced from 4a8c0b82 to fde9384c, which carries it: `std/net` `send`
+    # returns after a swallowed disconnect (no spin on a reset peer) and
+    # resumes a short write at the written offset (upstream bb85d2dda5,
+    # e2b2142a49; reprobuild-pm issue
+    # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=4a8c0b82122b50d9924f62062a1093b5df104ca1";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
       flake = false;
     };
     nim-csources-src = {

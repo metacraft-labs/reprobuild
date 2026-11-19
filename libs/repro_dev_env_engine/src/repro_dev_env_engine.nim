@@ -14,6 +14,18 @@ import repro_interface_artifacts
 import repro_local_store/pattern_scoped_enumeration
 import repro_runquota
 import repro_tool_profiles
+# The helpers' command lines are declared in repro's description; only their
+# spellings are read here, at compile time.
+from repro_cli_support/cli_description import reproLongFlags
+
+const
+  CompileProviderFlags = reproLongFlags(@["internal", "compile-provider"])
+    ## The long spelling of each flag of `repro internal compile-provider`.
+  DevEnvIntrospectFlags = reproLongFlags(@["internal", "dev-env-introspect"])
+    ## The long spelling of each flag of `repro internal dev-env-introspect`.
+  RenderDevEnvShellFlags = reproLongFlags(@["internal", "render-dev-env-shell"])
+    ## The long spelling of each flag of `repro internal
+    ## render-dev-env-shell`.
 
 type
   DevEnvEdgeError* = object of CatchableError
@@ -207,18 +219,19 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
   var inputs = plan.inputSources
   if inputs.find(interfacePath) < 0:
     inputs.add(interfacePath)
+  # The helper's command line in the words the CLI's generated parser reads
+  # back to these values: each value attached to its declared flag.
   var command = @[
     helperCliPath,
-    "__repro-compile-provider",
-    "--module", modulePath,
-    "--out", plan.outputBinaryPath,
-    "--artifact", artifactPath,
-    "--interface", interfacePath,
-    "--work-dir", workDir
+    "internal", "compile-provider",
+    CompileProviderFlags.module & "=" & modulePath,
+    CompileProviderFlags.`out` & "=" & plan.outputBinaryPath,
+    CompileProviderFlags.artifact & "=" & artifactPath,
+    CompileProviderFlags.interfaceArtifact & "=" & interfacePath,
+    CompileProviderFlags.workDir & "=" & workDir
   ]
   if scratchDir.len > 0:
-    command.add("--scratch-dir")
-    command.add(scratchDir)
+    command.add(CompileProviderFlags.scratchDir & "=" & scratchDir)
   let compilerCwd =
     if scratchDir.len > 0:
       scratchDir
@@ -759,27 +772,26 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     config.lockSliceId,
     fileFingerprintPart(config.developOverridesPath)
   ])
+  # The helper's command line in the words the CLI's generated parser reads
+  # back to these values: each value attached to its declared flag.
   var argv = @[
     config.publicCliPath,
-    "__repro-dev-env-introspect",
-    "--provider-binary", provider.outputBinaryPath,
-    "--provider-artifact-id", providerArtifactId,
-    "--project-root", config.projectRoot,
-    "--out", artifactPath,
-    "--protocol-root", protocolRoot
+    "internal", "dev-env-introspect",
+    DevEnvIntrospectFlags.providerBinary & "=" & provider.outputBinaryPath,
+    DevEnvIntrospectFlags.providerArtifactId & "=" & providerArtifactId,
+    DevEnvIntrospectFlags.projectRoot & "=" & config.projectRoot,
+    DevEnvIntrospectFlags.`out` & "=" & artifactPath,
+    DevEnvIntrospectFlags.protocolRoot & "=" & protocolRoot
   ]
   if config.entryPointId.len > 0:
-    argv.add("--entry-point")
-    argv.add(config.entryPointId)
+    argv.add(DevEnvIntrospectFlags.entryPoint & "=" & config.entryPointId)
   if config.activity.len > 0:
-    argv.add("--activity")
-    argv.add(config.activity)
+    argv.add(DevEnvIntrospectFlags.activity & "=" & config.activity)
   if config.lockSliceId.len > 0:
-    argv.add("--lock-slice")
-    argv.add(config.lockSliceId)
+    argv.add(DevEnvIntrospectFlags.lockSlice & "=" & config.lockSliceId)
   if config.developOverridesPath.len > 0:
-    argv.add("--develop-overrides")
-    argv.add(config.developOverridesPath)
+    argv.add(DevEnvIntrospectFlags.developOverrides & "=" &
+      config.developOverridesPath)
   var inputs = @[provider.outputBinaryPath, providerArtifactPath]
   if config.developOverridesPath.len > 0 and
       fileExists(extendedPath(config.developOverridesPath)):
@@ -820,10 +832,10 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
   ])
   let argv = @[
     config.publicCliPath,
-    "__repro-render-dev-env-shell",
-    "--artifact", artifactPath,
-    "--out", shellFragmentPath,
-    "--navigator-stats", navigatorStatsPath
+    "internal", "render-dev-env-shell",
+    RenderDevEnvShellFlags.artifact & "=" & artifactPath,
+    RenderDevEnvShellFlags.`out` & "=" & shellFragmentPath,
+    RenderDevEnvShellFlags.navigatorStats & "=" & navigatorStatsPath
   ]
   action("__repro_dev_env_shell_render", argv,
     # Named-Lock-Files §7.2 — see `lockIdentityOutsideSolvedGraph`.

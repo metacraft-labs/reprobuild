@@ -1128,11 +1128,26 @@ proc snapshotKeyedForConfig(snapshot: ProviderGraphSnapshot;
   ## changed -- each a different invocation -- and for a snapshot keyed in
   ## an earlier shape of the key, whose fragments are then produced again
   ## once.
+  ##
+  ## Each fragment is keyed from its OWN stored arguments, so that alone
+  ## cannot see a refresh for another root. The snapshot must also hold the
+  ## root invocation this refresh requests -- the root entry point on
+  ## ``config.rootArguments`` in ``config.namespace``. A different root
+  ## argument gives the root fragment a different key (its argument
+  ## digest), so a snapshot produced for another root is not reused without
+  ## invoking the root (Project-Provider-Graph-Protocol.md §"Full Versus
+  ## Fragment Invocation"), even when the provider artifact does not depend
+  ## on the root and so does not force the invocation itself.
+  let rootKey = invocationKeyFor(config, config.rootEntryPointId,
+    config.rootArguments, config.namespace)
+  var holdsRequestedRoot = false
   for fragment in snapshot.fragments:
     if fragment.invocationKey != invocationKeyFor(config,
         fragment.entryPointId, fragment.arguments, fragment.namespace):
       return false
-  true
+    if fragment.invocationKey == rootKey:
+      holdsRequestedRoot = true
+  holdsRequestedRoot
 
 proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
   ## Bring the persisted provider-graph snapshot up to date and return it.
@@ -1158,9 +1173,9 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
   ## stored one under the same key: an equal digest is reported as an early
   ## cutoff, and only what it no longer owns is reported stale. A stored
   ## fragment whose key this refresh does not reproduce -- another lock
-  ## slice, activity or project, or a member that is gone -- is pruned, and
-  ## its effects become cleanup candidates that a surviving claim on the
-  ## same effect still protects (``planOutputCleanup``).
+  ## slice, activity, project or root, or a member that is gone -- is
+  ## pruned, and its effects become cleanup candidates that a surviving
+  ## claim on the same effect still protects (``planOutputCleanup``).
   # Before anything is spawned or read: a refresh with no project root
   # cannot produce a usable graph, and every plan below inherits this
   # value. Nor can one with no project, which every key below names.
@@ -1220,9 +1235,9 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
 
   # The stored graph cannot be reused: either another provider produced it
   # (the validity attributes), or the provider is current and the
-  # invocations are not (the keys). Run the root and every child again;
-  # the previous snapshot only decides what is reported replaced, cut off
-  # or pruned.
+  # invocations are not (the keys, including the requested root's). Run
+  # the root and every child again; the previous snapshot only decides what
+  # is reported replaced, cut off or pruned.
   let previous = snapshot
   snapshot = emptyProviderGraphSnapshot(config.providerArtifactId, manifest)
   runRootAndChildren(config, provider, binaryInput, manifest, snapshot, result,

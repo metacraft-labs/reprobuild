@@ -1886,6 +1886,7 @@ tests/integration/t_cs_m6_dev_env_command_lines.nim	nim	5
 tests/integration/t_cs_m6_develop_and_flake_command_lines.nim	nim	4
 tests/integration/t_cs_m6_machines_command_lines.nim	nim	4
 tests/integration/t_cs_m6_project_introspection_command_lines.nim	nim	4
+tests/integration/t_cs_m6_role_process_command_lines.nim	nim	5
 tests/integration/t_cs_m6_round8a_command_lines.nim	nim	14
 tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim	nim	3
 tests/integration/t_cs_m6_usage_errors_and_coloured_help.nim	nim	5
@@ -2361,7 +2362,7 @@ tests/integration/t_provider_library_c_abi_memory_ownership.nim	nim	3
 tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
-tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	4
+tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	5
 tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
@@ -2420,7 +2421,7 @@ tests/integration/t_repro_push_explicit_routes_skip_unpublished_record_store.nim
 tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim	nim	2
 tests/integration/t_repro_push_real_hooks_publish_outgoing_head_and_closure.nim	nim	34
 tests/integration/t_repro_push_sync_integrates_upstream_then_publishes.nim	nim	4
-tests/integration/t_repro_reap_verb_is_dispatched.nim	nim	3
+tests/integration/t_repro_reap_verb_is_dispatched.nim	nim	4
 tests/integration/t_repro_runtime_dlopen_without_library_path.nim	nim	4
 tests/integration/t_repro_test_issues_certificate_by_default_in_clean_state.nim	nim	2
 tests/integration/t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed.nim	nim	1
@@ -2781,7 +2782,7 @@ tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_cs_m1_external_tool_argv_unchanged.nim	nim	6
 tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim	nim	2
 tests/unit/t_cs_m6_no_hand_written_argv_parsing.nim	nim	3
-tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	14
+tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	15
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	6
 tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9

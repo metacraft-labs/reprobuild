@@ -12,11 +12,11 @@
 ## `startUserDaemon` runs for an endpoint that does not answer -- then deleted
 ## that file, i.e. a LIVE same-basename daemon's record.
 ##
-## WHAT THESE CASES ASSERT. Every daemon here is a real `repro-daemon
-## --foreground`: this binary re-executes itself in fixture mode and hands its
-## arguments to `runUserDaemonCommand`, the function the `repro-daemon` entry
-## point calls, so `--endpoint` and `--state-dir` go through the production
-## flag parser. A stale daemon is made the way one is made in the field: the
+## WHAT THESE CASES ASSERT. Every daemon here is a real `repro daemon serve
+## --foreground`: this binary re-executes itself in fixture mode and reads its
+## arguments through repro's generated parser into the configuration `repro
+## daemon serve` runs (`userDaemonConfigOfArgs`), so `--endpoint` and
+## `--state-dir` go through the production parser. A stale daemon is made the way one is made in the field: the
 ## process is SIGKILLed, leaving its socket file and its record behind. The
 ## cases pin: a stale sibling's discovery cleanup leaves a live daemon's record
 ## alone and still removes the stale one's; a daemon started with a non-default
@@ -46,15 +46,16 @@
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_daemon_core
+from repro_cli_support/daemon_cli import userDaemonConfigOfArgs
 
 const FixtureFlag = "--daemon-fixture"
 
 if paramCount() >= 1 and paramStr(1) == FixtureFlag:
-  # `repro-daemon --foreground <flags>`, in this process.
-  var args = @["--foreground"]
-  for i in 2 .. paramCount():
-    args.add(paramStr(i))
-  quit(runUserDaemonCommand(args))
+  # `repro daemon serve --foreground <flags>`, in this process: the flags
+  # read by repro's generated parser into the configuration `repro daemon
+  # serve` runs (`userDaemonConfigOfArgs`).
+  quit(runUserDaemonForeground(userDaemonConfigOfArgs(
+    @["daemon", "serve", "--foreground"] & commandLineParams()[1 .. ^1])))
 
 when defined(posix):
   from repro_test_support/process_fixtures import shortSocketDirAtProcessExit

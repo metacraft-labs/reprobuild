@@ -58,9 +58,9 @@ import sys
 from pathlib import Path
 
 # The commands whose flags and environment variables are compared, by their
-# words after `repro` ("" is `repro` itself). Each later group of commands is
-# added here when its parsing moves onto the description, and the test lists
-# the same commands.
+# words after `repro` ("" is `repro` itself): every command repro declares
+# (its hidden spellings aside). The test lists the same commands, and checks
+# that its list is every command the description declares.
 COVERED_COMMANDS = [
     "",
     "help",
@@ -283,6 +283,51 @@ COVERED_COMMANDS = [
     "attest cross-check",
     "attest launch",
     "attest reap",
+    # Every other command repro declares (round 8b): the list is every
+    # command, hidden spellings aside.
+    "daemon serve",
+    "daemon start",
+    "daemon status",
+    "daemon stop",
+    "daemon restart",
+    "daemon sessions",
+    "daemon logs",
+    "store daemon start",
+    "store daemon status",
+    "store daemon stop",
+    "home __build-bundle",
+    "home __receive-bundle",
+    "home __transfer-bundle",
+    "home __remote-activate",
+    "system addon",
+    "system state",
+    "system secret",
+    "system adopt",
+    "debug io",
+    "debug io monitor",
+    "hooks protocol",
+    "hooks dispatch",
+    "hooks cache-push",
+    "pressure",
+    "internal",
+    "internal shared-pool-upload-pack",
+    "internal resolve-package",
+    "internal io",
+    "internal io monitor",
+    "internal runquota-helper",
+    "internal compile-provider",
+    "internal extract-interface",
+    "internal compile-profile",
+    "internal probe-profile-platforms",
+    "internal dev-env-introspect",
+    "internal render-dev-env-shell",
+    "internal direnv-activate",
+    "internal native-shell-activate",
+    "internal dev-session-supervisor",
+    "internal dev-session-http",
+    "internal cmake-regenerate",
+    "catalog",
+    "catalog publish",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
@@ -300,8 +345,10 @@ SHORT_FLAG = re.compile(r"(?<![\w-])-([A-Za-z])\1?(?![\w-])")
 ENV_CLAUSE = re.compile(r"\benvironment:\s*((?:`[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*`"
                         r"(?:\s*,\s*|\s+and\s+)?)+)")
 ENV_NAME = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)`")
-COMMAND_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
-HEADED_COMMAND = re.compile(r"`repro ([a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*)`")
+# A command word; an internal step may start with `__` (`home __build-bundle`).
+COMMAND_WORD = re.compile(r"^(?:__)?[a-z][a-z0-9-]*$")
+HEADED_COMMAND = re.compile(
+    r"`repro ([a-z][a-z0-9-]*(?: (?:__)?[a-z][a-z0-9-]*)*)`")
 
 
 BULLET_LEAD = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+`([^`\n]+)`")

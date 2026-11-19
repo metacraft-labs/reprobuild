@@ -22,6 +22,9 @@ import runquota_protocol
 import runquota_client/pressure_text
 import repro_runquota/build_pressure
 import repro_runquota/store_status
+# The helper's command line is declared in repro's description; only its
+# spellings are read here, at compile time (no parser is linked).
+from repro_cli_support/cli_description import reproLongFlags
 
 export build_pressure
 
@@ -1050,31 +1053,43 @@ proc acquireCliArgs*(request: ReproResourceRequest;
   ]
   result.add(command.argv)
 
+const
+  RunQuotaHelperCommandWords* = ["internal", "runquota-helper"]
+    ## The words that select the helper's command line (`repro internal
+    ## runquota-helper`; its hidden `__repro-runquota-helper` spelling is
+    ## the same declaration).
+  HelperFlags = reproLongFlags(@["internal", "runquota-helper"])
+    ## The long spelling of each flag of the helper's command line, from
+    ## repro's description.
+
 proc helperCliArgs*(request: ReproResourceRequest;
                     command: ReproCommandSpec;
                     resultPath: string): seq[string] =
-  result = @[
-    "__repro-runquota-helper",
-    "--result", resultPath,
-    "--label", request.label,
-    "--stats", request.commandStatsId,
-    "--cpu", $request.effectiveCpu(),
-    "--mem", $request.effectiveMemory(),
-    "--pool", request.namedPool,
-    "--pool-units", $request.namedPoolUnits,
-    "--pool-capacity", $request.namedPoolCapacity,
-    "--cpu-min", $request.cpuMinMilli,
-    "--cpu-pref", $request.cpuPreferredMilli,
-    "--width-flag", command.widthFlag,
-    "--cwd", command.cwd,
-    "--stdout-limit", $command.stdoutLimit,
-    "--stderr-limit", $command.stderrLimit
+  ## The command line the RunQuota helper is started with: the words the
+  ## generated parser of repro's command line reads back to these values.
+  ## Each value is attached to its flag (``--<long>=<value>``), so an empty
+  ## value or one that starts with ``-`` (a width flag such as ``-j``) stays
+  ## that flag's; the command follows ``--``.
+  result = @RunQuotaHelperCommandWords & @[
+    HelperFlags.resultPath & "=" & resultPath,
+    HelperFlags.label & "=" & request.label,
+    HelperFlags.stats & "=" & request.commandStatsId,
+    HelperFlags.cpu & "=" & $request.effectiveCpu(),
+    HelperFlags.mem & "=" & $request.effectiveMemory(),
+    HelperFlags.pool & "=" & request.namedPool,
+    HelperFlags.poolUnits & "=" & $request.namedPoolUnits,
+    HelperFlags.poolCapacity & "=" & $request.namedPoolCapacity,
+    HelperFlags.cpuMin & "=" & $request.cpuMinMilli,
+    HelperFlags.cpuPref & "=" & $request.cpuPreferredMilli,
+    HelperFlags.widthFlag & "=" & command.widthFlag,
+    HelperFlags.cwd & "=" & command.cwd,
+    HelperFlags.stdoutLimit & "=" & $command.stdoutLimit,
+    HelperFlags.stderrLimit & "=" & $command.stderrLimit
   ]
   if command.isolatedEnv:
-    result.add("--isolated-env")
+    result.add(HelperFlags.isolatedEnv)
   for entry in command.env:
-    result.add("--env")
-    result.add(entry)
+    result.add(HelperFlags.env & "=" & entry)
   result.add("--")
   result.add(command.argv)
 
@@ -2993,82 +3008,14 @@ proc executionJson(execution: ReproRunQuotaExecution; runnerError = ""): JsonNod
     "lease_released": execution.leaseReleased
   }
 
-proc runRunQuotaHelperCli*(args: openArray[string]): int =
-  var request = ReproResourceRequest()
-  var command = ReproCommandSpec()
-  var resultPath = ""
-  var i = 0
-  while i < args.len:
-    case args[i]
-    of "--result":
-      if i + 1 >= args.len: return 2
-      resultPath = args[i + 1]
-      i += 2
-    of "--label":
-      if i + 1 >= args.len: return 2
-      request.label = args[i + 1]
-      i += 2
-    of "--stats":
-      if i + 1 >= args.len: return 2
-      request.commandStatsId = args[i + 1]
-      i += 2
-    of "--cpu":
-      if i + 1 >= args.len: return 2
-      request.cpuMilli = uint32(parseUInt(args[i + 1]))
-      i += 2
-    of "--mem":
-      if i + 1 >= args.len: return 2
-      request.memoryBytes = parseUInt(args[i + 1])
-      i += 2
-    of "--pool":
-      if i + 1 >= args.len: return 2
-      request.namedPool = args[i + 1]
-      i += 2
-    of "--pool-units":
-      if i + 1 >= args.len: return 2
-      request.namedPoolUnits = uint32(parseUInt(args[i + 1]))
-      i += 2
-    of "--pool-capacity":
-      if i + 1 >= args.len: return 2
-      request.namedPoolCapacity = uint32(parseUInt(args[i + 1]))
-      i += 2
-    of "--cpu-min":
-      if i + 1 >= args.len: return 2
-      request.cpuMinMilli = uint32(parseUInt(args[i + 1]))
-      i += 2
-    of "--cpu-pref":
-      if i + 1 >= args.len: return 2
-      request.cpuPreferredMilli = uint32(parseUInt(args[i + 1]))
-      i += 2
-    of "--width-flag":
-      if i + 1 >= args.len: return 2
-      command.widthFlag = args[i + 1]
-      i += 2
-    of "--cwd":
-      if i + 1 >= args.len: return 2
-      command.cwd = args[i + 1]
-      i += 2
-    of "--stdout-limit":
-      if i + 1 >= args.len: return 2
-      command.stdoutLimit = parseInt(args[i + 1])
-      i += 2
-    of "--stderr-limit":
-      if i + 1 >= args.len: return 2
-      command.stderrLimit = parseInt(args[i + 1])
-      i += 2
-    of "--env":
-      if i + 1 >= args.len: return 2
-      command.env.add(args[i + 1])
-      i += 2
-    of "--isolated-env":
-      command.isolatedEnv = true
-      i += 1
-    of "--":
-      if i + 1 >= args.len: return 2
-      command.argv = @args[i + 1 .. ^1]
-      i = args.len
-    else:
-      return 2
+proc runRunQuotaHelper*(request: ReproResourceRequest;
+                        command: ReproCommandSpec;
+                        resultPath: string): int =
+  ## The RunQuota helper (``repro internal runquota-helper``): runs
+  ## ``command`` under a lease for ``request`` and writes the execution, a
+  ## failure included, to ``resultPath`` as JSON. Exit 2 when there is no
+  ## result path or no command; 0 otherwise. Its command line is parsed from
+  ## repro's description (``repro_cli_support/runquota_helper_cli``).
   if resultPath.len == 0 or command.argv.len == 0:
     return 2
   try:

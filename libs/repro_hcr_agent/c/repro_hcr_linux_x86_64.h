@@ -239,6 +239,17 @@ static int repro_hcr_lx_protection_is_wx(int protection) {
          (REPRO_HCR_LX_PROT_WRITE | REPRO_HCR_LX_PROT_EXEC);
 }
 
+/* Every `mprotect` the provider ISSUES, so a gate can assert that none of
+ * them touched target text (design §14: target text is replaced, never
+ * re-protected). The first REPRO_HCR_LX_MPROTECT_LOG_CAP ranges are kept; the
+ * count goes on past that, so a reader can tell a complete log from a
+ * truncated one. Observations only: nothing in the provider branches on
+ * them. */
+#define REPRO_HCR_LX_MPROTECT_LOG_CAP 64
+static uint64_t repro_hcr_lx_mprotect_issued_count = 0;
+static uint64_t repro_hcr_lx_mprotect_log_address[REPRO_HCR_LX_MPROTECT_LOG_CAP];
+static uint64_t repro_hcr_lx_mprotect_log_length[REPRO_HCR_LX_MPROTECT_LOG_CAP];
+
 /* Returns 0 on success, or the negated errno the kernel reported. */
 static long repro_hcr_lx_raw_mprotect(uint64_t address, size_t length,
                                       int protection) {
@@ -246,6 +257,13 @@ static long repro_hcr_lx_raw_mprotect(uint64_t address, size_t length,
     repro_hcr_lx_wx_requests_refused += 1;
     return -REPRO_HCR_LX_EACCES;
   }
+  if (repro_hcr_lx_mprotect_issued_count < REPRO_HCR_LX_MPROTECT_LOG_CAP) {
+    repro_hcr_lx_mprotect_log_address[repro_hcr_lx_mprotect_issued_count] =
+        address;
+    repro_hcr_lx_mprotect_log_length[repro_hcr_lx_mprotect_issued_count] =
+        (uint64_t)length;
+  }
+  repro_hcr_lx_mprotect_issued_count += 1;
   return repro_hcr_lx_syscall3(REPRO_HCR_LX_NR_MPROTECT, (long)address,
                                (long)length, (long)protection);
 }
@@ -561,18 +579,56 @@ static int repro_hcr_lx_rel32_reachable(uint64_t window_address,
 /* ---------------------------------------------------------------------------
  * Host capability probe (design §5.2).
  *
- * MDWE's measured failure mode is that the RW step SUCCEEDS and only the
- * restore of PROT_EXEC fails, which would leave the target's own text
- * permanently non-executable. So the round trip is probed on a provider-owned
- * scratch mapping at agent start and the host is refused at negotiation, never
+ * WHAT IS PROBED IS THE PUBLICATION ITSELF. Since 2026-10-05 target text is
+ * replaced, never written in place (design §5.1): a copy of the span is built
+ * in a provider code page (the `memfd` dual mapping, or the anonymous
+ * fallback), finalized, and moved over the live span with
+ * `mremap(MREMAP_FIXED)`. So the probe runs exactly that replacement, through
+ * the production `repro_hcr_lx_replace_text_word`, on a scratch
+ * `PROT_READ|PROT_EXEC` mapping the provider owns, and then CALLS the replaced
+ * page. The `memfd` backing is tried first and the anonymous fallback second;
+ * a host on which neither completes is refused at negotiation, never
  * discovered mid-commit.
+ *
+ * The `mprotect` RW->RX round trip this probe used to measure is NOT probed
+ * any more. It is not the publication, so a host that refuses it — MDWE does,
+ * and MDWE leaves the `memfd` backing alone — is not thereby unable to
+ * publish. Measuring it would refuse exactly the hardened hosts the `memfd`
+ * backing exists to serve.
  * ------------------------------------------------------------------------- */
+
+/* What one backing's probe replacement answered. 0 and the negated errnos are
+ * the replacement's own answer (`repro_hcr_lx_replace_text_word`); the small
+ * positive values say why there is no such answer. */
+#define REPRO_HCR_LX_REPLACEMENT_COMPLETED 0
+#define REPRO_HCR_LX_REPLACEMENT_NOT_ATTEMPTED 1  /* an earlier backing completed */
+#define REPRO_HCR_LX_REPLACEMENT_BACKING_UNAVAILABLE 2 /* no sealable memfd dual mapping */
+#define REPRO_HCR_LX_REPLACEMENT_BACKING_DISABLED 3 /* the test lever forced the fallback */
+#define REPRO_HCR_LX_REPLACEMENT_SCRATCH_UNAVAILABLE 4 /* no scratch mapping */
+#define REPRO_HCR_LX_REPLACEMENT_WRONG_ANSWER 5 /* the page ran and returned the wrong value */
+
+/* Which backing completed the probe replacement. */
+#define REPRO_HCR_LX_BACKING_NONE 0
+#define REPRO_HCR_LX_BACKING_MEMFD 1
+#define REPRO_HCR_LX_BACKING_ANONYMOUS 2
 
 typedef struct repro_hcr_lx_capabilities {
   int probed;
-  int text_protection_roundtrip;   /* 1 when RW->RX round trip works */
-  long protection_probe_rw_result; /* raw syscall result, negated errno on fail */
-  long protection_probe_rx_result;
+  /* 1 when a complete §5.1 page replacement was performed on the scratch
+   * mapping and the replaced page ran. This, and nothing else, is what
+   * "this host can be patched" means on Linux. */
+  int text_replacement_supported;
+  int text_replacement_backing;          /* REPRO_HCR_LX_BACKING_* */
+  long text_replacement_memfd_result;     /* REPRO_HCR_LX_REPLACEMENT_* or -errno */
+  long text_replacement_anonymous_result; /* REPRO_HCR_LX_REPLACEMENT_* or -errno */
+  /* The §5.1 step at which each backing's replacement stopped
+   * (REPRO_HCR_LX_REPLACE_STEP_*), so a refusal says whether it came before
+   * the move (step 5) — the property design §14 requires of the anonymous
+   * fallback under MDWE — rather than leaving it to be inferred from an
+   * errno that the move could equally answer. 0 when it completed or was
+   * not attempted. */
+  int text_replacement_memfd_step;
+  int text_replacement_anonymous_step;
   int membarrier_sync_core;        /* 1 when SYNC_CORE is registered and usable */
   long membarrier_query_mask;
   long membarrier_register_result;
@@ -586,7 +642,7 @@ typedef struct repro_hcr_lx_capabilities {
   int text_left_writable;          /* never set on Linux now: text is replaced, not written (kept for the wire field) */
   /* HLX-M9. `PR_GET_MDWE` for this process: the flags, or a negated errno.
    * Read so a capability-time refusal can NAME the blocking policy instead of
-   * describing its symptom. A host that refuses the round trip WITHOUT MDWE
+   * describing its symptom. A host that refuses the replacement WITHOUT MDWE
    * set is a different finding from one that refuses it because MDWE is set,
    * and the two must not be reported with the same sentence. */
   long mdwe_flags;
@@ -617,11 +673,15 @@ static void *repro_hcr_lx_map_anonymous(void *hint, size_t length,
                                         int protection, int extra_flags);
 static int repro_hcr_lx_unmap(void *address, size_t length);
 static size_t repro_hcr_lx_page_size(void);
+/* Defined after the replacement it drives (below). */
+static void repro_hcr_lx_probe_text_replacement(void);
+/* Provided by the including translation unit: apply the test levers that
+ * select a code path the agent-start probe must take too (the agent reads its
+ * `REPRO_HCR_TEST_*` environment; the probe shim sets its levers directly and
+ * supplies an empty body). Called once, before the first probe. */
+static void repro_hcr_lx_apply_probe_levers(void);
 
 static void repro_hcr_lx_probe_capabilities(void) {
-  size_t page_size;
-  void *scratch;
-
   if (repro_hcr_lx_caps.probed) {
     if (repro_hcr_lx_pretend_clang_cet_unsupported) {
       repro_hcr_lx_caps.clang_cet_unsupported = 1;
@@ -674,31 +734,8 @@ static void repro_hcr_lx_probe_capabilities(void) {
 
   repro_hcr_lx_caps.mdwe_flags = repro_hcr_lx_raw_get_mdwe();
 
-  page_size = repro_hcr_lx_page_size();
-  scratch = repro_hcr_lx_map_anonymous(
-      NULL, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_EXEC, 0);
-  if (scratch == NULL) {
-    repro_hcr_lx_caps.text_protection_roundtrip = 0;
-    return;
-  }
-  repro_hcr_lx_caps.protection_probe_rw_result = repro_hcr_lx_raw_mprotect(
-      (uint64_t)(uintptr_t)scratch, page_size,
-      REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_WRITE);
-  if (repro_hcr_lx_caps.protection_probe_rw_result == 0) {
-    /* Prove the mapping really is writable, not merely reported so. */
-    memset(scratch, 0x90, REPRO_HCR_LX_WINDOW_BYTES);
-    repro_hcr_lx_caps.protection_probe_rx_result = repro_hcr_lx_raw_mprotect(
-        (uint64_t)(uintptr_t)scratch, page_size,
-        REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_EXEC);
-  } else {
-    repro_hcr_lx_caps.protection_probe_rx_result = -1;
-  }
-  repro_hcr_lx_caps.text_protection_roundtrip =
-      (repro_hcr_lx_caps.protection_probe_rw_result == 0 &&
-       repro_hcr_lx_caps.protection_probe_rx_result == 0)
-          ? 1
-          : 0;
-  repro_hcr_lx_unmap(scratch, page_size);
+  repro_hcr_lx_apply_probe_levers();
+  repro_hcr_lx_probe_text_replacement();
 }
 
 static const repro_hcr_lx_capabilities *repro_hcr_lx_capability_report(void) {
@@ -1193,7 +1230,8 @@ static uint8_t *repro_hcr_lx_code_writer(void *exec_base) {
 
 /* Make the page receive no further writes: drop the writable alias and seal
  * the memfd. Returns 0 on success. For a fallback page this is the
- * pre-HLX-M9 `mprotect` to `PROT_READ|PROT_EXEC`, unchanged. */
+ * pre-HLX-M9 `mprotect` to `PROT_READ|PROT_EXEC`, unchanged, and a refusal
+ * returns the kernel's negated errno. */
 static int repro_hcr_lx_finalize_code_page(void *exec_base, size_t length) {
   repro_hcr_lx_code_page *page =
       repro_hcr_lx_find_code_page((uint64_t)(uintptr_t)exec_base);
@@ -1205,11 +1243,13 @@ static int repro_hcr_lx_finalize_code_page(void *exec_base, size_t length) {
   repro_hcr_lx_last_seal_result = 0;
   repro_hcr_lx_last_seal_verified = 0;
   if (page == NULL) {
-    return repro_hcr_lx_raw_mprotect((uint64_t)(uintptr_t)exec_base, length,
-                                     REPRO_HCR_LX_PROT_READ |
-                                         REPRO_HCR_LX_PROT_EXEC) == 0
-               ? 0
-               : -1;
+    /* The kernel's own answer (0 or a negated errno), so a refusal here —
+     * MDWE's `EACCES` — reaches the caller as measured, not as a constant. */
+    long rc = repro_hcr_lx_raw_mprotect((uint64_t)(uintptr_t)exec_base,
+                                        length,
+                                        REPRO_HCR_LX_PROT_READ |
+                                            REPRO_HCR_LX_PROT_EXEC);
+    return (int)rc;
   }
   if (page->write_base != 0) {
     (void)repro_hcr_lx_raw_munmap(page->write_base, page->length);
@@ -2537,11 +2577,10 @@ static int repro_hcr_lx_txn_prepare(repro_hcr_lx_transaction *txn) {
   }
 
   caps = repro_hcr_lx_capability_report();
-  if (!caps->text_protection_roundtrip) {
-    /* Design §5.2: MDWE lets the RW step succeed and fails only the PROT_EXEC
-     * restore, which would leave the target's text permanently non-executable.
-     * The provider probed this at agent start and refuses here rather than
-     * discovering it after the point of no return. */
+  if (!caps->text_replacement_supported) {
+    /* Design §5.2: neither backing of the §5.1 page replacement completed on
+     * the agent-start probe. The agent already refused this host at
+     * negotiation; this is the backstop for a caller that patches anyway. */
     memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
     txn->refusal = REPRO_HCR_LX_REFUSED_UNSUPPORTED_HOST;
     repro_hcr_lx_last_report.refusal = txn->refusal;
@@ -2669,6 +2708,13 @@ static int repro_hcr_lx_txn_prepare(repro_hcr_lx_transaction *txn) {
 /* Observations, for gates. Nothing in the provider branches on them. */
 static uint64_t repro_hcr_lx_text_replace_count = 0;
 static long repro_hcr_lx_last_text_replace_result = 0;
+/* The step (numbered as in design §5.1) at which the last replacement stopped,
+ * or 0 when it completed. */
+#define REPRO_HCR_LX_REPLACE_STEP_COMPLETED 0
+#define REPRO_HCR_LX_REPLACE_STEP_COPY_PAGE 2
+#define REPRO_HCR_LX_REPLACE_STEP_FINALIZE 4
+#define REPRO_HCR_LX_REPLACE_STEP_MOVE 5
+static int repro_hcr_lx_last_text_replace_step = 0;
 
 static long repro_hcr_lx_replace_text_word(uint64_t span_start,
                                            size_t span_length,
@@ -2677,10 +2723,12 @@ static long repro_hcr_lx_replace_text_word(uint64_t span_start,
   void *exec_base;
   uint8_t *writer;
   long rc;
+  int finalize_rc;
 
   exec_base = repro_hcr_lx_map_named_code_page(NULL, span_length, 0,
                                                REPRO_HCR_LX_TEXT_MEMFD_NAME);
   if (exec_base == NULL) {
+    repro_hcr_lx_last_text_replace_step = REPRO_HCR_LX_REPLACE_STEP_COPY_PAGE;
     repro_hcr_lx_last_text_replace_result = -12; /* ENOMEM */
     return repro_hcr_lx_last_text_replace_result;
   }
@@ -2690,14 +2738,18 @@ static long repro_hcr_lx_replace_text_word(uint64_t span_start,
       word;
   if (fail_exec_step) {
     repro_hcr_lx_release_code_page(exec_base, span_length);
+    repro_hcr_lx_last_text_replace_step = REPRO_HCR_LX_REPLACE_STEP_FINALIZE;
     repro_hcr_lx_last_text_replace_result = -REPRO_HCR_LX_EACCES;
     return repro_hcr_lx_last_text_replace_result;
   }
-  if (repro_hcr_lx_finalize_code_page(exec_base, span_length) != 0) {
+  finalize_rc = repro_hcr_lx_finalize_code_page(exec_base, span_length);
+  if (finalize_rc != 0) {
     /* Under `PR_MDWE_REFUSE_EXEC_GAIN` the anonymous fallback cannot become
-     * executable. The live page was never touched. */
+     * executable. The live page was never touched. `finalize_rc` is the
+     * kernel's negated errno (MDWE answers `-EACCES`). */
     repro_hcr_lx_release_code_page(exec_base, span_length);
-    repro_hcr_lx_last_text_replace_result = -REPRO_HCR_LX_EACCES;
+    repro_hcr_lx_last_text_replace_step = REPRO_HCR_LX_REPLACE_STEP_FINALIZE;
+    repro_hcr_lx_last_text_replace_result = (long)finalize_rc;
     return repro_hcr_lx_last_text_replace_result;
   }
   rc = repro_hcr_lx_syscall6(
@@ -2709,13 +2761,136 @@ static long repro_hcr_lx_replace_text_word(uint64_t span_start,
     /* Finalization already released the page's bookkeeping, so this is a
      * plain unmap of a page nothing references. */
     (void)repro_hcr_lx_raw_munmap((uint64_t)(uintptr_t)exec_base, span_length);
+    repro_hcr_lx_last_text_replace_step = REPRO_HCR_LX_REPLACE_STEP_MOVE;
     repro_hcr_lx_last_text_replace_result = rc;
     return rc;
   }
   repro_hcr_lx_text_replace_count += 1;
+  repro_hcr_lx_last_text_replace_step = REPRO_HCR_LX_REPLACE_STEP_COMPLETED;
   repro_hcr_lx_last_text_replace_result = 0;
   return 0;
 }
+
+/*
+ * The agent-start probe of the publication (design §5.2), one backing at a
+ * time. Runs `repro_hcr_lx_replace_text_word` — the production replacement,
+ * not a model of it — over a scratch `PROT_READ|PROT_EXEC` page the provider
+ * owns, then CALLS the replaced page. The page is reported complete only when
+ * it answers the value the replacement wrote: a copy that was moved into
+ * place but never became executable, or a move that did not land, cannot be
+ * reported as success.
+ *
+ * The scratch page starts executable and is never made writable, so it has
+ * the shape of target text, and a policy that refuses something about the
+ * replacement refuses it here first, at agent start.
+ */
+static long repro_hcr_lx_probe_replacement_with(int force_anonymous,
+                                                int *stopped_at_step) {
+  /* `mov eax, 0x5eed; ret; nop; nop`: the window word the replacement
+   * writes. A value no fixture in this tree uses. */
+  static const uint8_t word_bytes[8] = {0xB8, 0xED, 0x5E, 0x00,
+                                        0x00, 0xC3, 0x90, 0x90};
+  size_t page_size = repro_hcr_lx_page_size();
+  int previous_lever = repro_hcr_lx_force_anonymous_code_pages;
+  uint64_t word;
+  void *scratch;
+  long rc;
+  int answered;
+
+  scratch = repro_hcr_lx_map_anonymous(
+      NULL, page_size, REPRO_HCR_LX_PROT_READ | REPRO_HCR_LX_PROT_EXEC, 0);
+  if (scratch == NULL) {
+    return REPRO_HCR_LX_REPLACEMENT_SCRATCH_UNAVAILABLE;
+  }
+  memcpy(&word, word_bytes, sizeof(word));
+  repro_hcr_lx_force_anonymous_code_pages = force_anonymous;
+  rc = repro_hcr_lx_replace_text_word((uint64_t)(uintptr_t)scratch, page_size,
+                                      (uint64_t)(uintptr_t)scratch, word, 0);
+  repro_hcr_lx_force_anonymous_code_pages = previous_lever;
+  *stopped_at_step = rc != 0 ? repro_hcr_lx_last_text_replace_step
+                             : REPRO_HCR_LX_REPLACE_STEP_COMPLETED;
+  if (rc != 0) {
+    /* A refused replacement leaves the scratch page as it was. */
+    (void)repro_hcr_lx_unmap(scratch, page_size);
+    return rc;
+  }
+  /* New instructions on an executable page: a recorder watching this process
+   * is told before they run, as for every other code the provider makes. */
+  repro_hcr_mcr_report_code(scratch, sizeof(word));
+  answered = ((int (*)(void))scratch)();
+  (void)repro_hcr_lx_unmap(scratch, page_size);
+  return answered == 0x5eed ? REPRO_HCR_LX_REPLACEMENT_COMPLETED
+                            : REPRO_HCR_LX_REPLACEMENT_WRONG_ANSWER;
+}
+
+static void repro_hcr_lx_probe_text_replacement(void) {
+  repro_hcr_lx_capabilities *caps = &repro_hcr_lx_caps;
+  /* The probe is not a publication. Every observation a gate reads about
+   * publications and code pages is put back afterwards, so a gate that counts
+   * replacements or pages counts the target's and not the probe's. */
+  uint64_t saved_replace_count = repro_hcr_lx_text_replace_count;
+  long saved_replace_result = repro_hcr_lx_last_text_replace_result;
+  int saved_replace_step = repro_hcr_lx_last_text_replace_step;
+  uint64_t saved_dual = repro_hcr_lx_dual_page_count;
+  uint64_t saved_sealed = repro_hcr_lx_dual_seal_count;
+  uint64_t saved_fallback = repro_hcr_lx_fallback_page_count;
+  long saved_seal_result = repro_hcr_lx_last_seal_result;
+  int saved_seal_verified = repro_hcr_lx_last_seal_verified;
+  uint64_t saved_mprotect_count = repro_hcr_lx_mprotect_issued_count;
+
+  caps->text_replacement_supported = 0;
+  caps->text_replacement_backing = REPRO_HCR_LX_BACKING_NONE;
+  caps->text_replacement_anonymous_result =
+      REPRO_HCR_LX_REPLACEMENT_NOT_ATTEMPTED;
+  caps->text_replacement_memfd_step = 0;
+  caps->text_replacement_anonymous_step = 0;
+
+  /* 1. The `memfd` backing. */
+  if (repro_hcr_lx_force_anonymous_code_pages) {
+    caps->text_replacement_memfd_result =
+        REPRO_HCR_LX_REPLACEMENT_BACKING_DISABLED;
+  } else if (!repro_hcr_lx_memfd_dual_supported(repro_hcr_lx_page_size())) {
+    caps->text_replacement_memfd_result =
+        REPRO_HCR_LX_REPLACEMENT_BACKING_UNAVAILABLE;
+  } else {
+    caps->text_replacement_memfd_result =
+        repro_hcr_lx_probe_replacement_with(
+            0, &caps->text_replacement_memfd_step);
+    if (caps->text_replacement_memfd_result != 0) {
+      /* The dual mapping can be built but the replacement through it does
+       * not complete. Production must not then choose it for target text
+       * (`repro_hcr_lx_map_named_code_page` picks the backing by this flag),
+       * so the anonymous fallback becomes the backing for every page. */
+      repro_hcr_lx_memfd_dual_available = 0;
+    }
+  }
+  if (caps->text_replacement_memfd_result == 0) {
+    caps->text_replacement_supported = 1;
+    caps->text_replacement_backing = REPRO_HCR_LX_BACKING_MEMFD;
+  } else {
+    /* 2. The anonymous fallback. */
+    caps->text_replacement_anonymous_result =
+        repro_hcr_lx_probe_replacement_with(
+            1, &caps->text_replacement_anonymous_step);
+    if (caps->text_replacement_anonymous_result == 0) {
+      caps->text_replacement_supported = 1;
+      caps->text_replacement_backing = REPRO_HCR_LX_BACKING_ANONYMOUS;
+    }
+  }
+
+  repro_hcr_lx_text_replace_count = saved_replace_count;
+  repro_hcr_lx_last_text_replace_result = saved_replace_result;
+  repro_hcr_lx_last_text_replace_step = saved_replace_step;
+  repro_hcr_lx_dual_page_count = saved_dual;
+  repro_hcr_lx_dual_seal_count = saved_sealed;
+  repro_hcr_lx_fallback_page_count = saved_fallback;
+  repro_hcr_lx_last_seal_result = saved_seal_result;
+  repro_hcr_lx_last_seal_verified = saved_seal_verified;
+  /* The anonymous attempt's `mprotect` was of the provider's own copy, never
+   * of target text; the log of mprotects a gate reads is about the latter. */
+  repro_hcr_lx_mprotect_issued_count = saved_mprotect_count;
+}
+
 
 /*
  * Publish one prepared site: the page replacement that carries the new window

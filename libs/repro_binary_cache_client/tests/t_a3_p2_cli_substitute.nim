@@ -88,8 +88,8 @@ suite "A3 P2 — CLI substitute / publish / lookup":
     check code == 0
     # The standalone ``repro-binary-cache-client`` banner was retired; the
     # toolset now ships as ``repro cache <subcommand>`` (Binary-Caches.md
-    # §"Client CLI Surface"). The test driver forwards the bare verb into
-    # the same shared ``runCacheSubcommand`` dispatch, whose usage banner
+    # §"Client CLI Surface"). The test driver runs ``repro cache`` with the
+    # bare verb, through repro's own command line, whose generated help
     # reads ``repro cache``.
     check outp.contains("repro cache")
 
