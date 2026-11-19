@@ -2333,6 +2333,7 @@ flag	repro internal io monitor	--evidence
 flag	repro internal io monitor	--format
 flag	repro internal io monitor	--inline-site-tables
 flag	repro internal io monitor	--interest
+flag	repro internal io monitor	--payload-env
 command	repro internal io monitor run
 flag	repro internal io monitor run	--capture-stdio
 flag	repro internal io monitor run	--capture-stdio-path

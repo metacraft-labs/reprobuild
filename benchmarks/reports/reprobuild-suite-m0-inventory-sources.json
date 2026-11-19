@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3019,
+    "nimTestBinaries": 3022,
     "pureUnitConsolidationGroups": 88,
-    "pureUnitTests": 807,
-    "staticallyDetectedRuntimeCompilerFlowTests": 149,
-    "testEntries": 3069
+    "pureUnitTests": 808,
+    "staticallyDetectedRuntimeCompilerFlowTests": 150,
+    "testEntries": 3072
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -595,6 +595,22 @@
       "targetOs": "soAny"
     },
     {
+      "count": 4,
+      "defines": [],
+      "dependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_content_table.nim",
+        "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
+        "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
+        "libs/repro_local_store/tests/t_store_copy.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 11,
       "defines": [],
       "dependencyShape": [
@@ -632,21 +648,6 @@
         "libs/repro_local_store/tests/t_per_computation_output_dirs.nim",
         "libs/repro_local_store/tests/t_retention_gc.nim",
         "libs/repro_local_store/tests/t_store_budget_gc.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 3,
-      "defines": [],
-      "dependencyShape": [
-        "repro_local_store",
-        "repro_test_support"
-      ],
-      "owner": "libs/repro_local_store",
-      "sources": [
-        "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
-        "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
-        "libs/repro_local_store/tests/t_store_copy.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1723,9 +1724,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1671,
+      "integration": 1673,
       "platform/destructive": 198,
-      "pure unit": 807,
+      "pure unit": 808,
       "unclassified": 369
     },
     "graphOwnedTestArtifacts": [
@@ -1940,9 +1941,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3019,
+    "nimTestBinaryCount": 3022,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3069
+    "testEntryCount": 3072
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3128,6 +3129,72 @@
         }
       ],
       "source": "tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cc",
+            "cmakeBin",
+            "reproBin",
+            "root",
+            "source",
+            "store",
+            "stub"
+          ],
+          "line": 78,
+          "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = findCompiler()"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cc",
+            "cmakeBin",
+            "reproBin",
+            "root",
+            "source",
+            "store",
+            "stub"
+          ],
+          "line": 142,
+          "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "\"-DCMAKE_C_COMPILER=\" & cc, \"--debug-trycompile\"],"
+        },
+        {
+          "assignedCommandVariable": "built",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cc",
+            "cmakeBin",
+            "reproBin",
+            "root",
+            "source",
+            "store",
+            "stub"
+          ],
+          "line": 230,
+          "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let built = runShell(shellCommand(@[cc, \"-o\", stub,"
+        }
+      ],
+      "source": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim"
     },
     {
       "class": "integration",
@@ -21313,6 +21380,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_content_table",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_content_table.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_distinct_realizations_never_share_a_prefix_directory",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -34997,6 +35082,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cmake_trycompile_probes_are_served_across_configures",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_configurable_system_in_dsl",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -40112,6 +40214,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_behind_pin_skip_names_the_sibling_distance_and_remedy.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_bundle_says_when_a_project_pins_an_upstream_nim",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_bundle_says_when_a_project_pins_an_upstream_nim.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -52214,13 +52334,14 @@
         "repro_interface_artifacts",
         "repro_local_store",
         "repro_project_dsl",
+        "repro_selfhost",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -56501,7 +56622,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_trycompile_probe_is_served_across_scratch_directories.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -61011,7 +61132,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r14e_3_action_env_threading.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 31,
+      "staticCaseCount": 33,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

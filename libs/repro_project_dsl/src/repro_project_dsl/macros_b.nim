@@ -10145,12 +10145,13 @@ proc emitDeclaredPackageImports(sectionStmts: NimNode): NimNode =
     when defined(reproDslDepsDebug):
       echo "DSLDEPS-DEBUG: collected=" & $collected
     for name in collected:
-      # Quoted by hand rather than with `quoteShell`: this module is
-      # `include`d, so it inherits whatever the host imported, and the
-      # emission must not add a new import dependency to every recipe.
-      let resolved = staticExec(
-        reproBin & " internal resolve-package \"" &
-        reproConsumerRoot & "\" \"" & name & "\"").strip()
+      # One program and its arguments, quoted word by word
+      # (`compileTimeCommand`, from `compile_time_shell`, which the module
+      # that `include`s this one imports): the pinned compiler then starts
+      # the engine directly, so no `/bin/sh` and none of its libraries
+      # become inputs of the recipe compile.
+      let resolved = staticExec(compileTimeCommand([reproBin, "internal",
+        "resolve-package", reproConsumerRoot, name])).strip()
       if resolved.len == 0:
         continue
       let recipe = resolved & "/repro.nim"

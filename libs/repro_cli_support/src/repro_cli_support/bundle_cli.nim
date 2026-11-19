@@ -10,6 +10,7 @@ when not defined(windows):
   import repro_bundle
   import repro_local_store/store_bundle
   import ./store_bundle_cli
+  import ./bundle_nim_pins
 
 type
   BundleCliHooks* = object
@@ -120,6 +121,7 @@ else:
                 stderr.writeLine("repro bundle create: dev env of " & m.name &
                   " not frozen: " & e.msg)
         let r = createBundle(opts)
+        warnPinnedUpstreamNim("bundle create", r.nativeProjectDirs)
         if emitJson:
           echo readFile(r.latestPath)
         else:

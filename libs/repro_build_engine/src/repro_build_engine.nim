@@ -14748,27 +14748,57 @@ proc ensureShippedMacosToolsEnvironment*() =
 when defined(macosx):
   proc resolveNonSipShell*(): string
 
+const
+  MonitorPayloadEnvFlag* = "--payload-env="
+    ## ``repro internal io monitor --payload-env=NAME=VALUE ... -- <command>``
+    ## sets ``NAME`` to ``VALUE`` in the environment of ``<command>`` only:
+    ## the monitor process itself was started without it. The engine's own
+    ## role-process flag, taken off the command line before the rest reaches
+    ## io-mon's parser (``takeMonitorPayloadEnv``).
+
+proc takeMonitorPayloadEnv*(args: openArray[string]):
+    tuple[rest: seq[string], env: seq[(string, string)]] =
+  ## Split ``repro internal io monitor``'s arguments into the
+  ## ``--payload-env=NAME=VALUE`` assignments that come before the command's
+  ## ``--`` and everything else, in order. An assignment without a name, or
+  ## without ``=``, is not one and stays in ``rest`` for io-mon to refuse.
+  ## Anything after the first ``--`` is the command's own and is never taken.
+  result.rest = @[]
+  result.env = @[]
+  var inCommand = false
+  for arg in args:
+    if not inCommand and arg == "--":
+      inCommand = true
+    elif not inCommand and arg.startsWith(MonitorPayloadEnvFlag):
+      let assignment = arg[MonitorPayloadEnvFlag.len .. ^1]
+      let eq = assignment.find('=')
+      if eq > 0:
+        result.env.add((assignment[0 ..< eq], assignment[eq + 1 .. ^1]))
+        continue
+    result.rest.add(arg)
+
 proc wrapMonitoredPayloadWithRuntimeEnv(argv: openArray[string];
                                         payloadIndex: int;
-                                        exportPrefix: string): seq[string] =
-  result = newSeqOfCap[string](argv.len + 4)
-  for i in 0 ..< payloadIndex:
+                                        vars: openArray[(string, string)]):
+    seq[string] =
+  ## ``argv`` with one ``--payload-env=NAME=VALUE`` per variable placed just
+  ## before the monitor's own ``--`` (``argv[payloadIndex - 1]``), so the
+  ## monitor sets them for the command alone, after it has started without
+  ## them. The command, from ``payloadIndex`` on, is unchanged.
+  ##
+  ## It used to put a ``/bin/sh -c 'export NAME=VALUE; exec "$@"' sh``
+  ## between the monitor and the command. That shell was the root of the
+  ## monitored tree, so every such action recorded the host shell and the
+  ## libraries it loads as inputs, and a machine whose ``/bin/sh`` is another
+  ## program (or another build of the same one) missed on all of them. On
+  ## macOS it had to be a non-SIP shell besides. The monitor starts the
+  ## command itself, so the variables can be set there.
+  result = newSeqOfCap[string](argv.len + vars.len)
+  for i in 0 ..< payloadIndex - 1:
     result.add(argv[i])
-  var shell = "/bin/sh"
-  when defined(macosx):
-    # The monitor itself has already started without the dependency-provided
-    # loader paths. Keep that protection while avoiding a SIP boundary before
-    # the real payload: macOS' /bin/sh strips the injected monitor shim, which
-    # makes the whole child subtree unobservable and forces every otherwise
-    # cacheable automatic-monitor action to skip publishing its record.
-    let nonSipShell = resolveNonSipShell()
-    if nonSipShell.len > 0:
-      shell = nonSipShell
-  result.add(shell)
-  result.add("-c")
-  result.add(exportPrefix & "exec \"$@\"")
-  result.add("sh")
-  for i in payloadIndex ..< argv.len:
+  for (name, value) in vars:
+    result.add(MonitorPayloadEnvFlag & name & "=" & value)
+  for i in payloadIndex - 1 ..< argv.len:
     result.add(argv[i])
 
 proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
@@ -14782,9 +14812,11 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
   ## Move explicit loader-path entries from the process environment into
   ## exports at the start of that program. The monitor and interpreter then
   ## start against their own libraries, while every command run by the action
-  ## receives the same loader paths. A monitor-wrapped direct command is
-  ## replaced by a tiny shell payload that exports the paths only after the
-  ## monitor has started; an ordinary non-shell argv remains unchanged.
+  ## receives the same loader paths. A monitor-wrapped direct command keeps
+  ## its argv: the monitor is told to set the paths for that command alone
+  ## (``--payload-env``, ``wrapMonitoredPayloadWithRuntimeEnv``), so neither
+  ## the monitor nor a shell of the host's sits between them. An ordinary
+  ## non-shell argv remains unchanged.
   result.argv = @[]
   for arg in argv:
     result.argv.add(arg)
@@ -14815,15 +14847,19 @@ proc deferRuntimeLibraryEnvForShell*(argv, env: seq[string]):
       let eq = entry.find('=')
       if eq <= 0 or not isRuntimeLibraryEnv(entry[0 ..< eq]):
         result.env.add(entry)
-    var prefix = ""
-    for i, name in names:
-      if found[i]:
-        prefix.add("export " & name & "=" & quoteShell(values[i]) & "; ")
     if scriptIndex >= 0:
+      var prefix = ""
+      for i, name in names:
+        if found[i]:
+          prefix.add("export " & name & "=" & quoteShell(values[i]) & "; ")
       result.argv[scriptIndex] = prefix & result.argv[scriptIndex]
     else:
+      var vars: seq[(string, string)] = @[]
+      for i, name in names:
+        if found[i]:
+          vars.add((name, values[i]))
       result.argv = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
-        prefix)
+        vars)
 
 proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
                                      env: StringTableRef): seq[string] =
@@ -14838,16 +14874,17 @@ proc deferRuntimeLibraryEnvForShell*(argv: seq[string];
       return
     const names = ["LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
     var prefix = ""
+    var vars: seq[(string, string)] = @[]
     for name in names:
       if env.hasKey(name):
         prefix.add("export " & name & "=" & quoteShell(env[name]) & "; ")
+        vars.add((name, env[name]))
         env.del(name)
-    if prefix.len > 0:
+    if vars.len > 0:
       if scriptIndex >= 0:
         result[scriptIndex] = prefix & result[scriptIndex]
       else:
-        result = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex,
-          prefix)
+        result = wrapMonitoredPayloadWithRuntimeEnv(argv, payloadIndex, vars)
 
 const NimStandardLibrarySubdirs = ["", "deprecated/core", "deprecated/pure",
   "pure/collections", "pure/concurrency", "impure", "wrappers",
@@ -19938,6 +19975,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let casOpenStart = statStart()
   var cas = openCasStore(sharedRoot)
   finishStat("repro cas open", casOpenStart)
+  # The per-host content table beside the action cache: a content-checked
+  # input whose identity, size, mtime and file-system version are unchanged
+  # is not re-hashed (`repro_local_store/content_table`). Self-validating
+  # entries, so the root only says where they live.
+  setContentTableRoot(sharedRoot / "content-table")
   let actionCacheOpenStart = statStart()
   let attachActionCacheShm = config.actionCacheRoot.len > 0
   let warmCache = warmActionCacheFor(sharedRoot / "action-cache",

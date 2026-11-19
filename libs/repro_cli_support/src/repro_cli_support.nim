@@ -102,6 +102,25 @@ proc runIoMonitorCli(programName: string; argv: seq[string];
   ## the mount point, handed to io-mon's parser.
   io_mon_cli.runFsSnoopCli(programName, reproWordsAfterMount(argv, mount))
 
+proc runInternalIoMonitorCli(programName: string; argv: seq[string];
+                             mount: openArray[string]): int =
+  ## ``repro internal io monitor``: the monitor the engine wraps an action
+  ## in. repro's parser accepted the whole command line, the engine's own
+  ## ``--payload-env=NAME=VALUE`` assignments included (declared on this
+  ## mount only, ``cli_description.withEnginePayloadEnv``). Before io-mon's
+  ## parser sees the words after the mount point, those assignments
+  ## (``takeMonitorPayloadEnv``) are taken off and set in this process's
+  ## environment, which the command the monitor starts inherits. This process has already started, so the
+  ## dynamic loader read its own ``LD_LIBRARY_PATH`` / ``DYLD_LIBRARY_PATH``
+  ## before they were set and never reads them again: the monitor keeps its
+  ## own libraries, and the command gets the loader paths the action
+  ## declared, with no shell between the two
+  ## (``repro_build_engine.deferRuntimeLibraryEnvForShell``).
+  let taken = takeMonitorPayloadEnv(reproWordsAfterMount(argv, mount))
+  for (name, value) in taken.env:
+    putEnv(name, value)
+  io_mon_cli.runFsSnoopCli(programName, taken.rest)
+
 import repro_provider_runtime
 import repro_project_dsl
 # Deliberately NOT re-exported through the ``repro_project_dsl`` umbrella:
@@ -2238,11 +2257,17 @@ proc capabilitiesJson*(): JsonNode =
     # `--action-output=all` (Provider-Compile-Tiering.md §"A TryCompile hit
     # must replay the probe's output"). The CMake generator lets its
     # try_compile builds be served from cache only when this is listed.
-    "build-action-output-replay",
-    # The direct provider reads `trycompile.rbsz` v6, whose `relocatable`
-    # flag keys a try_compile project's actions independently of its
-    # scratch directory. The generator writes v6 only when this is listed.
-    "trycompile-relocatable-probes"])
+    "build-action-output-replay"])
+    # NOT listed for now: `trycompile-relocatable-probes`. The direct
+    # provider reads `trycompile.rbsz` v6, whose `relocatable` flag keys a
+    # try_compile project's actions independently of its scratch directory,
+    # and the generator writes v6 only when this capability is listed. A
+    # relocatable probe is revalidated by content (`hybrid`), which today
+    # hashes every input of every probe edge on record and monitors its
+    # compile; measured, that makes a cold configure 1.7-1.9 times slower
+    # (reprobuild-pm issue 2026-10-10-trycompile-edge-cache-key-is-unique-
+    # to-its-configure, "Criterion 4, measured"). The capability returns
+    # with the per-host content-digest memo that removes the hashing cost.
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
@@ -3302,9 +3327,19 @@ proc relocatableInlineExecAnchors(argv: openArray[string]): seq[string] =
       if dir.len > 0 and dir.isAbsolute:
         roots.add(dir)
   roots.add(absolutePath(currentActionCacheRoot()))
+  # The store the CMake generator stages try_compile sources into
+  # (`<store>/cmake-trycompile-sources/<digest>/`): `$REPROBUILD_STORE_ROOT`
+  # when set, which is also what `currentActionCacheRoot` honours. The
+  # `$REPRO_STORE_ROOT` / per-user default store is anchored too.
+  let stagingStore = getEnv("REPROBUILD_STORE_ROOT")
+  if stagingStore.len > 0:
+    roots.add(absolutePath(stagingStore))
   let store = resolveStoreRoot()
   if store.len > 0:
     roots.add(absolutePath(store))
+  # The engine's own installation (`<prefix>/bin/repro`, `<prefix>/lib/` with
+  # the monitor shim the monitored process loads).
+  roots.add(parentDir(parentDir(getAppFilename())))
   if argv.len > 0 and argv[0].isAbsolute:
     let bin = parentDir(argv[0])
     let prefix = parentDir(bin)
@@ -106302,8 +106337,9 @@ proc runInternalCommand(conf: ReproCommandLineInternal;
   of ReproCommandLineInternalCommand.io:
     case conf.io.command
     of ReproCommandLineInternalIoCommand.monitor:
-      # The monitor's own command line (io-mon's, mounted here).
-      runIoMonitorCli("repro internal io monitor", argv,
+      # The monitor's own command line (io-mon's, mounted here), after the
+      # engine's `--payload-env` assignments are taken off it.
+      runInternalIoMonitorCli("repro internal io monitor", argv,
         ["internal", "io", "monitor"])
   of ReproCommandLineInternalCommand.runquotaHelper:
     runRunQuotaHelperOf(conf.runquotaHelper)

@@ -63,7 +63,7 @@ suite "action-output sidecar":
     check decodeActionOutput(raw[0 ..< raw.len - 1], "ab12").isNone
     check decodeActionOutput(raw & @[0'u8], "ab12").isNone
     var future = raw
-    # version-literal-ok: 0xff stands for a version no build writes yet
+    # version-literal-ok: 0xff is a far-future version this build never writes, not current + 1
     future[4] = 0xff'u8
     check decodeActionOutput(future, "ab12").isNone
 

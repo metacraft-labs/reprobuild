@@ -2133,6 +2133,34 @@ proc cmakeRegenerateParams(): NimNode {.compileTime.} =
     flag depfile is string, required = true, help = "The depfile to write"
     flag publicCli is string, help = "The repro image to name in it"
 
+proc withEnginePayloadEnv(body: NimNode): NimNode {.compileTime.} =
+  ## io-mon's command line (``body``) as ``repro internal io monitor``
+  ## accepts it. The engine also writes its own ``--payload-env=NAME=VALUE``
+  ## assignments into the monitor's bare form, just before the monitor's
+  ## ``--`` (``repro_build_engine.wrapMonitoredPayloadWithRuntimeEnv``): the
+  ## variables the monitored command alone is started with. They are the
+  ## engine's, not io-mon's, so they are declared here, on the ``call:`` of
+  ## this mount only; the handler takes them off before io-mon's parser reads
+  ## the rest (``runInternalIoMonitorCli``).
+  let payloadEnv = unbound(quote do:
+    flag payloadEnv is seq[string], format = equals, visibility = hidden,
+      help = "NAME=VALUE: set for the monitored command alone (written by " &
+        "the engine)")
+  result = body
+  for stmt in result:
+    if stmt.kind in {nnkCall, nnkCommand} and stmt.len >= 2 and
+        stmt[0].eqIdent("call") and stmt[^1].kind == nnkStmtList:
+      # `quote` of a single statement yields the statement itself, not a
+      # statement list.
+      if payloadEnv.kind == nnkStmtList:
+        for flagStmt in payloadEnv:
+          stmt[^1].add(flagStmt)
+      else:
+        stmt[^1].add(payloadEnv)
+      return
+  error("io-mon's command line has no `call:` to add `--payload-env` to",
+    body)
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
@@ -2295,7 +2323,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let addonSecret = addonSecretCommands()
   let addonAdopt = addonAdoptParams()
   let debugIoMonitor = ioMonCommandLineDescription()
-  let internalIoMonitor = ioMonCommandLineDescription()
+  let internalIoMonitor = withEnginePayloadEnv(ioMonCommandLineDescription())
   result = unbound quote do:
     help "Reproducible builds, development environments and workspaces"
     # Command-line flags are kebab-case (`--tool-provisioning`); keys in
