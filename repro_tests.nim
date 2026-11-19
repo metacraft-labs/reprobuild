@@ -5377,6 +5377,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_c_objects_are_position_independent.nim",
+    binary: "build/test-bin/t_c_objects_are_position_independent",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim",
     binary: "build/test-bin/t_cargo_edge_owns_its_target_dir",
     defines: @[],

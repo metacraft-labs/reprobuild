@@ -43,6 +43,16 @@ proc targetIsElf*(): bool =
     ct = nativeCrossTarget()
   ct.binaryFormat == bfELF
 
+proc targetTakesPic*(): bool =
+  ## Whether the active target's objects are compiled with ``-fPIC``: every
+  ## target but PE. PE has no position-independent code model, and clang
+  ## refuses the flag for an MSVC target ("unsupported option '-fPIC' for
+  ## target 'x86_64-pc-windows-msvc'"). Read as ``targetIsElf`` reads it.
+  var ct = peekActiveCrossTarget()
+  if ct == nil:
+    ct = nativeCrossTarget()
+  ct.binaryFormat != bfPE
+
 proc sharedLibraryLayout*(api: LibraryApi; into: string): SharedLibraryLayout =
   ## The layout of the shared library declared as ``library <into>:`` with
   ## ``api``. The base name is ``api.soname``, else ``into``.

@@ -10,6 +10,7 @@ import ../types/executable
 import ../types/options
 import ../operations/compile
 import ../operations/link
+from ./shared_library_layout import targetTakesPic
 
 proc c_executable*(into: string;
                    sources: seq[string];
@@ -30,7 +31,11 @@ proc c_executable*(into: string;
       target = target,
       inputs = inputs,
       defines = extraDefines,
-      standard = standard))
+      standard = standard,
+      # C-Cpp.md §"Mode A": ``-fPIC`` on every per-source compile (not on
+      # a PE target). A PIC object links into a PIE or a non-PIE
+      # executable alike.
+      pic = targetTakesPic()))
 
   let linkEdge = link(LinkOptions(
     objects: objects,

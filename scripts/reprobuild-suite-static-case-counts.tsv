@@ -455,6 +455,7 @@ libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_apt_install_store_identity_is_byte_keyed.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
+libs/repro_dsl_stdlib/tests/t_c_objects_are_position_independent.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim	nim	16
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	32

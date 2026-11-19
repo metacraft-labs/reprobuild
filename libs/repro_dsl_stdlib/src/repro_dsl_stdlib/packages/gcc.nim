@@ -343,6 +343,7 @@ proc gccCompile*(opts: CompileOptions): BuildActionDef =
   let bt = currentCompileFlags()
   gcc(source = opts.source, output = opts.target,
     compileOnly = true,
+    pic = opts.pic,
     includeDirs = includeDirs,
     defines = defs,
     standard = std,
