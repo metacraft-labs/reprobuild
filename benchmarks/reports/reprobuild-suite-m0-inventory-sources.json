@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3016,
+    "nimTestBinaries": 3017,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 807,
     "staticallyDetectedRuntimeCompilerFlowTests": 149,
-    "testEntries": 3066
+    "testEntries": 3067
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1723,7 +1723,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1669,
+      "integration": 1670,
       "platform/destructive": 198,
       "pure unit": 807,
       "unclassified": 368
@@ -1940,9 +1940,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3016,
+    "nimTestBinaryCount": 3017,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3066
+    "testEntryCount": 3067
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -56441,6 +56441,24 @@
       "source": "tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_trycompile_probe_is_served_across_scratch_directories",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cmake_trycompile",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_trycompile_probe_is_served_across_scratch_directories.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

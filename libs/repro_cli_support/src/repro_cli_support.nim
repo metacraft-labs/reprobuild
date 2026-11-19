@@ -2232,7 +2232,11 @@ proc capabilitiesJson*(): JsonNode =
     # `--action-output=all` (Provider-Compile-Tiering.md §"A TryCompile hit
     # must replay the probe's output"). The CMake generator lets its
     # try_compile builds be served from cache only when this is listed.
-    "build-action-output-replay"])
+    "build-action-output-replay",
+    # The direct provider reads `trycompile.rbsz` v6, whose `relocatable`
+    # flag keys a try_compile project's actions independently of its
+    # scratch directory. The generator writes v6 only when this is listed.
+    "trycompile-relocatable-probes"])
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
@@ -3268,6 +3272,45 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
 ## substituted `@FILE:` value enters the key only as part of the digest; the
 ## plaintext spawned argv is already what the lowered graph cache stores for
 ## the action.
+proc relocatableInlineExecAnchors(argv: openArray[string]): seq[string] =
+  ## The roots a relocatable inline-exec edge (``BuildActionDef.relocatable``,
+  ## a CMake try_compile probe) reaches by ABSOLUTE path from whatever
+  ## scratch directory it runs in (`repro_core/relocation`): the host's
+  ## system directories, the reprobuild store and action cache (which hold a
+  ## probe's staged source), and the install prefix of the program the edge
+  ## runs (`<prefix>/bin/<tool>`: a compiler driver reads its own headers,
+  ## libraries and sub-programs below that prefix). Inputs and argv elements
+  ## under them stay named absolutely; everything else is named relative to
+  ## the edge's cwd. Sorted, so the list is a stable part of the edge.
+  ##
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles" states the soundness assumption: an input reached by absolute
+  ## path lies under an anchor. One that does not is recorded relative and
+  ## revalidated at the relocated spot, which costs a miss, never a wrong hit.
+  var roots = @["/nix", "/etc", "/usr", "/proc", "/sys", "/dev", "/run",
+    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt", "/var"]
+  when defined(windows):
+    for name in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)",
+                 "ProgramData"]:
+      let dir = getEnv(name)
+      if dir.len > 0 and dir.isAbsolute:
+        roots.add(dir)
+  roots.add(absolutePath(currentActionCacheRoot()))
+  let store = resolveStoreRoot()
+  if store.len > 0:
+    roots.add(absolutePath(store))
+  if argv.len > 0 and argv[0].isAbsolute:
+    let bin = parentDir(argv[0])
+    let prefix = parentDir(bin)
+    roots.add(if prefix.len > 0 and extractFilename(bin).toLowerAscii == "bin":
+                prefix
+              else: bin)
+  for root in roots:
+    let normalized = os.normalizedPath(root).replace('\\', '/')
+    if normalized notin result:
+      result.add(normalized)
+  result.sort()
+
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   # `BuildAction.governingLockIdentity` is required. Give `result` a complete
@@ -3373,6 +3416,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       if declared.isSome and declared.get() != ffpTimestamp:
         policyFromTools = true
         declared.get()
+      elif payload.relocatable:
+        # A relocated record is revalidated against ANOTHER tree, whose
+        # files carry their own mtimes (a probe's object file is restored or
+        # rebuilt in each scratch directory): content decides, as for the
+        # engine's relocatable recipe compiles.
+        ffpHybrid
       else:
         ffpTimestamp
     of acfpTimestamp:
@@ -3450,10 +3499,50 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         payload.commandStatsId
       else:
         payload.id
+    let inlineCwd = resolveCanonicalExecRoot(effectiveCwdKind,
+      effectiveCwdCustomPath, projectRoot)
+    # A RELOCATABLE edge (a CMake try_compile probe, `BuildActionDef.
+    # relocatable`) computes the same thing in any scratch directory. Its
+    # key names each argv element the way its record names an input and
+    # keys the cwd's depth, not its path (`action()`, `argvKeyComponents`;
+    # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", riders of
+    # 2026-11-16/17). The caller fingerprint below must not re-add what that
+    # takes out: it covers the payload, which spells the argv and the cwd
+    # absolutely, so for a relocatable edge it covers a copy of the payload
+    # whose argv is in its relocatable names and whose cwd is cleared.
+    let relocatable = payload.relocatable and inlineCwd.isAbsolute
+    let relocationAnchors =
+      if relocatable: relocatableInlineExecAnchors(argv)
+      else: @[]
+    let keyedArgv =
+      if relocatable:
+        argvKeyComponents(argv, inlineCwd, true, relocationAnchors).argv
+      else:
+        argv
+    let keyedPayload =
+      if relocatable:
+        var relocated = payload
+        for arg in relocated.call.arguments.mitems:
+          if arg.name == "argv":
+            arg.encodedValue = keyedArgv.join("\x1f")
+          elif arg.name == "cwd":
+            arg.encodedValue = ""
+        relocated.cwdCustomPath = ""
+        # The digest of the project's generated `reprobuild.nim`, which
+        # spells the scratch directory: unique per configure, so it would
+        # key every probe apart. The direct provider builds a try_compile
+        # project's graph from `trycompile.rbsz` and never reads that file,
+        # and the action's own content (argv, env, inputs, outputs, policy)
+        # is in the key already. Caching-Architecture.md §"BuildXL-Inspired
+        # Fingerprinting" keeps recipe body hashes out of action keys.
+        relocated.recipeRevisionFingerprint = ""
+        actionPayload(relocated)
+      else:
+        node.payload
     let fingerprintText = [
       "reprobuild.localInlineExecAction.v1",
       payload.id,
-      node.payload
+      keyedPayload
     ].join("\n") & (block:
       let libraries = environmentPrefixKeyText(profiles,
         payload.toolIdentityRefs)
@@ -3506,8 +3595,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
       # no lock files is governed by `default`, the one workspace lock.
       governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
-      cwd = resolveCanonicalExecRoot(effectiveCwdKind,
-        effectiveCwdCustomPath, projectRoot),
+      cwd = inlineCwd,
       deps = payload.deps,
       inputs = payload.inputs.mapIt(materialProjectPath(projectRoot, it)),
       outputs = payload.outputs,
@@ -3517,8 +3605,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
       weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
-        argv),
+        keyedArgv),
       actionCachePolicy = actionCachePolicy,
+      relocatable = relocatable,
+      relocationAnchors = relocationAnchors,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
       # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
@@ -5018,7 +5108,12 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 19'u16
+  LoweredGraphCacheVersion = 20'u16
+    # v20: ``BuildAction.relocatable`` (a byte) and ``relocationAnchors`` (a
+    # string list) after ``canonicalWorkKey``. A v19 record decoded
+    # without them would key a relocatable edge relocatably (its weak
+    # fingerprint is cached) but record its inputs by absolute path on the
+    # warm path only.
     # v19: ``BuildAction.canonicalWorkKey``, a string after
     # ``contentKeyedToolCaches``. A v18 record decoded without it would run
     # the edge without its canonical work tree on the warm path only.
@@ -6172,6 +6267,8 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeString(action.widthFlag)
   outp.writeStringSeq(action.contentKeyedToolCaches)
   outp.writeString(action.canonicalWorkKey)
+  outp.add(if action.relocatable: 1'u8 else: 0'u8)
+  outp.writeStringSeq(action.relocationAnchors)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6265,6 +6362,12 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.widthFlag = readString(bytes, pos)
   result.contentKeyedToolCaches = readStringSeq(bytes, pos)
   result.canonicalWorkKey = readString(bytes, pos)
+  let relocatableByte = readByteValue(bytes, pos)
+  if relocatableByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action relocatable sentinel")
+  result.relocatable = relocatableByte == 1'u8
+  result.relocationAnchors = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)

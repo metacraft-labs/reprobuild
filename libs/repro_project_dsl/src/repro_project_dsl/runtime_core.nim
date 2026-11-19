@@ -295,7 +295,10 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 37'u16
+  BuildActionPayloadVersion* = 38'u16
+    ## v38: ``relocatable`` -- one strict sentinel byte appended after
+    ## ``canonicalWorkKey``. v37-and-earlier payloads decode as not
+    ## relocatable, which is what every action declared before it.
     ## v37: ``canonicalWorkKey`` -- the key of the action's canonical work
     ## tree (Hermetic-Builds-And-Path-Independence.md §"Canonical work
     ## trees"), a string appended after ``envPassthrough``. v36-and-earlier
@@ -2244,7 +2247,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   optionalOutputs: openArray[string] = [];
                   sizedBy = "";
                   contentKeyedToolCaches: openArray[string] = [];
-                  canonicalWorkKey = ""):
+                  canonicalWorkKey = "";
+                  relocatable = false):
     BuildActionDef {.dynOrStatic.} =
   ## ``sizedBy``: the width flag of a command that is not a typed call but
   ## runs a parallel tool (``sized_tools.sizedWidthByFlag``). The edge then
@@ -2316,7 +2320,19 @@ proc buildAction*(id: string; call: PublicCliCall;
   # encoding aside from the new sentinel byte the v20 codec adds.
   let recipeRevisionFingerprint = computeRecipeRevisionFingerprint(
     activeProviderProjectRoot())
-  let packageActionEnv = currentPackageActionEnvEntries()
+  var packageActionEnv = currentPackageActionEnvEntries()
+  if relocatable:
+    # ``OUT_MIRROR`` names the package's staging root under the project
+    # root, and a declared variable is keyed by value: it would pin a
+    # relocatable action to the one location it ran in. A relocatable action
+    # computes the same thing anywhere, so it cannot depend on that path,
+    # and it is not handed one (a tool that read it would fail visibly
+    # rather than be served another location's result).
+    var kept: seq[(string, string)] = @[]
+    for entry in packageActionEnv:
+      if entry[0] != "OUT_MIRROR":
+        kept.add(entry)
+    packageActionEnv = kept
   let actionEnv = mergePackageActionEnv(packageActionEnv, env)
   # An action that starts a parallel tool is sized: it asks RunQuota for a
   # width range and names the flag that takes the grant (``sized_tools``).
@@ -2365,7 +2381,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     scratchDirs: @scratchDirs,
     removeBeforeRun: @removeBeforeRun,
     contentKeyedToolCaches: @contentKeyedToolCaches,
-    canonicalWorkKey: canonicalWorkKey)
+    canonicalWorkKey: canonicalWorkKey,
+    relocatable: relocatable)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -4686,6 +4703,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v37: the key of the action's canonical work tree.
   if version >= 37'u16:
     payload.writeString(action.canonicalWorkKey)
+  # v38: the action is relocatable.
+  if version >= 38'u16:
+    payload.writeByte(if action.relocatable: 1'u8 else: 0'u8)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4990,6 +5010,13 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # An older payload declares no canonical work tree: the action runs
     # where it always did.
     result.canonicalWorkKey = ""
+  if version >= 38'u16:
+    let relocatableByte = readByte(bytes, pos)
+    if relocatableByte > 1'u8:
+      raisePayload("invalid build action relocatable sentinel")
+    result.relocatable = relocatableByte == 1'u8
+  else:
+    result.relocatable = false
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

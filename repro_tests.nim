@@ -31537,6 +31537,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let manifestText = sampleManifestText()"),
   TestSpec(
+    source: "tests/integration/t_trycompile_probe_is_served_across_scratch_directories.nim",
+    binary: "build/test-bin/t_trycompile_probe_is_served_across_scratch_directories",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level putEnv"),
+  TestSpec(
     source: "tests/integration/t_tsm_report_transport.nim",
     binary: "build/test-bin/t_tsm_report_transport",
     defines: @[],

@@ -85,7 +85,9 @@ suite "lowered graph cache action round trip":
       cpuPreferredMilli: 16000,
       widthFlag: "--test-threads",
       contentKeyedToolCaches: @["/recipe/zlib/.repro/build/go/cache"],
-      canonicalWorkKey: "node-build-0123456789abcdef")
+      canonicalWorkKey: "node-build-0123456789abcdef",
+      relocatable: true,
+      relocationAnchors: @["/nix", "/recipe/toolchain"])
 
     let decoded = loweredGraphActionRoundTripForTest(@[action])
     check decoded.len == 1
@@ -139,6 +141,11 @@ suite "lowered graph cache action round trip":
     # hosts (Tool-Owned-Caches.md "Trust Boundary").
     check roundTrip.contentKeyedToolCaches == action.contentKeyedToolCaches
     check roundTrip.determinismClass == edHostBound
+    # A warm build that lost them would record a relocatable edge's inputs by
+    # absolute path (`recordedInputNames`) while its cached weak fingerprint
+    # still keys it relocatably.
+    check roundTrip.relocatable
+    check roundTrip.relocationAnchors == action.relocationAnchors
 
     # The declared/passthrough CLASSIFICATION must survive the cache, and
     # this is not a formality. Before it was serialised, a warm build
@@ -215,7 +222,7 @@ suite "lowered graph cache action round trip":
       id: "codec-version-test")
     var encoded = loweredGraphCacheBytesForTest(@[action])
     let versionOffset = loweredGraphCacheVersionOffsetForTest()
-    check encoded[versionOffset] == 19'u8
+    check encoded[versionOffset] == 20'u8
     check encoded[versionOffset + 1] == 0'u8
     # An older version could not carry the newer per-action fields (v5:
     # `envPassthrough`; v6: the dependency-policy event-interest opt-ins;
@@ -229,7 +236,8 @@ suite "lowered graph cache action round trip":
     # expansion flag, whose predecessor stored the expanded argv; v16: the
     # sub-tool list after it; v17: the width range and width flag after
     # that; v18: the content-keyed tool caches after those; v19: the
-    # canonical work key after them). Decoding such a record under
+    # canonical work key after them; v20: the relocatable flag and
+    # anchors after that). Decoding such a record under
     # the current layout would silently return defaults for every action rather
     # than failing, so the rejection below is what makes a field's absence
     # impossible instead of invisible.
@@ -243,7 +251,7 @@ suite "lowered graph cache action round trip":
     # what that value now spells. Poking an ancient version instead would leave
     # the one skew that can silently mis-restore a warm edge's capture unasserted
     # by anything.
-    encoded[versionOffset] = 18'u8
+    encoded[versionOffset] = 19'u8
     var rejected = false
     try:
       discard loweredGraphCacheActionsForTest(encoded)
