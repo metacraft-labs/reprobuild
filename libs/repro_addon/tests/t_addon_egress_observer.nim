@@ -26,6 +26,7 @@
 ##
 ## Falsifying builds: ``egress-state-survives-reload`` and
 ## ``egress-instance-ignores-boot`` (the reload step);
+## ``egress-ignores-counter-reset`` (the two counter-reset cases);
 ## ``egress-observer-not-installed`` -- the observer unit
 ## never loads the table; the unit step goes red.
 ##
@@ -49,6 +50,7 @@ if existsEnv(InnerCheckEnv):
   echo "CHECK present=", c.present, " setFull=", c.setFull,
        " unattributed=", c.unattributed, " fresh=", c.fresh.len,
        " refused=", c.refused.len,
+       (if c.counterReset.len > 0: " reset=" & c.counterReset else: ""),
        (if c.error.len > 0: " error=" & c.error else: "")
   quit(0)
 
@@ -147,6 +149,16 @@ suite "the egress observer's table":
     let outside = run(renderEgressNft(@[]).replace(AgentSliceCgroup, other),
       send & " 192.0.2.9")
     check outside.len == 0
+
+  test "a destination the listing repeats is one destination":
+    # The kernel's dump of a set that grows while it is read repeats
+    # elements: one destination, with the largest count listed.
+    let listed = """{"nftables": [{"set": {"elem": [
+      {"elem": {"val": "192.0.2.7", "counter": {"packets": 2}}},
+      {"elem": {"val": "192.0.2.8", "counter": {"packets": 1}}},
+      {"elem": {"val": "192.0.2.7", "counter": {"packets": 3}}}]}}]}"""
+    check parseRefusedSet(listed) ==
+      @[("192.0.2.7", 3'i64), ("192.0.2.8", 1'i64)]
 
   test "a new or grown destination is fresh once":
     let st = root / "state"
@@ -319,6 +331,176 @@ suite "the egress observer's table":
     checkpoint keyed.join(" | ")
     check keyed.len == 1 and '/' in keyed[0]
 
+  test "refused packets after a reset of the counter are still counted":
+    # Reprobuild-pm issue
+    # 2026-11-18-addon-egress-counter-reset-hides-unattributed-packets-until-the-shortfall-regrows.md:
+    # ``nft reset counter`` zeroes the named counter and keeps the table's
+    # handle and the sets' elements, so the counter falls below what the
+    # sets hold, and packets a full set did not add afterwards were hidden
+    # until they made up that gap. The real table: twenty control datagrams
+    # (every fetch sends one, and their element keeps its count through the
+    # reset too), nine refused packets and a check; the counter reset by
+    # hand and a check; the set filled, and five packets it cannot add. The
+    # check after counts those five, and the one after it five more.
+    check nft.len > 0
+    check ownCgroupLevel2().len > 0
+    writeFile(root / "control.py", "import socket\n" &
+      "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n" &
+      "for _ in range(20):\n" &
+      "    s.sendto(b'c', ('" & EgressControlAddress & "', " &
+        $EgressControlPort & "))\n")
+    let checks = realChecks("reset",
+      "python3 " & quoteShell(root / "control.py") & "; " &
+      flood & " 1 1 9; CHECK; " &
+      quoteShell(nft) & " reset counter inet " & EgressTableName &
+        " refused >/dev/null; CHECK; " &
+      # The set holds the control's element and one destination.
+      flood & " " & $(EgressSetSize - 2) & " 2 1; " & flood & " 5 3 1; " &
+      "CHECK; " & flood & " 5 4 1; CHECK")
+    check checks == @[
+      "CHECK present=true setFull=false unattributed=0 fresh=1 refused=1",
+      # The check that sees the reset says so, and starts over.
+      "CHECK present=true setFull=false unattributed=0 fresh=0 refused=1 " &
+        "reset=the counter of refused packets fell from 29 to 0",
+      "CHECK present=true setFull=true unattributed=5 fresh=" &
+        $(EgressSetSize - 2) & " refused=" & $(EgressSetSize - 1),
+      "CHECK present=true setFull=true unattributed=5 fresh=" &
+        $(EgressSetSize - 2 - EgressDetectionsMax) & " refused=" &
+        $(EgressSetSize - 1)]
+
+  test "a count that went down in place makes the check start over":
+    # The accounting of the case above, and what else can go down. Red
+    # under ``egress-ignores-counter-reset``.
+    let st = root / "state-went-down"
+    var un = -1'i64
+    var reset = "?"
+    var controlWas = -1'i64
+    proc step(refused: seq[RefusedDestination]; counted: int64;
+              table = "t"; control = 0'i64;
+              kernel = -1'i64): seq[RefusedDestination] =
+      freshSince(refused, st, table, counted, addr un,
+                 controlPackets = control, controlBefore = addr controlWas,
+                 kernelCounted = kernel, counterReset = addr reset)
+    # A full set: 12 packets counted, 9 held, 3 reported.
+    discard step(@[("192.0.2.30", 9'i64)], 12)
+    check (un, reset) == (3'i64, "")
+    # The counter reset to zero and two packets since, which the full set
+    # did not add: the reset is named, and the two are counted, since the
+    # counter's new value was all counted after the reset and the set
+    # gained nothing. What no set added before the reset cannot be told.
+    discard step(@[("192.0.2.30", 9'i64)], 2)
+    check un == 2
+    check reset == "the counter of refused packets fell from 12 to 2"
+    # From here on every unattributed packet is counted, one for one, though
+    # the counter is still far below what the set holds.
+    discard step(@[("192.0.2.30", 9'i64)], 7)
+    check (un, reset) == (5'i64, "")
+    discard step(@[("192.0.2.30", 9'i64)], 7)
+    check (un, reset) == (0'i64, "")
+    # A counter that could not be read keeps what the last reading was, so
+    # a reset meanwhile is seen by the next check that reads it.
+    discard step(@[("192.0.2.30", 9'i64)], -1)
+    check reset == ""
+    discard step(@[("192.0.2.30", 9'i64)], 1)
+    check (un, reset) ==
+      (1'i64, "the counter of refused packets fell from 7 to 1")
+    discard step(@[("192.0.2.30", 9'i64)], 2)
+    check (un, reset) == (1'i64, "")
+    # A destination's count lowered in place: it is recorded again by its
+    # new count, and the shortfall that opened (the counter kept its 2) is
+    # not reported as packets.
+    let again = step(@[("192.0.2.30", 4'i64)], 2)
+    check again == @[("192.0.2.30", 4'i64)]
+    check (un, reset) == (0'i64, "the count of 192.0.2.30 fell from 9 to 4")
+    # The control's element reset: its earlier count is zero, so the
+    # control still reads as tripped by what was sent since.
+    discard step(@[("192.0.2.30", 4'i64)], 2, control = 6, kernel = 8)
+    check (un, reset, controlWas) == (0'i64, "", 0'i64)
+    discard step(@[("192.0.2.30", 4'i64)], 7, control = 1, kernel = 8)
+    check (un, controlWas) == (0'i64, 0'i64)
+    check reset == "the control address's count fell from 6 to 1"
+    # A control datagram between the check's reads lowers the counter LESS
+    # the control's element (7, then 6) while the kernel's counter grew
+    # (8, then 9): no reset.
+    discard step(@[("192.0.2.30", 4'i64)], 6, control = 3, kernel = 9)
+    check (un, reset) == (0'i64, "")
+    # The counter reset while the control's element keeps a count above
+    # it: the counter less the element is below zero, which ``counted``
+    # (it stops at zero) does not show. The shortfall follows the kernel's
+    # counter, so the next two packets no set added are counted. (Taken
+    # from ``counted`` they were hidden until the counter passed the
+    # control's count.)
+    discard step(@[("192.0.2.30", 4'i64)], 0, control = 3, kernel = 0)
+    check (un, reset) ==
+      (0'i64, "the counter of refused packets fell from 9 to 0")
+    # (A reset counter that a packet the set DID add has raised again
+    # proves nothing unattributed: 5 counted, and the set gained 5.)
+    discard step(@[("192.0.2.30", 9'i64)], 2, control = 3, kernel = 5)
+    discard step(@[("192.0.2.30", 14'i64)], 2, control = 3, kernel = 5)
+    check (un, reset) == (0'i64, "")
+    discard step(@[("192.0.2.30", 4'i64)], 0, control = 3, kernel = 0)
+    check reset.startsWith("the counter of refused packets fell from 5 to 0")
+    discard step(@[("192.0.2.30", 4'i64)], 0, control = 3, kernel = 2)
+    check (un, reset) == (2'i64, "")
+    # A destination deleted from its set (the sets have no timeout): the
+    # check starts over, and the packets it held are not reported as ones a
+    # full set did not add.
+    discard step(@[("192.0.2.30", 4'i64), ("192.0.2.31", 6'i64)], 5,
+                 control = 3, kernel = 8)
+    check (un, reset) == (0'i64, "")
+    discard step(@[("192.0.2.30", 4'i64)], 5, control = 3, kernel = 8)
+    check (un, reset) ==
+      (0'i64, "the destination 192.0.2.31 (6 packet(s)) left its set")
+    # A count that went down at a check that could not read the counter:
+    # the next check that reads it starts over, and reports nothing for
+    # the gap the reset opened.
+    discard step(@[("192.0.2.30", 1'i64)], -1, control = 3)
+    check reset == "the count of 192.0.2.30 fell from 4 to 1"
+    check "starting-over 1" in readFile(st)
+    discard step(@[("192.0.2.30", 1'i64)], 6, control = 3, kernel = 9)
+    check (un, reset) == (0'i64, "")
+    check "starting-over" notin readFile(st)
+    discard step(@[("192.0.2.30", 1'i64)], 7, control = 3, kernel = 10)
+    check (un, reset) == (1'i64, "")
+    # A reload is a new instance, never a reset: lower counts are expected.
+    discard step(@[("192.0.2.30", 1'i64)], 1, table = "u", kernel = 1)
+    check (un, reset, controlWas) == (0'i64, "", 0'i64)
+    # An instance that could not be read is "-" at every load: lower counts
+    # there may be a reload's, and are not called a reset.
+    discard step(@[("192.0.2.30", 5'i64)], 5, table = "-", kernel = 5)
+    discard step(@[("192.0.2.30", 1'i64)], 1, table = "-", kernel = 1)
+    check reset == ""
+    # A state written before the counter was kept as the kernel gave it
+    # kept the counter less the control's element, which was never above
+    # the counter. A counter that grew past it is no reset ...
+    let before = EgressStateHeader & "\ntable u\ncheck 9\ncontrol 4\n" &
+      "192.0.2.30 1\ncounter refused 50\nunattributed 49\n"
+    writeFile(st, before)
+    discard step(@[("192.0.2.30", 1'i64)], 51, table = "u", control = 4,
+                 kernel = 55)
+    check (un, reset) == (1'i64, "")
+    # ... and one below it has fallen: a host whose counter was reset
+    # before the upgrade starts over at its first check, and counts the
+    # three packets no set added since.
+    writeFile(st, before)
+    discard step(@[("192.0.2.30", 1'i64)], 0, table = "u", control = 4,
+                 kernel = 3)
+    check (un, reset) ==
+      (3'i64, "the counter of refused packets fell from 50 to 3")
+    discard step(@[("192.0.2.30", 1'i64)], 0, table = "u", control = 4,
+                 kernel = 2)
+    check reset == "the counter of refused packets fell from 3 to 2"
+    # It is printed by the check, and is no detection of its own (an open
+    # owner decision: reprobuild-pm issue
+    # 2026-11-19-addon-egress-counter-reset-is-not-a-detection.md).
+    writeFile(root / "evidence.conf", "sink = 127.0.0.1:1\n")
+    let site = EvidenceSite(stateDir: root / "sr", dir: root / "evr",
+      outbox: root / "evr" / "outbox", confPath: root / "evidence.conf",
+      attestationKey: root / "none", host: "h", journal: false)
+    recordEgressCheck(EgressCheck(present: true, counterReset: reset), site,
+                      30_000)
+    check toSeq(walkFiles(site.dir / "*.json")).len == 0
+
   test "the control datagram between the check's reads is no egress-set-full":
     # Mock: a stand-in ``nft`` answering from a file. The race is between
     # the check's separate reads of the kernel's counters and a packet sent
@@ -346,6 +528,7 @@ suite "the egress observer's table":
       "if [ -e " & quoteShell(reload) & " ]; then\n" &
       "  read r < " & quoteShell(reload) & "\n" &
       "  if [ $n -ge $r ]; then h=4; v=$((n - r + 1)); fi\nfi\n" &
+      "if [ -e " & quoteShell(dir / "churn") & " ]; then h=$n; fi\n" &
       "case \"$*\" in\n" &
       "  'list tables') echo 'table " & EgressTableFamily & " " &
         EgressTableName & "' ;;\n" &
@@ -372,6 +555,9 @@ suite "the egress observer's table":
       check not c.setFull
       check c.unattributed == 0
       check c.fresh.len == 0
+      # Nor does a healthy table's counter, read amid datagrams, ever read
+      # as one that went down.
+      check c.counterReset == ""
     # The table reloaded between the check's reads of the counter and of
     # the sets: the old instance's counter (large) against the new
     # instance's sets (near empty) would read as unattributed packets. The
@@ -384,5 +570,21 @@ suite "the egress observer's table":
     check r.error.len == 0
     check r.unattributed == 0
     check r.counted >= 0
+    check r.counterReset == ""
+    # A reload at every attempt (a new handle at every read): the check
+    # gives up on the counter, and keys what it read to no instance, since
+    # its sets may be an earlier instance's. Keyed to the newest one, the
+    # next check read that instance's lower counts as a change in place and
+    # reported none of its unattributed packets.
+    writeFile(dir / "churn", "")
+    let g = checkEgress(fake, st)
+    check g.error.len == 0
+    check g.counted == -1
+    check "\ntable -\n" in readFile(st)
+    removeFile(dir / "churn")
+    let h = checkEgress(fake, st)
+    check h.error.len == 0
+    check h.counterReset == ""
+    check "\ntable -\n" notin readFile(st)
 
 removeDir(root)
