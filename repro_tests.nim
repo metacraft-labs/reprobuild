@@ -33575,7 +33575,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: for fixture in Fixtures:"),
+    singleReason: "suite-scope statement runs at every start-up: for (fixture, expected) in Fixtures:"),
   TestSpec(
     source: "tests/unit/t_cs_m6_no_hand_written_argv_parsing.nim",
     binary: "build/test-bin/t_cs_m6_no_hand_written_argv_parsing",
