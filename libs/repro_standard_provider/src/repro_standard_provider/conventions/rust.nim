@@ -101,6 +101,11 @@
 ##     drops to the crude fallback when an external dep is detected.
 ##     A future milestone can graduate this to per-dep ``--extern``
 ##     threading.
+##   * ``harness = false`` beyond a plain ``[[test]]`` table — a
+##     ``[[test]]`` with ``harness = false`` is compiled without ``--test``;
+##     a setting ``scanHarnessSettings`` cannot attribute to one (inline
+##     tables, ``[lib]``/``[[bin]]``) routes the workspace to the crude
+##     fallback.
 ##   * cdylib / dylib as a ``--extern`` source for downstream Rust
 ##     crates. The M23 surface treats them like the C ABI export they
 ##     are; an additional convention extension would have to thread the
@@ -191,6 +196,24 @@ type
     sourcePath: string
       ## Absolute path to the target's crate root (``main.rs``/``lib.rs``
       ## or whatever ``Cargo.toml`` declares).
+    noHarness: bool
+      ## An integration test declared with ``harness = false``
+      ## (``scanHarnessSettings``): its test build is compiled with
+      ## ``--cfg test`` in place of ``--test``, as Cargo does, so its own
+      ## ``main`` runs.
+    unitTests: bool
+      ## The target's ``test`` key as ``cargo metadata`` reports it (the
+      ## target table's ``test`` setting, ``true`` unless the manifest
+      ## turns it off; Cargo reference, "Cargo Targets", "The ``test``
+      ## field":
+      ## https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-test-field).
+      ## For a library or a binary it says whether ``cargo test`` builds
+      ## and runs the target's own ``#[cfg(test)]`` code as a test crate;
+      ## Mode A then emits that unit under the ``test`` target
+      ## (``emitForUnitTestTarget``). For an integration test it says
+      ## whether ``cargo test`` builds and runs it at all (``[[test]] test
+      ## = false`` leaves it to ``cargo test --test <name>``), and Pass C
+      ## emits none for ``false``.
 
   RustPackage = object
     ## One workspace member (or, in the single-crate case, the entire
@@ -227,6 +250,13 @@ type
       ## ``cargo metadata`` is non-empty) or an optional dependency.
       ## Mode A does no feature resolution, so such a package sends the
       ## whole workspace to Mode B (Rust.md §"Recognition" item 6).
+    harnessUnattributed: bool
+      ## True when the package's ``Cargo.toml`` may set ``harness = false``
+      ## where ``scanHarnessSettings`` cannot tell on which ``[[test]]``
+      ## (``HarnessSettings.unattributed``). Mode A would build that
+      ## target with ``rustc --test``, which replaces its ``main`` with
+      ## libtest's runner, so this sends the whole workspace to Mode B
+      ## (Rust.md §"Recognition" item 6).
     crateEnv: seq[(string, string)]
       ## The package-level variables Cargo sets for every crate of this
       ## package (``CARGO_PKG_*``, ``CARGO_MANIFEST_DIR``,
@@ -257,6 +287,10 @@ type
       ## features enabled on one package depend on what every package
       ## that depends on it asks for, so the trigger is workspace-wide
       ## (Rust.md §"Features, lints and the crate environment").
+    harnessUnattributed: bool
+      ## True when any package may set ``harness = false`` where Mode A
+      ## cannot tell on which target (``RustPackage.harnessUnattributed``).
+      ## Routes the entire project through Mode B, like ``hasFeatures``.
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -364,6 +398,208 @@ proc cargoTomlHasPackageTable(cargoTomlPath: string): bool =
     if stripped == "[package]" or stripped.startsWith("[package."):
       return true
   false
+
+type
+  HarnessSettings = object
+    ## What ``scanHarnessSettings`` read from one ``Cargo.toml``.
+    harnessOffTests: seq[string]
+      ## Names of the ``[[test]]`` targets set ``harness = false`` in the
+      ## plain form the scan attributes (see ``scanHarnessSettings``).
+    unattributed: bool
+      ## The manifest may set ``harness = false`` somewhere the scan
+      ## cannot tie to a ``[[test]]``, ``[[bench]]`` or ``[[example]]``
+      ## table and its name, or could not be read. Sends the workspace to
+      ## Mode B.
+
+proc looseHarnessFalseCount(text: string): int =
+  ## How many times ``text`` may set ``harness = false``: every
+  ## ``harness`` key, bare, quoted or the last part of a dotted key,
+  ## followed by ``=`` and ``false``, wherever it stands. Errs towards
+  ## counting (text inside a string value counts too).
+  const keyChars = {'A'..'Z', 'a'..'z', '0'..'9', '_', '-'}
+  const blank = {' ', '\t', '\r', '\n'}
+  var start = 0
+  while true:
+    let at = text.find("harness", start)
+    if at < 0:
+      return
+    start = at + len("harness")
+    if at > 0 and text[at - 1] in keyChars:
+      continue
+    var i = start
+    if i < text.len and text[i] in {'"', '\''}:
+      # A quoted key: the quote before it must be the same one.
+      if at == 0 or text[at - 1] != text[i]:
+        continue
+      inc i
+    elif i < text.len and text[i] in keyChars:
+      continue
+    while i < text.len and text[i] in blank:
+      inc i
+    if i >= text.len or text[i] != '=':
+      continue
+    inc i
+    while i < text.len and text[i] in blank:
+      inc i
+    if text.continuesWith("false", i) and
+        (i + len("false") >= text.len or
+          text[i + len("false")] notin keyChars):
+      inc result
+
+proc hasEscapedQuotedKey(line: string): bool =
+  ## True when ``line`` holds a basic-string (``"..."``) key with an
+  ## escape sequence in it, such as ``"harness" = false``: a key the
+  ## loose count cannot read.
+  var i = 0
+  while i < line.len:
+    if line[i] == '"':
+      var j = i + 1
+      var escaped = false
+      while j < line.len and line[j] != '"':
+        if line[j] == '\\':
+          escaped = true
+          inc j
+        inc j
+      if j >= line.len:
+        return false
+      var k = j + 1
+      while k < line.len and line[k] in {' ', '\t'}:
+        inc k
+      if escaped and k < line.len and line[k] == '=':
+        return true
+      i = j + 1
+    else:
+      inc i
+  false
+
+proc plainValue(line, key: string): tuple[found: bool; value: string] =
+  ## ``key = <value>`` written plainly on one line: a bare key, then the
+  ## value, then optionally a comment. ``value`` is the text after ``=``
+  ## with a trailing comment removed only when the value is not a string.
+  let s = line.strip()
+  if not s.startsWith(key):
+    return
+  let rest = s[key.len .. ^1].strip(trailing = false)
+  if not rest.startsWith("="):
+    return
+  var value = rest[1 .. ^1].strip()
+  if not value.startsWith("\""):
+    let hash = value.find('#')
+    if hash >= 0:
+      value = value[0 ..< hash].strip()
+  (true, value)
+
+proc plainStringName(value: string): string =
+  ## The name in ``"<name>"`` (optionally followed by a comment); empty
+  ## when ``value`` is anything else, such as a string with an escape.
+  if not value.startsWith("\""):
+    return ""
+  let close = value.find('"', 1)
+  if close < 0:
+    return ""
+  let name = value[1 ..< close]
+  let tail = value[close + 1 .. ^1].strip()
+  if '\\' in name or (tail.len > 0 and not tail.startsWith("#")):
+    return ""
+  name
+
+proc scanHarnessSettings(cargoTomlPath: string): HarnessSettings =
+  ## Which targets ``Cargo.toml`` builds without libtest's harness.
+  ## ``cargo metadata`` does not report ``harness`` (a target's keys are
+  ## ``crate_types``, ``doc``, ``doctest``, ``edition``, ``kind``,
+  ## ``name``, ``src_path`` and ``test``), so this reads the manifest.
+  ## With ``harness = false`` Cargo compiles the target's test build
+  ## without ``--test`` and the target's own ``main`` is the test (Cargo
+  ## reference, "Cargo Targets", "The ``harness`` field":
+  ## https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-harness-field).
+  ##
+  ## Deliberately not a TOML parser (see the module header). Two passes
+  ## over the manifest, whole-line comments removed:
+  ##
+  ##   * ``looseHarnessFalseCount`` counts every place that may set
+  ##     ``harness = false``, in any form;
+  ##   * a line-wise pass attributes the plain form: a ``harness = false``
+  ##     line inside a ``[[test]]``, ``[[bench]]`` or ``[[example]]``
+  ##     table. A ``[[test]]`` table's name comes from its plain
+  ##     ``name = "<name>"`` line; ``[[bench]]`` and ``[[example]]`` need
+  ##     none, since Mode A builds neither.
+  ##
+  ## When the loose count exceeds what the second pass attributed (an
+  ## inline table, a dotted or quoted key, ``[lib]`` or ``[[bin]]``,
+  ## whose test crates Mode A compiles with ``--test`` only
+  ## (``emitForUnitTestTarget``), a ``[[test]]`` with no plain name), or a quoted key holds an escape, or the manifest holds a
+  ## multi-line string (``"""`` or ``'''``, which the line-wise pass cannot
+  ## see into), or the file cannot be read, ``unattributed`` is set and
+  ## the workspace goes to Mode B, which cargo builds as declared.
+  if not fileExists(extendedPath(cargoTomlPath)):
+    return
+  var raw: string
+  try:
+    raw = readFile(extendedPath(cargoTomlPath))
+  except CatchableError:
+    result.unattributed = true
+    return
+  var text = ""
+  var lines: seq[string] = @[]
+  for line in raw.splitLines():
+    if line.strip().startsWith("#"):
+      continue
+    text.add(line)
+    text.add('\n')
+    lines.add(line)
+    if hasEscapedQuotedKey(line):
+      result.unattributed = true
+  let loose = looseHarnessFalseCount(text)
+  if loose == 0:
+    return
+  if "\"\"\"" in text or "\'\'\'" in text:
+    # A multi-line string can hold lines that look like table headers or
+    # ``name =`` lines; the line-wise pass cannot tell them apart, and
+    # would credit a setting to the wrong table.
+    result.unattributed = true
+    return
+  var attributed = 0
+  var section = ""
+  var sectionName = ""
+  var sectionHarnessOff = 0
+  proc flush(settings: var HarnessSettings; attributed: var int;
+             section, sectionName: string; sectionHarnessOff: int) =
+    if sectionHarnessOff == 0:
+      return
+    case section
+    of "[[test]]":
+      if sectionName.len > 0:
+        settings.harnessOffTests.add(sectionName)
+        attributed += sectionHarnessOff
+    of "[[bench]]", "[[example]]":
+      attributed += sectionHarnessOff
+    else:
+      discard
+  for line in lines:
+    let s = line.strip()
+    if s.startsWith("["):
+      flush(result, attributed, section, sectionName, sectionHarnessOff)
+      let close = s.find(']')
+      section =
+        if s.startsWith("[["):
+          let c2 = s.find("]]")
+          if c2 < 0: s
+          else: "[[" & s[2 ..< c2].strip() & "]]"
+        elif close < 0: s
+        else: "[" & s[1 ..< close].strip() & "]"
+      sectionName = ""
+      sectionHarnessOff = 0
+      continue
+    let h = plainValue(line, "harness")
+    if h.found and h.value == "false":
+      inc sectionHarnessOff
+      continue
+    let n = plainValue(line, "name")
+    if n.found:
+      sectionName = plainStringName(n.value)
+  flush(result, attributed, section, sectionName, sectionHarnessOff)
+  if loose > attributed:
+    result.unattributed = true
 
 proc rustcExecutable(): string =
   findExe("rustc")
@@ -638,10 +874,9 @@ proc extractTargets(pkgNode: JsonNode;
         hasDylib = true
       of "test":
         # M22: integration tests under ``tests/<name>.rs``. Cargo emits
-        # one ``targets[]`` entry per file. We DO NOT pick up ``--test``
-        # built unit-tests inside ``src/lib.rs`` (those still need
-        # ``cargo test`` proper) — only the ``tests/`` directory's
-        # standalone integration-test crates.
+        # one ``targets[]`` entry per file. A library's or a binary's own
+        # ``#[cfg(test)]`` tests are no target of this kind: they are the
+        # ``test`` key of the lib/bin entry (``RustTarget.unitTests``).
         isTest = true
       else:
         isOther = true
@@ -667,12 +902,19 @@ proc extractTargets(pkgNode: JsonNode;
       elif hasStaticlib: rtkStaticlib
       elif hasDylib: rtkDylib
       else: rtkIntegrationTest
+    # Cargo reports ``test`` for every target; a metadata without it is
+    # read as Cargo's default, ``true``.
+    let unitTests =
+      if "test" in target and target["test"].kind == JBool:
+        target["test"].getBool()
+      else: true
     result.add(RustTarget(
       crateName: normaliseCrateName(rawName),
       rawName: rawName,
       edition: targetEdition(target, packageEdition),
       kind: kind,
-      sourcePath: srcPath))
+      sourcePath: srcPath,
+      unitTests: unitTests))
     if isOther:
       # Future-proofing: don't fail loud, but a custom kind on the same
       # target as bin/lib is unusual enough that the comment surfaces in
@@ -814,7 +1056,7 @@ proc loadProject(projectRoot: string;
     let manifestDir =
       if manifestPath.len > 0: manifestPath.parentDir
       else: projectRoot
-    let targets = extractTargets(pkgNode, packageEdition)
+    var targets = extractTargets(pkgNode, packageEdition)
     var workspaceDeps: seq[string] = @[]
     var hasExternalDeps = false
     if "dependencies" in pkgNode and pkgNode["dependencies"].kind == JArray:
@@ -870,6 +1112,15 @@ proc loadProject(projectRoot: string;
     let hasFeatures = packageDeclaresFeatures(pkgNode)
     if hasFeatures:
       result.hasFeatures = true
+    let harness = scanHarnessSettings(
+      if manifestPath.len > 0: manifestPath
+      else: projectRoot / "Cargo.toml")
+    let harnessUnattributed = harness.unattributed
+    if harnessUnattributed:
+      result.harnessUnattributed = true
+    for t in targets.mitems:
+      if t.kind == rtkIntegrationTest and t.rawName in harness.harnessOffTests:
+        t.noHarness = true
     let crateEnv = packageCrateEnv(pkgNode,
       if manifestPath.len > 0: manifestPath
       else: projectRoot / "Cargo.toml")
@@ -886,6 +1137,7 @@ proc loadProject(projectRoot: string;
         workspaceDeps: workspaceDeps,
         hasExternalDeps: hasExternalDeps,
         hasFeatures: hasFeatures,
+        harnessUnattributed: harnessUnattributed,
         crateEnv: crateEnv))
       continue
     result.packages.add(RustPackage(
@@ -896,6 +1148,7 @@ proc loadProject(projectRoot: string;
       workspaceDeps: workspaceDeps,
       hasExternalDeps: hasExternalDeps,
       hasFeatures: hasFeatures,
+      harnessUnattributed: harnessUnattributed,
       crateEnv: crateEnv))
   # Workspace detection: prefer ``workspace_members.len > 1`` (the
   # robust signal cargo metadata emits) but fall back to the textual
@@ -1047,6 +1300,16 @@ proc testRunStampPath(projectRoot, packageCrateName, testName: string):
     string =
   testsScratchDir(projectRoot, packageCrateName) /
     (testName & ".stamp")
+
+proc unitTestsScratchDir(projectRoot, packageCrateName,
+                         kindToken: string): string =
+  ## Where the test crate of a library's or a binary's own ``#[cfg(test)]``
+  ## code goes: ``<scratch>/<package>/tests/unit-<kind>``. Its crate name is
+  ## the target's, which an integration test ``tests/<package>.rs`` and a
+  ## binary sharing the library's name can also have, so each kind gets its
+  ## own directory. ``unit-<kind>`` holds a ``-``, which no crate name
+  ## does, so it cannot be an integration test's binary or stamp.
+  testsScratchDir(projectRoot, packageCrateName) / ("unit-" & kindToken)
 
 proc collectRustSourcesUnderManifest(manifestDir: string): seq[string] =
   ## Every ``.rs`` under ``<manifestDir>/src``. These become the declared
@@ -1392,11 +1655,15 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
   ## test (``tests/<name>.rs``).
   ##
   ##   Compile action:
-  ##     ``rustc --test --crate-name <name> --edition <e>
+  ##     ``rustc [--test] --crate-name <name> --edition <e>
   ##       --crate-type bin --emit=link --out-dir <scratch>/tests
   ##       -L dependency=<scratch>/<crate>/deps
   ##       --extern <libCrate>=<rlib>
   ##       <test.rs>``
+  ##
+  ##     A ``harness = false`` target (``RustTarget.noHarness``) gets
+  ##     ``--cfg test`` in place of ``--test``: its own ``main`` is the
+  ##     test, as under Cargo.
   ##
   ##     produces ``<scratch>/tests/<name>[.exe]``. The ``-L
   ##     dependency=`` path is the library's metadata dir so any
@@ -1430,16 +1697,23 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
   let binaryOutput =
     testBinaryPath(projectRoot, packageCrateName, test.crateName)
 
-  var argv = @[
-    rustcExe,
-    "--test",
+  var argv = @[rustcExe]
+  if test.noHarness:
+    # ``harness = false``: the target is a plain program whose ``main`` is
+    # the test. ``--test`` would replace that ``main`` with libtest's
+    # runner (Rust.md §"Test commands"). Cargo passes ``--cfg test``
+    # instead, so ``#[cfg(test)]`` code is still compiled in.
+    argv.add(@["--cfg", "test"])
+  else:
+    argv.add("--test")
+  argv.add(@[
     "--crate-name", test.crateName,
     "--edition", test.edition,
     "--crate-type", crateTypeArg(test.kind),
     "--emit=link",
     "--out-dir", testsDir,
     "-L", "dependency=" & depsDir,
-  ]
+  ])
   if libActions.crateName.len > 0 and libActions.rlibPath.len > 0:
     argv.add("--extern")
     argv.add(libActions.crateName & "=" & libActions.rlibPath)
@@ -1506,9 +1780,11 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     runInputs.add(actions.linkAction.outputs[0])
     if actions.linkAction.id notin runDeps:
       runDeps.add(actions.linkAction.id)
+  # Cargo runs a test with its package's directory as the working
+  # directory, so a test that opens a path relative to it finds the file.
   let runAction = buildAction(
     id = rustActionId("test-run", pkg, test),
-    call = inlineExecCall(runArgv, projectRoot),
+    call = inlineExecCall(runArgv, pkg.manifestDir),
     deps = runDeps,
     inputs = runInputs,
     outputs = @[],
@@ -1526,6 +1802,113 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     title = "rust-test:" & test.crateName,
     entries = @[test.crateName],
     actionId = rustActionId("test-stamp", pkg, test),
+    deps = @[runAction.id],
+    commandStatsId = "rust.rustc-test-stamp")
+
+  TestTargetActions(
+    compileAction: compileAction,
+    runAction: runAction,
+    stampAction: stampAction)
+
+proc emitForUnitTestTarget(projectRoot, rustcExe: string;
+                           target: RustTarget;
+                           pkg: RustPackage;
+                           packageCrateName: string;
+                           linkExterns: seq[string];
+                           externDepIds: seq[string];
+                           inputRlibs: seq[string];
+                           cargoExe: string): TestTargetActions =
+  ## The test crate of a library's or a binary's own ``#[cfg(test)]`` code
+  ## (Rust.md §"Test commands"): the target's crate root compiled again
+  ## with ``--test``, then run and stamped like an integration test.
+  ## ``cargo test`` builds this unit for every lib and bin target whose
+  ## ``test`` key is ``true``, alongside the target's ordinary build.
+  ##
+  ##   ``rustc --test --crate-name <crate> --edition <e> --crate-type bin
+  ##     --emit=link --out-dir <scratch>/tests/unit-<kind>
+  ##     -C metadata=<hash> <the target's -L / --extern flags> <root>.rs``
+  ##
+  ## ``linkExterns`` / ``externDepIds`` / ``inputRlibs`` are the ones the
+  ## target's own link action gets: the test crate is the same source
+  ## with the same dependencies, and for a binary that includes its own
+  ## package's library, as Cargo passes it. The crate environment is the
+  ## target's (Cargo sets ``CARGO_BIN_NAME`` for a binary's test crate as
+  ## well, and neither ``CARGO_BIN_EXE_*`` nor ``CARGO_TARGET_TMPDIR``,
+  ## which are for integration tests and benchmarks only).
+  ##
+  ## A target with ``harness = false`` should be built without
+  ## ``--test``; ``cargo metadata`` does not report ``harness``, so that
+  ## case is not told apart here (reprobuild-pm issue
+  ## ``2026-11-17-rust-mode-a-compiles-harness-false-integration-tests-with-the-test-harness.md``).
+  let kindToken = targetKindToken(target.kind)
+  let outDir = unitTestsScratchDir(projectRoot, packageCrateName, kindToken)
+  createDir(extendedPath(outDir))
+  let binaryOutput =
+    when defined(windows): outDir / (target.crateName & ".exe")
+    else: outDir / target.crateName
+  # A test crate's own ``-C metadata``, so its symbols differ from the
+  # target's ordinary build and from a library it is linked against that
+  # has the same crate name (a binary's test crate gets
+  # ``--extern <its own lib>``, as Cargo passes it).
+  let stableHash = stableHashHex("test:" & kindToken & ":" &
+    target.crateName & "@" & target.edition)
+  var argv = @[
+    rustcExe,
+    "--test",
+    "--crate-name", target.crateName,
+    "--edition", target.edition,
+    "--crate-type", "bin",
+    "--emit=link",
+    "--out-dir", outDir,
+    "-C", "metadata=" & stableHash,
+  ]
+  for flag in linkExterns:
+    argv.add(flag)
+  argv.add(target.sourcePath)
+
+  let compileEnv = targetCrateEnv(pkg, target, cargoExe)
+  let compileInputs = block:
+    var inputs = collectRustSourcesUnderManifest(pkg.manifestDir)
+    if target.sourcePath notin inputs:
+      inputs.add(target.sourcePath)
+    inputs.add(pkg.manifestPath)
+    for rlib in inputRlibs:
+      inputs.add(rlib)
+    inputs
+  let compileAction = buildAction(
+    id = rustActionId("test-compile", pkg, target),
+    call = inlineExecCall(argv, projectRoot),
+    deps = externDepIds,
+    inputs = compileInputs,
+    outputs = @[binaryOutput],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "rust.rustc-test-compile",
+    env = compileEnv)
+
+  var runEnv: seq[(string, string)] = @[]
+  for (k, v) in compileEnv:
+    if k notin ["CARGO_CRATE_NAME", "CARGO_BIN_NAME",
+                "CARGO_PRIMARY_PACKAGE"]:
+      runEnv.add((k, v))
+  # Run from the package's directory, as Cargo does.
+  let runAction = buildAction(
+    id = rustActionId("test-run", pkg, target),
+    call = inlineExecCall(@[binaryOutput], pkg.manifestDir),
+    deps = @[compileAction.id],
+    inputs = @[binaryOutput],
+    outputs = @[],
+    pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(),
+    commandStatsId = "rust.rustc-test-run",
+    env = runEnv)
+
+  let stampPath = outDir / (target.crateName & ".stamp")
+  let stampAction = fs.stamp(
+    output = stampPath,
+    title = "rust-test:" & kindToken & ":" & target.crateName,
+    entries = @[target.crateName],
+    actionId = rustActionId("test-stamp", pkg, target),
     deps = @[runAction.id],
     commandStatsId = "rust.rustc-test-stamp")
 
@@ -1809,6 +2192,15 @@ proc rustEmitFragment(projectRoot: string;
     # cargo resolves them.
     if project.hasFeatures:
       return rustCrudeFallback(projectRoot, request)
+    # Rust.md §"Recognition" item 6 and §"Test commands": a target with
+    # ``harness = false`` is tested by running its own ``main``. Mode A
+    # builds a ``[[test]]`` it can name that way without ``--test``
+    # (``RustTarget.noHarness``); a setting it cannot attribute would leave
+    # some target compiled with ``--test``, whose libtest runner reports
+    # "running 0 tests" and passes whatever the body does, so cargo builds
+    # that workspace (Mode B).
+    if project.harnessUnattributed:
+      return rustCrudeFallback(projectRoot, request)
     # Verify every declared source path actually exists; cargo metadata
     # can sometimes report stale entries if the user edits Cargo.toml
     # without saving the source file.
@@ -1843,6 +2235,10 @@ proc rustEmitFragment(projectRoot: string;
         ## ``--extern`` sources — cdylib/staticlib/dylib still land here
         ## for diagnostic completeness but their ``rlibPath`` is empty.
       var allActions: seq[BuildActionDef] = @[]
+      var testActions: seq[BuildActionDef] = @[]
+        ## Every action of the non-default ``test`` target: the test
+        ## crates of libraries and binaries (Passes A and B) and of
+        ## integration tests (Pass C).
       var binActionsByPackage =
         initTable[string, seq[(RustTarget, TargetActions)]]()
         ## package name → its binaries' actions, for the
@@ -1934,6 +2330,22 @@ proc rustEmitFragment(projectRoot: string;
           allActions.add(actions.linkAction)
           discard target(libraryTargetName(pkg, t),
             @[actions.metadataAction, actions.linkAction])
+          if t.unitTests:
+            # The library's own ``#[cfg(test)]`` tests: the same crate
+            # root with the same dependencies as its link action.
+            let unit = emitForUnitTestTarget(
+              projectRoot = projectRoot,
+              rustcExe = rustcExe,
+              target = t,
+              pkg = pkg,
+              packageCrateName = normaliseCrateName(pkg.packageName),
+              linkExterns = linkExterns,
+              externDepIds = externDepIds,
+              inputRlibs = inputRlibs,
+              cargoExe = cargoExe)
+            testActions.add(unit.compileAction)
+            testActions.add(unit.runAction)
+            testActions.add(unit.stampAction)
           # Record only the FIRST lib-flavoured target of each package
           # — that's the one a workspace consumer's ``--extern
           # <crateName>=<path>`` flag will point at when it depends on
@@ -2024,6 +2436,22 @@ proc rustEmitFragment(projectRoot: string;
           allActions.add(actions.linkAction)
           discard target(t.crateName, @[actions.linkAction])
           binActionsByPackage.mgetOrPut(pkg.packageName, @[]).add((t, actions))
+          if t.unitTests:
+            # The binary's own ``#[cfg(test)]`` tests, with the binary's
+            # dependencies (its own package's library included).
+            let unit = emitForUnitTestTarget(
+              projectRoot = projectRoot,
+              rustcExe = rustcExe,
+              target = t,
+              pkg = pkg,
+              packageCrateName = normaliseCrateName(pkg.packageName),
+              linkExterns = linkExterns,
+              externDepIds = externDepIds,
+              inputRlibs = inputRlibs,
+              cargoExe = cargoExe)
+            testActions.add(unit.compileAction)
+            testActions.add(unit.runAction)
+            testActions.add(unit.stampAction)
       if allActions.len == 0:
         raise newException(ValueError,
           "rust convention: no bin or lib targets found across " &
@@ -2033,12 +2461,13 @@ proc rustEmitFragment(projectRoot: string;
       # Pass C (M22): integration tests under ``tests/<name>.rs``. Per
       # cargo metadata's ``kind=["test"]`` filter; each becomes a
       # ``rustc --test`` compile + a run action that fires the harness.
+      # The test crates of libraries' and binaries' own ``#[cfg(test)]``
+      # code were added to ``testActions`` in Passes A and B.
       # The test target is non-default so ``repro build .#default``
       # stays bin/lib-only; ``repro build .#test`` opts in. Tests need
       # the package's primary lib target as the ``--extern`` source —
       # without it the test couldn't ``use <crate>::...``; we skip
       # tests for packages without a lib target.
-      var testActions: seq[BuildActionDef] = @[]
       for pkg in project.packages:
         var hasTests = false
         for t in pkg.targets:
@@ -2058,7 +2487,8 @@ proc rustEmitFragment(projectRoot: string;
           normaliseCrateName(pkg.packageName)
         let libActions = libActionsByPackage[pkg.packageName]
         for t in pkg.targets:
-          if t.kind != rtkIntegrationTest:
+          if t.kind != rtkIntegrationTest or not t.unitTests:
+            # ``test = false``: ``cargo test`` neither builds nor runs it.
             continue
           let pair = emitForTestTarget(
             projectRoot = projectRoot,

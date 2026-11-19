@@ -44,6 +44,33 @@
 ##    fixture, not Mode A, is wrong), then requires Mode A to emit no rustc
 ##    action and one cargo delegation (Mode B) action instead.
 ##
+## 3. **Test targets with ``harness = false``** (reprobuild-pm
+##    issues/2026-11-17-rust-mode-a-compiles-harness-false-integration-tests-with-the-test-harness.md).
+##    Such a target is a plain program whose own ``main`` is the test; cargo
+##    compiles it without ``--test`` (Cargo reference, "Cargo Targets", "The
+##    ``harness`` field":
+##    https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-harness-field).
+##    With ``--test`` rustc links libtest's runner instead: the binary
+##    prints ``running 0 tests`` and exits 0 whatever the body would do.
+##    ``cargo metadata`` does not report ``harness``. The fixture has two
+##    such ``[[test]]`` targets, ``custom`` (its ``main`` prints a line only
+##    it prints) and ``failing`` (its ``main`` panics), an ordinary test
+##    ``normal`` with a ``#[test]`` function, and a ``[[bench]]`` with
+##    ``harness = false`` (Mode A builds no bench). The test checks with
+##    ``cargo test --no-run -v`` which units cargo builds with ``--test``,
+##    requires each Mode A test compile to match (``--test``, or cargo's
+##    ``--cfg test`` in its place), then runs Mode A's rustc actions and
+##    test-run actions with the real ``rustc``: ``custom`` must print its
+##    line and, from a ``cfg!(test)`` branch, ``cfg test on``, and pass;
+##    ``failing`` must fail; ``normal`` must run its ``#[test]``.
+##
+##    A setting Mode A's manifest scan cannot tie to a named ``[[test]]``
+##    (here the inline-table form ``test = [{ ..., harness = false }]`` in a
+##    workspace member, a quoted key spelled with an escape, or a
+##    multi-line string that holds a line like a table header) sends the
+##    workspace to cargo (Mode B), as Rust.md §"Recognition" item 6 says.
+##    ``harness = false`` that is only a comment changes nothing.
+##
 ## No mocks: ``cargo metadata`` and the production emitter
 ## (``rustConvention().emitFragment``) run unmodified, and the cargo and
 ## rustc used are whichever are on ``PATH``. When either is missing the case
@@ -184,7 +211,14 @@ type
     byId: Table[string, BuildActionDef]
     actionIds: seq[string]   ## every action id, in fragment order
     nodeIds: seq[string]     ## every graph node id, in fragment order
-    rustcIds: seq[string]    ## the rustc actions' ids, sorted
+    rustcIds: seq[string]
+      ## the rustc actions' ids, sorted, without the test crates of the
+      ## ``test`` target (``rustc-test-compile-*``, compiled with
+      ## ``--test`` or, for ``harness = false``, ``--cfg test``):
+      ## ``cargo build`` builds none
+    allRustcIds: seq[string]
+      ## every rustc action's id, sorted, test crates included: what
+      ## ``cargo test`` builds
 
 proc modeAFragment(root: string): ModeAFragment =
   let conv = rust_convention.rustConvention()
@@ -201,8 +235,11 @@ proc modeAFragment(root: string): ModeAFragment =
     let argv = inlineArgvOf(action)
     if argv.len > 0 and argv[0].extractFilename.startsWith("rustc") and
         flagValue(argv, "--crate-name").len > 0:
-      result.rustcIds.add(action.id)
+      result.allRustcIds.add(action.id)
+      if not action.id.startsWith("rustc-test-compile-"):
+        result.rustcIds.add(action.id)
   result.rustcIds.sort()
+  result.allRustcIds.sort()
 
 proc duplicates(values: openArray[string]): seq[string] =
   var seen = initHashSet[string]()
@@ -266,6 +303,94 @@ proc writeOutsidePathDepFixture(parent: string) =
     "publish = false\n")
   writeFile(parent / "outside" / "src" / "lib.rs",
     "pub fn y() -> u32 { 9 }\n")
+
+proc writeNoHarnessFixture(root: string; manifestTail: string;
+                           manifestHead = "") =
+  ## A package ``noharness`` with a library and ``tests/custom.rs``, whose
+  ## ``main`` prints a line only it prints. ``manifestTail`` (after the
+  ## ``[package]`` table) or ``manifestHead`` (top-level keys, before it)
+  ## declares, or does not declare, the test target.
+  createDir(root / "src")
+  createDir(root / "tests")
+  writeFile(root / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package noharness:\n" &
+    "  uses:\n" &
+    "    \"rust >=1.80\"\n")
+  writeFile(root / "Cargo.toml",
+    manifestHead &
+    "[package]\n" &
+    "name = \"noharness\"\n" &
+    "version = \"0.1.0\"\n" &
+    "edition = \"2021\"\n" &
+    "publish = false\n" &
+    "\n" & manifestTail)
+  writeFile(root / "src" / "lib.rs",
+    "pub fn answer() -> u32 { 42 }\n")
+  writeFile(root / "tests" / "custom.rs",
+    "fn main() {\n" &
+    "    assert_eq!(noharness::answer(), 42);\n" &
+    "    println!(\"custom main ran\");\n" &
+    "    if cfg!(test) {\n" &
+    "        println!(\"cfg test on\");\n" &
+    "    }\n" &
+    "}\n")
+
+proc cargoTestOutput(root: string): string =
+  ## ``cargo test --test custom`` in ``root``; also writes ``Cargo.lock``,
+  ## which recognition needs.
+  let (output, exitCode) = runCapture(findExe("cargo"),
+    ["test", "--offline", "--test", "custom", "--target-dir",
+     root / "cargo-target"], root)
+  checkpoint "cargo test output:\n" & output
+  doAssert exitCode == 0, "cargo test failed with exit " & $exitCode
+  output
+
+proc cargoTestUnits(root: string): Table[string, seq[string]] =
+  ## ``cargo test --no-run -v``: the rustc argv of each unit cargo builds
+  ## for its tests, by crate name, from its ``Running `rustc ...``` lines.
+  ## Only the integration tests' crate names are unique here, which is all
+  ## the caller looks up. A target directory of its own, so that no unit is
+  ## already fresh and every one prints its argv.
+  let (output, exitCode) = runCapture(findExe("cargo"),
+    ["test", "--no-run", "-v", "--offline", "--target-dir",
+     root / "cargo-units-target"], root)
+  checkpoint "cargo test --no-run -v output:\n" & output
+  doAssert exitCode == 0, "cargo test --no-run failed with exit " & $exitCode
+  for line in output.splitLines():
+    let start = line.find("Running `")
+    if start < 0:
+      continue
+    let body = line[start + len("Running `") .. ^1].strip(chars = {'`', ' '})
+    let argv = body.splitWhitespace()
+    if argv.len == 0 or not argv[0].extractFilename.startsWith("rustc"):
+      continue
+    let name = flagValue(argv, "--crate-name")
+    if name.len > 0:
+      result[name] = argv
+
+template checkDelegatedToCargo(root: string) =
+  ## Mode A emits no rustc action and one cargo delegation for ``root``.
+  ## A template, not a proc: ``check`` marks the enclosing test failed only
+  ## when it expands inside that test's body.
+  let modeA = modeAFragment(root)
+  checkpoint "Mode A actions: " & $modeA.actionIds
+  for id in modeA.rustcIds:
+    checkpoint id & " argv: " & inlineArgvOf(modeA.byId[id]).join(" ")
+  check modeA.rustcIds.len == 0
+  var delegations: seq[string] = @[]
+  for id in modeA.actionIds:
+    if id.startsWith("crude-build-"):
+      delegations.add(id)
+  check delegations.len == 1
+
+proc testActionId(modeA: ModeAFragment; phase, target: string): string =
+  ## The id of ``target``'s ``test-<phase>`` action; empty when absent.
+  for id in modeA.actionIds:
+    if id.startsWith("rustc-test-" & phase & "-") and
+        id.endsWith(".test." & target):
+      return id
+  ""
 
 suite "rust convention: library and binary targets, path dependencies":
   test "a library and a binary sharing a crate name build like cargo's":
@@ -411,3 +536,225 @@ suite "rust convention: library and binary targets, path dependencies":
               arg.extractFilename == "cargo.exe":
             namesCargo = true
         check namesCargo
+
+  test "a [[test]] with harness = false is built without --test and its main runs":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let root = createTempDir("test_rust_convention_no_harness_", "")
+      defer:
+        removeDir(root)
+      isolateFromAmbientCargo(root)
+      writeNoHarnessFixture(root,
+        "[[test]]\n" &
+        "name = \"custom\"\n" &
+        "path = \"tests/custom.rs\"\n" &
+        "harness = false   # its main is the test\n" &
+        "\n" &
+        "[[test]]\n" &
+        "harness = false\n" &
+        "name = \"failing\"\n" &
+        "\n" &
+        "[[bench]]\n" &
+        "name = \"b\"\n" &
+        "harness = false\n")
+      writeFile(root / "tests" / "failing.rs",
+        "fn main() {\n" &
+        "    assert_eq!(noharness::answer(), 41, \"failing main ran\");\n" &
+        "}\n")
+      writeFile(root / "tests" / "normal.rs",
+        "#[test]\n" &
+        "fn normal_test_ran() {\n" &
+        "    assert_eq!(noharness::answer(), 42);\n" &
+        "}\n")
+      createDir(root / "benches")
+      writeFile(root / "benches" / "b.rs", "fn main() {}\n")
+
+      # Cargo runs custom's own main, and builds the two harness = false
+      # tests without --test and the ordinary one with it. If it did not,
+      # the fixture would not tell a harness build from a plain one.
+      let cargoOutput = cargoTestOutput(root)
+      require "custom main ran" in cargoOutput
+      require "cfg test on" in cargoOutput
+      let units = cargoTestUnits(root)
+      require "custom" in units
+      require "failing" in units
+      require "normal" in units
+      require "--test" notin units["custom"]
+      require "--test" notin units["failing"]
+      require "--test" in units["normal"]
+
+      let modeA = modeAFragment(root)
+      checkpoint "Mode A actions: " & $modeA.actionIds
+      for id in modeA.actionIds:
+        check not id.startsWith("crude-build-")
+      for target in ["custom", "failing", "normal"]:
+        let compileId = testActionId(modeA, "compile", target)
+        checkpoint target & " compile action: " & compileId
+        require compileId.len > 0
+        let argv = inlineArgvOf(modeA.byId[compileId])
+        checkpoint compileId & " argv: " & argv.join(" ")
+        check ("--test" in argv) == ("--test" in units[target])
+        # Cargo passes ``--cfg test`` to a harness = false build.
+        check flagValue(argv, "--cfg") == flagValue(units[target], "--cfg")
+
+      # Build every rustc action with the real rustc, in dependency order.
+      var pending = modeA.allRustcIds
+      var ran: seq[string] = @[]
+      while pending.len > 0:
+        var next: seq[string] = @[]
+        for id in pending:
+          var ready = true
+          for dep in modeA.byId[id].deps:
+            if dep in modeA.allRustcIds and dep notin ran:
+              ready = false
+          if ready:
+            let argv = inlineArgvOf(modeA.byId[id])
+            let (output, exitCode) = runCapture(argv[0], argv[1 .. ^1], root,
+              modeA.byId[id].env)
+            checkpoint id & " rustc output:\n" & output
+            check exitCode == 0
+            ran.add(id)
+          else:
+            next.add(id)
+        require next.len < pending.len
+        pending = next
+
+      # Run each test as Mode A's test-run action does.
+      proc runTest(modeA: ModeAFragment; root, target: string):
+          tuple[output: string; exitCode: int] =
+        let runId = testActionId(modeA, "run", target)
+        doAssert runId.len > 0, "no test-run action for " & target
+        let argv = inlineArgvOf(modeA.byId[runId])
+        result = runCapture(argv[0], argv[1 .. ^1], root, modeA.byId[runId].env)
+        checkpoint runId & " output (exit " & $result.exitCode & "):\n" &
+          result.output
+      let custom = runTest(modeA, root, "custom")
+      check custom.exitCode == 0
+      check "custom main ran" in custom.output
+      check "cfg test on" in custom.output
+      let failing = runTest(modeA, root, "failing")
+      check failing.exitCode != 0
+      check "failing main ran" in failing.output
+      let normal = runTest(modeA, root, "normal")
+      check normal.exitCode == 0
+      check "normal_test_ran ... ok" in normal.output
+
+
+  test "harness = false Mode A cannot attribute (an inline table) sends the workspace to cargo":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let parent = createTempDir("test_rust_convention_no_harness_ws_", "")
+      defer:
+        removeDir(parent)
+      isolateFromAmbientCargo(parent)
+      let member = parent / "member"
+      writeNoHarnessFixture(member, "",
+        manifestHead =
+          "test = [{ name = \"custom\", path = \"tests/custom.rs\", " &
+            "harness = false }]\n")
+      writeFile(parent / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package noharnessWs:\n" &
+        "  uses:\n" &
+        "    \"rust >=1.80\"\n")
+      writeFile(parent / "Cargo.toml",
+        "[workspace]\n" &
+        "resolver = \"2\"\n" &
+        "members = [\"member\"]\n")
+      require "custom main ran" in cargoTestOutput(parent)
+      checkDelegatedToCargo(parent)
+
+  test "harness = false on a [lib] or a [[bin]] sends the workspace to cargo":
+    # Mode A compiles a library's and a binary's test crate with
+    # ``--test`` and nothing else. On a ``harness = false`` target that
+    # would replace the target's own ``main`` with libtest's runner, which
+    # finds no ``#[test]``, prints "running 0 tests" and passes whatever
+    # the target does (Rust.md §"Test commands"). The scan does not
+    # attribute such a setting, so the workspace must go to Mode B.
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      for (label, manifestTail) in [
+          ("lib", "[lib]\nharness = false\n"),
+          ("bin", "[[bin]]\nname = \"tool\"\npath = \"src/main.rs\"\n" &
+            "harness = false\n")]:
+        checkpoint "harness = false on the " & label
+        let root = createTempDir("test_rust_convention_harness_" & label &
+          "_", "")
+        defer:
+          removeDir(root)
+        isolateFromAmbientCargo(root)
+        writeNoHarnessFixture(root, manifestTail)
+        writeFile(root / "src" / "main.rs",
+          "fn main() { assert_eq!(noharness::answer(), 42); }\n")
+        # Cargo accepts the manifest (and writes the ``Cargo.lock``
+        # recognition needs); ``custom`` keeps the harness here.
+        discard cargoTestOutput(root)
+        checkDelegatedToCargo(root)
+
+  test "a quoted harness key spelled with an escape sends the workspace to cargo":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let root = createTempDir("test_rust_convention_harness_escape_", "")
+      defer:
+        removeDir(root)
+      isolateFromAmbientCargo(root)
+      # ``"harness"`` is the key ``harness`` to a TOML reader; the
+      # scan cannot read it, so it must not keep the package in Mode A.
+      writeNoHarnessFixture(root,
+        "[[test]]\n" &
+        "name = \"custom\"\n" &
+        "\"harn\\u0065ss\" = false\n")
+      require "custom main ran" in cargoTestOutput(root)
+      checkDelegatedToCargo(root)
+
+  test "a multi-line string in the manifest sends the workspace to cargo":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let root = createTempDir("test_rust_convention_harness_mlstring_", "")
+      defer:
+        removeDir(root)
+      isolateFromAmbientCargo(root)
+      # A line that looks like ``[[bench]]`` inside a multi-line string: a
+      # line-wise reader would credit custom's setting to a bench and keep
+      # ``--test`` on custom.
+      writeNoHarnessFixture(root,
+        "[[test]]\n" &
+        "name = \"custom\"\n" &
+        "note = '''\n" &
+        "[[bench]]\n" &
+        "'''\n" &
+        "harness = false\n")
+      require "custom main ran" in cargoTestOutput(root)
+      checkDelegatedToCargo(root)
+
+  test "harness = false only in a comment leaves the package in Mode A":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let root = createTempDir("test_rust_convention_harness_comment_", "")
+      defer:
+        removeDir(root)
+      isolateFromAmbientCargo(root)
+      writeNoHarnessFixture(root,
+        "# harness = false\n" &
+        "[[test]]\n" &
+        "name = \"custom\"\n" &
+        "path = \"tests/custom.rs\"\n")
+      # Under libtest's harness the file's main does not run: cargo prints
+      # ``running 0 tests``. Mode A's ``--test`` build matches cargo here.
+      let output = cargoTestOutput(root)
+      require "custom main ran" notin output
+      require "running 0 tests" in output
+      let modeA = modeAFragment(root)
+      checkpoint "Mode A actions: " & $modeA.actionIds
+      check modeA.rustcIds.len > 0
+      for id in modeA.actionIds:
+        check not id.startsWith("crude-build-")
+      let compileId = testActionId(modeA, "compile", "custom")
+      require compileId.len > 0
+      check "--test" in inlineArgvOf(modeA.byId[compileId])
