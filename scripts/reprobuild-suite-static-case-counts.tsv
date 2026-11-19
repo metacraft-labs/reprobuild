@@ -201,6 +201,7 @@ libs/repro_build_engine/tests/t_evidence_is_evaluated_once_per_action.nim	nim	3
 libs/repro_build_engine/tests/t_fingerprint_audit_every_action_has_lock_identity.nim	nim	6
 libs/repro_build_engine/tests/t_force_rebuild_is_honored_by_engine_api.nim	nim	3
 libs/repro_build_engine/tests/t_hermetic_action_env.nim	nim	3
+libs/repro_build_engine/tests/t_host_bound_entry_is_served_only_on_its_host.nim	nim	10
 libs/repro_build_engine/tests/t_ignored_root_survives_a_symlinked_prefix.nim	nim	2
 libs/repro_build_engine/tests/t_inherited_environment_cache.nim	nim	6
 libs/repro_build_engine/tests/t_inline_site_tables.nim	nim	5

@@ -2329,6 +2329,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: putEnv(LeakVar, \"from-the-invoking-shell\")"),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_host_bound_entry_is_served_only_on_its_host.nim",
+    binary: "build/test-bin/t_host_bound_entry_is_served_only_on_its_host",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for navigator in [true, false]:"),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_ignored_root_survives_a_symlinked_prefix.nim",
     binary: "build/test-bin/t_ignored_root_survives_a_symlinked_prefix",
     defines: @[],
