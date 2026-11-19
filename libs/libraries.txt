@@ -45,3 +45,4 @@ repro_cargo_edge
 repro_nimble_reader
 repro_nimble_index
 repro_nimble_generator
+repro_nimble_fetch

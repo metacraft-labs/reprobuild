@@ -1815,7 +1815,7 @@ const
       primary: @["develop", "add", "why", "lock", "workspace"],
       secondary: @["remove", "sync", "pull", "branch", "switch", "push",
         "check", "hooks", "locking", "flake", "gateway", "bundle",
-        "catalog"]),
+        "catalog", "nimble"]),
     ReproCommandGroup(title: "Machines & Diagnostics",
       primary: @["home", "system", "infra", "health"],
       secondary: @["anywhere", "deploy-agent", "hardware", "disk", "attest",
@@ -2534,6 +2534,16 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         pos modules is seq[string], required = false,
           help = "Provider modules, relative to the root (default: every " &
             "packages/{interfaces,vendor,source}/<name>/repro.nim)"
+    subcmd "nimble",
+        help = "Work with the Nimble packages a lock pins":
+      subcmd "verify",
+          help = "Re-hash the store entries of a lock's nimble: packages " &
+            "and compare them with the lock, offline":
+        flag lock is string,
+          help = "The lock (default: repro.lock in the current directory)"
+        flag store is string,
+          help = "The source store (default: the user's, under the user " &
+            "cache directory)"
     subcmd "deps", help = "Refresh and check scanner-inferred dependencies":
       subcmd "refresh",
           help = "Scan the workspace and rewrite repro.scanned-deps.nim":
@@ -3137,7 +3147,8 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Exit 0 when the blob is present, 1 when it is not":
         pos digest is string, help = "The blob's 64-character hex digest"
     subcmd "cache",
-        help = "Look up, substitute and publish binary-cache entries. The " &
+        help = "Look up, substitute and publish binary-cache entries, and " &
+          "explain build actions' cache keys (`key`, `explain`). The " &
           "cache is `$REPRO_BINARY_CACHE_URL` (default " &
           "`http://localhost:7878`); `substitute` trusts only the caches " &
           "`$REPRO_CACHES_CONFIG` (else /etc/repro/caches.conf and " &
@@ -3167,6 +3178,29 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       subcmd "gen-key", help = "Create the producer key pair when it is " &
           "missing, and print its public key":
         `cacheIdentity`
+      # The portable action key, and why two of them differ: the engine's own
+      # evidence for a planned action, and for a recorded execution when this
+      # host has one. Not part of the binary-cache client (`cache_cli`): these
+      # lower the project's graph, as `repro graph` does.
+      subcmd "key", help = "Print a build action's portable cache key and " &
+          "the evidence it is computed from":
+        flag format is string,
+          help = "The output format: `text` (the default) or `json`"
+        boolFlag json is bool, help = "Shortcut for `--format=json`"
+        `graphInspection`
+        pos selector is string,
+          help = "The action, as `<project>#<action-id>`"
+      subcmd "explain", help = "Explain why two build actions' cache keys " &
+          "differ, or say that they agree":
+        flag format is string,
+          help = "The output format: `text` (the default) or `json`"
+        boolFlag json is bool, help = "Shortcut for `--format=json`"
+        `graphInspection`
+        pos first is string,
+          help = "An action, as `<project>#<action-id>`, or a file " &
+            "`repro cache key --json` wrote"
+        pos second is string,
+          help = "The action or key file to compare it with"
       # `repro cache help`: the same as `repro cache --help`.
       subcmd "help", visibility = hidden:
         pos topic is seq[string], required = false

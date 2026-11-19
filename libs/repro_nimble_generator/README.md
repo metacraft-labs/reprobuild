@@ -40,3 +40,10 @@ not provide yet.
 
 Tests: `libs/repro_nimble_generator/tests/` (local origins served over real
 HTTPS by `git http-backend`; nothing reaches the internet).
+
+Publishing: when a generation writes `published-index/`, it first writes
+every canonical archive of the generation to each directory `[[mirror]]` the
+source set declares, then refuses to write anything unless every source
+object the new index names is on every required mirror at its recorded size
+(`repro_nimble_fetch/mirror`). An index with no required mirror is not
+published. Mirrors are not part of the source set's identity.

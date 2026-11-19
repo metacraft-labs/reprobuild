@@ -100,6 +100,8 @@ COVERED_COMMANDS = [
     "cache publish",
     "cache derive-key",
     "cache gen-key",
+    "cache key",
+    "cache explain",
     "bundle",
     "bundle create",
     "bundle publish",
@@ -391,6 +393,8 @@ COVERED_COMMANDS = [
     "catalog publish",
     "catalog generate",
     "catalog verify",
+    "nimble",
+    "nimble verify",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}

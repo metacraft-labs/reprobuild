@@ -6,7 +6,7 @@
 ## generation policy. It is read as a CLOSED subset of TOML, the discipline
 ## `repro-catalogs.toml` is read with: UTF-8, comments, blank lines, the
 ## top-level `schema`, the tables `[[registry]]`, `[[root]]`, `[[extra]]`,
-## `[[override]]` and `[policy]`, and `key = value` lines whose value is a
+## `[[override]]`, `[[mirror]]` and `[policy]`, and `key = value` lines whose value is a
 ## basic "string", a non-negative decimal integer, or a one-line array of
 ## basic strings. An unknown key, a duplicate key, a table outside that list
 ## or any other construct is a refusal that names its line; every refusal is
@@ -18,7 +18,8 @@
 ## The source set's identity (`sourceSetIdentity`) is a hash of its parsed,
 ## canonically ordered content, not of its bytes: the order of the tables,
 ## comments and spacing are not inputs of a generation, so two operators
-## whose files differ only in those generate the same root.
+## whose files differ only in those generate the same root. The mirrors are
+## not in it either: they say where the sources are kept, not what they are.
 
 import std/[algorithm, sets, strutils]
 from std/unicode import validateUtf8
@@ -67,6 +68,20 @@ type
     hasRequires*: bool
     line*: int
 
+  MirrorRole* = enum
+    mrRequired = "required"
+      ## publishing is complete only when every source object is on it
+    mrOptional = "optional"
+      ## served to clients, never awaited by a publish
+
+  MirrorDecl* = object
+    ## `[[mirror]]`: a durable copy of the index's source objects
+    ## (NPC-AREQ13). A location, not part of what the index says, so it is
+    ## not in the source set's identity.
+    url*: string  ## `https://...`, or an absolute directory path
+    role*: MirrorRole
+    line*: int
+
   SourcePolicy* = object
     unlisted*: UnlistedPolicy
     probe*: ProbePolicy
@@ -79,6 +94,7 @@ type
     extras*: seq[ExtraSource]        ## sorted by name key
     overrides*: seq[OverrideRecord]  ## sorted by (name key, tag)
     policy*: SourcePolicy
+    mirrors*: seq[MirrorDecl]        ## in declaration order: the search order
 
   SourceSetError* = object of ValueError
     ## The source set cannot be read; the message names every cause.
@@ -126,7 +142,8 @@ proc parseSourceSet*(text, path: string): SourceSet =
         return true
     false
 
-  type Section = enum sTop, sRegistry, sRoot, sExtra, sOverride, sPolicy
+  type Section = enum sTop, sRegistry, sRoot, sExtra, sOverride, sPolicy,
+    sMirror
   var section = sTop
   var tables: seq[(Section, int, seq[(string, Value, int)])]
   var top: seq[(string, Value, int)]
@@ -183,6 +200,7 @@ proc parseSourceSet*(text, path: string): SourceSet =
       of "[[root]]": section = sRoot
       of "[[extra]]": section = sExtra
       of "[[override]]": section = sOverride
+      of "[[mirror]]": section = sMirror
       of "[policy]":
         if sawPolicy:
           fail(lineNo, "duplicate table [policy]")
@@ -191,7 +209,7 @@ proc parseSourceSet*(text, path: string): SourceSet =
       else:
         fail(lineNo, "unsupported table header " & header.escape() &
           " (read: [[registry]], [[root]], [[extra]], [[override]], " &
-          "[policy])")
+          "[[mirror]], [policy])")
         section = sTop
         continue
       tables.add((section, lineNo, newSeq[(string, Value, int)]()))
@@ -342,6 +360,7 @@ proc parseSourceSet*(text, path: string): SourceSet =
   var roots: seq[(string, int)]
   var extras: seq[ExtraSource]
   var overrides: seq[OverrideRecord]
+  var mirrors: seq[MirrorDecl]
   var policy = SourcePolicy(unlisted: upRefuse, probe: ppOff)
 
   for (sec, at, raw) in tables:
@@ -372,6 +391,26 @@ proc parseSourceSet*(text, path: string): SourceSet =
       elif nameDefect(p).len > 0:
         fail(at, "root package " & p.escape() & " " & nameDefect(p))
       else: roots.add((p, at))
+    of sMirror:
+      let e = keysOf(raw, ["url", "role"], "[[mirror]]")
+      var hasUrl, hasRole: bool
+      let url = str(e, "url", hasUrl, "[[mirror]]")
+      let role = str(e, "role", hasRole, "[[mirror]]")
+      var m = MirrorDecl(url: url, role: mrRequired, line: at)
+      if not hasUrl: fail(at, "[[mirror]] is missing `url`")
+      elif nameDefect(url).len > 0:
+        fail(at, "mirror url " & url.escape() & " " & nameDefect(url))
+      elif not (url.startsWith("https://") or url.startsWith("/")):
+        fail(at, "mirror url " & url.escape() & " is neither an https:// " &
+          "URL nor an absolute directory path")
+      if hasRole:
+        case role
+        of "required": m.role = mrRequired
+        of "optional": m.role = mrOptional
+        else:
+          fail(at, "mirror role " & role.escape() & " is neither " &
+            "\"required\" nor \"optional\"")
+      mirrors.add m
     of sExtra:
       let e = keysOf(raw, ["name", "origin"], "[[extra]]")
       var hasName, hasOrigin: bool
@@ -474,6 +513,11 @@ proc parseSourceSet*(text, path: string): SourceSet =
       fail(o.line, "a second [[override]] of " & o.package.escape() &
         (if o.tag.len > 0: " at tag " & o.tag.escape() else: ""))
     seenOverrides.incl k
+  var seenMirrors = initHashSet[string]()
+  for m in mirrors:
+    if m.url in seenMirrors:
+      fail(m.line, "mirror " & m.url.escape() & " is listed twice")
+    seenMirrors.incl m.url
   var seenRemotes = initHashSet[string]()
   for r in registries:
     if r.remote in seenRemotes:
@@ -499,10 +543,13 @@ proc parseSourceSet*(text, path: string): SourceSet =
   result.extras = extras
   result.overrides = overrides
   result.policy = policy
+  result.mirrors = mirrors
 
 proc canonicalText*(s: SourceSet): string =
   ## The source set's content in one canonical spelling: what its identity
-  ## hashes. Line numbers are not part of it.
+  ## hashes. Line numbers are not part of it, and neither are the mirrors:
+  ## where copies of the sources are kept does not change what the index
+  ## says (NPC-AREQ19: a location is not identity).
   var lines = @["schema " & SourceSetSchemaV1]
   for r in s.registries:
     lines.add "registry " & r.remote.escape() & " " & r.commit

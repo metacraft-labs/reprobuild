@@ -65,10 +65,12 @@ cooldown_days = 0
 track_head = ["beta", "alpha"]
 """ % [extraUrl])
 
-proc hostB(regUrl, regCommit, extraUrl: string): string =
-  # The same content: tables in another order, other comments and spacing.
+proc hostB(regUrl, regCommit, extraUrl, mirror: string): string =
+  # The same content: tables in another order, other comments and spacing,
+  # and its own mirror: where the sources are kept is not identity.
   "# host B's copy of the source set\n" &
     "schema = \"reprobuild.nimble-source-set.v1\"\n\n" &
+    "[[mirror]]\nurl = \"" & mirror & "\"\n\n" &
     "[policy]\ntrack_head = [\"alpha\",\"beta\"]   # sorted otherwise\n" &
     "cooldown_days = 0\n\n" &
     "[[extra]]\norigin = \"" & extraUrl & "\"\nname = \"epsilon\"\n\n" &
@@ -126,7 +128,7 @@ suite "NPC-M4: two hosts generate the same root":
         lang: "de_DE.UTF-8", cwd: hostRootB / "elsewhere" / "cwd",
         noise: @[("NPC_HOST", "b"), ("SOURCE_DATE_EPOCH", "1"),
                  ("GIT_DIR", hostRootB / "not-a-repo")])) do ():
-      let ss = parseSourceSet(hostB(regUrl, regCommit, extraUrl), "b.toml")
+      let ss = parseSourceSet(hostB(regUrl, regCommit, extraUrl, hostRootB / "mirror"), "b.toml")
       b = generate(f.genConfig(ss, generatedAt, hostRootB / "state",
         outputDir = hostRootB / "published-index"))
 
@@ -155,7 +157,7 @@ suite "NPC-M4: two hosts generate the same root":
     # And `repro catalog verify` agrees: a third run from host A's published
     # index and the same inputs reproduces the root.
     let v = verifyIndex(hostRootA / "published-index",
-      parseSourceSet(hostB(regUrl, regCommit, extraUrl), "b.toml"), "",
+      parseSourceSet(hostB(regUrl, regCommit, extraUrl, hostRootB / "mirror"), "b.toml"), "",
       hostRootC / "verify-state", f.genConfig(SourceSet(), 0, ""))
     check v.verified
     check v.differences.len == 0

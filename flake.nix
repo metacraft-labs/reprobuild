@@ -16,10 +16,11 @@
     git-hooks.follows = "nixos-modules/git-hooks-nix";
     # `bundlers` is the official NixOS bundler collection (the same set
     # `nix bundle --bundler github:NixOS/bundlers#toArx` reaches for). We
-    # only consume its `toArx` bundler (nix-community/nix-bundle under the
-    # hood) to package the full `reprobuild` store closure into ONE
-    # self-extracting, relocatable executable (see `packages.repro-portable`
-    # below). Follow our nixpkgs so the bundler's arx/nix-user-chroot helper
+    # consume only the nix-community/nix-bundle source it locks
+    # (`bundlers.inputs.nix-bundle`), whose arx and nix-user-chroot pieces
+    # package the full `reprobuild` store closure into ONE self-extracting,
+    # relocatable executable (see `packages.repro-portable` below and
+    # nix/repro-portable/package.nix). Follow our nixpkgs so those helper
     # tools share the fleet's package set rather than pulling a second one.
     bundlers = {
       url = "github:NixOS/bundlers";
@@ -2155,22 +2156,27 @@
           #    load). A dlopen-by-baked-abs-path solver cannot be statically
           #    linked, and clingo/openssl/blake3/sqlite would all have to be
           #    static too. So a true static binary is infeasible here.
-          #  * The `toArx` bundler embeds the whole closure and, at run time,
-          #    uses `nix-user-chroot` to expose the extracted store at the
-          #    real `/nix/store` inside a user namespace. That makes every
-          #    baked `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen
-          #    path resolve WITHOUT a real `/nix/store` on the host. It
-          #    requires unprivileged user namespaces (default on the target
-          #    Debian image).
+          #  * The bundle embeds the whole closure and, at run time, uses
+          #    `nix-user-chroot` to expose the extracted store at the real
+          #    `/nix/store` inside a user namespace. That makes every baked
+          #    `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen path
+          #    resolve WITHOUT a real `/nix/store` on the host. It requires
+          #    unprivileged user namespaces (default on the target Debian
+          #    image).
           #
-          # This is the same machinery as `nix bundle --bundler
-          # github:NixOS/bundlers#toArx .#reprobuild`, wired as a first-class
-          # package output so callers can just `nix build .#repro-portable`.
-          # The bundler keys off `meta.mainProgram` ("repro"), so the produced
-          # executable launches the single `repro` image from the extracted
-          # closure. It ADDS to — and does not
-          # disturb — `packages.default`/`packages.reprobuild` or `just build`.
-          reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
+          # This is the machinery behind `nix bundle --bundler
+          # github:NixOS/bundlers#toArx .#reprobuild`, but NOT the stock
+          # bundler: that one's nix-user-chroot hid /bin (so every `/bin/sh`
+          # spawn failed), started repro in `/` instead of the caller's
+          # directory, and emptied PATH. nix/repro-portable/package.nix
+          # assembles the same arx + nix-user-chroot pieces with those fixed;
+          # `checks.repro-portable-host-root` proves it against a host root
+          # without /nix. It ADDS to — and does not disturb —
+          # `packages.default`/`packages.reprobuild` or `just build`.
+          reproPortable = pkgs.callPackage ./nix/repro-portable/package.nix {
+            inherit reprobuild;
+            nix-bundle-src = bundlers.inputs.nix-bundle;
+          };
 
           # The language toolchains the Mode 2/3 convention tests drive --
           # `libs/repro_standard_provider/tests/test_<lang>_*_convention` and
@@ -2655,6 +2661,18 @@
             packaged-runquota-runtime-wrapper = pkgs.callPackage ./nix/tests-runquota-runtime-wrapper.nix {
               inherit reprobuild runquotaTools;
             };
+            # The portable bundle, run on a host-shaped root with NO /nix
+            # (merged-/usr, busybox + static git, as on a Debian runner image):
+            # repro must spawn `/bin/sh`, start in the caller's directory, and
+            # carry a real `hooks ensure` + `git checkout` round trip. The
+            # stock nix-user-chroot is the negative control and must fail all
+            # four. Linux only, like the bundle. It builds the full ~800 MB
+            # archive; run it alone with
+            # `nix build .#checks.x86_64-linux.repro-portable-host-root`.
+            ${if pkgs.stdenv.hostPlatform.isLinux then "repro-portable-host-root" else null} =
+              pkgs.callPackage ./nix/tests/repro-portable-host-root.nix {
+                inherit reproPortable;
+              };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''

@@ -42,6 +42,8 @@ import repro_nimble_index
 import repro_nimble_reader except nameKey
 import git_tool
 
+import repro_nimble_fetch/mirror
+
 import ./assemble
 import ./edge_objects
 import ./egress
@@ -88,6 +90,12 @@ type
     gitBin*: string ## "" resolves git from `PATH`
     shardBits*: int ## < 0: the previous root's, else the default
     observer*: NetworkObserver
+    mirrors*: seq[Mirror]
+      ## where the generation's source objects are published; empty: the
+      ## source set's `[[mirror]]` tables. Read only when ``outputDir`` is set
+    mirrorAccess*: Option[EgressPolicy]
+      ## how HTTPS mirrors are reached (resolver, trust anchors, limits);
+      ## none: the host's defaults
 
   Execution* = object
     family*: EdgeFamily
@@ -537,6 +545,62 @@ proc loadPrevious(run: Run) =
   if run.cfg.shardBits < 0:
     run.shardBits = int(idx.root.shardBits)
 
+proc publishSources(run: Run; built: BuiltIndex) =
+  ## Publishing (NPC-AREQ13, threat model G12): write this generation's
+  ## canonical archives to every directory mirror, then refuse unless EVERY
+  ## source object the new index names -- the records carried from earlier
+  ## generations included -- is on EVERY required mirror at its recorded
+  ## size. Runs before the index directory is written, so an incomplete
+  ## revision is never written at all.
+  let mirrors =
+    if run.cfg.mirrors.len > 0: run.cfg.mirrors
+    else: mirrorsOf(run.cfg.sourceSet.mirrors)
+  var anyRequired = false
+  for m in mirrors:
+    if m.required: anyRequired = true
+  if not anyRequired:
+    fail("the index declares no required mirror: an index repository " &
+      "keeps a durable copy of every source it names (NPC-AREQ13), so a " &
+      "generation is published only with at least one [[mirror]] in " &
+      SourceSetFileName)
+  let access =
+    if run.cfg.mirrorAccess.isSome: run.cfg.mirrorAccess.get
+    else: defaultPolicy()
+  var keys: seq[string]
+  for k in run.sourcePath.keys: keys.add k
+  keys.sort()
+  for k in keys:
+    let path = run.sourcePath[k]
+    let src = decodeSource(readFile(path))
+    if src.state != anOk: continue
+    let archive = readFile(path & ".tar")
+    for m in mirrors:
+      if m.kind == mkDirectory:
+        m.putObject(sourceObjectPath(src.facts.treeDigest), archive)
+  var objects: seq[SourceObjectRef]
+  var seen = initHashSet[string]()
+  for (id, bytes) in built.objects:
+    if id == built.rootId or id == built.root.nameMap.id or
+        id == built.root.events.id:
+      continue
+    let shard = decodeShard(bytes)
+    for p in shard.packages:
+      for v in p.versions:
+        let t = $v.tree
+        if t in seen: continue
+        seen.incl t
+        objects.add SourceObjectRef(tree: t, size: int64(v.size),
+          label: p.name & " " & v.version.tag & " (" & v.commit & ")")
+  let missing = missingFromMirrors(mirrors, objects, access)
+  if missing.len > 0:
+    var lines: seq[string]
+    for x in missing:
+      lines.add x.mirror & ": " & x.obj.label & " tree " & x.obj.tree &
+        ": " & x.detail
+    fail("the generation is not published: " & $missing.len & " source " &
+      "object(s) are not on every required mirror (NPC-AREQ13):\n  " &
+      lines.join("\n  "))
+
 proc unlistedName(url, subdir: string): string =
   var u = url.toLowerAscii()
   let sep = u.find("://")
@@ -964,6 +1028,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
   result.built = BuiltIndex(rootId: indexObjectId(rootBytes),
     root: decodeRoot(rootBytes), rootBytes: rootBytes, objects: objects)
   if config.outputDir.len > 0:
+    run.publishSources(result.built)
     writeIndexDir(result.built, config.outputDir)
   result.executed = run.executed
   result.refusals = run.refusals

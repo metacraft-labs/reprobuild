@@ -559,6 +559,10 @@ for libName in [
   # reader, the origin egress policy, the fetch (`netFetch`) and pure index
   # edges, origin events and `repro catalog verify`.
   "repro_nimble_generator",
+  # Nimble package catalog NPC-M5: the source plane's client -- mirrors, the
+  # lockfile-keyed closure index, the `nimble.fetch` (`netFetch`) edges, the
+  # confined archive extractor and the local source store.
+  "repro_nimble_fetch",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import

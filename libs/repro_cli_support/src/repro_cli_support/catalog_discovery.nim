@@ -226,9 +226,38 @@ proc gitObjectId*(kind, content: string): string =
   ## The SHA-1 object id of a git object of type ``kind`` with ``content``.
   toLowerAscii($secureHash(kind & " " & $content.len & "\0" & content))
 
-proc readVerified(store: GitStore; kind, oid: string): string =
+type ObjectTooLarge = object of CatalogDiscoveryError
+  ## An object larger than its reader's bound, refused before it was read.
+  size: int64
+
+proc objectSize(store: GitStore; oid: string): int64 =
+  ## The size git records for object ``oid`` (`git cat-file -s`), read from
+  ## the object's header without reading its content. Raises when git cannot
+  ## say.
+  let r = store.run(["cat-file", "-s", oid])
+  if r.code != 0:
+    discoveryError("object " & oid & " cannot be sized in " & store.gitDir &
+      ": " & r.errors.strip())
+  try:
+    parseBiggestInt(r.output.strip())
+  except ValueError:
+    discoveryError("`git cat-file -s " & oid & "` answered " &
+      r.output.strip().escape() & ", not a size")
+
+proc readVerified(store: GitStore; kind, oid: string; maxBytes = -1): string =
   ## The bytes of object ``oid``, which must be of type ``kind`` and hash to
-  ## ``oid``. Raises otherwise.
+  ## ``oid``. Raises otherwise. With ``maxBytes`` >= 0 the object's size is
+  ## asked first and a larger object is refused (`ObjectTooLarge`) WITHOUT
+  ## its content being read: a hostile pinned repository cannot make the
+  ## reader hold more than the bound (NPC-M3's gap, closed by NPC-M5).
+  if maxBytes >= 0:
+    let size = store.objectSize(oid)
+    if size > maxBytes:
+      var e = newException(ObjectTooLarge, "object " & oid & " (" & kind &
+        ") of " & store.gitDir & " is " & $size & " bytes, more than " &
+        $maxBytes & "; it is not read")
+      e.size = size
+      raise e
   let r = store.run(["cat-file", kind, oid])
   if r.code != 0:
     discoveryError("object " & oid & " (" & kind & ") cannot be read from " &
@@ -629,7 +658,10 @@ proc discoverNimbleIndexAt*(repo, remote, gitRef, revision,
       refusals.sorted(cmp).join("\n    ") & "\n    fix" & republish[1 .. ^1])
   var rootText = ""
   try:
-    rootText = store.readVerified("blob", rootBlob)
+    rootText = store.readVerified("blob", rootBlob, MaxRootBytes)
+  except ObjectTooLarge as err:
+    discoveryError(where & ": `" & PublishedIndexDir & "/" & IndexRootFile &
+      "` is refused: " & err.msg & republish)
   except CatalogDiscoveryError as err:
     discoveryError(err.msg & ". Move the shared clone " & store.gitDir &
       " aside and re-create it (`repro ws sync`)")
@@ -676,10 +708,16 @@ proc indexSource*(d: DiscoveredNimbleIndex): IndexObjectSource =
           where)
       var text = ""
       var failure = ""
+      var oversize = false
       try:
-        text = store.readVerified("blob", blobs[hex])
+        text = store.readVerified("blob", blobs[hex], maxBytes)
+      except ObjectTooLarge as err:
+        failure = err.msg
+        oversize = true
       except CatalogDiscoveryError as err:
         failure = err.msg
+      if oversize:
+        refuse(nrOversize, "object " & hex & " of " & where & ": " & failure)
       if failure.len > 0:
         refuse(nrMissingObject, failure)
       if text.len > maxBytes:
