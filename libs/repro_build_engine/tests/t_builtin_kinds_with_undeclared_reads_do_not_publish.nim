@@ -53,7 +53,7 @@ let TmpDir = absolutePath(
 const
   Refused = [bakCopyFile, bakPreserveTree, bakEnsureLine, bakEnsureSnippet,
              bakWorkspaceVcs, bakBinaryCacheSubstitute, bakForeignProvision,
-             bakMetadataFetch, bakSolveLock, bakLockUpdate]
+             bakMetadataFetch, bakSolveLock, bakLockUpdate, bakCatalogIndex]
   Allowed = [bakEnsureDir, bakWriteText, bakStamp]
   StubProvisioner = "t-stub-provisioner"
 
@@ -71,6 +71,7 @@ registerBinaryCacheSubstituteExecutor(stubExecutor)
 registerMetadataFetchExecutor(stubExecutor)
 registerSolveLockExecutor(stubExecutor)
 registerLockUpdateExecutor(stubExecutor)
+registerCatalogIndexExecutor(stubExecutor)
 registerForeignProvisionExecutor(StubProvisioner, stubExecutor)
 
 proc project(name: string): string =

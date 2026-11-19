@@ -623,9 +623,13 @@ proc emptyCanonicalWorkTree*(lease: CanonicalWorkLease): string =
   ## Empties the lease's work tree (creating it when missing), without
   ## following links. "" on success.
   try:
-    if dirExists(lease.workDir) or symlinkExists(lease.workDir):
-      removePathNoFollow(lease.workDir)
-    createDir(extendedPath(lease.workDir))
+    # The extended spelling, as the engine's scratch reset uses: an npm
+    # tree nests far past MAX_PATH, and a plain path stops the removal at
+    # the first file too deep to name.
+    let tree = extendedPath(lease.workDir)
+    if dirExists(tree) or symlinkExists(tree):
+      removePathNoFollow(tree)
+    createDir(tree)
   except CatchableError as err:
     return "cannot empty the canonical work tree " & lease.workDir & ": " &
       err.msg
@@ -644,8 +648,9 @@ proc releaseCanonicalWork*(lease: var CanonicalWorkLease;
     return ""
   if removeTree and getEnv(KeepCanonicalWorkEnv) != "1":
     try:
-      if dirExists(lease.workDir) or symlinkExists(lease.workDir):
-        removePathNoFollow(lease.workDir)
+      let tree = extendedPath(lease.workDir)
+      if dirExists(tree) or symlinkExists(tree):
+        removePathNoFollow(tree)
     except CatchableError as err:
       result = "cannot remove the canonical work tree " & lease.workDir &
         ": " & err.msg

@@ -225,7 +225,9 @@ const
     "repro internal dev-session-supervisor",
     "repro internal dev-session-http", "repro internal cmake-regenerate",
     # Declared with its page after the round: `repro catalog publish`.
-    "repro catalog", "repro catalog publish"]
+    "repro catalog", "repro catalog publish",
+    # The Nimble index generator's verbs.
+    "repro catalog generate", "repro catalog verify"]
     ## The commands whose flags and environment variables are compared:
     ## every command repro declares.
   SpecifiedNotImplemented = [

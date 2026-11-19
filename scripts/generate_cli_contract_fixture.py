@@ -389,6 +389,8 @@ COVERED_COMMANDS = [
     "internal cmake-regenerate",
     "catalog",
     "catalog publish",
+    "catalog generate",
+    "catalog verify",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
