@@ -134,6 +134,16 @@ type Fixture = object
 
 var fixtureCounter = 0
 
+proc gitIndex(dir: string; files: openArray[string]) =
+  ## A flake inside a git work tree sees only tracked files; an edit to a
+  ## tracked file is seen as a dirty tree, which is the case under test.
+  var args = @["init -q", "add"]
+  for file in files:
+    args[1].add(" " & quoteShell(file))
+  for arg in args:
+    let (output, code) = execCmdEx("git -C " & quoteShell(dir) & " " & arg)
+    doAssert code == 0, "failed to prepare fixture git index: " & output
+
 proc privateFlake(f: var Fixture; variant: string): string =
   ## The fixture flake with its shell text made unique to this process and
   ## `variant`, so the realized output is a store path nothing else on the
@@ -147,9 +157,72 @@ proc privateFlake(f: var Fixture; variant: string): string =
   writeFile(result / "flake.nix", flake.replace(FixtureText,
     "printf '%s\\n' reprobuild-nix-tool-edge-" & f.tag & "-" & variant))
   copyFile(sourceRoot / "flake.lock", result / "flake.lock")
-  for args in ["init -q", "add flake.nix flake.lock"]:
-    let (output, code) = execCmdEx("git -C " & quoteShell(result) & " " & args)
-    doAssert code == 0, "failed to prepare fixture git index: " & output
+  gitIndex(result, ["flake.nix", "flake.lock"])
+
+proc importingFlake(f: var Fixture; variant, flakeText: string;
+                    files: openArray[(string, string)]): string =
+  ## A private flake whose package is built from files ``flake.nix``
+  ## imports or copies, not from ``flake.nix`` itself: ``flakeText`` as its
+  ## ``flake.nix``, the fixture's ``flake.lock`` (so nothing new is
+  ## fetched) and ``files`` written relative to it.
+  let sourceRoot = findRepoRoot() / FixtureRelRoot
+  result = f.root / ("flake-" & variant)
+  createDir(result)
+  writeFile(result / "flake.nix", flakeText)
+  copyFile(sourceRoot / "flake.lock", result / "flake.lock")
+  var tracked = @["flake.nix", "flake.lock"]
+  for (rel, text) in files:
+    createDir((result / rel).parentDir)
+    writeFile(result / rel, text)
+    tracked.add(rel)
+  gitIndex(result, tracked)
+
+const FlakeSystems = """
+      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f system);"""
+
+const OverlayFlake = """{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  outputs = { self, nixpkgs }:
+    let""" & FlakeSystems & """
+    in {
+      packages = forAllSystems (system:
+        let pkgs = import nixpkgs {
+              inherit system;
+              overlays = [ (import ./nix/overlay.nix) ];
+            };
+        in { hello-sh = pkgs.reprobuildNixToolEdgeFixture; });
+    };
+}
+"""
+
+proc overlayText(marker: string): string =
+  "final: prev: {\n" &
+  "  reprobuildNixToolEdgeFixture = final.writeShellApplication {\n" &
+  "    name = \"" & ToolName & "\";\n" &
+  "    text = \"printf '%s\\\\n' " & marker & "\";\n" &
+  "  };\n}\n"
+
+const SourceTreeFlake = """{
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  outputs = { self, nixpkgs }:
+    let""" & FlakeSystems & """
+    in {
+      packages = forAllSystems (system:
+        let pkgs = import nixpkgs { inherit system; };
+        in {
+          hello-sh = pkgs.runCommand "reprobuild-nix-tool-edge-src" {
+            src = ./.;
+          } ''
+            install -Dm755 $src/tool/run.sh $out/bin/""" & ToolName & """
+          '';
+        });
+    };
+}
+"""
+
+proc toolScript(marker: string): string =
+  "#!/bin/sh\nprintf '%s\\n' " & marker & "\n"
 
 proc openFixture(): Fixture =
   inc fixtureCounter
@@ -395,6 +468,88 @@ suite "a Nix-realized tool is a provisioning edge with a receipt":
       check fileExists(again.resolvedExecutablePath)
       check again.provisioningReceipt == profile.provisioningReceipt
       check realized in receiptPaths(again.provisioningReceipt)
+
+  # reprobuild-pm issue 2026-11-16 "the Nix tool-provisioning edge may serve
+  # a local flake tool from the action cache, keyed only on flake.nix /
+  # flake.lock" (Edge-Derived-Identities.md section 7, clarification of
+  # 2026-10-23; Dependency-Provisioning-In-Build-Graph.md section 3). The
+  # edge declares the top-level flake files only, so an edit of a file the
+  # flake IMPORTS, or of the source tree a derivation COPIES, moves no
+  # declared input. Were the edge cacheable for a `.#…` selector, the second
+  # resolution below would be an up-to-date / action-cache hit serving the
+  # receipt of the first realization. Each case edits only that file, so the
+  # output store path changes while `flake.nix` and `flake.lock` do not.
+  proc editOnlyImportedFile(f: var Fixture; flake, rel, text: string) =
+    let flakeNix = readFile(flake / "flake.nix")
+    let flakeLock = readFile(flake / "flake.lock")
+    writeFile(flake / rel, text)
+    # The precondition the issue names: no declared input moved.
+    doAssert readFile(flake / "flake.nix") == flakeNix
+    doAssert readFile(flake / "flake.lock") == flakeLock
+
+  proc checkReResolvesAfterEdit(f: var Fixture; flake, rel, editedText: string) =
+    setCurrentDir(flake)
+    let use = fixtureUse(f.tag & "-edit")
+    let first = resolveNixTool(use, f.storeRoot)
+    f.realized.add(first.selectedStorePath)
+    checkpoint("first realization: " & first.selectedStorePath)
+    require first.provisioningReceipt.len > 0
+    require first.selectedStorePath in receiptPaths(first.provisioningReceipt)
+    let edges = nixToolProvisioningEdges(use, f.storeRoot, getCurrentDir())
+    # The imported file is not a declared input: this is what makes a
+    # cacheable edge stale rather than merely slow.
+    check flake / rel notin edges.actions[0].inputs
+    check getCurrentDir() / rel notin edges.actions[0].inputs
+
+    f.editOnlyImportedFile(flake, rel, editedText)
+
+    # The edge itself, through the real engine, against the same tool store
+    # and action cache the first resolution used.
+    let rerun = runProvisioningEdges(edges, f.storeRoot)
+    let edgeResult = rerun.resultFor(edges.rootId)
+    checkpoint("edge after edit: " & $edgeResult.status &
+      " launched=" & $edgeResult.launched)
+    check edgeResult.status == asSucceeded
+    check edgeResult.launched
+    let named = receiptPaths(first.provisioningReceipt)
+    checkpoint("receipt after edit: " & $named)
+    check first.selectedStorePath notin named
+
+    # And the resolver as a consumer sees it: a new realization, named by
+    # the same receipt path.
+    let second = resolveNixTool(use, f.storeRoot)
+    f.realized.add(second.selectedStorePath)
+    checkpoint("second realization: " & second.selectedStorePath)
+    check second.selectedStorePath != first.selectedStorePath
+    check second.provisioningReceipt == first.provisioningReceipt
+    check second.selectedStorePath in receiptPaths(second.provisioningReceipt)
+    check first.selectedStorePath notin receiptPaths(second.provisioningReceipt)
+    check fileExists(second.resolvedExecutablePath)
+    let (output, code) = execCmdEx(quoteShell(second.resolvedExecutablePath))
+    check code == 0
+    check output.strip() == f.tag & "-after"
+
+  test "editing an overlay the flake imports re-realizes a local flake tool":
+    if not HostRunsGate:
+      skip(PlatformSkipReason)
+    else:
+      var f = openFixture()
+      defer: f.close()
+      let flake = f.importingFlake("overlay", OverlayFlake,
+        [("nix/overlay.nix", overlayText(f.tag & "-before"))])
+      f.checkReResolvesAfterEdit(flake, "nix/overlay.nix",
+        overlayText(f.tag & "-after"))
+
+  test "editing a file of a `src = ./.` tree re-realizes a local flake tool":
+    if not HostRunsGate:
+      skip(PlatformSkipReason)
+    else:
+      var f = openFixture()
+      defer: f.close()
+      let flake = f.importingFlake("srctree", SourceTreeFlake,
+        [("tool/run.sh", toolScript(f.tag & "-before"))])
+      f.checkReResolvesAfterEdit(flake, "tool/run.sh",
+        toolScript(f.tag & "-after"))
 
   test "an immutable remote pin retains cached acquisition and helper-free warm resolution":
     if not HostRunsGate:

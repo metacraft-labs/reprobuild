@@ -50433,7 +50433,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -54890,7 +54890,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_source_hash_runtime_paths.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
