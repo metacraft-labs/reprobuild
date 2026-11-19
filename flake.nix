@@ -441,7 +441,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/f6065a9c6f3b56ab7c1d7e24750f7b9cb27c5661";
+      url = "github:metacraft-labs/nim-cli-spec/fcd5b309c2cb38656d8d2c3b39a7c4e72b5dfb3a";
       flake = false;
     };
     nim-entrypoints-src = {
@@ -462,12 +462,13 @@
       # ``confutils/clispec_config``: confutils instantiated over a clispec
       # description. repro's own command line is such a description
       # (``repro_cli_support/cli_program``), so the engine compile imports it.
-      # Only the clispec bridge and its layers are imported, which need no
-      # serialization library; the package root (no ``src/``) is the import
-      # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
+      # The clispec bridge and its layers are imported, and the TOML adapter
+      # (``confutils/layers/toml_source``), through which the configuration
+      # writers validate a whole file (it needs ``toml_serialization``,
+      # vendored here); the package root (no ``src/``) is the import path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/ddd056a1cd13a9a24aa5f3451df23aaaa6c46091";
+      url = "github:metacraft-labs/nim-confutils/ffd5d9a6cf8481b2e696be3704f14b315a10aed9";
       flake = false;
     };
     nimcrypto-src = {

@@ -107,6 +107,11 @@
 # 2026-11-17 added one compiler-is-subject row:
 # t_dsl_package_names_sharing_an_identifier_are_refused (nim check of
 # package modules whose refusal message is the assertion).
+# 2026-11-19 added two compiler-is-subject rows:
+# t_cs_m6b_snippet_checked_at_compile_time (nim check of configuration blocks
+# whose compile error is the assertion) and
+# t_cs_m6b_derivation_once_per_description (nim check of N-block fixtures whose
+# compile-time derivation count and compile time are the assertion).
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -224,6 +229,8 @@ libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim	compi
 libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim	product-api	compileAndAdaptHomeProfile from an embedded caller; the subject is which image the profile compile spawns as its monitor driver (the caller must be refused, a named repro must compile).
 libs/repro_cli_support/tests/t_installed_prefix_assembly_is_recorded.nim	migrate-pending	MIGRATABLE: cc builds a library with debug info and an app from fixed C text written by the test, as in libs/repro_dsl_stdlib/tests/t_installed_prefix.nim; the assertions are on the assembly edge's cache record under the real monitor, not on the compiler. BLOCKED ON THE C EDGE: repro.nim has no C-compiler fixture edge to build them as declared graph inputs.
 libs/repro_core/tests/t_zig_target_vendored_hash.nim	compiler-is-subject	The subject is what config.nims defines for a compile: `nim check` of a probe, with and without -d:reproZigTarget, reports reproVendoredHash at compile time. No artifact is produced, and the flag that varies is the assertion.
+libs/repro_dsl_stdlib/tests/t_cs_m6b_derivation_once_per_description.nim	compiler-is-subject	The COMPILE ITSELF is the subject: compile (:69) runs an out-of-process `nim check` on generated fixtures with N configuration blocks and asserts the number of tables clispec derived during that compile (printed by the fixture at compile time) and the compile time the checks add per block. Neither is an artifact a build edge produces; the fixture is generated per N.
+libs/repro_dsl_stdlib/tests/t_cs_m6b_snippet_checked_at_compile_time.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: checkFixture (:32) runs an out-of-process `nim check` on a generated recipe module writing a cargo configuration block against cargo's description, and the cases assert the compile error naming the key and its line (or that the corrected block compiles). A build edge cannot produce a compile that is required to fail; `compiles(...)` cannot observe a `{.error.}` raised inside a macro's expansion.
 libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: the helper (:196) runs nim check on a generated interface module and returns (ok, output) so the test can assert a specific REFUSAL message. A graph edge cannot produce an artifact whose compile is required to fail. Newly detected: 'nim check' had no pattern at all before this change.
 libs/repro_home_apply/tests/t_builtin_adapter_installer.nim	optional-host-tool	quoteShell(candle)/quoteShell(light) drive WiX to synthesize an MSI fixture from generated .wxs. The tool is a host-installed installer packer, not a compiler producing a helper binary; the test skips when it is absent, and a graph edge for it could only be expressed with a host-local assumption about where WiX lives.
 libs/repro_home_apply/tests/t_builtin_adapter_installer_innosetup_fpc.nim	optional-host-tool	quoteShell(iscc) drives the Inno Setup compiler over a generated .iss to synthesize an installer fixture; skips when iscc is off PATH. Same reasoning as t_builtin_adapter_installer.

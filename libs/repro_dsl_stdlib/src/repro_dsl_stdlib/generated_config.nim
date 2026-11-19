@@ -62,6 +62,42 @@ proc writeStructured*(state: var actions.ApplyState;
   for i, ch in text: content[i] = byte(ord(ch))
   applyOwnedFile(state, store, scope, path, content, inputs)
 
+proc writeStructured*(state: var actions.ApplyState;
+                     store: var Store;
+                     scope: HomeScope;
+                     path: string;
+                     format: ConfigFormat;
+                     value: StructuredValue;
+                     description: CliConfigTable;
+                     inputs: seq[ResolvedInput] = @[]):
+                    OwnedApplyResult =
+  ## `writeStructured` for a file a described program reads: `description`
+  ## is that program's configuration table (a tool's
+  ## `<executable>ConfigDescription`). The tree is checked against it in one
+  ## walk before anything is serialized or written, and a tree that does not
+  ## fit raises a `ConfigValidationError` naming `path` and every key that
+  ## does not fit, leaving the target untouched.
+  checkStructured(description, value, path)
+  writeStructured(state, store, scope, path, format, value, inputs)
+
+proc configFileText*(state: var actions.ApplyState;
+                     store: var Store;
+                     scope: HomeScope;
+                     path, text: string;
+                     description: CliConfigTable;
+                     format = cfToml;
+                     inputs: seq[ResolvedInput] = @[]):
+                    OwnedApplyResult =
+  ## Writes a whole configuration file given as text (rendered by a
+  ## template, say) for a described program, after validating the text
+  ## against the program's description: a `ConfigValidationError` names the
+  ## file, the line and the key of every entry that does not fit, and
+  ## nothing is written. TOML is the format validated.
+  checkConfigText(description, path, text, format)
+  var content = newSeq[byte](text.len)
+  for i, ch in text: content[i] = byte(ord(ch))
+  applyOwnedFile(state, store, scope, path, content, inputs)
+
 proc configFile*(state: var actions.ApplyState;
                 store: var Store;
                 scope: HomeScope;

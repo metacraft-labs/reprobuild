@@ -281,7 +281,7 @@ nim-entrypoints
 # pin it -- the fork has no repro.nim declaring a library, so it cannot be a
 # `uses:` producer (see repro.nim) -- so it is pinned here, at flake.lock's
 # `nim-confutils-src` revision. Move the two together.
-nim-confutils=ddd056a1cd13a9a24aa5f3451df23aaaa6c46091
+nim-confutils=ffd5d9a6cf8481b2e696be3704f14b315a10aed9
 
 # nim-shm-lease: runquota's published stats table imports its anchor on
 # WINDOWS now, not only on Linux/macOS, and the Windows release leg builds

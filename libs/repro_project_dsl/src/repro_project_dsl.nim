@@ -149,9 +149,12 @@ export NonDeterminismPolicy, MonitorCaptureBreadth
 # ``clispec/model`` is re-exported. The parser (``clispec/dsl``) is
 # compile-time machinery for the ``package`` and ``defineCliInterface``
 # macros and is NOT re-exported, so its helper names never reach a recipe's
-# namespace.
-import clispec/[model, dsl]
-export model
+# namespace. ``clispec/config_check`` is re-exported: a tool whose description
+# declares configuration keys gets a ``<executable>ConfigDescription``
+# constant (``cli_extension.nim``), and the code that builds it, and the
+# configuration writers that read it, use its names.
+import clispec/[model, dsl, config_check]
+export model, config_check
 
 include "repro_project_dsl/types"
 

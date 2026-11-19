@@ -160,10 +160,93 @@ stage REPRO_CT_TEST_RUNNER_SRC reprobuild-ct-test-runner \
 stage IO_MON_SRC io-mon/src io_mon.nim ../io-mon/src
 stage STACKABLE_HOOKS_SRC nim-stackable-hooks/src stackable_hooks.nim \
   ../nim-stackable-hooks/src
-# config.nims resolves these four sibling-FIRST; mirror it so the archive holds
-# what was compiled.
+# config.nims resolves these sibling-FIRST (`addSiblingFirstPackagePath`);
+# mirror its choice so the archive holds what was compiled:
+#
+# * no sibling checkout -> $<ENV_VAR>;
+# * REPRO_SIBLING_POLICY=sibling, no $<ENV_VAR>, or $<ENV_VAR> naming the
+#   sibling itself -> the sibling;
+# * REPRO_SIBLING_POLICY=pin -> $<ENV_VAR>;
+# * otherwise the sibling, unless it is stale: behind the revision this
+#   repository pins for it (repro.lock's `deps` entry, else
+#   .github/sibling-repos) and carrying no local changes, in which case
+#   $<ENV_VAR>.
+#
+# Each choice of $<ENV_VAR> over an existing sibling is announced on stderr, as
+# config.nims announces it.
+
+# The revision this repository pins for the sibling checkout <name> (the
+# directory name, as config.nims's `pinnedSiblingRevision` keys it); empty
+# when nothing pins it.
+pinned_sibling_revision() { # pinned_sibling_revision <name>
+  local name=$1 line rev=""
+  if [[ -f repro.lock ]]; then
+    # One inline table per `deps` entry: `{ name = "<name>", ... revision = "<sha>" ... }`.
+    rev=$(grep -o "{ name = \"$name\",[^}]*revision = \"[0-9a-f]*\"" repro.lock |
+      head -n 1 | sed 's/.*revision = "\([0-9a-f]*\)"/\1/')
+  fi
+  if [[ -z "$rev" && -f .github/sibling-repos ]]; then
+    while IFS= read -r line; do
+      line=${line%%#*}
+      line=${line//[[:space:]]/}
+      case "$line" in
+        "$name!="*) rev=${line#"$name!="}; break ;;
+        "$name="*) rev=${line#"$name="}; break ;;
+      esac
+    done < .github/sibling-repos
+  fi
+  printf '%s' "$rev"
+}
+
+# Git in the sibling checkout, with the variables a git hook exports for THIS
+# repository cleared (they would point `git -C` back here) and lazy fetches
+# off (a pin the sibling lacks locally is a pin it is not ahead of).
+sibling_git() { # sibling_git <checkout> <git args>...
+  local checkout=$1; shift
+  env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY \
+    -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_COMMON_DIR -u GIT_PREFIX \
+    GIT_NO_LAZY_FETCH=1 git -C "$checkout" "$@"
+}
+
+# Why the sibling checkout <checkout> is stale, or nothing when it is not (or
+# when that cannot be told: no pin, no git), as config.nims decides it.
+sibling_staleness() { # sibling_staleness <checkout>
+  local checkout=$1 pin head dirty
+  pin=$(pinned_sibling_revision "$(basename "$checkout")")
+  [[ -n "$pin" ]] || return 0
+  head=$(sibling_git "$checkout" rev-parse HEAD 2>/dev/null) || return 0
+  dirty=$(sibling_git "$checkout" status --porcelain --untracked-files=no 2>/dev/null) || return 0
+  [[ ${#head} -ge 12 && -z "$dirty" ]] || return 0
+  if ! sibling_git "$checkout" merge-base --is-ancestor "$pin" HEAD 2>/dev/null; then
+    printf 'the sibling is at %s, which is not at or ahead of the revision %s this repository pins, and carries no local changes' \
+      "${head:0:12}" "${pin:0:12}"
+  fi
+}
+
 sibling_first() { # sibling_first <ENV_VAR> <sibling> <marker>
-  if [[ -f "$2/$3" ]]; then printf '%s' "$2"; else printf '%s' "${!1:-}"; fi
+  local env_name=$1 sibling=$2 marker=$3 env_path=${!1:-}
+  local policy=${REPRO_SIBLING_POLICY:-} why=""
+  if [[ ! -f "$sibling/$marker" ]]; then
+    printf '%s' "$env_path"
+    return 0
+  fi
+  if [[ "$policy" != sibling && -n "$env_path" && -f "$env_path/$marker" &&
+        "$(cd "$env_path" && pwd -P)" != "$(cd "$sibling" && pwd -P)" ]]; then
+    if [[ "$policy" == pin ]]; then
+      why="REPRO_SIBLING_POLICY=pin"
+    else
+      # The sibling's checkout: `../<name>/src` -> `../<name>`.
+      local checkout=$sibling
+      [[ "$(basename "$checkout")" == src ]] && checkout=$(dirname "$checkout")
+      why=$(sibling_staleness "$checkout")
+    fi
+    if [[ -n "$why" ]]; then
+      echo "stage_release_sources: using \$$env_name=$env_path instead of the sibling $sibling ($why); set REPRO_SIBLING_POLICY=sibling to force the sibling" >&2
+      printf '%s' "$env_path"
+      return 0
+    fi
+  fi
+  printf '%s' "$sibling"
 }
 SHM_GSET_SRC=$(sibling_first SHM_GSET_SRC ../nim-shm-gset/src shm_gset.nim) \
   stage SHM_GSET_SRC nim-shm-gset/src shm_gset.nim
