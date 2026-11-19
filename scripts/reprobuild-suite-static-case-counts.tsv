@@ -93,6 +93,7 @@ libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_late_recipient_key_pair.nim	nim	4
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
 libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	9
+libs/repro_addon/tests/t_addon_plan_json_has_no_rendered_sections.nim	nim	4
 libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	3
 libs/repro_addon/tests/t_addon_preflight_pre_bootstrap_inputs.nim	nim	38
 libs/repro_addon/tests/t_addon_profile_kinds_through_the_switch.nim	nim	17
@@ -1484,6 +1485,7 @@ tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	ni
 tests/e2e/hcr-linux-hardening/t_e2e_hcr_linux_text_left_writable_reaches_the_wire.nim	nim	2
 tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim	nim	2
 tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim	nim	3
+tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim	nim	5
 tests/e2e/hcr-linux-prepare/t_e2e_hcr_linux_prepare_object_expands_compressed_debug_sections.nim	nim	3
 tests/e2e/hcr-linux-prepare/t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.nim	nim	2
 tests/e2e/hcr-linux-rbhcr/t_e2e_hcr_linux_isonim_shim_against_real_agent.nim	nim	2
@@ -2013,6 +2015,7 @@ tests/integration/t_gateway_accepts_a_lock_pinning_other_repositories_and_names_
 tests/integration/t_gateway_accepts_one_ref_push_certified_before_push.nim	nim	4
 tests/integration/t_gateway_bare_borrows_pool_objects_and_costs_no_second_copy.nim	nim	2
 tests/integration/t_gateway_finds_certificates_by_the_pushed_tree.nim	nim	1
+tests/integration/t_gateway_forced_push_publishes_a_rewrite_under_a_lease.nim	nim	11
 tests/integration/t_gateway_lifecycle_is_idempotent_and_reversible.nim	nim	4
 tests/integration/t_gateway_lock_read_keeps_git_stderr_apart.nim	nim	2
 tests/integration/t_gateway_plain_git_unset_is_a_per_repo_opt_out.nim	nim	1
