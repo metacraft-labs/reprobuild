@@ -455,6 +455,7 @@ libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_apt_install_store_identity_is_byte_keyed.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
+libs/repro_dsl_stdlib/tests/t_c_objects_are_position_independent.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim	nim	16
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	32
@@ -676,6 +677,7 @@ libs/repro_launch_plan/tests/t_codec_smoke.nim	nim	13
 libs/repro_local_store/tests/t_a4_p4_eviction.nim	nim	4
 libs/repro_local_store/tests/t_a_prefix_an_older_build_named_is_found_where_it_lies.nim	nim	6
 libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	nim	13
+libs/repro_local_store/tests/t_action_output_sidecar.nim	nim	5
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim	nim	6
 libs/repro_local_store/tests/t_distinct_realizations_never_share_a_prefix_directory.nim	nim	2
@@ -1818,7 +1820,7 @@ tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
 tests/integration/t_branch_from_mainlines.nim	nim	10
 tests/integration/t_branch_matching_first_rule_wins_upstream_and_detached.nim	nim	1
 tests/integration/t_branch_unpublished_source_head.nim	nim	5
-tests/integration/t_build_action_output_all_passes_action_output_through.nim	nim	6
+tests/integration/t_build_action_output_all_passes_action_output_through.nim	nim	8
 tests/integration/t_build_declares_its_pools_to_runquota.nim	nim	2
 tests/integration/t_build_declares_sizing_to_runquota.nim	nim	3
 tests/integration/t_build_honours_override_provenance_for_exact_pins.nim	nim	4
@@ -2380,7 +2382,7 @@ tests/integration/t_provider_library_c_abi_memory_ownership.nim	nim	3
 tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
-tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	5
+tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	6
 tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
@@ -2635,6 +2637,7 @@ tests/integration/t_tpm_quote_comes_from_the_tpm.nim	nim	4
 tests/integration/t_tpm_quote_verifies.nim	nim	7
 tests/integration/t_tpm_read_wait_tells_a_signal_from_a_timeout.nim	nim	3
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	nim	15
+tests/integration/t_trycompile_probe_is_served_across_scratch_directories.nim	nim	2
 tests/integration/t_tsm_report_transport.nim	nim	39
 tests/integration/t_two_checkouts_share_a_static_library_edge.nim	nim	2
 tests/integration/t_two_checkouts_share_a_static_library_edge_macos.nim	nim	3

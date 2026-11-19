@@ -109,6 +109,7 @@ proc zigCompile*(opts: CompileOptions; ct: CrossTarget): BuildActionDef =
     sources = @[opts.source],
     output = targetKeyedPath(opts.target),
     compileOnly = true,
+    pic = opts.pic,
     includeDirs = includeDirs,
     defines = defs,
     standard = opts.standard,

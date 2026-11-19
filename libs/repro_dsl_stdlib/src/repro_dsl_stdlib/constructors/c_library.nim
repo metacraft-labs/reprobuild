@@ -90,7 +90,13 @@ proc c_library*(into: string;
       target = target,
       inputs = inputs,
       defines = extraDefines,
-      standard = standard))
+      standard = standard,
+      # Every object is position-independent, whatever the link kind:
+      # a shared link needs it, and a PIC object serves a static archive
+      # too (C-Cpp.md §"Mode A"). Left to the compiler's default, a
+      # shared link fails on a non-PIE gcc, and on an x86-64 PIE one as
+      # soon as a source references a global ("recompile with -fPIC").
+      pic = targetTakesPic()))
 
   let linkKind =
     case api.linkKind

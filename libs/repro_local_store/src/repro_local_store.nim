@@ -2971,6 +2971,11 @@ const
     ## Exported so tests and tooling can find the sidecar without re-deriving
     ## the extension. Not `.rec`, `.octime` or `.det`, so every older reader
     ## of an edge directory ignores it.
+  ActionOutputFileExt* = ".out"
+    ## The action-output sidecar (`recordActionOutput`), declared here so the
+    ## reap, removal and GC sweeps below can name it. Not `.rec`, `.octime`,
+    ## `.det`, `.acc` or `.obs`, so every older reader of an edge directory
+    ## ignores it.
 
 proc inputAccessFileName*(strongHex: string): string =
   strongHex & InputAccessFileExt
@@ -5208,7 +5213,8 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
     if kind == pcFile and
         (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt) or
          path.endsWith(InputAccessFileExt) or
-         path.endsWith(ObservedExecutionFileExt)):
+         path.endsWith(ObservedExecutionFileExt) or
+         path.endsWith(ActionOutputFileExt)):
       let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
       if not fileExists(extendedPath(owner)):
         try:
@@ -6610,9 +6616,11 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   metadataCache: ptr FileMetadataCache = nil;
                                   envResolver: EnvResolver = nil;
                                   outputRoot = "";
-                                  containerOutputs: seq[string] = @[]):
+                                  containerOutputs: seq[string] = @[];
+                                  useHotTier = true):
                                   ActionCacheLookup =
-  if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
+  if useHotTier and allowMetadataOnlyHit and not verifyOutputBlobs and
+      policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
     if hot.found and hot.record.policy == policy:
       var changed = false
@@ -6832,6 +6840,143 @@ proc inputAccessesFor*(cache: ActionCache; weak, strong: ContentDigest):
   except OSError, IOError:
     none(InputAccesses)
 
+# ---------------------------------------------------------------------------
+# Action-output sidecar (Provider-Compile-Tiering.md §"A TryCompile hit must
+# replay the probe's output").
+#
+# The stdout and stderr of the execution behind a record, as CAS blobs, so a
+# later hit can hand a caller the output a run would have printed
+# (`repro build --action-output=all`; CLI/build.md §"Action Output"). A CMake
+# try_compile reads its compiler's `-v` output and its warnings out of that
+# output; a hit that printed nothing would make the configure compute
+# different cache variables from a miss.
+#
+# A sidecar for the same reason as the others: the RBAR frame cannot grow
+# (`ActionRecordVersion`). Keyed like the input-access sidecar, by the strong
+# fingerprint alone with no write-sequence back-reference: a republish that
+# never saw the output (the cache daemon, a peer install) leaves it in place,
+# and any execution with that strong fingerprint is one whose output may be
+# replayed for it. The output need not be byte-identical to what a fresh run
+# would print (it names the recording run's scratch paths); the spec asks for
+# the configure-level result to match, not the bytes.
+#
+# Written for EVERY record the engine publishes after an execution, empty
+# streams included: an absent sidecar means "this record cannot say what the
+# run printed" (a record from an older binary, a peer install), which is not
+# the same as "it printed nothing", and a caller that needs the output treats
+# the first as a miss. An empty stream stores no blob.
+# ---------------------------------------------------------------------------
+
+const
+  ActionOutputMagic = "RBAO"
+  ActionOutputVersion = 1'u16
+
+type
+  RecordedActionOutput* = object
+    ## The captured streams of the execution behind one record. A blob with
+    ## `sizeBytes == 0` is an empty stream, stored nowhere.
+    stdout*: CasBlobRef
+    stderr*: CasBlobRef
+
+  ReplayedActionOutput* = object
+    stdout*: string
+    stderr*: string
+
+proc actionOutputFileName*(strongHex: string): string =
+  strongHex & ActionOutputFileExt
+
+proc encodeActionOutput*(strongHex: string;
+                         output: RecordedActionOutput): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(ActionOutputMagic[i])))
+  result.writeU16Le(ActionOutputVersion)
+  # The record this describes, inside the payload as well as in the file
+  # name, so a sidecar copied or renamed beside another record is refused.
+  result.writeString(strongHex)
+  for blob in [output.stdout, output.stderr]:
+    result.writeU64Le(blob.sizeBytes)
+    if blob.sizeBytes > 0'u64:
+      result.writeDigest(blob.digest)
+
+proc decodeActionOutput*(raw: openArray[byte]; strongHex: string):
+    Option[RecordedActionOutput] =
+  ## `none` on ANY problem: a wrong magic, an unknown version, a different
+  ## record, trailing or missing bytes. `none` means "the output is unknown",
+  ## never "it was empty".
+  if raw.len < 6:
+    return none(RecordedActionOutput)
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(ActionOutputMagic[i])):
+      return none(RecordedActionOutput)
+  try:
+    var pos = 4
+    if readU16Le(raw, pos) != ActionOutputVersion:
+      return none(RecordedActionOutput)
+    if readString(raw, pos) != strongHex:
+      return none(RecordedActionOutput)
+    var blobs: array[2, CasBlobRef]
+    for i in 0 .. 1:
+      blobs[i].sizeBytes = readU64Le(raw, pos)
+      if blobs[i].sizeBytes > 0'u64:
+        blobs[i].digest = readDigest(raw, pos)
+    if pos != raw.len:
+      return none(RecordedActionOutput)
+    some(RecordedActionOutput(stdout: blobs[0], stderr: blobs[1]))
+  except EnvelopeError:
+    none(RecordedActionOutput)
+
+proc recordActionOutput*[CasT: LocalCas | Store](cache: ActionCache;
+                         cas: var CasT; weak, strong: ContentDigest;
+                         stdout, stderr: string) =
+  ## Store `stdout` and `stderr` in `cas` and write the action-output sidecar
+  ## beside the `.rec` that `recordActionResult` just published. Best-effort,
+  ## like the input-access sidecar: one that cannot be written costs a later
+  ## replaying hit (which then re-runs), never the build.
+  let dirPath = cache.perEdgeDirPath(weak)
+  let strongHex = digestHex(strong)
+  let finalPath = dirPath / actionOutputFileName(strongHex)
+  let now = getTime()
+  let tmpPath = finalPath & ".tmp." & $getCurrentProcessId() & "." &
+    $now.toUnix & "." & $now.nanosecond
+  try:
+    var output: RecordedActionOutput
+    if stdout.len > 0:
+      output.stdout = cas.storeBlob(bytes(stdout))
+    if stderr.len > 0:
+      output.stderr = cas.storeBlob(bytes(stderr))
+    createDir(extendedPath(dirPath))
+    writeFile(extendedPath(tmpPath),
+      byteString(encodeActionOutput(strongHex, output)))
+    moveFile(extendedPath(tmpPath), extendedPath(finalPath))
+  except CatchableError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+
+proc recordedActionOutputFor*[CasT: LocalCas | Store](cache: ActionCache;
+                              cas: CasT; weak, strong: ContentDigest):
+    Option[ReplayedActionOutput] =
+  ## The output recorded for one (edge, path-set) pair, read back from the
+  ## CAS and verified, or `none` when no sidecar is there, it cannot be read,
+  ## or a blob it names is missing or corrupt.
+  let strongHex = digestHex(strong)
+  let path = cache.perEdgeDirPath(weak) / actionOutputFileName(strongHex)
+  if not fileExists(extendedPath(path)):
+    return none(ReplayedActionOutput)
+  try:
+    let decoded = decodeActionOutput(bytes(readFile(extendedPath(path))),
+      strongHex)
+    if decoded.isNone:
+      return none(ReplayedActionOutput)
+    var replay: ReplayedActionOutput
+    if decoded.get.stdout.sizeBytes > 0'u64:
+      replay.stdout = byteString(cas.readBlob(decoded.get.stdout))
+    if decoded.get.stderr.sizeBytes > 0'u64:
+      replay.stderr = byteString(cas.readBlob(decoded.get.stderr))
+    some(replay)
+  except CatchableError:
+    none(ReplayedActionOutput)
+
 proc applyHostBinding(lookup: var ActionCacheLookup;
                       usingClass: EdgeDeterminism) =
   ## `Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 4 at the per-edge
@@ -6908,19 +7053,25 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          nowUnix: int64 = 0;
                          buildEpoch = "";
                          containerOutputs: openArray[string] = [];
-                         determinism = edWeak):
+                         determinism = edWeak;
+                         useHotTier = true):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
   ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
   ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
+  ## `useHotTier = false` answers from the full records even where the warm
+  ## metadata projection would do: that projection drops the strong
+  ## fingerprint (`hotMetadataRecord`), which a caller replaying the
+  ## record's captured output needs to find it (`recordedActionOutputFor`).
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot,
-    containerOutputs = @containerOutputs)
+    containerOutputs = @containerOutputs,
+    useHotTier = useHotTier)
   result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
@@ -6935,19 +7086,25 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          nowUnix: int64 = 0;
                          buildEpoch = "";
                          containerOutputs: openArray[string] = [];
-                         determinism = edWeak):
+                         determinism = edWeak;
+                         useHotTier = true):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
   ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
   ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
+  ## `useHotTier = false` answers from the full records even where the warm
+  ## metadata projection would do: that projection drops the strong
+  ## fingerprint (`hotMetadataRecord`), which a caller replaying the
+  ## record's captured output needs to find it (`recordedActionOutputFor`).
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot,
-    containerOutputs = @containerOutputs)
+    containerOutputs = @containerOutputs,
+    useHotTier = useHotTier)
   result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
@@ -7055,7 +7212,7 @@ proc scanCacheEntries*(cache: ActionCache;
         recPath: path,
         recordBytes: fileSizeOrZero(path))
       for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
-                  ObservedExecutionFileExt]:
+                  ObservedExecutionFileExt, ActionOutputFileExt]:
         entry.recordBytes += fileSizeOrZero(edgeDir / (strongHex & ext))
       try:
         entry.mtimeUnix = toUnix(getLastModificationTime(extendedPath(path)))
@@ -7088,6 +7245,21 @@ proc scanCacheEntries*(cache: ActionCache;
       if not decodable:
         entry.payloadBytes = 0
         entry.blobDigests = @[]
+      else:
+        # The captured-output blobs the action-output sidecar names are
+        # this entry's too: released with it, and kept while it lives.
+        let outPath = edgeDir / actionOutputFileName(strongHex)
+        if fileExists(extendedPath(outPath)):
+          try:
+            let output = decodeActionOutput(
+              bytes(readFile(extendedPath(outPath))), strongHex)
+            if output.isSome:
+              for blob in [output.get.stdout, output.get.stderr]:
+                if blob.sizeBytes > 0'u64:
+                  entry.payloadBytes += int64(blob.sizeBytes)
+                  entry.blobDigests.add(digestHex(blob.digest))
+          except OSError, IOError:
+            discard
       entry.expired =
         entry.meta.declared and
         isExpired(entry.meta.retention, entry.meta.writeTimeUnix, now,
@@ -7102,7 +7274,7 @@ proc removeEntry(entry: CacheEntryRef): bool =
   ## success.
   let dir = entry.recPath.parentDir
   for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
-              ObservedExecutionFileExt]:
+              ObservedExecutionFileExt, ActionOutputFileExt]:
     let sidecar = dir / (entry.strongHex & ext)
     if fileExists(extendedPath(sidecar)):
       try: removeFile(extendedPath(sidecar))

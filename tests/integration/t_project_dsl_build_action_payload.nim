@@ -454,6 +454,9 @@ suite "project DSL build action payload":
       # v37: the canonical work key; empty here so the tail stays at its
       # minimum (below), and empty is also what an older payload decodes to.
       check decoded.canonicalWorkKey == ""
+      # v38's relocatable byte: the marked action is not relocatable, so
+      # every version decodes it as false.
+      check not decoded.relocatable
     let currentImage = encodeBuildActionPayload(action)
     let current = decodeBuildActionPayload(currentImage)
     check current.scratchDirs == action.scratchDirs
@@ -492,14 +495,29 @@ suite "project DSL build action payload":
       0, 0, 0, 0, 0, 0, 0, 0]
     check image36[^32 .. ^17] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
-    # The current payload ends with the canonical work key (v37): an empty
-    # string, exactly its four-byte minimum, right after that list, so the
-    # current version also ends on a field at its minimum. A version that
-    # appends another field fails here rather than quietly testing nothing at
-    # the boundary.
-    check currentImage[^4 .. ^1] == @[0'u8, 0, 0, 0]
-    check currentImage[^20 .. ^5] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+    # Version 37 ends with the canonical work key: an empty string, exactly
+    # its four-byte minimum, right after that list.
+    let image37 = encodeBuildActionPayloadAtVersion(action, 37'u16)
+    check image37[^4 .. ^1] == @[0'u8, 0, 0, 0]
+    check image37[^20 .. ^5] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
+    # The current payload ends with the relocatable byte (v38), 0 for this
+    # action, right after the canonical work key. A version that appends
+    # another field fails here rather than quietly testing nothing at the
+    # boundary.
+    check currentImage[^1] == 0'u8
+    check currentImage[^5 .. ^2] == @[0'u8, 0, 0, 0]
+    check currentImage[^21 .. ^6] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    var relocated = action
+    relocated.relocatable = true
+    let relocatedImage = encodeBuildActionPayload(relocated)
+    check relocatedImage[^1] == 1'u8
+    check decodeBuildActionPayload(relocatedImage).relocatable
+    var corrupt = relocatedImage
+    corrupt[^1] = 2'u8
+    expect BuildActionPayloadError:
+      discard decodeBuildActionPayload(corrupt)
 
   test "version 4 payloads decode with default CLI argument formatting":
     let decoded = decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(

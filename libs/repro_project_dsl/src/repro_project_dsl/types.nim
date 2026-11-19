@@ -2014,6 +2014,16 @@ type
       ## fingerprint, the resolved path does not. Derive it with
       ## ``canonicalWorkKeyFor``. Payload codec v37+; an older payload decodes
       ## with it empty.
+    relocatable*: bool
+      ## The action computes the same thing wherever its working directory
+      ## is, given the same content at the same cwd-relative places. Lowered
+      ## onto the engine's ``BuildAction.relocatable``: its key names the
+      ## argv and its observed inputs relative to the cwd (except under the
+      ## relocation anchors the lowering derives) and keys the cwd's depth
+      ## rather than its path (Caching-Architecture.md §"BuildXL-Inspired
+      ## Fingerprinting", riders of 2026-11-16/17). Set by the CMake
+      ## try_compile direct provider. Payload codec v38+; an older payload
+      ## decodes as not relocatable.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]

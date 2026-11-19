@@ -80,7 +80,7 @@ suite "canonical work keys":
       "node-build-0123456789abcdef"
     let decoded = decodeBuildActionPayload(encodeBuildActionPayload(action))
     check decoded.canonicalWorkKey == "node-build-0123456789abcdef"
-    check buildActionPayloadVersion(encodeBuildActionPayload(action)) == 37'u16
+    check buildActionPayloadVersion(encodeBuildActionPayload(action)) >= 37'u16
     let v36 = decodeBuildActionPayload(
       encodeBuildActionPayloadAtVersion(action, 36'u16))
     check v36.canonicalWorkKey == ""
