@@ -129,6 +129,14 @@ type
     notApplied*: bool                 ## the host does not apply `concern`:
                                       ## planned and shown, never executed,
                                       ## never drift
+    resourceAction*: Option[ResourceAction]
+                                      ## category "resource": the resource
+                                      ## planner's own decision, with the
+                                      ## detail `action` folds away
+                                      ## (replace, adopt, drift digests,
+                                      ## deferred, kept vendor update).
+                                      ## `repro home plan --json` reports
+                                      ## it per resource.
 
   PlanPreview* = object
     ## M72 Deliverable 2: the result of `repro home apply --plan`.
@@ -2836,6 +2844,10 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
         if not notApplied:
           inc preview.driftCount
       item.detail = a.summary
+      if a.kind == rakDriftBlocked:
+        item.detail.add("; expected=" & a.driftExpectedHex.substr(0, 11) &
+          " observed=" & a.driftObservedHex.substr(0, 11))
+      item.resourceAction = some(a)
       preview.items.add(item)
   result.addResourceItems(composePlan(ownedDesired, recordedBindings,
     DecisionOptions(reconcile: reconcilePolicy, enforcePreventDestroy: true)),
@@ -2857,16 +2869,20 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     result.generationIdHex == activeGenIdHex and result.driftCount == 0 and
     result.unrealizable.len == 0
 
-proc renderPlanPreview*(preview: PlanPreview): string =
+proc renderPlanPreview*(preview: PlanPreview;
+                        command = "repro home apply --plan"): string =
   ## Stable, line-oriented rendering of a `--plan` preview. The gate
   ## asserts on the category headers and the per-item action verbs.
+  ## `command` names the entry point in the header: `repro home plan` and
+  ## `repro home apply --plan` render the one preview
+  ## (Core-Invariants.md §One Implementation Per Concern).
   ##
   ## GM7: items of a concern the host does not apply are listed apart, after
   ## the applied ones, under `not applied on <host>`; records released by a
   ## narrowed concern set under `released`. Neither section exists for a
   ## host that applies every concern and released nothing, so the rendering
   ## of an undeclared profile is unchanged.
-  result = "repro home apply --plan: " & $preview.items.len &
+  result = command & ": " & $preview.items.len &
     " operation(s) previewed, " & $preview.driftCount & " drift(s)"
   if preview.unrealizable.len > 0:
     result.add(", " & $preview.unrealizable.len &

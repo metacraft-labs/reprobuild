@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3000,
+    "nimTestBinaries": 3001,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 805,
     "staticallyDetectedRuntimeCompilerFlowTests": 149,
-    "testEntries": 3050
+    "testEntries": 3051
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1722,7 +1722,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1655,
+      "integration": 1656,
       "platform/destructive": 198,
       "pure unit": 805,
       "unclassified": 368
@@ -1939,9 +1939,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3000,
+    "nimTestBinaryCount": 3001,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3050
+    "testEntryCount": 3051
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20129,7 +20129,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_home_resources/tests/t_smoke_home_resources.nim",
       "sourceSuiteCount": 13,
-      "staticCaseCount": 176,
+      "staticCaseCount": 175,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38739,6 +38739,23 @@
       "source": "tests/e2e/m83/t_e2e_home_host_flag_resolved_once.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_plan_previews_what_apply_plan_previews",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_profile"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/m83/t_e2e_home_plan_previews_what_apply_plan_previews.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
