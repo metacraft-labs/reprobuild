@@ -190,7 +190,7 @@ proc node_package*(srcDir = "src";
 
   proc q(v: string): string = v.replace("\\", "/").replace("\"", "\\\"")
 
-  # THE BUILD RUNS IN A SCRATCH COPY of the fetched tree, and delivers only
+  # THE BUILD RUNS IN A COPY of the fetched tree, and delivers only
   # the bundle. `npm ci` fills `node_modules` and the bundle script writes
   # `dist/` trees and then reads them back; done in the fetched `src/` that
   # mutated the fetch's own output (so its record no longer described it),
@@ -200,10 +200,34 @@ proc node_package*(srcDir = "src";
   # emptied by the engine before the action runs and nothing under it is
   # evidence (`BuildAction.scratchDirs`, BuildXL's pip temp directory); the
   # bundle goes to `distDir`, the edge's declared output.
+  #
+  # THAT COPY IS A CANONICAL WORK TREE (reprobuild-pm
+  # `spec/Hermetic-Builds-And-Path-Independence.md` §"Canonical work trees"):
+  # the engine places it at `<root>/<key>/work` -- `C:\repro-exec\...` or
+  # `/var/tmp/repro-exec/...`, or the user's cache directory when that root
+  # may not be used -- and hands it to the script as
+  # `REPRO_CANONICAL_WORK_DIR`. The key hashes the recipe's logical identity,
+  # so every checkout of the recipe's repository builds at the SAME path.
+  # That is what makes the bundle reproducible across checkouts: esbuild
+  # names a split chunk by a hash of its content, and gemini-cli's wasm
+  # plugin writes the absolute path of the module into that content, so a
+  # checkout-specific work tree gave every chunk -- and every file importing
+  # one -- checkout-specific NAMES, which the path rewrite below ran too late
+  # to fix. Everything that must stay per checkout (the declared bundle, the
+  # private npm cache, the committed lock) stays in the checkout.
   let underProject = proc (rel: string): string =
     if projectRoot.len > 0: projectRoot / rel else: rel
+  let canonicalKey =
+    if projectRoot.len > 0 and pkgName.len > 0:
+      canonicalWorkKeyFor("node-build", pkgName, logicalRecipePath(projectRoot))
+    else: ""
+  # Without a project root (the provider's startup pass, which plans nothing
+  # it runs) the tree falls back to the old in-checkout scratch directory.
   let scratchDir = underProject(".repro/build/node-work")
-  let workTree = scratchDir / "src"
+  let workRoot =
+    if canonicalKey.len > 0: "$" & CanonicalWorkDirVar
+    else: q(scratchDir)
+  let workTree = workRoot & "/src"
   let distDir = underProject(".repro/build/node/dist")
   let entryDirOf = entry.parentDir.replace("\\", "/")
 
@@ -215,8 +239,14 @@ proc node_package*(srcDir = "src";
   var extraEnvPrefix = ""
   for (k, v) in extraEnv:
     extraEnvPrefix.add(k & "=\"" & q(v) & "\" ")
-  var buildScript = "set -e; mkdir -p \"" & q(workTree) & "\"; " &
-    "cp -R \"" & q(src) & "/.\" \"" & q(workTree) & "/\"; "
+  var buildScript = "set -e; "
+  if canonicalKey.len > 0:
+    # The engine always sets it for a keyed edge; failing loudly beats
+    # building in `/src` should it ever not.
+    buildScript.add(": \"${" & CanonicalWorkDirVar & ":?the engine gives " &
+      "this edge a canonical work tree}\"; ")
+  buildScript.add("mkdir -p \"" & workTree & "\"; " &
+    "cp -R \"" & q(src) & "/.\" \"" & workTree & "/\"; ")
   # A committed lock (`NpmBuildClosureLockName`) replaces upstream's in the
   # WORK TREE, so `npm ci` installs the lock the vendored closure was
   # generated from -- and the fetched tree, the fetch's own output, is left
@@ -252,24 +282,28 @@ proc node_package*(srcDir = "src";
   #     ceiling at the project root git finds no repository, and a script
   #     falls back exactly as it does on a source tarball;
   #   * node's OpenSSL loads the system `openssl.cnf` at startup — pointed
-  #     at an empty file under the project;
+  #     at an empty file in the work tree;
   #   * npm itself reads `~/.gitconfig` (its path comes from the home
   #     directory, not from git's variables), and node keeps a V8 compile
-  #     cache in the host temp directory — the home directory is a
-  #     project-local one, and the compile cache is off.
+  #     cache in the host temp directory — the home directory is one in the
+  #     work tree, and the compile cache is off.
+  # All of them live beside the sources in the work tree, so their paths are
+  # the canonical ones too. Git's ceiling is the work tree's root: the sources
+  # are `<root>/src`, and nothing above them is this build's repository.
   if projectRoot.len > 0:
-    let hermetic = scratchDir / "hermetic"
-    buildScript.add("mkdir -p \"" & q(hermetic / "home") & "\"; ")
-    buildScript.add("export HOME=\"" & q(hermetic / "home") &
-      "\" USERPROFILE=\"" & q(hermetic / "home") &
+    let hermetic = workRoot & "/hermetic"
+    let ceiling = if canonicalKey.len > 0: workRoot else: q(projectRoot)
+    buildScript.add("mkdir -p \"" & hermetic & "/home\"; ")
+    buildScript.add("export HOME=\"" & hermetic & "/home" &
+      "\" USERPROFILE=\"" & hermetic & "/home" &
       "\" NODE_DISABLE_COMPILE_CACHE=1; ")
-    buildScript.add(": > \"" & q(hermetic / "openssl.cnf") & "\"; ")
+    buildScript.add(": > \"" & hermetic & "/openssl.cnf\"; ")
     buildScript.add("export npm_config_userconfig=\"" &
-      q(hermetic / "npmrc") & "\" npm_config_globalconfig=\"" &
-      q(hermetic / "global-npmrc") & "\" GIT_CONFIG_NOSYSTEM=1 " &
-      "GIT_CONFIG_GLOBAL=\"" & q(hermetic / "gitconfig") & "\" " &
-      "GIT_CEILING_DIRECTORIES=\"" & q(projectRoot) & "\" " &
-      "OPENSSL_CONF=\"" & q(hermetic / "openssl.cnf") & "\"; ")
+      hermetic & "/npmrc\" npm_config_globalconfig=\"" &
+      hermetic & "/global-npmrc\" GIT_CONFIG_NOSYSTEM=1 " &
+      "GIT_CONFIG_GLOBAL=\"" & hermetic & "/gitconfig\" " &
+      "GIT_CEILING_DIRECTORIES=\"" & ceiling & "\" " &
+      "OPENSSL_CONF=\"" & hermetic & "/openssl.cnf\"; ")
   # `ignoreScripts`: skip the dependencies' install scripts. A recipe opts in
   # only when the bundle is proven byte-identical without them — gemini-cli
   # compiles `@github/keytar` with node-gyp there (host MSVC, a Python found
@@ -298,6 +332,11 @@ proc node_package*(srcDir = "src";
   # produced different bytes. Every occurrence of the work tree's absolute
   # path, in either slash spelling, becomes `.` (the work tree the paths were
   # relative to). Done with `node`, a tool this step already declares.
+  #
+  # KEPT WITH THE CANONICAL WORK TREE. The tree makes the bundler see the
+  # same path in every checkout, so the names it derives agree; the rewrite
+  # keeps that path -- the shared root, or on fallback the user's cache
+  # directory -- out of the delivered bytes, which then name no host path.
   buildScript.add("node -e '" & DeliveredPathRewriter & "' \"" &
     q(workTree) & "\" \"" & q(distDir) & "\"")
   let compileEdge = buildAction(
@@ -312,7 +351,8 @@ proc node_package*(srcDir = "src";
     # it (so another host resolves the install without it on disk) and the
     # determinism probe has something to compare.
     declaredOutputs = @[distDir],
-    scratchDirs = @[scratchDir],
+    scratchDirs = (if canonicalKey.len > 0: @[] else: @[scratchDir]),
+    canonicalWorkKey = canonicalKey,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "node_package.build",
