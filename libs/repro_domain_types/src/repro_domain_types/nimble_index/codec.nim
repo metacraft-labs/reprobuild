@@ -170,6 +170,10 @@ proc versionSortKey*(r: VersionRecord): string =
   ## commit. Unique per package, so a duplicate record is refused.
   $chr(ord(r.version.kind)) & r.version.tag & "\0" & r.commit
 
+proc heldSortKey*(h: HeldVersion): string =
+  ## The canonical order of an observation's held versions: as records.
+  $chr(ord(h.version.kind)) & h.version.tag & "\0" & h.commit
+
 proc eventSortKey*(e: OriginEvent): string =
   var t = ""
   for shift in countdown(56, 0, 8):
@@ -264,9 +268,8 @@ proc validateNamedBins(ps: seq[NamedBin]; bound: int; field: string) =
     checkFreeText(p.key, field & "[" & $i & "].key", MaxPathBytes)
     checkFreeText(p.value, field & "[" & $i & "].value", MaxPathBytes)
 
-proc validateRecord*(r: VersionRecord; originCount: int; field: string) =
-  ## One version record, against the package it is in.
-  let v = r.version
+proc validateRecordVersion(v: RecordVersion; field: string) =
+  ## The version of a record or of a held version.
   case v.kind
   of rvkTag:
     var parsed: seq[uint64]
@@ -291,6 +294,10 @@ proc validateRecord*(r: VersionRecord; originCount: int; field: string) =
   if v.components.len > MaxVersionComponents:
     refuse(nrBound, field & ".version has more than " &
       $MaxVersionComponents & " components")
+
+proc validateRecord*(r: VersionRecord; originCount: int; field: string) =
+  ## One version record, against the package it is in.
+  validateRecordVersion(r.version, field)
   if r.commit.len notin [40, 64] or not isLowerHex(r.commit):
     refuse(nrInvalidText, field & ".commit is not a full-width lower-case " &
       "object id")
@@ -403,6 +410,43 @@ proc validatePackage*(p: PackageEnvelope; field: string) =
     keys.add versionSortKey(r)
   requireStrictlyAscending(keys, field & ".versions")
 
+proc validateObservation*(o: PackageObservation; field: string) =
+  checkIdent(o.name, field & ".name")
+  checkIdent(o.origin.url, field & ".origin.url", maxLen = MaxTextBytes)
+  checkFreeText(o.origin.subdir, field & ".origin.subdir", MaxPathBytes,
+    allowEmpty = true)
+  checkIdent(o.headRef, field & ".headRef", allowEmpty = true)
+  if o.head.len > 0 and (o.head.len notin [40, 64] or not isLowerHex(o.head)):
+    refuse(nrInvalidText, field & ".head is not a full-width lower-case " &
+      "object id")
+  if o.state != osAnswering and (o.head.len > 0 or o.headRef.len > 0 or
+      o.tags.len > 0):
+    refuse(nrInconsistent, field & ": an origin that did not answer has no " &
+      "refs")
+  if o.tags.len > MaxObservedTags:
+    refuse(nrBound, field & ".tags has more than " & $MaxObservedTags &
+      " entries")
+  var names: seq[string]
+  for i, t in o.tags:
+    checkIdent(t.name, field & ".tags[" & $i & "].name")
+    if t.commit.len notin [40, 64] or not isLowerHex(t.commit):
+      refuse(nrInvalidText, field & ".tags[" & $i & "].commit is not a " &
+        "full-width lower-case object id")
+    names.add t.name
+  requireStrictlyAscending(names, field & ".tags")
+  if o.held.len > MaxHeldVersions:
+    refuse(nrBound, field & ".held has more than " & $MaxHeldVersions &
+      " entries")
+  var keys: seq[string]
+  for i, h in o.held:
+    let f = field & ".held[" & $i & "]"
+    validateRecordVersion(h.version, f)
+    if h.commit.len notin [40, 64] or not isLowerHex(h.commit):
+      refuse(nrInvalidText, f & ".commit is not a full-width lower-case " &
+        "object id")
+    keys.add heldSortKey(h)
+  requireStrictlyAscending(keys, field & ".held")
+
 proc validateShard*(s: NimbleShard) =
   if int(s.shardBits) > MaxShardBits:
     refuse(nrBound, "shard: shardBits " & $s.shardBits & " exceeds " &
@@ -416,7 +460,10 @@ proc validateShard*(s: NimbleShard) =
   if s.aliases.len > MaxAliasesPerShard:
     refuse(nrBound, "shard: " & $s.aliases.len & " aliases, bound " &
       $MaxAliasesPerShard)
-  if s.packages.len == 0 and s.aliases.len == 0:
+  if s.observations.len > MaxPackagesPerShard:
+    refuse(nrBound, "shard: " & $s.observations.len & " observations, " &
+      "bound " & $MaxPackagesPerShard)
+  if s.packages.len == 0 and s.aliases.len == 0 and s.observations.len == 0:
     refuse(nrInconsistent, "shard: an empty bucket has no shard")
   var keys: seq[string]
   for i, p in s.packages:
@@ -444,6 +491,19 @@ proc validateShard*(s: NimbleShard) =
         "package name in this shard")
     aliasKeys.add k
   requireStrictlyAscending(aliasKeys, "shard.aliases")
+  var observationKeys: seq[string]
+  for i, o in s.observations:
+    let field = "shard.observations[" & $i & "]"
+    validateObservation(o, field)
+    let k = nameKey(o.name)
+    if shardBucket(k, int(s.shardBits)) != s.bucket:
+      refuse(nrWrongShard, field & " " & o.name.escape() & " belongs to " &
+        "another shard")
+    if aliasKeys.binarySearch(k, cmpBytes) >= 0:
+      refuse(nrInconsistent, field & " " & o.name.escape() & " is an alias " &
+        "in this shard, and an alias is not observed")
+    observationKeys.add k
+  requireStrictlyAscending(observationKeys, "shard.observations")
 
 proc validateRoot*(r: NimbleIndexRoot) =
   checkSpacedAscii(r.generator, "root.generator", MaxNameBytes)
@@ -753,6 +813,62 @@ proc fromW(w: PackageW; field: string): PackageEnvelope =
   for i, v in w.versions:
     result.versions.add fromW(v, field & ".versions[" & $i & "]")
 
+proc commitL(hex, field: string): List[byte, MaxCommitBytes] =
+  ## An object id as bytes; the empty id is the empty list.
+  var commit: seq[byte]
+  if hex.len mod 2 != 0 or not isLowerHex(hex):
+    refuse(nrInvalidText, field & " is not lower-case hex")
+  for i in countup(0, hex.len - 2, 2):
+    commit.add byte(parseHexInt(hex[i .. i + 1]))
+  toL(commit, List[byte, MaxCommitBytes], field)
+
+proc toW(v: RecordVersion; field: string): VersionW =
+  var comps = v.components
+  VersionW(kind: uint8(ord(v.kind)),
+    components: toL(comps, List[uint64, MaxVersionComponents],
+      field & ".components"),
+    tag: textL(v.tag, WName, field & ".tag"))
+
+proc toW(o: PackageObservation; field: string): ObservationW =
+  var tags: seq[ObservedTagW]
+  for i, t in o.tags:
+    tags.add ObservedTagW(name: textL(t.name, WName, field & ".tags"),
+      commit: commitL(t.commit, field & ".tags[" & $i & "].commit"))
+  var held: seq[HeldW]
+  for i, h in o.held:
+    held.add HeldW(version: toW(h.version, field & ".held[" & $i & "]"),
+      commit: commitL(h.commit, field & ".held[" & $i & "].commit"),
+      firstSeen: h.firstSeen)
+  ObservationW(name: textL(o.name, WName, field & ".name"),
+    origin: OriginW(url: textL(o.origin.url, WText, field & ".origin"),
+      subdir: textL(o.origin.subdir, WPath, field & ".origin"),
+      vcs: uint8(ord(o.origin.vcs))),
+    state: uint8(ord(o.state)),
+    headRef: textL(o.headRef, WName, field & ".headRef"),
+    head: commitL(o.head, field & ".head"),
+    tags: toL(tags, List[ObservedTagW, MaxObservedTags], field & ".tags"),
+    held: toL(held, List[HeldW, MaxHeldVersions], field & ".held"))
+
+proc fromW(w: ObservationW; field: string): PackageObservation =
+  result.name = wText(w.name)
+  result.origin = PackageOrigin(url: wText(w.origin.url),
+    subdir: wText(w.origin.subdir),
+    vcs: enumFrom(w.origin.vcs, OriginVcs, field & ".origin.vcs"))
+  result.state = enumFrom(w.state, ObservationState, field & ".state")
+  result.headRef = wText(w.headRef)
+  result.head = toHexLower(asSeq(w.head))
+  for t in w.tags:
+    result.tags.add ObservedTag(name: wText(t.name),
+      commit: toHexLower(asSeq(t.commit)))
+  for i, h in w.held:
+    result.held.add HeldVersion(
+      version: RecordVersion(
+        kind: enumFrom(h.version.kind, RecordVersionKind,
+          field & ".held[" & $i & "].version.kind"),
+        components: asSeq(h.version.components),
+        tag: wText(h.version.tag)),
+      commit: toHexLower(asSeq(h.commit)), firstSeen: h.firstSeen)
+
 proc toW*(s: NimbleShard): ShardW =
   var ps: seq[PackageW]
   for i, p in s.packages: ps.add toW(p, "shard.packages[" & $i & "]")
@@ -760,10 +876,15 @@ proc toW*(s: NimbleShard): ShardW =
   for a in s.aliases:
     al.add AliasW(alias: textL(a.alias, WName, "shard.aliases"),
       target: textL(a.target, WName, "shard.aliases"))
+  var os: seq[ObservationW]
+  for i, o in s.observations:
+    os.add toW(o, "shard.observations[" & $i & "]")
   ShardW(schema: NimbleIndexSchemaVersion, shardBits: s.shardBits,
     bucket: s.bucket,
     packages: toL(ps, List[PackageW, MaxPackagesPerShard], "shard.packages"),
-    aliases: toL(al, List[AliasW, MaxAliasesPerShard], "shard.aliases"))
+    aliases: toL(al, List[AliasW, MaxAliasesPerShard], "shard.aliases"),
+    observations: toL(os, List[ObservationW, MaxPackagesPerShard],
+      "shard.observations"))
 
 proc fromW(w: ShardW): NimbleShard =
   result.shardBits = w.shardBits
@@ -773,6 +894,8 @@ proc fromW(w: ShardW): NimbleShard =
   for a in w.aliases:
     result.aliases.add PackageAlias(alias: wText(a.alias),
       target: wText(a.target))
+  for i, o in w.observations:
+    result.observations.add fromW(o, "shard.observations[" & $i & "]")
 
 proc toW*(r: NimbleIndexRoot): RootW =
   var ss: seq[ShardRefW]

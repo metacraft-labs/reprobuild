@@ -71,6 +71,17 @@ type
     standard*: string
       ## Language standard, e.g. ``"c11"`` / ``"c++17"``. Translated
       ## to ``-std=c11`` / ``-std=c++17`` on gcc/clang.
+    pic*: bool
+      ## Compile position-independent code (``-fPIC``). C-Cpp.md §"Mode A
+      ## — Fine-grained build graph (primary)" lists ``-fPIC`` in every
+      ## per-source compile, and ``c_library`` / ``c_executable`` set it
+      ## on every target but PE. Without it an object is
+      ## position-independent only if the compiler defaults to it, and on
+      ## x86-64 even a PIE default (``-fPIE``) is not enough for a shared
+      ## link: a reference to a global with default visibility is then
+      ## ``R_X86_64_PC32``, which ld refuses in a shared object
+      ## ("recompile with -fPIC"). ``Toolchain.defaultFlags.pic`` is not
+      ## consulted.
     extra*: seq[string]
       ## Pass-through flags appended to the compiler argv verbatim —
       ## an escape hatch for one-off knobs the dispatch routine

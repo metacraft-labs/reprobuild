@@ -1120,8 +1120,8 @@ proc requireRefreshProjectId(config: RefreshConfig) =
       config.providerArtifactId & "'; the caller must supply the package " &
       "name of the project it refreshes")
 
-proc snapshotKeyedForConfig(snapshot: ProviderGraphSnapshot;
-                            config: RefreshConfig): bool =
+proc providerSnapshotKeyedFor*(snapshot: ProviderGraphSnapshot;
+                               config: RefreshConfig): bool =
   ## Whether every stored fragment is an invocation THIS refresh would make:
   ## its stored key is the one ``config`` gives its entry point, arguments
   ## and namespace. False when the project, the lock slice or the activity
@@ -1138,6 +1138,11 @@ proc snapshotKeyedForConfig(snapshot: ProviderGraphSnapshot;
   ## invoking the root (Project-Provider-Graph-Protocol.md §"Full Versus
   ## Fragment Invocation"), even when the provider artifact does not depend
   ## on the root and so does not force the invocation itself.
+  ##
+  ## Exported because ``refreshProviderGraph`` is not the only reuse site: a
+  ## caller that serves a stored snapshot WITHOUT refreshing it (the CLI's
+  ## warm snapshot shortcut) must apply the same rule, or it would serve the
+  ## graph this refresh refuses.
   let rootKey = invocationKeyFor(config, config.rootEntryPointId,
     config.rootArguments, config.namespace)
   var holdsRequestedRoot = false
@@ -1192,7 +1197,7 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
   let providerFresh = snapshot.fragments.len > 0 and
     snapshot.providerArtifactId == config.providerArtifactId and
     providerSnapshotBinaryFresh(snapshot, binaryInput.identity)
-  if providerFresh and snapshotKeyedForConfig(snapshot, config):
+  if providerFresh and providerSnapshotKeyedFor(snapshot, config):
     let manifest = snapshot.manifest
     validateManifest(manifest, config.providerArtifactId)
     refreshStoredBindings(snapshot, manifest)

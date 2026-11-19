@@ -2508,7 +2508,32 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       pos target is string, required = false,
         help = "The target (`target[#action]` or a path) whose graph to " &
           "search (default: the current project)"
-    subcmd "catalog", help = "Publish a catalog's interface artifacts":
+    subcmd "catalog",
+        help = "Publish a catalog's interface artifacts, or generate and " &
+          "verify a Nimble package index":
+      subcmd "generate",
+          help = "Regenerate published-index/ of a Nimble index repository " &
+            "from its nimble-sources.toml":
+        flag root is string,
+          help = "The index repository (default: the current directory)"
+        flag sourceSet is string,
+          help = "The source set (default: <root>/nimble-sources.toml)"
+        flag state is string,
+          help = "This host's generator state: edge outputs and cache " &
+            "(default: under the user cache directory)"
+        flag generatedAt is string,
+          help = "The generation time in Unix seconds (default: now)"
+      subcmd "verify",
+          help = "Repeat the generation of a Nimble index from the inputs it " &
+            "names and compare the roots":
+        flag sourceSet is string,
+          help = "The source set (default: nimble-sources.toml beside the index)"
+        flag previous is string,
+          help = "The previous generation's index, when the root names one"
+        flag state is string,
+          help = "This host's generator state for the repeat"
+        pos index is string,
+          help = "The index repository, or its published-index/ directory"
       subcmd "publish",
           help = "Write published-interfaces/ from the catalog's providers":
         boolFlag check is bool,
@@ -3390,15 +3415,16 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Remove from Scoop the packages this apply drops (only " &
             "what Reprobuild installed and nothing holds)"
         `homeApplyPlatform`
-      subcmd "plan", help = "Show what the next apply would do; exit " &
-          "non-zero on drift":
+      subcmd "plan", help = "Show what the next apply would do (the " &
+          "preview `apply --plan` prints); exit non-zero on drift or on " &
+          "a package with no realization":
         `homePlanHost`
         boolFlag allowDrift is bool, help = "Exit 0 even when drift is detected"
         boolFlag reconcileDrift is bool,
           help = "Plan replacing drifted targets"
         boolFlag json is bool,
           help = "Print the plan as one JSON document (schema " &
-            "reprobuild.home.plan.v1); the exit code is the same as without it"
+            "reprobuild.home.plan.v2); the exit code is the same as without it"
       subcmd "export", help = "Print the evaluated home-profile intent " &
           "(activities, config, hosts, resources, the host's selection, " &
           "provenance) as JSON, or check a committed export; exit 1 when " &

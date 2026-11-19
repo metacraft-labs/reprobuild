@@ -243,7 +243,9 @@ suite "repro home export: other platforms":
 
     # For the compiling platform the evaluation is what the planner plans
     # on this host.
-    let plan = sb.runHomePlan(host = "gm3-host")
+    let plan = sb.runHomePlan(host = "gm3-host",
+      extraEnv = sb.fixturePackageEnv(["ripgrep", "gm3-mac-app", "git",
+        "gm3-windows-terminal", "gm3-strace"]))
     checkpoint("plan output:\n" & plan.output)
     require plan.exitCode == 0
     var planned: seq[string]

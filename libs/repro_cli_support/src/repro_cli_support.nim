@@ -250,6 +250,7 @@ from test_certificates/note_framing as tcnotes import nil
 from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
+import repro_cli_support/catalog_generate
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -2242,7 +2243,16 @@ proc capabilitiesJson*(): JsonNode =
     "cmake-regeneration-edge",
     "provider-cache-priming",
     "build-report-json-inspection",
-    "build-action-output"])
+    "build-action-output",
+    # A hit replays its record's captured output under
+    # `--action-output=all` (Provider-Compile-Tiering.md §"A TryCompile hit
+    # must replay the probe's output"). The CMake generator lets its
+    # try_compile builds be served from cache only when this is listed.
+    "build-action-output-replay",
+    # The direct provider reads `trycompile.rbsz` v6, whose `relocatable`
+    # flag keys a try_compile project's actions independently of its
+    # scratch directory. The generator writes v6 only when this is listed.
+    "trycompile-relocatable-probes"])
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
@@ -3278,6 +3288,45 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
 ## substituted `@FILE:` value enters the key only as part of the digest; the
 ## plaintext spawned argv is already what the lowered graph cache stores for
 ## the action.
+proc relocatableInlineExecAnchors(argv: openArray[string]): seq[string] =
+  ## The roots a relocatable inline-exec edge (``BuildActionDef.relocatable``,
+  ## a CMake try_compile probe) reaches by ABSOLUTE path from whatever
+  ## scratch directory it runs in (`repro_core/relocation`): the host's
+  ## system directories, the reprobuild store and action cache (which hold a
+  ## probe's staged source), and the install prefix of the program the edge
+  ## runs (`<prefix>/bin/<tool>`: a compiler driver reads its own headers,
+  ## libraries and sub-programs below that prefix). Inputs and argv elements
+  ## under them stay named absolutely; everything else is named relative to
+  ## the edge's cwd. Sorted, so the list is a stable part of the edge.
+  ##
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles" states the soundness assumption: an input reached by absolute
+  ## path lies under an anchor. One that does not is recorded relative and
+  ## revalidated at the relocated spot, which costs a miss, never a wrong hit.
+  var roots = @["/nix", "/etc", "/usr", "/proc", "/sys", "/dev", "/run",
+    "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/opt", "/var"]
+  when defined(windows):
+    for name in ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)",
+                 "ProgramData"]:
+      let dir = getEnv(name)
+      if dir.len > 0 and dir.isAbsolute:
+        roots.add(dir)
+  roots.add(absolutePath(currentActionCacheRoot()))
+  let store = resolveStoreRoot()
+  if store.len > 0:
+    roots.add(absolutePath(store))
+  if argv.len > 0 and argv[0].isAbsolute:
+    let bin = parentDir(argv[0])
+    let prefix = parentDir(bin)
+    roots.add(if prefix.len > 0 and extractFilename(bin).toLowerAscii == "bin":
+                prefix
+              else: bin)
+  for root in roots:
+    let normalized = os.normalizedPath(root).replace('\\', '/')
+    if normalized notin result:
+      result.add(normalized)
+  result.sort()
+
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   # `BuildAction.governingLockIdentity` is required. Give `result` a complete
@@ -3368,6 +3417,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # Caches.md "Trust Boundary"): a branch that dropped them would let the
     # edge's records leave this host.
     result.contentKeyedToolCaches = payload.contentKeyedToolCaches
+    # The canonical work tree's key (Hermetic-Builds-And-Path-Independence.md
+    # "Canonical work trees"). Copied on every branch: a branch that dropped
+    # it would run the edge in a checkout-specific tree again.
+    result.canonicalWorkKey = payload.canonicalWorkKey
   # Caching-Architecture D2: an edge that states no policy takes the one its
   # resolved tools declare, else the owner-decided default, timestamp.
   var policyFromTools = false
@@ -3379,6 +3432,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       if declared.isSome and declared.get() != ffpTimestamp:
         policyFromTools = true
         declared.get()
+      elif payload.relocatable:
+        # A relocated record is revalidated against ANOTHER tree, whose
+        # files carry their own mtimes (a probe's object file is restored or
+        # rebuilt in each scratch directory): content decides, as for the
+        # engine's relocatable recipe compiles.
+        ffpHybrid
       else:
         ffpTimestamp
     of acfpTimestamp:
@@ -3456,10 +3515,50 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
         payload.commandStatsId
       else:
         payload.id
+    let inlineCwd = resolveCanonicalExecRoot(effectiveCwdKind,
+      effectiveCwdCustomPath, projectRoot)
+    # A RELOCATABLE edge (a CMake try_compile probe, `BuildActionDef.
+    # relocatable`) computes the same thing in any scratch directory. Its
+    # key names each argv element the way its record names an input and
+    # keys the cwd's depth, not its path (`action()`, `argvKeyComponents`;
+    # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", riders of
+    # 2026-11-16/17). The caller fingerprint below must not re-add what that
+    # takes out: it covers the payload, which spells the argv and the cwd
+    # absolutely, so for a relocatable edge it covers a copy of the payload
+    # whose argv is in its relocatable names and whose cwd is cleared.
+    let relocatable = payload.relocatable and inlineCwd.isAbsolute
+    let relocationAnchors =
+      if relocatable: relocatableInlineExecAnchors(argv)
+      else: @[]
+    let keyedArgv =
+      if relocatable:
+        argvKeyComponents(argv, inlineCwd, true, relocationAnchors).argv
+      else:
+        argv
+    let keyedPayload =
+      if relocatable:
+        var relocated = payload
+        for arg in relocated.call.arguments.mitems:
+          if arg.name == "argv":
+            arg.encodedValue = keyedArgv.join("\x1f")
+          elif arg.name == "cwd":
+            arg.encodedValue = ""
+        relocated.cwdCustomPath = ""
+        # The digest of the project's generated `reprobuild.nim`, which
+        # spells the scratch directory: unique per configure, so it would
+        # key every probe apart. The direct provider builds a try_compile
+        # project's graph from `trycompile.rbsz` and never reads that file,
+        # and the action's own content (argv, env, inputs, outputs, policy)
+        # is in the key already. Caching-Architecture.md §"BuildXL-Inspired
+        # Fingerprinting" keeps recipe body hashes out of action keys.
+        relocated.recipeRevisionFingerprint = ""
+        actionPayload(relocated)
+      else:
+        node.payload
     let fingerprintText = [
       "reprobuild.localInlineExecAction.v1",
       payload.id,
-      node.payload
+      keyedPayload
     ].join("\n") & (block:
       let libraries = environmentPrefixKeyText(profiles,
         payload.toolIdentityRefs)
@@ -3512,8 +3611,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
       # no lock files is governed by `default`, the one workspace lock.
       governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
-      cwd = resolveCanonicalExecRoot(effectiveCwdKind,
-        effectiveCwdCustomPath, projectRoot),
+      cwd = inlineCwd,
       deps = payload.deps,
       inputs = payload.inputs.mapIt(materialProjectPath(projectRoot, it)),
       outputs = payload.outputs,
@@ -3523,8 +3621,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
       weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
-        argv),
+        keyedArgv),
       actionCachePolicy = actionCachePolicy,
+      relocatable = relocatable,
+      relocationAnchors = relocationAnchors,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
       # Windows-Build-Correctness M6 — carry the invoked TOOL's entropy
@@ -5024,7 +5124,15 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 18'u16
+  LoweredGraphCacheVersion = 20'u16
+    # v20: ``BuildAction.relocatable`` (a byte) and ``relocationAnchors`` (a
+    # string list) after ``canonicalWorkKey``. A v19 record decoded
+    # without them would key a relocatable edge relocatably (its weak
+    # fingerprint is cached) but record its inputs by absolute path on the
+    # warm path only.
+    # v19: ``BuildAction.canonicalWorkKey``, a string after
+    # ``contentKeyedToolCaches``. A v18 record decoded without it would run
+    # the edge without its canonical work tree on the warm path only.
     # v18: ``BuildAction.contentKeyedToolCaches``, a string list after
     # ``widthFlag``. A v17 record decoded without it would make a cache-
     # reading edge `weak` again on the warm path only, and its records would
@@ -6174,6 +6282,9 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeU32Le(action.cpuPreferredMilli)
   outp.writeString(action.widthFlag)
   outp.writeStringSeq(action.contentKeyedToolCaches)
+  outp.writeString(action.canonicalWorkKey)
+  outp.add(if action.relocatable: 1'u8 else: 0'u8)
+  outp.writeStringSeq(action.relocationAnchors)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6266,6 +6377,13 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.cpuPreferredMilli = readU32Le(bytes, pos)
   result.widthFlag = readString(bytes, pos)
   result.contentKeyedToolCaches = readStringSeq(bytes, pos)
+  result.canonicalWorkKey = readString(bytes, pos)
+  let relocatableByte = readByteValue(bytes, pos)
+  if relocatableByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action relocatable sentinel")
+  result.relocatable = relocatableByte == 1'u8
+  result.relocationAnchors = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -8291,18 +8409,45 @@ proc refreshReadableProviderGraph(config: RefreshConfig):
     "was built from reprobuild libraries newer than this repro binary.\n  " &
     sourceLine)
 
-proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
-                                   providerBinaryPath: string):
+proc projectProviderRefreshConfig*(storeRoot: string;
+                                   artifact: ProjectInterfaceArtifact;
+                                   providerBinaryPath, providerArtifactId,
+                                   projectRoot: string): RefreshConfig =
+  ## The refresh of a project's root provider graph, as every CLI path
+  ## (build, project evaluation, lowered graph) makes it. Built once per
+  ## path and given both to the snapshot shortcut and to the refresh, so
+  ## the two cannot disagree about which invocations the snapshot must
+  ## hold.
+  RefreshConfig(
+    storeRoot: storeRoot,
+    projectId: artifact.projectInterface.packageName,
+    providerBinaryPath: providerBinaryPath,
+    providerArtifactId: providerArtifactId,
+    rootEntryPointId: artifact.projectInterface.packageName & ".root",
+    rootArguments: projectRoot,
+    namespace: "project",
+    lockSliceId: digestHex(artifact.interfaceFingerprint),
+    activity: "build",
+    providerWorkingDir: projectRoot)
+
+proc readFreshProviderGraphSnapshot*(config: RefreshConfig):
     Option[ProviderGraphSnapshot] =
+  ## The persisted snapshot at ``config.storeRoot``, when it can be served
+  ## for ``config`` as-is, without calling ``refreshProviderGraph``: the same
+  ## provider artifact and binary, readable payloads, unchanged evaluation
+  ## inputs, and every fragment an invocation ``config``'s refresh would
+  ## make (``providerSnapshotKeyedFor``: the project, lock slice, activity,
+  ## namespace and requested root). Anything else is ``none``, and the
+  ## caller refreshes.
   inc warmBuildCacheCounters.providerSnapshotDiskReads
-  let path = providerSnapshotPath(storeRoot)
+  let path = providerSnapshotPath(config.storeRoot)
   if not fileExists(extendedPath(path)):
     return none(ProviderGraphSnapshot)
   try:
-    let snapshot = loadProviderGraphSnapshot(storeRoot)
-    if snapshot.providerArtifactId != providerArtifactId:
+    let snapshot = loadProviderGraphSnapshot(config.storeRoot)
+    if snapshot.providerArtifactId != config.providerArtifactId:
       return none(ProviderGraphSnapshot)
-    if not providerSnapshotBinaryFresh(snapshot, providerBinaryPath):
+    if not providerSnapshotBinaryFresh(snapshot, config.providerBinaryPath):
       return none(ProviderGraphSnapshot)
     # Before the inputs check, not after it: with the artifact id and the
     # binary matching, ``refreshProviderGraph`` keeps every fragment whose
@@ -8312,33 +8457,42 @@ proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
     # and is left alone.
     if not providerSnapshotUsable(snapshot, path):
       return none(ProviderGraphSnapshot)
+    # The rule ``refreshProviderGraph`` applies before its own warm path: a
+    # snapshot produced for another root (or project, lock slice, activity,
+    # namespace) is another invocation's graph, whatever its freshness
+    # (Project-Provider-Graph-Protocol.md §"Full Versus Fragment
+    # Invocation").
+    if not providerSnapshotKeyedFor(snapshot, config):
+      return none(ProviderGraphSnapshot)
     if not providerSnapshotInputsFresh(snapshot):
       return none(ProviderGraphSnapshot)
     return some(snapshot)
   except CatchableError:
     return none(ProviderGraphSnapshot)
 
-proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
-                                       providerBinaryPath: string):
+proc warmReadFreshProviderGraphSnapshot*(config: RefreshConfig):
     Option[ProviderGraphSnapshot] =
-  let path = providerSnapshotPath(storeRoot)
-  let key = storeRoot & "\0" & providerArtifactId
+  ## ``readFreshProviderGraphSnapshot`` behind this process's warm table.
+  ## The table is keyed by store and artifact only, so a warm entry is
+  ## re-checked against ``config``'s invocation keys like a disk read.
+  let path = providerSnapshotPath(config.storeRoot)
+  let key = config.storeRoot & "\0" & config.providerArtifactId
   if warmProviderSnapshots.hasKey(key):
     let warm = warmProviderSnapshots[key]
-    if warm.providerArtifactId == providerArtifactId and
+    if warm.providerArtifactId == config.providerArtifactId and
         evidenceFresh(path, warm.snapshotEvidence) and
-        warm.snapshot.providerArtifactId == providerArtifactId and
-        providerSnapshotBinaryFresh(warm.snapshot, providerBinaryPath) and
+        warm.snapshot.providerArtifactId == config.providerArtifactId and
+        providerSnapshotBinaryFresh(warm.snapshot, config.providerBinaryPath) and
+        providerSnapshotKeyedFor(warm.snapshot, config) and
         providerSnapshotInputsFresh(warm.snapshot):
       if warm.populatedByPid != getCurrentProcessId():
         inc warmBuildCacheCounters.inheritedWarmHits
       return some(warm.snapshot)
-  result = readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
-    providerBinaryPath)
+  result = readFreshProviderGraphSnapshot(config)
   if result.isSome:
     warmProviderSnapshots[key] = WarmProviderSnapshot(
       populatedByPid: getCurrentProcessId(),
-      providerArtifactId: providerArtifactId,
+      providerArtifactId: config.providerArtifactId,
       snapshotPath: path,
       snapshotEvidence: durableFileEvidence(path),
       snapshot: result.get())
@@ -10596,8 +10750,12 @@ proc emitActionOutputs(buildResult: BuildRunResult;
   ## parsing the compiler's ``-v`` output (stderr) out of the build tool's
   ## output, and a build that prints only status lines leaves them empty.
   ##
-  ## An action served from cache or found up to date did not run and has no
-  ## output to print, as with Ninja for an up-to-date edge. Nothing is
+  ## An action served from the action cache prints the output its record's
+  ## execution captured: the engine replays it (`replayCachedActionOutput`,
+  ## set for this mode), and does not serve a record that cannot say what
+  ## its run printed (Provider-Compile-Tiering.md §"A TryCompile hit must
+  ## replay the probe's output"). A non-cacheable action found up to date
+  ## did not run and has nothing to print, as with Ninja. Nothing is
   ## printed between actions: a header line would be one more line for
   ## CMake's link-line regex to consider.
   for item in buildResult.results:
@@ -12747,6 +12905,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
+      # `--action-output=all` prints every action's output, so a hit has to
+      # carry the output its record's execution captured
+      # (Provider-Compile-Tiering.md §"A TryCompile hit must replay the
+      # probe's output").
+      replayCachedActionOutput: actionOutput == baoAll,
       runQuotaCliPath: publicCliPath,
       monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,
@@ -14342,12 +14505,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var refresh: ProviderRefreshReport
     var previousProviderSnapshot: ProviderGraphSnapshot
     progressRenderer.renderPhase("checking project provider graph snapshot")
+    let refreshConfig = projectProviderRefreshConfig(providerGraphStore,
+      artifact, provider.outputBinaryPath, providerArtifactId, projectRoot)
     let freshSnapshot =
       if forceRebuild or dryRun:
         none(ProviderGraphSnapshot)
       else:
-        warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId,
-          provider.outputBinaryPath)
+        warmReadFreshProviderGraphSnapshot(refreshConfig)
     if freshSnapshot.isSome:
       refresh.snapshot = freshSnapshot.get()
       refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
@@ -14360,17 +14524,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         previousProviderSnapshot = loadProviderGraphSnapshot(providerGraphStore)
       except CatchableError:
         previousProviderSnapshot = ProviderGraphSnapshot()
-      refresh = refreshReadableProviderGraph(RefreshConfig(
-        storeRoot: providerGraphStore,
-        projectId: artifact.projectInterface.packageName,
-        providerBinaryPath: provider.outputBinaryPath,
-        providerArtifactId: providerArtifactId,
-        rootEntryPointId: artifact.projectInterface.packageName & ".root",
-        rootArguments: projectRoot,
-        namespace: "project",
-        lockSliceId: digestHex(artifact.interfaceFingerprint),
-        activity: "build",
-        providerWorkingDir: projectRoot))
+      refresh = refreshReadableProviderGraph(refreshConfig)
     finishStat(buildStats, statsEnabled, "repro provider graph refresh",
       providerGraphStart)
     let providerInvocationCount =
@@ -14535,6 +14689,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var engineConfig = BuildEngineConfig(
       cacheRoot: outDir / "build-engine-cache",
       actionCacheRoot: currentActionCacheRoot(),
+      # `--action-output=all` prints every action's output, so a hit has to
+      # carry the output its record's execution captured
+      # (Provider-Compile-Tiering.md §"A TryCompile hit must replay the
+      # probe's output").
+      replayCachedActionOutput: actionOutput == baoAll,
       runQuotaCliPath: publicCliPath,
       monitorCliPath: selfSpawnIoMonitorPath(publicCliPath),
       monitorCliArgs: internalIoMonitorArgs,
@@ -29582,6 +29741,9 @@ type
     licContentMismatch      ## obtained content ≠ recorded integrity
     licRevisionUnreachable  ## the locked revision's object is absent/unreachable
     licNoRevisionPinned     ## a VCS-native integrity with no revision to verify at
+    licShallowCheckout      ## the revision is absent from a SHALLOW checkout:
+                            ## unverifiable here, which says nothing about
+                            ## whether it still exists upstream
 
   LockedIntegrityFailure* = object
     ## One dependency whose obtained content did not match its locked integrity.
@@ -31982,6 +32144,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "publishToBinaryCache": action.publishToBinaryCache,
     "fixedOutput": action.fixedOutput,
     "scratchDirs": action.scratchDirs,
+    "canonicalWorkKey": action.canonicalWorkKey,
     "removeBeforeRun": action.removeBeforeRun,
     "optionalOutputs": action.optionalOutputs,
     "binaryCacheKey": binaryCacheKey,
@@ -32438,28 +32601,19 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport
+  let refreshConfig = projectProviderRefreshConfig(providerGraphStore,
+    artifact, provider.outputBinaryPath, result.providerArtifactId, projectRoot)
   let freshSnapshot =
     if forceRefresh:
       none(ProviderGraphSnapshot)
     else:
-      warmReadFreshProviderGraphSnapshot(providerGraphStore, result.providerArtifactId,
-        provider.outputBinaryPath)
+      warmReadFreshProviderGraphSnapshot(refreshConfig)
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
     refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
     result.providerGraphCacheHit = true
   else:
-    refresh = refreshReadableProviderGraph(RefreshConfig(
-      storeRoot: providerGraphStore,
-      projectId: artifact.projectInterface.packageName,
-      providerBinaryPath: provider.outputBinaryPath,
-      providerArtifactId: result.providerArtifactId,
-      rootEntryPointId: artifact.projectInterface.packageName & ".root",
-      rootArguments: projectRoot,
-      namespace: "project",
-      lockSliceId: digestHex(artifact.interfaceFingerprint),
-      activity: "build",
-      providerWorkingDir: projectRoot))
+    refresh = refreshReadableProviderGraph(refreshConfig)
   # Workspace-Manifest-Optional MO-6 — fold any present projectExtension
   # sibling's fragments into this project's snapshot (see the matching
   # call in ``executeBuildTarget``). Skipped when this proc is reused to
@@ -32654,23 +32808,13 @@ proc refreshRecipeProviderSnapshot(target: string;
   let providerArtifactId = digestHex(provider.providerFingerprint)
   let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport
-  let freshSnapshot =
-    warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId,
-      provider.outputBinaryPath)
+  let refreshConfig = projectProviderRefreshConfig(providerGraphStore,
+    artifact, provider.outputBinaryPath, providerArtifactId, projectRoot)
+  let freshSnapshot = warmReadFreshProviderGraphSnapshot(refreshConfig)
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
   else:
-    refresh = refreshReadableProviderGraph(RefreshConfig(
-      storeRoot: providerGraphStore,
-      projectId: artifact.projectInterface.packageName,
-      providerBinaryPath: provider.outputBinaryPath,
-      providerArtifactId: providerArtifactId,
-      rootEntryPointId: artifact.projectInterface.packageName & ".root",
-      rootArguments: projectRoot,
-      namespace: "project",
-      lockSliceId: digestHex(artifact.interfaceFingerprint),
-      activity: "build",
-      providerWorkingDir: projectRoot))
+    refresh = refreshReadableProviderGraph(refreshConfig)
   discard mergeProjectExtensions(refresh.snapshot, projectRoot,
     artifact.projectInterface.packageName, effectiveMode, publicCliPath,
     workRoot, lowerGraph = false)
@@ -47287,6 +47431,25 @@ proc committedLockCommand*(workspaceRoot: string): string =
   if workspaceRoot.len == 0: "repro lock refresh"
   else: "repro lock refresh " & workspaceRoot
 
+proc withoutRootEntryAtIssuance*(ld: LockedDependencies;
+                                 issuing: bool): LockedDependencies =
+  ## The committed lock's entries the pre-push gate verifies at their
+  ## coordinates. When the gate runs for certificate ISSUANCE
+  ## (``CheckArgs.issuingForCurrentHead``) the lock's root (self) entry is
+  ## left out: its revision is the commit ``repro lock refresh`` ran on, the
+  ## parent of the commit carrying the lock, and under content binding it is
+  ## informational, like a certificate's ``base`` (Unified-Locking-And-Hooks.md
+  ## §13.7.5 "The root entry"; Test-Certificates.md §"Issuance
+  ## preconditions"). A depth-1 CI checkout or a pull request's merge
+  ## checkout does not have that commit, so verifying it refused every such
+  ## certification. The real pre-push gate and the server gateway still
+  ## verify the root entry: there the lock is about to be published.
+  result = ld
+  if issuing:
+    result.deps = @[]
+    for d in ld.deps:
+      if not isSelfLockedDep(d): result.deps.add(d)
+
 proc lockedIntegrityCauseToken*(c: LockedIntegrityCause): string =
   ## The machine-readable ``cause=`` token a refusal's EVIDENCE carries, so a
   ## consumer can tell "the revision vanished" from "the content changed"
@@ -47295,6 +47458,7 @@ proc lockedIntegrityCauseToken*(c: LockedIntegrityCause): string =
   of licContentMismatch: "content-mismatch"
   of licRevisionUnreachable: "locked-revision-unreachable"
   of licNoRevisionPinned: "no-revision-pinned"
+  of licShallowCheckout: "shallow-checkout"
 
 proc lockedIntegrityRemedy*(f: LockedIntegrityFailure; qualifier: string;
                             restoreWhere, repinCommand: string): string =
@@ -47314,6 +47478,17 @@ proc lockedIntegrityRemedy*(f: LockedIntegrityFailure; qualifier: string;
       "the usual cause — the revision is GONE, not changed. Restore it in " &
       restoreWhere & ", or re-pin at the current revision with `" &
       repinCommand & "`"
+  of licShallowCheckout:
+    # A depth-limited clone (CI's default ``actions/checkout``) lacks most
+    # history, so an absent revision is the expected state there, not
+    # evidence of a force-push. The repair is to fetch the history, never to
+    # re-pin: re-pinning would rewrite a correct lock to suit the checkout.
+    "the locked revision " & f.revision & " for '" & f.path &
+      "' is not present in this checkout, and the checkout is SHALLOW " &
+      "(a depth-limited clone), so the locked record cannot be verified " &
+      "here" & where & ". Fetch the full history and retry: " &
+      "`git fetch --unshallow` in the checkout, or `fetch-depth: 0` on " &
+      "`actions/checkout`"
   of licNoRevisionPinned:
     "the locked record for '" & f.path & "' pins no concrete revision to " &
       "verify its recorded integrity at" & where & "; re-pin at the current " &
@@ -49766,12 +49941,23 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
           quoteShell(d.coordinates.revision & "^{commit}"),
           options = {poUsePath}, env = scrubbedGitRepositoryEnv())
         if rp.exitCode != 0 or rp.output.strip().len == 0:
+          # An absent revision means "gone upstream" only in a checkout that
+          # has the history. A shallow one (a depth-1 CI clone) lacks it by
+          # construction, so say the revision cannot be verified HERE rather
+          # than send the operator looking for a force-push.
+          let shallowProbe = execCmdEx(quoteShell(gitBin) & " -C " &
+            quoteShell(repoAbs) & " rev-parse --is-shallow-repository",
+            options = {poUsePath}, env = scrubbedGitRepositoryEnv())
+          let shallow = shallowProbe.exitCode == 0 and
+            shallowProbe.output.strip() == "true"
           result.add(LockedIntegrityFailure(name: d.name, path: d.path,
             expected: d.integrity, observed: "",
             revision: d.coordinates.revision,
-            cause: licRevisionUnreachable,
+            cause: (if shallow: licShallowCheckout
+                    else: licRevisionUnreachable),
             diagnostic: "locked revision " & d.coordinates.revision &
-              " is not present/reachable in '" & d.path & "'"))
+              " is not present/reachable in '" & d.path & "'" &
+              (if shallow: " (a shallow checkout)" else: "")))
           continue
         let observed =
           gitObjectMultihash(gitObjectFormatOf(repoAbs), rp.output.strip())
@@ -73294,8 +73480,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # untampered lock every recomputed integrity equals the recorded one
     # (the locked revision's object is present), so the manifest-less gate
     # passes exactly as before.
-    let committedLd = populateLockedDeps(
-      LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot))
+    let committedLd = withoutRootEntryAtIssuance(populateLockedDeps(
+      LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot)),
+      parsed.issuingForCurrentHead)
     let integrityFailures = verifyLockedIntegrityAtCoordinates(
       parsed.workspaceRoot, committedLd)
     if integrityFailures.len > 0:
@@ -73500,8 +73687,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # branch runs, applied here so the mixed path also refuses a tampered public
     # lock — §8.4 "tampered committed lock fails at the client (public branch)").
     if committedLockPaths.len > 0:
-      let publicLd = populateLockedDeps(
-        LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot))
+      let publicLd = withoutRootEntryAtIssuance(populateLockedDeps(
+        LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot)),
+        parsed.issuingForCurrentHead)
       var scopedPublic = LockedDependencies(
         schema: publicLd.schema, platform: publicLd.platform, deps: @[])
       for d in publicLd.deps:
@@ -88784,6 +88972,9 @@ type
     ipDirty             ## a SIBLING in the closure has a dirty tree.
     ipUnpublished       ## a sibling in the closure has an unpublished HEAD.
     ipOffLock           ## a sibling differs from the locked revision.
+    ipLockIntegrity     ## a locked entry does not verify at its coordinates:
+                        ## its revision is absent from the checkout, or the
+                        ## content there differs from the recorded integrity.
     ipUndeclaredCheckout ## the attested repository is not a checkout the
                          ## workspace declares (a second path to one, or a
                          ## stray clone): no lock or publication state
@@ -89235,6 +89426,12 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string):
       result.kind = ipUnpublished
     of "lock-stale", "lock-failure":
       result.kind = ipOffLock
+    of "locked-integrity-mismatch":
+      # Not "off the locked revision": the gate could not verify a locked
+      # entry where it is checked out (an absent revision, a shallow
+      # checkout, changed content). Its remedy, rendered from the cause, is
+      # the one surfaced.
+      result.kind = ipLockIntegrity
     of "current-repo-identity":
       # The repository being certified is not one this workspace declares:
       # a second path to a declared checkout (a bind mount, a copy) or a
@@ -90807,6 +91004,7 @@ proc issuancePreconditionLabel(kind: IssuancePreconditionKind): string =
   of ipDirty: "a develop-mode sibling's working tree is dirty"
   of ipUnpublished: "dependency has unpushed commits"
   of ipOffLock: "repo not at the locked revision"
+  of ipLockIntegrity: "a locked dependency cannot be verified in this checkout"
   of ipUndeclaredCheckout:
     "this checkout is not a repository the workspace declares"
   of ipNoWorkspace: "not a workspace"
@@ -106623,6 +106821,14 @@ proc runReproCommandLine(programName: string; args: seq[string];
       except CatchableError as err:
         stderr.writeLine("repro catalog: error: " & err.msg)
         return 1
+    of ReproCommandLineCatalogCommand.generate:
+      let r = conf.catalog.generate
+      return runCatalogGenerateCommand(r.root, r.sourceSet, r.state,
+        r.generatedAt)
+    of ReproCommandLineCatalogCommand.verify:
+      let r = conf.catalog.verify
+      return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
+        r.state)
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:

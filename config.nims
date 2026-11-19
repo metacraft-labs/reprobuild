@@ -555,6 +555,10 @@ for libName in [
   # their per-version requirements, and the deterministic index writer. The
   # objects' codec is `repro_domain_types/nimble_index`.
   "repro_nimble_index",
+  # Nimble package catalog NPC-M4: the index generator -- the source set
+  # reader, the origin egress policy, the fetch (`netFetch`) and pure index
+  # edges, origin events and `repro catalog verify`.
+  "repro_nimble_generator",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import

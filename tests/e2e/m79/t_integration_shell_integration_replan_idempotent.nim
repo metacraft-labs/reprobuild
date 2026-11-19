@@ -83,12 +83,13 @@ proc runRepro(envOverrides: openArray[tuple[k, v: string]];
 
 proc resourcePlanLine(planOutput, address: string): string =
   ## Extract the `repro home plan` per-resource line for `address`.
-  ## `renderPlan` (`repro_home_resources/plan.nim`) emits one line per
-  ## resource of the form
-  ##   `  <action>    <address> (<kind>)`
-  ## (the action verb / address / kind come from `lifecycle.summarize`).
-  ## Returns the trimmed line, or "" if no line for that address was
-  ## found.
+  ## `renderPlanPreview` (`repro_home_apply/pipeline.nim`), the one
+  ## rendering of `repro home plan` and `repro home apply --plan`, emits
+  ## one line per resource under `[resource]` of the form
+  ##   `    <verb>  <address>  (<lifecycle.summarize line>)`
+  ## where the verb is the preview's (`no-op`, `update`,
+  ## `conflict-drift`, ...). Returns the trimmed line, or "" if no line
+  ## for that address was found.
   for rawLine in planOutput.splitLines():
     let trimmed = rawLine.strip()
     if trimmed.len == 0:
@@ -190,7 +191,7 @@ suite "M79 gate: integration_shell_integration_replan_idempotent":
       # STRONG assertion on the exact action — not just "exits 0".
       check noChangeLine.startsWith("no-op")
       check not noChangeLine.startsWith("update")
-      check not noChangeLine.startsWith("DRIFT")
+      check not noChangeLine.startsWith("conflict-drift")
       # The whole plan settles to zero drift.
       check planNoChange.output.contains("0 drift(s)")
 
@@ -217,14 +218,14 @@ suite "M79 gate: integration_shell_integration_replan_idempotent":
       writeFile(shellRc, edited)
 
       # `repro home plan` surfaces the drift on the shell.integration
-      # resource — EXACT action assertion (`DRIFT`), not a generic
+      # resource — EXACT action assertion (`conflict-drift`), not a generic
       # "non-zero exit". A genuine content change MUST still drift; the
       # M79 fix does not weaken the M72/M68 drift contract.
       let driftPlan = runRepro(baseEnv, ["home", "plan"])
       check driftPlan.exitCode != 0
       let driftLine = resourcePlanLine(driftPlan.output, ShellAddress)
       check driftLine.len > 0
-      check driftLine.startsWith("DRIFT")
+      check driftLine.startsWith("conflict-drift")
       check not driftLine.startsWith("no-op")
       check not driftLine.startsWith("update")
       check driftPlan.output.contains("1 drift(s)")
