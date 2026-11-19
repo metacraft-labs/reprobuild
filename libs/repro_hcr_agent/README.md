@@ -47,13 +47,16 @@ reads as more than it is:
   runtime-mapped `__patchable_function_entries` section.
 - **`mprotect` is a raw syscall**, never libc, so an MCR-recorded process does
   not re-enter the recording path.
-- **The host is probed at agent start.** If the `PROT_READ|PROT_WRITE` →
-  `PROT_READ|PROT_EXEC` round trip cannot complete, the agent drops
-  `direct-patch-injection` from the capabilities it advertises in its hello and
-  refuses any patch request with `unsupported-host` *before* touching a byte of
-  target text. The coordinator does not yet fail the handshake on the missing
-  capability; that half is HLX-M9's, along with the gate that runs under
-  `PR_SET_MDWE`.
+- **The host is probed at agent start.** The probe performs a complete text
+  page replacement — the mechanism every publication uses — on a scratch
+  `PROT_READ|PROT_EXEC` page the agent owns, through the `memfd` dual mapping
+  first and the anonymous fallback second, and then calls the replaced page.
+  If neither completes, the agent drops `direct-patch-injection` from the
+  capabilities it advertises in its hello and reports `patchingSupported:
+  false` with a `host-text-replacement-refused` reason naming the blocking
+  policy, so the coordinator refuses the host at negotiation. The `mprotect`
+  round trip on its own is not probed: under `PR_SET_MDWE` it fails while the
+  `memfd` backing still publishes.
 - **Symbol resolution is registered symbols only.** There is deliberately no
   `dlsym` fallback: `dlsym` cannot see `static` or hidden functions and a
   partial resolver would hide that. HLX-M1 lands the real ELF pipeline.

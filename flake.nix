@@ -938,8 +938,12 @@
     # (bb0e8943..93793d47): `std/osproc` closes the child's pipes and reaps
     # it when a start fails, frees the clone child's stack by its base
     # pointer, and retries the error-pipe read and `waitpid` on EINTR.
+    # fde9384c: `std/net` `send` returns after a swallowed disconnect (no
+    # spin on a reset peer) and resumes a short write at the written offset
+    # (upstream bb85d2dda5, e2b2142a49; reprobuild-pm issue
+    # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c47c55d166224bcffe485045378c766a0f5e67a2";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
       flake = false;
     };
     nim-csources-src = {
