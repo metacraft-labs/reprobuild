@@ -71,6 +71,24 @@
 ##    workspace to cargo (Mode B), as Rust.md §"Recognition" item 6 says.
 ##    ``harness = false`` that is only a comment changes nothing.
 ##
+## 4. **A registry dev-dependency.** The package ``member`` (no
+##    ``[workspace]``) has an integration test ``tests/it.rs`` that calls
+##    ``seven::seven()``, and ``[dev-dependencies] seven = "1"``. The crate
+##    is served offline by Cargo's source replacement (``[source.crates-io]
+##    replace-with`` a ``directory`` source in the scratch ``CARGO_HOME``;
+##    Cargo reference, "Source Replacement"), which ``cargo metadata
+##    --no-deps`` does not reveal: it reports the dependency's ``source`` as
+##    the crates.io registry, as for any registry dependency. Rust.md
+##    §"Recognition", item 6 sends a workspace with any dependency that is
+##    no workspace member to Mode B and exempts no dependency kind. Mode A
+##    gives a test compile no ``--extern`` for a registry crate, so keeping
+##    the workspace in Mode A fails ``repro build .#test`` with an
+##    unresolved crate in ``rustc``. The test checks with ``cargo test
+##    --no-run -v`` that cargo hands the test ``--extern seven=...``, then
+##    requires Mode A to emit no rustc action and one cargo delegation.
+##    Regression test for reprobuild-pm
+##    issues/2026-11-17-rust-mode-a-tolerates-registry-dev-dependencies-that-its-test-compile-cannot-resolve.md.
+##
 ## No mocks: ``cargo metadata`` and the production emitter
 ## (``rustConvention().emitFragment``) run unmodified, and the cargo and
 ## rustc used are whichever are on ``PATH``. When either is missing the case
@@ -101,8 +119,9 @@ proc isolateFromAmbientCargo(root: string) =
   ## reference, "Environment variables Cargo reads":
   ## https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-reads).
   ## ``CARGO_HOME`` moves to an empty directory under ``root`` so a user's
-  ## ``$CARGO_HOME/config.toml`` cannot add flags either; the fixtures have
-  ## no registry dependency, so nothing needs the real one. The same
+  ## ``$CARGO_HOME/config.toml`` cannot add flags either. Nothing needs the
+  ## real one: the one registry dependency (case 3) is served from a
+  ## ``directory`` source that its fixture configures in this cargo home. The same
   ## isolation as ``test_rust_convention_crate_env_vs_cargo``. Process-wide
   ## on purpose: this file is its own process.
   for name in ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR",
@@ -205,6 +224,27 @@ proc cargoUnits(root, targetDir: string): Table[UnitKey, seq[string]] =
     if key.crateName.len == 0:
       continue
     result[key] = argv
+
+proc cargoTestUnits(root, targetDir: string): Table[string, seq[string]] =
+  ## ``cargo test --no-run -v`` of the package at ``root``: the rustc argv
+  ## of each unit, keyed by crate name. A test unit has ``--test`` and no
+  ## ``--crate-type``, so ``cargoUnits``' key does not tell it apart.
+  let (output, exitCode) = runCapture(findExe("cargo"),
+    ["test", "--no-run", "-v", "--offline", "--target-dir", targetDir],
+    root)
+  checkpoint "cargo test --no-run -v output:\n" & output
+  doAssert exitCode == 0, "cargo test --no-run failed with exit " & $exitCode
+  for line in output.splitLines():
+    let start = line.find("Running `")
+    if start < 0:
+      continue
+    let body = line[start + len("Running `") .. ^1].strip(chars = {'`', ' '})
+    let argv = body.splitWhitespace()
+    if argv.len == 0 or not argv[0].extractFilename.startsWith("rustc"):
+      continue
+    let name = flagValue(argv, "--crate-name")
+    if name.len > 0 and "--test" in argv:
+      result[name] = argv
 
 type
   ModeAFragment = object
@@ -391,6 +431,59 @@ proc testActionId(modeA: ModeAFragment; phase, target: string): string =
         id.endsWith(".test." & target):
       return id
   ""
+
+proc writeRegistryDevDepFixture(parent: string) =
+  ## ``parent/pkg`` is the package (the project root Mode A sees);
+  ## ``parent/vendor/seven`` is the registry crate, served through a
+  ## ``directory`` source that ``$CARGO_HOME/config.toml`` puts in place
+  ## of crates.io, so cargo resolves it offline.
+  let root = parent / "pkg"
+  createDir(root / "src")
+  createDir(root / "tests")
+  createDir(parent / "vendor" / "seven" / "src")
+  writeFile(root / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package member:\n" &
+    "  uses:\n" &
+    "    \"rust >=1.80\"\n")
+  writeFile(root / "Cargo.toml",
+    "[package]\n" &
+    "name = \"member\"\n" &
+    "version = \"0.1.0\"\n" &
+    "edition = \"2021\"\n" &
+    "publish = false\n" &
+    "\n" &
+    "[dev-dependencies]\n" &
+    "seven = \"1\"\n")
+  writeFile(root / "src" / "lib.rs",
+    "pub fn x() -> u32 { 3 }\n")
+  writeFile(root / "tests" / "it.rs",
+    "#[test]\n" &
+    "fn sums() {\n" &
+    "    assert_eq!(member::x() + seven::seven(), 10);\n" &
+    "}\n")
+  writeFile(parent / "vendor" / "seven" / "Cargo.toml",
+    "[package]\n" &
+    "name = \"seven\"\n" &
+    "version = \"1.0.0\"\n" &
+    "edition = \"2021\"\n")
+  writeFile(parent / "vendor" / "seven" / "src" / "lib.rs",
+    "pub fn seven() -> u32 { 7 }\n")
+  writeFile(parent / "vendor" / "seven" / ".cargo-checksum.json",
+    "{\"files\":{},\"package\":" &
+    "\"0000000000000000000000000000000000000000000000000000000000000000\"}\n")
+  # Only ever the scratch cargo home ``isolateFromAmbientCargo(parent)``
+  # set: never a developer's real ``~/.cargo/config.toml``.
+  let cargoHome = getEnv("CARGO_HOME")
+  doAssert cargoHome == parent / "cargo-home",
+    "isolateFromAmbientCargo(parent) must run first; CARGO_HOME is " &
+    cargoHome
+  writeFile(cargoHome / "config.toml",
+    "[source.crates-io]\n" &
+    "replace-with = \"vendored\"\n" &
+    "\n" &
+    "[source.vendored]\n" &
+    "directory = \"" & (parent / "vendor") & "\"\n")
 
 suite "rust convention: library and binary targets, path dependencies":
   test "a library and a binary sharing a crate name build like cargo's":
@@ -758,3 +851,33 @@ suite "rust convention: library and binary targets, path dependencies":
       let compileId = testActionId(modeA, "compile", "custom")
       require compileId.len > 0
       check "--test" in inlineArgvOf(modeA.byId[compileId])
+
+  test "a registry dev-dependency sends the workspace to cargo (Mode B)":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let parent = createTempDir("test_rust_convention_registry_dev_dep_", "")
+      defer:
+        removeDir(parent)
+      isolateFromAmbientCargo(parent)
+      writeRegistryDevDepFixture(parent)
+      let root = parent / "pkg"
+
+      let units = cargoTestUnits(root, parent / "cargo-target")
+      # Cargo hands the integration test the dev-dependency. If it did
+      # not, the fixture would not exercise the dependency at all.
+      require "it" in units
+      check externNames(units["it"]) == @["member", "seven"]
+
+      let modeA = modeAFragment(root)
+      checkpoint "Mode A actions: " & $modeA.actionIds
+      for id in modeA.rustcIds:
+        checkpoint id & " argv: " & inlineArgvOf(modeA.byId[id]).join(" ")
+      # Mode A would give the test compile ``--extern member`` alone and
+      # ``rustc`` would fail to resolve ``seven``: every unit goes to cargo.
+      check modeA.rustcIds.len == 0
+      var delegations: seq[string] = @[]
+      for id in modeA.actionIds:
+        if id.startsWith("crude-build-"):
+          delegations.add(id)
+      check delegations.len == 1

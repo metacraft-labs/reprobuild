@@ -235,11 +235,11 @@ type
       ## workspace member.
     hasExternalDeps: bool
       ## True when this package depends on a package Mode A does not
-      ## compile: a normal or build dependency with ``source != null`` (a
-      ## crates.io registry or git dep), or a ``path`` dependency of any
-      ## kind whose directory is not a workspace member (outside the
-      ## workspace, listed in ``exclude``, or any path dependency of a
-      ## package with no ``[workspace]``). ``cargo metadata --no-deps``
+      ## compile: a dependency of any kind (normal, build or dev) with
+      ## ``source != null`` (a crates.io registry or git dep), or a
+      ## ``path`` dependency of any kind whose directory is not a
+      ## workspace member (outside the workspace, listed in ``exclude``,
+      ## or any path dependency of a package with no ``[workspace]``). ``cargo metadata --no-deps``
       ## lists members only, so Mode A has no target to compile for such
       ## a dependency and could pass no ``--extern`` for it. Used by the
       ## routing in ``rustEmitFragment`` to fall through to the Mode B
@@ -1069,25 +1069,16 @@ proc loadProject(projectRoot: string;
         # ``git+``. Only path deps that resolve to a sibling workspace
         # member contribute an ``--extern`` edge.
         #
-        # M23: Also note "build" and "dev" kinds. Build-script
-        # dependencies (``kind == "build"``) wire into build.rs which
-        # already routes through the Mode B crude fallback (see
-        # ``hasBuildRs``). Dev dependencies (``kind == "dev"``) are
-        # only consumed by tests — the M22 test target compile would
-        # need to thread them, but for now dev-deps are ignored at the
-        # default-build surface and tests fall back to crude when they
-        # need external dev deps.
-        let depKindStr =
-          if "kind" in dep and dep["kind"].kind == JString:
-            dep["kind"].getStr()
-          else: ""
+        # A registry or git dependency (``source`` set) sends the
+        # workspace to Mode B whatever its kind (Rust.md §"Recognition",
+        # item 6). That includes a dev-dependency: Mode A gives a test
+        # compile ``--extern`` for its own package's library only, so
+        # ``rustc`` would fail to resolve the crate in ``repro build
+        # .#test`` (reprobuild-pm
+        # issues/2026-11-17-rust-mode-a-tolerates-registry-dev-dependencies-that-its-test-compile-cannot-resolve.md).
         let hasSource = "source" in dep and dep["source"].kind != JNull
         if hasSource:
-          # Treat normal+build deps with external sources as triggering
-          # the Mode B fallback. Dev deps are tolerated at default-build
-          # time (they only matter for tests).
-          if depKindStr != "dev":
-            hasExternalDeps = true
+          hasExternalDeps = true
           continue
         let depPath =
           if "path" in dep and dep["path"].kind == JString:
@@ -1103,7 +1094,7 @@ proc loadProject(projectRoot: string;
           # ``cargo metadata --no-deps`` does not list it, so Mode A has
           # no target to compile and no rlib to pass with ``--extern``.
           # Dropping it would leave ``rustc`` with an unresolved crate;
-          # cargo resolves it in Mode B. Unlike a registry dev-dependency
+          # cargo resolves it in Mode B. As for a registry dependency
           # this applies to every kind: a dev-dependency here would leave
           # the package's test compile with the same unresolved crate.
           hasExternalDeps = true
