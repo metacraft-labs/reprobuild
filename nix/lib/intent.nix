@@ -421,13 +421,17 @@ let
       profileDir,
       host,
       packagesCatalog ? null,
+      catalogClones ? null,
     }:
     let
       safeHost = builtins.replaceStrings [ " " "/" ] [ "-" "-" ] host;
       # A profile that imports catalogs (`repro-catalogs.toml`) reads each
       # import from the shared bare clone of its remote at the pinned commit;
-      # the build sandbox has none. Refused here, naming the imports, until
-      # the catalog can be supplied to the sandbox as a fixed-output input
+      # the build sandbox has none. `catalogClones` supplies them as a
+      # fixed-output input: a directory laid out as the shared clone root
+      # (`github.com/<owner>/<repo>.git`, a bare clone holding the pinned
+      # commit), set as `$REPRO_WORKSPACE_CLONES`. Without it the export of a
+      # profile with imports is refused here, naming the imports
       # (Federated-Catalog-Imports.md § Home profiles, "IFD mode"). Snapshot
       # mode is unaffected: a committed export carries the resolution.
       catalogsFile = profileDir + "/repro-catalogs.toml";
@@ -437,8 +441,8 @@ let
         else
           [ ];
     in
-    if importedRepos != [ ] then
-      throw "reprobuild.lib.readIntent: IFD mode cannot export a profile that imports catalogs (${builtins.concatStringsSep ", " importedRepos}, from ${toString catalogsFile}): the build sandbox has no shared clone to read them from. Pass `snapshot` (a committed `repro home export`) instead"
+    if importedRepos != [ ] && catalogClones == null then
+      throw "reprobuild.lib.readIntent: IFD mode cannot export a profile that imports catalogs (${builtins.concatStringsSep ", " importedRepos}, from ${toString catalogsFile}): the build sandbox has no shared clone to read them from. Pass `catalogClones` (a fixed-output directory laid out as the shared clone root) or `snapshot` (a committed `repro home export`) instead"
     else
     pkgs.runCommand "repro-home-export-${safeHost}.json"
       (
@@ -448,6 +452,7 @@ let
           nativeBuildInputs = [ repro ];
         }
         // (if packagesCatalog == null then { } else { REPROBUILD_PACKAGES_ROOT = packagesCatalog; })
+        // (if catalogClones == null then { } else { REPRO_WORKSPACE_CLONES = catalogClones; })
       )
       ''
         export HOME="$TMPDIR/home"
@@ -551,7 +556,8 @@ in
 
   # reprobuild.lib.readIntent { host, system, snapshot ? null, profileDir ? null,
   #                             buildSystem ? <evaluator>, nixos ? null,
-  #                             repro ? <pinned>, packagesCatalog ? null }
+  #                             repro ? <pinned>, packagesCatalog ? null,
+  #                             catalogClones ? null }
   #
   # Snapshot mode when `snapshot` (a path to a committed export) is given,
   # IFD mode otherwise (`profileDir` required; `packagesCatalog`, a
@@ -576,6 +582,7 @@ in
       nixos ? null,
       repro ? null,
       packagesCatalog ? null,
+      catalogClones ? null,
     }:
     let
       mode = if snapshot != null then "snapshot" else "ifd";
@@ -591,7 +598,7 @@ in
             readFile (exportDerivation {
               pkgs = pkgsFor buildSystem;
               repro = if repro != null then repro else reproFor buildSystem;
-              inherit profileDir host packagesCatalog;
+              inherit profileDir host packagesCatalog catalogClones;
             })
           );
       reason =

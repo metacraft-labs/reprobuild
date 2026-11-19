@@ -497,14 +497,22 @@ let
       # Whether the target is NixOS (null: not stated; a profile with a
       # `nixos` guard is then refused, as `repro home facts --target` does).
       nixos ? null,
+      # A directory laid out as the shared clone root (`github.com/<owner>/
+      # <repo>.git`, a bare clone holding each pinned commit): where a profile
+      # that imports catalogs (`repro-catalogs.toml`) reads them in the sandbox
+      # (`$REPRO_WORKSPACE_CLONES`). Null: the profile imports none.
+      catalogClones ? null,
     }:
     pkgs.runCommand "host-facts-reprobuild-${host}.json"
-      {
-        profile = profileDir;
-        inherit host system;
-        nativeBuildInputs = [ repro ];
-        nixosFlag = if nixos == null then "" else if nixos then "--nixos" else "--nixos=false";
-      }
+      (
+        {
+          profile = profileDir;
+          inherit host system;
+          nativeBuildInputs = [ repro ];
+          nixosFlag = if nixos == null then "" else if nixos then "--nixos" else "--nixos=false";
+        }
+        // (if catalogClones == null then { } else { REPRO_WORKSPACE_CLONES = catalogClones; })
+      )
       ''
         export HOME="$TMPDIR/home"
         unset REPRO_HOST
@@ -524,6 +532,8 @@ let
   #   repro ? <this flake's repro for the configuration's system>,
   #   nixos ? <the intent module's option, else null>,   whether the host is
   #                                      NixOS (a profile's `nixos` guards)
+  #   catalogClones ? null,              the shared clone root of the catalogs
+  #                                      the profile imports (see reprobuildFacts)
   # } -> a derivation that builds both facts documents and runs
   #      `repro home compare`; it fails (with the report on the log) when the
   #      comparison exits non-zero. $out holds nix.json, reprobuild.json,
@@ -542,6 +552,8 @@ let
       # intent module's `reprobuild.intent.nixos` when the configuration uses
       # it, else not stated.
       nixos ? configuration.config.reprobuild.intent.nixos or null,
+      # See `reprobuildFacts`.
+      catalogClones ? null,
     }:
     let
       pkgs = configuration.pkgs;
@@ -562,6 +574,7 @@ let
           host
           system
           nixos
+          catalogClones
           ;
         repro = reproPkg;
       };
