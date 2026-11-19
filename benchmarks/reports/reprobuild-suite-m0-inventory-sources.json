@@ -3145,7 +3145,7 @@
             "store",
             "stub"
           ],
-          "line": 67,
+          "line": 78,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -3165,7 +3165,7 @@
             "store",
             "stub"
           ],
-          "line": 131,
+          "line": 142,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -3185,7 +3185,7 @@
             "store",
             "stub"
           ],
-          "line": 217,
+          "line": 230,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -54851,7 +54851,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_source_hash_runtime_paths.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
