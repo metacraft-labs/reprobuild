@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2997,
+    "nimTestBinaries": 3000,
     "pureUnitConsolidationGroups": 88,
-    "pureUnitTests": 804,
+    "pureUnitTests": 805,
     "staticallyDetectedRuntimeCompilerFlowTests": 149,
-    "testEntries": 3047
+    "testEntries": 3050
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -798,7 +798,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 45,
+      "count": 46,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -834,6 +834,7 @@
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_variant_uses.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_expression_values.nim",
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
+        "libs/repro_project_dsl/tests/t_canonical_work_key.nim",
         "libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim",
         "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
         "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
@@ -1721,9 +1722,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1653,
+      "integration": 1655,
       "platform/destructive": 198,
-      "pure unit": 804,
+      "pure unit": 805,
       "unclassified": 368
     },
     "graphOwnedTestArtifacts": [
@@ -1938,9 +1939,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2997,
+    "nimTestBinaryCount": 3000,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3047
+    "testEntryCount": 3050
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -11795,6 +11796,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_canonical_work_tree_reproduces_split_bundle",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_hash",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_canonical_work_tree_reproduces_split_bundle.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_child_cpu_stats_row",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -15814,6 +15835,24 @@
       "source": "libs/repro_core/tests/t_bounded_lock_refuses_at_its_deadline_on_every_platform.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_canonical_work_dir",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_canonical_work_dir.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25721,6 +25760,23 @@
       "source": "libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 17,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_canonical_work_key",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_canonical_work_key.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
