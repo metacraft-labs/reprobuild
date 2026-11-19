@@ -8077,6 +8077,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_content_table.nim",
+    binary: "build/test-bin/t_content_table",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = createTempDir(\"repro-content-table-\", \"\")"),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_distinct_realizations_never_share_a_prefix_directory.nim",
     binary: "build/test-bin/t_distinct_realizations_never_share_a_prefix_directory",
     defines: @[],

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3020,
+    "nimTestBinaries": 3021,
     "pureUnitConsolidationGroups": 88,
-    "pureUnitTests": 807,
+    "pureUnitTests": 808,
     "staticallyDetectedRuntimeCompilerFlowTests": 150,
-    "testEntries": 3070
+    "testEntries": 3071
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -595,6 +595,22 @@
       "targetOs": "soAny"
     },
     {
+      "count": 4,
+      "defines": [],
+      "dependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_content_table.nim",
+        "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
+        "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
+        "libs/repro_local_store/tests/t_store_copy.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 11,
       "defines": [],
       "dependencyShape": [
@@ -632,21 +648,6 @@
         "libs/repro_local_store/tests/t_per_computation_output_dirs.nim",
         "libs/repro_local_store/tests/t_retention_gc.nim",
         "libs/repro_local_store/tests/t_store_budget_gc.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 3,
-      "defines": [],
-      "dependencyShape": [
-        "repro_local_store",
-        "repro_test_support"
-      ],
-      "owner": "libs/repro_local_store",
-      "sources": [
-        "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
-        "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
-        "libs/repro_local_store/tests/t_store_copy.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1725,7 +1726,7 @@
       "graph-fixture": 24,
       "integration": 1672,
       "platform/destructive": 198,
-      "pure unit": 807,
+      "pure unit": 808,
       "unclassified": 369
     },
     "graphOwnedTestArtifacts": [
@@ -1940,9 +1941,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3020,
+    "nimTestBinaryCount": 3021,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3070
+    "testEntryCount": 3071
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3145,7 +3146,7 @@
             "store",
             "stub"
           ],
-          "line": 67,
+          "line": 78,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -3165,7 +3166,7 @@
             "store",
             "stub"
           ],
-          "line": 131,
+          "line": 142,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -3185,7 +3186,7 @@
             "store",
             "stub"
           ],
-          "line": 217,
+          "line": 230,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -21375,6 +21376,24 @@
       "source": "libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_content_table",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_content_table.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
