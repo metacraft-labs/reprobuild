@@ -1756,3 +1756,75 @@ suite "the bootstrap's handoff reads the latest.json restore.sh was made from":
       bad.latestSha256 = "not-a-hash"
       expect BundleError:
         discard restoreBundle(bad)
+
+# A local bundle's parts directory may be writable by others, and a restore
+# may run as root. Every file a restore writes for itself (a member listing,
+# an exclude list, tar's diagnostics) must go into a private directory: one
+# planted beside the parts as a symlink would otherwise be followed by a
+# shell redirection and its target overwritten, and one rewritten between
+# its write and its read would change what is checked or extracted.
+# Regression tests for reprobuild-pm issue
+# 2026-11-16-bundle-restore-writes-scratch-files-into-a-local-source-directory.md.
+
+proc plantVictims(partsDir, victims: string;
+                  names: openArray[string]): seq[(string, string)] =
+  ## A symlink in `partsDir` under each of `names`, to a file of its own in
+  ## `victims` that holds "untouched".
+  createDir(victims)
+  for n in names:
+    let victim = victims / ("victim" & n)
+    writeFile(victim, "untouched\n")
+    createSymlink(victim, partsDir / n)
+    result.add((partsDir / n, victim))
+
+proc entriesOf(dir: string): seq[string] =
+  for _, p in walkDir(dir, relative = true): result.add(p)
+  result.sort()
+
+suite "a restore writes nothing beside a local half's parts":
+  test "the Nix half follows no symlink planted beside its parts":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-scratch-nix-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let (a, b, c, _) = addPayloadPaths(top)
+      let partsDir = top / "bundle" / "x86_64-linux" / NixHalfDir / "h"
+      let h = packedHalf(@[a, b, c], partsDir, "h", a, b)
+      # The names an earlier restore wrote here.
+      let planted = plantVictims(partsDir, top / "victims",
+        [".members", ".members.stderr", ".unpack.stderr"])
+      let before = entriesOf(partsDir)
+      let root = top / "root"
+      restoreNixHalf(h, partsDir, root)
+      check pathValid(root, a)
+      check pathValid(root, b)
+      check pathValid(root, c)
+      for (link, victim) in planted:
+        checkpoint link & " -> " & victim
+        check readFile(victim) == "untouched\n"
+        check symlinkExists(link)
+      check entriesOf(partsDir) == before
+
+  test "the sources half follows no symlink planted beside its parts":
+    if findExe("zstd").len == 0 or findExe("tar").len == 0:
+      skip("tar and zstd are needed")
+    else:
+      let top = createTempDir("repro-bundle-scratch-src-", "")
+      defer: removeDir(top)
+      let (h, dir) = craftedHalf(top, "ok", "ws", ["lib"], [],
+        addAs("ws/lib/a"))
+      let planted = plantVictims(dir, top / "victims",
+        [".unpack.stderr", ".members", ".members.stderr"])
+      let before = entriesOf(dir)
+      let ws = top / "restore" / "ws"
+      check refusal(h, dir, ws) == ""
+      check readFile(ws / "lib" / "a") == "planted\n"
+      for (link, victim) in planted:
+        checkpoint link & " -> " & victim
+        check readFile(victim) == "untouched\n"
+        check symlinkExists(link)
+      check entriesOf(dir) == before
