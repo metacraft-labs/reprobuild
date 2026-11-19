@@ -171,7 +171,12 @@ activity of the same name, export, and delete them from Nix. After each one,
 run [Compare a Home Manager configuration with a profile](compare-with-home-manager.md),
 which fails on any package the move lost or added.
 
-A complete set of dotfiles moved this way is not linked from this page yet.
+The example this guide uses is the finished shape of these steps: a profile
+with three activities and three hosts, a flake whose configurations read the
+committed export, the equivalence check with its allowlist, and a Mac host
+whose application reaches Homebrew as a cask. Compare your flake with
+[`nix/home-manager-profile` in reprobuild-examples](https://github.com/metacraft-labs/reprobuild-examples/tree/85be7381b8bb77ee3cc8639458eccb233410ccd2/nix/home-manager-profile)
+as you move each activity.
 
 ## Take a package from another package set
 
