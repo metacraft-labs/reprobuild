@@ -9423,6 +9423,15 @@ type
       ## cannot attribute.
     cacheRecordInputs*: seq[string]
       ## What the execution behind that record was observed reading.
+    cacheRecordContentVerified*: bool
+      ## Every keyed input of that record has, read now, the content the
+      ## record was made from (``ActionResult.cacheRecordContentVerified``):
+      ## the reused result stands for an execution over byte-identical
+      ## inputs. False for a timestamp-policy record, for a hybrid record
+      ## whose input changed with its size and mtime kept, and for every
+      ## reuse the engine did not judge.
+    cacheRecordContentDetail*: string
+      ## Why ``cacheRecordContentVerified`` is false, when the engine said.
     keyCoversObservedReads*: bool
       ## The action's cache key covers every input the monitor observed it
       ## reading: a cacheable process action under a monitored dependency
@@ -10469,7 +10478,10 @@ proc executedActionRecords(actions: openArray[BuildAction];
     var record = ExecutedActionRecord(id: item.id, status: item.status,
       launched: item.launched, cacheDecision: item.cacheDecision,
       cacheRecordObservedHere: item.cacheRecordObservedHere,
-      cacheRecordInputs: item.cacheRecordInputs, exitCode: item.exitCode,
+      cacheRecordInputs: item.cacheRecordInputs,
+      cacheRecordContentVerified: item.cacheRecordContentVerified,
+      cacheRecordContentDetail: item.cacheRecordContentDetail,
+      exitCode: item.exitCode,
       monitorDepfile: item.monitorDepfilePath,
       startOrder: order.getOrDefault(item.id, -1))
     if byId.hasKey(item.id):
@@ -89742,6 +89754,11 @@ type
     refused: seq[string]
       ## Members answered by the cache with a result that cannot be attested
       ## (``reusedResultRefusal``); ``repro certify`` re-executes their node.
+    refusedClosure: seq[string]
+      ## Other actions of the closure answered by the cache with a result
+      ## whose inputs are not verified byte-identical now
+      ## (``reusedContentRefusal``); ``repro certify`` re-executes them with
+      ## their node's members.
     commands: seq[seq[string]]
     depfiles: seq[string]
       ## Monitor captures of the closure's executed actions.
@@ -89750,6 +89767,25 @@ type
       ## executions read, from ``recordedSources`` records.
     recordedSources: int
 
+proc reusedContentRefusal*(record: ExecutedActionRecord): string =
+  ## Why a reused result of ANY action in a certificate-producing closure
+  ## does not stand for an execution over the inputs the certified content
+  ## holds, or ``""`` when it does (test-certificates Standard §6.2.1, "the
+  ## record covers the inputs": byte-identical, not metadata-identical;
+  ## Test-Certificates.md §"Reused results"). A key match is not enough: the
+  ## timestamp policy keys an input by its size and mtime, and a hybrid
+  ## lookup trusts an input whose size and mtime are unchanged, so content
+  ## replaced with those kept (``cp -p``, ``rsync -a``, ``tar -x``, a
+  ## restore) is still a hit (Caching-Architecture.md §"Known Limit: The
+  ## Default Policy Can Serve A Stale Result"). The engine re-hashes the
+  ## inputs of a content-checked record during a certifying run
+  ## (``cacheRecordContentVerified``); anything else is refused.
+  if record.cacheRecordContentVerified:
+    return ""
+  if record.cacheRecordContentDetail.len > 0:
+    return record.cacheRecordContentDetail
+  "its cache record's inputs were not verified to be byte-identical now"
+
 proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   ## Why a test command the action cache answered may NOT be attested, or
   ## ``""`` when it may (test-certificates Standard §6.2.1, decision D16 of
@@ -89757,9 +89793,11 @@ proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   ## conditions:
   ##
   ##   * the record covers the inputs: a key-matched record answered it
-  ##     (``cdHit`` / ``cdHybridCutoff``, so every keyed input is byte- or
-  ##     metadata-identical now), and the action's key is one that covers
-  ##     what the monitor observed it reading (``keyCoversObservedReads``);
+  ##     (``cdHit`` / ``cdHybridCutoff``), the action's key is one that
+  ##     covers what the monitor observed it reading
+  ##     (``keyCoversObservedReads``), and every keyed input is
+  ##     byte-identical now, not merely metadata-identical
+  ##     (``reusedContentRefusal``);
   ##   * the record came from an execution this host observed
   ##     (``cacheRecordObservedHere``). Reprobuild has no record signed by a
   ##     project-registered key today, so that second arm of the standard is
@@ -89775,7 +89813,7 @@ proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   if not record.cacheRecordObservedHere:
     return "its cache record is not one this host observed executing (a " &
       "LAN peer's, or one whose origin is not recorded)"
-  ""
+  reusedContentRefusal(record)
 
 proc certificateNodeVerdict(run: CertificateNodeRun;
     records: Table[string, ExecutedActionRecord]): CertificateNodeVerdict =
@@ -89785,7 +89823,7 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
   ## ``recordedReads`` are what the records of its reused actions say their
   ## executions read, so the untracked-inputs rule sees a reused test's reads
   ## too.
-  var failed, missing, refusals: seq[string]
+  var failed, missing, refusals, closureRefusals: seq[string]
   for id in run.closure:
     if not records.hasKey(id):
       missing.add(id)
@@ -89802,6 +89840,17 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
       inc result.recordedSources
       for path in record.cacheRecordInputs:
         result.recordedReads.add(path)
+      # A reused action the test commands depend on is part of what the
+      # claim rests on: an output it did not recompute from the certified
+      # inputs is what the tests then ran over. Its result must stand for an
+      # execution over byte-identical inputs too (Standard §6.2.1;
+      # Test-Certificates.md §"Reused results"). Members are judged in full
+      # by ``reusedResultRefusal`` below.
+      if run.members.find(id) < 0:
+        let refusal = reusedContentRefusal(record)
+        if refusal.len > 0:
+          result.refusedClosure.add(id)
+          closureRefusals.add(id & " (" & refusal & ")")
   if failed.len > 0:
     result.problem = "it did not pass: " & failed.join(", ")
     result.remedy = "fix the failing actions and re-run"
@@ -89824,10 +89873,18 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
         continue
     if record.argv.len > 0:
       attested.add(id)
-  if refusals.len > 0:
-    result.problem = $refusals.len & " of its " & $run.members.len &
-      " test command(s) were answered by the action cache with a result " &
-      "that cannot be attested: " & refusals.join(", ")
+  if refusals.len > 0 or closureRefusals.len > 0:
+    var parts: seq[string]
+    if refusals.len > 0:
+      parts.add($refusals.len & " of its " & $run.members.len &
+        " test command(s) were answered by the action cache with a result " &
+        "that cannot be attested: " & refusals.join(", "))
+    if closureRefusals.len > 0:
+      parts.add($closureRefusals.len & " action(s) its test commands " &
+        "depend on were answered by the action cache with a result whose " &
+        "inputs are not byte-identical to the ones it was made from: " &
+        closureRefusals.join(", "))
+    result.problem = parts.join("; ")
     result.remedy = "run 'repro certify " & run.node.name & "', which " &
       "re-executes them"
     return
@@ -90511,13 +90568,20 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     if opts.certifyExplicit:
       var rerun: seq[string]
       for i, run in runs:
-        if verdicts[i].refused.len > 0:
+        if verdicts[i].refused.len > 0 or verdicts[i].refusedClosure.len > 0:
+          # The closure actions first: a hard rebuild scoped by ``--only``
+          # re-executes exactly the matched actions, so one whose reused
+          # result was refused must be named or the members re-run over its
+          # unverified output.
+          for id in verdicts[i].refusedClosure:
+            if rerun.find(id) < 0:
+              rerun.add(id)
           for id in run.members:
             if rerun.find(id) < 0:
               rerun.add(id)
       if rerun.len > 0:
         stderr.writeLine("repro certify: re-executing " & $rerun.len &
-          " test command(s) whose cached results cannot be attested: " &
+          " action(s) whose cached results cannot be attested: " &
           rerun.join(", "))
         var extra = @["--hard-rebuild"]
         for id in rerun:

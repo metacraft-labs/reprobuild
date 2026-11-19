@@ -44,12 +44,15 @@ const certToolInterface = "import repro_project_dsl\n\n" &
   "    flag marker is string, alias = \"--marker\", required = true\n" &
   "    outputs output\n"
 
-proc edgeLine(stem: string): string =
+proc edgeLine(stem: string; hybrid = false): string =
   ## A ``build:`` line binding ``<stem>`` to an edge with action id
-  ## ``<stem>`` that copies ``src/<stem>.txt`` to ``build/<stem>-out``.
+  ## ``<stem>`` that copies ``src/<stem>.txt`` to ``build/<stem>-out``. A
+  ## ``hybrid`` edge states the content-checked ``hybrid`` input-check policy;
+  ## the others take the tool's default, ``timestamp``.
   "    let " & stem & " = certTool(actionId = \"" & stem & "\",\n" &
     "      input = \"src/" & stem & ".txt\",\n" &
     "      output = \"build/" & stem & "-out\",\n" &
+    (if hybrid: "      actionCachePolicy = acfpHybrid,\n" else: "") &
     "      marker = \".repro/runs.log\")\n"
 
 type WorkspaceCertifyFixture* = object
@@ -60,12 +63,16 @@ proc app*(fx: WorkspaceCertifyFixture): string = fx.cf.sib.app
 
 proc setupWorkspaceCertifyFixture*(label: string; stems: openArray[string];
                                    buildLines: string;
-                                   untrackedStems: openArray[string] = []):
+                                   untrackedStems: openArray[string] = [];
+                                   hybridStems: openArray[string] = []):
     WorkspaceCertifyFixture =
   ## The TC-8d workspace with ``app`` turned into a project: one edge per
   ## stem, then ``buildLines``. Every file is committed and pushed except the
   ## inputs of ``untrackedStems``, which are left untracked in the working
-  ## tree. The committed ``repro.lock`` is the one the TC-8d fixture refreshed
+  ## tree. The edges of ``hybridStems`` state the ``hybrid`` input-check
+  ## policy, whose cached results a certificate may rest on (Standard
+  ## §6.2.1); the rest keep the default ``timestamp``, whose results it may
+  ## not. The committed ``repro.lock`` is the one the TC-8d fixture refreshed
   ## (it pins the siblings; the tool comes from ``PATH``, which no lock
   ## pins), so the project needs no second refresh.
   result.cf = setupCertifyFixture(label)
@@ -95,7 +102,7 @@ proc setupWorkspaceCertifyFixture*(label: string; stems: openArray[string];
   var body = ""
   for stem in stems:
     writeFile(app / "src" / (stem & ".txt"), stem & " v1\n")
-    body.add(edgeLine(stem))
+    body.add(edgeLine(stem, hybrid = stem in hybridStems))
   # The siblings app already depends on stay declared: a recipe is where its
   # dependencies are (owner decision 2026-11-05), so a rewrite that dropped
   # them would make the next refresh drop their pins. They are not under the

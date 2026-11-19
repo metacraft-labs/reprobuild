@@ -5374,8 +5374,16 @@ proc observedExecutionOf*(cache: ActionCache;
   # recompute it. A wrong recomputation finds no sidecar: fail-closed.
   var strong = record.strongFingerprint
   if strong == ContentDigest():
-    strong = computeStrongFingerprint(record.weakFingerprint, record.inputs,
-      record.envInputs)
+    # A content-checked record's projection has had its input hashes
+    # stripped too, so its strong fingerprint cannot be recomputed:
+    # `computeStrongFingerprint` raises for an input without one. That is
+    # "a problem", and the answer to it is false, never an exception that
+    # aborts the run that asked.
+    try:
+      strong = computeStrongFingerprint(record.weakFingerprint, record.inputs,
+        record.envInputs)
+    except ActionRecordError:
+      return false
   let recName = recFileNameForStrong(strong)
   let obsPath = dirPath / observedExecutionFileName(recName.splitFile.name)
   if not fileExists(extendedPath(obsPath)):
