@@ -8393,18 +8393,45 @@ proc refreshReadableProviderGraph(config: RefreshConfig):
     "was built from reprobuild libraries newer than this repro binary.\n  " &
     sourceLine)
 
-proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
-                                   providerBinaryPath: string):
+proc projectProviderRefreshConfig*(storeRoot: string;
+                                   artifact: ProjectInterfaceArtifact;
+                                   providerBinaryPath, providerArtifactId,
+                                   projectRoot: string): RefreshConfig =
+  ## The refresh of a project's root provider graph, as every CLI path
+  ## (build, project evaluation, lowered graph) makes it. Built once per
+  ## path and given both to the snapshot shortcut and to the refresh, so
+  ## the two cannot disagree about which invocations the snapshot must
+  ## hold.
+  RefreshConfig(
+    storeRoot: storeRoot,
+    projectId: artifact.projectInterface.packageName,
+    providerBinaryPath: providerBinaryPath,
+    providerArtifactId: providerArtifactId,
+    rootEntryPointId: artifact.projectInterface.packageName & ".root",
+    rootArguments: projectRoot,
+    namespace: "project",
+    lockSliceId: digestHex(artifact.interfaceFingerprint),
+    activity: "build",
+    providerWorkingDir: projectRoot)
+
+proc readFreshProviderGraphSnapshot*(config: RefreshConfig):
     Option[ProviderGraphSnapshot] =
+  ## The persisted snapshot at ``config.storeRoot``, when it can be served
+  ## for ``config`` as-is, without calling ``refreshProviderGraph``: the same
+  ## provider artifact and binary, readable payloads, unchanged evaluation
+  ## inputs, and every fragment an invocation ``config``'s refresh would
+  ## make (``providerSnapshotKeyedFor``: the project, lock slice, activity,
+  ## namespace and requested root). Anything else is ``none``, and the
+  ## caller refreshes.
   inc warmBuildCacheCounters.providerSnapshotDiskReads
-  let path = providerSnapshotPath(storeRoot)
+  let path = providerSnapshotPath(config.storeRoot)
   if not fileExists(extendedPath(path)):
     return none(ProviderGraphSnapshot)
   try:
-    let snapshot = loadProviderGraphSnapshot(storeRoot)
-    if snapshot.providerArtifactId != providerArtifactId:
+    let snapshot = loadProviderGraphSnapshot(config.storeRoot)
+    if snapshot.providerArtifactId != config.providerArtifactId:
       return none(ProviderGraphSnapshot)
-    if not providerSnapshotBinaryFresh(snapshot, providerBinaryPath):
+    if not providerSnapshotBinaryFresh(snapshot, config.providerBinaryPath):
       return none(ProviderGraphSnapshot)
     # Before the inputs check, not after it: with the artifact id and the
     # binary matching, ``refreshProviderGraph`` keeps every fragment whose
@@ -8414,33 +8441,42 @@ proc readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
     # and is left alone.
     if not providerSnapshotUsable(snapshot, path):
       return none(ProviderGraphSnapshot)
+    # The rule ``refreshProviderGraph`` applies before its own warm path: a
+    # snapshot produced for another root (or project, lock slice, activity,
+    # namespace) is another invocation's graph, whatever its freshness
+    # (Project-Provider-Graph-Protocol.md §"Full Versus Fragment
+    # Invocation").
+    if not providerSnapshotKeyedFor(snapshot, config):
+      return none(ProviderGraphSnapshot)
     if not providerSnapshotInputsFresh(snapshot):
       return none(ProviderGraphSnapshot)
     return some(snapshot)
   except CatchableError:
     return none(ProviderGraphSnapshot)
 
-proc warmReadFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
-                                       providerBinaryPath: string):
+proc warmReadFreshProviderGraphSnapshot*(config: RefreshConfig):
     Option[ProviderGraphSnapshot] =
-  let path = providerSnapshotPath(storeRoot)
-  let key = storeRoot & "\0" & providerArtifactId
+  ## ``readFreshProviderGraphSnapshot`` behind this process's warm table.
+  ## The table is keyed by store and artifact only, so a warm entry is
+  ## re-checked against ``config``'s invocation keys like a disk read.
+  let path = providerSnapshotPath(config.storeRoot)
+  let key = config.storeRoot & "\0" & config.providerArtifactId
   if warmProviderSnapshots.hasKey(key):
     let warm = warmProviderSnapshots[key]
-    if warm.providerArtifactId == providerArtifactId and
+    if warm.providerArtifactId == config.providerArtifactId and
         evidenceFresh(path, warm.snapshotEvidence) and
-        warm.snapshot.providerArtifactId == providerArtifactId and
-        providerSnapshotBinaryFresh(warm.snapshot, providerBinaryPath) and
+        warm.snapshot.providerArtifactId == config.providerArtifactId and
+        providerSnapshotBinaryFresh(warm.snapshot, config.providerBinaryPath) and
+        providerSnapshotKeyedFor(warm.snapshot, config) and
         providerSnapshotInputsFresh(warm.snapshot):
       if warm.populatedByPid != getCurrentProcessId():
         inc warmBuildCacheCounters.inheritedWarmHits
       return some(warm.snapshot)
-  result = readFreshProviderGraphSnapshot(storeRoot, providerArtifactId,
-    providerBinaryPath)
+  result = readFreshProviderGraphSnapshot(config)
   if result.isSome:
     warmProviderSnapshots[key] = WarmProviderSnapshot(
       populatedByPid: getCurrentProcessId(),
-      providerArtifactId: providerArtifactId,
+      providerArtifactId: config.providerArtifactId,
       snapshotPath: path,
       snapshotEvidence: durableFileEvidence(path),
       snapshot: result.get())
@@ -14453,12 +14489,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var refresh: ProviderRefreshReport
     var previousProviderSnapshot: ProviderGraphSnapshot
     progressRenderer.renderPhase("checking project provider graph snapshot")
+    let refreshConfig = projectProviderRefreshConfig(providerGraphStore,
+      artifact, provider.outputBinaryPath, providerArtifactId, projectRoot)
     let freshSnapshot =
       if forceRebuild or dryRun:
         none(ProviderGraphSnapshot)
       else:
-        warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId,
-          provider.outputBinaryPath)
+        warmReadFreshProviderGraphSnapshot(refreshConfig)
     if freshSnapshot.isSome:
       refresh.snapshot = freshSnapshot.get()
       refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
@@ -14471,17 +14508,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         previousProviderSnapshot = loadProviderGraphSnapshot(providerGraphStore)
       except CatchableError:
         previousProviderSnapshot = ProviderGraphSnapshot()
-      refresh = refreshReadableProviderGraph(RefreshConfig(
-        storeRoot: providerGraphStore,
-        projectId: artifact.projectInterface.packageName,
-        providerBinaryPath: provider.outputBinaryPath,
-        providerArtifactId: providerArtifactId,
-        rootEntryPointId: artifact.projectInterface.packageName & ".root",
-        rootArguments: projectRoot,
-        namespace: "project",
-        lockSliceId: digestHex(artifact.interfaceFingerprint),
-        activity: "build",
-        providerWorkingDir: projectRoot))
+      refresh = refreshReadableProviderGraph(refreshConfig)
     finishStat(buildStats, statsEnabled, "repro provider graph refresh",
       providerGraphStart)
     let providerInvocationCount =
@@ -32558,28 +32585,19 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
 
   let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport
+  let refreshConfig = projectProviderRefreshConfig(providerGraphStore,
+    artifact, provider.outputBinaryPath, result.providerArtifactId, projectRoot)
   let freshSnapshot =
     if forceRefresh:
       none(ProviderGraphSnapshot)
     else:
-      warmReadFreshProviderGraphSnapshot(providerGraphStore, result.providerArtifactId,
-        provider.outputBinaryPath)
+      warmReadFreshProviderGraphSnapshot(refreshConfig)
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
     refresh.persistedSnapshotPath = providerSnapshotPath(providerGraphStore)
     result.providerGraphCacheHit = true
   else:
-    refresh = refreshReadableProviderGraph(RefreshConfig(
-      storeRoot: providerGraphStore,
-      projectId: artifact.projectInterface.packageName,
-      providerBinaryPath: provider.outputBinaryPath,
-      providerArtifactId: result.providerArtifactId,
-      rootEntryPointId: artifact.projectInterface.packageName & ".root",
-      rootArguments: projectRoot,
-      namespace: "project",
-      lockSliceId: digestHex(artifact.interfaceFingerprint),
-      activity: "build",
-      providerWorkingDir: projectRoot))
+    refresh = refreshReadableProviderGraph(refreshConfig)
   # Workspace-Manifest-Optional MO-6 — fold any present projectExtension
   # sibling's fragments into this project's snapshot (see the matching
   # call in ``executeBuildTarget``). Skipped when this proc is reused to
@@ -32774,23 +32792,13 @@ proc refreshRecipeProviderSnapshot(target: string;
   let providerArtifactId = digestHex(provider.providerFingerprint)
   let providerGraphStore = providerGraphStoreRoot(outDir / "provider-graph")
   var refresh: ProviderRefreshReport
-  let freshSnapshot =
-    warmReadFreshProviderGraphSnapshot(providerGraphStore, providerArtifactId,
-      provider.outputBinaryPath)
+  let refreshConfig = projectProviderRefreshConfig(providerGraphStore,
+    artifact, provider.outputBinaryPath, providerArtifactId, projectRoot)
+  let freshSnapshot = warmReadFreshProviderGraphSnapshot(refreshConfig)
   if freshSnapshot.isSome:
     refresh.snapshot = freshSnapshot.get()
   else:
-    refresh = refreshReadableProviderGraph(RefreshConfig(
-      storeRoot: providerGraphStore,
-      projectId: artifact.projectInterface.packageName,
-      providerBinaryPath: provider.outputBinaryPath,
-      providerArtifactId: providerArtifactId,
-      rootEntryPointId: artifact.projectInterface.packageName & ".root",
-      rootArguments: projectRoot,
-      namespace: "project",
-      lockSliceId: digestHex(artifact.interfaceFingerprint),
-      activity: "build",
-      providerWorkingDir: projectRoot))
+    refresh = refreshReadableProviderGraph(refreshConfig)
   discard mergeProjectExtensions(refresh.snapshot, projectRoot,
     artifact.projectInterface.packageName, effectiveMode, publicCliPath,
     workRoot, lowerGraph = false)

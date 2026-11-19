@@ -7457,7 +7457,7 @@
           "executedVariables": [
             "args"
           ],
-          "line": 192,
+          "line": 196,
           "path": "tests/integration/t_provider_recompile_keeps_every_invocation_key.nim",
           "patterns": [
             "nim-argv"
@@ -51942,6 +51942,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_provider_runtime",
         "repro_test_support"
       ],
@@ -51949,7 +51950,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_provider_recompile_keeps_every_invocation_key.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
