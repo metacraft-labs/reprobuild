@@ -570,11 +570,9 @@ proc runInfraPlan(flags: InfraCliFlags; namespace = "infra"): int =
           stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
           reconcileDrift: flags.reconcileDrift, planOnly: true))
         if flags.json:
-          # The add-on's sections have no structured renderer of their own
-          # yet; the ledger diff and the drift are structured, the rest is
-          # the text the plain report prints.
-          addOnJson = %*{"planId": r.planId, "ledgerDiff": r.ledgerDiff,
-            "drift": r.drift, "report": addon_cli.renderAddonSections(r)}
+          # Every add-on section as structured keys, never the text the
+          # plain report prints (CLI-UX-AREQ4).
+          addOnJson = addon_cli.addonSectionsJson(r)
         else:
           echo command & " (add-on)"
           stdout.write(addon_cli.renderAddonSections(r))
@@ -867,8 +865,9 @@ proc prefixRecordDirtyLines*(prefix: string): seq[string] =
   let record = prefix / "share" / "repro" / "cross-build-info"
   if not fileExists(record):
     return
+  const DirtySuffix = "-dirty"   # what `git describe --dirty` appends
   for line in readFile(record).splitLines():
-    if "-dirty" in line:
+    if DirtySuffix in line:
       result.add(line)
 
 proc publishBuildForProfileEdge*(spec, mirrorRoot, targetTriple,
@@ -1936,58 +1935,60 @@ proc runInfraCommand*(args: seq[string]): int =
   runReproArgs(@["infra"] & args, proc (c: ReproCommandLine): int =
     runInfraCommand(c.infra))
 
-proc runSystemAddonCommand*(sub: string; rest: seq[string]): int =
+proc runSystemAddonCommand*(conf: ReproCommandLineSystem;
+                            argv: seq[string]): int =
   ## ``repro system addon|state|secret|adopt ...``: the add-on's own command
-  ## line (``repro_addon/cli``, which the static add-on binary parses too),
-  ## handed the words after ``sub`` unparsed.
+  ## line (``repro_infra/addon_command_line``, which the static add-on
+  ## binary parses too), mounted in repro's description. repro's parser has
+  ## accepted ``argv`` (repro's whole command line); the words after the
+  ## mount point go to the add-on's generated parser
+  ## (``addon_cli.runAddonArgs``), which reads them from the same
+  ## declarations into the add-on's typed configuration.
+  type Sub = ReproCommandLineSystemCommand
+  let sub = case conf.command
+    of Sub.state: "state"
+    of Sub.secret: "secret"
+    of Sub.adopt: "adopt"
+    else: "addon"
   try:
-    case sub
-    of "state":
-      # `repro system state <verb>`: the declared state set (ReproOS Add-On
-      # Mode §11.1). A restore runs on a host realised in full after a
-      # conversion, so the verbs answer on every Linux host, not only an
-      # add-on one.
-      when defined(linux):
-        return addon_cli.runAddonCli(@["state"] & rest)
-      else:
-        stderr.writeLine("repro system state: supported only on Linux")
-        return 2
-    of "secret":
-      # `repro system secret put --service S --name N [--target T]`: an
-      # add-on host's verb is `repro system addon secret put`, which this
-      # hands over to; a host realised in full seals into its one envelope
-      # (`full_host_secrets`), materialised by the next `repro infra apply`
-      # and, after a reboot, by `repro system secret materialise --boot`
-      # (the boot unit that apply installs).
-      when defined(linux):
-        if rest.len > 0 and rest[0] == "materialise":
-          return runFullHostSecretMaterialiseCli(rest[1 .. ^1])
-        if addon_apply.isAddonHost(resolveSystemStateDir()):
-          return addon_cli.runAddonCli(@["secret"] & rest)
-        return runFullHostSecretPutCli(rest)
-      else:
-        stderr.writeLine("repro system secret: supported only on Linux")
-        return 2
-    of "addon":
-      when defined(linux):
-        return addon_cli.runAddonCli(rest)
-      else:
-        stderr.writeLine("repro system addon: supported only on Linux")
-        return 2
-    of "adopt":
-      when defined(linux):
+    when defined(linux):
+      let words = reproWordsAfterMount(argv, ["system", sub])
+      case conf.command
+      of Sub.state:
+        # `repro system state <verb>`: the declared state set (ReproOS Add-On
+        # Mode §11.1). A restore runs on a host realised in full after a
+        # conversion, so the verbs answer on every Linux host, not only an
+        # add-on one.
+        return addon_cli.runAddonArgs(@["system", "addon", "state"] & words)
+      of Sub.secret:
+        # `repro system secret put --service S --name N [--target T]`: an
+        # add-on host's verb is `repro system addon secret put`, which this
+        # hands over to; a host realised in full seals into its one envelope
+        # (`full_host_secrets`), materialised by the next `repro infra apply`
+        # and, after a reboot, by `repro system secret materialise --boot`
+        # (the boot unit that apply installs).
+        case conf.secret.command
+        of ReproCommandLineSystemSecretCommand.materialise:
+          return runFullHostSecretMaterialiseCommand(
+            conf.secret.materialise.boot)
+        of ReproCommandLineSystemSecretCommand.put:
+          if addon_apply.isAddonHost(resolveSystemStateDir()):
+            return addon_cli.runAddonArgs(@["system", "addon", "secret"] &
+              words)
+          let p = conf.secret.put
+          return runFullHostSecretPutCommand(p.service, p.name, p.target)
+      of Sub.adopt:
         # System-scope adoption exists for add-on hosts (spec §11.2 step 3);
         # a full system profile has no unowned objects to claim.
         if not addon_apply.isAddonHost(resolveSystemStateDir()):
           stderr.writeLine("repro system adopt: only an add-on host has " &
             "objects to adopt; this host carries no ownership ledger")
           return 2
-        return addon_cli.runAddonAdoptCli(rest)
+        return addon_cli.runAddonArgs(@["system", "adopt"] & words)
       else:
-        stderr.writeLine("repro system adopt: supported only on Linux")
-        return 2
+        return addon_cli.runAddonArgs(@["system", "addon"] & words)
     else:
-      stderr.writeLine("repro system: unknown subcommand: " & sub)
+      stderr.writeLine("repro system " & sub & ": supported only on Linux")
       return 2
   except ValueError as e:
     stderr.writeLine("repro system " & sub & ": " & e.msg)
@@ -1996,16 +1997,18 @@ proc runSystemAddonCommand*(sub: string; rest: seq[string]): int =
     stderr.writeLine("repro system " & sub & ": error: " & e.msg)
     return 1
 
-proc runSystemCommand*(conf: ReproCommandLineSystem): int =
+proc runSystemCommand*(conf: ReproCommandLineSystem;
+                       argv: seq[string]): int =
   ## `repro system <subcommand>`. M69 Phase B wires the full
   ## `add/remove/list/why/sync/history/rollback` profile-editing
   ## family (the system-scope analogue of the M60-M64 `repro home`
   ## commands), alongside the Phase-A `audit` reader; `plan` and `apply`
   ## are `repro infra plan|apply` under this namespace's name, run by the
   ## same procs. The command line is
-  ## parsed from repro's description (`repro_cli_support/cli_description`);
-  ## the add-on's own subcommands (`addon`, `state`, `secret`, `adopt`)
-  ## reach `runSystemAddonCommand` unparsed.
+  ## parsed from repro's description (`repro_cli_support/cli_description`).
+  ## The add-on's own subcommands (`addon`, `state`, `secret`, `adopt`),
+  ## mounted from the add-on's description, reach `runSystemAddonCommand`
+  ## with ``argv``, repro's whole command line.
   let sub = case conf.command
     of ReproCommandLineSystemCommand.add: "add"
     of ReproCommandLineSystemCommand.remove: "remove"
@@ -2072,14 +2075,11 @@ proc runSystemCommand*(conf: ReproCommandLineSystem): int =
       let c = conf.audit
       return runSystemAudit(infraFlagsOf(c),
         (if c.generation.len > 0: @[c.generation] else: @[]))
-    of ReproCommandLineSystemCommand.addon:
-      return runSystemAddonCommand("addon", conf.addon.args)
-    of ReproCommandLineSystemCommand.state:
-      return runSystemAddonCommand("state", conf.state.args)
-    of ReproCommandLineSystemCommand.secret:
-      return runSystemAddonCommand("secret", conf.secret.args)
-    of ReproCommandLineSystemCommand.adopt:
-      return runSystemAddonCommand("adopt", conf.adopt.args)
+    of ReproCommandLineSystemCommand.addon,
+        ReproCommandLineSystemCommand.state,
+        ReproCommandLineSystemCommand.secret,
+        ReproCommandLineSystemCommand.adopt:
+      return runSystemAddonCommand(conf, argv)
   except ValueError as e:
     stderr.writeLine("repro system " & sub & ": " & e.msg)
     return 2
@@ -2089,6 +2089,7 @@ proc runSystemCommand*(conf: ReproCommandLineSystem): int =
 
 proc runSystemCommand*(args: seq[string]): int =
   ## ``repro system <args>`` in this process, through the generated parser.
-  runReproArgs(@["system"] & args, proc (c: ReproCommandLine): int =
-    runSystemCommand(c.system))
+  let argv = @["system"] & args
+  runReproArgs(argv, proc (c: ReproCommandLine): int =
+    runSystemCommand(c.system, argv))
 

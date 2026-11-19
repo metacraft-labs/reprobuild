@@ -305,8 +305,8 @@ suite "L3: crash-safe reaper":
     # over the NAMED group reaps it anyway — the `repro reap --force cluster`
     # re-materialize-from-clean path — ignoring the unexpired lease.
     #
-    # This case used to be named after `--hard-rebuild`, which `runReapCli`
-    # accepted as a bare alias of `--force`. That spelling now belongs to
+    # This case used to be named after `--hard-rebuild`, which the reaper's
+    # own argv parser accepted as a bare alias of `--force`. That spelling now belongs to
     # `repro build` (Edge-Determinism-And-Soft-Rebuild.md §4.3), where it
     # means something entirely different; see case (10) for the refusal.
     let keepReport = reapOnce(store, now = t0 + initDuration(minutes = 1))
@@ -329,9 +329,9 @@ suite "L3: crash-safe reaper":
 
     var lines: seq[string] = @[]
     let capture = proc (line: string) = lines.add(line)
-    let rc = runReapCli(@["--once", "--state-root=" & store.root],
-                        now = t0 + ttl + initDuration(minutes = 1),
-                        echoLine = capture)
+    let rc = runReap(force = false, targets = @[], storeRoot = store.root,
+                     now = t0 + ttl + initDuration(minutes = 1),
+                     echoLine = capture)
     check rc == 0
     check destroyLog == @["cluster"]
     check not hasStateRecord(store, "cluster")
@@ -341,18 +341,19 @@ suite "L3: crash-safe reaper":
       if l.contains("cluster"): mentioned = true
     check mentioned
 
-  test "(10) `repro reap` REFUSES the two `repro build` rebuild verbs":
-    ## The negative control for the verb-collision resolution.
-    ## `runReapCli` used to accept `--hard-rebuild` and
-    ## `--rebuild-host-bound` as bare aliases of `--force`, i.e. as a
-    ## request to destroy a still-leased state. Those two spellings are now
-    ## `repro build`'s, where they select which determinism classes to
-    ## invalidate in the ACTION CACHE and destroy nothing.
+  test "(10) `repro reap --force` still reaps what the build verbs used to":
+    ## The negative control for the verb-collision resolution, the reaper's
+    ## half. `--hard-rebuild` and `--rebuild-host-bound` were once bare
+    ## aliases of `--force`, i.e. a request to destroy a still-leased state.
+    ## They are now `repro build`'s, where they select which determinism
+    ## classes to invalidate in the ACTION CACHE and destroy nothing; `repro
+    ## reap`'s command line declares them only to refuse them with
+    ## `reapRefusalOfBuildSpelling` (pinned, through the real command line,
+    ## by `t_repro_reap_verb_is_dispatched`).
     ##
-    ## Both arms are required. Asserting only the refusal would pass against
-    ## a parser that refused every flag, so the second arm proves `--force`
-    ## still does the destructive thing the refused spellings used to do --
-    ## the capability was RELOCATED, not removed.
+    ## Here: the refusal names where the verb went, and `--force` (the
+    ## sweep's `force`) still does the destructive thing the refused
+    ## spellings used to do -- the capability was RELOCATED, not removed.
     let store = scratchStore("verbs")
     let t0 = fromUnix(1_700_000_000)
     let ttl = initDuration(minutes = 30)
@@ -360,29 +361,20 @@ suite "L3: crash-safe reaper":
     let inLease = t0 + initDuration(minutes = 1)
 
     for spelling in ["--hard-rebuild", "--rebuild-host-bound"]:
-      var lines: seq[string] = @[]
-      let capture = proc (line: string) = lines.add(line)
-      let rc = runReapCli(@[spelling, "--state-root=" & store.root],
-                          now = inLease, echoLine = capture)
-      # Refused, with a non-zero exit...
-      check rc == 2
-      # ...and the state is STILL THERE. A refusal that destroyed anything
-      # would be worse than the alias it replaced.
-      check hasStateRecord(store, "cluster")
-      check destroyLog.len == 0
-      # ...and the operator is told where the verb went, rather than getting
-      # a bare exit 2 that reads as a typo.
-      var explained = false
-      for l in lines:
-        if l.contains("repro build") and l.contains("--force"):
-          explained = true
-      check explained
+      let refusal = reapRefusalOfBuildSpelling(spelling)
+      check refusal.contains(spelling)
+      check refusal.contains("repro build") and refusal.contains("--force")
 
-    # The other arm: `--force` is unaffected and still reaps the unexpired
-    # lease it always reaped. Scoped to the named group, exactly as case (8)
-    # scopes it, so the consumer record is not swept in as collateral.
-    let rc = runReapCli(@["--force", "cluster", "--state-root=" & store.root],
-                        now = inLease)
+    # A sweep without force keeps the unexpired lease...
+    check runReap(force = false, targets = @["cluster"],
+                  storeRoot = store.root, now = inLease) == 0
+    check hasStateRecord(store, "cluster")
+    check destroyLog.len == 0
+    # ...and the forced one reaps it. Scoped to the named group, exactly as
+    # case (8) scopes it, so the consumer record is not swept in as
+    # collateral.
+    let rc = runReap(force = true, targets = @["cluster"],
+                     storeRoot = store.root, now = inLease)
     check rc == 0
     check not hasStateRecord(store, "cluster")
     check destroyLog == @["cluster"]
@@ -487,7 +479,7 @@ suite "L3: crash-safe reaper":
       effectiveDeadline: some(t0), lastRenewed: t0))
     var lines: seq[string] = @[]
     let capture = proc (line: string) = lines.add(line)
-    let rc = runReapCli(@["--once", "--state-root=" & store2.root],
+    let rc = runReap(force = false, targets = @[], storeRoot = store2.root,
                         now = later, echoLine = capture)
     # Non-zero: the verb was asked to destroy this state and did not.
     check rc == 1
@@ -643,7 +635,7 @@ suite "L3: crash-safe reaper":
     writeFile(store.root / "garbage.rec", "\x00")
     var lines: seq[string] = @[]
     let capture = proc (line: string) = lines.add(line)
-    var rc = runReapCli(@["--once", "--state-root=" & store.root],
+    var rc = runReap(force = false, targets = @[], storeRoot = store.root,
                         now = later, echoLine = capture)
     check rc == 1
     check "reaped: 1" in lines
@@ -663,7 +655,7 @@ suite "L3: crash-safe reaper":
     bytes[4] = char((StateRecordSszVersion + 1) and 0xFF)
     writeFile(path, bytes)
     lines = @[]
-    rc = runReapCli(@["--once", "--state-root=" & store2.root],
+    rc = runReap(force = false, targets = @[], storeRoot = store2.root,
                     now = later, echoLine = capture)
     check rc == 0
     check "foreign: 1" in lines

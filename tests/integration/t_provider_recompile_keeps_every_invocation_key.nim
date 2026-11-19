@@ -28,13 +28,20 @@
 ##   same provider and across a recompile: the previous fragments are pruned
 ##   and their effects reported stale, but output cleanup leaves every one
 ##   in place because a surviving fragment claims it (``ocoSkippedShared``);
+## * a different root argument is a different root invocation, even with the
+##   provider held fixed: the root is invoked again for the new argument and
+##   the previous root's fragments are pruned. The CLI's snapshot shortcut
+##   (``readFreshProviderGraphSnapshot`` / ``warmReadFreshProviderGraphSnapshot``),
+##   which serves a stored snapshot WITHOUT a refresh, refuses it the same
+##   way, from disk and from its warm table;
 ## * the key names the project, and a refresh without one is refused;
 ## * a snapshot persisted with keys of the old shape is re-evaluated once,
 ##   its outputs protected the same way, and is warm afterwards.
 
-import std/[algorithm, os, sequtils, strutils, tables, tempfiles, unittest]
+import std/[algorithm, options, os, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_provider_runtime
+import repro_cli_support
 
 import lints/ambient_execution
 import repro_test_support
@@ -193,20 +200,28 @@ proc compileProvider(fx: Fixture; name: string;
   args.add(fx.providerSource)
   requireNimSuccess(args)
 
-proc refresh(fx: Fixture; store, provider, artifactId: string;
-             lockSlice = "lock-v1"; activity = "build";
-             projectId = ProjectId): ProviderRefreshReport =
-  refreshProviderGraph(RefreshConfig(
+proc configFor(fx: Fixture; store, provider, artifactId: string;
+               lockSlice = "lock-v1"; activity = "build";
+               projectId = ProjectId; rootArguments = "";
+               namespace = Namespace): RefreshConfig =
+  RefreshConfig(
     storeRoot: store,
     projectId: projectId,
     providerBinaryPath: provider,
     providerArtifactId: artifactId,
     rootEntryPointId: RootEntryPoint,
-    rootArguments: fx.srcDir,
-    namespace: Namespace,
+    rootArguments: (if rootArguments.len > 0: rootArguments else: fx.srcDir),
+    namespace: namespace,
     lockSliceId: lockSlice,
     activity: activity,
-    providerWorkingDir: fx.repoRoot))
+    providerWorkingDir: fx.repoRoot)
+
+proc refresh(fx: Fixture; store, provider, artifactId: string;
+             lockSlice = "lock-v1"; activity = "build";
+             projectId = ProjectId;
+             rootArguments = ""): ProviderRefreshReport =
+  refreshProviderGraph(fx.configFor(store, provider, artifactId, lockSlice,
+    activity, projectId, rootArguments))
 
 proc materializeOutputs(fx: Fixture) =
   ## The files the member fragments claim, so cleanup has something real
@@ -416,6 +431,102 @@ suite "provider recompile keeps every invocation key":
       let warm = fx.refresh(store, providerV2, ArtifactV2,
         lockSlice = "lock-v3", activity = "test")
       check warm.invoked.len == 0
+
+    test "a different root argument re-invokes the root":
+      ## The root argument (the project root in production) is part of the
+      ## root fragment's key through its argument digest, so a refresh for
+      ## another root is another invocation (Project-Provider-Graph-Protocol.md
+      ## §"Full Versus Fragment Invocation"). The provider binary and its
+      ## artifact id are held fixed: this covers a store reused for another
+      ## root by a provider whose artifact does not depend on the root, the
+      ## case a changed artifact id (``geiProviderSource``) does not catch.
+      ##
+      ## Recorded as reprobuild-pm issues/2026-11-16-provider-graph-warm-
+      ## refresh-ignores-a-changed-root-argument.md: the warm path compared
+      ## each stored fragment's key with the key of its OWN stored arguments,
+      ## never the stored root's arguments with the requested ones, so it
+      ## served the old root's graph and invoked nothing.
+      let fx = newFixture("repro-root-argument-is-identity")
+      defer: fx.dispose()
+      let store = fx.tempRoot / "store"
+      let providerV1 = fx.compileProvider("provider-v1")
+      let otherRoot = fx.tempRoot / "other-src"
+      createDir(otherRoot)
+      writeFile(otherRoot / "c.txt", "charlie\n")
+
+      let cold = fx.refresh(store, providerV1, ArtifactV1)
+      check onePerInvocation(cold.snapshot)
+      let coldKeys = keysByInvocation(cold.snapshot)
+      # The control: the same root again is warm, so whatever the next
+      # refresh invokes is owed to the root argument alone.
+      let warm = fx.refresh(store, providerV1, ArtifactV1)
+      check warm.invoked.len == 0
+
+      let moved = fx.refresh(store, providerV1, ArtifactV1,
+        rootArguments = otherRoot)
+      checkpoint("invoked: " & $moved.invoked.mapIt(it.entryPointId & " " &
+        it.arguments & " " & $it.reason))
+      require moved.invoked.len == 2
+      check moved.invoked[0].entryPointId == RootEntryPoint
+      check moved.invoked[0].arguments == otherRoot
+      check moved.invoked[0].reason == girLockOrConfigChanged
+      check moved.invoked[1].entryPointId == MemberEntryPoint
+      check moved.invoked[1].arguments == otherRoot / "c.txt"
+      # The snapshot is the new root's graph and nothing of the old one.
+      let stored = moved.snapshot.fragments.mapIt(invocation(it)).ascending()
+      check stored == @[RootEntryPoint & " " & otherRoot,
+        MemberEntryPoint & " " & (otherRoot / "c.txt")].ascending()
+      check ascending(moved.prunedInvocationKeys) == sortedValues(coldKeys)
+      check staleIdentities(moved) == @["build/a.txt.out", "build/b.txt.out"]
+      let persisted = loadProviderGraphSnapshot(store)
+      check persisted.fragments.mapIt(invocation(it)).ascending() == stored
+
+      # And the new root is warm in turn.
+      let warmAgain = fx.refresh(store, providerV1, ArtifactV1,
+        rootArguments = otherRoot)
+      check warmAgain.invoked.len == 0
+
+    test "the snapshot shortcut serves only the requested invocations":
+      ## The CLI does not always call ``refreshProviderGraph``: when the
+      ## stored snapshot is fresh it serves it directly. That shortcut must
+      ## apply the refresh's own rule, or a build for another root would be
+      ## served the old root's graph without the refresh ever running.
+      let fx = newFixture("repro-shortcut-requires-invocation")
+      defer: fx.dispose()
+      forgetWarmBuildCaches()
+      defer: forgetWarmBuildCaches()
+      let store = fx.tempRoot / "store"
+      let providerV1 = fx.compileProvider("provider-v1")
+      let otherRoot = fx.tempRoot / "other-src"
+      createDir(otherRoot)
+      let cold = fx.refresh(store, providerV1, ArtifactV1)
+      check onePerInvocation(cold.snapshot)
+
+      let requested = fx.configFor(store, providerV1, ArtifactV1)
+      # The controls: the invocation the snapshot was produced for is served,
+      # from disk and then from the warm table the first read populates.
+      check readFreshProviderGraphSnapshot(requested).isSome
+      check warmReadFreshProviderGraphSnapshot(requested).isSome
+      check warmReadFreshProviderGraphSnapshot(requested).isSome
+
+      # Another root, the provider held fixed: refused from the warm table
+      # (keyed by store and artifact, so it holds an entry) and from disk.
+      let movedRoot = fx.configFor(store, providerV1, ArtifactV1,
+        rootArguments = otherRoot)
+      check warmReadFreshProviderGraphSnapshot(movedRoot).isNone
+      check readFreshProviderGraphSnapshot(movedRoot).isNone
+      # The other identity components the stored keys name.
+      for other in [
+          fx.configFor(store, providerV1, ArtifactV1, namespace = "other"),
+          fx.configFor(store, providerV1, ArtifactV1, lockSlice = "lock-v2"),
+          fx.configFor(store, providerV1, ArtifactV1, activity = "test"),
+          fx.configFor(store, providerV1, ArtifactV1, projectId = "beta")]:
+        checkpoint("refused config: " & other.namespace & " " &
+          other.lockSliceId & " " & other.activity & " " & other.projectId)
+        check warmReadFreshProviderGraphSnapshot(other).isNone
+        check readFreshProviderGraphSnapshot(other).isNone
+      # Refusing is not discarding: the requested invocation is still served.
+      check warmReadFreshProviderGraphSnapshot(requested).isSome
 
     test "the invocation key names the project, and a refresh needs one":
       let fx = newFixture("repro-key-names-project")

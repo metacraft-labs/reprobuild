@@ -72,12 +72,17 @@ import repro_interface_artifacts/catalog_composition
 import repro_interface_artifacts/catalog_declaration
 import repro_interface_artifacts/contribution_fingerprint
 import repro_lock
+import repro_nimble_index
 import git_tool
 import shared_clones
 
 export catalog_declaration
 
 type
+  GitStore = object
+    gitBin: string
+    gitDir: string
+
   CatalogDiscoveryError* = object of CatchableError
     ## A declared catalog could not be read at its pinned identity. The
     ## message names every cause and the remedy; nothing falls back.
@@ -95,6 +100,22 @@ type
     published*: seq[PublishedArtifact]
     content*: CatalogContent
     offered*: seq[ContributionIdentity]
+
+  DiscoveredNimbleIndex* = object
+    ## A ``kind = "nimble-index"`` catalog read at one exact revision: its
+    ## verified root and where each published object's blob is. Shards are
+    ## read on demand, through ``indexSource``.
+    repo*: string
+    remote*: string
+    gitRef*: string
+    revision*: string
+    indexIdentity*: string ## RECOMPUTED: BLAKE3 of the root, 64 hex.
+    rootId*: IndexObjectId
+    root*: NimbleIndexRoot
+    rootTree*: string
+    objectStore*: string
+    store: GitStore
+    blobs: Table[string, string] ## object id (hex) -> blob id
 
   CatalogEvidenceFailure* = object
     ## A catalog that could not be read at a locked record's own revision
@@ -115,7 +136,10 @@ type
     previous*: seq[ContributionIdentity]
     pins*: seq[LockedCatalogImport]
       ## The import pins this answer was read at: the lock's own (verified)
-      ## for a build, freshly resolved ones for re-selection.
+      ## for a build, freshly resolved ones for re-selection. Every kind.
+    nimbleIndexes*: seq[DiscoveredNimbleIndex]
+      ## The ``nimble-index`` imports, read at their pins. They supply no
+      ## provisioning content.
     evidenceFailures*: seq[CatalogEvidenceFailure]
       ## Locked records whose own catalog revision could not be read for
       ## ``previous`` (diagnostics only).
@@ -150,10 +174,6 @@ proc catalogGitEnv(): StringTableRef =
   # place.
   result["GIT_NO_LAZY_FETCH"] = "1"
   result["GIT_TERMINAL_PROMPT"] = "0"
-
-type GitStore = object
-  gitBin: string
-  gitDir: string
 
 proc drain(s: Stream): string =
   ## Every byte until end of stream. NOT ``readAll``: on Windows it stops at
@@ -329,6 +349,39 @@ proc openCatalogStore(repo, remote, projectRoot: string): GitStore =
 # Reading one catalog at one revision
 # ---------------------------------------------------------------------------
 
+proc pinnedRootTree(store: GitStore; revision, where, republish: string):
+    string =
+  ## The root tree of the pinned commit, read by id and re-hashed.
+  var commit = ""
+  try:
+    commit = store.readVerified("commit", revision)
+  except CatalogDiscoveryError as err:
+    discoveryError(where & ": the pinned commit is not available in the " &
+      "shared clone " & store.gitDir & " (" & err.msg & "). Fetch it with " &
+      "`git --git-dir=" & quoteShell(store.gitDir) & " fetch origin " &
+      revision & "` or `repro ws sync`; another revision, a checkout or a " &
+      "sibling directory is never used instead")
+  if not commit.startsWith("tree ") or commit.len < 46 or commit[45] != '\n':
+    discoveryError(where & ": the commit object does not start with its " &
+      "tree" & republish)
+  result = commit[5 ..< 45]
+  if not isLowerHex40(result):
+    discoveryError(where & ": the commit names a malformed tree" & republish)
+
+proc verifiedTree(store: GitStore; oid, where, republish: string):
+    seq[TreeEntry] =
+  ## A tree on the path to the published objects. Its refusal names the
+  ## catalog and the remedy (M6 deliverable 4): a tree that cannot be read
+  ## or does not hash to its id is a damaged store; one that does not parse
+  ## was published that way.
+  try:
+    result = parseTree(store.readVerified("tree", oid), oid)
+  except CatalogDiscoveryError as err:
+    if err.msg.endsWith(" is malformed"):
+      discoveryError(where & ": " & err.msg & republish)
+    discoveryError(where & ": " & err.msg & ". Move the shared clone " &
+      store.gitDir & " aside and re-create it (`repro ws sync`)")
+
 proc discoverCatalogAt*(repo, remote, gitRef, revision,
                         projectRoot: string): DiscoveredCatalog =
   ## Read the catalog ``remote`` at exactly ``revision`` (see the module
@@ -346,33 +399,9 @@ proc discoverCatalogAt*(repo, remote, gitRef, revision,
     "valid interface artifacts (the `commit` or `ref` of its [[import]] in " &
     CatalogImportsFileName & "), or have its publisher regenerate and " &
     "commit `" & PublishedInterfacesDir & "/`"
-  var commit = ""
-  try:
-    commit = store.readVerified("commit", revision)
-  except CatalogDiscoveryError as err:
-    discoveryError(where & ": the pinned commit is not available in the " &
-      "shared clone " & store.gitDir & " (" & err.msg & "). Fetch it with " &
-      "`git --git-dir=" & quoteShell(store.gitDir) & " fetch origin " &
-      revision & "` or `repro ws sync`; another revision, a checkout or a " &
-      "sibling directory is never used instead")
-  if not commit.startsWith("tree ") or commit.len < 46 or commit[45] != '\n':
-    discoveryError(where & ": the commit object does not start with its " &
-      "tree" & republish)
-  let rootTree = commit[5 ..< 45]
-  if not isLowerHex40(rootTree):
-    discoveryError(where & ": the commit names a malformed tree" & republish)
+  let rootTree = pinnedRootTree(store, revision, where, republish)
   proc treeAt(oid: string): seq[TreeEntry] =
-    ## A tree on the path to the artifacts. Its refusal names the catalog
-    ## and the remedy (M6 deliverable 4): a tree that cannot be read or does
-    ## not hash to its id is a damaged store; one that does not parse was
-    ## published that way.
-    try:
-      result = parseTree(store.readVerified("tree", oid), oid)
-    except CatalogDiscoveryError as err:
-      if err.msg.endsWith(" is malformed"):
-        discoveryError(where & ": " & err.msg & republish)
-      discoveryError(where & ": " & err.msg & ". Move the shared clone " &
-        store.gitDir & " aside and re-create it (`repro ws sync`)")
+    verifiedTree(store, oid, where, republish)
   let rootEntries = treeAt(rootTree)
   let pubs = rootEntries.filterIt(it.name == PublishedInterfacesDir)
   if pubs.len == 0:
@@ -512,7 +541,156 @@ proc catalogImportOf*(d: DiscoveredCatalog): CatalogImport =
 
 proc lockPinOf*(d: DiscoveredCatalog): LockedCatalogImport =
   LockedCatalogImport(repo: d.repo, remote: d.remote, gitRef: d.gitRef,
-    revision: d.revision, interfaceArtifact: d.interfaceArtifact)
+    revision: d.revision, interfaceArtifact: d.interfaceArtifact,
+    kind: cikProvisioning)
+
+proc lockPinOf*(d: DiscoveredNimbleIndex): LockedCatalogImport =
+  ## The ``catalog_imports`` record of a Nimble index import: its revision
+  ## and the index identity (the root's hash) in ``interface_artifact``.
+  LockedCatalogImport(repo: d.repo, remote: d.remote, gitRef: d.gitRef,
+    revision: d.revision, interfaceArtifact: d.indexIdentity,
+    kind: cikNimbleIndex)
+
+# ---------------------------------------------------------------------------
+# The `nimble-index` kind
+# ---------------------------------------------------------------------------
+
+proc isLowerHex64(value: string): bool =
+  value.len == 64 and value.allIt(it in {'0'..'9', 'a'..'f'})
+
+proc discoverNimbleIndexAt*(repo, remote, gitRef, revision,
+                            projectRoot: string): DiscoveredNimbleIndex =
+  ## Read the Nimble index ``remote`` publishes at exactly ``revision``:
+  ## ``published-index/root`` and the listing of ``published-index/objects``,
+  ## every object read by id and re-hashed (C1), from the shared clone whose
+  ## origin is ``remote`` (C2). The root is decoded by the bounded codec;
+  ## every object it names must be published beside it. No shard is read
+  ## here. Raises ``CatalogDiscoveryError`` naming every cause.
+  if not isFullRevision(revision):
+    discoveryError("catalog \"" & repo & "\" (" & remote & ") is pinned to " &
+      revision.escape() & ", which is not a full-width lower-case commit " &
+      "id; a branch name or an abbreviated id names a set of commits")
+  let store = openCatalogStore(repo, remote, projectRoot)
+  if not isLowerHex40(revision):
+    discoveryError(catalogName(repo, remote) & " is pinned to a 64-hex " &
+      "revision; SHA-256 repositories are not supported yet")
+  let where = catalogName(repo, remote) & " at " & revision
+  let republish = ". Pin a revision of \"" & repo & "\" that publishes a " &
+    "valid Nimble index (the `commit` or `ref` of its [[import]] in " &
+    CatalogImportsFileName & "), or have its generator regenerate and " &
+    "commit `" & PublishedIndexDir & "/`"
+  let rootTree = pinnedRootTree(store, revision, where, republish)
+  let rootEntries = verifiedTree(store, rootTree, where, republish)
+  let pubs = rootEntries.filterIt(it.name == PublishedIndexDir)
+  if pubs.len != 1 or pubs[0].mode != "40000":
+    discoveryError(where & ": the commit publishes no Nimble index (" &
+      (if pubs.len == 0: "there is no `" & PublishedIndexDir & "/` directory"
+       elif pubs.len > 1: "the root tree names `" & PublishedIndexDir & "` " &
+         $pubs.len & " times"
+       else: "`" & PublishedIndexDir & "` is not a directory") &
+      " at the repository root)" & republish)
+  var refusals: seq[string] = @[]
+  var rootBlob = ""
+  var objectsTree = ""
+  var seen: seq[string] = @[]
+  for e in verifiedTree(store, pubs[0].oid, where, republish):
+    if e.name in seen:
+      refusals.add("`" & PublishedIndexDir & "/" & e.name & "` appears more " &
+        "than once in the tree")
+    seen.add(e.name)
+    if e.name == IndexRootFile and e.mode == "100644":
+      rootBlob = e.oid
+    elif e.name == IndexObjectsDir and e.mode == "40000":
+      objectsTree = e.oid
+    else:
+      refusals.add("`" & PublishedIndexDir & "/" & e.name & "` (mode " &
+        e.mode & ") is neither the `" & IndexRootFile & "` file nor the `" &
+        IndexObjectsDir & "/` directory; the directory holds the index and " &
+        "nothing else")
+  if rootBlob.len == 0:
+    refusals.add("`" & PublishedIndexDir & "/" & IndexRootFile & "` is missing")
+  if objectsTree.len == 0:
+    refusals.add("`" & PublishedIndexDir & "/" & IndexObjectsDir &
+      "/` is missing")
+  var blobs = initTable[string, string]()
+  if objectsTree.len > 0:
+    for e in verifiedTree(store, objectsTree, where, republish):
+      if e.mode != "100644" or not isLowerHex64(e.name):
+        refusals.add("`" & PublishedIndexDir & "/" & IndexObjectsDir & "/" &
+          e.name & "` (mode " & e.mode & ") is not a regular file named by " &
+          "a 64-hex object id")
+      elif e.name in blobs:
+        refusals.add("`" & PublishedIndexDir & "/" & IndexObjectsDir & "/" &
+          e.name & "` appears more than once in the tree")
+      else:
+        blobs[e.name] = e.oid
+  if refusals.len > 0:
+    discoveryError(where & " cannot be read as a Nimble index:\n    " &
+      refusals.sorted(cmp).join("\n    ") & "\n    fix" & republish[1 .. ^1])
+  var rootText = ""
+  try:
+    rootText = store.readVerified("blob", rootBlob)
+  except CatalogDiscoveryError as err:
+    discoveryError(err.msg & ". Move the shared clone " & store.gitDir &
+      " aside and re-create it (`repro ws sync`)")
+  var rootBytes = newSeq[byte](rootText.len)
+  for i, c in rootText: rootBytes[i] = byte(ord(c))
+  let rootId = indexObjectId(rootBytes)
+  var root: NimbleIndexRoot
+  try:
+    root = decodeRoot(rootBytes)
+  except NimbleIndexError as err:
+    discoveryError(where & ": `" & PublishedIndexDir & "/" & IndexRootFile &
+      "` is refused: " & err.msg & republish)
+  var named = @[($rootId, "the root"), ($root.nameMap.id, "the name map"),
+    ($root.events.id, "the events")]
+  for sh in root.shards:
+    named.add(($sh.id, "shard " & $sh.bucket))
+  for (hex, what) in named:
+    if hex notin blobs:
+      refusals.add(what & " (" & hex & ") is not published in `" &
+        PublishedIndexDir & "/" & IndexObjectsDir & "/`")
+  if $rootId in blobs and blobs[$rootId] != rootBlob:
+    refusals.add("`" & PublishedIndexDir & "/" & IndexObjectsDir & "/" &
+      $rootId & "` is not the same blob as `" & PublishedIndexDir & "/" &
+      IndexRootFile & "`")
+  if refusals.len > 0:
+    discoveryError(where & " publishes an incomplete Nimble index:\n    " &
+      refusals.sorted(cmp).join("\n    ") & "\n    fix" & republish[1 .. ^1])
+  DiscoveredNimbleIndex(repo: repo, remote: remote, gitRef: gitRef,
+    revision: revision, indexIdentity: $rootId, rootId: rootId, root: root,
+    rootTree: rootTree, objectStore: store.gitDir, store: store, blobs: blobs)
+
+proc indexSource*(d: DiscoveredNimbleIndex): IndexObjectSource =
+  ## The index's objects, read from the shared clone at the pinned revision:
+  ## each blob by id and re-hashed (git's id), then checked against the
+  ## index object id by the index reader.
+  let store = d.store
+  let blobs = d.blobs
+  let where = catalogName(d.repo, d.remote) & " at " & d.revision
+  IndexObjectSource(description: where,
+    fetch: proc (id: IndexObjectId; maxBytes: int): seq[byte] =
+      let hex = $id
+      if hex notin blobs:
+        refuse(nrMissingObject, "object " & hex & " is not published by " &
+          where)
+      var text = ""
+      var failure = ""
+      try:
+        text = store.readVerified("blob", blobs[hex])
+      except CatalogDiscoveryError as err:
+        failure = err.msg
+      if failure.len > 0:
+        refuse(nrMissingObject, failure)
+      if text.len > maxBytes:
+        refuse(nrOversize, "object " & hex & " of " & where & " is " &
+          $text.len & " bytes, more than " & $maxBytes)
+      result = newSeq[byte](text.len)
+      for i, c in text: result[i] = byte(ord(c)))
+
+proc openNimbleIndex*(d: DiscoveredNimbleIndex): NimbleIndex =
+  ## The index for reading: root verified again by its id, shards on demand.
+  openIndex(indexSource(d), d.rootId)
 
 # ---------------------------------------------------------------------------
 # The declaration
@@ -672,12 +850,17 @@ proc renderEvidenceFailures*(failures: seq[CatalogEvidenceFailure]):
 
 proc answerOf(located: LocatedCatalogDeclaration;
               discovered: seq[DiscoveredCatalog];
+              indexes: seq[DiscoveredNimbleIndex];
               claims: seq[LockedRealization];
               projectRoot: string): CatalogAnswer =
   for d in discovered:
     result.imports.add(catalogImportOf(d))
     result.offered.add(d.offered)
     result.pins.add(lockPinOf(d))
+  for d in indexes:
+    result.pins.add(lockPinOf(d))
+  result.nimbleIndexes = indexes
+  result.pins.sort(proc (a, b: LockedCatalogImport): int = cmp(a.repo, b.repo))
   result.policy = located.declaration.policy
   result.resolver = offeredContributionResolver(result.offered)
   result.previous = evidenceAt(claims, projectRoot, discovered,
@@ -733,6 +916,9 @@ proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
     if d.interfaceArtifact.len > 0 and p.interfaceArtifact != d.interfaceArtifact:
       disagree.add("the declaration asserts interface artifact " &
         d.interfaceArtifact & ", the lock pins " & p.interfaceArtifact)
+    if p.kind != d.kind:
+      disagree.add("the declaration names kind `" & $d.kind & "`, the lock " &
+        "pins kind `" & $p.kind & "`")
     if disagree.len > 0:
       refusals.add("the committed lock's pin for catalog import \"" & d.repo &
         "\" disagrees with repro-catalogs.toml (" & at & "): " &
@@ -748,8 +934,25 @@ proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
         "repro-catalogs.toml does not declare; " & reselect & " to drop " &
         "the pin, or declare it in " & located.path)
   var discovered: seq[DiscoveredCatalog] = @[]
+  var indexes: seq[DiscoveredNimbleIndex] = @[]
   for (d, p) in toRead:
     let at = located.path & ":" & $d.line
+    if d.kind == cikNimbleIndex:
+      try:
+        let found = discoverNimbleIndexAt(p.repo, p.remote, p.gitRef,
+          p.revision, projectRoot)
+        if found.indexIdentity != p.interfaceArtifact:
+          refusals.add("catalog \"" & p.repo & "\" (" & p.remote & ") at " &
+            p.revision & " publishes the Nimble index " & found.indexIdentity &
+            ", but the committed lock pins " & p.interfaceArtifact &
+            "; nothing read at that revision is used. " &
+            reselect.capitalizeAscii())
+          continue
+        indexes.add(found)
+      except CatalogDiscoveryError as err:
+        refusals.add(err.msg & "\n    (the [[import]] of \"" & p.repo &
+          "\" is at " & at & ")")
+      continue
     try:
       let found = discoverCatalogAt(p.repo, p.remote, p.gitRef, p.revision,
         projectRoot)
@@ -767,7 +970,7 @@ proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
         "\" is at " & at & ")")
   if refusals.len > 0:
     discoveryError(refusals.sorted(cmp).join("\n  "))
-  answerOf(located, discovered, claims, projectRoot)
+  answerOf(located, discovered, indexes, claims, projectRoot)
 
 proc catalogsForReselect*(projectRoot: string;
                           claims: seq[LockedRealization]): CatalogAnswer =
@@ -778,12 +981,26 @@ proc catalogsForReselect*(projectRoot: string;
   let located = readLocatedCatalogDeclaration(projectRoot)
   var refusals: seq[string] = @[]
   var discovered: seq[DiscoveredCatalog] = @[]
+  var indexes: seq[DiscoveredNimbleIndex] = @[]
   for d in located.declaration.imports:
     let at = located.path & ":" & $d.line
     try:
       let revision =
         if d.commit.len > 0: d.commit
         else: resolveCatalogRef(d.repo, d.remote, d.gitRef, projectRoot)
+      if d.kind == cikNimbleIndex:
+        let found = discoverNimbleIndexAt(d.repo, d.remote, d.gitRef,
+          revision, projectRoot)
+        if d.interfaceArtifact.len > 0 and
+            found.indexIdentity != d.interfaceArtifact:
+          refusals.add("catalog \"" & d.repo & "\" (" & d.remote & ") at " &
+            revision & " publishes the Nimble index " & found.indexIdentity &
+            ", but repro-catalogs.toml asserts " & d.interfaceArtifact &
+            " (" & at & "); correct or remove the `interface_artifact` " &
+            "assertion there, or pin the revision that publishes it")
+          continue
+        indexes.add(found)
+        continue
       let found = discoverCatalogAt(d.repo, d.remote, d.gitRef, revision,
         projectRoot)
       if d.interfaceArtifact.len > 0 and
@@ -801,7 +1018,7 @@ proc catalogsForReselect*(projectRoot: string;
         "\" is at " & at & ")")
   if refusals.len > 0:
     discoveryError(refusals.sorted(cmp).join("\n  "))
-  answerOf(located, discovered, claims, projectRoot)
+  answerOf(located, discovered, indexes, claims, projectRoot)
 
 proc renderCatalogPinChanges*(old, new: seq[LockedCatalogImport]): seq[string] =
   ## One line per catalog import pin that re-selection added, removed or
@@ -825,6 +1042,8 @@ proc renderCatalogPinChanges*(old, new: seq[LockedCatalogImport]): seq[string] =
       var parts: seq[string] = @[]
       if a[0].remote != b[0].remote:
         parts.add("remote " & a[0].remote & " -> " & b[0].remote)
+      if a[0].kind != b[0].kind:
+        parts.add("kind " & $a[0].kind & " -> " & $b[0].kind)
       if a[0].gitRef != b[0].gitRef:
         parts.add("ref \"" & a[0].gitRef & "\" -> \"" & b[0].gitRef & "\"")
       if a[0].revision != b[0].revision:

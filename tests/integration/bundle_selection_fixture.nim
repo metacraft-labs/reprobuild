@@ -6,6 +6,7 @@
 ## Not a test (no `t_` prefix), so the suite generator never compiles it on
 ## its own. The tests that import it are
 ## `t_selection_bundle_contains_only_the_selection`,
+## `t_a_bundle_says_when_a_project_pins_an_upstream_nim`,
 ## `t_bad_bundles_are_refused_before_writing`,
 ## `t_manifest_is_readable_without_import` and
 ## `t_bundle_restores_on_a_plain_machine_without_rebuilding`.
@@ -54,7 +55,15 @@ proc gitInit(dir: string; origin = "") =
   if origin.len > 0:
     run("git remote add origin " & quoteShell(origin), dir)
 
-proc writeRepo(dir, repo: string) =
+const
+  DslExportName* = "dslexport"
+    ## With `writeWorkspace(dslExport = true)`, a directory of the workspace
+    ## root's own checkout whose `repro.nim` exports one constant, and which
+    ## beta's recipe imports through `dslDeps:` (resolved at compile time as
+    ## `<beta>/../dslexport`).
+  DslExportSymbol* = "dslexportGreeting"
+
+proc writeRepo(dir, repo: string; dslDeps = false) =
   let marker = markerOf(repo)
   createDir(dir / "src")
   writeFile(dir / "src" / ("in-" & marker & ".txt"), "source " & marker & "\n")
@@ -78,13 +87,23 @@ package MARKER:
       dependencyPolicy = automaticMonitorPolicy())
     defaultBuildAction(a)
 """.multiReplace(("MARKER", marker),
-    ("OUTREL", outputRel(repo)), ("EDGE", produceEdge(repo))))
+    ("OUTREL", outputRel(repo)), ("EDGE", produceEdge(repo))) &
+    (if not dslDeps: ""
+     else:
+       # The use is under `reproInterfaceMode`, the one compile that resolves
+       # `dslDeps:`: an import the resolution dropped fails that compile.
+       "  dslDeps:\n    \"" & DslExportName & "\"\n" &
+       "  when defined(reproInterfaceMode):\n" &
+       "    const imported = " & DslExportSymbol & "\n" &
+       "    static: doAssert imported.len > 0\n"))
   gitInit(dir, "https://example.invalid/" & repo)
 
-proc writeWorkspace*(ws: string) =
+proc writeWorkspace*(ws: string; dslExport = false) =
   ## The workspace root (a Git checkout holding the manifests) with projects
   ## `pair` (alpha, beta) and `all` (alpha, beta, gamma), and the three
-  ## repositories checked out beside the manifests.
+  ## repositories checked out beside the manifests. With `dslExport`, the
+  ## root also holds `DslExportName`, and beta's recipe imports it with
+  ## `dslDeps:`, a compile-time resolution through the engine.
   createDir(ws / "projects")
   createDir(ws / "repos")
   createDir(ws / "url-prefixes")
@@ -107,13 +126,17 @@ proc writeWorkspace*(ws: string) =
       "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" &
       repo & "\"\npath = \"" & repo & "\"\nurl_prefix = \"acme\"\n" &
       "mainline = \"main\"\n")
+  if dslExport:
+    createDir(ws / DslExportName)
+    writeFile(ws / DslExportName / "repro.nim",
+      "const " & DslExportSymbol & "* = \"from the workspace root\"\n")
   gitInit(ws, "https://example.invalid/ws")
   createDir(ws / ".repro")
   writeFile(ws / ".repro" / "workspace-state.toml",
     "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\n" &
     "project = \"pair\"\nprojects = [\"pair\"]\n")
   for repo in Repos:
-    writeRepo(ws / repo, repo)
+    writeRepo(ws / repo, repo, dslDeps = dslExport and repo == "beta")
 
 proc reproEnv*(host: SharedHost;
                extra: openArray[(string, string)] = []): StringTableRef =

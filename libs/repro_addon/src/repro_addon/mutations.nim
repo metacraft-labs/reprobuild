@@ -1305,6 +1305,12 @@
 ##                                            (decision 181)
 ## ``egress-units-unix-sockets``              the egress units may make Unix
 ##                                            sockets (decision 181)
+## ``contain-records-before-quiesce``         contain records its statement
+##                                            while the agent can still start
+##                                            or finish a tick, so the tick's
+##                                            heartbeat lands after the
+##                                            containment (decision 51, A11
+##                                            round 23b)
 ## ``first-use-without-ledger-copy``         with no identity and no ledger
 ##                                            copy, the records' directory is
 ##                                            recorded at first use, a
@@ -2415,6 +2421,7 @@ const
                           "ship-decoded-as-root",
                           "outbox-written-by-path",
                           "egress-units-unix-sockets",
+                          "contain-records-before-quiesce",
                           "verify-absent-dir-without-identity-noted",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",

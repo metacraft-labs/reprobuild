@@ -57,6 +57,9 @@ static void *repro_hcr_lx_map_anonymous(void *hint, size_t length,
   return mapped == MAP_FAILED ? NULL : mapped;
 }
 
+/* The shim's levers are set by direct calls, not read from the environment. */
+static void repro_hcr_lx_apply_probe_levers(void) {}
+
 static int repro_hcr_lx_unmap(void *address, size_t length) {
   return munmap(address, length);
 }
@@ -107,8 +110,12 @@ const char *repro_hcr_lx_probe_refusal_name(int code) {
   return repro_hcr_lx_refusal_name(code);
 }
 
-int repro_hcr_lx_probe_text_protection_roundtrip(void) {
-  return repro_hcr_lx_capability_report()->text_protection_roundtrip;
+int repro_hcr_lx_probe_text_replacement_supported(void) {
+  return repro_hcr_lx_capability_report()->text_replacement_supported;
+}
+
+int repro_hcr_lx_probe_text_replacement_backing(void) {
+  return repro_hcr_lx_capability_report()->text_replacement_backing;
 }
 
 int repro_hcr_lx_probe_membarrier_sync_core(void) {
@@ -119,12 +126,14 @@ long long repro_hcr_lx_probe_membarrier_query_mask(void) {
   return (long long)repro_hcr_lx_capability_report()->membarrier_query_mask;
 }
 
-long long repro_hcr_lx_probe_protection_probe_rw_result(void) {
-  return (long long)repro_hcr_lx_capability_report()->protection_probe_rw_result;
+long long repro_hcr_lx_probe_text_replacement_memfd_result(void) {
+  return (long long)repro_hcr_lx_capability_report()
+      ->text_replacement_memfd_result;
 }
 
-long long repro_hcr_lx_probe_protection_probe_rx_result(void) {
-  return (long long)repro_hcr_lx_capability_report()->protection_probe_rx_result;
+long long repro_hcr_lx_probe_text_replacement_anonymous_result(void) {
+  return (long long)repro_hcr_lx_capability_report()
+      ->text_replacement_anonymous_result;
 }
 
 unsigned long long repro_hcr_lx_probe_sled_address_for_entry(
@@ -804,14 +813,12 @@ int repro_hcr_lx_probe_txn_site_refusal(int index) {
 /*
  * HLX-M9 — the provider-owned code-page allocator, driven directly.
  *
- * WHY THIS IS REACHED HERE AND NOT THROUGH A PATCH. Under
- * `PR_SET_MDWE(PR_MDWE_REFUSE_EXEC_GAIN)` — the only W^X policy this host can
- * express — `repro_hcr_lx_txn_prepare` refuses BEFORE it reaches the page
- * allocator, because the host capability probe already failed. That refusal is
- * correct (the TARGET'S text still cannot be made writable, which is HLX-OQ-1's
- * half and is not what this deliverable is about), but it means no patch path
- * can ever exercise the allocator on a hardened host. The shim is the vehicle
- * that can, and it runs the SAME production code the agent runs.
+ * WHY THIS IS ALSO REACHED HERE AND NOT ONLY THROUGH A PATCH. A patch reaches
+ * the allocator only on a host the agent-start probe accepted, and with the
+ * `memfd` backing disabled under `PR_SET_MDWE(PR_MDWE_REFUSE_EXEC_GAIN)` the
+ * probe refuses the host before any patch exists. The shim drives one page
+ * lifecycle directly, through the SAME production code the agent runs, so both
+ * mechanisms can be measured on one host whatever the probe decided.
  *
  * `repro_hcr_lx_probe_code_page_cycle` performs one complete lifecycle —
  * allocate, write through whatever alias the mechanism provides, finalize —

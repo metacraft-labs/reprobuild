@@ -9,8 +9,8 @@
 ##     payload fields).
 ##   * Lifecycle decision algorithm (`decideAction`): pure function
 ##     from `(desired, observed, recorded)` to `ResourceAction`.
-##   * `composePlan` + `renderPlan`: the engine behind
-##     `repro home plan`.
+##   * `composePlan`: the resource decisions of the preview
+##     `repro home plan` / `repro home apply --plan` print.
 ##   * Per-resource drivers under `repro_home_resources/drivers/`:
 ##     `managed_block`, `registry` (Windows), `env_user`,
 ##     `windows_startup`, `shell_integration`, and the Phase B

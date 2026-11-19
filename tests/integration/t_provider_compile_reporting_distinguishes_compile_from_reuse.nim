@@ -98,10 +98,11 @@ suite "provider-compile reporting distinguishes a compile from a reuse":
       checkpoint("missing " & reproBin & "; run `just build` first")
       fail()
     else:
-      # A SHORT root on purpose: nothing here depends on path length, but
-      # the provider compile's argv is embedded in its action key and a
-      # very deep root makes the fixture needlessly fragile.
-      let tempRoot = "/tmp/rb-provrep-" & $getCurrentProcessId()
+      # A short name under $TMPDIR: nothing here depends on path length, but
+      # the provider compile's argv is embedded in its action key and a very
+      # deep root makes the fixture needlessly fragile. Not a fixed `/tmp`,
+      # which a host may have full or quota-limited while $TMPDIR is not.
+      let tempRoot = getTempDir() / ("rb-provrep-" & $getCurrentProcessId())
       removeDir(tempRoot)
       createDir(tempRoot)
       defer: removeDir(tempRoot)

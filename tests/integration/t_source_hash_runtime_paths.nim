@@ -199,7 +199,8 @@ echo "portable-hashes-ready"
       check portableReleaseRpathFlags("/opt/clingo", release).len == 0
       check portableReleaseRpathFlags("", "").len == 0
       let flags = portableReleaseRpathFlags("", release)
-      check flags == @["--passL:'-Wl,-rpath,$ORIGIN'"]
+      check flags == @["--passL:'-Wl,-rpath,$ORIGIN'",
+        "--passL:-Wl,--enable-new-dtags"]
 
       let source = scratch / "probe.nim"
       writeFile(source, """
@@ -391,5 +392,105 @@ echo marker()
         @[loader, "--library-path", release, "./probe"]
       # This test process is not a portable release.
       check portableReleaseHelperArgv([helper]) == @[helper]
+
+    test "portable release helpers keep the release's libraries ahead of the toolchain's":
+      # A helper compiled by a Nix C compiler carries that compiler's glibc
+      # directory in its search list, and the helper compile adds runtime
+      # directories through `runtimeRpathCompilerFlags`, whose
+      # `--disable-new-dtags` made the whole list a DT_RPATH. The loader
+      # searches a DT_RPATH before `--library-path`, so the release's loader
+      # mapped the toolchain's libc.so.6 and died on a GLIBC_PRIVATE symbol
+      # (`__nptl_change_stack_perm`) that libc lacks.
+      #
+      # A test cannot load a second glibc safely, so `libreprotestc` stands in
+      # for libc.so.6: one soname, built twice. The "toolchain" copy sits in a
+      # directory handed to `runtimeRpathCompilerFlags`, as the toolchain's
+      # glibc directory sits in the helper's list; the "release" copy sits in
+      # the release's lib directory. Each reports which one it is. The
+      # release's lib directory also holds real copies of this toolchain's
+      # loader and C library, the pair the archive bundles.
+      # No spaces in these paths: `runtimeRpathCompilerFlags` writes its
+      # directories into `passL` text unquoted, as production does.
+      let scratch = createTempDir("repro-portable-precedence-", "")
+      defer: removeDir(scratch)
+      let release = scratch / "release-lib"
+      let toolchain = scratch / "toolchain-lib"
+      createDir(release)
+      createDir(toolchain)
+      let cc = getEnv("CC", "cc")
+      let libcProbe = run(@[cc, "-print-file-name=libc.so.6"])
+      require libcProbe.code == 0
+      let glibcDir = parentDir(expandFilename(libcProbe.output.strip()))
+      var loaderName = ""
+      for kind, path in walkDir(glibcDir):
+        let leaf = extractFilename(path)
+        if leaf.startsWith("ld-linux") and ".so" in leaf:
+          loaderName = leaf
+          break
+      checkpoint("glibc directory: " & glibcDir)
+      require loaderName.len > 0
+      for leaf in [loaderName, "libc.so.6", "libm.so.6", "libdl.so.2",
+                   "libpthread.so.0", "librt.so.1"]:
+        if fileExists(glibcDir / leaf):
+          copyFile(glibcDir / leaf, release / leaf)
+          inclFilePermissions(release / leaf, {fpUserExec})
+      let loader = release / loaderName
+
+      let suffix = $getCurrentProcessId()
+      let soname = "libreprotestc_" & suffix & ".so.6"
+      for (dir, role) in [(toolchain, "TOOLCHAIN"), (release, "RELEASE")]:
+        let source = scratch / (role & ".c")
+        writeFile(source, "const char *repro_libc_role(void) { return \"" &
+          role & "-" & suffix & "\"; }\n")
+        let built = run(@[cc, "-shared", "-fPIC", "-Wl,-soname," & soname,
+          "-o", dir / soname, source])
+        checkpoint(built.output)
+        require built.code == 0
+
+      let source = scratch / "probe.nim"
+      writeFile(source, """
+proc repro_libc_role(): cstring {.importc, cdecl.}
+echo repro_libc_role()
+""")
+      # The production flags in the production order: `externalHashFlags`
+      # adds every runtime directory before the portable-release flags.
+      let linkInput = @["--passL:-L" & toolchain,
+        "--passL:-l:" & soname]
+      let runtimeFlags = runtimeRpathCompilerFlags(@[toolchain], rltLinux)
+      let portableFlags = portableReleaseRpathFlags("", release)
+      require runtimeFlags.len > 0
+      require portableFlags.len > 0
+      let nim = getEnv("REPRO_NIM_COMPILER", findExe("nim"))
+      for (name, flags) in [("release", runtimeFlags & portableFlags),
+                            ("prefix", runtimeFlags)]:
+        let compiled = run(@[nim, "c", "--skipUserCfg:on", "--skipParentCfg:on",
+          "--skipProjCfg:on", "--hints:off"] & linkInput & flags & @[
+          "--nimcache:" & (scratch / (name & "-cache")),
+          "-o:" & (scratch / (name & "-helper") / "probe"), source])
+        checkpoint(compiled.output)
+        require compiled.code == 0
+      let helper = scratch / "release-helper" / "probe"
+      let prefixHelper = scratch / "prefix-helper" / "probe"
+      check toolchain in elfRunpathEntries(helper)
+      check PortableReleaseHelperRunpathMarker in elfRunpathEntries(helper)
+
+      # Started as the engine starts it: the release's copy must win.
+      let argv = portableReleaseHelperArgvFor([helper], loader, release,
+        elfRunpathEntries)
+      check argv == @[loader, "--library-path", release, helper]
+      let launched = run(argv, cleanLoader = true)
+      checkpoint(launched.output)
+      check launched.code == 0
+      check launched.output.strip() == "RELEASE-" & suffix
+
+      # A helper without the marker is started directly and keeps a DT_RPATH:
+      # its runtime directories still outrank the caller's library path.
+      check portableReleaseHelperArgvFor([prefixHelper], loader, release,
+        elfRunpathEntries) == @[prefixHelper]
+      let direct = run(@[prefixHelper], cleanLoader = true,
+        extraEnv = [("LD_LIBRARY_PATH", release)])
+      checkpoint(direct.output)
+      check direct.code == 0
+      check direct.output.strip() == "TOOLCHAIN-" & suffix
 else:
   discard # ELF loader regression; Windows uses vendored C and macOS uses LC_RPATH.

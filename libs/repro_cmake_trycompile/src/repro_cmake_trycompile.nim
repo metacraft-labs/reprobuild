@@ -57,7 +57,16 @@ import repro_core
 
 const
   TryCompileMetadataMagic* = "RBCT"
-  TryCompileMetadataVersion* = 5'u16
+  TryCompileMetadataVersion* = 6'u16
+  ## v6 appends a payload-level ``relocatable`` flag after ``actionEnv``:
+  ##     the generator sets it for a ``try_compile`` project, whose actions
+  ##     compute the same thing in any scratch directory, so the engine keys
+  ##     them relocatably (``BuildAction.relocatable``) and two configures
+  ##     can share a probe's result (reprobuild-pm issue 2026-10-10,
+  ##     "trycompile-edge-cache-key-is-unique-to-its-configure"). v5 readers
+  ##     reject it; the generator writes v6 only when ``repro capabilities``
+  ##     lists ``trycompile-relocatable-probes``, so an older ``repro`` keeps
+  ##     receiving v5.
   ## v5 appends optionalOutputs to each action; earlier readers reject it.
   ## v1: single target (legacy, TryCompile probes only).
   ## v2: multi-target with optional default + all aggregator (Tier 2c
@@ -90,11 +99,11 @@ const
   ## for the provider artifact itself. Bumping ``Version`` invalidates
   ## that share — keep it in lockstep with the binary protocol.
   TryCompileProviderArtifactId* =
-    "repro-cmake-trycompile-provider.v5"
+    "repro-cmake-trycompile-provider.v6"
   TryCompileProviderRootEntryPointId* =
     "cmakeReprobuildTryCompile.root"
   TryCompileProviderRootBodyHash* =
-    "cmakeReprobuildTryCompile.root.v5"
+    "cmakeReprobuildTryCompile.root.v6"
   TryCompileProviderPackageName* = "cmakeReprobuildTryCompile"
   TryCompileProviderNamespace* = "project"
 
@@ -177,6 +186,11 @@ type
     ## v1..v3 envelopes and on v4 envelopes whose project opted out of
     ## the declared ``PATH``.
     actionEnv*: seq[string]
+    relocatable*: bool
+      ## v6-only: every action of this project is relocatable -- it computes
+      ## the same thing wherever its working directory is, given the same
+      ## content at the same cwd-relative places. Set by the generator for a
+      ## ``try_compile`` project and nothing else. False on v1..v5.
     ## v1 compatibility fields. Decoder fills these on v1 envelopes and
     ## encoder writes them only when ``targets`` is empty (so v1 readers
     ## still get a usable single-target view).
@@ -284,6 +298,8 @@ proc encodeTryCompileMetadata*(meta: TryCompileMetadata): seq[byte] =
   # envelope outright, so there is no reader that could be confused by
   # an always-present (possibly empty) field.
   payload.writeStringSeq(meta.actionEnv)
+  # v6 trailer, unconditional for the same reason as the v4 one.
+  payload.writeBool(meta.relocatable)
 
   result = @[]
   for ch in TryCompileMetadataMagic:
@@ -368,6 +384,8 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
       # declare no `PATH`, `actionPathDecision` takes its inherited
       # branch, and the census counts them as `inherited (passthrough)`.
       result.actionEnv = readStringSeq(bytes, pos)
+    if version >= 6'u16:
+      result.relocatable = readBool(bytes, pos)
     # Maintain v1 compatibility view: expose the first target through the
     # legacy single-target fields so older code paths still see something.
     if result.targets.len > 0:

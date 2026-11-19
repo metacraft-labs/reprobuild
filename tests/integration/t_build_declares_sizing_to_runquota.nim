@@ -29,6 +29,10 @@
 ## action skip its lease (a cache hit) in a real build would test the cache,
 ## not the walk.
 
+# The RunQuota helper role of the image this test stands in for: its
+# command line read by repro's generated parser.
+from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
+  selectsRunQuotaHelper
 import std/[algorithm, json, os, osproc, sets, strutils, tables, tempfiles,
   unittest]
 
@@ -54,8 +58,8 @@ when isMainModule:
     fixtureWrite(params[2], params[1] & "\n")
     fixtureWrite(params[3], "out/" & params[1] & ".txt:\n")
     quit 0
-  if params.len > 0 and params[0] == "__repro-runquota-helper":
-    quit runRunQuotaHelperCli(params[1 .. ^1])
+  if selectsRunQuotaHelper(params):
+    quit runRunQuotaHelperArgs(params)
 
 proc startCapturingDaemon(repoRoot, root: string): Process =
   let socket = runquotaSocketEndpoint("repro-sizing-" &

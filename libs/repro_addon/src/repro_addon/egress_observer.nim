@@ -486,10 +486,8 @@ proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
               ("control", if c.control.len > 0: c.control else: "not-run"),
               ("count", $c.refused.len)]), site)
 
-proc runEgressCheckCli*(args: seq[string]): int =
-  if args.len != 0:
-    stderr.write("usage: repro system addon egress-check\n")
-    return 2
+proc runEgressCheckCommand*(): int =
+  ## ``repro system addon egress-check`` (repro-addon-egress-check.service).
   let site = defaultSite()
   let heartbeat = try: int64(loadEvidenceConf().heartbeatSec) * 1000
                   except CatchableError: 0'i64

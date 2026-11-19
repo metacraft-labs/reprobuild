@@ -1119,7 +1119,7 @@ const
     ## The schema of `repro home list --json`.
   HomeHistoryJsonSchema* = "reprobuild.home.history.v1"
     ## The schema of `repro home history --json`.
-  HomePlanJsonSchema* = "reprobuild.home.plan.v1"
+  HomePlanJsonSchema* = "reprobuild.home.plan.v2"
     ## The schema of `repro home plan --json`.
 
 proc listedStateWord(state: OriginState): string =
@@ -1339,18 +1339,59 @@ proc runHomeHistory(json = false): int =
 # `repro home apply` (M63).
 # ---------------------------------------------------------------------------
 
-proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
-                      relock = false; targetPlatform = "";
-                      targetArch = ""; uninstallFromScoop = false): int =
-  ## M72 Deliverable 2: `repro home apply --plan` — a non-mutating
-  ## preview of the FULL apply (packages, stow, generated files,
-  ## managed blocks, launchers, resources). Runs the planning half of
-  ## the pipeline through `runApplyPlan`, which executes NO mutating
-  ## step (no realize, no stage, no rotate, no commit, no `scoop
-  ## install`). Exit 0 on a clean / no-op plan; non-zero when drift is
-  ## detected unless `--allow-drift` was passed, and non-zero whenever a
-  ## package of an applied concern has no realization: the apply fails on
-  ## it, and neither `--allow-drift` nor `--reconcile-drift` changes that.
+proc homePlanJson(preview: PlanPreview; profilePath: string;
+                  failsOnDrift, fails: bool): JsonNode =
+  ## `repro home plan --json`: the preview `repro home apply --plan` prints,
+  ## as one document (schema `reprobuild.home.plan.v2`). One `operations`
+  ## entry per previewed operation, in the text form's order of discovery;
+  ## a resource's entry also carries the resource planner's own decision.
+  var operations = newJArray()
+  for item in preview.items:
+    var op = %*{"category": item.category, "name": item.name,
+      "action": $item.action, "concern": $item.concern,
+      "notApplied": item.notApplied, "detail": item.detail}
+    if item.resourceAction.isSome:
+      let a = item.resourceAction.get
+      op["resource"] = %*{"address": a.address, "action": $a.kind,
+        "resourceKind": $a.resourceKind, "summary": a.summary,
+        "driftExpected": a.driftExpectedHex,
+        "driftObserved": a.driftObservedHex, "deferred": a.deferred,
+        "keptVendorUpdate": a.keptVendorUpdate}
+    else:
+      op["resource"] = newJNull()
+    operations.add(op)
+  %*{"schemaId": HomePlanJsonSchema, "profile": profilePath,
+    "host": preview.host, "targetGeneration": preview.generationIdHex,
+    "isNoOp": preview.isNoOp, "operations": operations,
+    "operationCount": preview.items.len, "driftCount": preview.driftCount,
+    "unrealizable": preview.unrealizable,
+    "concernsApplied": (if preview.applied.declared:
+      %describeAppliedConcerns(preview.applied, preview.host)
+      else: newJNull()),
+    "notAppliedCount": preview.notAppliedCount,
+    "releasedCount": preview.releasedCount,
+    # The exit code this plan gives, so a reader of the document alone
+    # knows whether it fails and why.
+    "failsOnDrift": failsOnDrift, "fails": fails}
+
+proc runHomePreview(command: string; allowDrift, reconcileDrift: bool;
+                    relock = false; targetPlatform = "";
+                    targetArch = ""; uninstallFromScoop = false;
+                    json = false): int =
+  ## M72 Deliverable 2: the non-mutating preview of the FULL apply
+  ## (packages, stow, generated files, managed blocks, launchers,
+  ## resources). `repro home plan` and `repro home apply --plan` are two
+  ## spellings of this one procedure, named by `command` in their output
+  ## (Core-Invariants.md §One Implementation Per Concern); until
+  ## 2026-11-18 `repro home plan` planned the `resources:` block alone and
+  ## printed `0 resource(s) planned` for a profile of packages.
+  ## Runs the planning half of the pipeline through `runApplyPlan`,
+  ## which executes NO mutating step (no realize, no stage, no rotate, no
+  ## commit, no `scoop install`). Exit 0 on a clean / no-op plan;
+  ## non-zero when drift is detected unless `--allow-drift` was passed,
+  ## and non-zero whenever a package of an applied concern has no
+  ## realization: the apply fails on it, and neither `--allow-drift` nor
+  ## `--reconcile-drift` changes that.
   try:
     var opts: ApplyOptions
     opts.reconcileStowDrift = reconcileDrift
@@ -1371,41 +1412,54 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
       opts.targetContext = ctx
       opts.hasTargetContext = true
     # M83 Phase F3: same hard-error compile path as the real apply.
+    # A missing `home.nim` is reported as such (`ENoProfile`), not as a
+    # failed compile of a file that is not there.
     let profilePath =
       if opts.profilePath.len > 0: opts.profilePath
-      else: resolveProfilePath()
+      else: loadProfilePath()
     let stateDir = resolveStateDir()
     let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
     if outcomeCompile.profile == nil:
       stderr.writeLine(formatCompileAdaptFailure(
-        "repro home apply --plan", profilePath, outcomeCompile))
+        command, profilePath, outcomeCompile))
       return 1
     opts.preLoadedProfile = outcomeCompile.profile
     let preview = runApplyPlan(opts)
-    stdout.write(renderPlanPreview(preview))
-    var failed = false
+    let failsOnDrift = preview.driftCount > 0 and not allowDrift and
+      not reconcileDrift
+    let fails = failsOnDrift or preview.unrealizable.len > 0
+    if json:
+      echo pretty(homePlanJson(preview, profilePath, failsOnDrift, fails))
+    else:
+      stdout.write(renderPlanPreview(preview, command))
     if preview.unrealizable.len > 0:
-      stderr.writeLine("repro home apply --plan: " &
+      stderr.writeLine(command & ": " &
         $preview.unrealizable.len & " package(s) of an applied concern " &
         "have no realization on this host, so the apply would fail: " &
         preview.unrealizable.join(", "))
-      failed = true
-    if preview.driftCount > 0 and not allowDrift and not reconcileDrift:
-      stderr.writeLine("repro home apply --plan: " & $preview.driftCount &
+    if failsOnDrift:
+      stderr.writeLine(command & ": " & $preview.driftCount &
         " drift item(s) detected. Pass --allow-drift to exit 0 anyway, " &
         "or --reconcile-drift to plan the reconciling apply.")
-      failed = true
-    return (if failed: 1 else: 0)
+    return (if fails: 1 else: 0)
+  except ENoProfile as err:
+    printNoProfile(err)
+    return 1
+  except EPreventDestroy as err:
+    # M68 Phase B: a `preventDestroy` resource scheduled for destroy is an
+    # error of the plan, not a silent `destroy` line.
+    stderr.writeLine(command & ": " & err.msg)
+    return 1
   except EApplyIntentLoad as err:
-    stderr.writeLine("repro home apply --plan: step 1 (load intent) " &
+    stderr.writeLine(command & ": step 1 (load intent) " &
       "failed: " & err.msg)
     return 1
   except EHomeApply as err:
-    stderr.writeLine("repro home apply --plan: planning failed at step " &
+    stderr.writeLine(command & ": planning failed at step " &
       $err.step & " (" & err.stepName & "): " & err.msg)
     return 1
   except CatchableError as err:
-    stderr.writeLine("repro home apply --plan: planning failed with " &
+    stderr.writeLine(command & ": planning failed with " &
       "unexpected error: " & err.msg)
     return 1
 
@@ -1436,8 +1490,9 @@ proc runHomeApply(c: ReproCommandLineHomeApply): int =
                             hostFlag, hostGiven, identity):
     return 2
   if planMode:
-    return runHomeApplyPlan(allowDrift, reconcileDrift, relock,
-      targetPlatform, targetArch, uninstallFromScoop)
+    return runHomePreview("repro home apply --plan", allowDrift,
+      reconcileDrift, relock, targetPlatform, targetArch,
+      uninstallFromScoop)
   # A real apply with --reconcile-drift threads the policy through the
   # apply pipeline so a drifted stow target can be replaced.
   if reconcileDrift:
@@ -2879,130 +2934,18 @@ proc runHomeGet(c: ReproCommandLineHomeGet): int =
 # ---------------------------------------------------------------------------
 
 proc runHomePlan(c: ReproCommandLineHomePlan): int =
-  ## `repro home plan [--allow-drift]` — non-mutating preview of
-  ## what the next apply would do. Walks the same DesiredSet the
-  ## apply pipeline composes: M78 makes that the profile's
-  ## `resources:` block (the production source) with
-  ## `REPRO_TEST_RESOURCES` merged over it as a test-only override.
-  ## Observes the live state and prints one line per resource. Exits
-  ## non-zero when drift is detected unless `--allow-drift` was passed.
-  let allowDrift = c.allowDrift
-  let reconcileFlag = c.reconcileDrift
+  ## `repro home plan` — what the next `repro home apply` would do, without
+  ## doing it: the same preview as `repro home apply --plan` (packages,
+  ## stow links, generated files, managed blocks, launchers and resources),
+  ## through the one procedure (`runHomePreview`). `--json` prints it as
+  ## one `reprobuild.home.plan.v2` document.
   let hostFlag = c.host.get("")
   let hostGiven = c.host.isSome
   var identity: HostIdentity
   if not resolveCommandHost("plan", hostFlag, hostGiven, identity):
     return 2
-  try:
-    let homeDir = getHomeDir()
-    # M78: the desired set is the profile's `resources:` block, with
-    # `REPRO_TEST_RESOURCES` merged over it as a test-only override.
-    let profilePath = loadProfilePath()
-    let stateDir = resolveStateDir()
-    # M83 Phase F3: the compile-then-adapt path is the ONLY path. A
-    # profile compilation failure is a HARD ERROR — the legacy text
-    # parser is no longer consulted as an apply-path fallback.
-    let outcomeCompile = compileAndAdaptHomeProfile(profilePath, stateDir)
-    if outcomeCompile.profile == nil:
-      stderr.writeLine(formatCompileAdaptFailure(
-        "repro home plan", profilePath, outcomeCompile))
-      return 1
-    let prof = outcomeCompile.profile
-    # The host must be one the profile declares (or the profile declares
-    # none), as for every other `repro home` command that plans: the one
-    # selection rule raises `EUndeclaredHost` otherwise.
-    discard enabledActivitiesFor(prof, identity.name)
-    # GM7: only the resources of the concerns this host applies are planned;
-    # the rest are listed as not applied, and a recorded binding of a concern
-    # no longer applied is released, never destroyed
-    # (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
-    let host = identity.name
-    let applied = appliedConcernsFor(prof, host)
-    var desired = initDesiredSet()
-    var notApplied: seq[string]
-    for address, res in composeDesiredResources(prof, homeDir,
-        host).resources:
-      if concernOfResourceKind(res.kind) in applied.concerns:
-        desired.resources[address] = res
-      else:
-        notApplied.add($concernOfResourceKind(res.kind) & "  " & address)
-    var released: seq[string]
-    # Load recorded bindings from the active generation's manifest.
-    var recorded = initOrderedTable[string, RecordedBinding]()
-    let activeId = readCurrentGenerationId(stateDir)
-    if activeId.len > 0:
-      let pointerFile = pointerPath(stateDir, activeId)
-      if fileExists(extendedPath(pointerFile)):
-        try:
-          let env = readPointerFile(pointerFile)
-          var manifestKey: PrefixIdBytes
-          for i in 0 ..< 32:
-            manifestKey[i] = env.activationManifestDigest[i]
-          var store = openStore(resolveStoreRoot())
-          defer:
-            try: store.close() except CatchableError: discard
-          let manifestBytes = readCasBlob(store, manifestKey)
-          let manifest = decodeManifestBytes(manifestBytes)
-          let apps = applicationPackagesOf(manifest)
-          for rb in manifest.resourceBindings:
-            if rb.resourceKind.len == 0: continue
-            let concern = concernOfBinding(rb, apps)
-            if concern notin applied.concerns:
-              if not isZeroDigest(rb.postWriteDigest):
-                released.add($concern & "  " & rb.resourceAddress)
-              continue
-            recorded[rb.resourceAddress] = toRecorded(rb)
-        except CatchableError:
-          discard
-    let policy =
-      if reconcileFlag: rpReconcileDrift
-      else: rpFailClosed
-    # M68 Phase B: `preventDestroy` enforcement is active in the
-    # planner too — `repro home plan` previews exactly what apply
-    # would do, so a `preventDestroy` resource scheduled for
-    # destroy surfaces here as `EPreventDestroy` rather than as a
-    # silent `destroy` line.
-    let opts = DecisionOptions(reconcile: policy,
-      enforcePreventDestroy: true)
-    let report = composePlan(desired, recorded, opts)
-    let failsOnDrift = report.driftCount > 0 and not allowDrift and
-      not reconcileFlag
-    if c.json:
-      var actions = newJArray()
-      for a in report.actions:
-        actions.add(%*{"address": a.address, "action": $a.kind,
-          "resourceKind": $a.resourceKind, "summary": a.summary,
-          "driftExpected": a.driftExpectedHex,
-          "driftObserved": a.driftObservedHex, "deferred": a.deferred,
-          "keptVendorUpdate": a.keptVendorUpdate})
-      echo pretty(%*{"schemaId": HomePlanJsonSchema, "profile": profilePath,
-        "host": host, "actions": actions,
-        "changedCount": report.changedCount, "noOpCount": report.noOpCount,
-        "driftCount": report.driftCount,
-        "concernsApplied": (if applied.declared:
-          %describeAppliedConcerns(applied, host) else: newJNull()),
-        "notApplied": notApplied, "released": released,
-        # The exit code this plan gives, so a reader of the document alone
-        # knows whether the drift fails it.
-        "failsOnDrift": failsOnDrift})
-      return (if failsOnDrift: 1 else: 0)
-    stdout.write(renderPlan(report))
-    if applied.declared:
-      echo "  concerns applied: " & describeAppliedConcerns(applied, host)
-    for line in notApplied:
-      echo "  not applied (concern not in hosts." & host & ".applies): " &
-        line
-    for line in released:
-      echo "  release (concern no longer applied; left in place): " & line
-    if failsOnDrift:
-      return 1
-    return 0
-  except EPreventDestroy as err:
-    stderr.writeLine("repro home plan: " & err.msg)
-    return 1
-  except CatchableError as err:
-    stderr.writeLine("repro home plan: error: " & err.msg)
-    return 1
+  runHomePreview("repro home plan", c.allowDrift, c.reconcileDrift,
+    json = c.json)
 
 # ---------------------------------------------------------------------------
 # `repro home adopt <resource>` (M68; Phase A skeleton).
@@ -3526,7 +3469,7 @@ proc runHomeExport(c: ReproCommandLineHomeExport): int =
 
 # ---------------------------------------------------------------------------
 # `repro home facts` / `repro home compare` (GM6: host facts and the
-# equivalence report; docs/user-guide/host-facts.md).
+# equivalence report; docs/users/content/guides/machines/compare-with-home-manager.md).
 # ---------------------------------------------------------------------------
 
 proc runHomeFacts(c: ReproCommandLineHomeFacts): int =

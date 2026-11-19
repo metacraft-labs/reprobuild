@@ -310,7 +310,7 @@ suite "repro system plan|apply and universal --json":
            "reprobuild.system.history.v1", 0),
           (@["system", "audit", "--state-dir", f.stateDir],
            "reprobuild.system.audit.v1", 0),
-          (@["home", "plan"], "reprobuild.home.plan.v1", 0),
+          (@["home", "plan"], "reprobuild.home.plan.v2", 0),
           (@["home", "list"], "reprobuild.home.list.v1", 0),
           (@["home", "history"], "reprobuild.home.history.v1", 0),
           (@["capabilities"], "reprobuild.capabilities.v1", 0)]:
@@ -364,8 +364,10 @@ suite "repro system plan|apply and universal --json":
       check driftDoc{"driftCount"}.getInt() == 1
       check driftDoc{"failsOnDrift"}.getBool()
       var driftActions: seq[string]
-      for a in driftDoc{"actions"}.getElems():
-        if a{"action"}.getStr() == "drift_blocked":
+      for op in driftDoc{"operations"}.getElems():
+        let a = op{"resource"}
+        if a.kind == JObject and a{"action"}.getStr() == "drift_blocked":
+          check op{"action"}.getStr() == "conflict-drift"
           driftActions.add a{"address"}.getStr()
       check driftActions == @["sysjsonRc"]
       let allowed = f.run(["home", "plan", "--json", "--allow-drift"])

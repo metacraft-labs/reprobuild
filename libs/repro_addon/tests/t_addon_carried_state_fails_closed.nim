@@ -313,7 +313,7 @@ suite "carried state fails closed":
     let rooted = under(root, CarriedStateDir)
     createDir(rooted.parentDir)
     copyDir(carriedDir(), rooted)
-    check runStateCli(@["install-unit", "--root", root]) == 0
+    check runStateCommand(StateCommand(verb: "install-unit", root: root)) == 0
     let units = installRestoreUnit(rooted, "/usr/bin/repro", root)
     check units == @["eth-validator.service"]
     let d = root / "etc/systemd/system"
@@ -356,8 +356,8 @@ suite "carried state fails closed":
       startsWith("ECarriedStatePending")
 
   test "install-unit refuses a carried directory other than the default":
-    check runStateCli(@["install-unit", "--from", "/srv/elsewhere",
-                        "--root", fresh("root-from")]) == 2
+    check runStateCommand(StateCommand(verb: "install-unit",
+      fromDir: "/srv/elsewhere", root: fresh("root-from"))) == 2
 
   test "under a hold a floored unit is refused for the carried state first":
     # A floored unit (one named exception, not a waiver: the rest of the

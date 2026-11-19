@@ -33,6 +33,17 @@
 ## records for one repo, or for one remote, refuse. The reader accepts only
 ## the bytes the writer produces.
 ##
+## ## Kinds
+##
+## An import has a ``kind`` (Federated-Catalog-Imports.md § Catalog kinds):
+## ``provisioning`` (the default) or ``nimble-index``. A ``provisioning``
+## pin is written exactly as before, as a ``v1`` record without the field,
+## so every existing lock keeps its bytes. Any other kind is written as a
+## ``v2`` record, which carries ``kind`` after ``remote``; for it
+## ``interface_artifact`` holds that kind's identity (for ``nimble-index``,
+## the hash of the index root). A ``v2`` record naming ``provisioning`` is
+## not the writer's bytes and is refused, as is an unknown kind.
+##
 ## ## No seal
 ##
 ## Unlike a provisioning record, an import pin carries no fingerprint that
@@ -48,13 +59,25 @@ import ./toml_subset # tomlEscape
 
 const
   LockedCatalogImportRecordV1* = "reprobuild.locked-catalog-import.v1"
-    ## The per-record version tag. The reader refuses any other value.
+    ## The per-record version tag of a ``provisioning`` pin.
+
+  LockedCatalogImportRecordV2* = "reprobuild.locked-catalog-import.v2"
+    ## The per-record version tag of a pin of any other kind; it carries
+    ## ``kind``. The reader refuses any tag but these two.
 
   CatalogImportsLockKey* = "catalog_imports"
     ## The key of the record array inside the committed lock's ``[lock]``
     ## table.
 
 type
+  CatalogImportKind* = enum
+    ## What an imported catalog publishes, and what its identity means
+    ## (Federated-Catalog-Imports.md § Catalog kinds).
+    cikProvisioning = "provisioning"
+      ## ``published-interfaces/``; identity ``catalogArtifactIdentity``
+    cikNimbleIndex = "nimble-index"
+      ## ``published-index/``; identity the BLAKE3 hash of the index root
+
   LockedCatalogImport* = object
     ## One pinned catalog import. Every field is required except ``gitRef``,
     ## which is empty when the declaration named a commit.
@@ -63,12 +86,30 @@ type
     gitRef*: string            ## advisory: the declared moving reference.
     revision*: string          ## full-width: 40 or 64 lower-case hex.
     interfaceArtifact*: string ## 64 lower-case hex.
+    kind*: CatalogImportKind   ## ``cikProvisioning`` unless declared.
 
   LockedCatalogImportError* = object of CatchableError
     ## A catalog import pin refused on write or on read.
 
-const ImportFieldOrder = ["record", "repo", "remote", "ref", "revision",
-  "interface_artifact"]
+const
+  ImportFieldOrder = ["record", "repo", "remote", "ref", "revision",
+    "interface_artifact"]
+  ImportFieldOrderV2 = ["record", "repo", "remote", "kind", "ref", "revision",
+    "interface_artifact"]
+
+proc parseCatalogImportKind*(value: string; kind: var CatalogImportKind): bool =
+  ## ``value`` as a kind; false for any spelling that is not exactly one.
+  for k in CatalogImportKind:
+    if $k == value:
+      kind = k
+      return true
+  false
+
+proc catalogImportKindNames*(): string =
+  ## The known kinds, for a refusal: `provisioning`, `nimble-index`.
+  for k in CatalogImportKind:
+    if result.len > 0: result.add(", ")
+    result.add("`" & $k & "`")
 
 proc isLowerHex(value: string; width: int): bool =
   if value.len != width:
@@ -166,11 +207,21 @@ proc catalogImportDefects*(r: LockedCatalogImport): seq[string] =
       "identity: \"" & r.interfaceArtifact & "\"")
 
 proc canonicalCatalogImportEntry*(r: LockedCatalogImport): string =
-  ## One record as its canonical inline table, fields in one fixed order.
-  let values = [LockedCatalogImportRecordV1, r.repo, r.remote, r.gitRef,
-    r.revision, r.interfaceArtifact]
+  ## One record as its canonical inline table, fields in one fixed order:
+  ## a ``v1`` record for a ``provisioning`` pin, a ``v2`` record (with
+  ## ``kind``) for any other.
+  var names: seq[string]
+  var values: seq[string]
+  if r.kind == cikProvisioning:
+    names = @ImportFieldOrder
+    values = @[LockedCatalogImportRecordV1, r.repo, r.remote, r.gitRef,
+      r.revision, r.interfaceArtifact]
+  else:
+    names = @ImportFieldOrderV2
+    values = @[LockedCatalogImportRecordV2, r.repo, r.remote, $r.kind,
+      r.gitRef, r.revision, r.interfaceArtifact]
   result = "{ "
-  for i, name in ImportFieldOrder:
+  for i, name in names:
     if i > 0: result.add(", ")
     result.add(name & " = \"" & tomlEscape(values[i]) & "\"")
   result.add(" }")
@@ -211,7 +262,8 @@ proc parseError(message: string) {.noreturn.} =
 
 proc parseCatalogImports*(rhs: string): seq[LockedCatalogImport] =
   ## Parse the right-hand side of the ``catalog_imports`` key. Strict: every
-  ## entry carries exactly the v1 fields, each once and well formed, and the
+  ## entry carries exactly the fields of its record version (``v1``, or
+  ## ``v2`` with ``kind``), each once and well formed, and the
   ## array is the canonical bytes the writer produces. Anything else --
   ## including an empty or truncated array -- raises
   ## ``LockedCatalogImportError``.
@@ -299,24 +351,49 @@ proc parseCatalogImports*(rhs: string): seq[LockedCatalogImport] =
 
   for n, pairs in entries:
     let where = "catalog_imports entry " & $n & ": "
-    var values: array[ImportFieldOrder.len, string]
-    var seen: array[ImportFieldOrder.len, bool]
+    var record = ""
+    var hasRecord = false
     for (key, value) in pairs:
-      let index = ImportFieldOrder.find(key)
+      if key == "record":
+        record = value
+        hasRecord = true
+        break
+    if not hasRecord:
+      parseError(where & "missing field record")
+    let order =
+      if record == LockedCatalogImportRecordV1: @ImportFieldOrder
+      elif record == LockedCatalogImportRecordV2: @ImportFieldOrderV2
+      else:
+        parseError(where & "unsupported record version \"" & record &
+          "\" (this reader accepts " & LockedCatalogImportRecordV1 & " and " &
+          LockedCatalogImportRecordV2 & ")")
+        @[]
+    var values = newSeq[string](order.len)
+    var seen = newSeq[bool](order.len)
+    for (key, value) in pairs:
+      let index = order.find(key)
       if index < 0:
         parseError(where & "unknown field " & key)
       if seen[index]:
         parseError(where & "duplicate field " & key)
       seen[index] = true
       values[index] = value
-    for index, name in ImportFieldOrder:
+    for index, name in order:
       if not seen[index]:
         parseError(where & "missing field " & name)
-    if values[0] != LockedCatalogImportRecordV1:
-      parseError(where & "unsupported record version \"" & values[0] &
-        "\" (this reader accepts " & LockedCatalogImportRecordV1 & ")")
-    let r = LockedCatalogImport(repo: values[1], remote: values[2],
-      gitRef: values[3], revision: values[4], interfaceArtifact: values[5])
+    var r: LockedCatalogImport
+    if record == LockedCatalogImportRecordV1:
+      r = LockedCatalogImport(repo: values[1], remote: values[2],
+        gitRef: values[3], revision: values[4], interfaceArtifact: values[5],
+        kind: cikProvisioning)
+    else:
+      var kind: CatalogImportKind
+      if not parseCatalogImportKind(values[3], kind):
+        parseError(where & "unknown kind \"" & values[3] & "\" (known: " &
+          catalogImportKindNames() & ")")
+      r = LockedCatalogImport(repo: values[1], remote: values[2],
+        kind: kind, gitRef: values[4], revision: values[5],
+        interfaceArtifact: values[6])
     let defects = catalogImportDefects(r)
     if defects.len > 0:
       parseError(where & defects.join("; "))

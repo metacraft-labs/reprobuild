@@ -7,18 +7,16 @@
 ## statically -- it loads its solver library at start-up and links TLS --
 ## and an add-on host must keep working when a release upgrade replaces the
 ## distribution's libc underneath it. It carries the add-on's verbs and the
-## system-scope apply path they run on, and nothing else:
-##
-##   repro system addon <command> …     (see repro_addon/cli)
-##   repro system adopt <address> --profile <file>
-##   repro system rollback [<generation>] [--reconcile-drift]
-##   repro infra plan --profile <file>  (the add-on's plan sections)
-##   repro infra apply --profile <file> (an add-on generation)
-##   repro store gc | roots | list      (the system-scope store)
-##   repro --version
+## system-scope apply path they run on, and nothing else: `repro system
+## addon …`, `repro system state …` (which the first-boot restore unit it
+## writes runs), `repro system adopt|rollback`, `repro infra plan|apply` (an
+## add-on generation), `repro store gc|recover|roots|list` (the system-scope
+## store) and `repro --version`. Its command line is declared in
+## ``repro_infra/addon_command_line`` and parsed by the parser generated
+## from it (``repro_addon/cli``); `repro --help` prints it.
 ##
 ## Invoked under the name ``repro-addon-fingerprint`` it is the base
-## fingerprint tool.
+## fingerprint tool, whose command line is declared there too.
 ##
 ## Build it with ``scripts/build_addon_static.sh``, which also writes its
 ## published SHA-256.
@@ -31,28 +29,8 @@ import repro_addon/cli
 proc main(): int =
   let args = commandLineParams()
   if extractFilename(getAppFilename()) == "repro-addon-fingerprint":
-    return runFingerprintCli(args)
-  if args.len >= 1 and args[0] in ["--version", "version"]:
-    echo "repro " & ReprobuildVersion & " (add-on, static)"
-    return 0
-  if args.len >= 2 and args[0] == "system" and args[1] == "addon":
-    return runAddonCli(args[2 .. ^1])
-  if args.len >= 2 and args[0] == "system" and args[1] == "rollback":
-    return runAddonRollbackCli(args[2 .. ^1])
-  if args.len >= 2 and args[0] == "system" and args[1] == "adopt":
-    return runAddonAdoptCli(args[2 .. ^1])
-  if args.len >= 2 and args[0] == "infra" and args[1] == "apply":
-    return runAddonInfraApplyCli(args[2 .. ^1])
-  if args.len >= 2 and args[0] == "infra" and args[1] == "plan":
-    return runAddonInfraPlanCli(args[2 .. ^1])
-  if args.len >= 1 and args[0] == "store":
-    return runAddonStoreCli(args[1 .. ^1])
-  stderr.write("usage: repro system addon <command> … | " &
-               "repro system adopt <address> --profile <file> | " &
-               "repro system rollback [<generation>] | " &
-               "repro infra plan|apply --profile <file> | " &
-               "repro store gc|recover|roots|list | repro --version\n\n")
-  stderr.write(AddonUsage)
-  2
+    return runFingerprintToolArgs(args)
+  runAddonArgs(args, version = "repro " & ReprobuildVersion &
+    " (add-on, static)")
 
 quit(main())

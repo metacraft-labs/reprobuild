@@ -84,7 +84,7 @@ proc checkPlans(run: PlanRun; payload: string) =
   checkpoint("repro home plan output:\n" & run.output)
   check run.exitCode == 0
   check run.createLines.len == 1
-  check run.output.contains("1 resource(s) planned")
+  check run.output.startsWith("repro home plan: ")
   if run.createLines.len == 1:
     check run.createLines[0].contains(
       "fs.userFile:~/payload-" & payload & ".txt")

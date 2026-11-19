@@ -95,13 +95,11 @@ suite "sync and hooks help":
     var topics: seq[seq[string]] = @[]
     for word in ShownCommands:
       topics.add(@[word])
-    # A deeper word of a command whose words its own parser reads, and which
-    # has no usage synopsis. (`allow`, `gateway` and then `ci`, the examples
-    # until they moved onto the description, now have generated help of
-    # their own, and a word after them in `repro help`'s topic is an unknown
-    # command, as for every command parsed from the description. `system
-    # addon` hands its words to the add-on's own command line.)
-    topics.add(@["system", "addon", "somewhere"])
+    # (A deeper word of a command whose words another parser read, `repro
+    # help system addon somewhere`, was the last such topic; the add-on's
+    # command line is mounted in repro's description now, so a word below it
+    # that names no verb is an unknown command, as everywhere: checked
+    # below with `allow`'s.)
     for topic in topics:
       let res = runShell(shellCommand(@[repro, "help"] & topic, env),
         cwd = empty, timeoutMs = 60_000)
@@ -114,6 +112,13 @@ suite "sync and hooks help":
       # its directory.
       check "Allowed repro dev-env" notin res.output
       check "was not trusted" notin res.output
+    let mounted = runShell(shellCommand(@[repro, "help", "system", "addon",
+      "somewhere"], env), cwd = empty, timeoutMs = 60_000)
+    checkpoint("repro help system addon somewhere -> exit " & $mounted.code &
+      "\n" & mounted.output)
+    check mounted.code == 2
+    check "error: unknown subcommand 'somewhere' for 'repro system addon'" in
+      mounted.output
     let deeper = runShell(shellCommand(@[repro, "help", "allow", "somewhere"],
       env), cwd = empty, timeoutMs = 60_000)
     checkpoint("repro help allow somewhere -> exit " & $deeper.code & "\n" &

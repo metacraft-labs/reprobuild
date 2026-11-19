@@ -141,6 +141,12 @@ type
     skippedRecords*: seq[SkippedRecord]
       ## Records that touch the selection but were not exported as
       ## re-witnessable, with the reason (normally a stale output).
+    projectDirs*: seq[string]
+      ## Every directory of the selection that holds a project file
+      ## (`repro.nim` or `reprobuild.nim`), in the order they were found:
+      ## the projects whose records the bundle may carry. Not part of the
+      ## bundle's contents or its id; computed for the commands that report
+      ## on the projects they carry.
 
   BundlePart* = object
     ## One part of a half, as its manifest lists it (`{file, bytes, sha256}`,
@@ -718,6 +724,9 @@ proc computeClosure*(roots: BundleRoots;
 
   var projectDirs: seq[string]
   findProjectDirs(ws, sel, [storeRoot, acRoot], projectDirs)
+  for dir in projectDirs:
+    if fileExists(dir / "repro.nim") or fileExists(dir / "reprobuild.nim"):
+      result.projectDirs.add(dir)
 
   # 1. Action-cache edges (and 2. their outputs).
   # `acRoot` is the shared cache root `resolveActionCacheRoot` returns: the

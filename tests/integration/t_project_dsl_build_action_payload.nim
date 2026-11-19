@@ -451,6 +451,12 @@ suite "project DSL build action payload":
         check decoded.envPassthrough == action.envPassthrough
       else:
         check decoded.envPassthrough.len == 0
+      # v37: the canonical work key; empty here so the tail stays at its
+      # minimum (below), and empty is also what an older payload decodes to.
+      check decoded.canonicalWorkKey == ""
+      # v38's relocatable byte: the marked action is not relocatable, so
+      # every version decodes it as false.
+      check not decoded.relocatable
     let currentImage = encodeBuildActionPayload(action)
     let current = decodeBuildActionPayload(currentImage)
     check current.scratchDirs == action.scratchDirs
@@ -482,15 +488,36 @@ suite "project DSL build action payload":
     check image35[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
     check image35[^28 .. ^17] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    # The current payload ends with the passthrough names (v36), a third
-    # list of three empty strings right after that one, so the current
-    # version also meets the bound with equality. A version that appends
+    # Version 36 ends with the passthrough names, a third list of three
+    # empty strings right after that one.
+    let image36 = encodeBuildActionPayloadAtVersion(action, 36'u16)
+    check image36[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    check image36[^32 .. ^17] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    # Version 37 ends with the canonical work key: an empty string, exactly
+    # its four-byte minimum, right after that list.
+    let image37 = encodeBuildActionPayloadAtVersion(action, 37'u16)
+    check image37[^4 .. ^1] == @[0'u8, 0, 0, 0]
+    check image37[^20 .. ^5] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    # The current payload ends with the relocatable byte (v38), 0 for this
+    # action, right after the canonical work key. A version that appends
     # another field fails here rather than quietly testing nothing at the
     # boundary.
-    check currentImage[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+    check currentImage[^1] == 0'u8
+    check currentImage[^5 .. ^2] == @[0'u8, 0, 0, 0]
+    check currentImage[^21 .. ^6] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
-    check currentImage[^32 .. ^17] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 0, 0, 0, 0, 0, 0]
+    var relocated = action
+    relocated.relocatable = true
+    let relocatedImage = encodeBuildActionPayload(relocated)
+    check relocatedImage[^1] == 1'u8
+    check decodeBuildActionPayload(relocatedImage).relocatable
+    var corrupt = relocatedImage
+    corrupt[^1] = 2'u8
+    expect BuildActionPayloadError:
+      discard decodeBuildActionPayload(corrupt)
 
   test "version 4 payloads decode with default CLI argument formatting":
     let decoded = decodeBuildActionPayload(encodeBuildActionPayloadAtVersion(

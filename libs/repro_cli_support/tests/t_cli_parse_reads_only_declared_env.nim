@@ -129,9 +129,10 @@ suite "repro command-line parse: environment reads":
       let output = run.stdout & run.stderr
       checkpoint(helperImage & ": monitored helper exit " & $run.code &
         ":\n" & output)
-      # The helper refuses its empty argv AFTER the parse.
+      # The parse refuses the helper's empty argv (its flags are required),
+      # so what the depfile records is the parse's own reads.
       check run.code == 2
-      check "missing --profile" in output
+      check "missing required parameter" in output
       require fileExists(depfile)
 
       let reads = envReads(readMonitorDepFile(depfile))

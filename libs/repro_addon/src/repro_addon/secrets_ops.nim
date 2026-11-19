@@ -507,40 +507,12 @@ proc reexecInNoSwapScope*(): int =
 # The CLI.
 # ---------------------------------------------------------------------------
 
-proc takeArg(args: seq[string]; i: var int; flag: string): string =
-  let a = args[i]
-  if a.startsWith(flag & "="):
-    return a[flag.len + 1 .. ^1]
-  if i + 1 >= args.len:
-    raise newException(ValueError, flag & " needs a value")
-  inc i
-  args[i]
-
-proc runSecretPutCli*(args: seq[string]): int =
+proc runSecretPutCommand*(service, name, target: string): int =
   ## ``repro system addon secret put --service S --name N [--target T]``;
   ## the secret is read from stdin, byte for byte.
-  if args.len == 0 or args[0] != "put":
-    stderr.write("usage: repro system addon secret put --service S " &
-      "--name N [--target T] < secret\n")
-    return 2
-  var service, name, target = ""
-  var i = 1
-  try:
-    while i < args.len:
-      let a = args[i]
-      if a == "--service" or a.startsWith("--service="):
-        service = takeArg(args, i, "--service")
-      elif a == "--name" or a.startsWith("--name="):
-        name = takeArg(args, i, "--name")
-      elif a == "--target" or a.startsWith("--target="):
-        target = takeArg(args, i, "--target")
-      else:
-        raise newException(ValueError, "unknown option " & a)
-      inc i
-    if service.len == 0 or name.len == 0:
-      raise newException(ValueError, "--service and --name are required")
-  except ValueError as e:
-    stderr.write("repro system addon secret put: " & e.msg & "\n")
+  if service.len == 0 or name.len == 0:
+    stderr.write("repro system addon secret put: --service and --name are " &
+      "required\n")
     return 2
   let layout = defaultSecretsLayout()
   try:
@@ -557,10 +529,8 @@ proc runSecretPutCli*(args: seq[string]): int =
     stderr.write("repro system addon secret put: " & e.msg & "\n")
     1
 
-proc runRotateRecipientKeyCli*(args: seq[string]): int =
-  if args.len != 0:
-    stderr.write("usage: repro system addon rotate-recipient-key\n")
-    return 2
+proc runRotateRecipientKeyCommand*(): int =
+  ## ``repro system addon rotate-recipient-key``.
   try:
     let r = rotateKey(DefaultStateDir, defaultSecretsLayout())
     stdout.write("next recipient public key: " & r.publicKeyHex & "\n")

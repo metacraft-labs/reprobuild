@@ -1,5 +1,12 @@
 # Exporting a home profile — `repro home export`
 
+> **Superseded.** This page is no longer maintained. The published pages are
+> [Home profile export](../users/content/reference/files/home-export.md) (every field of the
+> document, which must change in the same commit as `home_export.nim`) and
+> [Export a home profile for Nix](../users/content/guides/machines/export-a-home-profile.md).
+> The `hosts:` entry forms below (`applies:`, `system:`) are in the
+> [DSL reference](../users/content/reference/dsl.md#hosts). Edit those, not this page.
+
 `repro home export` prints what your `home.nim` evaluates to for one host, as
 a versioned JSON document. Other tools read that document instead of
 re-implementing Reprobuild's rules: a Nix module can take your package list

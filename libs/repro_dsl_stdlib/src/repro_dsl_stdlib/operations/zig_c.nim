@@ -109,6 +109,7 @@ proc zigCompile*(opts: CompileOptions; ct: CrossTarget): BuildActionDef =
     sources = @[opts.source],
     output = targetKeyedPath(opts.target),
     compileOnly = true,
+    pic = opts.pic,
     includeDirs = includeDirs,
     defines = defs,
     standard = opts.standard,
@@ -149,7 +150,8 @@ proc zigLink*(opts: LinkOptions; ct: CrossTarget): BuildActionDef =
     libs = libs,
     libDirs = libDirs,
     extra = opts.extra,
-    after = opts.objects)
+    # After every library ``-l`` names, not only the objects.
+    after = opts.objects & linkPrerequisites(opts.deps))
 
 proc nimCpuOf*(triple: string): string =
   ## Nim's `--cpu:` spelling of a triple's CPU

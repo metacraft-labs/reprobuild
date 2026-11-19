@@ -2000,6 +2000,30 @@ type
       ## it on every edge; an edge adds its own names through
       ## ``appendRegisteredActionEnvPassthrough``. Payload codec v36+; an
       ## older payload decodes with the list empty.
+    canonicalWorkKey*: string
+      ## The key of the action's CANONICAL WORK TREE (reprobuild-pm
+      ## ``spec/Hermetic-Builds-And-Path-Independence.md`` §"Canonical work
+      ## trees"). Non-empty: for each run the engine places a work tree at
+      ## ``<root>/<key>/work`` -- ``C:\repro-exec`` or ``/var/tmp/repro-exec``,
+      ## or the per-user cache directory when that root may not be used --
+      ## empties it, holds the key's lock while the action runs, and hands the
+      ## path to the action as ``REPRO_CANONICAL_WORK_DIR``. The path names
+      ## neither the checkout nor the user, so a tool that embeds or hashes
+      ## the paths it is given produces the same bytes in every checkout.
+      ## Nothing under the tree is evidence; the key enters the weak
+      ## fingerprint, the resolved path does not. Derive it with
+      ## ``canonicalWorkKeyFor``. Payload codec v37+; an older payload decodes
+      ## with it empty.
+    relocatable*: bool
+      ## The action computes the same thing wherever its working directory
+      ## is, given the same content at the same cwd-relative places. Lowered
+      ## onto the engine's ``BuildAction.relocatable``: its key names the
+      ## argv and its observed inputs relative to the cwd (except under the
+      ## relocation anchors the lowering derives) and keys the cwd's depth
+      ## rather than its path (Caching-Architecture.md §"BuildXL-Inspired
+      ## Fingerprinting", riders of 2026-11-16/17). Set by the CMake
+      ## try_compile direct provider. Payload codec v38+; an older payload
+      ## decodes as not relocatable.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]

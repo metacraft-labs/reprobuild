@@ -385,7 +385,18 @@
       # every monitored process decoding it again. The range also builds the
       # debug shim at the stated -O level and injects native ARM64 children on
       # Windows on Arm.
-      url = "github:metacraft-labs/io-mon/735726963f48d91031463cbd9d1e9cf8f444f5ee";
+      # Bumped 73572696 -> efe6dc5b (2026-11-19, io-mon `agents`): io-mon's
+      # command line is a clispec description (`io_mon/cli_description`,
+      # parsed by `io_mon/cli`), which repro mounts under `repro debug io
+      # monitor` and `repro internal io monitor`; this revision is the first
+      # that has it, so the engine does not build against an older pin. The
+      # range also keys the macOS EndpointSecurity subtree view on the audit
+      # token and fences the capture (ae0bf6f).
+      # Bumped efe6dc5b -> 8b8faa81 (2026-11-19, io-mon `agents`): the
+      # mountable description uses nim-cli-spec's `cliUnbound` instead of a
+      # copy of its own, so it needs nim-cli-spec fcd5b30 (`clispec/splice`),
+      # the revision this flake pins.
+      url = "github:metacraft-labs/io-mon/8b8faa81bb0cad5d2d91fae80ceaaa7092782ec2";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -939,8 +950,23 @@
     # (bb0e8943..93793d47): `std/osproc` closes the child's pipes and reaps
     # it when a start fails, frees the clone child's stack by its base
     # pointer, and retries the error-pipe read and `waitpid` on EINTR.
+    #
+    # Advanced from c47c55d1 to 4a8c0b82: `staticExec` and `gorgeEx` start a
+    # command made of plain and quoted words, or `cd <absolute dir> &&
+    # [exec] <plain command>`, without `/bin/sh -c`, so a recipe compile
+    # whose macros run a command at compile time no longer reads the host's
+    # shell either. A program that cannot be started now reports the shell's
+    # exit code (127 or 126) for the compiler's own commands too. One
+    # commit, in compiler/gorgeimpl.nim and compiler/shellfreeexec.nim plus
+    # their tests.
+    #
+    # Advanced from 4a8c0b82 to fde9384c, which carries it: `std/net` `send`
+    # returns after a swallowed disconnect (no spin on a reset peer) and
+    # resumes a short write at the written offset (upstream bb85d2dda5,
+    # e2b2142a49; reprobuild-pm issue
+    # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c47c55d166224bcffe485045378c766a0f5e67a2";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
       flake = false;
     };
     nim-csources-src = {
@@ -1079,7 +1105,7 @@
       ...
     }:
     let
-      # The Nix helper library (milestone GM5; docs/user-guide/nix-helper-library.md),
+      # The Nix helper library (milestone GM5; docs/users/content/reference/nix-library.md),
       # exported as `lib` and tested by the `lib-*` checks below.
       # System-independent: the IFD derivation of `readIntent` is built for
       # whichever system the CALLER names as the evaluator (`buildSystem`),

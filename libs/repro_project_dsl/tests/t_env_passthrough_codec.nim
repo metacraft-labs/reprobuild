@@ -67,7 +67,8 @@ suite "action environment passthrough":
     check decoded.envPassthrough == @["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
     # A name both declared and passthrough keeps both halves.
     check decoded.env == @[("TMPDIR", "/declared")]
-    check buildActionPayloadVersion(encodeBuildActionPayload(action)) == 36'u16
+    check buildActionPayloadVersion(encodeBuildActionPayload(action)) ==
+      BuildActionPayloadVersion
     let v35 = decodeBuildActionPayload(
       encodeBuildActionPayloadAtVersion(action, 35'u16))
     check v35.envPassthrough.len == 0

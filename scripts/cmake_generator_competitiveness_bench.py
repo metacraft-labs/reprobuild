@@ -1136,6 +1136,7 @@ def configure_cross_project_role(context, role_root, key, source_dir,
         configure_args, env=env)
     return {
         "project": key,
+        "binaryDir": str(binary_dir),
         "storeRoot": str(store_root),
         "wallMs": result["wallMs"],
         "status": result["status"],
@@ -1170,7 +1171,64 @@ def run_cross_project_once(context, run_root, project_a, project_b,
         context, run_root / "b-warm", project_b["key"],
         project_b["sourceDir"], project_b["configureArgs"], shared_store,
         configure=configure)
-    return {"coldB": cold_b, "primeA": prime_a, "warmB": warm_b}
+    return {"coldB": cold_b, "primeA": prime_a, "warmB": warm_b,
+            "parity": configure_parity(cold_b["binaryDir"],
+                                       warm_b["binaryDir"])}
+
+
+# The configure-level facts a try_compile computes (Cache-Scope Phase 1
+# validation; Provider-Compile-Tiering.md "A TryCompile hit must replay the
+# probe's output"): every check_* result in CMakeCache.txt, and every
+# CMAKE_<LANG>_IMPLICIT_* list CMake derives from the ABI probe's compiler
+# output, written to CMakeFiles/<version>/CMake<LANG>Compiler.cmake.
+CACHE_PARITY_ENTRY = re.compile(r"^(HAVE_[A-Za-z0-9_]+|[A-Za-z0-9_]*_COMPILES"
+                                r"|[A-Za-z0-9_]*_WORKS|CMAKE_[A-Z]+_ABI_COMPILED"
+                                r"|CMAKE_SIZEOF_[A-Z_]+)$")
+IMPLICIT_SET = re.compile(r'^set\((CMAKE_[A-Z]+_IMPLICIT_[A-Z_]+|'
+                          r'CMAKE_[A-Z]+_SIZEOF_DATA_PTR|'
+                          r'CMAKE_[A-Z]+_COMPILER_ABI)\s+"?(.*?)"?\)\s*$')
+
+
+def configure_facts(binary_dir):
+    """The try_compile-derived facts of one configure, by name."""
+    binary_dir = Path(binary_dir)
+    facts = {}
+    cache_file = binary_dir / "CMakeCache.txt"
+    if cache_file.exists():
+        for line in cache_file.read_text(errors="replace").splitlines():
+            if line.startswith(("//", "#")) or ":" not in line or "=" not in line:
+                continue
+            name, rest = line.split(":", 1)
+            if CACHE_PARITY_ENTRY.match(name):
+                facts["cache:" + name] = rest.split("=", 1)[1].strip()
+    for compiler_file in sorted(binary_dir.glob(
+            "CMakeFiles/*/CMake*Compiler.cmake")):
+        for line in compiler_file.read_text(errors="replace").splitlines():
+            match = IMPLICIT_SET.match(line.strip())
+            if match:
+                facts["compiler:" + match.group(1)] = match.group(2)
+    return facts
+
+
+def configure_parity(cold_binary_dir, warm_binary_dir):
+    """Compare a warm configure's try_compile facts with a cold one's.
+
+    `implicitEmpty` names the IMPLICIT lists that came out empty in the warm
+    configure while the cold one has them: the signature of a hit that
+    printed nothing to CMake."""
+    cold = configure_facts(cold_binary_dir)
+    warm = configure_facts(warm_binary_dir)
+    mismatches = []
+    for name in sorted(set(cold) | set(warm)):
+        if cold.get(name) != warm.get(name):
+            mismatches.append({"name": name, "cold": cold.get(name),
+                               "warm": warm.get(name)})
+    implicit_empty = sorted(
+        name for name, value in warm.items()
+        if "_IMPLICIT_" in name and not value and cold.get(name))
+    return {"facts": len(cold), "mismatches": mismatches,
+            "implicitEmpty": implicit_empty,
+            "match": not mismatches and bool(cold)}
 
 
 def aggregate_hit_rate(summaries):
@@ -1205,7 +1263,12 @@ def cross_project_summary(project_a, project_b, samples):
                   else "fail")
 
     median_cold = cold_summary["medianWallMs"]
+    parities = [s.get("parity") for s in samples if s.get("parity")]
     return {
+        "configureParity": (all(p["match"] for p in parities)
+                            if parities else None),
+        "configureParityMismatches": sum(len(p["mismatches"])
+                                         for p in parities),
         "scenario": CROSS_PROJECT_SCENARIO,
         "projectA": project_a,
         "projectB": project_b,

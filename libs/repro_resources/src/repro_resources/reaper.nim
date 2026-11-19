@@ -1117,8 +1117,54 @@ proc defaultUserStateStoreRoot*(): string =
   getHomeDir() / ".cache" / "repro" / "state"
 
 proc reapRefusalOfBuildSpelling*(spelling: string): string =
-  ## What `repro reap` says to `--hard-rebuild` / `--rebuild-host-bound`
-  ## (see `runReapCli` for why both are refused explicitly).
+  ## What `repro reap` says to `--hard-rebuild` / `--rebuild-host-bound`,
+  ## which its command line declares only to refuse with this text.
+  ##
+  ## Why `--hard-rebuild` and `--rebuild-host-bound` are not accepted
+  ##
+  ## They used to be, as bare aliases of `--force`. They were removed when
+  ## `Edge-Determinism-And-Soft-Rebuild.md` §4.2/§4.3 claimed both spellings
+  ## for `repro build`, where they mean something ELSE: which determinism
+  ## classes to invalidate in the ACTION CACHE. Here they meant "ignore an
+  ## unexpired lease and destroy the state anyway" — a destructive operation
+  ## on live infrastructure, not a cache invalidation.
+  ##
+  ## One spelling, two verbs, two meanings, one of them destructive is not a
+  ## collision worth documenting around. The resolution is to give the
+  ## spellings to `repro build` (where the spec defines them) and leave this
+  ## verb with `--force`, which is what it always did and what its own
+  ## semantics actually describe. Three facts made removal the cheap
+  ## direction rather than the expensive one:
+  ##
+  ##   1. The spellings belong to `repro build`, which is where the spec
+  ##      defines them. This verb has no claim on them.
+  ##
+  ##      This reason used to read "nothing dispatches `repro reap` yet …  no
+  ##      operator can have typed either spelling". That is no longer true:
+  ##      `repro reap` is a declared command, so both spellings
+  ##      are now operator-reachable. The change strengthens the refusal
+  ##      rather than weakening it, and it is why the refusal is spelled out
+  ##      explicitly instead of falling through the generic unknown-flag arm —
+  ##      an operator who reaches for a `repro build` spelling here is told
+  ##      where the verb went rather than getting a bare exit 2. (The verb is
+  ##      absent from the usage text, as the equally-dispatched `health` and
+  ##      `gateway` are: `renderUsage` lists none of the three, so that is the
+  ##      house convention and not an oversight here.)
+  ##   2. Nothing has ever exercised `force` through either flag STRING. The
+  ##      library's own test drives it as `reapOnce(force = true)`, and the
+  ##      dispatcher simply forwards argv, so removing the aliases changed no
+  ##      behaviour anybody depended on — it only changed what a typo gets
+  ##      told. (`t_repro_reap_verb_is_dispatched` pins the refusal through the
+  ##      real command line and that the verb is reachable; `t_l3_reaper`
+  ##      case (10) that `--force` still reaps.)
+  ##   3. Keeping them as aliases would have made
+  ##      `repro reap --rebuild-host-bound` and
+  ##      `repro build --rebuild-host-bound` do unrelated things, one of
+  ##      which deletes a VM.
+  ##
+  ## Both are refused EXPLICITLY rather than falling through the generic
+  ## unknown-flag arm, so an operator who reaches for one is told where the
+  ## verb went instead of getting a bare exit 2.
   "repro reap: " & spelling & " is a `repro build` verb (it selects " &
     "which determinism classes to invalidate in the action cache). To " &
     "reap a still-leased state, use `repro reap --force`."
@@ -1131,9 +1177,21 @@ proc runReap*(force: bool; targets: seq[string]; storeRoot = "";
   ## store), the body of ``repro reap``: `force` selects every present record
   ## regardless of its lease, and a non-empty `targets` restricts the sweep
   ## to those addresses. Returns the process exit code. ``repro reap``'s
-  ## command line is parsed from repro's description; ``runReapCli`` is the
-  ## same entry over an argv. See ``runReapCli`` for the transport and the
-  ## output.
+  ## command line is parsed from repro's description, which calls this with
+  ## its values.
+  ##
+  ## Pure w.r.t. output: `echoLine` (default: `echo`) receives each report
+  ## line, so a test can capture output without a process.
+  ##
+  ## TRANSPORT (§4.3 fallback (b)). With no explicit `transport`, the sweep
+  ## resolves each record's destroy route from the record itself: a record that
+  ## names a provider artifact is destroyed over a session to that provider, and
+  ## everything else in-process. That is what makes the by-hand sweep able to
+  ## reap an out-of-tree type at all — the operator the §4.5 finding sends here
+  ## otherwise needs "a build that links the type", which for an Incus driver
+  ## does not exist. A store with no such record launches nothing, so the
+  ## in-process behaviour is unchanged where there is no artifact to use.
+  ## A caller that passes `some(transport)` pins it and no session is opened.
   let emit = if echoLine != nil: echoLine
              else: (proc (line: string) = echo line)
   let root = if storeRoot.len > 0: storeRoot else: defaultUserStateStoreRoot()
@@ -1207,95 +1265,3 @@ proc runReap*(force: bool; targets: seq[string]; storeRoot = "";
       report.unreadable.len > 0:
     return 1
   0
-
-proc runReapCli*(args: seq[string];
-                 storeRootOverride = "";
-                 now: Time = getTime();
-                 transport = none(ReapTransport);
-                 echoLine: proc (line: string) {.closure.} = nil): int =
-  ## The `repro reap [--once] [--force] [--state-root=PATH] [address...]`
-  ## entry. Returns a process exit code. `--once` is accepted (and is the
-  ## only mode here — a single sweep; the daemon-hosted repeated schedule is
-  ## L4). `--force` selects every present record regardless of lease. Bare
-  ## address args restrict the sweep to a group.
-  ##
-  ## Pure w.r.t. output: `echoLine` (default: `echo`) receives each report
-  ## line, so a test can capture output without a process.
-  ##
-  ## TRANSPORT (§4.3 fallback (b)). With no explicit `transport`, the sweep
-  ## resolves each record's destroy route from the record itself: a record that
-  ## names a provider artifact is destroyed over a session to that provider, and
-  ## everything else in-process. That is what makes the by-hand sweep able to
-  ## reap an out-of-tree type at all — the operator the §4.5 finding sends here
-  ## otherwise needs "a build that links the type", which for an Incus driver
-  ## does not exist. A store with no such record launches nothing, so the
-  ## in-process behaviour is unchanged where there is no artifact to use.
-  ## A caller that passes `some(transport)` pins it and no session is opened.
-  ##
-  ## ## Why `--hard-rebuild` and `--rebuild-host-bound` are NOT accepted here
-  ##
-  ## They used to be, as bare aliases of `--force`. They were removed when
-  ## `Edge-Determinism-And-Soft-Rebuild.md` §4.2/§4.3 claimed both spellings
-  ## for `repro build`, where they mean something ELSE: which determinism
-  ## classes to invalidate in the ACTION CACHE. Here they meant "ignore an
-  ## unexpired lease and destroy the state anyway" — a destructive operation
-  ## on live infrastructure, not a cache invalidation.
-  ##
-  ## One spelling, two verbs, two meanings, one of them destructive is not a
-  ## collision worth documenting around. The resolution is to give the
-  ## spellings to `repro build` (where the spec defines them) and leave this
-  ## verb with `--force`, which is what it always did and what its own
-  ## semantics actually describe. Three facts made removal the cheap
-  ## direction rather than the expensive one:
-  ##
-  ##   1. The spellings belong to `repro build`, which is where the spec
-  ##      defines them. This verb has no claim on them.
-  ##
-  ##      This reason used to read "nothing dispatches `repro reap` yet …  no
-  ##      operator can have typed either spelling". That is no longer true:
-  ##      there IS a `"reap"` arm in `runThinAppDispatch`, so both spellings
-  ##      are now operator-reachable. The change strengthens the refusal
-  ##      rather than weakening it, and it is why the refusal is spelled out
-  ##      explicitly instead of falling through the generic unknown-flag arm —
-  ##      an operator who reaches for a `repro build` spelling here is told
-  ##      where the verb went rather than getting a bare exit 2. (The verb is
-  ##      absent from the usage text, as the equally-dispatched `health` and
-  ##      `gateway` are: `renderUsage` lists none of the three, so that is the
-  ##      house convention and not an oversight here.)
-  ##   2. Nothing has ever exercised `force` through either flag STRING. The
-  ##      library's own test drives it as `reapOnce(force = true)`, and the
-  ##      dispatcher simply forwards argv, so removing the aliases changed no
-  ##      behaviour anybody depended on — it only changed what a typo gets
-  ##      told. (`t_l3_reaper` case (10) now pins the refusal itself, and
-  ##      `t_repro_reap_verb_is_dispatched` pins that the verb is reachable.)
-  ##   3. Keeping them as aliases would have made
-  ##      `repro reap --rebuild-host-bound` and
-  ##      `repro build --rebuild-host-bound` do unrelated things, one of
-  ##      which deletes a VM.
-  ##
-  ## Both are refused EXPLICITLY rather than falling through the generic
-  ## unknown-flag arm, so an operator who reaches for one is told where the
-  ## verb went instead of getting a bare exit 2.
-  var force = false
-  var storeRoot = storeRootOverride
-  var targets: seq[string] = @[]
-  # Resolved BEFORE the parse loop, not after it, because the two refusals
-  # below report through it and they happen during parsing.
-  let emit = if echoLine != nil: echoLine
-             else: (proc (line: string) = echo line)
-  for raw in args:
-    if raw == "--once":
-      discard                    # single sweep is the only mode here (L4 = repeat)
-    elif raw == "--force":
-      force = true
-    elif raw == "--hard-rebuild" or raw == "--rebuild-host-bound":
-      emit(reapRefusalOfBuildSpelling(raw))
-      return 2
-    elif raw.startsWith("--state-root="):
-      storeRoot = raw[len("--state-root=") .. ^1]
-    elif raw.startsWith("--"):
-      return 2                   # unknown flag
-    else:
-      targets.add(raw)
-
-  runReap(force, targets, storeRoot, now, transport, emit)

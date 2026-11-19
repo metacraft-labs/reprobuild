@@ -10,9 +10,13 @@
 ## `reproCommandLineDescription` itself: the same tree the engine's parser
 ## and the thin client are generated from.
 ##
-## WHAT IS COMPARED, AND HOW IT GROWS. `CoveredCommands` lists the commands
-## whose flags and environment variables are compared: the commands parsed
-## from the description (the root; the first group: `help`, `version`,
+## WHAT IS COMPARED. `CoveredCommands` lists the commands whose flags and
+## environment variables are compared, and "every declared command is
+## compared" holds it equal to every command the description declares (its
+## hidden spellings aside: the top-level `__<name>` words and the namespaces'
+## `help` words, which spell commands listed under their own names). It grew
+## group by group as commands moved onto the description (the root; the first
+## group: `help`, `version`,
 ## `completion`, `capabilities`, `show-conventions`; the second: `configs`,
 ## `tasks`, `graph`, `why`, `deps` with `deps refresh`, `stats`; the third:
 ## `daemon`, `store`, `cas`, `cache`, `bundle`, `reap`, `launch-plan`,
@@ -23,10 +27,15 @@
 ## `prompt` and their subcommands; the sixth: the workspace and publication
 ## commands; the seventh: the build family, `build`, `bench`, `lint`,
 ## `clean`, `test`, `certify`, `certificates`, `ci`, `watch`; of the eighth,
-## `attest` and its subcommands). Each later
-## group of commands is added by listing it here and in the generator's
-## `COVERED_COMMANDS`; the last one replaces the list with every command. The
-## top-level command list is compared in full already. Both comparisons run
+## `attest` and its subcommands, then every other command: the role
+## processes under `internal`, the internal steps of `home` and `hooks`, the
+## daemons' subcommands, `pressure`, and the command lines of other programs
+## repro mounts, the add-on's and io-mon's, with every verb below them). A
+## new command is added here and in the generator's `COVERED_COMMANDS`. A
+## namespace's flags are accepted by each of its subcommands, so a flag a page
+## documents at a subcommand matches the namespace's declaration, and the
+## other way round (`sameAtAncestor`). The top-level command list is compared
+## in full. Both comparisons run
 ## against explicit lists of known differences that may only shrink: a
 ## difference that is no longer there fails the test until its entry is
 ## removed. The only differences are flags and environment variables a page
@@ -153,8 +162,74 @@ const
     # lines parse, so the flags their pages write are those programs'.
     "repro attest", "repro attest expect", "repro attest challenge",
     "repro attest verify", "repro attest cross-check", "repro attest launch",
-    "repro attest reap"]
-    ## The commands whose flags and environment variables are compared.
+    "repro attest reap",
+    # The eighth group, round 8b: every other command, so the list is every
+    # command repro declares (hidden spellings aside; "every declared command
+    # is compared"): the daemon's and the store daemon's subcommands, the
+    # internal steps of a remote home apply and of the managed hooks, the
+    # role processes (`internal`), `pressure`, and (round 8c) the command
+    # lines of other programs mounted in repro's (`system addon|state|
+    # secret|adopt`, the add-on's; `debug io monitor`, `internal io
+    # monitor`, io-mon's), with every verb.
+    "repro daemon serve", "repro daemon start", "repro daemon status",
+    "repro daemon stop", "repro daemon restart", "repro daemon sessions",
+    "repro daemon logs", "repro store daemon start",
+    "repro store daemon status", "repro store daemon stop",
+    "repro home __build-bundle", "repro home __receive-bundle",
+    "repro home __transfer-bundle", "repro home __remote-activate",
+    "repro system addon", "repro system addon preflight",
+    "repro system addon bootstrap", "repro system addon evidence-ship",
+    "repro system addon evidence-enrol", "repro system addon store-verify",
+    "repro system addon egress-check", "repro system addon evidence-harvest",
+    "repro system addon evidence-credential-check",
+    "repro system addon uninstall",
+    "repro system addon verify-discard-record", "repro system addon verify",
+    "repro system addon boot-confirm", "repro system addon reassert",
+    "repro system addon recover", "repro system addon secrets",
+    "repro system addon probe", "repro system addon secret",
+    "repro system addon secret put",
+    "repro system addon rotate-recipient-key",
+    "repro system addon image-assemble", "repro system addon agent-repin",
+    "repro system addon agent-tick", "repro system addon agent-fetch",
+    "repro system addon agent-apply", "repro system addon migration-plan",
+    "repro system addon resume", "repro system addon migrate",
+    "repro system addon contain", "repro system addon release",
+    "repro system addon fingerprint", "repro system addon fingerprint diff",
+    "repro system addon expected-delta", "repro system addon ledger",
+    "repro system addon import", "repro system addon state",
+    "repro system addon state backup", "repro system addon state release",
+    "repro system addon state verify", "repro system addon state restore",
+    "repro system addon state digest", "repro system addon state unit",
+    "repro system addon state install-unit", "repro system addon status",
+    "repro system addon retention", "repro system addon selfcheck-btrfs",
+    "repro system addon selfcheck-write", "repro system state",
+    "repro system state backup", "repro system state release",
+    "repro system state verify", "repro system state restore",
+    "repro system state digest", "repro system state unit",
+    "repro system state install-unit", "repro system secret",
+    "repro system secret put", "repro system secret materialise",
+    "repro system adopt", "repro debug io", "repro debug io monitor",
+    "repro debug io monitor run", "repro debug io monitor inspect",
+    "repro hooks protocol", "repro hooks dispatch", "repro hooks cache-push",
+    "repro pressure", "repro internal",
+    "repro internal shared-pool-upload-pack",
+    "repro internal resolve-package", "repro internal io",
+    "repro internal io monitor", "repro internal io monitor run",
+    "repro internal io monitor inspect", "repro internal runquota-helper",
+    "repro internal compile-provider", "repro internal extract-interface",
+    "repro internal compile-profile",
+    "repro internal probe-profile-platforms",
+    "repro internal dev-env-introspect",
+    "repro internal render-dev-env-shell", "repro internal direnv-activate",
+    "repro internal native-shell-activate",
+    "repro internal dev-session-supervisor",
+    "repro internal dev-session-http", "repro internal cmake-regenerate",
+    # Declared with its page after the round: `repro catalog publish`.
+    "repro catalog", "repro catalog publish",
+    # The Nimble index generator's verbs.
+    "repro catalog generate", "repro catalog verify"]
+    ## The commands whose flags and environment variables are compared:
+    ## every command repro declares.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
     "flag\trepro stats\t--db", "flag\trepro stats\t--metric-group",
@@ -191,16 +266,12 @@ const
     "flag\trepro watch\t--debounce", "flag\trepro watch\t--http",
     "flag\trepro watch\t--max-debounce", "flag\trepro watch\t--no-initial",
     "flag\trepro watch\t--target", "flag\trepro watch\t--task",
-    "flag\trepro watch\t--tier",
-    # Specified by its page after round 8a's fixture was cut, not
-    # implemented yet: `repro workspace shared-clones --reset-refs` (the
-    # gateway's stale-lease remedy).
-    "flag\trepro workspace shared-clones\t--reset-refs"]
+    "flag\trepro watch\t--tier"]
     ## Flags a covered command's page specifies that repro does not
     ## implement yet.
   SpecifiedNotDeclared = [
-    "audit", "catalog", "info", "init", "list", "lsp", "mcp", "outdated",
-    "package", "search", "upgrade"]
+    "audit", "info", "init", "list", "lsp", "mcp", "outdated", "package",
+    "search", "upgrade"]
     ## Commands the specification describes that repro does not have yet.
   DeclaredNotSpecified: array[0, string] = []
     ## Commands repro has whose specification is not a command page (some
@@ -259,6 +330,33 @@ proc withoutDeclaration(body: NimNode; command, name: string): NimNode =
   result = body.copyNimTree()
   if not removeDeclaration(result, command, name):
     error("no declaration " & command & "/" & name & " to remove")
+
+proc removeDeclarationAt(scope: NimNode; path: openArray[string];
+                         name: string): bool =
+  ## Removes parameter `name` of the command at `path` (its subcommand
+  ## words, for a command below the top level, such as a verb of a mounted
+  ## command line; the word `call:` names the `call:` of the command before
+  ## it) from `scope`, looking into the `group` sections as
+  ## `removeDeclaration` does; whether it found it.
+  for i in 0 ..< scope.len:
+    let stmt = scope[i]
+    if stmt.kind == nnkCommand and stmt.len == 3 and
+        stmt[0].eqIdent("group") and stmt[^1].kind == nnkStmtList:
+      if removeDeclarationAt(stmt[^1], path, name):
+        return true
+      continue
+    let isCall = stmt.kind == nnkCall and stmt.len == 2 and
+      stmt[0].eqIdent("call") and stmt[1].kind == nnkStmtList
+    if (if path[0] == "call:": not isCall else: commandWord(stmt) != path[0]):
+      continue
+    let body = stmt[^1]
+    if path.len > 1:
+      return removeDeclarationAt(body, path[1 .. ^1], name)
+    for j in 0 ..< body.len:
+      if paramName(body[j]) == name:
+        body.del(j)
+        return true
+  false
 
 proc removeEnv(scope: NimNode; command, name: string): bool =
   ## Removes the `env = ...` of parameter `name` of the top-level command
@@ -326,6 +424,37 @@ proc surfaceOf(body: NimNode): seq[string] =
         result.add("env\t" & path & "\t" & name)
   result.sort()
 
+macro declaredCommandPaths(): untyped =
+  ## Every command the description declares, as `repro <words>`: the
+  ## internal ones included (the role processes, the managed hooks' entry
+  ## points), the hidden SPELLINGS left out, since each spells a command
+  ## listed under its own name: the top-level `__<name>` words (`__repro-<name>`
+  ## is `internal <name>`, `__remote-activate` is `home __remote-activate`)
+  ## and the `help` word of a namespace (`repro <namespace> help` is `repro
+  ## help <namespace>`). A hidden command that spells nothing else
+  ## (`workspace projects`) is compared like any other.
+  let model = parseCliModel[NoCliExtension, ReproCommandLineParamExt](
+    reproCommandLineDescription(), NoCliExtension())
+  var hidden: seq[seq[string]] = @[]
+  for cmd in model.commands:
+    if not cmd.anonymous and cmd.visibility == cvHidden and cmd.path.len > 0 and
+        (cmd.path[^1] == "help" or
+         (cmd.path.len == 1 and cmd.path[0].startsWith("__"))):
+      hidden.add(cmd.path)
+  result = nnkBracket.newTree(newLit("repro"))
+  for cmd in model.commands:
+    if cmd.anonymous or cmd.path.len == 0:
+      continue
+    var underHidden = false
+    for h in hidden:
+      if cmd.path.len >= h.len and cmd.path[0 ..< h.len] == h:
+        underHidden = true
+    if not underHidden:
+      result.add(newLit(("repro " & cmd.path.join(" ")).strip()))
+
+const DeclaredCommands = declaredCommandPaths()
+  ## Every command repro declares, its hidden spellings left out.
+
 macro declaredSurface(command, name: static[string];
                       mutate: static[bool]): untyped =
   var body = reproCommandLineDescription()
@@ -359,6 +488,29 @@ const
   # declares, removed from `build` alone.
   WithoutBuildDaemon = declaredSurface("build", "daemon", true)
 
+macro declaredSurfaceWithoutAt(paths: static[seq[seq[string]]];
+                               name: static[string]): untyped =
+  ## The description's side with parameter `name` removed from the command
+  ## at each of `paths`.
+  var body = reproCommandLineDescription().copyNimTree()
+  for path in paths:
+    if not removeDeclarationAt(body, path, name):
+      error("no declaration " & $path & "/" & name & " to remove")
+  newLit(surfaceOf(body))
+
+const
+  # The mounted command lines (round 8c): a flag of an add-on verb, spliced
+  # from the add-on's description; and a flag of io-mon's, spliced from
+  # io-mon's under `debug io monitor`, removed from both places it is
+  # declared there (`run` and the bare form's `call:`, which would each
+  # match the other's page row as a namespace's flag does); its copy under
+  # `internal io monitor` stays.
+  WithoutAddonPreflightJson = declaredSurfaceWithoutAt(
+    @[@["system", "addon", "preflight"]], "json")
+  WithoutDebugMonitorDepfile = declaredSurfaceWithoutAt(
+    @[@["debug", "io", "monitor", "run"], @["debug", "io", "monitor", "call:"]],
+    "depfile")
+
 macro declaredSurfaceWithoutEnv(command, name: static[string]): untyped =
   newLit(surfaceOf(withoutEnv(reproCommandLineDescription(), command, name)))
 
@@ -391,12 +543,37 @@ proc rowsOf(rows: openArray[string]; kinds: openArray[string]): HashSet[
       if fields[0] == "verb" or fields[1] in CoveredCommands:
         result.incl(row)
 
+proc sameAtAncestor(row: string; other: HashSet[string];
+                    upwards: bool): bool =
+  ## Whether ``other`` holds the `flag`/`env` row ``row`` at another command
+  ## on the same line: an ancestor of its command when ``upwards``, else a
+  ## descendant. A namespace's flags are accepted by each of its
+  ## subcommands (`repro daemon --endpoint` is also `repro daemon start
+  ## --endpoint`), so a page may document one where it is used and the
+  ## description declare it on the namespace, or the other way round.
+  let fields = row.split('\t')
+  if fields.len != 3 or fields[0] notin ["flag", "env"]:
+    return false
+  for candidate in other:
+    let o = candidate.split('\t')
+    if o.len != 3 or o[0] != fields[0] or o[2] != fields[2] or
+        o[1] == fields[1]:
+      continue
+    let (inner, outer) = if upwards: (fields[1], o[1]) else: (o[1], fields[1])
+    if inner.startsWith(outer & " "):
+      return true
+  false
+
 proc differences(declared, specified: openArray[string]): seq[string] =
   ## Every row one side has and the other does not, with the known command
   ## differences accounted for; and every known difference that is gone.
+  ## A namespace's flag counts as the same row at each of its subcommands
+  ## (``sameAtAncestor``).
   let spec = rowsOf(specified, ["verb", "flag", "env"])
   let decl = rowsOf(declared, ["verb", "flag", "env"])
   for row in spec - decl:
+    if sameAtAncestor(row, decl, upwards = true):
+      continue
     let fields = row.split('\t')
     if fields[0] == "verb" and fields[1] in SpecifiedNotDeclared:
       continue
@@ -404,6 +581,8 @@ proc differences(declared, specified: openArray[string]): seq[string] =
       continue
     result.add(row & ": specified, not declared")
   for row in decl - spec:
+    if sameAtAncestor(row, spec, upwards = false):
+      continue
     let fields = row.split('\t')
     if fields[0] == "verb" and fields[1] in DeclaredNotSpecified:
       continue
@@ -423,6 +602,19 @@ proc differences(declared, specified: openArray[string]): seq[string] =
   result.sort()
 
 suite "CS-M6: the specification pages match the declarations":
+
+  test "every declared command is compared":
+    var covered = @CoveredCommands
+    covered.sort()
+    var declared = @DeclaredCommands
+    declared.sort()
+    for c in declared:
+      if c notin covered:
+        checkpoint("declared, not compared: " & c)
+    for c in covered:
+      if c notin declared:
+        checkpoint("compared, not declared: " & c)
+    check covered == declared
 
   test "the fixture covers the commands this test compares":
     var commands: seq[string] = @[]
@@ -496,8 +688,16 @@ suite "CS-M6: the specification pages match the declarations":
       @["flag\trepro why\t--tool-provisioning: specified, not declared"]
 
   test "removing a namespace's own flag fails the comparison":
+    # At the namespace and at each subcommand whose page writes it: the
+    # subcommands take the namespace's flags, and the pages document the
+    # flag where it is used.
     check differences(WithoutDaemonEndpoint, specified()) ==
-      @["flag\trepro daemon\t--endpoint: specified, not declared"]
+      @["flag\trepro daemon\t--endpoint: specified, not declared",
+        "flag\trepro daemon logs\t--endpoint: specified, not declared",
+        "flag\trepro daemon restart\t--endpoint: specified, not declared",
+        "flag\trepro daemon start\t--endpoint: specified, not declared",
+        "flag\trepro daemon status\t--endpoint: specified, not declared",
+        "flag\trepro daemon stop\t--endpoint: specified, not declared"]
 
   test "removing a fourth-group command's flag fails the comparison":
     check differences(WithoutHealthFix, specified()) ==
@@ -532,6 +732,16 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro watch\t--daemon" in WithoutWatchDaemonEnv
     check differences(WithoutWatchDaemonEnv, specified()) ==
       @["env\trepro watch\tREPRO_DAEMON: specified, not declared"]
+
+  test "removing a flag of a mounted command line fails the comparison":
+    check "flag\trepro system addon preflight\t--json" in Declared
+    check "flag\trepro system state verify\t--from" in Declared
+    check "flag\trepro internal io monitor run\t--depfile" in Declared
+    check differences(WithoutAddonPreflightJson, specified()) ==
+      @["flag\trepro system addon preflight\t--json: specified, not declared"]
+    check differences(WithoutDebugMonitorDepfile, specified()) ==
+      @["flag\trepro debug io monitor\t--depfile: specified, not declared",
+        "flag\trepro debug io monitor run\t--depfile: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==

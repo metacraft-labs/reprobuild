@@ -6,6 +6,10 @@ import repro_tool_profiles
 
 import ./client
 import ./protocol
+# `repro store serve`'s command line is declared in repro's description;
+# only its spellings are read here, at compile time.
+from repro_cli_support/cli_description import reproLongFlags
+
 
 when defined(posix):
   import std/posix except Time
@@ -54,49 +58,17 @@ type
 
 const DevDaemonLockFileName = ".reprostored-dev.lock"
 
-proc parseStoreRootFlag(args: seq[string]; defaultRoot = ""):
-    tuple[root: string; rest: seq[string]] =
-  var i = 0
-  while i < args.len:
-    let raw = args[i]
-    if raw.startsWith("--store-root="):
-      result.root = raw[len("--store-root=") .. ^1]
-    elif raw == "--store-root":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--store-root requires a path")
-      result.root = args[i + 1]
-      inc i
-    else:
-      result.rest.add(raw)
-    inc i
-  if result.root.len == 0:
-    result.root = defaultRoot
+const StoreServeFlags = reproLongFlags(@["store", "serve"])
+  ## The long spelling of each flag of `repro store serve`.
 
-proc parseEndpointFlag(args: seq[string]; defaultEndpoint = ""):
-    tuple[endpoint: string; rest: seq[string]] =
-  var i = 0
-  while i < args.len:
-    let raw = args[i]
-    if raw.startsWith("--endpoint="):
-      result.endpoint = raw[len("--endpoint=") .. ^1]
-    elif raw == "--endpoint":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--endpoint requires a path")
-      result.endpoint = args[i + 1]
-      inc i
-    else:
-      result.rest.add(raw)
-    inc i
-  if result.endpoint.len == 0:
-    result.endpoint = defaultEndpoint
-
-proc parseDevConfig*(args: seq[string]): tuple[config: DevDaemonConfig;
-    rest: seq[string]] =
-  let p1 = parseStoreRootFlag(args, defaultDevStoreRoot())
-  let p2 = parseEndpointFlag(p1.rest, defaultDevEndpoint())
-  result.config = DevDaemonConfig(endpoint: p2.endpoint,
-    storeRoot: devStoreRoot(p1.root))
-  result.rest = p2.rest
+proc storeServeArgs*(config: DevDaemonConfig): seq[string] =
+  ## The development store daemon's command line, `repro store serve --dev
+  ## ...` (the `repro` image run as the daemon), in the words repro's
+  ## generated parser reads back to ``config``: each flag the spelling the
+  ## description declares, its value (a path) the next word.
+  @["store", "serve", StoreServeFlags.dev,
+    StoreServeFlags.storeRoot, config.storeRoot,
+    StoreServeFlags.endpoint, config.endpoint]
 
 proc devDaemonLockPath*(storeRoot: string): string =
   storeRoot / DevDaemonLockFileName
@@ -548,37 +520,6 @@ proc runDevDaemonForeground*(config: DevDaemonConfig): int =
     client.closeIpcConn()
   0
 
-proc reprostoredUsage*(): string =
-  "usage: reprostored --dev [--store-root <path>] [--endpoint <path>]"
-
-proc runReprostoredCommand*(args: seq[string]): int =
-  if args.len == 1 and args[0] in ["--help", "-h"]:
-    echo reprostoredUsage()
-    return 0
-  if "--dev" notin args:
-    stderr.writeLine("reprostored: only --dev is implemented in this pass")
-    return 2
-  var filtered: seq[string] = @[]
-  for arg in args:
-    if arg != "--dev":
-      filtered.add(arg)
-  try:
-    let parsed = parseDevConfig(filtered)
-    if parsed.rest.len > 0:
-      stderr.writeLine("reprostored: unexpected argument: " & parsed.rest[0])
-      return 2
-    return runDevDaemonForeground(parsed.config)
-  except CatchableError as err:
-    stderr.writeLine("reprostored: error: " & err.msg)
-    return 1
-
-proc siblingReprostoredPath*(publicCliPath: string): string =
-  let candidate = parentDir(publicCliPath) / addFileExt("reprostored", ExeExt)
-  if fileExists(candidate):
-    candidate
-  else:
-    addFileExt("reprostored", ExeExt)
-
 proc waitForDevStatus(endpoint, expectedRoot: string; timeoutMs = 60000):
     StoreDaemonStatus =
   let deadline = epochTime() + float(timeoutMs) / 1000.0
@@ -622,9 +563,7 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
         discard dup2(devNull, 2)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
-      let argv = allocCStringArray([
-        exe, "store", "serve", "--dev", "--store-root", config.storeRoot,
-        "--endpoint", config.endpoint])
+      let argv = allocCStringArray(@[exe] & storeServeArgs(config))
       discard execv(cstring(exe), argv)
       quit(127)
   else:
@@ -644,9 +583,7 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
     if not isAbsolute(image):
       let found = findExe(image)
       image = if found.len > 0: found else: absolutePath(image)
-    discard spawnWithOwnStdio(image,
-      ["store", "serve", "--dev", "--store-root", config.storeRoot,
-        "--endpoint", config.endpoint],
+    discard spawnWithOwnStdio(image, storeServeArgs(config),
       env, inheritEnvironment = false, logPath = "",
       workingDir = parentDir(image))
   waitForDevStatus(config.endpoint, config.storeRoot)

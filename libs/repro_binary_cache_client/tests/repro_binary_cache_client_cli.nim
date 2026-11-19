@@ -1,4 +1,4 @@
-## Test-only driver for the binary-cache client dispatch.
+## Test-only driver for the binary-cache client: ``repro cache``.
 ##
 ## The shipping ``repro-binary-cache-client`` binary was retired and its
 ## toolset folded into ``repro cache <subcommand>`` (Binary-Caches.md
@@ -6,16 +6,17 @@
 ## integration tests, however, spawn a small standalone driver from
 ## ``build/test-bin/`` and pass it the bare subcommand verb
 ## (``lookup`` / ``substitute`` / ``publish`` / …) WITHOUT a ``cache``
-## prefix. This file is that driver: it forwards ``commandLineParams()``
-## straight into the shared ``runCacheSubcommand`` dispatch, so the tests
-## exercise byte-for-byte the SAME handlers that back ``repro cache``.
+## prefix. This file is that driver: it runs ``repro cache
+## <commandLineParams()>`` -- repro's own declared command line, parsed by
+## its generated parser, and the handlers ``repro cache`` runs
+## (``repro_cli_support/cache_cli``) -- without linking the build engine.
 ##
 ## It is intentionally not an ``apps/`` entrypoint and is never shipped —
 ## the product surface is ``repro cache``.
 
 import std/os
 
-import ../src/repro_binary_cache_client/cli_dispatch
+import repro_cli_support/cache_cli
 
 when isMainModule:
-  quit(runCacheSubcommand(commandLineParams()))
+  quit(runReproCacheArgs(commandLineParams()))

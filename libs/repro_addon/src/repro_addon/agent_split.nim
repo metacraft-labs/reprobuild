@@ -960,19 +960,9 @@ proc printTick(t: RecordedTick) =
 # The verbs.
 # ---------------------------------------------------------------------------
 
-proc takeArg(args: seq[string]; i: var int; flag: string): string =
-  let a = args[i]
-  if a.startsWith(flag & "="): return a[flag.len + 1 .. ^1]
-  if i + 1 >= args.len: raise newException(ValueError, flag & " needs a value")
-  inc i
-  args[i]
-
-proc runAgentFetchCli*(args: seq[string]): int =
+proc runAgentFetchCommand*(): int =
   ## ``repro system addon agent-fetch``: exit 0 when a staging directory
   ## was published (whatever it says), 1 when it could not be.
-  if args.len != 0:
-    stderr.write("usage: repro system addon agent-fetch\n")
-    return 2
   try:
     let conf = loadAgentConf()
     let r = runAgentFetch(conf, peerAuth.loadTrustAnchors(DeploySignersPath),
@@ -997,12 +987,9 @@ proc stagedResult(copyDir: string; target: string): AgentOutcome =
     errorCode: (if lines.len > 1: lines[1].strip() else: ""),
     message: "fetch unit: " & (if lines.len > 2: lines[2].strip() else: ""))
 
-proc runAgentApplyCli*(args: seq[string]): int =
+proc runAgentApplyCommand*(): int =
   ## ``repro system addon agent-apply``: one apply from the newest staging
   ## directory; exits with the agent's outcome code.
-  if args.len != 0:
-    stderr.write("usage: repro system addon agent-apply\n")
-    return 2
   if isContained():
     # An operator contained the host (decision 51): its units do not start;
     # should anything start it regardless, it applies nothing.
@@ -1067,31 +1054,19 @@ proc runAgentApplyCli*(args: seq[string]): int =
   printTick(t)
   t.exitCode
 
-proc runAgentTickCli*(args: seq[string]): int =
+proc runAgentTickCommand*(sources: seq[string]; target = "";
+                          allowedSigners = ""): int =
   ## ``repro system addon agent-tick --source S... [--target T]
   ## [--allowed-signers F]``: the single-process tick (see the header).
-  var sources: seq[string]
-  var target = ""
-  var signers = DeploySignersPath
-  var i = 0
-  try:
-    while i < args.len:
-      let a = args[i]
-      if a == "--source" or a.startsWith("--source="):
-        sources.add(takeArg(args, i, "--source"))
-      elif a == "--target" or a.startsWith("--target="):
-        target = takeArg(args, i, "--target")
-      elif a == "--allowed-signers" or a.startsWith("--allowed-signers="):
-        signers = takeArg(args, i, "--allowed-signers")
-      else:
-        raise newException(ValueError, "unknown option " & a)
-      inc i
-    if sources.len == 0:
-      raise newException(ValueError, "at least one --source is required")
-  except ValueError as e:
-    stderr.write("repro system addon agent-tick: " & e.msg & "\n")
+  ## ``target`` defaults to this host, ``allowedSigners`` to the add-on's
+  ## deploy signers.
+  if sources.len == 0:
+    stderr.write("repro system addon agent-tick: at least one --source is " &
+      "required\n")
     return 2
-  if target.len == 0: target = readHostname()
+  let target = if target.len > 0: target else: readHostname()
+  let signers = if allowedSigners.len > 0: allowedSigners
+                else: DeploySignersPath
   let cfg = AgentConfig(target: target, sources: sources,
     anchors: peerAuth.loadTrustAnchors(signers), stateDir: AgentStateDir,
     fetchTimeoutMs: 30_000)
@@ -1100,11 +1075,8 @@ proc runAgentTickCli*(args: seq[string]): int =
   printTick(t)
   t.exitCode
 
-proc runResumeCli*(args: seq[string]): int =
+proc runResumeCommand*(): int =
   ## ``repro system addon resume``: clear the pause marker (spec §9.3).
-  if args.len != 0:
-    stderr.write("usage: repro system addon resume\n")
-    return 2
   # The configured agent's marker, and every agent the add-on's rollback
   # pauses (registered with it, or at a well-known state directory).
   var resumed = resumeAgents(DefaultStateDir)

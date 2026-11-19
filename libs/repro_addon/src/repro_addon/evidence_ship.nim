@@ -582,14 +582,11 @@ proc inConfinedRun(): bool =
   ## runs (``EvidenceShipConfinedEnv``).
   getEnv(EvidenceShipConfinedEnv) == "1"
 
-proc runEvidenceHarvestCli*(args: seq[string]): int =
+proc runEvidenceHarvestCommand*(): int =
   ## ``repro system addon evidence-harvest``: the shipping unit's
   ## privileged ``ExecStartPre=+`` step. Turns the apt hook wrapper's
   ## events in root's log into outbox entries; reads nothing from the
   ## network.
-  if args.len != 0:
-    stderr.write("usage: repro system addon evidence-harvest\n")
-    return 2
   try:
     let n = harvestHookWrapperEvents(defaultShipSite(), readHost())
     if n > 0: stdout.write("evidence: " & $n & " apt hook event(s)\n")
@@ -598,15 +595,11 @@ proc runEvidenceHarvestCli*(args: seq[string]): int =
     stderr.write("repro system addon evidence-harvest: " & e.msg & "\n")
     2
 
-proc runEvidenceShipCli*(args: seq[string]): int =
-  var force = false
-  var noBackoff = false
-  for a in args:
-    if a == "--heartbeat": force = true
-    elif a == "--no-backoff": noBackoff = true
-    else:
-      stderr.write("usage: repro system addon evidence-ship [--heartbeat]\n")
-      return 2
+proc runEvidenceShipCommand*(heartbeat, noBackoff: bool): int =
+  ## ``repro system addon evidence-ship [--heartbeat]`` (the shipping unit);
+  ## ``noBackoff`` (``--no-backoff``, which the confined run of a root
+  ## caller's ship is given) skips the unit's wait.
+  let force = heartbeat
   if not inConfinedRun() and not mutated("ship-decoded-as-root"):
     # An operator's (or any root) invocation: ship in a confined run.
     try:
@@ -656,10 +649,8 @@ proc runEvidenceShipCli*(args: seq[string]): int =
   if not noBackoff:
     sleep(1000 * shipRunWait(site, heartbeat))
 
-proc runCredentialCheckCli*(args: seq[string]): int =
-  if args.len != 0:
-    stderr.write("usage: repro system addon evidence-credential-check\n")
-    return 2
+proc runCredentialCheckCommand*(): int =
+  ## ``repro system addon evidence-credential-check``.
   if not inConfinedRun() and not mutated("ship-decoded-as-root"):
     # The sink's answers are decoded in the shipping unit's confinement,
     # never by the calling root process (§13 decision 181).

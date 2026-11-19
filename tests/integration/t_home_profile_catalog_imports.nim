@@ -138,6 +138,13 @@ suite "home_profile_import_refusals":
     check "pins by `commit` only" in msg
     check FedRepoPackages in msg
 
+  test "an import of another kind is refused, not read as provisioning":
+    declare(@[importTable(FedRepoPackages, world.packages.remote,
+      "kind = \"nimble-index\"\ncommit = \"" & world.revPackages & "\"")])
+    let msg = refusalOf(proc () = discard readHomeCatalogImports(profilePath))
+    check "is of kind `nimble-index`" in msg
+    check FedRepoPackages in msg
+
   test "a policy table in a home profile's declaration is refused":
     # Accepting and ignoring it would let two contributions of one package
     # be resolved by sort order instead of by the profile's stated choice.
